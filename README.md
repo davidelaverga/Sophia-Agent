@@ -1,154 +1,283 @@
-# 🦌 DeerFlow - 2.0
+# Sophia
 
-English | [中文](./README_zh.md)
+**An AI voice companion with genuine continuity, emotional attunement, and measurable self-improvement.**
 
 [![Python](https://img.shields.io/badge/Python-3.12%2B-3776AB?logo=python&logoColor=white)](./backend/pyproject.toml)
 [![Node.js](https://img.shields.io/badge/Node.js-22%2B-339933?logo=node.js&logoColor=white)](./Makefile)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-<a href="https://trendshift.io/repositories/14699" target="_blank"><img src="https://trendshift.io/api/badge/repositories/14699" alt="bytedance%2Fdeer-flow | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
-> On February 28th, 2026, DeerFlow claimed the 🏆 #1 spot on GitHub Trending following the launch of version 2. Thanks a million to our incredible community — you made this happen! 💪🔥
-
-DeerFlow (**D**eep **E**xploration and **E**fficient **R**esearch **Flow**) is an open-source **super agent harness** that orchestrates **sub-agents**, **memory**, and **sandboxes** to do almost anything — powered by **extensible skills**.
-
-https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
-
-> [!NOTE]
-> **DeerFlow 2.0 is a ground-up rewrite.** It shares no code with v1. If you're looking for the original Deep Research framework, it's maintained on the [`1.x` branch](https://github.com/bytedance/deer-flow/tree/main-1.x) — contributions there are still welcome. Active development has moved to 2.0.
-
-## Official Website
-
-[<img width="2880" height="1600" alt="image" src="https://github.com/user-attachments/assets/a598c49f-3b2f-41ea-a052-05e21349188a" />](https://deerflow.tech)
-
-Learn more and see **real demos** on our [**official website**](https://deerflow.tech).
-
-## Coding Plan from ByteDance Volcengine
-
-<img width="4808" height="2400" alt="英文方舟" src="https://github.com/user-attachments/assets/2ecc7b9d-50be-4185-b1f7-5542d222fb2d" />
-
-- We strongly recommend using Doubao-Seed-2.0-Code, DeepSeek v3.2 and Kimi 2.5 to run DeerFlow
-- [Learn more](https://www.byteplus.com/en/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-- [中国大陆地区的开发者请点击这里](https://www.volcengine.com/activity/codingplan?utm_campaign=deer_flow&utm_content=deer_flow&utm_medium=devrel&utm_source=OWO&utm_term=deer_flow)
-
-## InfoQuest
-
-DeerFlow has newly integrated the intelligent search and crawling toolset independently developed by BytePlus--[InfoQuest (supports free online experience)](https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest)
-
-<a href="https://docs.byteplus.com/en/docs/InfoQuest/What_is_Info_Quest" target="_blank">
-  <img
-    src="https://sf16-sg.tiktokcdn.com/obj/eden-sg/hubseh7bsbps/20251208-160108.png"   alt="InfoQuest_banner"
-  />
-</a>
+Sophia is not a chatbot. She is not a therapist or a coach. She is a companion — someone who remembers across sessions, notices patterns over time, and calibrates her emotional presence to where you are right now. She meets you half a point higher than where you landed. Never more than that.
 
 ---
 
-## Table of Contents
+## What Makes Sophia Different
 
-- [🦌 DeerFlow - 2.0](#-deerflow---20)
-  - [Official Website](#official-website)
-  - [InfoQuest](#infoquest)
-  - [Table of Contents](#table-of-contents)
-  - [Quick Start](#quick-start)
-    - [Configuration](#configuration)
-    - [Running the Application](#running-the-application)
-      - [Option 1: Docker (Recommended)](#option-1-docker-recommended)
-      - [Option 2: Local Development](#option-2-local-development)
-    - [Advanced](#advanced)
-      - [Sandbox Mode](#sandbox-mode)
-      - [MCP Server](#mcp-server)
-      - [IM Channels](#im-channels)
-  - [From Deep Research to Super Agent Harness](#from-deep-research-to-super-agent-harness)
-  - [Core Features](#core-features)
-    - [Skills \& Tools](#skills--tools)
-      - [Claude Code Integration](#claude-code-integration)
-    - [Sub-Agents](#sub-agents)
-    - [Sandbox \& File System](#sandbox--file-system)
-    - [Context Engineering](#context-engineering)
-    - [Long-Term Memory](#long-term-memory)
-  - [Recommended Models](#recommended-models)
-  - [Embedded Python Client](#embedded-python-client)
-  - [Documentation](#documentation)
-  - [Contributing](#contributing)
-  - [License](#license)
-  - [Acknowledgments](#acknowledgments)
-    - [Key Contributors](#key-contributors)
-  - [Star History](#star-history)
+Most voice AI products respond to what you say. Sophia responds to where you are.
+
+Every turn, she estimates your emotional tone on a 0–4 scale. She selects a companion skill — vulnerability holding, active listening, gentle challenge — based on that tone, your session history, and the ritual context you set at the start. Her voice carries the right emotion for what she's saying, chosen by the same model that wrote the words. Her system prompt is rebuilt fresh every turn from layered, weighted components — not loaded once and forgotten.
+
+And she improves. Trace logging runs from Week 2 onward, capturing tone delta, emotion choices, and skill selections on every turn. By Week 6, golden turns feed into BootstrapFewShot examples injected into `voice.md`. GEPA runs an evolutionary optimization pass on the same file. `soul.md` — the file that defines who she is — is permanently excluded from any optimization. It is architecturally immutable.
+
+---
+
+## Architecture
+
+Two services. One intelligence.
+
+```
+┌──────────────────────────────────────────────────────────┐
+│  VOICE LAYER — Vision Agents                              │
+│                                                           │
+│  User ↔ WebRTC (Stream) ↔ Vision Agents server           │
+│  Web app (React SDK) · iOS app (Capacitor / WKWebView)   │
+│                                                           │
+│  STT:            Deepgram Nova-2                          │
+│  Turn detection: Smart Turn (neural)                      │
+│  Barge-in:       Automatic                                │
+│  TTS:            Cartesia Sonic-3 (LLM-chosen per turn)  │
+└──────────────────────────┬───────────────────────────────┘
+                           │ HTTP · runs/stream
+┌──────────────────────────┴───────────────────────────────┐
+│  INTELLIGENCE LAYER — DeerFlow fork                       │
+│                                                           │
+│  LangGraph server (port 2024)                             │
+│  sophia_companion  ← 14-middleware chain                  │
+│  sophia_builder    ← DeerFlow lead_agent (unchanged)      │
+│  Mem0 Platform     ← 9-category typed persistent memory  │
+│  Offline pipeline  ← handoffs, extraction, identity, GEPA│
+└──────────────────────────────────────────────────────────┘
+```
+
+The voice layer handles WebRTC transport, STT, turn detection, barge-in, and TTS. It knows nothing about Sophia's personality.
+
+The intelligence layer handles personality, emotional calibration, memory, ritual routing, skill selection, artifact generation, and self-improvement. It knows nothing about audio.
+
+They communicate over HTTP. `runs/stream` — not `runs/wait` — pipes text tokens to Cartesia as they arrive, so Sophia's voice starts after TTFT (~600ms) not after full generation (~1,200ms). The `emit_artifact` tool call arrives after the text stream and carries emotion metadata for the next TTS call.
+
+---
+
+## Three Platforms, One Intelligence
+
+| Platform | Interaction | Voice emotion | Artifact |
+|---|---|---|---|
+| Voice (web app) | WebRTC, real-time | Drives Cartesia TTS | Full 13-field |
+| Voice (iOS app) | WebRTC via Capacitor | Drives Cartesia TTS | Full 13-field |
+| Text (web app) | In-app text chat | Tracked, not delivered | Full 13-field |
+
+The iOS app is the existing Next.js web app wrapped in a Capacitor native shell. Same voice quality. Same intelligence. One-time microphone permission — no per-session Safari prompts.
+
+---
+
+## The 14-Middleware Companion Chain
+
+Every turn, the system prompt is rebuilt from scratch by 14 ordered middleware layers:
+
+```
+1.  ThreadDataMiddleware        — per-thread workspace directories
+2.  CrisisCheckMiddleware       — keyword scan, fast-paths to crisis_redirect
+3.  FileInjectionMiddleware     — soul.md (always)
+4.  FileInjectionMiddleware     — voice.md (skipped on crisis)
+5.  FileInjectionMiddleware     — techniques.md (skipped on crisis)
+6.  PlatformContextMiddleware   — sets platform signal for all downstream
+7.  UserIdentityMiddleware      — loads identity.md (empty on first session)
+8.  SessionStateMiddleware      — injects smart opener on first turn
+9.  ToneGuidanceMiddleware      — injects one band section, not the full file
+10. ContextAdaptationMiddleware — loads work / gaming / life context file
+11. RitualMiddleware            — loads ritual file, tracks phase across turns
+12. SkillRouterMiddleware       — selects companion skill via deterministic cascade
+13. Mem0MemoryMiddleware        — rule-based category selection → semantic search
+14. ArtifactMiddleware          — injects artifact instructions + previous artifact
+    SophiaTitleMiddleware       — ritual-aware session title (after LLM)
+    SophiaSummarizationMiddleware — artifact arc preserved on compression
+```
+
+Order is load-bearing. `RitualMiddleware` must precede `SkillRouterMiddleware` — the cascade reads `active_ritual` from state. `ToneGuidanceMiddleware` injects one band section (~726 tokens), not the full file (~3,630 tokens). The crisis fast-path (steps 2 → skip all expensive → 12) saves ~200ms per crisis turn.
+
+---
+
+## Memory System
+
+Mem0 Platform is the single memory authority. No competing providers.
+
+Nine custom categories:
+
+| Category | What it stores |
+|---|---|
+| `fact` | Static user info — name, job, location. High stability. |
+| `feeling` | Emotional patterns. Always include `tone_estimate` in metadata. |
+| `decision` | Genuine decisions made. Not considerations. |
+| `lesson` | Insights the user articulated or realized. |
+| `commitment` | Goals, deadlines, stated intentions. |
+| `preference` | Communication style, how they want to be treated. |
+| `relationship` | People in the user's life — names, roles, dynamics. |
+| `pattern` | Recurring behavioral observations. Require 2+ session evidence. |
+| `ritual_context` | How the user uses each ritual — what works, preferences. |
+
+Per-turn retrieval uses rule-based category selection in Python (zero latency), then semantic search within those categories. LRU cache (60s TTL) hits ~70% of turns within a session.
+
+Writes happen only in the offline pipeline — never in-turn. Every write includes full entity scoping: `user_id`, `agent_id`, `run_id` (session), `timestamp`, and metadata including `tone_estimate` (required for `feeling` category).
+
+---
+
+## The Smart Opener System
+
+At session end, the offline pipeline generates a single warm, context-aware sentence Sophia will use to open the next session — before the user says anything.
+
+Examples by scenario:
+
+- Upcoming event: *"The investor pitch is tomorrow. How are you feeling going into it?"*
+- Unresolved thread: *"You mentioned the conversation with your co-founder — did that happen?"*
+- After absence (3+ days): *"It's been a few days. Where are you at?"*
+- Low tone, no open threads: *"How are you doing today?"*
+- Post-breakthrough: *"Something shifted last time. How does it feel from the other side?"*
+
+---
+
+## Self-Improvement Loop
+
+```
+Week 2:  Trace logging starts — every turn writes tone, emotion, skill, platform, ritual
+Week 6:  BootstrapFewShot — scan golden turns (tone_delta ≥ 0.5), inject into voice.md
+Week 6:  GEPA first pass — evolutionary optimization of voice.md on tone_delta signal
+```
+
+Five invariants:
+
+1. `soul.md` is never a GEPA target — architecturally excluded
+2. Trace files are ground truth — never modified
+3. Global files require human review before deployment
+4. Tone regression is a hard block
+5. Schema version increments on structural changes
+
+---
+
+## Repository Structure
+
+```
+sophia/  (fork of bytedance/deer-flow)
+├── backend/src/
+│   ├── agents/
+│   │   ├── lead_agent/           ← DeerFlow — NEVER MODIFIED
+│   │   └── sophia_agent/         ← Companion (entirely new)
+│   │       ├── graph.py
+│   │       ├── agent.py          ← make_sophia_agent()
+│   │       ├── state.py          ← SophiaState TypedDict
+│   │       └── middlewares/      ← 14 middleware files
+│   └── sophia/                   ← Services (entirely new)
+│       ├── mem0_client.py
+│       ├── offline_pipeline.py
+│       ├── trace_logger.py
+│       ├── bootstrap.py
+│       ├── gepa.py
+│       └── prompts/              ← Pipeline prompt templates (NOT skill files)
+├── voice/                        ← Vision Agents layer
+│   ├── server.py
+│   ├── sophia_llm.py
+│   └── sophia_tts.py
+├── skills/public/sophia/         ← Skill files (read by agent at runtime)
+│   ├── soul.md                   ← IMMUTABLE
+│   ├── voice.md
+│   ├── techniques.md
+│   ├── tone_guidance.md
+│   ├── artifact_instructions.md
+│   ├── context/                  ← work.md · gaming.md · life.md
+│   ├── skills/                   ← 8 companion skill files
+│   └── rituals/                  ← prepare · debrief · vent · reset
+├── users/{user_id}/
+│   ├── identity.md
+│   ├── handoffs/latest.md
+│   └── traces/{session_id}.json
+├── gateway/routers/sophia.py
+├── CLAUDE.md                     ← AI context for Claude Code
+├── COMPOUND_LOG.md               ← Team compound engineering log
+├── langgraph.json
+├── config.yaml
+└── .env
+```
+
+---
 
 ## Quick Start
 
-### Configuration
+### Prerequisites
 
-1. **Clone the DeerFlow repository**
+- Python 3.12+
+- Node.js 22+
+- uv (fast Python package manager)
+- pnpm
+- A Stream account (WebRTC transport)
+- API keys: Anthropic, Mem0, Cartesia, Deepgram
 
-   ```bash
-   git clone https://github.com/bytedance/deer-flow.git
-   cd deer-flow
-   ```
+### 1. Clone and configure
 
-2. **Generate local configuration files**
+```bash
+git clone https://github.com/davidelaverga/Sophia-Agent.git
+cd Sophia-Agent
+make config
+```
 
-   From the project root directory (`deer-flow/`), run:
+This creates local configuration files based on the provided example templates.
 
-   ```bash
-   make config
-   ```
+### 2. Set API keys
 
-   This command creates local configuration files based on the provided example templates.
+Copy `.env.example` to `.env` and fill in:
 
-3. **Configure your preferred model(s)**
+```bash
+# Required — core
+ANTHROPIC_API_KEY=sk-ant-...
+MEM0_API_KEY=m0-...
 
-   Edit `config.yaml` and define at least one model:
+# Voice layer
+CARTESIA_API_KEY=...
+SOPHIA_VOICE_ID=...         # Cartesia voice ID for Sophia
+DEEPGRAM_API_KEY=...
+STREAM_API_KEY=...
+STREAM_API_SECRET=...
+```
 
-   ```yaml
-   models:
-     - name: gpt-4                       # Internal identifier
-       display_name: GPT-4               # Human-readable name
-       use: langchain_openai:ChatOpenAI  # LangChain class path
-       model: gpt-4                      # Model identifier for API
-       api_key: $OPENAI_API_KEY          # API key (recommended: use env var)
-       max_tokens: 4096                  # Maximum tokens per request
-       temperature: 0.7                  # Sampling temperature
+### 3. Configure models
 
-     - name: openrouter-gemini-2.5-flash
-       display_name: Gemini 2.5 Flash (OpenRouter)
-       use: langchain_openai:ChatOpenAI
-       model: google/gemini-2.5-flash-preview
-       api_key: $OPENAI_API_KEY          # OpenRouter still uses the OpenAI-compatible field name here
-       base_url: https://openrouter.ai/api/v1
-   ```
+Edit `config.yaml`:
 
-   OpenRouter and similar OpenAI-compatible gateways should be configured with `langchain_openai:ChatOpenAI` plus `base_url`. If you prefer a provider-specific environment variable name, point `api_key` at that variable explicitly (for example `api_key: $OPENROUTER_API_KEY`).
+```yaml
+models:
+  - name: claude-haiku
+    display_name: Claude Haiku 4.5
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-haiku-4-5-20251001
+    api_key: $ANTHROPIC_API_KEY
+    max_tokens: 4096
 
-4. **Set API keys for your configured model(s)**
+  - name: claude-sonnet
+    display_name: Claude Sonnet 4.6
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-sonnet-4-6
+    api_key: $ANTHROPIC_API_KEY
+    max_tokens: 8192
 
-   Choose one of the following methods:
+memory:
+  enabled: false       # Sophia uses Mem0 directly
+subagents:
+  enabled: true        # Required for builder delegation
+```
 
-- Option A: Edit the `.env` file in the project root (Recommended)
+### 4. Register Sophia graphs
 
+`langgraph.json` should contain:
 
-   ```bash
-   TAVILY_API_KEY=your-tavily-api-key
-   OPENAI_API_KEY=your-openai-api-key
-   # OpenRouter also uses OPENAI_API_KEY when your config uses langchain_openai:ChatOpenAI + base_url.
-   # Add other provider keys as needed
-   INFOQUEST_API_KEY=your-infoquest-api-key
-   ```
+```json
+{
+  "graphs": {
+    "sophia_companion": "./backend/src/agents/sophia_agent/graph.py:graph",
+    "sophia_builder": "./backend/src/agents/lead_agent/graph.py:graph"
+  },
+  "env": ".env",
+  "python_version": "3.12",
+  "dependencies": ["./backend"]
+}
+```
 
-- Option B: Export environment variables in your shell
-
-   ```bash
-   export OPENAI_API_KEY=your-openai-api-key
-   ```
-
-- Option C: Edit `config.yaml` directly (Not recommended for production)
-
-   ```yaml
-   models:
-     - name: gpt-4
-       api_key: your-actual-api-key-here  # Replace placeholder
-   ```
-
-### Running the Application
+### 5. Running the Application
 
 #### Option 1: Docker (Recommended)
 
@@ -173,13 +302,11 @@ make down   # Stop and remove containers
 
 Access: http://localhost:2026
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the detailed Docker development guide.
 
 #### Option 2: Local Development
 
-If you prefer running services locally:
-
-Prerequisite: complete the "Configuration" steps above first (`make config` and model API keys). `make dev` requires a valid configuration file (defaults to `config.yaml` in the project root; can be overridden via `DEER_FLOW_CONFIG_PATH`).
+Prerequisite: complete the configuration steps above first (`make config` and API keys).
 
 1. **Check prerequisites**:
    ```bash
@@ -193,7 +320,6 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
 
 3. **(Optional) Pre-pull sandbox image**:
    ```bash
-   # Recommended if using Docker/Container-based sandbox
    make setup-sandbox
    ```
 
@@ -204,10 +330,34 @@ Prerequisite: complete the "Configuration" steps above first (`make config` and 
 
 5. **Access**: http://localhost:2026
 
-### Advanced
-#### Sandbox Mode
+   Intelligence layer: `http://localhost:2024`
+   Voice layer: `python voice/server.py run`
+
+### 6. Verify
+
+```bash
+# Confirm both graphs are registered
+curl http://localhost:2024/assistants | jq '.[].assistant_id'
+# → "sophia_companion", "sophia_builder"
+
+# Confirm emit_artifact fires on first turn
+curl -X POST http://localhost:2024/threads -d '{}'
+curl -X POST http://localhost:2024/threads/{thread_id}/runs/stream \
+  -H "Content-Type: application/json" \
+  -d '{"assistant_id": "sophia_companion",
+       "input": {"messages": [{"role": "user", "content": "Hi"}]},
+       "config": {"configurable": {"user_id": "test", "platform": "voice"}}}'
+# → SSE stream — look for emit_artifact tool call in response
+```
+
+---
+
+## Advanced
+
+### Sandbox Mode
 
 DeerFlow supports multiple sandbox execution modes:
+
 - **Local Execution** (runs sandbox code directly on the host machine)
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
@@ -216,13 +366,13 @@ For Docker development, service startup follows `config.yaml` sandbox mode. In L
 
 See the [Sandbox Configuration Guide](backend/docs/CONFIGURATION.md#sandbox) to configure your preferred mode.
 
-#### MCP Server
+### MCP Server
 
-DeerFlow supports configurable MCP servers and skills to extend its capabilities.
-For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
+DeerFlow supports configurable MCP servers and skills to extend its capabilities. For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
+
 See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions.
 
-#### IM Channels
+### IM Channels
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 
@@ -236,12 +386,9 @@ DeerFlow supports receiving tasks from messaging apps. Channels auto-start when 
 
 ```yaml
 channels:
-  # LangGraph Server URL (default: http://localhost:2024)
   langgraph_url: http://localhost:2024
-  # Gateway API URL (default: http://localhost:8001)
   gateway_url: http://localhost:8001
 
-  # Optional: global session defaults for all mobile channels
   session:
     assistant_id: lead_agent
     config:
@@ -258,68 +405,25 @@ channels:
 
   slack:
     enabled: true
-    bot_token: $SLACK_BOT_TOKEN     # xoxb-...
-    app_token: $SLACK_APP_TOKEN     # xapp-... (Socket Mode)
-    allowed_users: []               # empty = allow all
+    bot_token: $SLACK_BOT_TOKEN
+    app_token: $SLACK_APP_TOKEN
+    allowed_users: []
 
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
-    allowed_users: []               # empty = allow all
-
-    # Optional: per-channel / per-user session settings
-    session:
-      assistant_id: mobile_agent
-      context:
-        thinking_enabled: false
-      users:
-        "123456789":
-          assistant_id: vip_agent
-          config:
-            recursion_limit: 150
-          context:
-            thinking_enabled: true
-            subagent_enabled: true
+    allowed_users: []
 ```
 
 Set the corresponding API keys in your `.env` file:
 
 ```bash
-# Telegram
 TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
-
-# Slack
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
-
-# Feishu / Lark
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
 ```
-
-**Telegram Setup**
-
-1. Chat with [@BotFather](https://t.me/BotFather), send `/newbot`, and copy the HTTP API token.
-2. Set `TELEGRAM_BOT_TOKEN` in `.env` and enable the channel in `config.yaml`.
-
-**Slack Setup**
-
-1. Create a Slack App at [api.slack.com/apps](https://api.slack.com/apps) → Create New App → From scratch.
-2. Under **OAuth & Permissions**, add Bot Token Scopes: `app_mentions:read`, `chat:write`, `im:history`, `im:read`, `im:write`, `files:write`.
-3. Enable **Socket Mode** → generate an App-Level Token (`xapp-…`) with `connections:write` scope.
-4. Under **Event Subscriptions**, subscribe to bot events: `app_mention`, `message.im`.
-5. Set `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN` in `.env` and enable the channel in `config.yaml`.
-
-**Feishu / Lark Setup**
-
-1. Create an app on [Feishu Open Platform](https://open.feishu.cn/) → enable **Bot** capability.
-2. Add permissions: `im:message`, `im:message.p2p_msg:readonly`, `im:resource`.
-3. Under **Events**, subscribe to `im.message.receive_v1` and select **Long Connection** mode.
-4. Copy the App ID and App Secret. Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `.env` and enable the channel in `config.yaml`.
-
-**Commands**
-
-Once a channel is connected, you can interact with DeerFlow directly from the chat:
 
 | Command | Description |
 |---------|-------------|
@@ -331,91 +435,29 @@ Once a channel is connected, you can interact with DeerFlow directly from the ch
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
 
-## From Deep Research to Super Agent Harness
+---
 
-DeerFlow started as a Deep Research framework — and the community ran with it. Since launch, developers have pushed it far beyond research: building data pipelines, generating slide decks, spinning up dashboards, automating content workflows. Things we never anticipated.
+## Core DeerFlow Features
 
-That told us something important: DeerFlow wasn't just a research tool. It was a **harness** — a runtime that gives agents the infrastructure to actually get work done.
-
-So we rebuilt it from scratch.
-
-DeerFlow 2.0 is no longer a framework you wire together. It's a super agent harness — batteries included, fully extensible. Built on LangGraph and LangChain, it ships with everything an agent needs out of the box: a filesystem, memory, skills, sandboxed execution, and the ability to plan and spawn sub-agents for complex, multi-step tasks.
-
-Use it as-is. Or tear it apart and make it yours.
-
-## Core Features
+Sophia is built on DeerFlow's agent harness. These capabilities are inherited and fully available.
 
 ### Skills & Tools
 
-Skills are what make DeerFlow do *almost anything*.
+Skills are structured capability modules — Markdown files that define workflows, best practices, and references. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more.
 
-A standard Agent Skill is a structured capability module — a Markdown file that defines a workflow, best practices, and references to supporting resources. DeerFlow ships with built-in skills for research, report generation, slide creation, web pages, image and video generation, and more. But the real power is extensibility: add your own skills, replace the built-in ones, or combine them into compound workflows.
+Sophia adds its own skill files in `skills/public/sophia/` — companion skills, rituals, tone guidance, and artifact instructions. These are loaded progressively by the middleware chain, not all at once.
 
-Skills are loaded progressively — only when the task needs them, not all at once. This keeps the context window lean and makes DeerFlow work well even with token-sensitive models.
-
-When you install `.skill` archives through the Gateway, DeerFlow accepts standard optional frontmatter metadata such as `version`, `author`, and `compatibility` instead of rejecting otherwise valid external skills.
-
-Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions. Swap anything. Add anything.
-
-Gateway-generated follow-up suggestions now normalize both plain-string model output and block/list-style rich content before parsing the JSON array response, so provider-specific content wrappers do not silently drop suggestions.
-
-```
-# Paths inside the sandbox container
-/mnt/skills/public
-├── research/SKILL.md
-├── report-generation/SKILL.md
-├── slide-creation/SKILL.md
-├── web-page/SKILL.md
-└── image-generation/SKILL.md
-
-/mnt/skills/custom
-└── your-custom-skill/SKILL.md      ← yours
-```
-
-#### Claude Code Integration
-
-The `claude-to-deerflow` skill lets you interact with a running DeerFlow instance directly from [Claude Code](https://docs.anthropic.com/en/docs/claude-code). Send research tasks, check status, manage threads — all without leaving the terminal.
-
-**Install the skill**:
-
-```bash
-npx skills add https://github.com/bytedance/deer-flow --skill claude-to-deerflow
-```
-
-Then make sure DeerFlow is running (default at `http://localhost:2026`) and use the `/claude-to-deerflow` command in Claude Code.
-
-**What you can do**:
-- Send messages to DeerFlow and get streaming responses
-- Choose execution modes: flash (fast), standard, pro (planning), ultra (sub-agents)
-- Check DeerFlow health, list models/skills/agents
-- Manage threads and conversation history
-- Upload files for analysis
-
-**Environment variables** (optional, for custom endpoints):
-
-```bash
-DEERFLOW_URL=http://localhost:2026            # Unified proxy base URL
-DEERFLOW_GATEWAY_URL=http://localhost:2026    # Gateway API
-DEERFLOW_LANGGRAPH_URL=http://localhost:2026/api/langgraph  # LangGraph API
-```
-
-See [`skills/public/claude-to-deerflow/SKILL.md`](skills/public/claude-to-deerflow/SKILL.md) for the full API reference.
+Tools follow the same philosophy. DeerFlow comes with a core toolset — web search, web fetch, file operations, bash execution — and supports custom tools via MCP servers and Python functions.
 
 ### Sub-Agents
 
-Complex tasks rarely fit in a single pass. DeerFlow decomposes them.
+Complex tasks rarely fit in a single pass. The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions.
 
-The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions. Sub-agents run in parallel when possible, report back structured results, and the lead agent synthesizes everything into a coherent output.
-
-This is how DeerFlow handles tasks that take minutes to hours: a research task might fan out into a dozen sub-agents, each exploring a different angle, then converge into a single report — or a website — or a slide deck with generated visuals. One harness, many hands.
+Sophia's `sophia_builder` delegates to DeerFlow's unmodified `lead_agent` graph. The companion asks all clarifying questions first, then hands off complete specs. The builder works asynchronously while the companion stays live.
 
 ### Sandbox & File System
 
-DeerFlow doesn't just *talk* about doing things. It has its own computer.
-
-Each task runs inside an isolated Docker container with a full filesystem — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It executes bash commands and codes. It views images. All sandboxed, all auditable, zero contamination between sessions.
-
-This is the difference between a chatbot with tool access and an agent with an actual execution environment.
+Each task runs inside an isolated Docker container with a full filesystem — skills, workspace, uploads, outputs. The agent reads, writes, and edits files. It executes bash commands and code. All sandboxed, all auditable, zero contamination between sessions.
 
 ```
 # Paths inside the sandbox container
@@ -427,90 +469,176 @@ This is the difference between a chatbot with tool access and an agent with an a
 
 ### Context Engineering
 
-**Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context. This means that the sub-agent will not be able to see the context of the main agent or other sub-agents. This is important to ensure that the sub-agent is able to focus on the task at hand and not be distracted by the context of the main agent or other sub-agents.
+**Isolated Sub-Agent Context**: Each sub-agent runs in its own isolated context, ensuring focus without distraction from the main agent or other sub-agents.
 
-**Summarization**: Within a session, DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant. This lets it stay sharp across long, multi-step tasks without blowing the context window.
+**Summarization**: DeerFlow manages context aggressively — summarizing completed sub-tasks, offloading intermediate results to the filesystem, compressing what's no longer immediately relevant.
 
 ### Long-Term Memory
 
-Most agents forget everything the moment a conversation ends. DeerFlow remembers.
+Sophia uses [Mem0 Platform](https://mem0.ai) as its single memory authority — see the [Memory System](#memory-system) section above. DeerFlow's built-in memory system is disabled (`memory.enabled: false` in `config.yaml`).
 
-Across sessions, DeerFlow builds a persistent memory of your profile, preferences, and accumulated knowledge. The more you use it, the better it knows you — your writing style, your technical stack, your recurring workflows. Memory is stored locally and stays under your control.
+### Embedded Python Client
 
-Memory updates now skip duplicate fact entries at apply time, so repeated preferences and context do not accumulate endlessly across sessions.
-
-## Recommended Models
-
-DeerFlow is model-agnostic — it works with any LLM that implements the OpenAI-compatible API. That said, it performs best with models that support:
-
-- **Long context windows** (100k+ tokens) for deep research and multi-step tasks
-- **Reasoning capabilities** for adaptive planning and complex decomposition
-- **Multimodal inputs** for image understanding and video comprehension
-- **Strong tool-use** for reliable function calling and structured outputs
-
-## Embedded Python Client
-
-DeerFlow can be used as an embedded Python library without running the full HTTP services. The `DeerFlowClient` provides direct in-process access to all agent and Gateway capabilities, returning the same response schemas as the HTTP Gateway API:
+DeerFlow can be used as an embedded Python library without running the full HTTP services:
 
 ```python
 from deerflow.client import DeerFlowClient
 
 client = DeerFlowClient()
 
-# Chat
 response = client.chat("Analyze this paper for me", thread_id="my-thread")
 
-# Streaming (LangGraph SSE protocol: values, messages-tuple, end)
 for event in client.stream("hello"):
     if event.type == "messages-tuple" and event.data.get("type") == "ai":
         print(event.data["content"])
 
-# Configuration & management — returns Gateway-aligned dicts
-models = client.list_models()        # {"models": [...]}
-skills = client.list_skills()        # {"skills": [...]}
+models = client.list_models()
+skills = client.list_skills()
 client.update_skill("web-search", enabled=True)
-client.upload_files("thread-1", ["./report.pdf"])  # {"success": True, "files": [...]}
+client.upload_files("thread-1", ["./report.pdf"])
 ```
 
-All dict-returning methods are validated against Gateway Pydantic response models in CI (`TestGatewayConformance`), ensuring the embedded client stays in sync with the HTTP API schemas. See `backend/packages/harness/deerflow/client.py` for full API documentation.
+See `backend/packages/harness/deerflow/client.py` for the full API documentation.
+
+---
+
+## iOS App (Capacitor)
+
+The existing Next.js web app wrapped in a native iOS shell. No Swift required.
+
+```bash
+npm install @capacitor/core @capacitor/cli
+npx cap init "Sophia" "com.sophia.app" --web-dir=out
+npx cap add ios
+npm run build && npx cap sync ios
+npx cap open ios        # Opens Xcode
+```
+
+Key test: tap the microphone once, grant permission, close the app, reopen — the system dialog must not appear again. If it does, the native permission flow is broken.
+
+The `ios/` directory is gitignored. Configure icons, splash screen, and capabilities in Xcode, not in code.
+
+---
+
+## Prompt Token Budget (Companion, Voice Peak)
+
+| Component | Tokens |
+|---|---|
+| soul.md + voice.md + techniques.md | ~2,853 |
+| Tone guidance (1 of 5 bands) | ~726 |
+| Context file (1 of 3) | ~130 |
+| Ritual file (when active) | ~600 |
+| artifact_instructions.md | ~2,760 |
+| User identity file | ~650 |
+| Session handoff | ~375 |
+| Mem0 memories (~10 results) | ~750 |
+| Active skill file | ~650 |
+| Previous artifact (conditional) | ~200 |
+| **Peak total** | **~9,144** |
+
+4.6% of Claude Haiku's 200k context. No compression needed at normal operation.
+
+---
+
+## Gateway API
+
+```
+GET    /api/sophia/{user_id}/memories/recent?status=pending_review
+PUT    /api/sophia/{user_id}/memories/{memory_id}
+DELETE /api/sophia/{user_id}/memories/{memory_id}
+POST   /api/sophia/{user_id}/memories/bulk-review
+GET    /api/sophia/{user_id}/visual/weekly
+GET    /api/sophia/{user_id}/visual/decisions
+GET    /api/sophia/{user_id}/visual/commitments
+POST   /api/sophia/{user_id}/reflect
+       body:    { query: string, period: "this_week" | "this_month" | "overall" }
+       returns: { voice_context: string, visual_parts: [...] }
+GET    /api/sophia/{user_id}/journal
+```
+
+---
+
+## Session Structure
+
+The user drives every session. There is no ambiguous intent detection.
+
+**Context mode** (app setting, 3 options):
+
+- `work` — strategic ally, professional stakes, grounded confidence
+- `gaming` — teammate and coach, higher energy, faster rhythm
+- `life` — deepest register, patient, willing to wait
+
+**Session type** (user choice at session start):
+
+- Free conversation — no ritual, Sophia follows
+- Prepare — structured intention-setting for what's ahead
+- Debrief — processing what happened
+- Vent — holding space, no agenda
+- Reset — grounding when overwhelmed
+
+Ritual and context pass as `configurable` parameters to the LangGraph server. The middleware chain reads them — never guesses them.
+
+---
+
+## Specification Documents
+
+Full implementation detail in `docs/specs/`:
+
+| File | Contents |
+|---|---|
+| `01_architecture_overview.md` | System overview, platforms, iOS Capacitor, key principles |
+| `02_build_plan.md` | 6-week three-track execution plan, API contracts, convergence checklists |
+| `03_memory_system.md` | Mem0 configuration, categories, retrieval, handoffs, smart opener, reflect flow |
+| `04_backend_integration.md` | Middleware chain details, voice pipeline, builder system, offline pipeline, GEPA |
+| `05_frontend_ux.md` | Vision Agents, voice experience, memory candidates, Journal, visual artifacts, Capacitor iOS |
+| `06_implementation_spec.md` | Codebase-specific patterns, common pitfalls, testing checklists |
+
+---
+
+## Foundation
+
+Sophia is built on [DeerFlow](https://github.com/bytedance/deer-flow) (MIT License) by ByteDance. The unmodified `lead_agent` graph powers Sophia's builder subagent. DeerFlow's middleware pattern, LangGraph integration, sandbox system, and summarization pipeline are the architectural foundation.
+
+Sophia's companion intelligence, memory system, voice layer, and self-improvement loop are entirely new work built alongside DeerFlow — not on top of it as a dependency.
+
+---
 
 ## Documentation
 
-- [Contributing Guide](CONTRIBUTING.md) - Development environment setup and workflow
-- [Configuration Guide](backend/docs/CONFIGURATION.md) - Setup and configuration instructions
-- [Architecture Overview](backend/CLAUDE.md) - Technical architecture details
-- [Backend Architecture](backend/README.md) - Backend architecture and API reference
+- [Contributing Guide](CONTRIBUTING.md) — Development environment setup and workflow
+- [Configuration Guide](backend/docs/CONFIGURATION.md) — Setup and configuration instructions
+- [Architecture Overview](backend/CLAUDE.md) — Technical architecture details
+- [Backend Architecture](backend/README.md) — Backend architecture and API reference
+
+---
 
 ## Contributing
 
 We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, workflow, and guidelines.
 
-Regression coverage includes Docker sandbox mode detection and provisioner kubeconfig-path handling tests in `backend/tests/`.
+---
 
 ## License
 
 This project is open source and available under the [MIT License](./LICENSE).
 
+---
+
 ## Acknowledgments
 
-DeerFlow is built upon the incredible work of the open-source community. We are deeply grateful to all the projects and contributors whose efforts have made DeerFlow possible. Truly, we stand on the shoulders of giants.
+Sophia is built upon the incredible work of the open-source community:
 
-We would like to extend our sincere appreciation to the following projects for their invaluable contributions:
+- **[DeerFlow](https://github.com/bytedance/deer-flow)** — The super agent harness that serves as Sophia's architectural foundation.
+- **[LangChain](https://github.com/langchain-ai/langchain)** — Powers LLM interactions and chains.
+- **[LangGraph](https://github.com/langchain-ai/langgraph)** — Enables multi-agent orchestration and the middleware pattern.
+- **[Mem0](https://mem0.ai)** — Persistent memory platform with typed categories.
+- **[Cartesia](https://cartesia.ai)** — Emotionally expressive text-to-speech.
+- **[Deepgram](https://deepgram.com)** — Real-time speech-to-text.
+- **[Stream](https://getstream.io)** — WebRTC transport layer.
 
-- **[LangChain](https://github.com/langchain-ai/langchain)**: Their exceptional framework powers our LLM interactions and chains, enabling seamless integration and functionality.
-- **[LangGraph](https://github.com/langchain-ai/langgraph)**: Their innovative approach to multi-agent orchestration has been instrumental in enabling DeerFlow's sophisticated workflows.
+### Key DeerFlow Contributors
 
-These projects exemplify the transformative power of open-source collaboration, and we are proud to build upon their foundations.
-
-### Key Contributors
-
-A heartfelt thank you goes out to the core authors of `DeerFlow`, whose vision, passion, and dedication have brought this project to life:
+A heartfelt thank you to the core authors of DeerFlow, whose work made Sophia possible:
 
 - **[Daniel Walnut](https://github.com/hetaoBackend/)**
 - **[Henry Li](https://github.com/magiccube/)**
-
-Your unwavering commitment and expertise have been the driving force behind DeerFlow's success. We are honored to have you at the helm of this journey.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.com/#bytedance/deer-flow&Date)
