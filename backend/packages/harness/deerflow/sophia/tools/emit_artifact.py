@@ -9,14 +9,6 @@ from typing import Literal
 from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
-TONE_BANDS = ["shutdown", "grief_fear", "anger_antagonism", "engagement", "enthusiasm"]
-SKILLS = [
-    "active_listening", "vulnerability_holding", "crisis_redirect",
-    "trust_building", "boundary_holding", "challenging_growth",
-    "identity_fluidity_support", "celebrating_breakthrough",
-]
-VOICE_SPEEDS = ["slow", "gentle", "normal", "engaged", "energetic"]
-
 
 class ArtifactInput(BaseModel):
     session_goal: str = Field(description="What this session is about. Set on turn 1, stable after.")

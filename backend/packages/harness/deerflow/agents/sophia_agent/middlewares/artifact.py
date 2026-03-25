@@ -69,16 +69,6 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
         artifact_data = None
         for msg in reversed(messages):
-            # Look for tool messages with name emit_artifact
-            if getattr(msg, "type", None) == "tool" and getattr(msg, "name", None) == "emit_artifact":
-                try:
-                    content = getattr(msg, "content", "")
-                    # The tool returns "Artifact recorded." — the actual data is in the tool call args
-                    break
-                except Exception:
-                    pass
-
-            # Also check AI messages for tool_calls with emit_artifact
             if getattr(msg, "type", None) == "ai":
                 tool_calls = getattr(msg, "tool_calls", [])
                 for tc in (tool_calls or []):

@@ -143,6 +143,54 @@ class TestCrisisCheckMiddleware:
             result = mw.before_agent(state, _make_runtime())
             assert result is not None, f"Signal not detected: {signal}"
 
+    # --- Normalization unit tests ---
+
+    def test_normalize_text(self):
+        from deerflow.agents.sophia_agent.middlewares.crisis_check import _normalize_text
+        assert _normalize_text("HELLO") == "hello"
+        assert _normalize_text("dieee") == "die"
+        assert _normalize_text("wannna") == "wana"
+        assert _normalize_text("I... want!!! to---die???") == "i want todie"
+        assert _normalize_text("  lots   of   spaces  ") == "lots of spaces"
+        # 2 repeated chars should NOT be collapsed (only 3+)
+        assert _normalize_text("wanna") == "wanna"
+
+    # --- MUST_DETECT parametrized ---
+
+    @pytest.mark.parametrize("text", [
+        "I want to die",
+        "I WANT TO DIE",
+        "i wanna die",
+        "kms",
+        "I don't want to be alive",
+        "better off dead",
+        "honestly I just want to die sometimes",
+        "been thinking about how to kill myself",
+        "I wannna dieee",
+    ])
+    def test_must_detect(self, text):
+        mw = self._get_middleware()
+        state = {"messages": [_make_message(text)]}
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None, f"MUST_DETECT failed for: {text!r}"
+        assert result["force_skill"] == "crisis_redirect"
+        assert result["skip_expensive"] is True
+
+    # --- MUST_NOT_DETECT parametrized ---
+
+    @pytest.mark.parametrize("text", [
+        "this traffic is killing me",
+        "I'm dying of laughter",
+        "that joke killed me",
+        "I could die for some pizza right now",
+        "the character dies in the movie",
+    ])
+    def test_must_not_detect(self, text):
+        mw = self._get_middleware()
+        state = {"messages": [_make_message(text)]}
+        result = mw.before_agent(state, _make_runtime())
+        assert result is None, f"MUST_NOT_DETECT failed for: {text!r}"
+
 
 # --- FileInjectionMiddleware ---
 
@@ -596,6 +644,84 @@ class TestSkillRouterMiddleware:
         assert "skill_session_data" in result
         assert result["skill_session_data"]["sessions_total"] == 1
 
+    def test_sessions_total_not_incremented_on_subsequent_turns(self, tmp_path):
+        """sessions_total must only increment on turn_count == 0 (session start)."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        sd = {
+            "sessions_total": 3,
+            "trust_established": False,
+            "complaint_signatures": {},
+            "skill_history": [],
+        }
+        # turn_count > 0 — sessions_total must NOT change
+        result = mw.before_agent(
+            {"messages": [_make_message("hello")], "skill_session_data": sd, "turn_count": 1},
+            _make_runtime(),
+        )
+        assert result["skill_session_data"]["sessions_total"] == 3
+
+    def test_sessions_total_increments_on_turn_zero(self, tmp_path):
+        """sessions_total increments exactly once per session (turn_count == 0)."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        sd = {
+            "sessions_total": 3,
+            "trust_established": False,
+            "complaint_signatures": {},
+            "skill_history": [],
+        }
+        result = mw.before_agent(
+            {"messages": [_make_message("hello")], "skill_session_data": sd, "turn_count": 0},
+            _make_runtime(),
+        )
+        assert result["skill_session_data"]["sessions_total"] == 4
+
+    def test_trust_established_visible_to_select_skill_same_turn(self, tmp_path):
+        """trust_established updated in before_agent must be visible to _select_skill on the same turn."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        # sessions_total is 4 in state. turn_count == 0 increments it to 5,
+        # which should set trust_established = True (threshold is 5).
+        # With trust, a benign message should get active_listening, not trust_building.
+        sd = {
+            "sessions_total": 4,
+            "trust_established": False,
+            "complaint_signatures": {},
+            "skill_history": [],
+        }
+        result = mw.before_agent(
+            {
+                "messages": [_make_message("I had a good day")],
+                "skill_session_data": sd,
+                "turn_count": 0,
+            },
+            _make_runtime(),
+        )
+        assert result["skill_session_data"]["trust_established"] is True
+        assert result["active_skill"] == "active_listening"
+
+    def test_breakthrough_detection_with_passed_session_data(self, tmp_path):
+        """Breakthrough detection works with session_data passed to _select_skill."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        result = mw.before_agent(
+            {
+                "messages": [_make_message("oh my god i just realized everything")],
+                "previous_artifact": {"tone_estimate": 3.5},
+                "turn_count": 1,
+                "skill_session_data": {
+                    "sessions_total": 10,
+                    "trust_established": True,
+                    "complaint_signatures": {},
+                    "skill_history": [],
+                    "last_tone_estimate": 2.0,
+                },
+            },
+            _make_runtime(),
+        )
+        assert result["active_skill"] == "celebrating_breakthrough"
+
 
 # --- ArtifactMiddleware ---
 
@@ -633,6 +759,75 @@ class TestArtifactMiddleware:
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
+        assert result is None
+
+    def test_captures_artifact_with_tool_message_present(self, tmp_path):
+        """after_model captures artifact from AIMessage even when ToolMessage is also in the list."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        artifact_args = {
+            "session_goal": "Discuss project",
+            "tone_estimate": 2.5,
+            "tone_target": 3.0,
+            "active_tone_band": "engagement",
+            "skill_loaded": "active_listening",
+        }
+        ai_msg = _make_ai_message_with_tool_call("emit_artifact", artifact_args)
+
+        # ToolMessage appears after AIMessage chronologically
+        tool_msg = MagicMock()
+        tool_msg.type = "tool"
+        tool_msg.name = "emit_artifact"
+        tool_msg.content = "Artifact recorded."
+
+        # Messages in chronological order: AI first, then ToolMessage
+        result = mw.after_model({"messages": [ai_msg, tool_msg]}, _make_runtime())
+        assert result is not None
+        assert result["current_artifact"]["session_goal"] == "Discuss project"
+        assert result["current_artifact"]["tone_estimate"] == 2.5
+
+    def test_previous_artifact_rotation(self, tmp_path):
+        """previous_artifact is set to the old current_artifact when a new one is captured."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        old_artifact = {"session_goal": "Old goal", "tone_estimate": 1.5}
+        new_args = {
+            "session_goal": "New goal",
+            "tone_estimate": 2.5,
+            "tone_target": 3.0,
+            "active_tone_band": "engagement",
+            "skill_loaded": "active_listening",
+        }
+        ai_msg = _make_ai_message_with_tool_call("emit_artifact", new_args)
+
+        result = mw.after_model(
+            {"messages": [ai_msg], "current_artifact": old_artifact},
+            _make_runtime(),
+        )
+        assert result is not None
+        assert result["previous_artifact"] == old_artifact
+        assert result["current_artifact"]["session_goal"] == "New goal"
+
+    def test_after_model_returns_none_without_emit_artifact(self, tmp_path):
+        """after_model returns None when no emit_artifact tool_call exists."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        # AI message with a different tool call
+        ai_msg = MagicMock()
+        ai_msg.type = "ai"
+        ai_msg.content = "Some response"
+        ai_msg.tool_calls = [{"name": "retrieve_memories", "args": {"query": "test"}}]
+
+        result = mw.after_model({"messages": [ai_msg]}, _make_runtime())
         assert result is None
 
 

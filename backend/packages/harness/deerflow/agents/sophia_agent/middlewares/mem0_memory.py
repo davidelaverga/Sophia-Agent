@@ -11,6 +11,8 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.sophia.mem0_client import search_memories
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,8 +80,6 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             query = str(content)[:200]  # truncate for search
 
         try:
-            from deerflow.sophia.mem0_client import search_memories
-
             results = search_memories(
                 user_id=self._user_id,
                 query=query,

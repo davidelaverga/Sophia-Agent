@@ -1,6 +1,6 @@
 """Sophia companion agent factory.
 
-Creates the Sophia companion agent with its 14-middleware chain.
+Creates the Sophia companion agent with its middleware chain.
 """
 
 import logging
@@ -22,7 +22,6 @@ from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssem
 from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
 from deerflow.agents.sophia_agent.middlewares.session_state import SessionStateMiddleware
 from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
-from deerflow.agents.sophia_agent.middlewares.summarization import SophiaSummarizationMiddleware
 from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
@@ -65,7 +64,7 @@ def make_sophia_agent(config: RunnableConfig):
         max_tokens=4096,
     )
 
-    # 14-middleware chain — order is load-bearing
+    # 16-middleware chain — order is load-bearing (14 core + 2 post-chain)
     middlewares = [
         # 1. Infrastructure
         ThreadDataMiddleware(lazy_init=True),
@@ -90,10 +89,10 @@ def make_sophia_agent(config: RunnableConfig):
         Mem0MemoryMiddleware(user_id),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
-        # Post-chain: prompt assembly, title, summarization
+        # Post-chain: prompt assembly, title
         PromptAssemblyMiddleware(),
         SophiaTitleMiddleware(),
-        SophiaSummarizationMiddleware(),
+        # Note: summarization middleware will be wired during DeerFlow integration (Unit 14)
     ]
 
     retrieve_memories = make_retrieve_memories_tool(user_id)

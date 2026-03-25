@@ -72,8 +72,8 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
                 logger.warning("Skill file not found: %s", path)
                 self._skill_contents[name] = ""
 
-    def _select_skill(self, state: SkillRouterState) -> str:
-        sd = state.get("skill_session_data") or _init_session_data()
+    def _select_skill(self, state: SkillRouterState, session_data: dict) -> str:
+        sd = session_data
         messages = state.get("messages", [])
         msg = ""
         if messages:
@@ -145,7 +145,8 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
 
         # Update session data
         sd = dict(state.get("skill_session_data") or _init_session_data())
-        sd["sessions_total"] = sd.get("sessions_total", 0) + 1
+        if state.get("turn_count", 0) == 0:
+            sd["sessions_total"] = sd.get("sessions_total", 0) + 1
         sd["trust_established"] = sd["sessions_total"] >= TRUST_SESSION_THRESHOLD
 
         # Track complaint signatures
@@ -161,7 +162,7 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
                 sigs[sig] = sigs.get(sig, 0) + 1
                 sd["complaint_signatures"] = sigs
 
-        skill = self._select_skill(state)
+        skill = self._select_skill(state, sd)
 
         # Store current tone for next turn's breakthrough comparison
         prev_artifact = state.get("previous_artifact") or {}
