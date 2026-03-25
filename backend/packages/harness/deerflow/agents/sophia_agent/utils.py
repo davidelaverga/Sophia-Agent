@@ -23,16 +23,15 @@ def safe_user_path(base_dir: Path, user_id: str, *segments: str) -> Path:
 
     Validates user_id, constructs the path, then verifies the resolved
     path stays within the base directory (defense in depth).
+    Uses Path.is_relative_to() for cross-platform correctness.
     """
     validate_user_id(user_id)
     target = (base_dir / user_id / Path(*segments) if segments
               else base_dir / user_id)
     resolved = target.resolve()
     base_resolved = base_dir.resolve()
-    if not str(resolved).startswith(str(base_resolved) + ("/" if "/" in str(base_resolved) else "\\")):
-        # Also check exact match (user_id dir itself)
-        if resolved != base_resolved and not resolved.is_relative_to(base_resolved):
-            raise ValueError(f"Path traversal detected for user_id: {user_id!r}")
+    if not resolved.is_relative_to(base_resolved):
+        raise ValueError("Path traversal detected")
     return target
 
 
