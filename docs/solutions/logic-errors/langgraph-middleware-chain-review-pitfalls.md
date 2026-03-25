@@ -102,18 +102,18 @@ Code used `skills/public/sophia` but directory was `skills/public/Sophia`. Works
 
 **Fix:** Rename directory to lowercase. Always test on case-sensitive filesystem.
 
-### P1-4: State Reducer Causes Prompt Bloat
+### ~~P1-4: State Reducer Causes Prompt Bloat~~ (RETRACTED)
 
-`system_prompt_blocks: Annotated[list[str], operator.add]` accumulates across every agent loop iteration, doubling the system prompt on each pass.
+**Original finding was incorrect.** `before_agent` runs once per invocation — tool loops go to `before_model`, not `before_agent`. So `operator.add` does NOT cause unbounded growth.
 
-**Fix:** Remove the additive reducer:
+Removing the reducer actually breaks accumulation: without `operator.add`, LangGraph uses LastValue semantics and only the last middleware's blocks survive. The reducer is **required** and **safe**.
+
+See: `docs/solutions/logic-errors/langgraph-state-reducer-removal-breaks-accumulation.md`
 
 ```python
-# WRONG — accumulates forever
+# CORRECT — operator.add is needed for multi-middleware accumulation
+# Safe because before_agent runs once (tool loops go to before_model)
 system_prompt_blocks: Annotated[list[str], operator.add]
-
-# RIGHT — last-write-wins, middleware rebuilds each pass
-system_prompt_blocks: list[str]
 ```
 
 ### P1-5: Breakthrough Detection Always Returns Zero
@@ -150,7 +150,7 @@ session_data["last_tone_estimate"] = curr_tone
 
 ## Key Takeaways
 
-1. **Additive reducers in LangGraph are per-iteration, not per-turn.** Every `Annotated[list, operator.add]` field grows on each agent loop pass. Use additive reducers only for fields that genuinely need accumulation (like `messages`).
+1. **~~Additive reducers in LangGraph are per-iteration~~ (RETRACTED).** `before_agent` runs once per invocation. `operator.add` is required for multi-middleware accumulation — without it, LangGraph's LastValue channel drops all but the last node's value. See the separate learning doc for details.
 
 2. **"Works on Windows" is not "works."** Case-insensitive filesystems hide path bugs. Always test on Linux.
 
