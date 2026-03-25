@@ -21,6 +21,8 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
 
     state_schema = PromptAssemblyState
 
+    _SYSTEM_MSG_ID = "sophia-system-prompt"
+
     @override
     def before_model(self, state: PromptAssemblyState, runtime: Runtime) -> dict | None:
         blocks = state.get("system_prompt_blocks", [])
@@ -28,11 +30,20 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
             return None
 
         system_content = "\n\n---\n\n".join(blocks)
-        system_msg = SystemMessage(content=system_content)
 
-        # Prepend system message to messages, removing any existing system message
+        # Use a stable ID so add_messages reducer replaces rather than duplicates.
+        # RemoveMessage removes any prior system message, then we add the new one.
+        from langchain_core.messages import RemoveMessage
+
         messages = list(state.get("messages", []))
-        filtered = [m for m in messages if not isinstance(m, SystemMessage)]
-        filtered.insert(0, system_msg)
+        updates = []
 
-        return {"messages": filtered}
+        # Remove existing system messages
+        for m in messages:
+            if isinstance(m, SystemMessage):
+                updates.append(RemoveMessage(id=m.id))
+
+        # Add the assembled system message with a stable ID
+        updates.append(SystemMessage(content=system_content, id=self._SYSTEM_MSG_ID))
+
+        return {"messages": updates}
