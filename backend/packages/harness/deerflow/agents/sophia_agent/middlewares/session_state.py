@@ -13,9 +13,12 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.utils import safe_user_path
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
+_USERS_DIR = _PROJECT_ROOT / "users"
 
 
 class SessionStateState(AgentState):
@@ -49,7 +52,12 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
         if turn_count != 0:
             return None
 
-        handoff_path = _PROJECT_ROOT / "users" / self._user_id / "handoffs" / "latest.md"
+        try:
+            handoff_path = safe_user_path(_USERS_DIR, self._user_id, "handoffs", "latest.md")
+        except ValueError:
+            logger.warning("Invalid user_id for session state: %s", self._user_id)
+            return None
+
         if not handoff_path.exists():
             return None
 

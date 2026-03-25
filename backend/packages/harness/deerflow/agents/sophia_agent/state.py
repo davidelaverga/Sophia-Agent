@@ -1,5 +1,4 @@
-import operator
-from typing import Annotated, NotRequired, TypedDict
+from typing import NotRequired, TypedDict
 
 from langchain.agents import AgentState
 
@@ -44,8 +43,10 @@ class SophiaState(AgentState):
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
 
-    # Prompt assembly — accumulated by middlewares via before_agent, assembled in before_model
-    system_prompt_blocks: Annotated[list[str], operator.add]
+    # Prompt assembly — built fresh each middleware pass, assembled in before_model
+    # NOTE: No additive reducer. Each middleware pass rebuilds this list from scratch.
+    # Using operator.add would cause unbounded growth across agent loop iterations.
+    system_prompt_blocks: NotRequired[list[str]]
 
     # Title
     title: NotRequired[str | None]

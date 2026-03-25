@@ -112,7 +112,9 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
             return "identity_fluidity_support"
 
         # 7. Breakthrough (tone spike + insight language)
-        prev_tone = prev.get("tone_estimate", tone)
+        # Compare current tone against the PREVIOUS turn's tone stored in session data.
+        # (Both cannot come from `prev` — that reads the same value, yielding delta=0.)
+        prev_tone = sd.get("last_tone_estimate", tone)
         tone_delta = tone - prev_tone
         if tone_delta >= TONE_SPIKE_THRESHOLD:
             insight_words = ["i just realized", "oh my god", "i never saw", "i've been"]
@@ -160,6 +162,10 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
                 sd["complaint_signatures"] = sigs
 
         skill = self._select_skill(state)
+
+        # Store current tone for next turn's breakthrough comparison
+        prev_artifact = state.get("previous_artifact") or {}
+        sd["last_tone_estimate"] = prev_artifact.get("tone_estimate", 2.5)
 
         # Track skill history
         history = list(sd.get("skill_history", []))

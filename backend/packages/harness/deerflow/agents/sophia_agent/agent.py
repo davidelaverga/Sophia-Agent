@@ -27,8 +27,9 @@ from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.tools.emit_artifact import emit_artifact
-from deerflow.sophia.tools.retrieve_memories import retrieve_memories
+from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 from deerflow.sophia.tools.switch_to_builder import switch_to_builder
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def make_sophia_agent(config: RunnableConfig):
         context_mode: "work" | "gaming" | "life" (default: "life")
     """
     cfg = config.get("configurable", {})
-    user_id = cfg.get("user_id", "default_user")
+    user_id = validate_user_id(cfg.get("user_id", "default_user"))
     platform = cfg.get("platform", "voice")
     ritual = cfg.get("ritual", None)
     context_mode = cfg.get("context_mode", "life")
@@ -95,6 +96,7 @@ def make_sophia_agent(config: RunnableConfig):
         SophiaSummarizationMiddleware(),
     ]
 
+    retrieve_memories = make_retrieve_memories_tool(user_id)
     tools = [emit_artifact, switch_to_builder, retrieve_memories]
 
     return create_agent(

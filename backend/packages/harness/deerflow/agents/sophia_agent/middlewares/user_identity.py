@@ -12,9 +12,12 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.utils import safe_user_path
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
+_USERS_DIR = _PROJECT_ROOT / "users"
 
 
 class UserIdentityState(AgentState):
@@ -36,7 +39,12 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
         if state.get("skip_expensive", False):
             return None
 
-        identity_path = _PROJECT_ROOT / "users" / self._user_id / "identity.md"
+        try:
+            identity_path = safe_user_path(_USERS_DIR, self._user_id, "identity.md")
+        except ValueError:
+            logger.warning("Invalid user_id for identity lookup: %s", self._user_id)
+            return None
+
         if not identity_path.exists():
             return None
 

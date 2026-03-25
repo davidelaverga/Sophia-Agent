@@ -6,6 +6,69 @@ from unittest.mock import MagicMock
 
 import pytest
 
+
+# --- User ID validation and path traversal ---
+
+class TestUserIdValidation:
+    def test_valid_user_id(self):
+        from deerflow.agents.sophia_agent.utils import validate_user_id
+        assert validate_user_id("user_123") == "user_123"
+        assert validate_user_id("test-user") == "test-user"
+        assert validate_user_id("ABC") == "ABC"
+
+    def test_empty_user_id_rejected(self):
+        from deerflow.agents.sophia_agent.utils import validate_user_id
+        with pytest.raises(ValueError):
+            validate_user_id("")
+
+    @pytest.mark.parametrize("malicious_id", [
+        "../etc/passwd",
+        "..\\windows\\system32",
+        "valid_user/../../other",
+        "user\x00hidden",
+        "a" * 200,
+        "user id with spaces",
+        "user;rm -rf",
+        "user$(whoami)",
+    ])
+    def test_malicious_user_id_rejected(self, malicious_id):
+        from deerflow.agents.sophia_agent.utils import validate_user_id
+        with pytest.raises(ValueError):
+            validate_user_id(malicious_id)
+
+    def test_safe_user_path_valid(self, tmp_path):
+        from deerflow.agents.sophia_agent.utils import safe_user_path
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        result = safe_user_path(users_dir, "test_user", "identity.md")
+        assert "test_user" in str(result)
+        assert "identity.md" in str(result)
+
+    def test_safe_user_path_traversal_rejected(self, tmp_path):
+        from deerflow.agents.sophia_agent.utils import safe_user_path
+        users_dir = tmp_path / "users"
+        users_dir.mkdir()
+        with pytest.raises(ValueError):
+            safe_user_path(users_dir, "../etc", "passwd")
+
+
+class TestExtractLastMessageText:
+    def test_plain_string_content(self):
+        from deerflow.agents.sophia_agent.utils import extract_last_message_text
+        msg = MagicMock()
+        msg.content = "Hello world"
+        assert extract_last_message_text([msg]) == "Hello world"
+
+    def test_multimodal_list_content(self):
+        from deerflow.agents.sophia_agent.utils import extract_last_message_text
+        msg = MagicMock()
+        msg.content = [{"text": "Hello"}, {"text": "world"}]
+        assert extract_last_message_text([msg]) == "Hello world"
+
+    def test_empty_messages(self):
+        from deerflow.agents.sophia_agent.utils import extract_last_message_text
+        assert extract_last_message_text([]) == ""
+
 # --- Helpers ---
 
 def _make_runtime(**context_kwargs):
@@ -157,34 +220,34 @@ class TestPlatformContextMiddleware:
 
 class TestUserIdentityMiddleware:
     def test_loads_identity_file(self, tmp_path):
-        from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware, _PROJECT_ROOT
+        from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
         # Create a temporary user identity file
-        user_dir = tmp_path / "users" / "test_user"
+        user_dir = tmp_path / "test_user"
         user_dir.mkdir(parents=True)
         (user_dir / "identity.md").write_text("Name: Test User\nRole: Developer")
 
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
-        original_root = mod._PROJECT_ROOT
-        mod._PROJECT_ROOT = tmp_path
+        original_users_dir = mod._USERS_DIR
+        mod._USERS_DIR = tmp_path
         try:
             mw = UserIdentityMiddleware("test_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
             assert result is not None
             assert "Test User" in result["system_prompt_blocks"][0]
         finally:
-            mod._PROJECT_ROOT = original_root
+            mod._USERS_DIR = original_users_dir
 
     def test_missing_identity_returns_none(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-        original_root = mod._PROJECT_ROOT
-        mod._PROJECT_ROOT = tmp_path
+        original_users_dir = mod._USERS_DIR
+        mod._USERS_DIR = tmp_path
         try:
             mw = UserIdentityMiddleware("nonexistent_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
             assert result is None
         finally:
-            mod._PROJECT_ROOT = original_root
+            mod._USERS_DIR = original_users_dir
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
@@ -198,10 +261,10 @@ class TestUserIdentityMiddleware:
 class TestSessionStateMiddleware:
     def test_smart_opener_on_turn_0(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
-        original_root = mod._PROJECT_ROOT
-        mod._PROJECT_ROOT = tmp_path
+        original_users_dir = mod._USERS_DIR
+        mod._USERS_DIR = tmp_path
 
-        user_dir = tmp_path / "users" / "test_user" / "handoffs"
+        user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
         (user_dir / "latest.md").write_text(
             '---\nsmart_opener: "How did the pitch go?"\n---\nSession notes here.'
@@ -213,14 +276,14 @@ class TestSessionStateMiddleware:
             assert result is not None
             assert "How did the pitch go?" in result["system_prompt_blocks"][0]
         finally:
-            mod._PROJECT_ROOT = original_root
+            mod._USERS_DIR = original_users_dir
 
     def test_no_opener_on_turn_1(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
-        original_root = mod._PROJECT_ROOT
-        mod._PROJECT_ROOT = tmp_path
+        original_users_dir = mod._USERS_DIR
+        mod._USERS_DIR = tmp_path
 
-        user_dir = tmp_path / "users" / "test_user" / "handoffs"
+        user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
         (user_dir / "latest.md").write_text('---\nsmart_opener: "Hello"\n---\n')
 
@@ -229,18 +292,18 @@ class TestSessionStateMiddleware:
             result = mw.before_agent({"messages": [], "turn_count": 1}, _make_runtime())
             assert result is None
         finally:
-            mod._PROJECT_ROOT = original_root
+            mod._USERS_DIR = original_users_dir
 
     def test_missing_handoff_returns_none(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
-        original_root = mod._PROJECT_ROOT
-        mod._PROJECT_ROOT = tmp_path
+        original_users_dir = mod._USERS_DIR
+        mod._USERS_DIR = tmp_path
         try:
             mw = mod.SessionStateMiddleware("test_user")
             result = mw.before_agent({"messages": [], "turn_count": 0}, _make_runtime())
             assert result is None
         finally:
-            mod._PROJECT_ROOT = original_root
+            mod._USERS_DIR = original_users_dir
 
 
 # --- ToneGuidanceMiddleware ---
@@ -464,6 +527,65 @@ class TestSkillRouterMiddleware:
         )
         assert result["active_skill"] == "vulnerability_holding"
 
+    def test_breakthrough_detection_with_tone_spike(self, tmp_path):
+        """Tone spike >= 1.0 with insight language triggers celebrating_breakthrough."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        result = mw.before_agent(
+            {
+                "messages": [_make_message("oh my god i just realized everything")],
+                "previous_artifact": {"tone_estimate": 3.5},
+                "skill_session_data": {
+                    "sessions_total": 10,
+                    "trust_established": True,
+                    "complaint_signatures": {},
+                    "skill_history": [],
+                    "last_tone_estimate": 2.0,  # Previous turn was 2.0, now 3.5 = delta 1.5
+                },
+            },
+            _make_runtime(),
+        )
+        assert result["active_skill"] == "celebrating_breakthrough"
+
+    def test_breakthrough_not_triggered_without_spike(self, tmp_path):
+        """Small tone change should not trigger breakthrough."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        result = mw.before_agent(
+            {
+                "messages": [_make_message("i just realized something")],
+                "previous_artifact": {"tone_estimate": 2.8},
+                "skill_session_data": {
+                    "sessions_total": 10,
+                    "trust_established": True,
+                    "complaint_signatures": {},
+                    "skill_history": [],
+                    "last_tone_estimate": 2.5,  # Delta 0.3, below threshold
+                },
+            },
+            _make_runtime(),
+        )
+        assert result["active_skill"] != "celebrating_breakthrough"
+
+    def test_last_tone_estimate_stored_in_session_data(self, tmp_path):
+        """Verify last_tone_estimate is updated after each turn."""
+        from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+        mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
+        result = mw.before_agent(
+            {
+                "messages": [_make_message("hello")],
+                "previous_artifact": {"tone_estimate": 3.2},
+                "skill_session_data": {
+                    "sessions_total": 10,
+                    "trust_established": True,
+                    "complaint_signatures": {},
+                    "skill_history": [],
+                },
+            },
+            _make_runtime(),
+        )
+        assert result["skill_session_data"]["last_tone_estimate"] == 3.2
+
     def test_session_data_persists(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
@@ -582,6 +704,59 @@ class TestEmitArtifactTool:
                 ritual_phase="freeform.test", voice_emotion_primary="calm",
                 voice_emotion_secondary="calm", voice_speed="invalid_speed",
             )
+
+
+# --- retrieve_memories tool ---
+
+class TestRetrieveMemoriesTool:
+    def test_tool_uses_bound_user_id(self):
+        from unittest.mock import patch
+        from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+
+        tool = make_retrieve_memories_tool("user_A")
+        # Patch at mem0_client module level since import is deferred inside the closure
+        with patch("deerflow.sophia.mem0_client.search_memories") as mock_search:
+            mock_search.return_value = [{"content": "test memory", "id": "m1"}]
+            result = tool.invoke({"query": "test query"})
+            mock_search.assert_called_once_with(
+                user_id="user_A",
+                query="test query",
+                categories=[],
+            )
+            assert "test memory" in result
+
+    def test_different_user_ids_produce_different_tools(self):
+        from unittest.mock import patch
+        from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+
+        tool_a = make_retrieve_memories_tool("user_A")
+        tool_b = make_retrieve_memories_tool("user_B")
+
+        with patch("deerflow.sophia.mem0_client.search_memories", return_value=[]) as mock_search:
+            tool_a.invoke({"query": "q"})
+            mock_search.assert_called_with(user_id="user_A", query="q", categories=[])
+
+            mock_search.reset_mock()
+            tool_b.invoke({"query": "q"})
+            mock_search.assert_called_with(user_id="user_B", query="q", categories=[])
+
+    def test_no_results_returns_message(self):
+        from unittest.mock import patch
+        from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+
+        tool = make_retrieve_memories_tool("user_test")
+        with patch("deerflow.sophia.mem0_client.search_memories", return_value=[]):
+            result = tool.invoke({"query": "nothing"})
+            assert result == "No relevant memories found."
+
+    def test_exception_returns_unavailable(self):
+        from unittest.mock import patch
+        from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+
+        tool = make_retrieve_memories_tool("user_test")
+        with patch("deerflow.sophia.mem0_client.search_memories", side_effect=Exception("API error")):
+            result = tool.invoke({"query": "test"})
+            assert result == "Memory retrieval temporarily unavailable."
 
 
 # --- Mem0 category selection ---
