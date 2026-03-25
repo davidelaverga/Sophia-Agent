@@ -1,7 +1,7 @@
 ---
 title: "feat: Implement Sophia 14-middleware companion chain"
 type: feat
-status: active
+status: completed
 date: 2026-03-24
 origin: docs/specs/04_backend_integration.md
 ---
