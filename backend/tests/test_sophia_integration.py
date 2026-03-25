@@ -93,9 +93,11 @@ class TestMiddlewareChainOrdering:
 
         middlewares = [
             CrisisCheckMiddleware(),
-            FileInjectionMiddleware(skills_path / "soul.md"),
-            FileInjectionMiddleware(skills_path / "voice.md", skip_on_crisis=True),
-            FileInjectionMiddleware(skills_path / "techniques.md", skip_on_crisis=True),
+            FileInjectionMiddleware(
+                (skills_path / "soul.md", False),
+                (skills_path / "voice.md", True),
+                (skills_path / "techniques.md", True),
+            ),
             PlatformContextMiddleware(),
             ToneGuidanceMiddleware(skills_path / "tone_guidance.md"),
             ContextAdaptationMiddleware(skills_path / "context", "life"),
@@ -140,9 +142,11 @@ class TestMiddlewareChainOrdering:
 
         middlewares = [
             CrisisCheckMiddleware(),
-            FileInjectionMiddleware(skills_path / "soul.md"),
-            FileInjectionMiddleware(skills_path / "voice.md", skip_on_crisis=True),
-            FileInjectionMiddleware(skills_path / "techniques.md", skip_on_crisis=True),
+            FileInjectionMiddleware(
+                (skills_path / "soul.md", False),
+                (skills_path / "voice.md", True),
+                (skills_path / "techniques.md", True),
+            ),
             PlatformContextMiddleware(),
             ToneGuidanceMiddleware(skills_path / "tone_guidance.md"),
             ContextAdaptationMiddleware(skills_path / "context", "life"),

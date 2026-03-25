@@ -203,7 +203,7 @@ class TestFileInjectionMiddleware:
     def test_injects_file_content(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         path = self._make_file(tmp_path, "test.md", "# Test Content")
-        mw = FileInjectionMiddleware(path)
+        mw = FileInjectionMiddleware((path, False))
         result = mw.before_agent({"messages": []}, _make_runtime())
         assert result is not None
         assert result["system_prompt_blocks"] == ["# Test Content"]
@@ -211,7 +211,7 @@ class TestFileInjectionMiddleware:
     def test_soul_md_injects_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         path = self._make_file(tmp_path, "soul.md", "Soul content")
-        mw = FileInjectionMiddleware(path, skip_on_crisis=False)
+        mw = FileInjectionMiddleware((path, False))
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
         assert result is not None
         assert "Soul content" in result["system_prompt_blocks"][0]
@@ -219,14 +219,26 @@ class TestFileInjectionMiddleware:
     def test_voice_md_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         path = self._make_file(tmp_path, "voice.md", "Voice content")
-        mw = FileInjectionMiddleware(path, skip_on_crisis=True)
+        mw = FileInjectionMiddleware((path, True))
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
         assert result is None
+
+    def test_multiple_files(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+        soul = self._make_file(tmp_path, "soul.md", "Soul")
+        voice = self._make_file(tmp_path, "voice.md", "Voice")
+        mw = FileInjectionMiddleware((soul, False), (voice, True))
+        # Normal turn: both injected
+        result = mw.before_agent({"messages": []}, _make_runtime())
+        assert result["system_prompt_blocks"] == ["Soul", "Voice"]
+        # Crisis: only soul injected
+        result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
+        assert result["system_prompt_blocks"] == ["Soul"]
 
     def test_missing_file_raises_at_init(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         with pytest.raises(FileNotFoundError):
-            FileInjectionMiddleware(tmp_path / "nonexistent.md")
+            FileInjectionMiddleware((tmp_path / "nonexistent.md", False))
 
 
 # --- PlatformContextMiddleware ---

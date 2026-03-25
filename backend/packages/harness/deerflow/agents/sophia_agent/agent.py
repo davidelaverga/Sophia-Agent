@@ -33,8 +33,9 @@ from deerflow.sophia.tools.switch_to_builder import switch_to_builder
 
 logger = logging.getLogger(__name__)
 
-# Resolve skills path relative to project root
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
+# Resolve skills path relative to repo root
+# agent.py → sophia_agent → agents → deerflow → harness → packages → backend → REPO_ROOT
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
 SKILLS_PATH = _PROJECT_ROOT / "skills" / "public" / "sophia"
 
 
@@ -70,10 +71,12 @@ def make_sophia_agent(config: RunnableConfig):
         ThreadDataMiddleware(lazy_init=True),
         # 2. Crisis fast-path (before any expensive middleware)
         CrisisCheckMiddleware(),
-        # 3-5. Always-loaded identity files
-        FileInjectionMiddleware(SKILLS_PATH / "soul.md"),
-        FileInjectionMiddleware(SKILLS_PATH / "voice.md", skip_on_crisis=True),
-        FileInjectionMiddleware(SKILLS_PATH / "techniques.md", skip_on_crisis=True),
+        # 3. Always-loaded identity files (soul always, voice+techniques skip on crisis)
+        FileInjectionMiddleware(
+            (SKILLS_PATH / "soul.md", False),
+            (SKILLS_PATH / "voice.md", True),
+            (SKILLS_PATH / "techniques.md", True),
+        ),
         # 6. Platform signal
         PlatformContextMiddleware(),
         # 7-8. User context
