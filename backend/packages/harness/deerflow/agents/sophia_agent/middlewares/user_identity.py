@@ -5,19 +5,16 @@ Returns empty on first session when the file doesn't exist yet.
 """
 
 import logging
-from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 
 logger = logging.getLogger(__name__)
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
-_USERS_DIR = _PROJECT_ROOT / "users"
 
 
 class UserIdentityState(AgentState):
@@ -40,7 +37,7 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
             return None
 
         try:
-            identity_path = safe_user_path(_USERS_DIR, self._user_id, "identity.md")
+            identity_path = safe_user_path(USERS_DIR, self._user_id, "identity.md")
         except ValueError:
             logger.warning("Invalid user_id for identity lookup: %s", self._user_id)
             return None

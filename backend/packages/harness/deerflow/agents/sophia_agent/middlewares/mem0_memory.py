@@ -11,6 +11,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.utils import extract_last_message_text
 from deerflow.sophia.mem0_client import search_memories
 
 logger = logging.getLogger(__name__)
@@ -72,12 +73,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         categories = _select_categories(ritual, active_skill, messages)
 
         # Build query from last user message
-        query = ""
-        if messages:
-            content = getattr(messages[-1], "content", "")
-            if isinstance(content, list):
-                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-            query = str(content)[:200]  # truncate for search
+        query = extract_last_message_text(messages)[:200]  # truncate for search
 
         try:
             results = search_memories(

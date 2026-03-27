@@ -14,7 +14,7 @@ def validate_user_id(user_id: str) -> str:
     enable path traversal or other injection attacks.
     """
     if not user_id or not _USER_ID_PATTERN.match(user_id):
-        raise ValueError(f"Invalid user_id: {user_id!r}")
+        raise ValueError("Invalid user_id format")
     return user_id
 
 

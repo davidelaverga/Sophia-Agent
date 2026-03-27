@@ -1,7 +1,7 @@
 ---
 title: "fix: Resolve P2 review findings across Sophia middleware chain"
 type: fix
-status: active
+status: completed
 date: 2026-03-25
 ---
 

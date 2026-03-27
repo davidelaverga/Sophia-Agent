@@ -32,23 +32,23 @@ class ContextAdaptationMiddleware(AgentMiddleware[ContextAdaptationState]):
         super().__init__()
         self._context_dir = context_dir
         self._context_mode = context_mode if context_mode in VALID_MODES else "life"
-        # Pre-load all context files at init
-        self._contents: dict[str, str] = {}
-        for mode in VALID_MODES:
-            path = context_dir / f"{mode}.md"
-            if path.exists():
-                self._contents[mode] = path.read_text(encoding="utf-8")
+        # Load only the active context file, not all 3
+        self._content: str | None = None
+        path = context_dir / f"{self._context_mode}.md"
+        if path.exists():
+            self._content = path.read_text(encoding="utf-8")
+        else:
+            logger.warning("Context file not found: %s", path)
 
     @override
     def before_agent(self, state: ContextAdaptationState, runtime: Runtime) -> dict | None:
         if state.get("skip_expensive", False):
             return None
 
-        content = self._contents.get(self._context_mode)
-        if not content:
+        if not self._content:
             return {"context_mode": self._context_mode}
 
         return {
             "context_mode": self._context_mode,
-            "system_prompt_blocks": [content],
+            "system_prompt_blocks": [self._content],
         }

@@ -13,6 +13,8 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
 logger = logging.getLogger(__name__)
 
 SKILL_FILES = {
@@ -72,15 +74,9 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
                 logger.warning("Skill file not found: %s", path)
                 self._skill_contents[name] = ""
 
-    def _select_skill(self, state: SkillRouterState, session_data: dict) -> str:
+    def _select_skill(self, state: SkillRouterState, session_data: dict, msg_text: str) -> str:
         sd = session_data
-        messages = state.get("messages", [])
-        msg = ""
-        if messages:
-            content = getattr(messages[-1], "content", "")
-            if isinstance(content, list):
-                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-            msg = str(content).lower()
+        msg = msg_text.lower()
 
         prev = state.get("previous_artifact") or {}
         tone = prev.get("tone_estimate", 2.5)
@@ -149,20 +145,18 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
             sd["sessions_total"] = sd.get("sessions_total", 0) + 1
         sd["trust_established"] = sd["sessions_total"] >= TRUST_SESSION_THRESHOLD
 
-        # Track complaint signatures
+        # Extract message content once for both complaint tracking and skill selection
         messages = state.get("messages", [])
-        if messages:
-            content = getattr(messages[-1], "content", "")
-            if isinstance(content, list):
-                content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
-            msg = str(content)
-            if msg:
-                sig = hashlib.md5(msg[:50].encode()).hexdigest()[:6]
-                sigs = dict(sd.get("complaint_signatures", {}))
-                sigs[sig] = sigs.get(sig, 0) + 1
-                sd["complaint_signatures"] = sigs
+        msg_text = extract_last_message_text(messages)
 
-        skill = self._select_skill(state, sd)
+        # Track complaint signatures
+        if msg_text:
+            sig = hashlib.md5(msg_text[:50].encode()).hexdigest()[:6]
+            sigs = dict(sd.get("complaint_signatures", {}))
+            sigs[sig] = sigs.get(sig, 0) + 1
+            sd["complaint_signatures"] = sigs
+
+        skill = self._select_skill(state, sd, msg_text)
 
         # Store current tone for next turn's breakthrough comparison
         prev_artifact = state.get("previous_artifact") or {}

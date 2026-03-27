@@ -281,33 +281,39 @@ class TestPlatformContextMiddleware:
 class TestUserIdentityMiddleware:
     def test_loads_identity_file(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+        import deerflow.agents.sophia_agent.paths as paths
         # Create a temporary user identity file
         user_dir = tmp_path / "test_user"
         user_dir.mkdir(parents=True)
         (user_dir / "identity.md").write_text("Name: Test User\nRole: Developer")
 
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
-        original_users_dir = mod._USERS_DIR
-        mod._USERS_DIR = tmp_path
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
         try:
             mw = UserIdentityMiddleware("test_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
             assert result is not None
             assert "Test User" in result["system_prompt_blocks"][0]
         finally:
-            mod._USERS_DIR = original_users_dir
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
 
     def test_missing_identity_returns_none(self, tmp_path):
+        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-        original_users_dir = mod._USERS_DIR
-        mod._USERS_DIR = tmp_path
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
         try:
             mw = UserIdentityMiddleware("nonexistent_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
             assert result is None
         finally:
-            mod._USERS_DIR = original_users_dir
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
@@ -320,9 +326,11 @@ class TestUserIdentityMiddleware:
 
 class TestSessionStateMiddleware:
     def test_smart_opener_on_turn_0(self, tmp_path):
+        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
-        original_users_dir = mod._USERS_DIR
-        mod._USERS_DIR = tmp_path
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
@@ -336,12 +344,15 @@ class TestSessionStateMiddleware:
             assert result is not None
             assert "How did the pitch go?" in result["system_prompt_blocks"][0]
         finally:
-            mod._USERS_DIR = original_users_dir
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
 
     def test_no_opener_on_turn_1(self, tmp_path):
+        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
-        original_users_dir = mod._USERS_DIR
-        mod._USERS_DIR = tmp_path
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
@@ -352,18 +363,22 @@ class TestSessionStateMiddleware:
             result = mw.before_agent({"messages": [], "turn_count": 1}, _make_runtime())
             assert result is None
         finally:
-            mod._USERS_DIR = original_users_dir
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
 
     def test_missing_handoff_returns_none(self, tmp_path):
+        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
-        original_users_dir = mod._USERS_DIR
-        mod._USERS_DIR = tmp_path
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
         try:
             mw = mod.SessionStateMiddleware("test_user")
             result = mw.before_agent({"messages": [], "turn_count": 0}, _make_runtime())
             assert result is None
         finally:
-            mod._USERS_DIR = original_users_dir
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
 
 
 # --- ToneGuidanceMiddleware ---
@@ -480,6 +495,31 @@ class TestContextAdaptationMiddleware:
         mw = ContextAdaptationMiddleware(ctx_dir, "invalid")
         result = mw.before_agent({"messages": []}, _make_runtime())
         assert result["context_mode"] == "life"
+
+    def test_only_active_file_loaded(self, tmp_path):
+        """Only the active context mode file should be loaded, not all 3."""
+        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+        ctx_dir = tmp_path / "context"
+        ctx_dir.mkdir()
+        (ctx_dir / "work.md").write_text("Work context")
+        (ctx_dir / "gaming.md").write_text("Gaming context")
+        (ctx_dir / "life.md").write_text("Life context")
+        mw = ContextAdaptationMiddleware(ctx_dir, "work")
+        # Should only have the work content, not a dict of all modes
+        assert mw._content == "Work context"
+        result = mw.before_agent({"messages": []}, _make_runtime())
+        assert "Work context" in result["system_prompt_blocks"][0]
+
+    def test_missing_context_file_returns_mode_only(self, tmp_path):
+        """Missing context file should log warning and return None from before_agent."""
+        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+        ctx_dir = tmp_path / "context"
+        ctx_dir.mkdir()
+        # No work.md file created
+        mw = ContextAdaptationMiddleware(ctx_dir, "work")
+        assert mw._content is None
+        result = mw.before_agent({"messages": []}, _make_runtime())
+        assert result == {"context_mode": "work"}
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware

@@ -1,22 +1,24 @@
 """Mem0 SDK wrapper with thread-safe bounded cache.
 
 Provides cached search_memories() for the middleware and tools.
-Cache has 60-second TTL and 256-entry max size. invalidate_user_cache()
-clears after writes. MemoryClient is cached at module level (singleton).
+Cache has 60-second TTL and 256-entry max size via cachetools.TTLCache.
+invalidate_user_cache() clears after writes. MemoryClient is cached at
+module level (singleton).
 """
 
 import logging
 import os
 import threading
-import time
+
+from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
 _CACHE_TTL = 60  # seconds
 _CACHE_MAX_SIZE = 256
 
-# Thread-safe cache with bounded size
-_cache: dict[str, tuple[float, list[dict]]] = {}
+# Thread-safe bounded TTL cache
+_cache: TTLCache = TTLCache(maxsize=_CACHE_MAX_SIZE, ttl=_CACHE_TTL)
 _cache_lock = threading.Lock()
 
 # Module-level client singleton
@@ -49,16 +51,6 @@ def _get_client():
         return _client
 
 
-def _evict_oldest_if_full() -> None:
-    """Evict oldest cache entries if cache exceeds max size. Caller must hold _cache_lock."""
-    if len(_cache) >= _CACHE_MAX_SIZE:
-        # Remove oldest 10% to avoid evicting on every insert
-        entries = sorted(_cache.items(), key=lambda x: x[1][0])
-        to_remove = max(1, _CACHE_MAX_SIZE // 10)
-        for key, _ in entries[:to_remove]:
-            del _cache[key]
-
-
 def search_memories(
     user_id: str,
     query: str,
@@ -71,14 +63,12 @@ def search_memories(
     Thread-safe with bounded cache size.
     """
     cache_key = f"{user_id}:{query}:{','.join(sorted(categories or []))}"
-    now = time.time()
 
     # Check cache (thread-safe)
     with _cache_lock:
-        if cache_key in _cache:
-            cached_time, cached_results = _cache[cache_key]
-            if now - cached_time < _CACHE_TTL:
-                return cached_results
+        cached_results = _cache.get(cache_key)
+        if cached_results is not None:
+            return cached_results
 
     client = _get_client()
     if client is None:
@@ -109,10 +99,9 @@ def search_memories(
         if categories:
             memories = [m for m in memories if not m["category"] or m["category"] in categories]
 
-        # Update cache (thread-safe, bounded)
+        # Update cache (thread-safe, bounded by TTLCache maxsize)
         with _cache_lock:
-            _evict_oldest_if_full()
-            _cache[cache_key] = (now, memories)
+            _cache[cache_key] = memories
 
         return memories
 
@@ -123,7 +112,8 @@ def search_memories(
 
 def invalidate_user_cache(user_id: str) -> None:
     """Clear all cached results for a user. Call after Mem0 writes."""
+    prefix = f"{user_id}:"
     with _cache_lock:
-        keys_to_remove = [k for k in _cache if k.startswith(f"{user_id}:")]
+        keys_to_remove = [k for k in _cache if k.startswith(prefix)]
         for k in keys_to_remove:
             del _cache[k]

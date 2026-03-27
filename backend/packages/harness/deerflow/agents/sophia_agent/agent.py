@@ -26,17 +26,13 @@ from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 from deerflow.sophia.tools.switch_to_builder import switch_to_builder
 
 logger = logging.getLogger(__name__)
-
-# Resolve skills path relative to repo root
-# agent.py → sophia_agent → agents → deerflow → harness → packages → backend → REPO_ROOT
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
-SKILLS_PATH = _PROJECT_ROOT / "skills" / "public" / "sophia"
 
 
 def make_sophia_agent(config: RunnableConfig):

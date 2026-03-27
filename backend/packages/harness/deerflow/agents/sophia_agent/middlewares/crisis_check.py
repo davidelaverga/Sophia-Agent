@@ -12,6 +12,8 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
 CRISIS_SIGNALS = [
     # Direct expressions
     "want to die",
@@ -119,13 +121,8 @@ class CrisisCheckMiddleware(AgentMiddleware[CrisisCheckState]):
         if not messages:
             return None
 
-        last_message = messages[-1]
-        content = getattr(last_message, "content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "") for p in content if isinstance(p, dict)
-            )
-        normalized = _normalize_text(str(content))
+        content = extract_last_message_text(messages)
+        normalized = _normalize_text(content)
 
         if _contains_signal(normalized):
             return {

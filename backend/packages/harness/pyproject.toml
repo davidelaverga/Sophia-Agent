@@ -5,6 +5,7 @@ description = "DeerFlow agent harness framework"
 requires-python = ">=3.12"
 dependencies = [
     "agent-sandbox>=0.0.19",
+    "cachetools>=5.3.0",
     "dotenv>=0.9.9",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",

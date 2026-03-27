@@ -6,19 +6,16 @@ injection. On turn_count == 0, injects a first-turn instruction block.
 
 import logging
 import re
-from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 
 logger = logging.getLogger(__name__)
-
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
-_USERS_DIR = _PROJECT_ROOT / "users"
 
 
 class SessionStateState(AgentState):
@@ -53,7 +50,7 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
             return None
 
         try:
-            handoff_path = safe_user_path(_USERS_DIR, self._user_id, "handoffs", "latest.md")
+            handoff_path = safe_user_path(USERS_DIR, self._user_id, "handoffs", "latest.md")
         except ValueError:
             logger.warning("Invalid user_id for session state: %s", self._user_id)
             return None
