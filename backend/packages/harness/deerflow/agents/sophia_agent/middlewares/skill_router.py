@@ -151,7 +151,7 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
 
         # Track complaint signatures
         if msg_text:
-            sig = hashlib.md5(msg_text[:50].encode()).hexdigest()[:6]
+            sig = hashlib.md5(msg_text[:50].lower().encode()).hexdigest()[:6]
             sigs = dict(sd.get("complaint_signatures", {}))
             sigs[sig] = sigs.get(sig, 0) + 1
             sd["complaint_signatures"] = sigs
