@@ -278,7 +278,7 @@ class TestAddMemories:
             call_kwargs = mock_client.add.call_args[1]
             assert call_kwargs["messages"] == [{"role": "user", "content": "hello"}]
             assert call_kwargs["user_id"] == "user1"
-            assert call_kwargs["agent_id"] == "sophia_companion"
+            assert "agent_id" not in call_kwargs, "agent_id must not be passed (creates unreachable scope in Mem0 v2)"
             assert call_kwargs["run_id"] == "sess_123"
             assert call_kwargs["metadata"] == metadata
 

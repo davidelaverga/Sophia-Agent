@@ -119,9 +119,11 @@ def add_memories(
 ) -> list[dict]:
     """Write memories to Mem0 for a user session.
 
-    Calls Mem0 SDK client.add() with agent_id="sophia_companion" and full
-    metadata dict. Thread-safe: acquires lock around SDK call, then
-    invalidates the user cache so subsequent searches reflect the new data.
+    Calls Mem0 SDK client.add() with user_id scoping and full metadata dict.
+    NOTE: agent_id is NOT passed — Mem0 v2 creates a separate namespace for
+    agent-scoped memories that is unreachable from user_id-only searches.
+    Thread-safe: acquires lock around SDK call, then invalidates the user
+    cache so subsequent searches reflect the new data.
 
     Returns the result from the SDK (typically a list of memory dicts),
     or an empty list if Mem0 is unavailable or the call fails.
@@ -138,7 +140,6 @@ def add_memories(
         add_kwargs = {
             "messages": messages,
             "user_id": user_id,
-            "agent_id": "sophia_companion",
             "run_id": session_id,
             "metadata": metadata or {},
         }
