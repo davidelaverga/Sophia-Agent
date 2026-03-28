@@ -1,39 +1,39 @@
 ---
 schema_version: 1
-session_id: session-elisabeth-001
-created: 2026-03-28T19:06:18.392093+00:00
+session_id: session-alejandro-002
+created: 2026-03-28T19:49:36.744640+00:00
 session_date: 2026-03-28
-smart_opener: "So you and Elisabeth had lunch — how are you thinking about what happens next?"
+smart_opener: "You ended last time seeing something about David—hows that landing now?"
 ---
 
 ```
 ---
 schema_version: 1
 session: sophia:none:2026-03-28
-created: 2026-03-28T19:06:13.572306+00:00
+created: 2026-03-28T19:49:31.415566+00:00
 ritual_phase: none
 ---
 
 ## Summary (max 300 chars)
-Session too brief to assess. User has a developing interest in Elisabeth, a work colleague (lunch together 2026-03-27). Notable: Elisabeth likes ice cream. No substantial conversation occurred this session. Sophia should watch for: whether user brings Elisabeth up again, signs of romantic intent, or anxiety about the connection.
+No session occurred. User was scheduled but did not connect. Sophia should check in on next available session with light touch — open the door without pressure. Note: user has active relational tensions (David/cofounder communication style mismatch) and valued connections (Alejandro, Carlos) that may be relevant context for future work.
 
 ## Tone Arc
 tone_estimate_final: unknown
 
 ## Next Steps
-- Listen for unprompted mentions of Elisabeth or the lunch
-- If user raises her again, explore what matters most to them about the connection
-- Hold space if uncertainty or nervousness emerges
+- Check in gently on whether scheduling works; no friction on timing.
+- When user returns, consider asking what's been on their mind since we last connected.
+- Hold the David/directness tension lightly — user is self-aware about it and may bring it back.
 
 ## Decisions (max 200 chars)
 No decisions this session.
 
 ## Open Threads (max 200 chars)
-Nature of user's feelings about Elisabeth unclear. No direct exploration yet. Worth returning to only if user opens the door.
+User has unresolved tension with cofounder David around communication style (David avoids directness; user values it). User shows awareness of the pattern but hasn't articulated a path forward.
 
 ## What Worked / What Didn't (max 200 chars)
-Session too brief to assess.
+No interaction occurred. Unable to assess.
 
 ## Feeling
-Session incomplete — no substantial terrain covered, but the foundation (Elisabeth memory) is flagged and ready for next conversation.
+No session — user's absence itself is neutral data. Next connection will set the tone.
 ```

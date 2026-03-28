@@ -137,15 +137,14 @@ def add_memories(
         # correct project scope (the SDK's _prepare_params should do this
         # automatically, but being explicit prevents the orphaned-memory
         # issue seen when the client's init ping hasn't completed yet).
+        # NOTE: Do NOT pass metadata={} to client.add().
+        # Mem0 v2 silently drops memories that include custom metadata.
+        # All context (category, importance, etc.) is embedded in the
+        # memory text by the extraction prompt instead.
         add_kwargs = {
             "messages": messages,
             "user_id": user_id,
-            "run_id": session_id,
-            "metadata": metadata or {},
         }
-        if client.org_id and client.project_id:
-            add_kwargs["org_id"] = client.org_id
-            add_kwargs["project_id"] = client.project_id
 
         result = client.add(**add_kwargs)
 

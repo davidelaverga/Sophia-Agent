@@ -256,31 +256,25 @@ class TestAddMemories:
             with mod._cache_lock:
                 assert len(mod._cache) == 0
 
-    def test_metadata_passed_through_to_sdk(self):
+    def test_no_metadata_passed_to_sdk(self):
+        """Mem0 v2 silently drops memories with custom metadata."""
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
         mock_client.add.return_value = []
-        metadata = {
-            "tone_estimate": 1.4,
-            "importance": "structural",
-            "platform": "voice",
-            "status": "pending_review",
-            "context_mode": "work",
-        }
         with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
             add_memories(
                 user_id="user1",
                 messages=[{"role": "user", "content": "hello"}],
                 session_id="sess_123",
-                metadata=metadata,
+                metadata={"importance": "structural"},
             )
             call_kwargs = mock_client.add.call_args[1]
             assert call_kwargs["messages"] == [{"role": "user", "content": "hello"}]
             assert call_kwargs["user_id"] == "user1"
-            assert "agent_id" not in call_kwargs, "agent_id must not be passed (creates unreachable scope in Mem0 v2)"
-            assert call_kwargs["run_id"] == "sess_123"
-            assert call_kwargs["metadata"] == metadata
+            assert "agent_id" not in call_kwargs
+            assert "metadata" not in call_kwargs
+            assert "run_id" not in call_kwargs
 
     def test_dict_with_results_key_normalized(self):
         from deerflow.sophia.mem0_client import add_memories
@@ -298,7 +292,8 @@ class TestAddMemories:
             assert len(result) == 1
             assert result[0]["id"] == "m1"
 
-    def test_default_metadata_is_empty_dict(self):
+    def test_metadata_param_ignored_by_sdk_call(self):
+        """Even when metadata is passed to add_memories, it must NOT reach the SDK."""
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
@@ -310,7 +305,7 @@ class TestAddMemories:
                 session_id="sess_123",
             )
             _, kwargs = mock_client.add.call_args
-            assert kwargs["metadata"] == {}
+            assert "metadata" not in kwargs
 
 
 class TestClientSingleton:
