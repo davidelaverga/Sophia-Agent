@@ -122,7 +122,7 @@ def _build_frontmatter(
         f"session_id: {session_id}\n"
         f"created: {iso_ts}\n"
         f"session_date: {date_str}\n"
-        f"smart_opener: \"{smart_opener}\"\n"
+        f"smart_opener: \"{smart_opener.replace(chr(34), '').replace(chr(39), '')}\"\n"
         "---\n"
     )
 

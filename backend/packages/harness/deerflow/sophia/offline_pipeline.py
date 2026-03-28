@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any
 
 from deerflow.agents.sophia_agent.utils import validate_user_id
@@ -33,6 +34,7 @@ logger = logging.getLogger(__name__)
 # Module-level idempotency guard — sufficient for single-process deployments.
 # If multi-process is needed later, upgrade to a file-based marker.
 _processed_sessions: set[str] = set()
+_processed_lock = threading.Lock()
 
 
 def run_offline_pipeline(
@@ -62,10 +64,12 @@ def run_offline_pipeline(
     # --- Validate user_id at entry ---
     validate_user_id(user_id)
 
-    # --- Idempotency check ---
-    if session_id in _processed_sessions:
-        logger.info("Session %s already processed — skipping", session_id)
-        return {"status": "already_processed", "session_id": session_id}
+    # --- Idempotency check (atomic check-and-add to prevent TOCTOU race) ---
+    with _processed_lock:
+        if session_id in _processed_sessions:
+            logger.info("Session %s already processed — skipping", session_id)
+            return {"status": "already_processed", "session_id": session_id}
+        _processed_sessions.add(session_id)
 
     # --- Thread state guard ---
     if thread_state is None:
@@ -171,8 +175,7 @@ def run_offline_pipeline(
         logger.error("Pipeline step 'visual_check' failed for session %s", session_id, exc_info=True)
         steps["visual_check"] = "error"
 
-    # --- Mark as processed ---
-    _processed_sessions.add(session_id)
+    # (session_id already added at the top via _processed_lock)
 
     logger.info(
         "Offline pipeline completed for session %s: %s",
