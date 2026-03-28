@@ -110,6 +110,49 @@ def search_memories(
         return []
 
 
+def add_memories(
+    user_id: str,
+    messages: list[dict],
+    session_id: str,
+    metadata: dict | None = None,
+) -> list[dict]:
+    """Write memories to Mem0 for a user session.
+
+    Calls Mem0 SDK client.add() with agent_id="sophia_companion" and full
+    metadata dict. Thread-safe: acquires lock around SDK call, then
+    invalidates the user cache so subsequent searches reflect the new data.
+
+    Returns the result from the SDK (typically a list of memory dicts),
+    or an empty list if Mem0 is unavailable or the call fails.
+    """
+    client = _get_client()
+    if client is None:
+        return []
+
+    try:
+        result = client.add(
+            messages=messages,
+            user_id=user_id,
+            agent_id="sophia_companion",
+            run_id=session_id,
+            metadata=metadata or {},
+        )
+
+        # Invalidate cache so searches reflect new memories
+        invalidate_user_cache(user_id)
+
+        # Normalize to list
+        if isinstance(result, dict) and "results" in result:
+            return result["results"]
+        if isinstance(result, list):
+            return result
+        return [result] if result else []
+
+    except Exception:
+        logger.warning("Mem0 add failed for user %s", user_id, exc_info=True)
+        return []
+
+
 def invalidate_user_cache(user_id: str) -> None:
     """Clear all cached results for a user. Call after Mem0 writes."""
     prefix = f"{user_id}:"

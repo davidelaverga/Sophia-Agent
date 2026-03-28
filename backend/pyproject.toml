@@ -26,3 +26,7 @@ members = ["packages/harness"]
 
 [tool.uv.sources]
 deerflow-harness = { workspace = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["packages/harness"]

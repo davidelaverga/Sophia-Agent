@@ -190,6 +190,130 @@ class TestSearchMemories:
         assert isinstance(mod._cache, TTLCache)
 
 
+class TestAddMemories:
+    def test_successful_add_returns_result(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [
+            {"id": "new_m1", "memory": "extracted fact"},
+            {"id": "new_m2", "memory": "extracted feeling"},
+        ]
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "I love coffee"}],
+                session_id="sess_123",
+            )
+            assert len(result) == 2
+            assert result[0]["id"] == "new_m1"
+
+    def test_add_with_no_api_key_returns_empty(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        with patch.dict("os.environ", {"MEM0_API_KEY": ""}):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+            )
+            assert result == []
+
+    def test_add_when_sdk_raises_returns_empty(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.side_effect = Exception("Mem0 API error")
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+            )
+            assert result == []
+
+    def test_cache_invalidated_after_successful_add(self):
+        from deerflow.sophia.mem0_client import add_memories, search_memories
+
+        import deerflow.sophia.mem0_client as mod
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = [{"id": "m1", "memory": "old fact", "metadata": {}}]
+        mock_client.add.return_value = [{"id": "new_m1", "memory": "new fact"}]
+
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            # Populate cache
+            search_memories("user1", "query")
+            with mod._cache_lock:
+                assert len(mod._cache) == 1
+
+            # Add memories — should invalidate cache
+            add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+            )
+            with mod._cache_lock:
+                assert len(mod._cache) == 0
+
+    def test_metadata_passed_through_to_sdk(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = []
+        metadata = {
+            "tone_estimate": 1.4,
+            "importance": "structural",
+            "platform": "voice",
+            "status": "pending_review",
+            "context_mode": "work",
+        }
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+                metadata=metadata,
+            )
+            mock_client.add.assert_called_once_with(
+                messages=[{"role": "user", "content": "hello"}],
+                user_id="user1",
+                agent_id="sophia_companion",
+                run_id="sess_123",
+                metadata=metadata,
+            )
+
+    def test_dict_with_results_key_normalized(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = {
+            "results": [{"id": "m1", "memory": "fact"}]
+        }
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "m1"
+
+    def test_default_metadata_is_empty_dict(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = []
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+            )
+            _, kwargs = mock_client.add.call_args
+            assert kwargs["metadata"] == {}
+
+
 class TestClientSingleton:
     def test_client_created_once(self):
         import deerflow.sophia.mem0_client as mod
