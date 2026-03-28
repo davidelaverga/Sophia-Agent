@@ -97,12 +97,13 @@ def make_sophia_agent(config: RunnableConfig):
     retrieve_memories = make_retrieve_memories_tool(user_id)
     tools = [emit_artifact, switch_to_builder, retrieve_memories]
 
-    return create_agent(
+    agent = create_agent(
         model=model,
         tools=tools,
         middleware=middlewares,
         state_schema=SophiaState,
-        # Sophia typically needs 2 model calls per turn (response + tool + end_turn).
-        # Set higher than default 25 to handle multi-tool turns gracefully.
-        recursion_limit=50,
     )
+    # Sophia typically needs 2 model calls per turn (response + tool + end_turn).
+    # Set higher than default 25 to handle multi-tool turns gracefully.
+    agent.recursion_limit = 50
+    return agent
