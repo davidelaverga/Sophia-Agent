@@ -320,7 +320,7 @@ class TestClientSingleton:
 
         mock_cls = MagicMock()
         with patch.dict("os.environ", {"MEM0_API_KEY": "test-key"}):
-            with patch("deerflow.sophia.mem0_client.MemoryClient", mock_cls, create=True):
+            with patch("mem0.MemoryClient", mock_cls):
                 mod._client = None
                 mod._client_initialized = False
                 c1 = mod._get_client()
@@ -366,7 +366,7 @@ class TestClientSingleton:
             results.append(c)
 
         with patch.dict("os.environ", {"MEM0_API_KEY": "test-key"}):
-            with patch("deerflow.sophia.mem0_client.MemoryClient", mock_cls, create=True):
+            with patch("mem0.MemoryClient", mock_cls):
                 mod._client = None
                 mod._client_initialized = False
                 threads = [threading.Thread(target=get_client) for _ in range(5)]

@@ -75,10 +75,10 @@ def search_memories(
         return []
 
     try:
+        # Mem0 v2 API requires filters dict instead of top-level params
         results = client.search(
             query=query,
-            user_id=user_id,
-            agent_id="sophia_companion",
+            filters={"user_id": user_id},
             limit=10,
         )
 
@@ -89,10 +89,11 @@ def search_memories(
         if isinstance(results, list):
             for r in results:
                 if isinstance(r, dict):
+                    meta = r.get("metadata") or {}
                     memories.append({
                         "id": r.get("id", ""),
                         "content": r.get("memory", r.get("content", "")),
-                        "category": r.get("metadata", {}).get("category", ""),
+                        "category": meta.get("category", "") if isinstance(meta, dict) else "",
                     })
 
         # Filter by categories if specified
