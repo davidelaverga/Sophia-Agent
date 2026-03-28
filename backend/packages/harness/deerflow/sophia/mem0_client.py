@@ -131,13 +131,22 @@ def add_memories(
         return []
 
     try:
-        result = client.add(
-            messages=messages,
-            user_id=user_id,
-            agent_id="sophia_companion",
-            run_id=session_id,
-            metadata=metadata or {},
-        )
+        # Explicitly pass org_id/project_id to ensure memories land in the
+        # correct project scope (the SDK's _prepare_params should do this
+        # automatically, but being explicit prevents the orphaned-memory
+        # issue seen when the client's init ping hasn't completed yet).
+        add_kwargs = {
+            "messages": messages,
+            "user_id": user_id,
+            "agent_id": "sophia_companion",
+            "run_id": session_id,
+            "metadata": metadata or {},
+        }
+        if client.org_id and client.project_id:
+            add_kwargs["org_id"] = client.org_id
+            add_kwargs["project_id"] = client.project_id
+
+        result = client.add(**add_kwargs)
 
         # Invalidate cache so searches reflect new memories
         invalidate_user_cache(user_id)

@@ -325,7 +325,8 @@ class TestUserIdentityMiddleware:
 # --- SessionStateMiddleware ---
 
 class TestSessionStateMiddleware:
-    def test_smart_opener_on_turn_0(self, tmp_path):
+    def test_smart_opener_on_greeting(self, tmp_path):
+        """Greeting message → opener delivered as first_turn_instruction."""
         import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         original_users_dir = paths.USERS_DIR
@@ -340,9 +341,43 @@ class TestSessionStateMiddleware:
 
         try:
             mw = mod.SessionStateMiddleware("test_user")
-            result = mw.before_agent({"messages": [], "turn_count": 0}, _make_runtime())
+            result = mw.before_agent(
+                {"messages": [_make_message("hey")], "turn_count": 0},
+                _make_runtime(),
+            )
             assert result is not None
-            assert "How did the pitch go?" in result["system_prompt_blocks"][0]
+            block = result["system_prompt_blocks"][0]
+            assert "How did the pitch go?" in block
+            assert "first_turn_instruction" in block
+        finally:
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
+
+    def test_substantive_message_gets_context_not_instruction(self, tmp_path):
+        """Real content on turn 0 → opener becomes context, not instruction."""
+        import deerflow.agents.sophia_agent.paths as paths
+        import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            '---\nsmart_opener: "How did the pitch go?"\n---\n'
+        )
+
+        try:
+            mw = mod.SessionStateMiddleware("test_user")
+            result = mw.before_agent(
+                {"messages": [_make_message("There is a new girl I like named Elisabeth")], "turn_count": 0},
+                _make_runtime(),
+            )
+            assert result is not None
+            block = result["system_prompt_blocks"][0]
+            assert "session_context" in block
+            assert "do NOT deliver it as a greeting" in block
+            assert "How did the pitch go?" in block
         finally:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir

@@ -275,13 +275,12 @@ class TestAddMemories:
                 session_id="sess_123",
                 metadata=metadata,
             )
-            mock_client.add.assert_called_once_with(
-                messages=[{"role": "user", "content": "hello"}],
-                user_id="user1",
-                agent_id="sophia_companion",
-                run_id="sess_123",
-                metadata=metadata,
-            )
+            call_kwargs = mock_client.add.call_args[1]
+            assert call_kwargs["messages"] == [{"role": "user", "content": "hello"}]
+            assert call_kwargs["user_id"] == "user1"
+            assert call_kwargs["agent_id"] == "sophia_companion"
+            assert call_kwargs["run_id"] == "sess_123"
+            assert call_kwargs["metadata"] == metadata
 
     def test_dict_with_results_key_normalized(self):
         from deerflow.sophia.mem0_client import add_memories
