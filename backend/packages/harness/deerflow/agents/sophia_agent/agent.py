@@ -102,4 +102,7 @@ def make_sophia_agent(config: RunnableConfig):
         tools=tools,
         middleware=middlewares,
         state_schema=SophiaState,
+        # Sophia typically needs 2 model calls per turn (response + tool + end_turn).
+        # Set higher than default 25 to handle multi-tool turns gracefully.
+        recursion_limit=50,
     )
