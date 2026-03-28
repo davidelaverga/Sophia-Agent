@@ -66,18 +66,20 @@ class TestMiddlewareChainOrdering:
         return sp
 
     def _run_before_agent_chain(self, middlewares, state, runtime):
-        """Simulate running before_agent on all middlewares in order."""
+        """Simulate running before_agent on all middlewares in order.
+
+        Each middleware now explicitly reads and extends system_prompt_blocks,
+        so we use last-write-wins (dict merge) here — matching the real
+        LangGraph middleware framework behavior.
+        """
         for mw in middlewares:
             if hasattr(mw, "before_agent"):
                 result = mw.before_agent(state, runtime)
                 if result:
-                    # Merge result into state (simulate LangGraph reducer)
+                    # Dict merge (last-write-wins) — middlewares handle
+                    # system_prompt_blocks accumulation internally.
                     for key, value in result.items():
-                        if key == "system_prompt_blocks":
-                            state.setdefault("system_prompt_blocks", [])
-                            state["system_prompt_blocks"].extend(value)
-                        else:
-                            state[key] = value
+                        state[key] = value
         return state
 
     def test_normal_turn_all_middlewares_fire(self, skills_path):
@@ -190,10 +192,7 @@ class TestMiddlewareChainOrdering:
         result = ritual_mw.before_agent(state, runtime)
         if result:
             for k, v in result.items():
-                if k == "system_prompt_blocks":
-                    state.setdefault("system_prompt_blocks", []).extend(v)
-                else:
-                    state[k] = v
+                state[k] = v
 
         # Now skill router can see ritual state
         assert state.get("active_ritual") == "debrief"

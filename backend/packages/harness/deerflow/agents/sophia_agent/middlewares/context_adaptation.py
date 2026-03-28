@@ -50,5 +50,5 @@ class ContextAdaptationMiddleware(AgentMiddleware[ContextAdaptationState]):
 
         return {
             "context_mode": self._context_mode,
-            "system_prompt_blocks": [self._content],
+            "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [self._content],
         }

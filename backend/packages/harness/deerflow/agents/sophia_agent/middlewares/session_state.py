@@ -68,7 +68,9 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
                     "Deliver this as your opening line before the user says anything.\n"
                     "</first_turn_instruction>"
                 )
-                return {"system_prompt_blocks": [block]}
+                blocks = list(state.get("system_prompt_blocks", []))
+                blocks.append(block)
+                return {"system_prompt_blocks": blocks}
         except Exception:
             logger.warning("Failed to read handoff for user %s", self._user_id, exc_info=True)
 

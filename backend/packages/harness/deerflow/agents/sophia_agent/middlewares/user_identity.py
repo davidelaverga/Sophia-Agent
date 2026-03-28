@@ -48,7 +48,9 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
         try:
             content = identity_path.read_text(encoding="utf-8")
             if content.strip():
-                return {"system_prompt_blocks": [f"<user_identity>\n{content}\n</user_identity>"]}
+                blocks = list(state.get("system_prompt_blocks", []))
+                blocks.append(f"<user_identity>\n{content}\n</user_identity>")
+                return {"system_prompt_blocks": blocks}
         except Exception:
             logger.warning("Failed to read identity file for user %s", self._user_id, exc_info=True)
 

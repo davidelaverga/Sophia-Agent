@@ -60,7 +60,9 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
                     + "\n</previous_artifact>"
                 )
 
-        return {"system_prompt_blocks": blocks}
+        existing = list(state.get("system_prompt_blocks", []))
+        existing.extend(blocks)
+        return {"system_prompt_blocks": existing}
 
     @override
     def after_model(self, state: ArtifactState, runtime: Runtime) -> dict | None:

@@ -100,7 +100,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         return {
             "injected_memories": memory_ids,
-            "system_prompt_blocks": [block],
+            "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }
 
     @override

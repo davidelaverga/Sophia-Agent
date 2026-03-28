@@ -82,5 +82,5 @@ class ToneGuidanceMiddleware(AgentMiddleware[ToneGuidanceState]):
 
         return {
             "active_tone_band": band,
-            "system_prompt_blocks": [band_content] if band_content else [],
+            "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + ([band_content] if band_content else []),
         }

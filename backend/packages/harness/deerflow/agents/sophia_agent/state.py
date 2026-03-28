@@ -45,8 +45,12 @@ class SophiaState(AgentState):
     builder_result: NotRequired[dict | None]
 
     # Prompt assembly — accumulated by middlewares in before_agent, assembled in before_model.
-    # Uses operator.add so each middleware's blocks are concatenated into the list.
-    # Safe because before_agent runs once per invocation (tool loops go to before_model, not before_agent).
+    # NOTE: operator.add is kept here for documentation purposes (it signals "append"
+    # semantics), but the LangGraph middleware framework uses dict merge (last-write-wins)
+    # for middleware return values — it does NOT apply the channel reducer from the state
+    # schema.  Therefore each middleware explicitly reads the existing list from state and
+    # extends it before returning.  This is the only correct way to accumulate blocks
+    # across the middleware chain.
     system_prompt_blocks: Annotated[list[str], operator.add]
 
     # Title

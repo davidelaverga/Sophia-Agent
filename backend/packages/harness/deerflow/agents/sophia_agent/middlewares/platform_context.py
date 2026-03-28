@@ -39,5 +39,5 @@ class PlatformContextMiddleware(AgentMiddleware[PlatformContextState]):
 
         return {
             "platform": platform,
-            "system_prompt_blocks": [PLATFORM_PROMPTS[platform]],
+            "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [PLATFORM_PROMPTS[platform]],
         }

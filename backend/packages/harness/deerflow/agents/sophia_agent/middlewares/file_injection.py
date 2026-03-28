@@ -55,4 +55,6 @@ class FileInjectionMiddleware(AgentMiddleware[FileInjectionState]):
 
         if not blocks:
             return None
-        return {"system_prompt_blocks": blocks}
+        existing = list(state.get("system_prompt_blocks", []))
+        existing.extend(blocks)
+        return {"system_prompt_blocks": existing}

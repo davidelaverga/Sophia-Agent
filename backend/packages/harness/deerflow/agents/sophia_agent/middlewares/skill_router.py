@@ -133,7 +133,7 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
             content = self._skill_contents.get("crisis_redirect", "")
             result: dict = {"active_skill": "crisis_redirect"}
             if content:
-                result["system_prompt_blocks"] = [content]
+                result["system_prompt_blocks"] = list(state.get("system_prompt_blocks", [])) + [content]
             return result
 
         if state.get("skip_expensive", False):
@@ -174,6 +174,6 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
 
         content = self._skill_contents.get(skill, "")
         if content:
-            result["system_prompt_blocks"] = [content]
+            result["system_prompt_blocks"] = list(state.get("system_prompt_blocks", [])) + [content]
 
         return result

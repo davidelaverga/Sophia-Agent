@@ -59,6 +59,6 @@ class RitualMiddleware(AgentMiddleware[RitualState]):
             result["ritual_phase"] = f"{self._ritual}.intro"
 
         if self._content:
-            result["system_prompt_blocks"] = [self._content]
+            result["system_prompt_blocks"] = list(state.get("system_prompt_blocks", [])) + [self._content]
 
         return result
