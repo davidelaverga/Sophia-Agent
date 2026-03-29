@@ -1,0 +1,17 @@
+## Communication Profile (max 400 chars)
+Values directness without judgment—appreciates people like Alejandro and Carlos who give honest feedback without diminishing him. Engages well when observations from trusted sources (Ana) are mirrored back. Responds to specific, evidence-based reflection better than generic reassurance. Avoids open-ended emotional questions; prefers concrete framing. As of 2026-03-28: deflects with task-focus when arriving stressed. More data needed on how to handle disagreement and whether challenge or permission works better.
+
+## Emotional Patterns (max 500 chars)
+Arrives task-focused (presentation prep, work concerns) rather than emotionally open; shifts toward personal reflection when his own standards are acknowledged rather than challenged. Baseline unclear from 4 sessions; typically enters around task-orientation and opens after 2-3 turns when approach validates his thoroughness. Self-aware about preparation style; Ana's external perspective reshapes thinking. Growth indicator (emerging across 3 sessions): moving from "I'm too hard on myself" (meta-awareness) toward "my preparation is legitimate" (ownership). More data needed on baseline tone and triggers beyond work pressure.
+
+## Life Context Map (max 600 chars)
+**Work/Startup**: Product manager; presentation deadline week of 2026-03-31. Active tension: user's thorough preparation style vs. cofounder David's spontaneity. User demonstrates self-awareness about own approach; David represents contrasting style that triggers defensiveness. Alejandro (security coworker) recently provided helpful, direct presentation feedback—positive influence. **Relationship**: Girlfriend Ana; her reflections reshape user's self-criticism patterns. Trusted enough to validate user's thinking. **Cofounder dynamic**: David avoids directness; user values and respects directness (Carlos, Alejandro model this). Communication misalignment is core tension.
+
+## Session Patterns (max 300 chars)
+Limited data (4 sessions across ~4 weeks). Sessions triggered by structural work events (presentation deadlines). User engages with preparation-focused framing. Underlying need (tentative): permission to trust his own judgment and preparation style as legitimate, especially against competing approaches. More data needed on whether sessions cluster around work milestones or appear at other life moments, and whether frequency is shifting.
+
+## What Works (max 400 chars)
+Reflecting observations from trusted people back to user produces engagement and shift. Acknowledging his self-awareness about working style (rather than challenging it) opens deeper conversation. Specific, evidence-based feedback lands; generic reassurance ("you've got this") falls flat. Directness without judgment resonates. As of 2026-03-28: challenge to own his preparation as strength (not flaw) produced positive tone shift. More data needed on tone band specificity and how to navigate disagreement gracefully.
+
+## Evolution Notes (max 400 chars)
+Too early for clear trajectory (4 sessions). User shows capacity for self-reflection and willingness to reconsider self-criticism when external perspective offered. Current growth edge: moving from meta-awareness ("I'm too hard on myself") to ownership ("my style is legitimate"). Emerging pattern: may need explicit permission to trust own judgment against competing approaches from valued others. Watch: whether this extends beyond work contexts into relationships or other decisions. Direction encouraging but nascent.
