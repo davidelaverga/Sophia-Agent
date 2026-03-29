@@ -1,0 +1,180 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+VOICE_DIR = ROOT_DIR / "voice"
+
+for env_file in (ROOT_DIR / ".env", VOICE_DIR / ".env"):
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
+
+
+SUPPORTED_BACKEND_MODES = {"shim", "deerflow"}
+SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
+SUPPORTED_SHIM_FAILURE_STAGES = {"ready", "request", "stream", "artifact", "timeout"}
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    return int(value) if value else default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    return float(value) if value else default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_optional(name: str) -> str | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+@dataclass(frozen=True)
+class VoiceSettings:
+    backend_mode: str
+    langgraph_base_url: str
+    assistant_id: str
+    platform: str
+    context_mode: str
+    ritual: str | None
+    agent_user_id: str
+    agent_user_name: str
+    cartesia_voice_id: str | None
+    cartesia_model_id: str
+    cartesia_sample_rate: int
+    deepgram_model: str
+    deepgram_language: str | None
+    smart_turn_silence_ms: int
+    smart_turn_speech_threshold: float
+    smart_turn_pre_speech_buffer_ms: int
+    smart_turn_vad_reset_seconds: float
+    backend_timeout_seconds: float
+    readiness_timeout_seconds: float
+    shim_response_text: str
+    shim_chunk_delay_ms: int
+    shim_failure_stage: str | None
+    shim_failure_message: str
+    shim_emit_invalid_artifact: bool
+
+    @property
+    def llm_label(self) -> str:
+        if self.backend_mode == "shim":
+            return "shim"
+        return f"deerflow:{self.assistant_id}"
+
+    @property
+    def instructions(self) -> str:
+        return (
+            "You are Sophia, an emotionally attuned voice companion. "
+            "Speak naturally and keep replies to 1-3 sentences. "
+            "Be warm, grounded, and specific. Ask at most one focused question at a time. "
+            "Do not sound clinical, robotic, or like a generic assistant."
+        )
+
+    def validate(self) -> None:
+        if self.backend_mode not in SUPPORTED_BACKEND_MODES:
+            supported = ", ".join(sorted(SUPPORTED_BACKEND_MODES))
+            raise ValueError(
+                f"Unsupported SOPHIA_BACKEND_MODE={self.backend_mode!r}. Use one of: {supported}."
+            )
+
+        if self.platform not in SUPPORTED_PLATFORMS:
+            supported = ", ".join(sorted(SUPPORTED_PLATFORMS))
+            raise ValueError(
+                f"Unsupported SOPHIA_PLATFORM={self.platform!r}. Use one of: {supported}."
+            )
+
+        required_env = [
+            "STREAM_API_KEY",
+            "STREAM_API_SECRET",
+            "DEEPGRAM_API_KEY",
+            "CARTESIA_API_KEY",
+        ]
+        missing = [name for name in required_env if not os.getenv(name)]
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(f"Missing required voice environment variables: {joined}.")
+
+        if self.backend_mode == "deerflow":
+            if not self.langgraph_base_url:
+                raise ValueError(
+                    "SOPHIA_LANGGRAPH_BASE_URL is required when SOPHIA_BACKEND_MODE=deerflow."
+                )
+            if not self.assistant_id:
+                raise ValueError(
+                    "SOPHIA_ASSISTANT_ID is required when SOPHIA_BACKEND_MODE=deerflow."
+                )
+
+        if (
+            self.shim_failure_stage is not None
+            and self.shim_failure_stage not in SUPPORTED_SHIM_FAILURE_STAGES
+        ):
+            supported = ", ".join(sorted(SUPPORTED_SHIM_FAILURE_STAGES))
+            raise ValueError(
+                f"Unsupported SOPHIA_SHIM_FAILURE_STAGE={self.shim_failure_stage!r}. "
+                f"Use one of: {supported}."
+            )
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> VoiceSettings:
+    backend_mode = os.getenv("SOPHIA_BACKEND_MODE") or os.getenv("SOPHIA_LLM_MODE") or "shim"
+    backend_mode = backend_mode.strip().lower()
+    if backend_mode == "anthropic":
+        backend_mode = "shim"
+
+    settings = VoiceSettings(
+        backend_mode=backend_mode,
+        langgraph_base_url=os.getenv("SOPHIA_LANGGRAPH_BASE_URL", "http://127.0.0.1:2024").strip().rstrip("/"),
+        assistant_id=os.getenv("SOPHIA_ASSISTANT_ID", "sophia_companion").strip(),
+        platform=os.getenv("SOPHIA_PLATFORM", "voice").strip(),
+        context_mode=os.getenv("SOPHIA_CONTEXT_MODE", "life").strip(),
+        ritual=_env_optional("SOPHIA_RITUAL"),
+        agent_user_id=os.getenv("SOPHIA_AGENT_USER_ID", "sophia-agent"),
+        agent_user_name=os.getenv("SOPHIA_AGENT_USER_NAME", "Sophia"),
+        cartesia_voice_id=_env_optional("SOPHIA_VOICE_ID"),
+        cartesia_model_id=os.getenv("SOPHIA_CARTESIA_MODEL", "sonic-3"),
+        cartesia_sample_rate=_env_int("SOPHIA_CARTESIA_SAMPLE_RATE", 16000),
+        deepgram_model=os.getenv("SOPHIA_DEEPGRAM_MODEL", "nova-2"),
+        deepgram_language=_env_optional("SOPHIA_DEEPGRAM_LANGUAGE"),
+        smart_turn_silence_ms=_env_int("SOPHIA_SMART_TURN_SILENCE_MS", 1200),
+        smart_turn_speech_threshold=_env_float("SOPHIA_SMART_TURN_SPEECH_THRESHOLD", 0.6),
+        smart_turn_pre_speech_buffer_ms=_env_int(
+            "SOPHIA_SMART_TURN_PRE_SPEECH_BUFFER_MS", 200
+        ),
+        smart_turn_vad_reset_seconds=_env_float(
+            "SOPHIA_SMART_TURN_VAD_RESET_SECONDS", 5.0
+        ),
+        backend_timeout_seconds=_env_float("SOPHIA_BACKEND_TIMEOUT_SECONDS", 20.0),
+        readiness_timeout_seconds=_env_float("SOPHIA_READINESS_TIMEOUT_SECONDS", 5.0),
+        shim_response_text=os.getenv(
+            "SOPHIA_SHIM_RESPONSE_TEXT",
+            "Let's stay with this for a second.",
+        ).strip(),
+        shim_chunk_delay_ms=_env_int("SOPHIA_SHIM_CHUNK_DELAY_MS", 40),
+        shim_failure_stage=_env_optional("SOPHIA_SHIM_FAILURE_STAGE"),
+        shim_failure_message=os.getenv(
+            "SOPHIA_SHIM_FAILURE_MESSAGE",
+            "Forced shim failure for testing.",
+        ).strip(),
+        shim_emit_invalid_artifact=_env_bool("SOPHIA_SHIM_EMIT_INVALID_ARTIFACT", False),
+    )
+    settings.validate()
+    return settings
