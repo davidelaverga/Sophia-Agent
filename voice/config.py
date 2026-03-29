@@ -38,6 +38,17 @@ def _env_bool(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_first(names: tuple[str, ...], default: str | None = None) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value is None:
+            continue
+        value = value.strip()
+        if value:
+            return value
+    return default
+
+
 def _env_optional(name: str) -> str | None:
     value = os.getenv(name)
     if value is None:
@@ -140,9 +151,22 @@ def get_settings() -> VoiceSettings:
     if backend_mode == "anthropic":
         backend_mode = "shim"
 
+    legacy_buffer_seconds = _env_first(("SOPHIA_BUFFER_IN_SECONDS",))
+    silence_ms_default = 1200
+    if legacy_buffer_seconds is not None:
+        silence_ms_default = int(float(legacy_buffer_seconds) * 1000)
+
+    confidence_threshold_default = 0.6
+    legacy_confidence_threshold = _env_first(("SOPHIA_CONFIDENCE_THRESHOLD",))
+    if legacy_confidence_threshold is not None:
+        confidence_threshold_default = float(legacy_confidence_threshold)
+
     settings = VoiceSettings(
         backend_mode=backend_mode,
-        langgraph_base_url=os.getenv("SOPHIA_LANGGRAPH_BASE_URL", "http://127.0.0.1:2024").strip().rstrip("/"),
+        langgraph_base_url=_env_first(
+            ("SOPHIA_LANGGRAPH_BASE_URL", "SOPHIA_BACKEND_BASE_URL"),
+            "http://127.0.0.1:2024",
+        ).rstrip("/"),
         assistant_id=os.getenv("SOPHIA_ASSISTANT_ID", "sophia_companion").strip(),
         platform=os.getenv("SOPHIA_PLATFORM", "voice").strip(),
         context_mode=os.getenv("SOPHIA_CONTEXT_MODE", "life").strip(),
@@ -152,10 +176,14 @@ def get_settings() -> VoiceSettings:
         cartesia_voice_id=_env_optional("SOPHIA_VOICE_ID"),
         cartesia_model_id=os.getenv("SOPHIA_CARTESIA_MODEL", "sonic-3"),
         cartesia_sample_rate=_env_int("SOPHIA_CARTESIA_SAMPLE_RATE", 16000),
-        deepgram_model=os.getenv("SOPHIA_DEEPGRAM_MODEL", "nova-2"),
+        deepgram_model=os.getenv("SOPHIA_DEEPGRAM_MODEL", "flux-general-en"),
         deepgram_language=_env_optional("SOPHIA_DEEPGRAM_LANGUAGE"),
-        smart_turn_silence_ms=_env_int("SOPHIA_SMART_TURN_SILENCE_MS", 1200),
-        smart_turn_speech_threshold=_env_float("SOPHIA_SMART_TURN_SPEECH_THRESHOLD", 0.6),
+        smart_turn_silence_ms=_env_int(
+            "SOPHIA_SMART_TURN_SILENCE_MS", silence_ms_default
+        ),
+        smart_turn_speech_threshold=_env_float(
+            "SOPHIA_SMART_TURN_SPEECH_THRESHOLD", confidence_threshold_default
+        ),
         smart_turn_pre_speech_buffer_ms=_env_int(
             "SOPHIA_SMART_TURN_PRE_SPEECH_BUFFER_MS", 200
         ),

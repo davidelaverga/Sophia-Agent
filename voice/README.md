@@ -22,6 +22,7 @@ Optional Sophia-specific settings:
 - `SOPHIA_BACKEND_MODE=shim|deerflow`
 - `SOPHIA_LANGGRAPH_BASE_URL=http://127.0.0.1:2024`
 - `SOPHIA_ASSISTANT_ID=sophia_companion`
+- `SOPHIA_DEEPGRAM_MODEL=flux-general-en`
 - `SOPHIA_CONTEXT_MODE=life`
 - `SOPHIA_RITUAL=prepare|debrief|vent|reset`
 - `SOPHIA_VOICE_ID=<cartesia voice id>`
@@ -100,5 +101,6 @@ voice\.venv\Scripts\python.exe -m voice.server serve --port 8000
 ## Notes
 
 - `server.py` disables Deepgram's built-in turn detection so Smart Turn owns turn boundaries.
+- With the current Vision Agents Deepgram plugin, `flux-general-en` is the safe Week 1 baseline for streaming STT.
 - `sophia_tts.py` still only queues artifact state for the next turn. Week 2 will make the emotion fields audible.
 - The adapter seam is the stable handoff point now. The proof path is `shim`, and the later swap is only a backend mode change.
