@@ -140,6 +140,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "sophia",
+                "description": "Sophia companion: memory review, reflect, journal, visual artifacts",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -175,6 +179,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Sophia API is mounted at /api/sophia
+    from app.gateway.routers import sophia
+    app.include_router(sophia.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
