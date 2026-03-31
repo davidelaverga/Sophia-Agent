@@ -21,17 +21,31 @@ class Mem0MemoryState(AgentState):
     skip_expensive: NotRequired[bool]
     active_ritual: NotRequired[str | None]
     active_skill: NotRequired[str]
+    context_mode: NotRequired[str]
     injected_memories: NotRequired[list[str]]
     system_prompt_blocks: NotRequired[list[str]]
+
+
+# Context-specific categories that get added when the matching context_mode is active
+_CONTEXT_MODE_CATEGORIES: dict[str, list[str]] = {
+    "work": ["project", "colleague", "career", "deadline"],
+    "gaming": ["game", "achievement", "gaming_team", "strategy"],
+    "life": ["family", "health", "personal_goal", "life_event"],
+}
 
 
 def _select_categories(
     ritual: str | None,
     active_skill: str | None,
     messages: list,
+    context_mode: str | None = None,
 ) -> list[str]:
-    """Rule-based category selection from CLAUDE.md spec."""
+    """Rule-based category selection from CLAUDE.md spec + context-specific categories."""
     categories = ["fact", "preference"]  # always
+
+    # Add context-specific categories
+    if context_mode and context_mode in _CONTEXT_MODE_CATEGORIES:
+        categories += _CONTEXT_MODE_CATEGORIES[context_mode]
 
     if ritual in ("prepare", "debrief"):
         categories += ["commitment", "decision"]
@@ -68,9 +82,10 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         ritual = state.get("active_ritual")
         active_skill = state.get("active_skill")
+        context_mode = state.get("context_mode")
         messages = state.get("messages", [])
 
-        categories = _select_categories(ritual, active_skill, messages)
+        categories = _select_categories(ritual, active_skill, messages, context_mode)
 
         # Build query from last user message
         query = extract_last_message_text(messages)[:200]  # truncate for search
@@ -80,6 +95,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                 user_id=self._user_id,
                 query=query,
                 categories=categories,
+                context_mode=context_mode,
             )
         except Exception:
             logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
