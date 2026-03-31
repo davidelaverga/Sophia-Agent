@@ -15,6 +15,7 @@ from app.gateway.routers import (
     skills,
     suggestions,
     uploads,
+    voice,
 )
 from deerflow.config.app_config import get_app_config
 
@@ -175,6 +176,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Voice API is mounted at /api/sophia/{user_id}/voice
+    app.include_router(voice.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

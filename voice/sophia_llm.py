@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -44,6 +45,7 @@ class SophiaLLM(LLM):
         self.settings = settings
         self.last_artifact: dict[str, Any] = {}
         self._tts_ref: Any = None
+        self._call_emitter: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._backend = adapter or build_backend_adapter(settings)
         self._pending_turn_metrics: dict[str, PendingTurnMetrics] = {}
 
@@ -52,6 +54,12 @@ class SophiaLLM(LLM):
         attach_hooks = getattr(tts, "attach_runtime_hooks", None)
         if callable(attach_hooks):
             attach_hooks(self.note_tts_audio_emitted, self.note_stage_error)
+
+    def attach_call_emitter(
+        self, emitter: Callable[[dict[str, Any]], Awaitable[None]]
+    ) -> None:
+        """Register a callback to forward artifacts/events as Stream custom events."""
+        self._call_emitter = emitter
 
     async def probe(self) -> None:
         await self._backend.probe()
@@ -247,6 +255,16 @@ class SophiaLLM(LLM):
                 self.last_artifact = artifact
                 if self._tts_ref is not None:
                     self._tts_ref.update_from_artifact(artifact)
+                if self._call_emitter is not None:
+                    try:
+                        await self._call_emitter(
+                            {"type": "sophia.artifact", "data": artifact}
+                        )
+                    except Exception:
+                        logger.warning(
+                            "voice.call_emitter_error Failed to emit artifact custom event",
+                            exc_info=True,
+                        )
                 artifact_seen = True
                 continue
 

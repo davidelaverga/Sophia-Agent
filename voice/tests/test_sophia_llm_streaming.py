@@ -111,3 +111,57 @@ async def test_simple_response_rejects_missing_artifact_after_text() -> None:
         )
 
     assert exc_info.value.stage == "backend-contract"
+
+
+@pytest.mark.anyio
+async def test_artifact_forwarded_via_call_emitter() -> None:
+    """When attach_call_emitter is set, artifact is emitted as a custom event."""
+    emitted: list[dict] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        emitted.append(payload)
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.text_chunk("ok"),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+
+    await llm.simple_response(
+        "test",
+        participant=SimpleNamespace(user_id="user-1"),
+    )
+
+    assert len(emitted) == 1
+    assert emitted[0]["type"] == "sophia.artifact"
+    assert emitted[0]["data"]["session_goal"] == "Week 1 voice proof"
+
+
+@pytest.mark.anyio
+async def test_call_emitter_failure_does_not_break_stream() -> None:
+    """A failing call emitter should log but not crash the turn."""
+
+    async def broken_emitter(payload: dict) -> None:
+        raise ConnectionError("Stream disconnected")
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.text_chunk("ok"),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(broken_emitter)
+
+    # Should complete without raising
+    response = await llm.simple_response(
+        "test",
+        participant=SimpleNamespace(user_id="user-1"),
+    )
+    assert response.text == "ok"
+    assert llm.last_artifact == _valid_artifact()
