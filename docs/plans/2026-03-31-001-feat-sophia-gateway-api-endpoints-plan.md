@@ -1,7 +1,7 @@
 ---
 title: "feat: Sophia Gateway API Endpoints"
 type: feat
-status: active
+status: completed
 date: 2026-03-31
 ---
 
