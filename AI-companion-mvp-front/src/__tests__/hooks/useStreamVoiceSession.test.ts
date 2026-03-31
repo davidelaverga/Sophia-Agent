@@ -33,7 +33,6 @@ const mockAddMessage = vi.fn()
 const mockSetVoiceFailed = vi.fn()
 
 vi.mock("../../app/stores/voice-store", () => ({
-  STREAM_VOICE_ENABLED: true,
   useVoiceStore: (selector: (s: Record<string, unknown>) => unknown) =>
     selector({
       addMessage: mockAddMessage,

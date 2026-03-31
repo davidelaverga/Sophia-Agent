@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useVoiceLoop } from '../hooks/useVoiceLoop';
 import { useStreamVoiceSession } from '../hooks/useStreamVoiceSession';
-import { STREAM_VOICE_ENABLED } from '../stores/voice-store';
 import type { StreamArtifactsPayload } from './stream-contract-adapters';
 
 type VoiceRetryState = { transcript: string; message: string } | null;
@@ -75,23 +73,13 @@ export function useSessionVoiceBridge({
     ingestArtifacts(artifacts, 'voice');
   }, [ingestArtifacts]);
 
-  const voiceStateLegacy = useVoiceLoop(undefined, {
-    sessionId,
-    onUserTranscript: handleUserTranscript,
-    onAssistantResponse: handleAssistantResponse,
-    onArtifacts: handleVoiceArtifacts,
-    onRateLimitError,
-  });
-
-  // Both hooks called unconditionally (React rules). Feature flag selects.
-  const voiceStateStream = useStreamVoiceSession(userId, {
+  // Stream voice session hook
+  const voiceState = useStreamVoiceSession(userId, {
     sessionId,
     onUserTranscript: handleUserTranscript,
     onAssistantResponse: handleAssistantResponse,
     onArtifacts: handleVoiceArtifacts,
   });
-
-  const voiceState = STREAM_VOICE_ENABLED ? voiceStateStream : voiceStateLegacy;
 
   useEffect(() => {
     if (!voiceState.error) return;

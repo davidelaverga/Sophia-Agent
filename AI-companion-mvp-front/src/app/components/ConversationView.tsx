@@ -12,7 +12,6 @@ import { useInterrupt } from "../hooks/useInterrupt"
 
 // Feature flag: Set to true to enable Reflections feature
 const ENABLE_REFLECTIONS = false
-import { useVoiceLoop } from "../hooks/useVoiceLoop"
 import { useStreamVoiceSession } from "../hooks/useStreamVoiceSession"
 import { useModeSwitch } from "../hooks/useModeSwitch"
 import { useSessionPersistence } from "../hooks/useSessionPersistence"
@@ -21,7 +20,7 @@ import { useUsageMonitor } from "../hooks/useUsageMonitor"
 import { useBackendTokenSync } from "../hooks/useBackendTokenSync"
 import { useChatAiRuntime } from "../chat/useChatAiRuntime"
 import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
-import { useVoiceStore as useVoiceFallbackStore, STREAM_VOICE_ENABLED } from "../stores/voice-store"
+import { useVoiceStore as useVoiceFallbackStore } from "../stores/voice-store"
 import { useRecapStore } from "../stores/recap-store"
 import { ingestChatVoiceArtifacts, mapRecapArtifactsToRitualArtifacts } from "../chat/chat-voice-artifacts"
 import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
@@ -128,16 +127,11 @@ export function ConversationView() {
     handleStreamArtifacts(artifacts)
   }, [handleStreamArtifacts])
 
-  // Both hooks called unconditionally (React rules). Feature flag selects which to use.
-  const legacyVoiceState = useVoiceLoop(user?.id, {
+  // Stream voice session hook
+  const voiceState = useStreamVoiceSession(user?.id, {
     sessionId: conversationId,
     onArtifacts: handleVoiceArtifacts,
   })
-  const streamVoiceState = useStreamVoiceSession(user?.id, {
-    sessionId: conversationId,
-    onArtifacts: handleVoiceArtifacts,
-  })
-  const voiceState = STREAM_VOICE_ENABLED ? streamVoiceState : legacyVoiceState
   const voiceStage = voiceState.stage
   const [dismissedVoiceRetry, setDismissedVoiceRetry] = useState(false)
 

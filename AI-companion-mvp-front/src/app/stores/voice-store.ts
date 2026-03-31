@@ -12,9 +12,6 @@
 
 import { create } from "zustand"
 
-// Feature flag: when true, ConversationView uses useStreamVoiceSession instead of useVoiceLoop.
-// Removed when Unit 6 completes.
-export const STREAM_VOICE_ENABLED = false
 import { createMessageId } from "../lib/utils"
 
 // =============================================================================
