@@ -45,6 +45,18 @@ export type StreamVoiceSessionReturn = {
   hasRetryableVoiceTurn: () => boolean
   /** Always resolves false — Stream handles retries server-side */
   retryLastVoiceTurn: () => Promise<boolean>
+  /** Not applicable for Stream — always false */
+  isReflectionTtsActive: boolean
+  /** Not applicable for Stream — always false */
+  needsUnlock: boolean
+  /** Not applicable for Stream — no WebSocket path routing */
+  path: undefined
+  /** Not applicable for Stream — SDK manages MediaStream internally */
+  stream: null
+  /** No-op — Stream handles audio unlock natively */
+  unlockAudio: () => void
+  /** No-op — reflection TTS goes through Stream agent */
+  speakText: (text: string) => Promise<void>
 }
 
 // ---------------------------------------------------------------------------
@@ -350,5 +362,11 @@ export function useStreamVoiceSession(
     resetVoiceState,
     hasRetryableVoiceTurn: () => false,
     retryLastVoiceTurn: async () => false,
+    isReflectionTtsActive: false,
+    needsUnlock: false,
+    path: undefined,
+    stream: null,
+    unlockAudio: () => {},
+    speakText: async () => {},
   }
 }
