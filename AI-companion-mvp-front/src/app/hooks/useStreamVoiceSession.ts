@@ -55,8 +55,8 @@ export type StreamVoiceSessionReturn = {
   stream: null
   /** No-op — Stream handles audio unlock natively */
   unlockAudio: () => void
-  /** No-op — reflection TTS goes through Stream agent */
-  speakText: (text: string) => Promise<void>
+  /** No-op — reflection TTS goes through Stream agent. Returns false (not spoken). */
+  speakText: (text: string, traceId?: string) => Promise<boolean>
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +367,6 @@ export function useStreamVoiceSession(
     path: undefined,
     stream: null,
     unlockAudio: () => {},
-    speakText: async () => {},
+    speakText: async () => false,
   }
 }
