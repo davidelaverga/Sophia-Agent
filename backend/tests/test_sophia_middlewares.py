@@ -1073,6 +1073,45 @@ class TestMem0CategorySelection:
         cats = _select_categories("prepare", None, [])
         assert "ritual_context" in cats
 
+    def test_work_context_adds_work_categories(self):
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+        cats = _select_categories(None, None, [], context_mode="work")
+        assert "project" in cats
+        assert "colleague" in cats
+        assert "career" in cats
+        assert "deadline" in cats
+
+    def test_gaming_context_adds_gaming_categories(self):
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+        cats = _select_categories(None, None, [], context_mode="gaming")
+        assert "game" in cats
+        assert "achievement" in cats
+        assert "gaming_team" in cats
+        assert "strategy" in cats
+
+    def test_life_context_adds_life_categories(self):
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+        cats = _select_categories(None, None, [], context_mode="life")
+        assert "family" in cats
+        assert "health" in cats
+        assert "personal_goal" in cats
+        assert "life_event" in cats
+
+    def test_no_context_mode_only_base_categories(self):
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+        cats = _select_categories(None, None, [])
+        assert "project" not in cats
+        assert "game" not in cats
+        assert "family" not in cats
+
+    def test_context_plus_ritual_combines_categories(self):
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+        cats = _select_categories("debrief", None, [], context_mode="work")
+        assert "project" in cats  # from work context
+        assert "commitment" in cats  # from debrief ritual
+        assert "decision" in cats  # from debrief ritual
+        assert "fact" in cats  # always present
+
 
 # --- SophiaTitleMiddleware ---
 
