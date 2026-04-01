@@ -14,6 +14,27 @@ from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
+# Context-specific category sets — memories in these categories are prioritized
+# when searching within the matching context_mode
+_CONTEXT_CATEGORIES: dict[str, set[str]] = {
+    "work": {"project", "colleague", "career", "deadline", "commitment", "decision"},
+    "gaming": {"game", "achievement", "gaming_team", "strategy"},
+    "life": {"family", "health", "personal_goal", "life_event", "relationship"},
+}
+
+# All custom categories (base 9 + context-specific)
+CUSTOM_CATEGORIES: list[str] = [
+    # Base 9 (from spec — apply across all contexts)
+    "fact", "feeling", "decision", "lesson", "commitment",
+    "preference", "relationship", "pattern", "ritual_context",
+    # Work context
+    "project", "colleague", "career", "deadline",
+    # Gaming context
+    "game", "achievement", "gaming_team", "strategy",
+    # Life context
+    "family", "health", "personal_goal", "life_event",
+]
+
 _CACHE_TTL = 60  # seconds
 _CACHE_MAX_SIZE = 256
 
@@ -55,14 +76,23 @@ def search_memories(
     user_id: str,
     query: str,
     categories: list[str] | None = None,
+    context_mode: str | None = None,
 ) -> list[dict]:
-    """Search Mem0 for memories matching the query and categories.
+    """Search Mem0 for memories matching the query, categories, and context.
 
-    Returns a list of memory dicts with 'id' and 'content' fields.
-    Results are cached per (user_id, query, categories) for 60 seconds.
+    Args:
+        user_id: The user identifier.
+        query: Semantic search query.
+        categories: Optional list of categories to filter by.
+        context_mode: Optional context mode (work/gaming/life) to prioritize
+            context-specific memories. Memories from other contexts are still
+            returned but ranked lower.
+
+    Returns a list of memory dicts with 'id', 'content', and 'category' fields.
+    Results are cached per (user_id, query, categories, context_mode) for 60 seconds.
     Thread-safe with bounded cache size.
     """
-    cache_key = f"{user_id}:{query}:{','.join(sorted(categories or []))}"
+    cache_key = f"{user_id}:{query}:{','.join(sorted(categories or []))}:{context_mode or ''}"
 
     # Check cache (thread-safe)
     with _cache_lock:
@@ -99,6 +129,16 @@ def search_memories(
         # Filter by categories if specified
         if categories:
             memories = [m for m in memories if not m["category"] or m["category"] in categories]
+
+        # Sort by context relevance if context_mode specified
+        if context_mode:
+            context_categories = _CONTEXT_CATEGORIES.get(context_mode, set())
+            # Memories matching the context's categories come first
+            memories.sort(
+                key=lambda m: (
+                    0 if m.get("category") in context_categories else 1,
+                ),
+            )
 
         # Update cache (thread-safe, bounded by TTLCache maxsize)
         with _cache_lock:

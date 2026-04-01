@@ -28,10 +28,12 @@ class ArtifactInput(BaseModel):
     )
 
 
-@tool(args_schema=ArtifactInput)
+@tool(args_schema=ArtifactInput, return_direct=True)
 def emit_artifact(**kwargs) -> str:
-    """REQUIRED ON EVERY TURN. Call this tool with your internal state calibration.
+    """REQUIRED ON EVERY TURN. Call this ONCE per turn alongside your spoken response.
     Your spoken response goes in the message content. This tool carries the
     metadata that drives voice emotion, session continuity, and self-improvement.
-    The user never sees this output."""
+    The user never sees this output.
+    IMPORTANT: Call this exactly once per turn. After calling, do NOT call any more tools.
+    Your turn is complete after this tool call."""
     return "Artifact recorded."
