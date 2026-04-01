@@ -3,6 +3,7 @@
 import { Square, Zap } from "lucide-react"
 import type { VoiceStateProps } from "../hooks/voice/voice-utils"
 import { useVoiceToggle } from "../hooks/useVoiceToggle"
+import { useEmotionColor } from "../hooks/useEmotionColor"
 import { Waveform } from "./Waveform"
 import { VoiceTranscript } from "./VoiceTranscript"
 import { VoiceMicButton, VoiceStatusText } from "./VoiceMicButton"
@@ -25,6 +26,8 @@ export function VoicePanel({ voiceState }: VoicePanelProps) {
     stopTalking,
     idleBehavior: "switch-mode",
   })
+
+  const emotionColor = useEmotionColor()
 
   const activeReply = partialReply || finalReply
   const showInterrupt = stage === "speaking"
@@ -69,6 +72,7 @@ export function VoicePanel({ voiceState }: VoicePanelProps) {
           <Waveform
             stream={stream ?? undefined}
             presenceState={getWaveformState()}
+            emotionRgb={emotionColor.rgb}
           />
         </div>
 
@@ -80,6 +84,8 @@ export function VoicePanel({ voiceState }: VoicePanelProps) {
             onClick={handleToggle}
             onKeyDown={handleKeyPress}
             size="large"
+            emotionPrimary={emotionColor.primary}
+            emotionGlow={emotionColor.glow}
           />
           <VoiceStatusText stage={stage} />
         </div>

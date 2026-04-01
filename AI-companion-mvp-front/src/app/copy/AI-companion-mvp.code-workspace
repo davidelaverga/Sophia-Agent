@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "../../../../../AI-companion-mvp"
+		},
+		{
+			"name": "AI-companion-mvp-front",
+			"path": "../../.."
+		}
+	],
+	"settings": {}
+}

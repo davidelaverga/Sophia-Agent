@@ -120,7 +120,7 @@ describe("useStreamVoiceSession", () => {
     })
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "/api/sophia/user-1/voice/connect",
+      "http://localhost:8001/api/sophia/user-1/voice/connect",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },

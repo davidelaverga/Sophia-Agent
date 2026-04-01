@@ -3,6 +3,7 @@
 import { Square } from "lucide-react"
 import type { VoiceStateProps } from "../hooks/voice/voice-utils"
 import { useVoiceToggle } from "../hooks/useVoiceToggle"
+import { useEmotionColor } from "../hooks/useEmotionColor"
 import { Waveform } from "./Waveform"
 import { ChatCollapsed } from "./ChatCollapsed"
 import { VoiceTranscript } from "./VoiceTranscript"
@@ -44,6 +45,8 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
     idleBehavior: "start-recording",
   })
 
+  const emotionColor = useEmotionColor()
+
   const _activeReply = partialReply || finalReply
   const showInterrupt = stage === "speaking"
 
@@ -68,6 +71,7 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
             <Waveform
               stream={stream ?? undefined}
               presenceState={getWaveformState()}
+              emotionRgb={emotionColor.rgb}
             />
           </div>
         </div>
@@ -82,6 +86,8 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
               onClick={handleToggle}
               onKeyDown={handleKeyPress}
               size="large"
+              emotionPrimary={emotionColor.primary}
+              emotionGlow={emotionColor.glow}
               ariaLabels={{
                 start: t("voiceFocusView.startRecordingAriaLabel"),
                 stop: t("voiceFocusView.stopRecordingAriaLabel"),

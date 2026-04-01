@@ -29,6 +29,16 @@ def make_settings(**overrides: object) -> VoiceSettings:
         "shim_failure_stage": None,
         "shim_failure_message": "Forced shim failure for testing.",
         "shim_emit_invalid_artifact": False,
+        "adaptive_silence_short_ms": 1000,
+        "adaptive_silence_medium_ms": 1500,
+        "adaptive_silence_long_ms": 2000,
+        "adaptive_silence_ceiling_ms": 2800,
+        "adaptive_silence_continuation_bonus_ms": 800,
+        "fragile_window_ms": 600,
+        "merge_min_new_words": 2,
+        "rhythm_min_sessions": 5,
+        "rhythm_base_min_ms": 800,
+        "rhythm_base_max_ms": 2400,
     }
     values.update(overrides)
     return VoiceSettings(**values)

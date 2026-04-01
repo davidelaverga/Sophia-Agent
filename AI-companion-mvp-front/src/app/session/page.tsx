@@ -37,6 +37,8 @@ import {
   VoiceComposerErrorBoundary,
   ArtifactsPanelErrorBoundary,
 } from '../components/error-boundaries';
+import { ModeToggle } from '../components/ModeToggle';
+import { useUiStore } from '../stores/ui-store';
 import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
@@ -95,6 +97,7 @@ export default function SessionPage() {
 function SessionPageContent() {
   const SHOW_SESSION_MEMORY_REJECT = false;
   const router = useRouter();
+  const focusMode = useUiStore((s) => s.mode);
   const debugEnabled = useMemo(() => {
     // 🔒 SECURITY: debug mode restricted to development only
     return process.env.NODE_ENV === 'development';
@@ -888,6 +891,13 @@ function SessionPageContent() {
           
           {/* Quick Actions rows removed – CompanionRail on left side now */}
           
+          {/* Mode Toggle */}
+          <div className="px-4 pt-2">
+            <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
+              <ModeToggle />
+            </div>
+          </div>
+          
           {/* Voice-First Composer */}
           <VoiceComposerErrorBoundary>
             <VoiceFirstComposer
@@ -905,6 +915,7 @@ function SessionPageContent() {
               isOffline={isOffline}
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}
+              textOnly={focusMode === 'text'}
             />
           </VoiceComposerErrorBoundary>
         </div>

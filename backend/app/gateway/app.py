@@ -1,17 +1,21 @@
 import logging
+import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
     agents,
     artifacts,
+    bootstrap,
     channels,
     mcp,
     memory,
     models,
+    sessions,
     skills,
     suggestions,
     uploads,
@@ -147,7 +151,16 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         ],
     )
 
-    # CORS is handled by nginx - no need for FastAPI middleware
+    # CORS: In production nginx handles CORS headers.
+    # For local dev (direct gateway access without nginx), enable CORS here.
+    cors_origins = os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost:3000").split(",")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     # Include routers
     # Models API is mounted at /api/models
@@ -176,6 +189,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
+
+    # Sessions API is mounted at /api/v1/sessions
+    app.include_router(sessions.router)
+
+    # Bootstrap API is mounted at /api/v1/bootstrap
+    app.include_router(bootstrap.router)
 
     # Voice API is mounted at /api/sophia/{user_id}/voice
     app.include_router(voice.router)

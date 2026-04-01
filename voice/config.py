@@ -83,6 +83,16 @@ class VoiceSettings:
     shim_failure_stage: str | None
     shim_failure_message: str
     shim_emit_invalid_artifact: bool
+    adaptive_silence_short_ms: int
+    adaptive_silence_medium_ms: int
+    adaptive_silence_long_ms: int
+    adaptive_silence_ceiling_ms: int
+    adaptive_silence_continuation_bonus_ms: int
+    fragile_window_ms: int
+    merge_min_new_words: int
+    rhythm_min_sessions: int
+    rhythm_base_min_ms: int
+    rhythm_base_max_ms: int
 
     @property
     def llm_label(self) -> str:
@@ -203,6 +213,18 @@ def get_settings() -> VoiceSettings:
             "Forced shim failure for testing.",
         ).strip(),
         shim_emit_invalid_artifact=_env_bool("SOPHIA_SHIM_EMIT_INVALID_ARTIFACT", False),
+        adaptive_silence_short_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_SHORT_MS", 1000),
+        adaptive_silence_medium_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_MEDIUM_MS", 1500),
+        adaptive_silence_long_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_LONG_MS", 2000),
+        adaptive_silence_ceiling_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_CEILING_MS", 2800),
+        adaptive_silence_continuation_bonus_ms=_env_int(
+            "SOPHIA_ADAPTIVE_SILENCE_CONTINUATION_BONUS_MS", 800
+        ),
+        fragile_window_ms=_env_int("SOPHIA_FRAGILE_WINDOW_MS", 600),
+        merge_min_new_words=_env_int("SOPHIA_MERGE_MIN_NEW_WORDS", 2),
+        rhythm_min_sessions=_env_int("SOPHIA_RHYTHM_MIN_SESSIONS", 5),
+        rhythm_base_min_ms=_env_int("SOPHIA_RHYTHM_BASE_MIN_MS", 800),
+        rhythm_base_max_ms=_env_int("SOPHIA_RHYTHM_BASE_MAX_MS", 2400),
     )
     settings.validate()
     return settings

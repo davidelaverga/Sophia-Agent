@@ -162,6 +162,11 @@ class SophiaLLM(LLM):
             note_response_started = getattr(self._tts_ref, "note_response_started", None)
             if callable(note_response_started):
                 note_response_started(user_id)
+            # Hint emotion from the user's words so TTS warms up before the
+            # backend artifact arrives (especially useful on turn 1).
+            hint_fn = getattr(self._tts_ref, "hint_emotion_from_transcript", None)
+            if callable(hint_fn):
+                hint_fn(text)
 
         request = BackendRequest(
             text=text,

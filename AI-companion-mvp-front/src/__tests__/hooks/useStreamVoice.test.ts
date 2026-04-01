@@ -8,6 +8,7 @@ import { useStreamVoice, type StreamVoiceCredentials } from "../../app/hooks/use
 const mockLeave = vi.fn().mockResolvedValue(undefined)
 const mockJoin = vi.fn().mockResolvedValue(undefined)
 const mockCameraDisable = vi.fn().mockResolvedValue(undefined)
+const mockMicrophoneEnable = vi.fn().mockResolvedValue(undefined)
 const mockDisconnectUser = vi.fn().mockResolvedValue(undefined)
 
 let callingStateCallback: ((state: CallingState) => void) | null = null
@@ -16,6 +17,7 @@ const mockCall = {
   join: mockJoin,
   leave: mockLeave,
   camera: { disable: mockCameraDisable },
+  microphone: { enable: mockMicrophoneEnable },
   state: {
     callingState$: {
       subscribe: vi.fn((cb: (state: CallingState) => void) => {
@@ -79,8 +81,9 @@ describe("useStreamVoice", () => {
       await result.current.join()
     })
 
-    expect(mockJoin).toHaveBeenCalledWith({ create: true })
     expect(mockCameraDisable).toHaveBeenCalled()
+    expect(mockMicrophoneEnable).toHaveBeenCalled()
+    expect(mockJoin).toHaveBeenCalledWith({ create: true })
   })
 
   it("leave() calls call.leave and resets to IDLE", async () => {

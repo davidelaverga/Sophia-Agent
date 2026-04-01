@@ -5,6 +5,7 @@ import { Mic, X } from "lucide-react"
 import { AppShell } from "./AppShell"
 import { ErrorBoundary } from "./ErrorBoundary"
 import { SessionFeedbackToast } from "./SessionFeedbackToast"
+import { ModeToggle } from "./ModeToggle"
 import { useChatStore } from "../stores/chat-store"
 import { useReflectionPrompt } from "../hooks/useReflectionPrompt"
 import { useUiStore as useFocusModeStore } from "../stores/ui-store"
@@ -22,6 +23,7 @@ import { useChatAiRuntime } from "../chat/useChatAiRuntime"
 import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
 import { useVoiceStore as useVoiceFallbackStore } from "../stores/voice-store"
 import { useRecapStore } from "../stores/recap-store"
+import { useEmotionStore } from "../stores/emotion-store"
 import { ingestChatVoiceArtifacts, mapRecapArtifactsToRitualArtifacts } from "../chat/chat-voice-artifacts"
 import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
 import { useTranslation } from "../copy"
@@ -37,7 +39,6 @@ import { RetryAction } from "./ui/RetryAction"
 import { Transcript, Composer } from "./chat"
 
 // Lazy load heavy components that aren't needed immediately
-const VoicePanel = lazy(() => import("./VoicePanel").then(mod => ({ default: mod.VoicePanel })))
 const VoiceFocusView = lazy(() => import("./VoiceFocusView").then(mod => ({ default: mod.VoiceFocusView })))
 const VoiceCollapsed = lazy(() => import("./VoiceCollapsed").then(mod => ({ default: mod.VoiceCollapsed })))
 const ReflectionModal = lazy(() => import("./reflection/ReflectionModal").then(mod => ({ default: mod.ReflectionModal })))
@@ -109,13 +110,21 @@ export function ConversationView() {
     },
   })
 
+  const setEmotion = useEmotionStore((s) => s.setEmotion)
+
   const handleStreamArtifacts = useCallback((artifacts: Record<string, unknown>) => {
+    // Update emotion color from the artifact's primary voice emotion
+    const emotion = artifacts.voice_emotion_primary
+    if (typeof emotion === "string") {
+      setEmotion(emotion)
+    }
+
     ingestChatVoiceArtifacts({
       artifacts,
       conversationId,
       setArtifacts: setRecapArtifacts,
     })
-  }, [conversationId, setRecapArtifacts])
+  }, [conversationId, setRecapArtifacts, setEmotion])
 
   useChatAiRuntime({
     userId: user?.id,
@@ -249,9 +258,6 @@ export function ConversationView() {
       if (focusMode !== "text") setMode("text")
     } else if (isLocked && focusMode === "text") {
       return
-    } else {
-      if (focusMode === "voice" || focusMode === "text") return
-      if (focusMode === "full") return
     }
   }, [voiceStage, composerHasFocus, userIsTyping, isLocked, focusMode, setMode, isManualOverride, canAutoSwitch])
 
@@ -311,6 +317,9 @@ export function ConversationView() {
       )}
       
       <div className="space-y-4 transition-all duration-500 ease-in-out">
+        {/* Mode Toggle — shown in all modes */}
+        <ModeToggle />
+
         {/* Voice Focus Mode */}
         {focusMode === "voice" && (
           <div>
@@ -335,74 +344,14 @@ export function ConversationView() {
         {/* Text Focus Mode */}
         {focusMode === "text" && (
           <div className="space-y-4">
-            <Suspense fallback={<VoiceCollapsedSkeleton />}>
-              <VoiceCollapsed />
-            </Suspense>
-            {pendingInterrupt && !isLocked && (
-              <>
-                <InterruptCard
-                  interrupt={pendingInterrupt}
-                  onSelect={handleInterruptSelectWithRetry}
-                  onSnooze={pendingInterrupt.kind !== "MICRO_DIALOG" && "snooze" in pendingInterrupt && pendingInterrupt.snooze
-                    ? handleInterruptSnooze
-                    : undefined}
-                  onDismiss={() => {
-                    handleInterruptDismiss()
-                    clearResumeError()
-                  }}
-                  isLoading={isResuming}
-                />
-                {resumeError && resumeRetryOptionId && (
-                  <div className="mt-2">
-                    <RetryAction
-                      message={resumeError}
-                      onRetry={() => {
-                        void handleResumeRetry()
-                      }}
-                      onDismiss={clearResumeError}
-                    />
-                  </div>
-                )}
-              </>
-            )}
-            {interruptQueue.length > 0 && (
-              <div className="-mt-2 text-center text-xs text-sophia-text2/70">
-                +{interruptQueue.length} {interruptQueue.length === 1 ? "question queued" : "questions queued"}
-              </div>
-            )}
-            <Transcript onPromptSelect={handlePromptSelect} />
-            {chatArtifacts && (
-              <ArtifactsPanelErrorBoundary>
-                <ArtifactsPanel
-                  artifacts={chatArtifacts}
-                  presetType="chat"
-                  className="w-full"
-                  onReflectionTap={handleReflectionTap}
-                  onMemoryApprove={handleMemoryApprove}
-                  onMemoryReject={handleMemoryReject}
-                  memoryInlineFeedback={memoryInlineFeedback}
-                />
-              </ArtifactsPanelErrorBoundary>
-            )}
-          </div>
-        )}
-
-        {/* Full View Mode */}
-        {focusMode === "full" && (
-          <div className="space-y-4">
-            <Suspense fallback={<div className="h-32 animate-pulse rounded-2xl bg-sophia-surface" />}>
-              <VoicePanel voiceState={voiceState} />
-            </Suspense>
-            {showVoiceRetry && (
-              <div className="px-1">
-                <RetryAction
-                  message={t("inputModeIndicator.singleFailure.message")}
-                  onRetry={() => {
-                    void handleRetryVoiceTurn()
-                  }}
-                  onDismiss={() => setDismissedVoiceRetry(true)}
-                  retryLabel={t("inputModeIndicator.fallback.retryVoice")}
-                />
+            {/* Typing indicator replaces VoiceCollapsed in text mode */}
+            {isLocked && (
+              <div className="flex items-center justify-center gap-2 py-3 text-sophia-text2">
+                <span className="relative flex h-2 w-2">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-sophia-purple opacity-75 animate-ping" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-sophia-purple" />
+                </span>
+                <span className="text-xs font-medium animate-pulse">Sophia is thinking...</span>
               </div>
             )}
             {pendingInterrupt && !isLocked && (

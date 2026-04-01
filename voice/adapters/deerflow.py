@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 
 import httpx
 
@@ -43,8 +43,9 @@ class DeerFlowBackendAdapter(BackendAdapter):
 
     async def probe(self) -> None:
         try:
-            response = await self._http.get(
-                "/assistants",
+            response = await self._http.post(
+                "/assistants/search",
+                json={"graph_id": self.settings.assistant_id, "limit": 1},
                 timeout=self.settings.readiness_timeout_seconds,
             )
             response.raise_for_status()
@@ -72,11 +73,11 @@ class DeerFlowBackendAdapter(BackendAdapter):
             ) from exc
 
         assistant_ids = {
-            item.get("assistant_id")
+            item.get("graph_id")
             for item in payload
-            if isinstance(item, dict) and item.get("assistant_id")
+            if isinstance(item, dict) and item.get("graph_id")
         }
-        if assistant_ids and self.settings.assistant_id not in assistant_ids:
+        if not assistant_ids:
             raise BackendStageError(
                 "backend-ready",
                 f"Assistant {self.settings.assistant_id!r} was not found in DeerFlow.",
@@ -97,8 +98,10 @@ class DeerFlowBackendAdapter(BackendAdapter):
                     "platform": request.platform,
                     "ritual": request.ritual,
                     "context_mode": request.context_mode,
+                    "thread_id": thread_id,
                 }
             },
+            "stream_mode": ["messages-tuple"],
         }
 
         try:
@@ -110,16 +113,29 @@ class DeerFlowBackendAdapter(BackendAdapter):
             ) as response:
                 response.raise_for_status()
 
+                # Track SSE event type and accumulate tool call JSON
+                current_event_type = ""
+                # Map tool_use id → {"name": str, "json_parts": list[str]}
+                active_tool_calls: dict[str, dict] = {}
+                artifact_emitted = False
+
                 async for line in response.aiter_lines():
-                    if not line.startswith("data: "):
+                    line = line.strip()
+
+                    # SSE event type line
+                    if line.startswith("event:"):
+                        current_event_type = line[6:].strip()
                         continue
 
-                    raw_event = line[6:].strip()
-                    if not raw_event or raw_event == "[DONE]":
+                    if not line.startswith("data:"):
+                        continue
+
+                    raw_data = line[5:].strip()
+                    if not raw_data or raw_data == "[DONE]":
                         continue
 
                     try:
-                        event = json.loads(raw_event)
+                        data = json.loads(raw_data)
                     except json.JSONDecodeError:
                         yield BackendEvent.error_event(
                             "backend-contract",
@@ -128,20 +144,104 @@ class DeerFlowBackendAdapter(BackendAdapter):
                         )
                         return
 
-                    if event.get("type") in {"error", "run_error"}:
+                    # Handle error events (SSE event line or data-level)
+                    if current_event_type == "error":
                         yield BackendEvent.error_event(
                             "backend-stream",
-                            str(event.get("data") or event),
+                            str(data.get("message") if isinstance(data, dict) else data),
                         )
                         return
 
-                    chunk = self._extract_ai_chunk(event)
-                    if chunk:
-                        yield BackendEvent.text_chunk(chunk)
+                    if (
+                        isinstance(data, dict)
+                        and data.get("type") in ("run_error", "error")
+                    ):
+                        yield BackendEvent.error_event(
+                            "backend-stream",
+                            str(data.get("data", data.get("message", str(data)))),
+                        )
+                        return
 
-                    artifact = self._extract_artifact(event)
-                    if artifact is not None:
-                        yield BackendEvent.artifact_payload(artifact)
+                    # Only process messages events (from stream_mode=messages-tuple)
+                    if current_event_type != "messages":
+                        continue
+
+                    # data is [msg_dict, metadata_dict]
+                    if not isinstance(data, list) or len(data) < 1:
+                        continue
+
+                    msg = data[0]
+                    if not isinstance(msg, dict):
+                        continue
+
+                    msg_type = msg.get("type", "")
+
+                    # Extract text and tool calls from AI messages
+                    if msg_type in (
+                        "AIMessageChunk", "AIMessage", "ai", "assistant",
+                    ):
+                        content = msg.get("content", [])
+                        # String content (complete non-streaming messages)
+                        if isinstance(content, str) and content:
+                            yield BackendEvent.text_chunk(content)
+                        # List of content blocks (streaming chunks)
+                        elif isinstance(content, list):
+                            for block in content:
+                                if not isinstance(block, dict):
+                                    continue
+                                block_type = block.get("type", "")
+                                if block_type == "text":
+                                    text = block.get("text", "")
+                                    if text:
+                                        yield BackendEvent.text_chunk(text)
+                                elif block_type == "tool_use":
+                                    tool_id = block.get("id", "")
+                                    tool_name = block.get("name", "")
+                                    if tool_id:
+                                        active_tool_calls[tool_id] = {
+                                            "name": tool_name,
+                                            "json_parts": [],
+                                        }
+                                elif block_type == "input_json_delta":
+                                    partial = block.get("partial_json", "")
+                                    if partial:
+                                        for tc in reversed(
+                                            list(active_tool_calls.values())
+                                        ):
+                                            tc["json_parts"].append(partial)
+                                            break
+
+                        # Check tool_calls array for complete artifact data
+                        if not artifact_emitted:
+                            for tc in msg.get("tool_calls") or []:
+                                if (
+                                    isinstance(tc, dict)
+                                    and tc.get("name") == "emit_artifact"
+                                ):
+                                    args = tc.get("args")
+                                    if isinstance(args, dict) and args:
+                                        yield BackendEvent.artifact_payload(args)
+                                        artifact_emitted = True
+                                        break
+
+                    # Complete tool message — artifact from accumulated JSON
+                    elif msg_type == "tool":
+                        tool_name = msg.get("name", "")
+                        if tool_name == "emit_artifact" and not artifact_emitted:
+                            artifact = self._parse_accumulated_artifact(
+                                active_tool_calls,
+                            )
+                            if artifact is not None:
+                                yield BackendEvent.artifact_payload(artifact)
+                                artifact_emitted = True
+                            else:
+                                yield BackendEvent.error_event(
+                                    "backend-contract",
+                                    "emit_artifact tool call produced no parseable artifact.",
+                                    recoverable=False,
+                                )
+                                return
+
         except httpx.TimeoutException as exc:
             self._thread_ids.pop(request.user_id, None)
             raise BackendStageError(
@@ -198,62 +298,20 @@ class DeerFlowBackendAdapter(BackendAdapter):
             self._thread_ids[user_id] = thread_id
             return thread_id
 
-    def _extract_ai_chunk(self, event: dict[str, object]) -> str:
-        if event.get("type") != "messages-tuple":
-            return ""
-
-        data = self._normalize_tuple_data(event.get("data"))
-        if not isinstance(data, dict):
-            return ""
-
-        if data.get("type") not in {"ai", "assistant"}:
-            return ""
-
-        content = data.get("content", "")
-        if isinstance(content, str):
-            return content
-
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict) and item.get("type") == "text":
-                    parts.append(str(item.get("text", "")))
-            return "".join(parts)
-
-        return ""
-
-    def _extract_artifact(self, event: dict[str, object]) -> dict[str, object] | None:
-        if event.get("type") != "messages-tuple":
-            return None
-
-        data = self._normalize_tuple_data(event.get("data"))
-        if not isinstance(data, dict):
-            return None
-
-        if data.get("type") != "tool" or data.get("name") != "emit_artifact":
-            return None
-
-        content = data.get("content")
-        if isinstance(content, dict):
-            return content
-        if isinstance(content, str) and content.strip():
+    def _parse_accumulated_artifact(
+        self, tool_calls: dict[str, dict],
+    ) -> dict[str, object] | None:
+        """Parse the emit_artifact tool input from accumulated JSON fragments."""
+        for tc in tool_calls.values():
+            if tc["name"] != "emit_artifact":
+                continue
+            raw = "".join(tc["json_parts"])
+            if not raw.strip():
+                continue
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(raw)
             except json.JSONDecodeError:
-                return None
+                continue
             if isinstance(parsed, dict):
                 return parsed
         return None
-
-    def _normalize_tuple_data(self, data: object) -> object:
-        if isinstance(data, dict):
-            return data
-
-        if isinstance(data, Iterable) and not isinstance(data, (str, bytes)):
-            parts = list(data)
-            if len(parts) == 2 and isinstance(parts[1], dict):
-                return parts[1]
-
-        return data

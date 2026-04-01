@@ -19,6 +19,7 @@ import {
 } from "./useStreamVoice"
 import { useVoiceStore } from "../stores/voice-store"
 import { usePresenceStore } from "../stores/presence-store"
+import { usePlatformSignal } from "./usePlatformSignal"
 import type { VoiceStage } from "./voice/voice-utils"
 
 // ---------------------------------------------------------------------------
@@ -64,7 +65,8 @@ export type StreamVoiceSessionReturn = {
 // ---------------------------------------------------------------------------
 
 const THINKING_TIMEOUT_MS = 15_000
-const TOKEN_ENDPOINT = "/api/sophia"
+const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8001"
+const TOKEN_ENDPOINT = `${GATEWAY_URL}/api/sophia`
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -138,6 +140,9 @@ export function useStreamVoiceSession(
   useEffect(() => { onUserTranscriptRef.current = onUserTranscript }, [onUserTranscript])
   useEffect(() => { onAssistantResponseRef.current = onAssistantResponse }, [onAssistantResponse])
   useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
+
+  // --- Platform signal ------------------------------------------------------
+  const platform = usePlatformSignal()
 
   // --- Stores --------------------------------------------------------------
   const addVoiceMessage = useVoiceStore((s) => s.addMessage)
@@ -287,7 +292,9 @@ export function useStreamVoiceSession(
     setFinalReply("")
 
     try {
-      const creds = await fetchStreamCredentials(userId, "voice")
+      console.log('[StreamVoiceSession] startTalking — fetching credentials for:', userId, 'platform:', platform)
+      const creds = await fetchStreamCredentials(userId, platform)
+      console.log('[StreamVoiceSession] credentials received, callId:', creds.callId)
       setCredentials(creds)
       // join() will be triggered by useStreamVoice once credentials cause client init
     } catch (err) {
@@ -296,11 +303,12 @@ export function useStreamVoiceSession(
       setStage("error")
       setVoiceFailed(message)
     }
-  }, [userId, setVoiceFailed])
+  }, [userId, platform, setVoiceFailed])
 
   // Auto-join when credentials arrive and call is ready
   useEffect(() => {
     if (credentials && call && callingState === CallingState.IDLE) {
+      console.log('[StreamVoiceSession] auto-join triggered — credentials + call ready')
       join()
     }
   }, [credentials, call, callingState, join])
