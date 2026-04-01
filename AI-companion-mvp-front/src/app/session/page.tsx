@@ -47,11 +47,8 @@ import { errorCopy } from '../lib/error-copy';
 import { UsageLimitModal } from '../components/UsageLimitModal';
 import { useSessionUiInteractions } from './useSessionUiInteractions';
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
-import { useSessionOutboundSend } from './useSessionSendActions';
 import { useSessionConversationArchive } from './useSessionConversationArchive';
 import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
-import { useSessionArtifactsReducer } from './useSessionArtifactsReducer';
-import { useSessionMessageViewModel } from './useSessionMessageViewModel';
 import { useSessionStreamPersistence } from './useSessionStreamPersistence';
 import { SESSION_REFLECTION_PREFIX, useSessionReflectionVoiceFlow } from './useSessionReflectionVoiceFlow';
 import { useSessionUiDerivedState } from './useSessionUiDerivedState';
@@ -61,14 +58,12 @@ import { useSessionPageGuards } from './useSessionPageGuards';
 import { useSessionInteractionOrchestration } from './useSessionInteractionOrchestration';
 import { useSessionInfrastructure } from './useSessionInfrastructure';
 import { useSessionValidationState } from './useSessionValidationState';
-import { useSessionStreamOrchestration } from './useSessionStreamOrchestration';
-import { useSessionChatRuntime } from './useSessionChatRuntime';
 import { useSessionInitializationOrchestration } from './useSessionInitializationOrchestration';
 import { useSessionInterruptOrchestration } from './useSessionInterruptOrchestration';
-import { useSessionVoiceOrchestration } from './useSessionVoiceOrchestration';
 import { useSessionQueueOrchestration } from './useSessionQueueOrchestration';
 import { useSessionExitOrchestration } from './useSessionExitOrchestration';
 import { useSessionPageLocalState } from './useSessionPageLocalState';
+import { useSessionRouteExperience } from './useSessionRouteExperience';
 import { debugLog } from '../lib/debug-logger';
 import { getFirstRunStepById } from '../onboarding';
 import { useOnboardingStore } from '../stores/onboarding-store';
@@ -198,18 +193,6 @@ function SessionPageContent() {
   } = useSessionPageLocalState({
     sessionId: session?.sessionId,
   });
-  
-  // Artifact domain state (phase 3c): single owner for merge + status sync.
-  const {
-    artifactStatus,
-    ingestArtifacts,
-    applyMemoryCandidates,
-  } = useSessionArtifactsReducer({
-    sessionId: session?.sessionId,
-    artifacts,
-    storeArtifacts,
-    updateSession,
-  });
 
   const {
     cancelledMessageId,
@@ -234,34 +217,52 @@ function SessionPageContent() {
   } = useSessionInterruptRetryState();
 
   const {
-    handleDataPart,
-    handleFinish,
-    markStreamTurnStarted,
-    setStreamInterruptHandler,
-  } = useSessionStreamOrchestration({
+    artifactStatus,
     ingestArtifacts,
-    setCurrentContext,
-    setMessageMetadata,
-    sessionId,
-    activeSessionId: session?.sessionId,
-    activeThreadId: session?.threadId,
-    debugEnabled,
-  });
-
-  const {
+    applyMemoryCandidates,
     chatMessages,
     sendChatMessage,
     chatStatus,
     chatError,
     setChatMessages,
     stopStreaming,
-  } = useSessionChatRuntime({
+    messages,
+    latestAssistantMessage,
+    setMessageTimestamp,
+    setStreamInterruptHandler,
+    sendMessage,
+    voiceState,
+    voiceStatus,
+    isReflectionTtsActive,
+    appendVoiceUserMessage,
+    setOnUserTranscriptHandler,
+    setAssistantResponseSuppressedChecker,
+    voiceRetryState,
+    handleVoiceRetryPress,
+    handleDismissVoiceRetry,
+    queueVoiceRetryFromCancel,
+    baseHandleMicClick,
+    setVoiceStatusCompat,
+  } = useSessionRouteExperience({
+    sessionId,
+    activeSessionId: session?.sessionId,
+    activeThreadId: session?.threadId,
     chatRequestBody,
-    handleDataPart,
-    handleFinish,
+    hasValidBackendSessionId,
+    backendSessionId,
+    userId,
+    artifacts,
+    storeArtifacts,
+    updateSession,
     showUsageLimitModal,
     recordConnectivityFailure,
     showToast,
+    setCurrentContext,
+    setMessageMetadata,
+    greetingAnchorId,
+    markOffline,
+    debugEnabled,
+    memoryHighlightsCount: memoryHighlights?.length ?? 0,
   });
 
   const removeInternalDebriefTriggerBubble = useCallback((triggerText: string) => {
@@ -289,28 +290,6 @@ function SessionPageContent() {
       return prev.filter((_, messageIndex) => messageIndex !== targetIndex);
     });
   }, [setChatMessages]);
-
-  const sendMessage = useSessionOutboundSend({
-    chatStatus,
-    sendChatMessage,
-    hasValidBackendSessionId,
-    chatRequestBody,
-    debugEnabled,
-    markStreamTurnStarted,
-    showToast,
-  });
-
-  const {
-    messages,
-    latestAssistantMessage,
-    setMessageTimestamp,
-  } = useSessionMessageViewModel({
-    chatMessages,
-    greetingAnchorId,
-    markOffline,
-    debugEnabled,
-    memoryHighlightsCount: memoryHighlights?.length ?? 0,
-  });
 
   const isStreaming = chatStatus === 'streaming' || chatStatus === 'submitted';
   const isTyping = isStreaming;
@@ -389,31 +368,6 @@ function SessionPageContent() {
     setMessageTimestamp,
     setChatMessages,
     ingestArtifacts,
-  });
-
-  const {
-    voiceState,
-    voiceStatus,
-    isReflectionTtsActive,
-    appendVoiceUserMessage,
-    setOnUserTranscriptHandler,
-    setAssistantResponseSuppressedChecker,
-    voiceRetryState,
-    handleVoiceRetryPress,
-    handleDismissVoiceRetry,
-    queueVoiceRetryFromCancel,
-    baseHandleMicClick,
-    setVoiceStatusCompat,
-  } = useSessionVoiceOrchestration({
-    userId,
-    hasValidBackendSessionId,
-    backendSessionId,
-    setChatMessages,
-    setMessageTimestamp,
-    ingestArtifacts,
-    sendMessage,
-    latestAssistantMessage,
-    isTyping,
   });
 
   useSessionStreamPersistence({

@@ -1,6 +1,38 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { ingestChatVoiceArtifacts, mapRecapArtifactsToRitualArtifacts } from '../../app/chat/chat-voice-artifacts';
+import {
+  applyChatRouteArtifacts,
+  ingestChatVoiceArtifacts,
+  mapRecapArtifactsToRitualArtifacts,
+  resolveChatArtifactsSessionId,
+} from '../../app/chat/chat-voice-artifacts';
+
+describe('applyChatRouteArtifacts', () => {
+  it('updates emotion and stores mapped artifacts in one step', () => {
+    const setArtifacts = vi.fn();
+    const setEmotion = vi.fn();
+
+    const stored = applyChatRouteArtifacts({
+      artifacts: {
+        session_id: 'session-from-route',
+        takeaway: 'You recovered after a hard pivot.',
+        voice_emotion_primary: 'warm',
+      },
+      setArtifacts,
+      setEmotion,
+    });
+
+    expect(stored).toBe(true);
+    expect(setEmotion).toHaveBeenCalledWith('warm');
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'session-from-route',
+      expect.objectContaining({
+        sessionId: 'session-from-route',
+        takeaway: 'You recovered after a hard pivot.',
+      })
+    );
+  });
+});
 
 describe('ingestChatVoiceArtifacts', () => {
   it('stores mapped artifacts using payload session_id when available', () => {
@@ -59,6 +91,12 @@ describe('ingestChatVoiceArtifacts', () => {
 
     expect(stored).toBe(false);
     expect(setArtifacts).not.toHaveBeenCalled();
+  });
+
+  it('resolves the session id with the same fallback rules used by the route hook', () => {
+    expect(resolveChatArtifactsSessionId({ session_id: 'payload-session' }, 'chat-session')).toBe('payload-session');
+    expect(resolveChatArtifactsSessionId({ takeaway: 'fallback' }, 'chat-session')).toBe('chat-session');
+    expect(resolveChatArtifactsSessionId({ takeaway: 'missing' })).toBeNull();
   });
 
   it('maps recap artifacts to ritual artifacts for ArtifactsPanel', () => {

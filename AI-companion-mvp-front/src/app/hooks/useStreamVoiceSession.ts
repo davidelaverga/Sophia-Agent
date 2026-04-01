@@ -17,10 +17,11 @@ import {
   useStreamVoice,
   type StreamVoiceCredentials,
 } from "./useStreamVoice"
+import { logger } from "../lib/error-logger"
 import { useVoiceStore } from "../stores/voice-store"
 import { usePresenceStore } from "../stores/presence-store"
 import { usePlatformSignal } from "./usePlatformSignal"
-import type { VoiceStage } from "./voice/voice-utils"
+import type { VoiceStage } from "../lib/voice-types"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -292,9 +293,14 @@ export function useStreamVoiceSession(
     setFinalReply("")
 
     try {
-      console.log('[StreamVoiceSession] startTalking — fetching credentials for:', userId, 'platform:', platform)
+      logger.debug("StreamVoiceSession", "Fetching credentials", {
+        userId,
+        platform,
+      })
       const creds = await fetchStreamCredentials(userId, platform)
-      console.log('[StreamVoiceSession] credentials received, callId:', creds.callId)
+      logger.debug("StreamVoiceSession", "Credentials received", {
+        callId: creds.callId,
+      })
       setCredentials(creds)
       // join() will be triggered by useStreamVoice once credentials cause client init
     } catch (err) {
@@ -308,7 +314,7 @@ export function useStreamVoiceSession(
   // Auto-join when credentials arrive and call is ready
   useEffect(() => {
     if (credentials && call && callingState === CallingState.IDLE) {
-      console.log('[StreamVoiceSession] auto-join triggered — credentials + call ready')
+      logger.debug("StreamVoiceSession", "Auto-join triggered")
       join()
     }
   }, [credentials, call, callingState, join])

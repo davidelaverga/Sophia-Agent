@@ -1,22 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import type { ArtifactStatusType } from '../components/session';
-import type { RitualArtifacts } from '../types/session';
 import {
   getLiveArtifactStatus,
   getPersistedArtifactStatus,
   mergeRitualArtifacts,
-} from './artifacts';
-import type { StreamArtifactsPayload } from './stream-contract-adapters';
+} from '../session/artifacts';
 import { debugLog } from '../lib/debug-logger';
-
-type ArtifactStatusState = {
-  takeaway: ArtifactStatusType;
-  reflection: ArtifactStatusType;
-  memories: ArtifactStatusType;
-};
-
-type ArtifactSource = 'stream' | 'interrupt' | 'companion' | 'voice';
+import type { RitualArtifacts } from '../types/session';
+import type { ArtifactStatusState, UseCompanionArtifactsRuntimeParams } from './artifacts-runtime.types';
+import type { CompanionArtifactSource } from './types';
 
 const WAITING_STATUS: ArtifactStatusState = {
   takeaway: 'waiting',
@@ -24,19 +17,12 @@ const WAITING_STATUS: ArtifactStatusState = {
   memories: 'waiting',
 };
 
-interface UseSessionArtifactsReducerParams {
-  sessionId?: string;
-  artifacts?: RitualArtifacts | null;
-  storeArtifacts: (artifacts: RitualArtifacts, summary?: string) => void;
-  updateSession: (updates: { artifacts?: RitualArtifacts; summary?: string }) => void;
-}
-
-export function useSessionArtifactsReducer({
+export function useCompanionArtifactsRuntime({
   sessionId,
   artifacts,
   storeArtifacts,
   updateSession,
-}: UseSessionArtifactsReducerParams) {
+}: UseCompanionArtifactsRuntimeParams) {
   const [artifactStatus, setArtifactStatus] = useState<ArtifactStatusState>(WAITING_STATUS);
   const artifactsRef = useRef<RitualArtifacts | null>(artifacts ?? null);
   const previousSessionIdRef = useRef<string | null>(null);
@@ -63,9 +49,9 @@ export function useSessionArtifactsReducer({
     previousSessionIdRef.current = currentSessionId;
   }, [sessionId, updateSession]);
 
-  const ingestArtifacts = useCallback((incoming: StreamArtifactsPayload, _source: ArtifactSource) => {
+  const ingestArtifacts = useCallback((incoming: CompanionArtifactsPayload, source: CompanionArtifactSource) => {
     debugLog('ArtifactsFlow', 'artifact payload received', {
-      source: _source,
+      source,
       keys: Object.keys(incoming || {}),
       hasTakeaway: typeof incoming?.takeaway === 'string' && incoming.takeaway.trim().length > 0,
       hasReflection:
@@ -81,7 +67,7 @@ export function useSessionArtifactsReducer({
       mergeMemoryCandidates: true,
     });
 
-    const merged: RitualArtifacts = _source === 'companion'
+    const merged: RitualArtifacts = source === 'companion'
       ? {
           ...mergedBase,
           takeaway: currentArtifacts.takeaway,
@@ -95,7 +81,7 @@ export function useSessionArtifactsReducer({
     setArtifactStatus(nextStatus);
 
     debugLog('ArtifactsFlow', 'artifact store updated', {
-      source: _source,
+      source,
       takeawayLength: merged.takeaway?.trim().length ?? 0,
       hasReflection: Boolean(merged.reflection_candidate?.prompt),
       memoryCandidatesCount: merged.memory_candidates?.length ?? 0,
@@ -129,3 +115,10 @@ export function useSessionArtifactsReducer({
     applyMemoryCandidates,
   };
 }
+
+type CompanionArtifactsPayload = {
+  takeaway?: string;
+  reflection_candidate?: string | { prompt?: string; why?: string };
+  memory_candidates?: unknown[];
+  [key: string]: unknown;
+};

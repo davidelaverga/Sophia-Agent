@@ -10,7 +10,7 @@
 
 import { useRef, useCallback } from "react"
 import { debugLog, debugWarn } from "../../lib/debug-logger"
-import { httpToWs } from "./voice-utils"
+import { httpToWs } from "../../hooks/voice/voice-utils"
 import {
   parseIncomingVoiceWebSocketMessage,
   type VoiceWebSocketMessage,

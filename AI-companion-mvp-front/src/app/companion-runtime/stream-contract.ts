@@ -1,26 +1,15 @@
 import { useCallback, useRef } from 'react';
 import { emitTiming } from '../lib/telemetry';
-import type { InterruptPayload } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 import {
   extractStreamMetadata,
   normalizeStreamDataPart,
   parseArtifactsPayload,
   parseInterruptPayload,
-  type StreamArtifactsPayload,
-} from './stream-contract-adapters';
+} from '../session/stream-contract-adapters';
+import type { UseCompanionStreamContractParams } from './types';
 
-interface UseSessionStreamContractParams {
-  ingestArtifacts: (incoming: StreamArtifactsPayload, source: 'stream' | 'interrupt' | 'companion' | 'voice') => void;
-  setInterrupt: (interrupt: InterruptPayload) => void;
-  setCurrentContext: (threadId: string, sessionId: string, runId?: string) => void;
-  setMessageMetadata: (messageId: string, metadata: Partial<SophiaMessageMetadata>) => void;
-  sessionId: string;
-  activeSessionId?: string;
-  activeThreadId?: string;
-}
-
-export function useSessionStreamContract({
+export function useCompanionStreamContract({
   ingestArtifacts,
   setInterrupt,
   setCurrentContext,
@@ -28,7 +17,7 @@ export function useSessionStreamContract({
   sessionId,
   activeSessionId,
   activeThreadId,
-}: UseSessionStreamContractParams) {
+}: UseCompanionStreamContractParams) {
   const latestStreamMetaRef = useRef<Partial<SophiaMessageMetadata>>({});
   const streamTurnStartedAtRef = useRef<number | null>(null);
 

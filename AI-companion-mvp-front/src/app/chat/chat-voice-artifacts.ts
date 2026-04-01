@@ -11,6 +11,10 @@ type IngestChatVoiceArtifactsParams = {
   setArtifacts: PersistArtifacts;
 };
 
+type ApplyChatRouteArtifactsParams = IngestChatVoiceArtifactsParams & {
+  setEmotion?: (emotion: string) => void;
+};
+
 function resolveArtifactsSessionId(payload: BackendArtifactsPayload, conversationId?: string): string | null {
   const payloadSessionId = typeof payload.session_id === 'string' ? payload.session_id.trim() : '';
   if (payloadSessionId) return payloadSessionId;
@@ -19,6 +23,13 @@ function resolveArtifactsSessionId(payload: BackendArtifactsPayload, conversatio
   if (fallbackConversationId) return fallbackConversationId;
 
   return null;
+}
+
+export function resolveChatArtifactsSessionId(
+  artifacts: Record<string, unknown>,
+  conversationId?: string
+): string | null {
+  return resolveArtifactsSessionId(artifacts as BackendArtifactsPayload, conversationId);
 }
 
 export function ingestChatVoiceArtifacts({
@@ -40,6 +51,24 @@ export function ingestChatVoiceArtifacts({
 
   setArtifacts(resolvedSessionId, mapped);
   return true;
+}
+
+export function applyChatRouteArtifacts({
+  artifacts,
+  conversationId,
+  setArtifacts,
+  setEmotion,
+}: ApplyChatRouteArtifactsParams): boolean {
+  const primaryEmotion = artifacts.voice_emotion_primary;
+  if (typeof primaryEmotion === 'string' && primaryEmotion.trim().length > 0) {
+    setEmotion?.(primaryEmotion);
+  }
+
+  return ingestChatVoiceArtifacts({
+    artifacts,
+    conversationId,
+    setArtifacts,
+  });
 }
 
 const ALLOWED_MEMORY_CATEGORIES = new Set<MemoryCategory>([

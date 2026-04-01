@@ -4,24 +4,16 @@ import { DefaultChatTransport } from 'ai';
 import { parseUsageLimitFromError } from '../lib/usage-limit-parser';
 import { errorCopy } from '../lib/error-copy';
 import { debugWarn } from '../lib/debug-logger';
+import type { UseCompanionChatRuntimeParams } from './types';
 
-type UseSessionChatRuntimeParams = {
-  chatRequestBody?: Record<string, unknown>;
-  handleDataPart: (dataPart: unknown) => void;
-  handleFinish: (options: { message: { id: string } }) => void;
-  showUsageLimitModal: (info: unknown) => void;
-  recordConnectivityFailure: () => void;
-  showToast: (args: { message: string; variant: 'warning' | 'error' | 'info' | 'success'; durationMs?: number }) => void;
-};
-
-export function useSessionChatRuntime({
+export function useCompanionChatRuntime({
   chatRequestBody,
   handleDataPart,
   handleFinish,
   showUsageLimitModal,
   recordConnectivityFailure,
   showToast,
-}: UseSessionChatRuntimeParams) {
+}: UseCompanionChatRuntimeParams) {
   const chatTransport = useMemo(() => {
     return new DefaultChatTransport({
       api: '/api/chat',

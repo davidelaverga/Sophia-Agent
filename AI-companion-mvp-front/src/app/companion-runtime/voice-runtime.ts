@@ -1,39 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useStreamVoiceSession } from '../hooks/useStreamVoiceSession';
-import type { StreamArtifactsPayload } from './stream-contract-adapters';
+import type { UseCompanionVoiceRuntimeOptions, CompanionVoiceRetryState } from './types';
 
-type VoiceRetryState = { transcript: string; message: string } | null;
 const DEFAULT_VOICE_CANCEL_RETRY_MESSAGE = 'Voice response cancelled. Retry?';
 
-type UseSessionVoiceBridgeOptions = {
-  userId?: string;
-  sessionId?: string;
-  onUserTranscriptFallback: (text: string) => void;
-  appendAssistantMessage: (text: string, suppressAssistantResponse: boolean) => void;
-  ingestArtifacts: (artifacts: StreamArtifactsPayload, source: 'voice' | 'interrupt') => void;
-  onRateLimitError: (payload: {
-    message: string;
-    remaining?: number;
-    estimatedSeconds?: number;
-  }) => void;
-  sendMessage: (params: { text: string }) => Promise<void>;
-  latestAssistantMessage: { id: string; content: string } | null;
-  isTyping: boolean;
-};
-
-export function useSessionVoiceBridge({
+export function useCompanionVoiceRuntime({
   userId,
   sessionId,
   onUserTranscriptFallback,
   appendAssistantMessage,
   ingestArtifacts,
-  onRateLimitError,
+  onRateLimitError: _onRateLimitError,
   sendMessage,
   latestAssistantMessage,
   isTyping,
-}: UseSessionVoiceBridgeOptions) {
+}: UseCompanionVoiceRuntimeOptions) {
   const [lastVoiceTranscript, setLastVoiceTranscript] = useState<string | null>(null);
-  const [voiceRetryState, setVoiceRetryState] = useState<VoiceRetryState>(null);
+  const [voiceRetryState, setVoiceRetryState] = useState<CompanionVoiceRetryState>(null);
   const [pendingVoiceRetryPlayback, setPendingVoiceRetryPlayback] = useState(false);
   const consumedRetryAssistantIdRef = useRef<string | null>(null);
   const onUserTranscriptHandlerRef = useRef<(text: string) => void>(onUserTranscriptFallback);
@@ -69,11 +52,10 @@ export function useSessionVoiceBridge({
     appendAssistantMessageRef.current(text, isAssistantResponseSuppressedRef.current());
   }, []);
 
-  const handleVoiceArtifacts = useCallback((artifacts: StreamArtifactsPayload) => {
+  const handleVoiceArtifacts = useCallback((artifacts: Parameters<UseCompanionVoiceRuntimeOptions['ingestArtifacts']>[0]) => {
     ingestArtifacts(artifacts, 'voice');
   }, [ingestArtifacts]);
 
-  // Stream voice session hook
   const voiceState = useStreamVoiceSession(userId, {
     sessionId,
     onUserTranscript: handleUserTranscript,

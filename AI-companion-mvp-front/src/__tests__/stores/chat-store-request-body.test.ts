@@ -1,26 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
-import { buildChatRequestBody } from '../../app/stores/chat-store';
+import { buildChatRouteBody } from '../../app/chat/useChatRouteExperience';
 
-describe('buildChatRequestBody', () => {
-  it('builds a minimal payload with only allowed keys', () => {
-    const payload = buildChatRequestBody({
-      message: '  hello  ',
-      conversationId: ' conv-1 ',
-      userId: ' user-1 ',
+describe('buildChatRouteBody', () => {
+  it('builds the canonical /chat payload shape', () => {
+    const payload = buildChatRouteBody({
+      conversationId: 'conv-1',
+      userId: 'user-1',
     });
 
     expect(payload).toEqual({
-      message: 'hello',
-      conversationId: 'conv-1',
+      session_id: 'conv-1',
+      session_type: 'chat',
+      context_mode: 'life',
       user_id: 'user-1',
-      platform: 'voice',
     });
   });
 
   it('does not include skill-selection fields in chat payload', () => {
-    const payload = buildChatRequestBody({
-      message: 'voice turn',
+    const payload = buildChatRouteBody({
       conversationId: 'conv-voice',
       userId: 'user-voice',
     }) as Record<string, unknown>;

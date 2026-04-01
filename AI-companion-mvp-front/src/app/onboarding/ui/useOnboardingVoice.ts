@@ -1,15 +1,15 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useAudioPlayback } from '../../hooks/voice/useAudioPlayback'
-import { buildSpeakTextCommand } from '../../hooks/voice/voice-loop-command-helpers'
+import { useAudioPlayback } from '../voice-legacy/useAudioPlayback'
+import { buildSpeakTextCommand } from '../voice-legacy/voice-loop-command-helpers'
 import {
   connectVoiceSessionFreshSafely,
   generateVoiceSessionId,
   resolveVoiceWsBaseUrl,
-} from '../../hooks/voice/voice-loop-connection-helpers'
+} from '../voice-legacy/voice-loop-connection-helpers'
 import { base64ToUint8Array } from '../../hooks/voice/voice-utils'
-import { useVoiceWebSocket } from '../../hooks/voice/useVoiceWebSocket'
+import { useVoiceWebSocket } from '../voice-legacy/useVoiceWebSocket'
 import { useOnboardingStore } from '../../stores/onboarding-store'
 import { getOnboardingVoiceOnlineState, shouldEnableOnboardingVoice } from '../voice'
 

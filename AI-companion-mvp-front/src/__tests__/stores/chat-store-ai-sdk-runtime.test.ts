@@ -14,42 +14,41 @@ function resetChatStoreForTest() {
     lastCompletedTurnId: undefined,
     abortController: undefined,
     isLoadingHistory: false,
-    runtimeMode: 'legacy',
-    aiSdkRuntime: undefined,
+    routeRuntime: undefined,
     streamStatus: 'idle',
     streamAttempt: 0,
     lastUserTurnId: undefined,
   })
 }
 
-describe('chat-store AI SDK runtime bridge', () => {
+describe('chat-store route runtime bridge', () => {
   beforeEach(() => {
     resetChatStoreForTest()
   })
 
-  it('binds and unbinds AI SDK runtime mode', () => {
+  it('binds and unbinds the route runtime bridge', () => {
     const send = vi.fn(async () => undefined)
     const stop = vi.fn()
     const retry = vi.fn(async () => undefined)
+    const recover = vi.fn(async () => undefined)
 
-    useChatStore.getState().bindAiSdkRuntime({ send, stop, retry })
+    useChatStore.getState().bindRouteRuntime({ send, stop, retry, recover })
 
-    expect(useChatStore.getState().runtimeMode).toBe('ai-sdk')
-    expect(useChatStore.getState().aiSdkRuntime).toBeDefined()
+    expect(useChatStore.getState().routeRuntime).toBeDefined()
 
-    useChatStore.getState().unbindAiSdkRuntime()
+    useChatStore.getState().unbindRouteRuntime()
 
-    expect(useChatStore.getState().runtimeMode).toBe('legacy')
-    expect(useChatStore.getState().aiSdkRuntime).toBeUndefined()
+    expect(useChatStore.getState().routeRuntime).toBeUndefined()
     expect(useChatStore.getState().streamStatus).toBe('idle')
   })
 
-  it('delegates sendMessage to bound AI SDK runtime', async () => {
+  it('delegates sendMessage to the bound route runtime', async () => {
     const send = vi.fn(async () => undefined)
     const stop = vi.fn()
     const retry = vi.fn(async () => undefined)
+    const recover = vi.fn(async () => undefined)
 
-    useChatStore.getState().bindAiSdkRuntime({ send, stop, retry })
+    useChatStore.getState().bindRouteRuntime({ send, stop, retry, recover })
     useChatStore.setState({ composerValue: 'hello from /chat' })
 
     await useChatStore.getState().sendMessage()
@@ -59,12 +58,13 @@ describe('chat-store AI SDK runtime bridge', () => {
     expect(useChatStore.getState().streamStatus).toBe('streaming')
   })
 
-  it('delegates cancel and retry actions to bound AI SDK runtime', async () => {
+  it('delegates cancel and retry actions to the bound route runtime', async () => {
     const send = vi.fn(async () => undefined)
     const stop = vi.fn()
     const retry = vi.fn(async () => undefined)
+    const recover = vi.fn(async () => undefined)
 
-    useChatStore.getState().bindAiSdkRuntime({ send, stop, retry })
+    useChatStore.getState().bindRouteRuntime({ send, stop, retry, recover })
     useChatStore.setState({
       streamStatus: 'error',
       messages: [
@@ -90,7 +90,7 @@ describe('chat-store AI SDK runtime bridge', () => {
     expect(useChatStore.getState().streamStatus).toBe('streaming')
   })
 
-  it('syncAiSdkState merges AI messages while preserving voice messages', () => {
+  it('syncRouteRuntimeState merges runtime messages while preserving voice messages', () => {
     const voiceMessage: ChatMessage = {
       id: 'voice-user-1',
       role: 'user',
@@ -115,7 +115,7 @@ describe('chat-store AI SDK runtime bridge', () => {
       conversationId: 'conv-1',
     })
 
-    useChatStore.getState().syncAiSdkState({
+    useChatStore.getState().syncRouteRuntimeState({
       messages: [aiMessage],
       chatStatus: 'streaming',
       conversationId: 'conv-1',

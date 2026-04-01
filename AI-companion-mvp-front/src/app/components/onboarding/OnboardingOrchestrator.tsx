@@ -17,6 +17,7 @@ import {
   ArtifactsConceptPreview,
   MemoryConceptPreview,
 } from './OnboardingConceptPreview';
+import { debugWarn } from '../../lib/debug-logger';
 
 function getConceptPreview(stepId: string): React.ReactNode | null {
   switch (stepId) {
@@ -110,7 +111,9 @@ export function OnboardingOrchestrator() {
     }
 
     skippedMissingTargetRef.current = currentStep.id;
-    console.warn(`[Onboarding] Missing target for step "${currentStep.id}". Advancing safely.`);
+    debugWarn('Onboarding', 'Missing target for step, advancing safely', {
+      stepId: currentStep.id,
+    });
     advanceStep();
   }, [advanceStep, currentStep, isResolved, isVisible, targetRects.length]);
 

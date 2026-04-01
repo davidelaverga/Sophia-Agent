@@ -1,7 +1,7 @@
 "use client"
 
 import { Square, Zap } from "lucide-react"
-import type { VoiceStateProps } from "../hooks/voice/voice-utils"
+import type { VoiceStateProps } from "../lib/voice-types"
 import { useVoiceToggle } from "../hooks/useVoiceToggle"
 import { useEmotionColor } from "../hooks/useEmotionColor"
 import { Waveform } from "./Waveform"

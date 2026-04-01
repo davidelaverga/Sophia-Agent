@@ -9,25 +9,15 @@ import { ModeToggle } from "./ModeToggle"
 import { useChatStore } from "../stores/chat-store"
 import { useReflectionPrompt } from "../hooks/useReflectionPrompt"
 import { useUiStore as useFocusModeStore } from "../stores/ui-store"
-import { useInterrupt } from "../hooks/useInterrupt"
+import type { ChatRouteExperience } from "../chat/useChatRouteExperience"
 
 // Feature flag: Set to true to enable Reflections feature
 const ENABLE_REFLECTIONS = false
-import { useStreamVoiceSession } from "../hooks/useStreamVoiceSession"
 import { useModeSwitch } from "../hooks/useModeSwitch"
-import { useSessionPersistence } from "../hooks/useSessionPersistence"
-import { useSupabase } from "../providers"
-import { useUsageMonitor } from "../hooks/useUsageMonitor"
-import { useBackendTokenSync } from "../hooks/useBackendTokenSync"
-import { useChatAiRuntime } from "../chat/useChatAiRuntime"
 import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
 import { useVoiceStore as useVoiceFallbackStore } from "../stores/voice-store"
-import { useRecapStore } from "../stores/recap-store"
-import { useEmotionStore } from "../stores/emotion-store"
-import { ingestChatVoiceArtifacts, mapRecapArtifactsToRitualArtifacts } from "../chat/chat-voice-artifacts"
 import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
 import { useTranslation } from "../copy"
-import { errorCopy } from "../lib/error-copy"
 import { ConnectionStatusBanner } from "./ConnectionStatusBanner"
 import { DevDiagnosticsPanel } from "./DevDiagnosticsPanel"
 import { ArtifactsPanel } from "./session"
@@ -43,19 +33,34 @@ const VoiceFocusView = lazy(() => import("./VoiceFocusView").then(mod => ({ defa
 const VoiceCollapsed = lazy(() => import("./VoiceCollapsed").then(mod => ({ default: mod.VoiceCollapsed })))
 const ReflectionModal = lazy(() => import("./reflection/ReflectionModal").then(mod => ({ default: mod.ReflectionModal })))
 
-export function ConversationView() {
+type ConversationViewProps = {
+  routeExperience: ChatRouteExperience
+}
+
+export function ConversationView({ routeExperience }: ConversationViewProps) {
   const { t } = useTranslation()
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const applyPrompt = useChatStore((state) => state.applyQuickPrompt)
-  const conversationId = useChatStore((state) => state.conversationId)
   const lastCompletedTurnId = useChatStore((state) => state.lastCompletedTurnId)
-  const setRecapArtifacts = useRecapStore((state) => state.setArtifacts)
-  const recapArtifacts = useRecapStore((state) => (conversationId ? state.artifacts[conversationId] : undefined))
-  const chatArtifacts = mapRecapArtifactsToRitualArtifacts(recapArtifacts)
+  const {
+    conversationId,
+    recapArtifacts,
+    setRecapArtifacts,
+    chatArtifacts,
+    voiceState,
+    pendingInterrupt,
+    interruptQueue,
+    isResuming,
+    resumeError,
+    canRetryResume,
+    handleInterruptSelect,
+    handleInterruptSnooze,
+    handleInterruptDismiss,
+    handleResumeRetry,
+    clearResumeError,
+  } = routeExperience
   const { chunks, dismiss } = useReflectionPrompt(conversationId, lastCompletedTurnId)
   const [micSupportWarning, setMicSupportWarning] = useState<string | null>(null)
-  const [resumeError, setResumeError] = useState<string | null>(null)
-  const [resumeRetryOptionId, setResumeRetryOptionId] = useState<string | null>(null)
   
   // Focus mode state
   const focusMode = useFocusModeStore((state) => state.mode)
@@ -65,82 +70,6 @@ export function ConversationView() {
   
   // Voice fallback detection
   const shouldAutoFallback = useVoiceFallbackStore((state) => state.shouldAutoFallback)
-  
-  // Voice state - SINGLE SOURCE OF TRUTH
-  const { user } = useSupabase()
-  const {
-    pendingInterrupt,
-    interruptQueue,
-    isResuming,
-    handleInterruptSelect,
-    handleInterruptSnooze,
-    handleInterruptDismiss,
-    setInterrupt,
-  } = useInterrupt({
-    sessionId: conversationId || "chat_pending",
-    threadId: undefined,
-    presetContext: "life",
-    sessionType: "chat",
-    onResumeSuccess: (response) => {
-      setResumeError(null)
-      const responseText = (response || "").trim()
-      if (!responseText) return
-
-      useChatStore.setState((state) => ({
-        messages: [
-          ...state.messages,
-          {
-            id: `interrupt-resume-${Date.now()}`,
-            role: "sophia",
-            content: responseText,
-            createdAt: Date.now(),
-            status: "complete",
-            source: "text",
-          },
-        ],
-      }))
-    },
-    onResumeError: (error) => {
-      if (error.message === "INTERRUPT_EXPIRED") {
-        setResumeRetryOptionId(null)
-        setResumeError(errorCopy.offerExpired)
-        return
-      }
-      setResumeError(errorCopy.resumeFailed)
-    },
-  })
-
-  const setEmotion = useEmotionStore((s) => s.setEmotion)
-
-  const handleStreamArtifacts = useCallback((artifacts: Record<string, unknown>) => {
-    // Update emotion color from the artifact's primary voice emotion
-    const emotion = artifacts.voice_emotion_primary
-    if (typeof emotion === "string") {
-      setEmotion(emotion)
-    }
-
-    ingestChatVoiceArtifacts({
-      artifacts,
-      conversationId,
-      setArtifacts: setRecapArtifacts,
-    })
-  }, [conversationId, setRecapArtifacts, setEmotion])
-
-  useChatAiRuntime({
-    userId: user?.id,
-    onInterrupt: setInterrupt,
-    onArtifacts: (artifacts) => handleStreamArtifacts(artifacts),
-  })
-
-  const handleVoiceArtifacts = useCallback((artifacts: Record<string, unknown>) => {
-    handleStreamArtifacts(artifacts)
-  }, [handleStreamArtifacts])
-
-  // Stream voice session hook
-  const voiceState = useStreamVoiceSession(user?.id, {
-    sessionId: conversationId,
-    onArtifacts: handleVoiceArtifacts,
-  })
   const voiceStage = voiceState.stage
   const [dismissedVoiceRetry, setDismissedVoiceRetry] = useState(false)
 
@@ -155,30 +84,6 @@ export function ConversationView() {
       setDismissedVoiceRetry(false)
     }
   }, [voiceState])
-
-  const clearResumeError = useCallback(() => {
-    setResumeError(null)
-  }, [])
-
-  const handleInterruptSelectWithRetry = useCallback(async (optionId: string) => {
-    setResumeRetryOptionId(optionId)
-    setResumeError(null)
-    await handleInterruptSelect(optionId)
-  }, [handleInterruptSelect])
-
-  const handleResumeRetry = useCallback(async () => {
-    if (!resumeRetryOptionId) return
-    await handleInterruptSelectWithRetry(resumeRetryOptionId)
-  }, [resumeRetryOptionId, handleInterruptSelectWithRetry])
-  
-  // Session persistence - must be at this level to capture all modes (text, voice, full)
-  useSessionPersistence()
-  
-  // Monitor usage and trigger alerts
-  useUsageMonitor()
-  
-  // Auto-sync backend token if missing (handles case where backend was down during OAuth callback)
-  const { isSyncing: _isTokenSyncing, syncError: _tokenSyncError } = useBackendTokenSync()
   
   // Track composer focus and interaction
   const [composerHasFocus, setComposerHasFocus] = useState(false)
@@ -358,17 +263,14 @@ export function ConversationView() {
               <>
                 <InterruptCard
                   interrupt={pendingInterrupt}
-                  onSelect={handleInterruptSelectWithRetry}
+                  onSelect={handleInterruptSelect}
                   onSnooze={pendingInterrupt.kind !== "MICRO_DIALOG" && "snooze" in pendingInterrupt && pendingInterrupt.snooze
                     ? handleInterruptSnooze
                     : undefined}
-                  onDismiss={() => {
-                    handleInterruptDismiss()
-                    clearResumeError()
-                  }}
+                  onDismiss={handleInterruptDismiss}
                   isLoading={isResuming}
                 />
-                {resumeError && resumeRetryOptionId && (
+                {resumeError && canRetryResume && (
                   <div className="mt-2">
                     <RetryAction
                       message={resumeError}

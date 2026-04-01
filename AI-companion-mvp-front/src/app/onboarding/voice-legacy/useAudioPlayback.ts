@@ -12,8 +12,8 @@ import { logger } from "../../lib/error-logger"
 import { debugLog, debugWarn } from "../../lib/debug-logger"
 import { isVerboseDebugEnabled } from "../../lib/debug"
 import { emitTelemetry } from "../../lib/telemetry"
-import type { QueuedChunk, RouterPath } from "./voice-utils"
-import { PREBUFFER_CHUNKS, FIRST_AUDIO_TARGET_MS, base64ToUint8Array } from "./voice-utils"
+import type { QueuedChunk, RouterPath } from "../../lib/voice-types"
+import { PREBUFFER_CHUNKS, FIRST_AUDIO_TARGET_MS, base64ToUint8Array } from "../../hooks/voice/voice-utils"
 
 type UseAudioPlaybackProps = {
   path?: RouterPath

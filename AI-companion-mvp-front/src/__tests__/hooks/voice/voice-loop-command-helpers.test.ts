@@ -3,7 +3,7 @@ import {
   buildSpeakTextCommand,
   handleStopTalkingCommandFailure,
   sendStopTalkingCommands,
-} from "../../../app/hooks/voice/voice-loop-command-helpers"
+} from "../../../app/onboarding/voice-legacy/voice-loop-command-helpers"
 
 describe("voice-loop-command-helpers", () => {
   it("returns no-audio when wav buffer is absent", async () => {

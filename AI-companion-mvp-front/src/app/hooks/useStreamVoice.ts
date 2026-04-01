@@ -7,6 +7,7 @@ import {
   type User,
   CallingState,
 } from "@stream-io/video-react-sdk"
+import { logger } from "../lib/error-logger"
 
 /**
  * Binds audio elements for remote participants using the SDK's own
@@ -93,7 +94,10 @@ export function useStreamVoice({
   useEffect(() => {
     if (!credentials) return
 
-    console.log('[StreamVoice] Creating client for user:', userId, 'callId:', credentials.callId)
+    logger.debug("StreamVoice", "Creating client", {
+      userId,
+      callId: credentials.callId,
+    })
     const user: User = { id: userId, type: "authenticated" }
     const streamClient = new StreamVideoClient({
       apiKey: credentials.apiKey,
@@ -134,20 +138,25 @@ export function useStreamVoice({
     setError(null)
 
     try {
-      console.log('[StreamVoice] join() starting — disabling camera, enabling mic')
+      logger.debug("StreamVoice", "Starting join")
       // Audio-only: disable camera BEFORE join to prevent getUserMedia({video})
       await call.camera.disable()
       await call.microphone.enable()
 
-      console.log('[StreamVoice] joining call with create:true')
+      logger.debug("StreamVoice", "Joining call", { create: true })
       await call.join({ create: true })
-      console.log('[StreamVoice] call.join() succeeded — callingState:', call.state.callingState)
+      logger.debug("StreamVoice", "Join succeeded", {
+        callingState: String(call.state.callingState),
+      })
 
       // Bind remote audio since we're outside <StreamCall> context
       audioCleanupRef.current = bindRemoteAudio(call)
-      console.log('[StreamVoice] remote audio bound')
+      logger.debug("StreamVoice", "Remote audio bound")
     } catch (err) {
-      console.error('[StreamVoice] join() FAILED:', err)
+      logger.logError(err, {
+        component: "useStreamVoice",
+        action: "join",
+      })
       const message = err instanceof Error ? err.message : "Failed to join call"
       setError(message)
       setCallingState(CallingState.IDLE)

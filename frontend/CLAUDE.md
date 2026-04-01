@@ -8,6 +8,16 @@ DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It commu
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2
 
+## Sophia Surface Boundary
+
+This top-level `frontend/` app is not the Sophia companion product surface.
+
+- Sophia companion product work belongs in `AI-companion-mvp-front/`.
+- Do not add Sophia-specific routes, recap/review UX, mock Sophia API trees, or `src/core/sophia` modules here.
+- If a change is specific to Sophia conversation, memory recap, onboarding voice, or companion runtime ownership, implement it in `AI-companion-mvp-front/` instead.
+
+The enforced boundary is documented in `docs/MVP_FRONTEND_SURFACE_BOUNDARY.md` and checked by `scripts/check-sophia-surface-boundary.js` from the MVP frontend package.
+
 ## Commands
 
 | Command | Purpose |

@@ -1,9 +1,6 @@
 /**
- * Index file for voice hooks
- * Re-exports voice-related hooks still in use
+ * Legacy voice utilities retained for onboarding compatibility.
+ * Conversation routes should not import runtime hooks from this namespace.
  */
 
-export { useAudioPlayback } from "./useAudioPlayback"
-export { useVoiceWebSocket } from "./useVoiceWebSocket"
-export type { WebSocketMessage, WebSocketHandlers } from "./useVoiceWebSocket"
 export * from "./voice-utils"

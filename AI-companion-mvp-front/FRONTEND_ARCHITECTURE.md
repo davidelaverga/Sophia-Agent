@@ -34,47 +34,86 @@ Primary size hotspots at kickoff:
 
 Reference baseline: `docs/P4_ARCHITECTURE_BASELINE_2026-03-02.md`.
 
-## Runtime Modes and Ownership (2026-03-03)
+## Runtime Ownership (Refreshed 2026-04-01)
 
-To avoid regressions while shipping, the frontend supports two product modes with explicit ownership boundaries:
+The frontend now uses one canonical conversation runtime namespace and two stable route shells.
 
-- Ritual session mode: `/session`
-   - Source of truth for ritual session state: `src/app/stores/session-store.ts`
-   - Streaming runtime: `src/app/session/useSessionChatRuntime.ts` (`useChat` + `/api/chat`)
-   - Stream contract normalization: `src/app/session/useSessionStreamContract.ts` + `stream-contract-adapters.ts`
+### Canonical Runtime Owner
 
-- Ritual-less chat mode: `/chat`
-   - Supported free-form chat experience
-   - Runtime ownership: `chat-store`-centric orchestration (`src/app/components/ConversationView.tsx`)
+Shared conversation behavior lives under `src/app/companion-runtime/`:
 
-- Auth/BFF rule (both modes):
-   - Client routes call local Next API routes
-   - Server-side routes read `httpOnly` cookie and attach backend auth
+- `useCompanionRuntime.ts` - route-level canonical runtime entry for `/chat`
+- `chat-runtime.ts` - AI SDK transport binding and shared message streaming lifecycle
+- `stream-contract.ts` - AI SDK data-part normalization, interrupt routing, and artifact ingress
+- `artifacts-runtime.ts` - artifact merge and persistence behavior
+- `voice-runtime.ts` - Stream/WebRTC voice session behavior for live conversation routes
+- `route-profiles.ts` - route-specific defaults for `chat` and `ritual`
 
-Guardrail: keep mode boundaries explicit. New ritual features should be implemented in `/session`; ritual-less chat enhancements should be implemented in `/chat`. Avoid implicit cross-dependencies between the two ownership paths.
+This namespace is the only place new shared Sophia conversation runtime behavior should be introduced.
 
-Phase 0 convergence references:
+### Route Shells
+
+The product still exposes two supported URLs:
+
+- Ritual session route: `/session`
+   - Route shell: `src/app/session/page.tsx`
+   - Route experience: `src/app/session/useSessionRouteExperience.ts`
+   - Route-owned concerns only: ritual bootstrap, session guards, debrief/recap exit flow, route chrome, and other ritual lifecycle behavior
+
+- Ritual-less chat route: `/chat`
+   - Route shell: `src/app/chat/page.tsx`
+   - Route experience: `src/app/chat/useChatRouteExperience.ts`
+   - Route-owned concerns only: free-chat route copy, presentation wiring, and route-local UX state
+
+Both route experiences must consume the canonical runtime instead of building route-local transport, stream, artifact, or voice stacks.
+
+### State Ownership
+
+- `src/app/stores/session-store.ts` remains the source of truth for ritual session lifecycle and recap/debrief state.
+- `src/app/stores/chat-store.ts` is now a route-local UI/persistence bridge for `/chat`, not a second transport owner.
+- Shared message metadata, emotion, presence, and recap stores remain neutral support stores and must not become route-specific transport owners.
+
+### Voice Ownership
+
+- Live conversation voice for `/session` and `/chat` is owned by the Stream/WebRTC path in:
+   - `src/app/hooks/useStreamVoice.ts`
+   - `src/app/hooks/useStreamVoiceSession.ts`
+   - `src/app/companion-runtime/voice-runtime.ts`
+
+- Legacy WebSocket voice remains onboarding-only under:
+   - `src/app/onboarding/voice-legacy/`
+
+The onboarding legacy voice folder is a compatibility island, not a second conversation runtime.
+
+### Guardrails
+
+- Do not add new transport or AI SDK owners under `src/app/chat/`, `src/app/session/`, or `src/app/components/`.
+- Do not reintroduce deleted route-local runtime files such as `src/app/chat/useChatAiRuntime.ts` or the removed `src/app/session/useSession*Runtime` wrappers.
+- Keep all new Sophia companion product work inside `AI-companion-mvp-front/`.
+- Use `npm run check:sophia:surface-boundary` to enforce repo boundary rules.
+
+Reference docs:
+
 - `docs/P0_ROUTE_OWNERSHIP_BASELINE_2026-03-03.md`
 - `docs/P0_SESSION_CANONICAL_CONTRACT_2026-03-03.md`
+- `../docs/MVP_FRONTEND_SURFACE_BOUNDARY.md`
 - `docs/CHAT_STREAM_PROTOCOL_GUARDRAILS.md`
 
-### Mode Matrix (Quick Reference)
+### Ownership Matrix (Current)
 
-| Mode | Primary Route | Primary Container | State Owner | Streaming Owner | Intended Scope |
-| --- | --- | --- | --- | --- | --- |
-| Ritual Session | `/session` | `src/app/session/page.tsx` | `session-store` (`src/app/stores/session-store.ts`) | `useSessionChatRuntime` (`src/app/session/useSessionChatRuntime.ts`) | Ritual flows, artifacts, recap, structured session lifecycle |
-| Ritual-less Chat | `/chat` | `src/app/components/ConversationView.tsx` | `chat-store` (`src/app/stores/chat-store.ts`) | `useChat` (AI SDK) runtime bridge (`src/app/chat/useChatAiRuntime.ts` + `/api/chat`) | Free-form chat without ritual/session structure |
+| Concern | Canonical Owner | Route Shell Usage |
+| --- | --- | --- |
+| Shared transcript, send/cancel/retry | `src/app/companion-runtime/chat-runtime.ts` | Consumed by `useChatRouteExperience` and `useSessionRouteExperience` |
+| Stream data-part normalization and interrupt ingress | `src/app/companion-runtime/stream-contract.ts` | Consumed by both route experiences |
+| Artifact merge and persistence | `src/app/companion-runtime/artifacts-runtime.ts` | Consumed by both route experiences |
+| Live conversation voice runtime | `src/app/companion-runtime/voice-runtime.ts` | Consumed by both route experiences |
+| Ritual route lifecycle | `src/app/session/page.tsx` + `src/app/session/*` route-only hooks | `/session` only |
+| Free-chat route presentation | `src/app/chat/page.tsx` + `src/app/components/ConversationView.tsx` | `/chat` only |
+| Onboarding voice-over | `src/app/onboarding/voice-legacy/*` | Onboarding only |
 
-### Audit Classification Guardrail (2026-03-03)
+### Classification Note
 
-`/chat` is a supported product mode for non-ritual sessions and must not be classified as legacy.
-
-Classification rules for future reviews:
-- Mark as **supported (non-legacy)**: `src/app/chat/page.tsx`, `src/app/components/ConversationView.tsx`, `src/app/stores/chat-store.ts`, and related `/chat` runtime paths.
-- Mark as **legacy** only when code is under legacy namespaces (`src/hooks/*`, `src/lib/*`, `src/types/*`, `src/helpers/*`) or explicitly tagged as archived/deprecated.
-- Treat `/session` and `/chat` as parallel owned modes (different scope), not duplicate accidental paths.
-
-Reviewer note: if an audit flags `/chat` as legacy, classify it as a documentation mismatch and correct the report.
+`/chat` remains a supported product route. It is no longer a parallel runtime owner, but it is not legacy. Any audit or cleanup report should classify it as an active route shell over the canonical runtime.
 
 ---
 
