@@ -107,7 +107,9 @@ export function mergeRitualArtifacts(
   const rawTakeaway = isNonEmptyString(payload.takeaway) ? payload.takeaway : undefined;
   const takeaway = filterFallbackTakeaway ? (isRealTakeaway(rawTakeaway) ? rawTakeaway : undefined) : rawTakeaway;
 
-  const reflectionCandidate = extractReflectionCandidate(payload.reflection_candidate);
+  const reflectionCandidate = extractReflectionCandidate(
+    payload.reflection_candidate ?? payload.reflection
+  );
   const validReflection = filterFallbackReflection
     ? (reflectionCandidate?.prompt && isRealReflection(reflectionCandidate.prompt) ? reflectionCandidate : undefined)
     : reflectionCandidate;

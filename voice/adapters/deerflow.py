@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 
 import httpx
@@ -13,6 +14,9 @@ from voice.adapters.base import (
     BackendStageError,
 )
 from voice.config import VoiceSettings
+
+
+logger = logging.getLogger(__name__)
 
 
 class DeerFlowBackendAdapter(BackendAdapter):
@@ -101,7 +105,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
                     "thread_id": thread_id,
                 }
             },
-            "stream_mode": ["messages-tuple"],
+            "stream_mode": ["messages-tuple", "values"],
         }
 
         try:
@@ -113,11 +117,14 @@ class DeerFlowBackendAdapter(BackendAdapter):
             ) as response:
                 response.raise_for_status()
 
-                # Track SSE event type and accumulate tool call JSON
+                # Track SSE event type and accumulate tool call JSON.
                 current_event_type = ""
-                # Map tool_use id → {"name": str, "json_parts": list[str]}
+                # Map tool_use id -> {"name": str, "json_parts": list[str]}
                 active_tool_calls: dict[str, dict] = {}
-                artifact_emitted = False
+                saw_artifact_tool = False
+                streamed_artifact: dict[str, object] | None = None
+                final_state_artifact: dict[str, object] | None = None
+                initial_values_artifact: dict[str, object] | None = None
 
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -162,8 +169,23 @@ class DeerFlowBackendAdapter(BackendAdapter):
                         )
                         return
 
-                    # Only process messages events (from stream_mode=messages-tuple)
-                    if current_event_type != "messages":
+                    if current_event_type == "values":
+                        values_artifact = self._extract_values_artifact(data)
+                        if values_artifact is None:
+                            continue
+
+                        if initial_values_artifact is None:
+                            initial_values_artifact = values_artifact
+
+                        if (
+                            saw_artifact_tool
+                            or values_artifact != initial_values_artifact
+                        ):
+                            final_state_artifact = values_artifact
+                        continue
+
+                    # HTTP SSE uses `event: messages` for messages-tuple frames.
+                    if current_event_type not in ("messages", "messages-tuple"):
                         continue
 
                     # data is [msg_dict, metadata_dict]
@@ -176,15 +198,15 @@ class DeerFlowBackendAdapter(BackendAdapter):
 
                     msg_type = msg.get("type", "")
 
-                    # Extract text and tool calls from AI messages
                     if msg_type in (
-                        "AIMessageChunk", "AIMessage", "ai", "assistant",
+                        "AIMessageChunk",
+                        "AIMessage",
+                        "ai",
+                        "assistant",
                     ):
                         content = msg.get("content", [])
-                        # String content (complete non-streaming messages)
                         if isinstance(content, str) and content:
                             yield BackendEvent.text_chunk(content)
-                        # List of content blocks (streaming chunks)
                         elif isinstance(content, list):
                             for block in content:
                                 if not isinstance(block, dict):
@@ -197,6 +219,8 @@ class DeerFlowBackendAdapter(BackendAdapter):
                                 elif block_type == "tool_use":
                                     tool_id = block.get("id", "")
                                     tool_name = block.get("name", "")
+                                    if tool_name == "emit_artifact":
+                                        saw_artifact_tool = True
                                     if tool_id:
                                         active_tool_calls[tool_id] = {
                                             "name": tool_name,
@@ -211,36 +235,46 @@ class DeerFlowBackendAdapter(BackendAdapter):
                                             tc["json_parts"].append(partial)
                                             break
 
-                        # Check tool_calls array for complete artifact data
-                        if not artifact_emitted:
-                            for tc in msg.get("tool_calls") or []:
-                                if (
-                                    isinstance(tc, dict)
-                                    and tc.get("name") == "emit_artifact"
-                                ):
-                                    args = tc.get("args")
-                                    if isinstance(args, dict) and args:
-                                        yield BackendEvent.artifact_payload(args)
-                                        artifact_emitted = True
-                                        break
+                        tool_call_artifact = self._extract_tool_call_artifact(
+                            msg.get("tool_calls")
+                        )
+                        if tool_call_artifact is not None:
+                            streamed_artifact = tool_call_artifact
+                            saw_artifact_tool = True
+                        elif self._has_emit_artifact_tool_call(msg.get("tool_calls")):
+                            saw_artifact_tool = True
 
-                    # Complete tool message — artifact from accumulated JSON
                     elif msg_type == "tool":
                         tool_name = msg.get("name", "")
-                        if tool_name == "emit_artifact" and not artifact_emitted:
+                        if tool_name == "emit_artifact":
+                            saw_artifact_tool = True
                             artifact = self._parse_accumulated_artifact(
                                 active_tool_calls,
                             )
                             if artifact is not None:
-                                yield BackendEvent.artifact_payload(artifact)
-                                artifact_emitted = True
-                            else:
-                                yield BackendEvent.error_event(
-                                    "backend-contract",
-                                    "emit_artifact tool call produced no parseable artifact.",
-                                    recoverable=False,
-                                )
-                                return
+                                streamed_artifact = artifact
+
+                artifact = final_state_artifact or streamed_artifact
+                if artifact is not None:
+                    if final_state_artifact is not None:
+                        logger.info(
+                            "voice.artifact source=values streamed_present=%s streamed_matches=%s",
+                            streamed_artifact is not None,
+                            streamed_artifact == final_state_artifact,
+                        )
+                    else:
+                        logger.info("voice.artifact source=streamed fallback=true")
+                    yield BackendEvent.artifact_payload(artifact)
+                elif saw_artifact_tool:
+                    logger.error(
+                        "voice.artifact source=missing status=contract_error"
+                    )
+                    yield BackendEvent.error_event(
+                        "backend-contract",
+                        "emit_artifact tool call produced no parseable artifact.",
+                        recoverable=False,
+                    )
+                    return
 
         except httpx.TimeoutException as exc:
             self._thread_ids.pop(request.user_id, None)
@@ -314,4 +348,53 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 continue
             if isinstance(parsed, dict):
                 return parsed
+        return None
+
+    def _extract_tool_call_artifact(
+        self,
+        tool_calls: object,
+    ) -> dict[str, object] | None:
+        if not isinstance(tool_calls, list):
+            return None
+
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            if tool_call.get("name") != "emit_artifact":
+                continue
+            args = tool_call.get("args")
+            if isinstance(args, dict) and args:
+                return dict(args)
+
+        return None
+
+    def _has_emit_artifact_tool_call(self, tool_calls: object) -> bool:
+        if not isinstance(tool_calls, list):
+            return False
+
+        return any(
+            isinstance(tool_call, dict)
+            and tool_call.get("name") == "emit_artifact"
+            for tool_call in tool_calls
+        )
+
+    def _extract_values_artifact(
+        self,
+        data: object,
+    ) -> dict[str, object] | None:
+        if not isinstance(data, dict):
+            return None
+
+        artifact = data.get("current_artifact")
+        if isinstance(artifact, dict) and artifact:
+            return dict(artifact)
+
+        values = data.get("values")
+        if not isinstance(values, dict):
+            return None
+
+        artifact = values.get("current_artifact")
+        if isinstance(artifact, dict) and artifact:
+            return dict(artifact)
+
         return None

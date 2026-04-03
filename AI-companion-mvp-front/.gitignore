@@ -5,6 +5,9 @@ node_modules/
 
 # Testing
 /coverage
+/test-results/
+/session-capture-profile/
+/.session-capture-profile*/
 
 # Next.js
 /.next/

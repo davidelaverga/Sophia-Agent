@@ -34,11 +34,14 @@ def make_settings(**overrides: object) -> VoiceSettings:
         "adaptive_silence_long_ms": 2000,
         "adaptive_silence_ceiling_ms": 2800,
         "adaptive_silence_continuation_bonus_ms": 800,
+        "adaptive_silence_fragment_bonus_ms": 1400,
+        "backend_stall_timeout_ms": 8000,
         "fragile_window_ms": 600,
         "merge_min_new_words": 2,
         "rhythm_min_sessions": 5,
         "rhythm_base_min_ms": 800,
         "rhythm_base_max_ms": 2400,
+        "same_turn_repeat_debounce_ms": 1200,
     }
     values.update(overrides)
     return VoiceSettings(**values)

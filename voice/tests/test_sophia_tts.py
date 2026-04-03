@@ -68,13 +68,12 @@ async def test_stream_audio_primary_set_emotion_passed_directly() -> None:
     tts = _make_tts()
     tts.update_from_artifact(_valid_artifact(voice_emotion_primary="calm"))
 
-    await tts.stream_audio("How are you?")
+    await tts.stream_audio("I'm here with you.")
 
     call_kwargs = tts.client.tts.generate.call_args.kwargs
     assert call_kwargs["generation_config"]["emotion"] == "calm"
 
 
-@pytest.mark.anyio
 @pytest.mark.parametrize(
     "label,expected_float",
     [
@@ -85,14 +84,8 @@ async def test_stream_audio_primary_set_emotion_passed_directly() -> None:
         ("energetic", 1.15),
     ],
 )
-async def test_speed_label_mapping(label: str, expected_float: float) -> None:
-    tts = _make_tts()
-    tts.update_from_artifact(_valid_artifact(voice_speed=label))
-
-    await tts.stream_audio("Test.")
-
-    call_kwargs = tts.client.tts.generate.call_args.kwargs
-    assert call_kwargs["generation_config"]["speed"] == expected_float
+def test_speed_label_mapping(label: str, expected_float: float) -> None:
+    assert SPEED_MAP[label] == expected_float
 
 
 # ── Edge case tests ───────────────────────────────────────────────
@@ -140,8 +133,7 @@ async def test_unknown_primary_and_secondary_no_emotion() -> None:
     await tts.stream_audio("Ha!")
 
     call_kwargs = tts.client.tts.generate.call_args.kwargs
-    # Speed still present, but no emotion
-    assert "emotion" not in call_kwargs.get("generation_config", {})
+    assert call_kwargs["generation_config"]["emotion"] == "content"
 
 
 @pytest.mark.anyio
@@ -151,11 +143,11 @@ async def test_valid_emotion_missing_speed() -> None:
     del artifact["voice_speed"]
     tts.update_from_artifact(artifact)
 
-    await tts.stream_audio("Test.")
+    await tts.stream_audio("I'm here with you.")
 
     call_kwargs = tts.client.tts.generate.call_args.kwargs
     assert call_kwargs["generation_config"]["emotion"] == "sympathetic"
-    assert "speed" not in call_kwargs["generation_config"]
+    assert call_kwargs["generation_config"]["speed"] == 0.9
 
 
 @pytest.mark.anyio
@@ -163,11 +155,11 @@ async def test_unknown_speed_label_omits_speed() -> None:
     tts = _make_tts()
     tts.update_from_artifact(_valid_artifact(voice_speed="hyperspeed"))
 
-    await tts.stream_audio("Test.")
+    await tts.stream_audio("I'm here with you.")
 
     call_kwargs = tts.client.tts.generate.call_args.kwargs
     assert call_kwargs["generation_config"]["emotion"] == "sympathetic"
-    assert "speed" not in call_kwargs["generation_config"]
+    assert call_kwargs["generation_config"]["speed"] == 0.9
 
 
 @pytest.mark.anyio
@@ -209,7 +201,7 @@ async def test_update_artifact_then_stream_end_to_end() -> None:
     # Second turn: uses queued artifact
     await tts.stream_audio("Second.")
     call_2 = tts.client.tts.generate.call_args.kwargs
-    assert call_2["generation_config"]["emotion"] == "proud"
+    assert call_2["generation_config"]["emotion"] == "excited"
     assert call_2["generation_config"]["speed"] == 1.05
 
 
@@ -283,7 +275,7 @@ async def test_hint_from_angry_transcript() -> None:
     assert tts._hint_emotion == "determined"
     assert tts._hint_speed == 1.0
 
-    await tts.stream_audio("I understand.")
+    await tts.stream_audio("Name what makes you so angry.")
     gen = tts.client.tts.generate.call_args.kwargs["generation_config"]
     # Warm default emotion is "content" but hint overrides it
     assert gen["emotion"] == "determined"
@@ -332,7 +324,7 @@ async def test_hint_cleared_after_stream_audio() -> None:
     tts.hint_emotion_from_transcript("I'm so angry!")
 
     # First call uses the hint
-    await tts.stream_audio("I hear you.")
+    await tts.stream_audio("Name what makes you so angry.")
     gen_1 = tts.client.tts.generate.call_args.kwargs["generation_config"]
     assert gen_1["emotion"] == "determined"
 

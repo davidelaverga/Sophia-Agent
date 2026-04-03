@@ -50,6 +50,18 @@ describe('stream-contract-adapters', () => {
     });
   });
 
+  it('preserves legacy reflection fields for downstream artifact normalization', () => {
+    const payload = parseArtifactsPayload({
+      takeaway: 'Takeaway',
+      reflection: 'What do you want to keep from this moment?',
+    });
+
+    expect(payload).toEqual({
+      takeaway: 'Takeaway',
+      reflection: 'What do you want to keep from this moment?',
+    });
+  });
+
   it('keeps previous stream metadata when incoming fields are missing', () => {
     const previous = {
       thread_id: 'thread-1',

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
 
@@ -21,16 +21,17 @@ from voice.adapters.base import (
     REQUIRED_ARTIFACT_FIELDS,
 )
 from voice.config import VoiceSettings
+from voice.turn_diagnostics import TurnDiagnostic, TurnDiagnosticsTracker
+from voice.voice_delivery_profile import (
+    classify_emotion_family,
+    classify_response_intent,
+    classify_user_transcript,
+)
 
 
 logger = logging.getLogger(__name__)
 
-
-@dataclass
-class PendingTurnMetrics:
-    speech_ended_at: float
-    first_text_ms: float | None = None
-    first_audio_ms: float | None = None
+TURN_COMPLETION_GRACE_MS = 400
 
 
 class SophiaLLM(LLM):
@@ -47,7 +48,24 @@ class SophiaLLM(LLM):
         self._tts_ref: Any = None
         self._call_emitter: Callable[[dict[str, Any]], Awaitable[None]] | None = None
         self._backend = adapter or build_backend_adapter(settings)
-        self._pending_turn_metrics: dict[str, PendingTurnMetrics] = {}
+        self._turn_diagnostics = TurnDiagnosticsTracker()
+        self._active_response_user_id: str | None = None
+        self._turn_completion_tasks: dict[str, asyncio.Task[None]] = {}
+        self._pending_user_ended_user_ids: set[str] = set()
+        self._runtime_platform = settings.platform
+        self._runtime_context_mode = settings.context_mode
+        self._runtime_ritual = settings.ritual
+
+    def bind_session_context(
+        self,
+        *,
+        platform: str,
+        context_mode: str,
+        ritual: str | None,
+    ) -> None:
+        self._runtime_platform = platform
+        self._runtime_context_mode = context_mode
+        self._runtime_ritual = ritual
 
     def attach_tts(self, tts: Any) -> None:
         self._tts_ref = tts
@@ -61,6 +79,56 @@ class SophiaLLM(LLM):
         """Register a callback to forward artifacts/events as Stream custom events."""
         self._call_emitter = emitter
 
+    async def emit_turn_event(
+        self,
+        phase: str,
+        user_id: str | None = None,
+    ) -> None:
+        emit_phase = True
+        resolved_user_id = user_id or self._active_response_user_id
+
+        if resolved_user_id and phase == "agent_started":
+            self._cancel_turn_completion(resolved_user_id)
+
+        if resolved_user_id and phase in {"agent_started", "agent_ended"}:
+            emit_phase = self._turn_diagnostics.note_agent_phase(
+                resolved_user_id,
+                phase,
+            )
+
+        if emit_phase:
+            await self._emit_call_event(
+                {"type": "sophia.turn", "data": {"phase": phase}},
+                event_type="sophia.turn",
+            )
+
+        if resolved_user_id and phase == "agent_ended":
+            self._schedule_turn_completion(resolved_user_id)
+
+    async def _emit_turn_diagnostic(self, diagnostic: TurnDiagnostic) -> None:
+        await self._emit_call_event(
+            {"type": "sophia.turn_diagnostic", "data": diagnostic.as_payload()},
+            event_type="sophia.turn_diagnostic",
+        )
+        logger.info(
+            "voice.turn_diagnostic turn_id=%s status=%s reason=%s raw_false_end_count=%d backend=%s",
+            diagnostic.turn_id,
+            diagnostic.status,
+            diagnostic.reason,
+            diagnostic.raw_false_end_count,
+            self.settings.backend_mode,
+        )
+
+        if diagnostic.user_id == self._active_response_user_id:
+            self._active_response_user_id = None
+        self._turn_completion_tasks.pop(diagnostic.user_id, None)
+        self._pending_user_ended_user_ids.discard(diagnostic.user_id)
+
+        if self._tts_ref is not None:
+            clear_context = getattr(self._tts_ref, "clear_response_context", None)
+            if callable(clear_context):
+                clear_context(diagnostic.user_id)
+
     async def probe(self) -> None:
         await self._backend.probe()
 
@@ -69,41 +137,91 @@ class SophiaLLM(LLM):
 
     def note_turn_end(self, participant: Participant | None) -> None:
         user_id = self._resolve_user_id(participant)
-        self._pending_turn_metrics[user_id] = PendingTurnMetrics(
-            speech_ended_at=time.perf_counter()
-        )
+        if user_id is not None:
+            self._pending_user_ended_user_ids.add(user_id)
+        turn_id = self._turn_diagnostics.note_user_ended(user_id, time.perf_counter())
         logger.info(
-            "voice.turn stage=turn_ended user_id=%s backend=%s",
+            "voice.turn stage=turn_ended user_id=%s turn_id=%s backend=%s",
             user_id,
+            turn_id,
             self.settings.backend_mode,
         )
 
+    def has_pending_user_ended(self, user_id: str | None = None) -> bool:
+        resolved_user_id = user_id or self._active_response_user_id
+        return bool(
+            resolved_user_id is not None
+            and resolved_user_id in self._pending_user_ended_user_ids
+        )
+
+    async def emit_pending_user_ended(self, user_id: str | None = None) -> bool:
+        resolved_user_id = user_id or self._active_response_user_id
+        if resolved_user_id is None:
+            return False
+
+        if resolved_user_id not in self._pending_user_ended_user_ids:
+            return False
+
+        await self.emit_turn_event("user_ended", user_id=resolved_user_id)
+        self._pending_user_ended_user_ids.discard(resolved_user_id)
+        return True
+
     def note_first_text_emitted(self, user_id: str) -> None:
-        metrics = self._pending_turn_metrics.get(user_id)
-        if metrics is None or metrics.first_text_ms is not None:
+        first_text_ms = self._turn_diagnostics.note_first_text(user_id, time.perf_counter())
+        if first_text_ms is None:
             return
 
-        metrics.first_text_ms = (time.perf_counter() - metrics.speech_ended_at) * 1000
         logger.info(
             "voice.metric metric=first_text_ms user_id=%s value=%.2f backend=%s",
             user_id,
-            metrics.first_text_ms,
+            first_text_ms,
             self.settings.backend_mode,
         )
 
+    def note_backend_completed(self, user_id: str) -> None:
+        backend_complete_ms = self._turn_diagnostics.note_backend_complete(
+            user_id,
+            time.perf_counter(),
+        )
+        if backend_complete_ms is not None:
+            logger.info(
+                "voice.metric metric=backend_complete_ms user_id=%s value=%.2f backend=%s",
+                user_id,
+                backend_complete_ms,
+                self.settings.backend_mode,
+            )
+
+        self._schedule_turn_completion(user_id)
+
     def note_tts_audio_emitted(self, user_id: str) -> None:
-        metrics = self._pending_turn_metrics.get(user_id)
-        if metrics is None or metrics.first_audio_ms is not None:
+        first_audio_ms = self._turn_diagnostics.note_first_audio(user_id, time.perf_counter())
+        if first_audio_ms is None:
             return
 
-        metrics.first_audio_ms = (time.perf_counter() - metrics.speech_ended_at) * 1000
         logger.info(
             "voice.metric metric=first_audio_ms user_id=%s value=%.2f backend=%s",
             user_id,
-            metrics.first_audio_ms,
+            first_audio_ms,
             self.settings.backend_mode,
         )
-        self._pending_turn_metrics.pop(user_id, None)
+
+    def note_final_text_emitted(self, user_id: str) -> None:
+        self._turn_diagnostics.note_final_text(user_id)
+        self._schedule_turn_completion(user_id)
+
+    def note_echo_suppression(self, user_id: str | None) -> None:
+        resolved_user_id = user_id or self._active_response_user_id
+        if resolved_user_id is None:
+            return
+
+        self._turn_diagnostics.annotate_reason(resolved_user_id, "echo_suppression")
+
+    def note_continuation_handling(self, user_id: str | None) -> None:
+        resolved_user_id = user_id or self._active_response_user_id
+        if resolved_user_id is None:
+            return
+
+        self._turn_diagnostics.annotate_reason(resolved_user_id, "continuation_handling")
 
     def note_stage_error(
         self,
@@ -113,15 +231,27 @@ class SophiaLLM(LLM):
         *,
         recoverable: bool = True,
     ) -> None:
-        if user_id is None:
-            self._pending_turn_metrics.clear()
-        else:
-            self._pending_turn_metrics.pop(user_id, None)
+        resolved_user_id = user_id or self._active_response_user_id
+        diagnostic = None
+        if resolved_user_id is not None:
+            self._cancel_turn_completion(resolved_user_id)
+        if resolved_user_id is not None:
+            diagnostic = self._turn_diagnostics.fail(
+                resolved_user_id,
+                self._canonical_reason_for_stage(stage),
+            )
 
         if self._tts_ref is not None:
             clear_context = getattr(self._tts_ref, "clear_response_context", None)
             if callable(clear_context):
                 clear_context(user_id)
+
+        if resolved_user_id == self._active_response_user_id:
+            self._active_response_user_id = None
+        if resolved_user_id is not None:
+            self._pending_user_ended_user_ids.discard(resolved_user_id)
+
+        self._schedule_turn_diagnostic(diagnostic)
 
         logger.error(
             "voice.error stage=%s user_id=%s recoverable=%s message=%s",
@@ -130,6 +260,69 @@ class SophiaLLM(LLM):
             recoverable,
             message,
         )
+
+    def _canonical_reason_for_stage(self, stage: str) -> str:
+        if stage in {"silence-empty-transcript", "stt"}:
+            return "transcript_gap"
+        if stage == "echo-suppression":
+            return "echo_suppression"
+        if stage == "continuation-handling":
+            return "continuation_handling"
+        if stage in {
+            "backend-contract",
+            "backend-ready",
+            "backend-request",
+            "backend-stream",
+            "backend-timeout",
+            "llm",
+            "tts",
+        }:
+            return "backend_stall"
+        return "silence_timing"
+
+    def _schedule_turn_completion(self, user_id: str) -> None:
+        if not self._turn_diagnostics.can_finalize(user_id):
+            return
+
+        self._cancel_turn_completion(user_id)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        self._turn_completion_tasks[user_id] = loop.create_task(
+            self._emit_turn_completion_after_grace(user_id)
+        )
+
+    def _cancel_turn_completion(self, user_id: str) -> None:
+        task = self._turn_completion_tasks.pop(user_id, None)
+        if task is None or task.done():
+            return
+        task.cancel()
+
+    async def _emit_turn_completion_after_grace(self, user_id: str) -> None:
+        if TURN_COMPLETION_GRACE_MS > 0:
+            try:
+                await asyncio.sleep(TURN_COMPLETION_GRACE_MS / 1000)
+            except asyncio.CancelledError:
+                return
+
+        diagnostic = self._turn_diagnostics.complete(user_id)
+        self._turn_completion_tasks.pop(user_id, None)
+        if diagnostic is not None:
+            await self._emit_turn_diagnostic(diagnostic)
+
+    def _schedule_turn_diagnostic(self, diagnostic: TurnDiagnostic | None) -> None:
+        if diagnostic is None:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        loop.create_task(self._emit_turn_diagnostic(diagnostic))
 
     async def simple_response(
         self,
@@ -168,12 +361,25 @@ class SophiaLLM(LLM):
             if callable(hint_fn):
                 hint_fn(text)
 
+            self._active_response_user_id = user_id
+
         request = BackendRequest(
             text=text,
             user_id=user_id,
-            platform=self.settings.platform,
-            ritual=self.settings.ritual,
-            context_mode=self.settings.context_mode,
+            platform=self._runtime_platform,
+            ritual=self._runtime_ritual,
+            context_mode=self._runtime_context_mode,
+        )
+
+        await self._emit_call_event(
+            {
+                "type": "sophia.user_transcript",
+                "data": {
+                    "text": request.text,
+                    "utterance_id": item_id,
+                },
+            },
+            event_type="sophia.user_transcript",
         )
 
         try:
@@ -238,6 +444,8 @@ class SophiaLLM(LLM):
                 if first_token_ms is None:
                     first_token_ms = (time.perf_counter() - request_started) * 1000
                     self.note_first_text_emitted(request.user_id)
+                    await self.emit_pending_user_ended(request.user_id)
+                    await self.emit_turn_event("agent_started", request.user_id)
 
                 text_parts.append(event.text)
                 self.events.send(
@@ -252,24 +460,32 @@ class SophiaLLM(LLM):
                         time_to_first_token_ms=first_token_ms if sequence == 0 else None,
                     )
                 )
+                await self._emit_transcript_event(
+                    "".join(text_parts),
+                    is_final=False,
+                )
                 sequence += 1
                 continue
 
             if event.kind == "artifact":
-                artifact = self._validate_artifact(event.artifact)
+                artifact = self._validate_artifact(
+                    event.artifact,
+                    response_text="".join(text_parts),
+                    user_text=request.text,
+                )
+                self.note_backend_completed(request.user_id)
+                await self._emit_transcript_event(
+                    "".join(text_parts),
+                    is_final=True,
+                )
+                self.note_final_text_emitted(request.user_id)
                 self.last_artifact = artifact
                 if self._tts_ref is not None:
                     self._tts_ref.update_from_artifact(artifact)
-                if self._call_emitter is not None:
-                    try:
-                        await self._call_emitter(
-                            {"type": "sophia.artifact", "data": artifact}
-                        )
-                    except Exception:
-                        logger.warning(
-                            "voice.call_emitter_error Failed to emit artifact custom event",
-                            exc_info=True,
-                        )
+                await self._emit_call_event(
+                    {"type": "sophia.artifact", "data": artifact},
+                    event_type="sophia.artifact",
+                )
                 artifact_seen = True
                 continue
 
@@ -298,7 +514,53 @@ class SophiaLLM(LLM):
             first_token_ms,
         )
 
-    def _validate_artifact(self, artifact: dict[str, Any] | None) -> dict[str, Any]:
+    async def _emit_transcript_event(
+        self,
+        text: str,
+        *,
+        is_final: bool,
+    ) -> None:
+        if not text:
+            return
+
+        await self._emit_call_event(
+            {
+                "type": "sophia.transcript",
+                "data": {"text": text, "is_final": is_final},
+            },
+            event_type="sophia.transcript",
+        )
+
+    async def _emit_call_event(
+        self,
+        payload: dict[str, Any],
+        *,
+        event_type: str,
+    ) -> None:
+        if self._call_emitter is None:
+            return
+
+        try:
+            await self._call_emitter(payload)
+            if event_type != "sophia.transcript":
+                logger.info(
+                    "voice.custom_event type=%s status=sent",
+                    event_type,
+                )
+        except Exception:
+            logger.warning(
+                "voice.call_emitter_error Failed to emit %s custom event",
+                event_type,
+                exc_info=True,
+            )
+
+    def _validate_artifact(
+        self,
+        artifact: dict[str, Any] | None,
+        *,
+        response_text: str = "",
+        user_text: str = "",
+    ) -> dict[str, Any]:
         if not isinstance(artifact, dict):
             raise BackendStageError(
                 "backend-contract",
@@ -314,7 +576,90 @@ class SophiaLLM(LLM):
                 recoverable=False,
             )
 
-        return dict(artifact)
+        return self._normalize_artifact(
+            dict(artifact),
+            response_text=response_text,
+            user_text=user_text,
+        )
+
+    def _normalize_artifact(
+        self,
+        artifact: dict[str, Any],
+        *,
+        response_text: str = "",
+        user_text: str = "",
+    ) -> dict[str, Any]:
+        tone_band = self._artifact_string(artifact.get("active_tone_band"))
+        skill = self._artifact_string(artifact.get("skill_loaded"))
+        primary_family = classify_emotion_family(
+            self._artifact_string(artifact.get("voice_emotion_primary"))
+        )
+        secondary_emotion = self._artifact_string(artifact.get("voice_emotion_secondary"))
+        speed_label = self._artifact_string(artifact.get("voice_speed"))
+        response_family = classify_response_intent(response_text)
+        user_family = classify_user_transcript(user_text)
+
+        if user_family == "celebratory":
+            artifact["active_tone_band"] = "enthusiasm"
+            artifact["voice_emotion_primary"] = "excited"
+            if secondary_emotion not in {"excited", "enthusiastic", "proud"}:
+                artifact["voice_emotion_secondary"] = "proud"
+            if speed_label not in {"engaged", "energetic"}:
+                artifact["voice_speed"] = "engaged"
+
+        if user_family == "supportive" and response_family not in {"challenging", "celebratory"}:
+            artifact["active_tone_band"] = "grief_fear"
+            artifact["voice_emotion_primary"] = "sympathetic"
+            if secondary_emotion not in {"calm", "sympathetic", "content"}:
+                artifact["voice_emotion_secondary"] = "calm"
+            if speed_label not in {"slow", "gentle"}:
+                artifact["voice_speed"] = "gentle"
+
+        if user_family == "challenging" and response_family != "celebratory":
+            artifact["active_tone_band"] = "engagement"
+            artifact["voice_emotion_primary"] = "determined"
+            if secondary_emotion not in {"calm", "confident", "curious"}:
+                artifact["voice_emotion_secondary"] = "curious"
+            if speed_label not in {"normal", "engaged"}:
+                artifact["voice_speed"] = "normal"
+
+        tone_band = self._artifact_string(artifact.get("active_tone_band"))
+        primary_family = classify_emotion_family(
+            self._artifact_string(artifact.get("voice_emotion_primary"))
+        )
+        secondary_emotion = self._artifact_string(artifact.get("voice_emotion_secondary"))
+        speed_label = self._artifact_string(artifact.get("voice_speed"))
+
+        if tone_band == "enthusiasm" or skill == "celebrating_breakthrough":
+            if primary_family != "celebratory":
+                artifact["voice_emotion_primary"] = "excited"
+                if secondary_emotion not in {
+                    "excited",
+                    "enthusiastic",
+                    "proud",
+                }:
+                    artifact["voice_emotion_secondary"] = "proud"
+
+            if speed_label not in {"engaged", "energetic"}:
+                artifact["voice_speed"] = "engaged"
+
+        if response_family == "challenging" and primary_family != "challenging":
+            artifact["voice_emotion_primary"] = "determined"
+            if secondary_emotion not in {"calm", "confident", "determined"}:
+                artifact["voice_emotion_secondary"] = "calm"
+            if tone_band in {"anger_antagonism", "antagonism"}:
+                artifact["active_tone_band"] = "engagement"
+            if speed_label not in {"normal", "engaged"}:
+                artifact["voice_speed"] = "normal"
+
+        return artifact
+
+    @staticmethod
+    def _artifact_string(value: Any) -> str | None:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return None
 
     def _resolve_user_id(self, participant: Participant | None) -> str:
         if participant is not None and participant.user_id:

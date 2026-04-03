@@ -4,6 +4,7 @@ import { inter } from "./fonts"
 import { ThemeBootstrap } from "./ThemeBootstrap"
 import { LocaleProvider } from "./components/LocaleProvider"
 import { CapacitorInit } from "./components/CapacitorInit"
+import { SessionCaptureBridge } from "./components/SessionCaptureBridge"
 import { UiToast } from "./components/UiToast"
 import { getRequestLocale, getServerCopy } from "./copy/server"
 
@@ -85,6 +86,7 @@ export default function RootLayout({
           <Providers>
             <ThemeBootstrap />
             <CapacitorInit />
+            <SessionCaptureBridge />
             <UiToast />
             <div className="min-h-[100svh]">{children}</div>
           </Providers>

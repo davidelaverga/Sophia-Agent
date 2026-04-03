@@ -85,6 +85,23 @@ Both route experiences must consume the canonical runtime instead of building ro
 
 The onboarding legacy voice folder is a compatibility island, not a second conversation runtime.
 
+### Live Voice Event Contract
+
+The supported live Stream custom-event contract for conversation routes is:
+
+- `sophia.transcript`
+   - emitted by the voice server as assistant-response text
+   - partial events carry cumulative text with `is_final: false`
+   - the final event carries the completed assistant response with `is_final: true`
+- `sophia.turn`
+   - phases: `user_ended`, `agent_started`, `agent_ended`
+   - consumed by `src/app/hooks/useStreamVoiceSession.ts` for stage and presence transitions
+- `sophia.artifact`
+   - carries the live artifact payload forwarded into `src/app/companion-runtime/voice-runtime.ts`
+   - route code must treat this as the canonical live artifact ingress path rather than inventing route-local parsing
+
+Backend note: the authoritative live artifact source is the voice server's final-state artifact, derived from DeerFlow `values.current_artifact`, not partial streamed tool-call args.
+
 ### Guardrails
 
 - Do not add new transport or AI SDK owners under `src/app/chat/`, `src/app/session/`, or `src/app/components/`.

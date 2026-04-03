@@ -147,6 +147,17 @@ class TestEndSession:
         )
         assert data["session_count"] == 2
 
+    def test_record_turn_accepts_empty_pause_list(self, tmp_path: Path):
+        tracker = _make_tracker(tmp_path)
+        tracker.load("userY")
+        tracker.record_turn(4, [], was_cancel_merge=False)
+        tracker.end_session()
+
+        data = json.loads(
+            (tmp_path / "userY" / "rhythm.json").read_text(encoding="utf-8")
+        )
+        assert data["avg_words_per_turn"] == pytest.approx(4.0)
+
 
 # ---------------------------------------------------------------------------
 # Silence offset computation

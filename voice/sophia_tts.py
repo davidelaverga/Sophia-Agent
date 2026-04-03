@@ -9,6 +9,7 @@ from vision_agents.plugins.cartesia import TTS as CartesiaTTS
 from getstream.video.rtc.track_util import AudioFormat, PcmData
 
 from voice.config import VoiceSettings
+from voice.voice_delivery_profile import classify_emotion_family, resolve_voice_delivery
 
 if TYPE_CHECKING:
     from voice.sophia_turn import SophiaTurnDetection
@@ -103,8 +104,10 @@ class SophiaTTS(CartesiaTTS):
         self._has_real_artifact: bool = False
         self._hint_emotion: str | None = None
         self._hint_speed: float | None = None
+        self._hint_transcript: str | None = None
         self._active_response_user_id: str | None = None
         self._first_audio_reported = False
+        self._last_resolved_delivery = None
         self._first_audio_callback: Callable[[str], None] | None = None
         self._error_callback: Callable[[str, str, str | None], None] | None = None
         self._echo_guard: SophiaTurnDetection | None = None
@@ -164,6 +167,7 @@ class SophiaTTS(CartesiaTTS):
         # Artifact wins — clear any pending hint.
         self._hint_emotion = None
         self._hint_speed = None
+        self._hint_transcript = None
         logger.info(
             "Queued next voice settings: emotion=%s speed=%s",
             artifact.get("voice_emotion_primary"),
@@ -181,6 +185,7 @@ class SophiaTTS(CartesiaTTS):
             if pattern.search(text):
                 self._hint_emotion = emotion
                 self._hint_speed = speed
+                self._hint_transcript = text
                 logger.info(
                     "[SOPHIA-VOICE] Emotion hint from transcript: '%s' at speed %.2f",
                     emotion,
@@ -190,46 +195,27 @@ class SophiaTTS(CartesiaTTS):
         # No match — hint stays None, warm default will be used.
         self._hint_emotion = None
         self._hint_speed = None
+        self._hint_transcript = text if text.strip() else None
 
-    def _resolve_emotion(self) -> str | None:
-        """Pick a valid Cartesia emotion: real artifact > hint > warm default > None."""
-        # 1. Real backend artifact (highest priority)
-        if self._has_real_artifact:
-            primary = self._next_artifact.get("voice_emotion_primary")
-            if isinstance(primary, str) and primary in CARTESIA_EMOTIONS:
-                return primary
-            secondary = self._next_artifact.get("voice_emotion_secondary")
-            if isinstance(secondary, str) and secondary in CARTESIA_EMOTIONS:
-                logger.info(
-                    "Emotion fallback: primary=%s not in Cartesia set, using secondary=%s",
-                    primary,
-                    secondary,
-                )
-                return secondary
-        # 2. Transcript hint (bridge for turn 1)
-        if self._hint_emotion is not None and self._hint_emotion in CARTESIA_EMOTIONS:
-            return self._hint_emotion
-        # 3. Warm default
-        primary = self._next_artifact.get("voice_emotion_primary")
-        if isinstance(primary, str) and primary in CARTESIA_EMOTIONS:
-            return primary
-        return None
+    def _resolve_delivery(self, text: str):
+        delivery = resolve_voice_delivery(
+            assistant_text=text,
+            has_real_artifact=self._has_real_artifact,
+            hinted_emotion=self._hint_emotion,
+            hinted_speed_label=self._hint_speed_label(),
+            queued_artifact=self._next_artifact,
+            user_transcript=getattr(self, "_hint_transcript", None),
+        )
+        self._last_resolved_delivery = delivery
+        return delivery
 
-    def _resolve_speed(self) -> float | None:
-        """Map a speed source to Cartesia float: real artifact > hint > warm default > None."""
-        if self._has_real_artifact:
-            label = self._next_artifact.get("voice_speed")
-            if isinstance(label, str):
-                mapped = SPEED_MAP.get(label)
-                if mapped is not None:
-                    return mapped
-        # Hint speed (float already)
-        if self._hint_speed is not None:
-            return self._hint_speed
-        # Warm default
-        label = self._next_artifact.get("voice_speed")
-        if isinstance(label, str):
-            return SPEED_MAP.get(label)
+    def _hint_speed_label(self) -> str | None:
+        if self._hint_speed is None:
+            return None
+
+        for label, speed in SPEED_MAP.items():
+            if abs(speed - self._hint_speed) < 0.001:
+                return label
         return None
 
     async def stream_audio(
@@ -244,8 +230,9 @@ class SophiaTTS(CartesiaTTS):
         voice_param = {"id": self.voice_id, "mode": "id"}
 
         # Build generation_config from queued artifact (sonic-3 only).
-        emotion = self._resolve_emotion()
-        speed = self._resolve_speed()
+        delivery = self._resolve_delivery(text)
+        emotion = delivery.emotion if delivery.emotion in CARTESIA_EMOTIONS else None
+        speed = SPEED_MAP.get(delivery.speed_label)
 
         gen_config: dict[str, Any] = {}
         if emotion is not None:
@@ -255,25 +242,14 @@ class SophiaTTS(CartesiaTTS):
 
         # --- Client-visible log tag ---
         source = "artifact" if self._has_real_artifact else ("hint" if self._hint_emotion else "warm-default")
-        if emotion and speed is not None:
-            speed_label = self._next_artifact.get("voice_speed", "?")
-            logger.info(
-                "[SOPHIA-VOICE] She used '%s' emotion at '%s' speed (%.2f) | source=%s",
-                emotion, speed_label, speed, source,
-            )
-        elif emotion:
-            logger.info(
-                "[SOPHIA-VOICE] She used '%s' emotion, no speed override | source=%s",
-                emotion, source,
-            )
-        elif self._has_real_artifact:
-            logger.info(
-                "[SOPHIA-VOICE] No valid emotion resolved | artifact=yes (primary=%s secondary=%s)",
-                self._next_artifact.get("voice_emotion_primary"),
-                self._next_artifact.get("voice_emotion_secondary"),
-            )
-        else:
-            logger.info("[SOPHIA-VOICE] No artifact queued — using warm default")
+        logger.info(
+            "[SOPHIA-VOICE] emitted_family=%s resolved_family=%s emotion=%s speed=%s source=%s",
+            classify_emotion_family(self._next_artifact.get("voice_emotion_primary")),
+            delivery.family,
+            emotion,
+            delivery.speed_label,
+            source,
+        )
 
         kwargs: dict[str, Any] = {
             "model_id": self.model_id,
@@ -308,5 +284,6 @@ class SophiaTTS(CartesiaTTS):
         # Clear one-shot hint after use.
         self._hint_emotion = None
         self._hint_speed = None
+        self._hint_transcript = None
 
         return result

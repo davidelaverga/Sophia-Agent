@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Callable
 from typing import Any, Optional
 
 from vision_agents.plugins.smart_turn import TurnDetection as SmartTurnDetection
@@ -34,21 +35,29 @@ _CONTINUATION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(?:and|but|because|so|or|although|though)\s*$", re.I),
     # Fillers
     re.compile(r"\b(?:um|uh|like|basically|actually)\s*$", re.I),
+    re.compile(r"\b(?:wait|sorry)\s*$", re.I),
     re.compile(r"\byou know\s*$", re.I),
     re.compile(r"\bI mean\s*$", re.I),
     # Incomplete clauses
     re.compile(r"\bI was\s*$", re.I),
     re.compile(r"\bI think\s*$", re.I),
+    re.compile(r"\blet me\s*$", re.I),
     re.compile(r"\bit'?s like\s*$", re.I),
     re.compile(r"\bthe thing is\s*$", re.I),
     # Trailing prepositions / articles
     re.compile(r"\b(?:to|for|with|the|a)\s*$", re.I),
 ]
 
-# Fragment start patterns — short phrases beginning with function words are almost
-# always mid-sentence fragments (e.g. "are getting better", "with my friend").
-# Only applied when word_count <= _FRAGMENT_MAX_WORDS.
+# Fragment start patterns — short phrases beginning with function words are often
+# mid-sentence fragments (e.g. "are getting better", "with my friend").
+# Only applied when word_count <= _FRAGMENT_MAX_WORDS, except for a slightly
+# longer conjunction-led restart like "but I still feel off sometimes".
 _FRAGMENT_MAX_WORDS = 5
+_CONJUNCTION_FRAGMENT_MAX_WORDS = 6
+_FRAGMENT_CONJUNCTION_START_PATTERN: re.Pattern[str] = re.compile(
+    r"^\s*(?:and|but|because|so|or|although|though)\b",
+    re.IGNORECASE,
+)
 _FRAGMENT_START_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:"
     r"are|is|was|were|am|"                                          # linking / aux verbs
@@ -56,7 +65,7 @@ _FRAGMENT_START_PATTERN: re.Pattern[str] = re.compile(
     r"do|does|did|"
     r"will|would|could|should|might|can|may|shall|"                 # modals
     r"being|getting|going|having|"                                  # participles
-    r"not|never|also|still|just|even|"                              # mid-sentence adverbs
+    r"not|never|also|still|just|even|wait|sorry|"                   # mid-sentence adverbs / corrections
     r"than|then|"                                                   # comparison / sequence
     r"that|which|who|whom|whose|where|when|while|"                  # relative / subordinate
     r"in|on|at|with|for|from|about|into|through|over|under|"        # prepositions
@@ -64,6 +73,8 @@ _FRAGMENT_START_PATTERN: re.Pattern[str] = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+
+_TURN_END_GUARD_RELEASE_NEW_WORDS = 4
 
 
 class SophiaTurnDetection(SmartTurnDetection):
@@ -78,6 +89,7 @@ class SophiaTurnDetection(SmartTurnDetection):
         adaptive_silence_long_ms: int = 2000,
         adaptive_silence_ceiling_ms: int = 2800,
         adaptive_silence_continuation_bonus_ms: int = 800,
+        adaptive_silence_fragment_bonus_ms: int = 1400,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -90,13 +102,27 @@ class SophiaTurnDetection(SmartTurnDetection):
         self._long_ms = adaptive_silence_long_ms
         self._ceiling_ms = adaptive_silence_ceiling_ms
         self._continuation_bonus_ms = adaptive_silence_continuation_bonus_ms
+        self._fragment_bonus_ms = adaptive_silence_fragment_bonus_ms
 
         # Mutable state — updated by STT events
         self._current_transcript: str = ""
+        self._current_transcript_is_final = False
         self._rhythm_offset_ms: int = 0
+        self._diagnostic_callback: Callable[[str | None], None] | None = None
+        self._turn_end_guard_active = False
+        self._turn_end_guard_fingerprint: str | None = None
+        self._turn_end_guard_transcript: str = ""
+        self._turn_end_guard_was_final = False
+
+    def attach_diagnostic_callback(
+        self,
+        callback: Callable[[str | None], None],
+    ) -> None:
+        self._diagnostic_callback = callback
 
     def note_agent_will_speak(self) -> None:
         """Call before TTS starts generating. Suppresses VAD immediately."""
+        self.clear_turn_end_guard()
         self._suppress_until = float("inf")
         logger.debug("[ECHO-GUARD] Suppression ON — agent will speak")
 
@@ -113,6 +139,7 @@ class SophiaTurnDetection(SmartTurnDetection):
 
     def note_agent_interrupted(self) -> None:
         """Call when the agent is interrupted mid-speech. Starts cooldown immediately."""
+        self.clear_turn_end_guard()
         self._suppress_until = time.monotonic() + self._echo_cooldown_ms / 1000
         logger.debug("[ECHO-GUARD] Agent interrupted — cooldown %dms", self._echo_cooldown_ms)
 
@@ -127,17 +154,40 @@ class SophiaTurnDetection(SmartTurnDetection):
 
     # --- Adaptive silence (Layer 1) -----------------------------------
 
-    def update_transcript(self, text: str) -> None:
+    def update_transcript(self, text: str, *, is_final: bool = False) -> None:
         """Feed the latest STT partial/final transcript so silence adapts."""
         self._current_transcript = text
+        self._current_transcript_is_final = is_final
         self._apply_adaptive_silence()
 
     def reset_transcript(self) -> None:
         """Clear transcript state after a turn ends."""
         self._current_transcript = ""
+        self._current_transcript_is_final = False
         # Restore base value so SmartTurn uses the word-count default for
         # the next turn until a new transcript arrives.
         self._apply_adaptive_silence()
+
+    def get_turn_transcript(self) -> str:
+        return self._current_transcript.strip()
+
+    def should_stabilize_submission(self, transcript: str | None = None) -> bool:
+        text = (transcript or self._current_transcript).strip()
+        if not text:
+            return True
+
+        word_count = len(text.split())
+        return (
+            not self._current_transcript_is_final
+            or self._has_continuation_signal(text)
+            or self._is_fragment(text, word_count)
+        )
+
+    def clear_turn_end_guard(self) -> None:
+        self._turn_end_guard_active = False
+        self._turn_end_guard_fingerprint = None
+        self._turn_end_guard_transcript = ""
+        self._turn_end_guard_was_final = False
 
     def set_rhythm_offset(self, offset_ms: int) -> None:
         """Set a per-user rhythm offset (from Layer 3) for this session."""
@@ -164,10 +214,18 @@ class SophiaTurnDetection(SmartTurnDetection):
         else:
             base = self._long_ms
 
-        # Continuation bonus — trailing signals OR short fragment starts
+        # Continuation bonus — trailing signals OR short fragment starts.
+        # Non-final fragmentary clauses get a stronger hold because they are the
+        # common pause-mid-thought pattern in live sessions.
         continuation = self._has_continuation_signal(self._current_transcript)
         fragment = self._is_fragment(self._current_transcript, word_count)
-        bonus = self._continuation_bonus_ms if (continuation or fragment) else 0
+        fragment_hold = fragment and not self._current_transcript_is_final
+        if fragment_hold:
+            bonus = self._fragment_bonus_ms
+        elif continuation or fragment:
+            bonus = self._continuation_bonus_ms
+        else:
+            bonus = 0
 
         # Rhythm offset
         raw = base + bonus + self._rhythm_offset_ms
@@ -176,7 +234,9 @@ class SophiaTurnDetection(SmartTurnDetection):
         self._trailing_silence_ms = effective  # type: ignore[attr-defined]
 
         reason_parts: list[str] = [f"words={word_count}", f"base={base}"]
-        if continuation:
+        if fragment_hold:
+            reason_parts.append(f"fragment_hold=+{self._fragment_bonus_ms}")
+        elif continuation:
             reason_parts.append(f"continuation=+{self._continuation_bonus_ms}")
         elif fragment:
             reason_parts.append(f"fragment=+{self._continuation_bonus_ms}")
@@ -199,10 +259,70 @@ class SophiaTurnDetection(SmartTurnDetection):
     @staticmethod
     def _is_fragment(text: str, word_count: int) -> bool:
         """Return True if a short phrase starts with a function word (mid-sentence fragment)."""
-        if word_count == 0 or word_count > _FRAGMENT_MAX_WORDS:
+        if word_count == 0:
             return False
         stripped = text.strip()
-        return bool(_FRAGMENT_START_PATTERN.match(stripped))
+        if word_count <= _FRAGMENT_MAX_WORDS and _FRAGMENT_START_PATTERN.match(stripped):
+            return True
+
+        return bool(
+            word_count <= _CONJUNCTION_FRAGMENT_MAX_WORDS
+            and _FRAGMENT_CONJUNCTION_START_PATTERN.match(stripped)
+        )
+
+    async def _emit_end_turn_event(self, *args: Any, **kwargs: Any) -> None:
+        if self._should_suppress_turn_end():
+            logger.debug("[TURN-GUARD] Suppressing duplicate TurnEndedEvent")
+            return
+
+        self._turn_end_guard_active = True
+        self._turn_end_guard_fingerprint = self._normalized_transcript(self._current_transcript)
+        self._turn_end_guard_transcript = self._current_transcript.strip()
+        self._turn_end_guard_was_final = self._current_transcript_is_final
+        await super()._emit_end_turn_event(*args, **kwargs)
+
+    def _should_suppress_turn_end(self) -> bool:
+        if not self._turn_end_guard_active:
+            return False
+
+        current_transcript = self._current_transcript.strip()
+        if not current_transcript:
+            return True
+
+        fingerprint = self._normalized_transcript(current_transcript)
+        new_word_count = self._count_new_words(
+            self._turn_end_guard_transcript,
+            current_transcript,
+        )
+        word_count = len(current_transcript.split())
+        has_continuation_signal = self._has_continuation_signal(current_transcript)
+        is_fragment = self._is_fragment(current_transcript, word_count)
+
+        if self._current_transcript_is_final and not self._turn_end_guard_was_final:
+            self.clear_turn_end_guard()
+            return False
+
+        if (
+            fingerprint
+            and fingerprint != self._turn_end_guard_fingerprint
+            and new_word_count >= _TURN_END_GUARD_RELEASE_NEW_WORDS
+            and not has_continuation_signal
+            and not is_fragment
+        ):
+            self.clear_turn_end_guard()
+            return False
+
+        return True
+
+    @staticmethod
+    def _normalized_transcript(text: str) -> str:
+        return " ".join(text.lower().split())
+
+    @staticmethod
+    def _count_new_words(previous: str, current: str) -> int:
+        previous_count = len(previous.split()) if previous else 0
+        current_count = len(current.split()) if current else 0
+        return max(0, current_count - previous_count)
 
     async def process_audio(
         self,
@@ -211,5 +331,7 @@ class SophiaTurnDetection(SmartTurnDetection):
         conversation: Optional[Any] = None,
     ) -> None:
         if self.is_suppressed:
+            if self._diagnostic_callback is not None:
+                self._diagnostic_callback(getattr(participant, "user_id", None))
             return
         await super().process_audio(audio_data, participant, conversation)
