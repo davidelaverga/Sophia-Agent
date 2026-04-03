@@ -55,6 +55,9 @@ class FileInjectionMiddleware(AgentMiddleware[FileInjectionState]):
 
         if not blocks:
             return None
-        existing = list(state.get("system_prompt_blocks", []))
-        existing.extend(blocks)
-        return {"system_prompt_blocks": existing}
+        # NOTE: FileInjectionMiddleware is the FIRST middleware to write blocks.
+        # It starts with a fresh list (not extending from state) to prevent
+        # accumulation across turns via the LangGraph checkpointer.
+        # All subsequent middlewares extend from state, which now contains
+        # only the current turn's blocks.
+        return {"system_prompt_blocks": blocks}
