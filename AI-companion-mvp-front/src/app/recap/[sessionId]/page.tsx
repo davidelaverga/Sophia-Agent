@@ -104,7 +104,7 @@ export default function RecapPage() {
   // Show loading state
   if (status === 'loading') {
     return (
-      <div className="min-h-screen bg-sophia-bg relative">
+      <div className="min-h-screen bg-transparent relative">
         <RecapPageFloatingHeader variant="skeleton" />
         
         {/* Cinematic loading - reuse RecapMemoryOrbit loading state */}
@@ -121,7 +121,7 @@ export default function RecapPage() {
   // Show error/empty states
   if (status !== 'ready' || !artifacts) {
     return (
-      <div className="min-h-screen bg-sophia-bg relative">
+      <div className="min-h-screen bg-transparent relative">
         <RecapPageFloatingHeader
           variant="with-title"
           onBack={() => {
@@ -150,7 +150,7 @@ export default function RecapPage() {
   const bottomPaddingClass = 'pb-36 sm:pb-40';
   
   return (
-    <div className={`min-h-screen bg-sophia-bg relative ${bottomPaddingClass}`}>
+    <div className={`min-h-screen bg-transparent relative ${bottomPaddingClass}`}>
       <RecapPageFloatingHeader
         variant="compact"
         onBack={() => {
