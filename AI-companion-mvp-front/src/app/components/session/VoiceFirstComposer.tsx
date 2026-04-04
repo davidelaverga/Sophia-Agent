@@ -188,33 +188,33 @@ export function VoiceFirstComposer({
   const dotColors = getDotColors();
   
   return (
-    <div data-onboarding={containerOnboardingId} className="p-4 sm:pb-4 pb-2 border-t border-white/[0.03]">
-      <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
+    <div data-onboarding={containerOnboardingId} className={cn(
+      textOnly
+        ? 'p-4 sm:pb-4 pb-2 border-t border-white/[0.03]'
+        : 'fixed bottom-8 left-1/2 -translate-x-1/2 z-30'
+    )}>
+      <div className={cn(textOnly && 'max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto')}>
         
-        {/* Sophia Presence Indicator — text-only gets a typing indicator */}
+        {/* Sophia Presence Indicator — text mode only */}
+        {textOnly && (
         <div className="flex justify-center mb-4">
           <div role="status" aria-live="polite" className="flex items-center gap-2 text-white/40">
             <span className="relative flex h-2 w-2">
               <span className={cn(
                 'absolute inline-flex h-full w-full rounded-full opacity-75',
-                textOnly
-                  ? (isTyping ? 'bg-white/20 animate-ping' : 'bg-green-400 animate-pulse')
-                  : dotColors.outer
+                isTyping ? 'bg-white/20 animate-ping' : 'bg-green-400 animate-pulse'
               )} />
               <span className={cn(
                 'relative inline-flex rounded-full h-2 w-2',
-                textOnly
-                  ? (isTyping ? 'bg-white/30' : 'bg-green-500')
-                  : dotColors.inner
+                isTyping ? 'bg-white/30' : 'bg-green-500'
               )} />
             </span>
             <span className="text-xs font-medium transition-all duration-300">
-              {textOnly
-                ? (isTyping ? 'Sophia is typing...' : 'Sophia — Ready')
-                : (statusText || (isTyping ? 'Sophia is thinking...' : isActive ? 'Listening...' : isBusy ? 'Processing...' : 'Sophia — Ready'))}
+              {isTyping ? 'Sophia is typing...' : 'Sophia — Ready'}
             </span>
           </div>
         </div>
+        )}
         
         {/* Main Controls */}
         <div className="flex flex-col items-center gap-3">
@@ -302,7 +302,8 @@ export function VoiceFirstComposer({
           </div>
           )}
           
-          {/* Text Input Toggle & Collapsible Area */}
+          {/* Text Input Toggle & Collapsible Area — text mode only in voice, always in text-only */}
+          {textOnly && (
           <div className="w-full">
             {!effectiveTextExpanded ? (
               // Collapsed state - just a hint button
@@ -397,6 +398,7 @@ export function VoiceFirstComposer({
               </div>
             )}
           </div>
+          )}
         </div>
         
       </div>

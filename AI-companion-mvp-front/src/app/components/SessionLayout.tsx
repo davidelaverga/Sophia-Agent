@@ -175,6 +175,10 @@ export function SessionLayout({
   // Chrome fade during active voice
   const { chromeFaded, chromeOpacity } = useChromeFade();
   
+  // Focus mode — hide header/footer entirely in voice mode for immersive experience
+  const focusMode = useUiStore((s) => s.mode);
+  const isVoiceMode = focusMode !== 'text';
+  
   // Focus traps for modal dialogs
   const { containerRef: backConfirmRef } = useFocusTrap(showBackConfirm);
   const { containerRef: offlineWarningRef } = useFocusTrap(showOfflineWarning);
@@ -270,11 +274,12 @@ export function SessionLayout({
     >
       {/* Presence Field — WebGL nebula + ribbons + sparks behind all content */}
       <PresenceField ref={presenceRef} />
-      {/* Header */}
+      {/* Header — hidden in voice mode for immersive Presence Field experience */}
       <header
         className={cn(
           'bg-black/20 backdrop-blur-md border-b border-white/[0.03] px-4 py-3 transition-all duration-500',
-          isVisible ? 'translate-y-0' : '-translate-y-full'
+          isVisible ? 'translate-y-0' : '-translate-y-full',
+          isVoiceMode && 'hidden'
         )}
         style={{ opacity: chromeOpacity, transition: 'opacity 500ms ease' }}
       >
@@ -388,13 +393,14 @@ export function SessionLayout({
         {children}
       </main>
       
-      {/* Mobile-only Footer - End Session for small screens */}
+      {/* Mobile-only Footer - End Session for small screens — hidden in voice mode */}
       <footer
         className={cn(
           'sm:hidden bg-black/20 backdrop-blur-md border-t border-white/[0.03]',
           'pb-[env(safe-area-inset-bottom)] pt-1.5 px-2',
           'transition-all duration-500 z-40 relative shrink-0',
-          isVisible ? 'translate-y-0' : 'translate-y-full'
+          isVisible ? 'translate-y-0' : 'translate-y-full',
+          isVoiceMode && 'hidden'
         )}
         style={{ opacity: chromeOpacity, transition: 'opacity 500ms ease' }}
       >

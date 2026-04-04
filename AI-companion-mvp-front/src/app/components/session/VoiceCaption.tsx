@@ -54,7 +54,7 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
 
   return (
     <div
-      className="fixed bottom-[72px] left-1/2 -translate-x-1/2 z-30 text-center pointer-events-none max-w-[600px] w-[90vw]"
+      className="fixed bottom-[140px] left-1/2 -translate-x-1/2 z-30 text-center pointer-events-none max-w-[600px] w-[90vw]"
       role="status"
       aria-live="polite"
       aria-label="Voice caption"

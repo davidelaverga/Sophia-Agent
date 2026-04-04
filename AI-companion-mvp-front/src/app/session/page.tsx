@@ -879,7 +879,15 @@ function SessionPageContent() {
           )}
           
           {/* Mode Toggle — whisper-style voice/text switcher */}
-          <div className="flex justify-center pt-2" style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}>
+          <div
+            className={cn(
+              'flex justify-center',
+              focusMode !== 'text'
+                ? 'fixed bottom-[100px] left-1/2 -translate-x-1/2 z-30'
+                : 'pt-2'
+            )}
+            style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+          >
             <ModeToggle opacity={chromeOpacity} />
           </div>
           
