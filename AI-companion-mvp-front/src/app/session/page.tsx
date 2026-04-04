@@ -28,6 +28,7 @@ import {
   PresenceArtifactPanel,
   ArtifactToggleIcon,
   WhisperIndicator,
+  ReflectionOverlay,
   MobileDrawer,
   FeedbackToast,
   // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
@@ -41,6 +42,7 @@ import {
 } from '../components/error-boundaries';
 import { ModeToggle } from '../components/ModeToggle';
 import { useChromeFade } from '../hooks/useChromeFade';
+import type { PresenceFieldHandle } from '../components/presence-field';
 import { useUiStore } from '../stores/ui-store';
 import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
@@ -97,6 +99,10 @@ function SessionPageContent() {
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
   const { chromeOpacity } = useChromeFade();
+  const presenceRef = useRef<PresenceFieldHandle | null>(null);
+  const handleImpulse = useCallback(() => {
+    presenceRef.current?.fireImpulse('coreIntensity', 0.15, 1500);
+  }, []);
   const debugEnabled = useMemo(() => {
     // 🔒 SECURITY: debug mode restricted to development only
     return process.env.NODE_ENV === 'development';
@@ -777,6 +783,7 @@ function SessionPageContent() {
       isEnding={isEnding}
       isSophiaResponding={isSophiaResponding}
       isReadOnly={isReadOnly}
+      presenceRef={presenceRef}
     >
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
@@ -827,6 +834,7 @@ function SessionPageContent() {
             nudgeSuggestion={nudgeSuggestion}
             onNudgeAccept={handleNudgeAccept}
             onNudgeDismiss={handleNudgeDismiss}
+            onImpulse={handleImpulse}
             onGoToDashboard={handleGoToDashboard}
           />
           </div>
@@ -839,6 +847,18 @@ function SessionPageContent() {
           
           {/* Whisper Indicator — atmospheric presence label */}
           <WhisperIndicator opacity={chromeOpacity} />
+
+          {/* Reflection Overlay — center-screen atmospheric prompt (voice mode) */}
+          {focusMode !== 'text' && (
+            <ReflectionOverlay
+              question={isReflectionVoiceFlowActive ? (artifacts?.reflection_candidate?.prompt ?? null) : null}
+              onDismiss={() => {
+                const prompt = artifacts?.reflection_candidate?.prompt;
+                if (prompt) void handleReflectionTap({ prompt }, 'tap');
+              }}
+              onActivate={() => presenceRef.current?.fireImpulse('flowEnergy', 0.12, 2000)}
+            />
+          )}
           
           {/* Mode Toggle — whisper-style voice/text switcher */}
           <div className="flex justify-center pt-2" style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}>

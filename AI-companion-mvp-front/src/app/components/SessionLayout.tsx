@@ -8,7 +8,7 @@
 
 'use client';
 
-import { ReactNode, useState, useEffect } from 'react';
+import { ReactNode, useState, useEffect, type RefObject } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Settings, Clock, X, LogOut, WifiOff, Lock } from 'lucide-react';
 import { cn } from '../lib/utils';
@@ -19,7 +19,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { useConnectivityStore, selectStatus } from '../stores/connectivity-store';
 import { useUiStore } from '../stores/ui-store';
 import { debugLog } from '../lib/debug-logger';
-import { PresenceField } from './presence-field';
+import { PresenceField, type PresenceFieldHandle } from './presence-field';
 import type { SessionClientStore, PresetType, ContextMode } from '../lib/session-types';
 
 interface SessionLayoutProps {
@@ -31,6 +31,7 @@ interface SessionLayoutProps {
   isSophiaResponding?: boolean;
   /** Read-only mode for ended sessions */
   isReadOnly?: boolean;
+  presenceRef?: RefObject<PresenceFieldHandle | null>;
 }
 
 const PRESET_LABELS: Record<PresetType, Record<ContextMode, string>> = {
@@ -163,6 +164,7 @@ export function SessionLayout({
   isEnding,
   isSophiaResponding = false,
   isReadOnly = false,
+  presenceRef,
 }: SessionLayoutProps) {
   const router = useRouter();
   const [showConfirm, setShowConfirm] = useState(false);
@@ -267,7 +269,7 @@ export function SessionLayout({
       onPointerDown={handleRootPointerDown}
     >
       {/* Presence Field — WebGL nebula + ribbons + sparks behind all content */}
-      <PresenceField />
+      <PresenceField ref={presenceRef} />
       {/* Header */}
       <header
         className={cn(

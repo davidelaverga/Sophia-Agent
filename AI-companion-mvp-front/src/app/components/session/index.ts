@@ -21,6 +21,7 @@ export { VoiceFirstComposer, type VoiceStatus } from './VoiceFirstComposer';
 export { VoiceCaption } from './VoiceCaption';
 export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
 export { WhisperIndicator } from './WhisperIndicator';
+export { ReflectionOverlay } from './ReflectionOverlay';
 export { MobileDrawer, type ArtifactStatusType } from './MobileDrawer';
 export { SophiaEyes } from './SophiaEyes';
 

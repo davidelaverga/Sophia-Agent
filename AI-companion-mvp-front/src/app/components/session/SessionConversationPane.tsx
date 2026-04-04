@@ -68,6 +68,7 @@ interface SessionConversationPaneProps {
   nudgeSuggestion: NudgeSuggestion | null;
   onNudgeAccept: (actionType: InvokeType) => void;
   onNudgeDismiss: () => void;
+  onImpulse?: () => void;
   onGoToDashboard: () => void;
 }
 
@@ -115,6 +116,7 @@ export function SessionConversationPane({
   nudgeSuggestion,
   onNudgeAccept,
   onNudgeDismiss,
+  onImpulse,
   onGoToDashboard,
 }: SessionConversationPaneProps) {
   return (
@@ -251,6 +253,7 @@ export function SessionConversationPane({
                       ? onInterruptSnooze
                       : undefined}
                     onDismiss={onInterruptDismiss}
+                    onImpulse={onImpulse}
                     isLoading={isResuming}
                   />
                 </InterruptCardErrorBoundary>
@@ -341,6 +344,7 @@ export function SessionConversationPane({
           suggestion={nudgeSuggestion}
           onAccept={onNudgeAccept}
           onDismiss={onNudgeDismiss}
+          onImpulse={onImpulse}
         />
       )}
     </>
