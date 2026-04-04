@@ -807,7 +807,7 @@ function SessionPageContent() {
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
           {/* Conversation pane — hidden in voice mode but stays mounted to preserve scroll */}
-          <div className={cn(focusMode !== 'text' && 'hidden', 'flex-1 flex flex-col min-h-0')}>
+          <div className={focusMode !== 'text' ? 'hidden' : 'flex-1 flex flex-col min-h-0'}>
             <SessionConversationPane
             messages={messages}
             isInitializingChat={isInitializingChat}
