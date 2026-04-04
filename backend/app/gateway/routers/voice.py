@@ -122,7 +122,13 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
     token = _generate_stream_token(api_secret, user_id)
 
     # Dispatch the voice agent to join this call
-    session_id = await _dispatch_voice_agent(call_id, call_type)
+    session_id = await _dispatch_voice_agent(
+        call_id=call_id,
+        call_type=call_type,
+        platform=body.platform,
+        context_mode=body.context_mode,
+        ritual=body.ritual,
+    )
 
     logger.info(
         "voice.connect user_id=%s platform=%s context_mode=%s ritual=%s call_id=%s session_id=%s",
@@ -143,7 +149,13 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
     )
 
 
-async def _dispatch_voice_agent(call_id: str, call_type: str) -> str | None:
+async def _dispatch_voice_agent(
+    call_id: str,
+    call_type: str,
+    platform: str,
+    context_mode: str,
+    ritual: str | None,
+) -> str | None:
     """Tell the Vision Agents voice server to spawn an agent for this call.
 
     Returns the session_id on success, or None if the voice server is unavailable
@@ -155,10 +167,40 @@ async def _dispatch_voice_agent(call_id: str, call_type: str) -> str | None:
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_SERVER_DISPATCH_TIMEOUT) as client:
-            resp = await client.post(url, json={"call_type": call_type})
+            resp = await client.post(
+                url,
+                json={
+                    "call_type": call_type,
+                    "platform": platform,
+                    "context_mode": context_mode,
+                    "ritual": ritual,
+                },
+            )
             resp.raise_for_status()
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                logger.warning(
+                    "voice.dispatch failed — voice server returned invalid JSON for call_id=%s",
+                    call_id,
+                )
+                return None
+
+            if not isinstance(data, dict):
+                logger.warning(
+                    "voice.dispatch failed — voice server returned non-object payload for call_id=%s",
+                    call_id,
+                )
+                return None
+
             session_id = data.get("session_id")
+            if session_id is not None and not isinstance(session_id, str):
+                logger.warning(
+                    "voice.dispatch failed — voice server returned invalid session_id for call_id=%s",
+                    call_id,
+                )
+                return None
+
             logger.info("voice.dispatch call_id=%s session_id=%s", call_id, session_id)
             return session_id
     except httpx.ConnectError:
@@ -173,6 +215,13 @@ async def _dispatch_voice_agent(call_id: str, call_type: str) -> str | None:
         return None
     except httpx.TimeoutException:
         logger.warning("voice.dispatch timed out after %.1fs for call_id=%s", VOICE_SERVER_DISPATCH_TIMEOUT, call_id)
+        return None
+    except httpx.RequestError as exc:
+        logger.warning(
+            "voice.dispatch failed — request error for call_id=%s: %s",
+            call_id,
+            exc,
+        )
         return None
 
 
@@ -208,6 +257,12 @@ async def voice_disconnect(user_id: str, body: VoiceDisconnectRequest) -> None:
             "voice.disconnect failed — %s: %s",
             exc.response.status_code,
             exc.response.text[:200],
+        )
+    except httpx.RequestError as exc:
+        logger.warning(
+            "voice.disconnect failed — request error for call_id=%s: %s",
+            body.call_id,
+            exc,
         )
 
     logger.info(

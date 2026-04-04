@@ -286,9 +286,14 @@ export function CosmicMemoryBubble({
                 rows={4}
                 autoFocus
                 className={cn(
-                  'w-full resize-none rounded-2xl border border-sophia-purple/30 bg-black/20 px-4 py-3 text-sm leading-relaxed text-sophia-text placeholder:text-sophia-text2/60',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple/40'
+                  'w-full resize-none rounded-2xl px-4 py-3 text-sm leading-relaxed placeholder:text-white/20',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20'
                 )}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  color: 'rgba(255, 255, 255, 0.65)',
+                }}
                 placeholder="Refine this memory"
                 aria-label="Refine memory text"
               />
@@ -301,17 +306,17 @@ export function CosmicMemoryBubble({
                   }}
                   disabled={!canSaveEdit}
                   className={cn(
-                    'rounded-full px-4 py-2 text-xs font-medium transition-all duration-300',
-                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple/50',
+                    'rounded-full px-4 py-2 text-[11px] tracking-[0.06em] transition-all duration-300',
+                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
                     'disabled:cursor-not-allowed disabled:opacity-40'
                   )}
                   style={{
-                    background: 'var(--sophia-purple)',
-                    color: 'var(--bg)',
-                    boxShadow: '0 4px 20px var(--sophia-purple), inset 0 1px 0 var(--sophia-glow)',
+                    background: 'rgba(255, 255, 255, 0.08)',
+                    border: '1px solid rgba(255, 255, 255, 0.10)',
+                    color: 'rgba(255, 255, 255, 0.60)',
                   }}
                 >
-                  Save refinement
+                  save refinement
                 </button>
 
                 <button
@@ -320,17 +325,17 @@ export function CosmicMemoryBubble({
                     handleCancelEdit();
                   }}
                   className={cn(
-                    'rounded-full px-4 py-2 text-xs font-medium text-sophia-text2 transition-all duration-300',
-                    'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple/30',
-                    'hover:text-sophia-text'
+                    'rounded-full px-4 py-2 text-[11px] tracking-[0.06em] transition-all duration-300',
+                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/10',
+                    'hover:text-white/40'
                   )}
                   style={{
-                    background: 'var(--card-bg)',
-                    border: '1px solid var(--sophia-purple)',
-                    opacity: 0.78,
+                    background: 'rgba(255, 255, 255, 0.03)',
+                    border: '1px solid rgba(255, 255, 255, 0.06)',
+                    color: 'rgba(255, 255, 255, 0.30)',
                   }}
                 >
-                  Cancel
+                  cancel
                 </button>
               </div>
             </div>
@@ -339,8 +344,8 @@ export function CosmicMemoryBubble({
               className={cn(
                 'text-center leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]',
                 isCenter
-                  ? 'text-sophia-text text-base sm:text-lg font-medium max-h-[7.5rem] sm:max-h-[9rem] overflow-y-auto pr-1'
-                  : 'text-sophia-text2/30 text-sm line-clamp-3'
+                  ? 'text-white/70 text-base sm:text-lg font-light max-h-[7.5rem] sm:max-h-[9rem] overflow-y-auto pr-1'
+                  : 'text-white/15 text-sm line-clamp-3'
               )}
             >
               {displayText}
@@ -357,21 +362,22 @@ export function CosmicMemoryBubble({
                 disabled={disabled}
                 data-onboarding={isCenter ? 'recap-memory-keep' : undefined}
                 className={cn(
-                  'px-6 py-2.5 rounded-full',
-                  'text-sm font-medium',
+                  'px-5 py-2.5 rounded-full',
+                  'text-[11px] tracking-[0.06em]',
                   'transition-all duration-300',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple/50',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
                   'disabled:opacity-40 disabled:cursor-not-allowed',
                   'hover:scale-105 active:scale-95'
                 )}
                 style={{
-                  background: 'var(--sophia-purple)',
-                  color: 'var(--bg)',
-                  boxShadow: '0 4px 20px var(--sophia-purple), inset 0 1px 0 var(--sophia-glow)',
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  border: '1px solid rgba(255, 255, 255, 0.12)',
+                  color: 'rgba(255, 255, 255, 0.65)',
+                  boxShadow: '0 4px 20px rgba(255, 255, 255, 0.03)',
                 }}
                 aria-label="Keep this memory"
               >
-                Keep this
+                keep this
               </button>
 
               <button
@@ -381,20 +387,20 @@ export function CosmicMemoryBubble({
                 }}
                 disabled={disabled}
                 className={cn(
-                  'inline-flex items-center gap-1.5 rounded-full px-4 py-2.5 text-sm font-medium transition-all duration-300',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple/30',
+                  'inline-flex items-center gap-1.5 rounded-full px-4 py-2.5 text-[11px] tracking-[0.06em] transition-all duration-300',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/10',
                   'disabled:opacity-40 disabled:cursor-not-allowed',
                   'hover:scale-105 active:scale-95'
                 )}
                 style={{
-                  background: 'color-mix(in srgb, var(--card-bg) 90%, transparent)',
-                  border: '1px solid color-mix(in srgb, var(--sophia-glow) 40%, transparent)',
-                  color: 'var(--sophia-text)',
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  border: '1px solid rgba(255, 255, 255, 0.06)',
+                  color: 'rgba(255, 255, 255, 0.35)',
                 }}
                 aria-label="Refine this memory"
               >
-                <Pencil className="h-4 w-4" />
-                Refine
+                <Pencil className="h-3.5 w-3.5" />
+                refine
               </button>
 
               <button
@@ -405,26 +411,24 @@ export function CosmicMemoryBubble({
                 disabled={disabled}
                 data-onboarding={isCenter ? 'recap-memory-discard' : undefined}
                 className={cn(
-                  'px-6 py-2.5 rounded-full',
-                  'text-sm font-medium',
-                  'text-sophia-text2/70',
+                  'px-5 py-2.5 rounded-full',
+                  'text-[11px] tracking-[0.06em]',
+                  'text-white/20',
                   'backdrop-blur-md',
-                  'hover:text-sophia-text',
+                  'hover:text-white/35',
                   'transition-all duration-300',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple/30',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/10',
                   'disabled:opacity-40 disabled:cursor-not-allowed',
                   'hover:scale-105 active:scale-95'
                 )}
                 style={{
-                  background: 'var(--card-bg)',
-                  border: '1px solid var(--sophia-purple)',
-                  opacity: 0.7,
-                  boxShadow: 'inset 0 0 20px var(--bg)',
+                  background: 'rgba(255, 255, 255, 0.02)',
+                  border: '1px solid rgba(255, 255, 255, 0.04)',
                 }}
                 aria-label="Let this memory go"
               >
-                <X className="mr-1 inline h-4 w-4" />
-                Let it go
+                <X className="mr-1 inline h-3.5 w-3.5" />
+                let it go
               </button>
             </div>
           )}

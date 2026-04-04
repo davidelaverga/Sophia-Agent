@@ -63,6 +63,32 @@ export function useSessionChatInitialization({
   const initialGreetingSetRef = useRef(false);
   const [isInitializingChat, setIsInitializingChat] = useState(true);
 
+  // R42: Smart opener fallback — if no greeting arrives within 2s, fire default
+  useEffect(() => {
+    if (hasInitializedRef.current || initialGreetingSetRef.current) return;
+    const timer = setTimeout(() => {
+      if (hasInitializedRef.current || initialGreetingSetRef.current) return;
+      if (!session) return;
+
+      initialGreetingSetRef.current = true;
+      hasInitializedRef.current = true;
+
+      const fallback = initialGreeting || "Hey, I'm Sophia.";
+      const fallbackId = greetingMessageId || `fallback-${Date.now()}`;
+
+      setMessageTimestamp(fallbackId, new Date().toISOString());
+      setChatMessages([
+        {
+          id: fallbackId,
+          role: 'assistant',
+          parts: [{ type: 'text', text: fallback }],
+        },
+      ]);
+      setIsInitializingChat(false);
+    }, 2000);
+    return () => clearTimeout(timer);
+  }, [session, initialGreeting, greetingMessageId, setChatMessages, setMessageTimestamp]);
+
   useEffect(() => {
     if (!session) return;
 

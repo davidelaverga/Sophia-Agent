@@ -121,6 +121,19 @@ const nextConfig = {
 
   // Suppress known warnings from OpenTelemetry instrumentation
   webpack: (config, { isServer }) => {
+    config.resolve = config.resolve || {}
+
+    if (!isServer) {
+      config.resolve.alias = {
+        ...(config.resolve.alias || {}),
+        axios: require.resolve('axios/dist/browser/axios.cjs'),
+      }
+      config.resolve.fallback = {
+        ...(config.resolve.fallback || {}),
+        http2: false,
+      }
+    }
+
     if (isServer) {
       config.ignoreWarnings = [
         { module: /node_modules\/require-in-the-middle/ },

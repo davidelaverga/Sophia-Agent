@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Check, MessageCircle } from 'lucide-react';
+import { Check } from 'lucide-react';
 import { cn } from '../../lib/utils';
 
 const NOISE_SVG = `data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E`;
@@ -159,8 +159,8 @@ export function KeyTakeaway({ takeaway, isLoading }: KeyTakeawayProps) {
 
   return (
     <div className="flex flex-col items-center text-center px-6 mb-14 motion-safe:animate-fadeIn" role="banner">
-      <span className="text-[11px] font-medium tracking-[0.35em] uppercase text-sophia-text2/40 mb-5">
-        KEY TAKEAWAY
+      <span className="text-[10px] tracking-[0.12em] uppercase text-white/20 mb-5">
+        key takeaway
       </span>
 
       <div className="relative max-w-2xl">
@@ -175,7 +175,7 @@ export function KeyTakeaway({ takeaway, isLoading }: KeyTakeawayProps) {
           aria-hidden="true"
         />
 
-        <h1 className="text-2xl sm:text-[28px] md:text-[32px] font-normal text-sophia-text leading-snug tracking-[-0.01em]">
+        <h1 className="font-cormorant text-[26px] sm:text-[30px] md:text-[34px] font-light text-white/[0.88] leading-snug">
           {takeaway}
         </h1>
       </div>
@@ -240,20 +240,15 @@ export function ReflectionPrompt({ prompt, onReflect, isLoading }: ReflectionPro
       <div
         className="relative w-full rounded-2xl backdrop-blur-xl px-6 py-5 overflow-hidden"
         style={{
-          background: 'var(--card-bg)',
-          border: '1px solid color-mix(in srgb, var(--sophia-purple) 60%, transparent)',
-          opacity: 0.95,
-          boxShadow: '0 0 50px color-mix(in srgb, var(--sophia-purple) 40%, transparent)',
+          background: 'rgba(255, 255, 255, 0.03)',
+          border: '1px solid rgba(255, 255, 255, 0.06)',
         }}
       >
-        <div className="flex items-center gap-2.5 mb-4">
-          <div className="w-5 h-5 rounded-md flex items-center justify-center" style={{ background: 'var(--sophia-purple)', opacity: 0.8 }}>
-            <MessageCircle className="w-3 h-3 text-sophia-bg" />
-          </div>
-          <span className="text-sm font-medium text-sophia-text">Something to reflect on</span>
-        </div>
+        <p className="font-cormorant italic text-[14px] tracking-[0.04em] text-white/30 mb-3">
+          something to reflect on
+        </p>
 
-        <p className="text-sophia-text/90 leading-relaxed text-left pl-4 text-[15px]" style={{ borderLeft: '2px solid var(--sophia-purple)' }}>
+        <p className="font-cormorant text-[17px] leading-relaxed text-white/60 text-left">
           {prompt}
         </p>
 
@@ -261,13 +256,14 @@ export function ReflectionPrompt({ prompt, onReflect, isLoading }: ReflectionPro
           <button
             onClick={onReflect}
             className={cn(
-              'mt-5 text-sm text-sophia-text2/50 hover:text-sophia-purple',
-              'transition-colors duration-300',
-              'flex items-center gap-1.5 group'
+              'mt-5 px-4 py-1.5 rounded-full',
+              'text-[10px] tracking-[0.08em] uppercase',
+              'bg-white/[0.04] border border-white/[0.06] text-white/25',
+              'hover:bg-white/[0.08] hover:text-white/40',
+              'transition-all duration-300'
             )}
           >
-            <span>Sit with this for a moment</span>
-            <span className="group-hover:translate-x-1 transition-transform duration-300">→</span>
+            sit with this
           </button>
         )}
       </div>
@@ -301,7 +297,7 @@ export function RecapOrbitLoading() {
         >
           <div className="flex flex-col items-center gap-3">
             <div className="w-8 h-8 rounded-full border-2 border-sophia-purple/30 border-t-sophia-purple animate-spin" />
-            <span className="text-sophia-text2/50 text-sm">Gathering thoughts...</span>
+            <span className="text-[11px] tracking-[0.08em] text-white/30">gathering thoughts...</span>
           </div>
         </div>
       </div>
@@ -320,16 +316,16 @@ export function RecapOrbitEmpty() {
           style={{
             background: `
               radial-gradient(ellipse 100% 80% at 50% 75%, var(--sophia-purple) 0%, transparent 50%),
-              radial-gradient(circle at 50% 50%, var(--card-bg) 0%, var(--bg) 100%)
+              radial-gradient(circle at 50% 50%, rgba(255,255,255,0.02) 0%, transparent 100%)
             `,
             boxShadow: 'inset 0 -20px 50px -20px var(--sophia-purple), 0 0 40px var(--sophia-purple)',
-            opacity: 0.5,
+            opacity: 0.35,
           }}
         >
-          <span className="text-4xl opacity-40">🧠</span>
+          <span className="text-4xl opacity-30">🧠</span>
         </div>
-        <p className="text-sophia-text font-medium mb-2">No memories to review</p>
-        <p className="text-sm text-sophia-text2/50">No new memories from this session.</p>
+        <p className="font-cormorant text-[18px] text-white/50 mb-2">no memories to review</p>
+        <p className="text-[12px] tracking-[0.06em] text-white/25">no new memories from this session</p>
       </div>
     </div>
   );
@@ -388,14 +384,14 @@ export function RecapOrbitCompleted({
           />
 
           <div className="flex flex-col items-center text-center px-8">
-            <div className="w-14 h-14 rounded-full flex items-center justify-center mb-4" style={{ background: 'var(--sophia-purple)', opacity: 0.3 }}>
-              <Check className="w-7 h-7 text-sophia-text" />
+            <div className="w-12 h-12 rounded-full flex items-center justify-center mb-4" style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.06)' }}>
+              <Check className="w-6 h-6 text-white/40" />
             </div>
-            <p className="text-sophia-text font-medium mb-1">All memories reviewed</p>
-            <p className="text-sm text-sophia-text2/50">
+            <p className="font-cormorant text-[17px] text-white/60 mb-1">all memories reviewed</p>
+            <p className="text-[11px] tracking-[0.06em] text-white/25">
               {approvedCount > 0
                 ? `${approvedCount} ${approvedCount === 1 ? 'memory' : 'memories'} ready to save`
-                : 'No memories selected'}
+                : 'no memories selected'}
             </p>
           </div>
         </div>
@@ -404,9 +400,8 @@ export function RecapOrbitCompleted({
           <div
             className="mt-6 w-full max-w-xl rounded-2xl px-4 py-4"
             style={{
-              background: 'color-mix(in srgb, var(--card-bg) 92%, transparent)',
-              border: '1px solid color-mix(in srgb, var(--sophia-purple) 18%, transparent)',
-              boxShadow: '0 0 30px color-mix(in srgb, var(--sophia-purple) 12%, transparent)',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid rgba(255, 255, 255, 0.06)',
             }}
           >
             <div className="space-y-2.5 max-h-48 overflow-y-auto pr-1">
@@ -415,22 +410,22 @@ export function RecapOrbitCompleted({
                   key={memory.id}
                   className="rounded-xl px-3 py-2.5"
                   style={{
-                    background: 'color-mix(in srgb, var(--sophia-purple) 4%, var(--card-bg))',
-                    border: '1px solid color-mix(in srgb, var(--sophia-purple) 12%, transparent)',
+                    background: 'rgba(255, 255, 255, 0.02)',
+                    border: '1px solid rgba(255, 255, 255, 0.04)',
                   }}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <p className="text-sm leading-relaxed text-sophia-text/85">{memory.text}</p>
+                    <p className="text-sm leading-relaxed text-white/60">{memory.text}</p>
                     {memory.isEdited && (
                       <span
                         className="shrink-0 rounded-full px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.14em]"
                         style={{
-                          background: 'color-mix(in srgb, var(--sophia-glow) 10%, transparent)',
-                          border: '1px solid color-mix(in srgb, var(--sophia-glow) 22%, transparent)',
-                          color: 'var(--sophia-text2)',
+                          background: 'rgba(255, 255, 255, 0.04)',
+                          border: '1px solid rgba(255, 255, 255, 0.08)',
+                          color: 'rgba(255, 255, 255, 0.35)',
                         }}
                       >
-                        Refined
+                        refined
                       </span>
                     )}
                   </div>

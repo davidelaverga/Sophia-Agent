@@ -21,7 +21,7 @@ try {
 
 $services = @(
     @{ Name = "LangGraph";  Port = 2024; Dir = "backend";               Cmd = "uv run langgraph dev --no-browser --allow-blocking --no-reload" }
-    @{ Name = "Voice";      Port = 8000; Dir = "voice";                 Cmd = "uv run python -m voice.server serve --port 8000" }
+    @{ Name = "Voice";      Port = 8000; Dir = ".";                     Cmd = "voice\.venv\Scripts\python.exe -m voice.server serve --port 8000" }
     @{ Name = "Gateway";    Port = 8001; Dir = "backend";               Cmd = "uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001" }
     @{ Name = "Frontend";   Port = 3000; Dir = "AI-companion-mvp-front"; Cmd = "npm run dev" }
 )
@@ -69,8 +69,8 @@ foreach ($svc in $services) {
         Write-Host "  Port $($svc.Port) in use — stopping stale $($svc.Name)..." -ForegroundColor Yellow
         $procs = Get-NetTCPConnection -LocalPort $svc.Port -ErrorAction SilentlyContinue |
                  Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($pid in $procs) {
-            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+        foreach ($processId in $procs) {
+            Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue
         }
         Start-Sleep -Seconds 1
     }
@@ -163,7 +163,7 @@ try {
     foreach ($svc in $services) {
         $procs = Get-NetTCPConnection -LocalPort $svc.Port -ErrorAction SilentlyContinue |
                  Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($pid in $procs) { Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue }
+        foreach ($processId in $procs) { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
     }
     Write-Host "  All services stopped." -ForegroundColor Green
 }

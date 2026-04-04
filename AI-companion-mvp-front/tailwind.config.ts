@@ -49,6 +49,7 @@ const config: Config = {
       },
       fontFamily: {
         sans: ["var(--font-inter)", "system-ui", "-apple-system", "BlinkMacSystemFont", "Segoe UI", "sans-serif"],
+        cormorant: ["var(--font-cormorant)", "Georgia", "Cambria", "Times New Roman", "serif"],
       },
       borderRadius: {
         md: "var(--radius-md)",

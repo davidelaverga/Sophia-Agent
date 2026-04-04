@@ -12,18 +12,30 @@ const mockMicrophoneEnable = vi.fn().mockResolvedValue(undefined)
 const mockDisconnectUser = vi.fn().mockResolvedValue(undefined)
 
 let callingStateCallback: ((state: CallingState) => void) | null = null
+let remoteParticipantsCallbacks: Array<
+  (participants: Array<{ sessionId: string }>) => void
+> = []
 
 const mockCall = {
   join: mockJoin,
   leave: mockLeave,
   camera: { disable: mockCameraDisable },
   microphone: { enable: mockMicrophoneEnable },
+  bindAudioElement: vi.fn(() => vi.fn()),
   state: {
     callingState$: {
       subscribe: vi.fn((cb: (state: CallingState) => void) => {
         callingStateCallback = cb
         return { unsubscribe: vi.fn() }
       }),
+    },
+    remoteParticipants$: {
+      subscribe: vi.fn(
+        (cb: (participants: Array<{ sessionId: string }>) => void) => {
+          remoteParticipantsCallbacks.push(cb)
+          return { unsubscribe: vi.fn() }
+        }
+      ),
     },
   },
 }
@@ -50,6 +62,7 @@ describe("useStreamVoice", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     callingStateCallback = null
+    remoteParticipantsCallbacks = []
   })
 
   it("starts in IDLE state with no client when credentials are null", () => {
@@ -61,6 +74,7 @@ describe("useStreamVoice", () => {
     expect(result.current.client).toBeNull()
     expect(result.current.call).toBeNull()
     expect(result.current.error).toBeNull()
+    expect(result.current.remoteParticipantSessionIds).toEqual([])
   })
 
   it("initializes client and call when credentials arrive", () => {
@@ -72,7 +86,7 @@ describe("useStreamVoice", () => {
     expect(result.current.call).not.toBeNull()
   })
 
-  it("join() calls call.join with create:true and disables camera", async () => {
+  it("join() disables camera, joins, then enables the microphone", async () => {
     const { result } = renderHook(() =>
       useStreamVoice({ userId: "user-1", credentials: validCredentials })
     )
@@ -82,8 +96,15 @@ describe("useStreamVoice", () => {
     })
 
     expect(mockCameraDisable).toHaveBeenCalled()
-    expect(mockMicrophoneEnable).toHaveBeenCalled()
     expect(mockJoin).toHaveBeenCalledWith({ create: true })
+    expect(mockMicrophoneEnable).toHaveBeenCalled()
+
+    expect(mockCameraDisable.mock.invocationCallOrder[0]).toBeLessThan(
+      mockJoin.mock.invocationCallOrder[0]
+    )
+    expect(mockJoin.mock.invocationCallOrder[0]).toBeLessThan(
+      mockMicrophoneEnable.mock.invocationCallOrder[0]
+    )
   })
 
   it("leave() calls call.leave and resets to IDLE", async () => {
@@ -144,5 +165,19 @@ describe("useStreamVoice", () => {
 
     expect(mockLeave).toHaveBeenCalled()
     expect(mockDisconnectUser).toHaveBeenCalled()
+  })
+
+  it("tracks remote participant session IDs from call state", () => {
+    const { result } = renderHook(() =>
+      useStreamVoice({ userId: "user-1", credentials: validCredentials })
+    )
+
+    act(() => {
+      remoteParticipantsCallbacks.forEach((callback) =>
+        callback([{ sessionId: "voice-session-123" }])
+      )
+    })
+
+    expect(result.current.remoteParticipantSessionIds).toEqual(["voice-session-123"])
   })
 })

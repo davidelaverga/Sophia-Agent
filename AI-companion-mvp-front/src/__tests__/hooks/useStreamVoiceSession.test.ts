@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, type Mock } from "vitest"
 import { renderHook, act } from "@testing-library/react"
 import { CallingState } from "@stream-io/video-react-sdk"
 import { useStreamVoiceSession } from "../../app/hooks/useStreamVoiceSession"
+import type { ContextMode, PresetType } from "../../app/lib/session-types"
 
 // ---------------------------------------------------------------------------
 // Mock: useStreamVoice (Unit 2)
@@ -9,6 +10,7 @@ import { useStreamVoiceSession } from "../../app/hooks/useStreamVoiceSession"
 
 let mockCallingState = CallingState.IDLE
 let mockStreamError: string | null = null
+let mockRemoteParticipantSessionIds: string[] = []
 const mockJoin = vi.fn().mockResolvedValue(undefined)
 const mockLeave = vi.fn().mockResolvedValue(undefined)
 let mockCall: Record<string, unknown> | null = null
@@ -20,6 +22,7 @@ vi.mock("../../app/hooks/useStreamVoice", () => ({
     call: mockCall,
     callingState: mockCallingState,
     error: mockStreamError,
+    remoteParticipantSessionIds: mockRemoteParticipantSessionIds,
     join: mockJoin,
     leave: mockLeave,
   }),
@@ -31,6 +34,18 @@ vi.mock("../../app/hooks/useStreamVoice", () => ({
 
 const mockAddMessage = vi.fn()
 const mockSetVoiceFailed = vi.fn()
+let mockSessionContextMode: ContextMode = "gaming"
+let mockSessionPresetType: PresetType | null = "vent"
+
+vi.mock("../../app/stores/session-store", () => ({
+  useSessionStore: (selector: (s: Record<string, unknown>) => unknown) =>
+    selector({
+      session: {
+        contextMode: mockSessionContextMode,
+        presetType: mockSessionPresetType,
+      },
+    }),
+}))
 
 vi.mock("../../app/stores/voice-store", () => ({
   useVoiceStore: (selector: (s: Record<string, unknown>) => unknown) =>
@@ -87,8 +102,12 @@ describe("useStreamVoiceSession", () => {
     vi.clearAllMocks()
     mockCallingState = CallingState.IDLE
     mockStreamError = null
+    mockRemoteParticipantSessionIds = []
     mockCall = null
+    mockSessionContextMode = "gaming"
+    mockSessionPresetType = "vent"
     callEventHandlers.clear()
+    vi.useRealTimers()
 
     mockFetch.mockResolvedValue({
       ok: true,
@@ -98,6 +117,7 @@ describe("useStreamVoiceSession", () => {
           token: "test-token",
           call_type: "audio_room",
           call_id: "test-call-123",
+          session_id: "voice-session-123",
         }),
       text: () => Promise.resolve(""),
     })
@@ -120,14 +140,41 @@ describe("useStreamVoiceSession", () => {
     })
 
     expect(mockFetch).toHaveBeenCalledWith(
-      "http://localhost:8001/api/sophia/user-1/voice/connect",
+      "/api/sophia/user-1/voice/connect",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          platform: "voice",
+          context_mode: "gaming",
+          ritual: "vent",
+        }),
       }),
     )
     // Stage should be connecting while waiting for call to be created
     expect(result.current.stage).toBe("connecting")
+  })
+
+  it("sends a null ritual for open or chat sessions", async () => {
+    mockSessionContextMode = "life"
+    mockSessionPresetType = "open"
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/connect",
+      expect.objectContaining({
+        body: JSON.stringify({
+          platform: "voice",
+          context_mode: "life",
+          ritual: null,
+        }),
+      }),
+    )
   })
 
   it("startTalking transitions to error on fetch failure", async () => {
@@ -146,6 +193,33 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("error")
     expect(result.current.error).toContain("503")
     expect(mockSetVoiceFailed).toHaveBeenCalled()
+  })
+
+  it("startTalking transitions to error when connect returns no session_id", async () => {
+    mockCall = makeCallMock()
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          api_key: "test-key",
+          token: "test-token",
+          call_type: "audio_room",
+          call_id: "test-call-123",
+          session_id: null,
+        }),
+      text: () => Promise.resolve(""),
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(result.current.stage).toBe("error")
+    expect(result.current.error).toBe("Sophia voice is unavailable right now. Try again.")
+    expect(mockSetVoiceFailed).toHaveBeenCalledWith("Sophia voice is unavailable right now. Try again.")
+    expect(mockJoin).not.toHaveBeenCalled()
   })
 
   it("startTalking with no userId sets error", async () => {
@@ -167,12 +241,84 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("connecting")
   })
 
-  it("maps CallingState.JOINED to listening", () => {
-    mockCallingState = CallingState.JOINED
+  it("keeps CallingState.JOINED in connecting until Sophia joins the call", async () => {
+    mockCall = makeCallMock()
 
-    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+    const { result, rerender } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    mockCallingState = CallingState.JOINED
+    rerender()
+
+    expect(result.current.stage).toBe("connecting")
+  })
+
+  it("transitions to listening when the expected Sophia session joins the call", async () => {
+    mockCall = makeCallMock()
+
+    const { result, rerender } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    mockCallingState = CallingState.JOINED
+    rerender()
+    expect(result.current.stage).toBe("connecting")
+
+    mockRemoteParticipantSessionIds = ["voice-session-123"]
+    rerender()
 
     expect(result.current.stage).toBe("listening")
+  })
+
+  it("does not treat Sophia custom events as startup readiness before the expected participant joins", async () => {
+    mockCall = makeCallMock()
+
+    const { result, rerender } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    mockCallingState = CallingState.JOINED
+    rerender()
+    expect(result.current.stage).toBe("connecting")
+
+    act(() => {
+      emitCustomEvent("sophia.user_transcript", {
+        text: "hello from user",
+        utterance_id: "utterance-1",
+      })
+    })
+
+    expect(result.current.stage).toBe("connecting")
+  })
+
+  it("times out startup when Sophia never joins the call", async () => {
+    vi.useFakeTimers()
+    mockCall = makeCallMock()
+
+    const { result, rerender } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    mockCallingState = CallingState.JOINED
+    rerender()
+    expect(result.current.stage).toBe("connecting")
+
+    act(() => {
+      vi.advanceTimersByTime(10_000)
+    })
+
+    expect(result.current.stage).toBe("error")
+    expect(result.current.error).toBe("Sophia voice is unavailable right now. Try again.")
+    expect(mockSetVoiceFailed).toHaveBeenCalledWith("Sophia voice is unavailable right now. Try again.")
   })
 
   it("forwards stream errors to voice-store", () => {
@@ -213,6 +359,51 @@ describe("useStreamVoiceSession", () => {
     })
 
     expect(result.current.partialReply).toBe("Hel")
+  })
+
+  it("handles sophia.user_transcript custom event", () => {
+    mockCallingState = CallingState.JOINED
+    mockCall = makeCallMock()
+
+    const onUserTranscript = vi.fn()
+    const { result } = renderHook(() =>
+      useStreamVoiceSession("user-1", { onUserTranscript }),
+    )
+
+    act(() => {
+      emitCustomEvent("sophia.user_transcript", {
+        text: "hello from user",
+        utterance_id: "utterance-1",
+      })
+    })
+
+    expect(onUserTranscript).toHaveBeenCalledWith("hello from user")
+    expect(result.current.finalReply).toBe("")
+    expect(mockAddMessage).not.toHaveBeenCalled()
+  })
+
+  it("ignores duplicate sophia.user_transcript events for the same utterance_id", () => {
+    mockCallingState = CallingState.JOINED
+    mockCall = makeCallMock()
+
+    const onUserTranscript = vi.fn()
+    renderHook(() =>
+      useStreamVoiceSession("user-1", { onUserTranscript }),
+    )
+
+    act(() => {
+      emitCustomEvent("sophia.user_transcript", {
+        text: "hello from user",
+        utterance_id: "utterance-1",
+      })
+      emitCustomEvent("sophia.user_transcript", {
+        text: "hello from user",
+        utterance_id: "utterance-1",
+      })
+    })
+
+    expect(onUserTranscript).toHaveBeenCalledTimes(1)
+    expect(onUserTranscript).toHaveBeenCalledWith("hello from user")
   })
 
   it("handles sophia.artifact custom event", () => {
@@ -261,11 +452,15 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("thinking")
   })
 
-  it("handles sophia.turn agent_ended → listening", () => {
+  it("handles sophia.turn agent_ended → listening", async () => {
     mockCallingState = CallingState.JOINED
     mockCall = makeCallMock()
 
     const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
 
     act(() => {
       emitCustomEvent("sophia.turn", { phase: "agent_ended" })

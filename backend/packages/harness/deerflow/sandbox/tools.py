@@ -78,6 +78,21 @@ def _is_skills_path(path: str) -> bool:
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
 
 
+def _join_path_preserving_style(base: str, relative: str) -> str:
+    """Join paths without forcing the current OS separator style."""
+    relative_path = relative.strip("/\\")
+    if not relative_path:
+        return base
+
+    separator = "\\" if "\\" in base and "/" not in base else "/"
+    normalized_base = base.rstrip("/\\") or separator
+    normalized_relative = relative_path.replace("\\", separator).replace("/", separator)
+
+    if normalized_base == separator:
+        return f"{separator}{normalized_relative}"
+    return f"{normalized_base}{separator}{normalized_relative}"
+
+
 def _resolve_skills_path(path: str) -> str:
     """Resolve a virtual skills path to a host filesystem path.
 
@@ -99,7 +114,7 @@ def _resolve_skills_path(path: str) -> str:
         return skills_host
 
     relative = path[len(skills_container):].lstrip("/")
-    return str(Path(skills_host) / relative) if relative else skills_host
+    return _join_path_preserving_style(skills_host, relative) if relative else skills_host
 
 
 def _path_variants(path: str) -> set[str]:
@@ -148,7 +163,7 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
             return actual_base
         if path.startswith(f"{virtual_base}/"):
             rest = path[len(virtual_base) :].lstrip("/")
-            return str(Path(actual_base) / rest) if rest else actual_base
+            return _join_path_preserving_style(actual_base, rest) if rest else actual_base
 
     return path
 

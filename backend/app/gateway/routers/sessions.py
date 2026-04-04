@@ -6,7 +6,7 @@ without the full offline pipeline being built yet.
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter
 from pydantic import BaseModel
@@ -84,7 +84,7 @@ class SessionEndResponse(BaseModel):
 @router.post("/start", response_model=SessionStartResponse)
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     """Create a new session (dev stub)."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     session_id = str(uuid.uuid4())
     thread_id = str(uuid.uuid4())
     message_id = str(uuid.uuid4())
@@ -112,7 +112,7 @@ async def get_active_session() -> ActiveSessionResponse:
 @router.post("/end", response_model=SessionEndResponse)
 async def end_session(body: SessionEndRequest) -> SessionEndResponse:
     """End a session (dev stub)."""
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     return SessionEndResponse(
         session_id=body.session_id,
         ended_at=now,

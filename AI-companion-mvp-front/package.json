@@ -15,6 +15,8 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "capture:session": "node scripts/capture-live-session.mjs",
+    "benchmark:voice": "node scripts/run-voice-benchmark.mjs",
     "test:e2e:memory": "playwright test tests/e2e/memory-highlights.spec.ts",
     "test:e2e:ci": "playwright test tests/e2e/memory-highlights.spec.ts --project=chromium",
     "test:guardrails:p4": "npm run check:logs:global && npm run check:sophia:surface-boundary && npm run type-check && vitest run src/__tests__/hooks/voice stream-protocol stream-transformers chat-request useSessionExtractedHooks useSessionRetryHandlers useSessionVoiceCommandSystem src/__tests__/architecture/runtime-ownership-contract.test.ts",

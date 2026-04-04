@@ -55,7 +55,7 @@ interface MessageBubbleProps {
 // COMPONENT
 // ============================================================================
 
-export function MessageBubble({ message, isLatest, onFeedback }: MessageBubbleProps) {
+export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
   const [isVisible, setIsVisible] = useState(!message.isNew);
   
   useEffect(() => {
@@ -114,15 +114,13 @@ export function MessageBubble({ message, isLatest, onFeedback }: MessageBubblePr
       {/* Sophia Avatar - visible for assistant messages */}
       {!isUser && (
         <div className={cn(
-          'shrink-0 w-8 h-8 rounded-full flex items-center justify-center mr-2 mt-3',
-          'bg-sophia-surface',
-          'border border-sophia-surface-border',
-          isLatest && 'ring-2 ring-sophia-purple/30 ring-offset-2 ring-offset-sophia-bg'
+          'shrink-0 w-7 h-7 rounded-full flex items-center justify-center mr-2 mt-3',
+          'bg-transparent'
         )}>
           <Sparkles className={cn(
-            'w-4 h-4 text-sophia-purple transition-all duration-500',
-            isLatest && 'animate-[sparkle_2s_ease-in-out_infinite]',
-            !isLatest && 'opacity-60'
+            'w-3.5 h-3.5 text-white/20 transition-all duration-500',
+            isLatest && 'animate-[sparkle_2s_ease-in-out_infinite] text-white/35',
+            !isLatest && 'opacity-50'
           )} />
         </div>
       )}
@@ -132,26 +130,21 @@ export function MessageBubble({ message, isLatest, onFeedback }: MessageBubblePr
           'max-w-[85%] sm:max-w-[75%] p-4 rounded-2xl relative group min-w-0',
           isUser
             ? cn(
-                'bg-sophia-user text-sophia-text',
-                // Queued message styling - dashed border and reduced opacity
-                isQueued && 'border border-dashed border-sophia-text2/30 opacity-70'
+                'bg-white/[0.06] text-white/70 border border-white/[0.04]',
+                isQueued && 'border-dashed border-white/10 opacity-70'
               )
-            // Sophia bubble - always has left border for type indication
             : cn(
-                'bg-sophia-bubble text-sophia-text border border-sophia-surface-border',
-                // Message type accent - 3px left border with color
-                'border-l-[3px]',
-                messageTypeStyle?.accentClass || 'border-l-transparent'
+                'bg-transparent text-white/75 font-light'
               ),
           // Subtle glow for assistant's latest message
-          !isUser && isLatest && 'shadow-soft',
+          !isUser && isLatest && 'shadow-[0_0_20px_rgba(255,255,255,0.02)]',
           // Dashed border for incomplete messages
           isIncomplete && 'border-dashed border-amber-400/50'
         )}
       >
         {(isVoiceTranscript || isVoiceResponse) && (
           <span
-            className="absolute top-2 right-2 text-sophia-text2/45 pointer-events-none"
+            className="absolute top-2 right-2 text-white/20 pointer-events-none"
             title={isVoiceTranscript ? 'Voice transcript' : 'Voice reply'}
             aria-hidden="true"
           >
@@ -178,7 +171,7 @@ export function MessageBubble({ message, isLatest, onFeedback }: MessageBubblePr
         
         {/* Queued message indicator */}
         {isQueued && (
-          <span className="flex items-center gap-1 mt-2 text-[11px] text-sophia-text2/70 italic">
+          <span className="flex items-center gap-1 mt-2 text-[11px] text-white/25 italic">
             <Clock className="w-3 h-3" />
             Queued - will send when online
           </span>
@@ -187,25 +180,13 @@ export function MessageBubble({ message, isLatest, onFeedback }: MessageBubblePr
         {/* Timestamp - revealed on hover, humanized */}
         <span 
           className={cn(
-            'absolute -bottom-5 text-[10px] text-sophia-text2/60 opacity-0 group-hover:opacity-100 transition-opacity cursor-default',
+            'absolute -bottom-5 text-[10px] text-white/20 opacity-0 group-hover:opacity-100 transition-opacity cursor-default',
             isUser ? 'right-2' : 'left-2'
           )}
           title={timeInfo.tooltip}
         >
           {timeInfo.text}
         </span>
-        
-        {/* Feedback buttons - only for assistant messages */}
-        {!isUser && onFeedback && (
-          <div className="absolute -bottom-5 right-2">
-            <MessageFeedback
-              messageId={message.id}
-              currentFeedback={message.feedback}
-              onFeedback={onFeedback}
-              compact
-            />
-          </div>
-        )}
       </div>
     </div>
   );

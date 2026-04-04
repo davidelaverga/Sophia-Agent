@@ -57,6 +57,7 @@ export type StreamVoiceCredentials = {
   token: string
   callType: string
   callId: string
+  sessionId?: string | null
 }
 
 export type UseStreamVoiceOptions = {
@@ -69,6 +70,7 @@ export type UseStreamVoiceReturn = {
   call: Call | null
   callingState: CallingState
   error: string | null
+  remoteParticipantSessionIds: string[]
   join: () => Promise<void>
   leave: () => Promise<void>
 }
@@ -83,6 +85,7 @@ export function useStreamVoice({
 }: UseStreamVoiceOptions): UseStreamVoiceReturn {
   const [callingState, setCallingState] = useState<CallingState>(CallingState.IDLE)
   const [error, setError] = useState<string | null>(null)
+  const [remoteParticipantSessionIds, setRemoteParticipantSessionIds] = useState<string[]>([])
   const [client, setClient] = useState<StreamVideoClient | null>(null)
   const [call, setCall] = useState<Call | null>(null)
   const clientRef = useRef<StreamVideoClient | null>(null)
@@ -116,14 +119,20 @@ export function useStreamVoice({
       setCallingState(state)
     })
 
+    const remoteParticipantsSubscription = streamCall.state.remoteParticipants$.subscribe((participants) => {
+      setRemoteParticipantSessionIds(participants.map((participant) => participant.sessionId))
+    })
+
     return () => {
       unsubscribe.unsubscribe()
+      remoteParticipantsSubscription.unsubscribe()
       audioCleanupRef.current?.()
       audioCleanupRef.current = null
       streamCall.leave().catch(() => {})
       streamClient.disconnectUser().catch(() => {})
       clientRef.current = null
       callRef.current = null
+      setRemoteParticipantSessionIds([])
       setClient(null)
       setCall(null)
       setCallingState(CallingState.IDLE)
@@ -139,15 +148,17 @@ export function useStreamVoice({
 
     try {
       logger.debug("StreamVoice", "Starting join")
-      // Audio-only: disable camera BEFORE join to prevent getUserMedia({video})
+      // Disable camera before join, but wait to acquire the microphone until the
+      // call is actually joined so early audio is not lost during connection.
       await call.camera.disable()
-      await call.microphone.enable()
 
       logger.debug("StreamVoice", "Joining call", { create: true })
       await call.join({ create: true })
       logger.debug("StreamVoice", "Join succeeded", {
         callingState: String(call.state.callingState),
       })
+
+      await call.microphone.enable()
 
       // Bind remote audio since we're outside <StreamCall> context
       audioCleanupRef.current = bindRemoteAudio(call)
@@ -185,6 +196,7 @@ export function useStreamVoice({
     call,
     callingState,
     error,
+    remoteParticipantSessionIds,
     join,
     leave,
   }

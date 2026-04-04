@@ -7,7 +7,7 @@ via add_memories() with full metadata and status="pending_review".
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anthropic
@@ -86,7 +86,7 @@ def extract_session_memories(
         return []
 
     metadata = session_metadata or {}
-    session_date = metadata.get("session_date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    session_date = metadata.get("session_date", datetime.now(UTC).strftime("%Y-%m-%d"))
 
     # Format the transcript
     transcript = _format_transcript(messages)

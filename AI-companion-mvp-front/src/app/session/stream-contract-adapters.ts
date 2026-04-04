@@ -6,6 +6,7 @@ import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 export type StreamArtifactsPayload = {
   takeaway?: string;
   reflection_candidate?: string | { prompt?: string; why?: string };
+  reflection?: string | { prompt?: string; why?: string };
   memory_candidates?: unknown[];
   [key: string]: unknown;
 };
@@ -44,6 +45,14 @@ export function parseArtifactsPayload(data: unknown): StreamArtifactsPayload | n
     (typeof payload.reflection_candidate !== 'object' || payload.reflection_candidate === null)
   ) {
     delete payload.reflection_candidate;
+  }
+
+  if (
+    payload.reflection !== undefined &&
+    typeof payload.reflection !== 'string' &&
+    (typeof payload.reflection !== 'object' || payload.reflection === null)
+  ) {
+    delete payload.reflection;
   }
 
   if (payload.memory_candidates !== undefined && !Array.isArray(payload.memory_candidates)) {

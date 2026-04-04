@@ -88,11 +88,14 @@ class VoiceSettings:
     adaptive_silence_long_ms: int
     adaptive_silence_ceiling_ms: int
     adaptive_silence_continuation_bonus_ms: int
+    adaptive_silence_fragment_bonus_ms: int
+    backend_stall_timeout_ms: int
     fragile_window_ms: int
     merge_min_new_words: int
     rhythm_min_sessions: int
     rhythm_base_min_ms: int
     rhythm_base_max_ms: int
+    same_turn_repeat_debounce_ms: int
 
     @property
     def llm_label(self) -> str:
@@ -220,11 +223,18 @@ def get_settings() -> VoiceSettings:
         adaptive_silence_continuation_bonus_ms=_env_int(
             "SOPHIA_ADAPTIVE_SILENCE_CONTINUATION_BONUS_MS", 800
         ),
+        adaptive_silence_fragment_bonus_ms=_env_int(
+            "SOPHIA_ADAPTIVE_SILENCE_FRAGMENT_BONUS_MS", 1400
+        ),
+        backend_stall_timeout_ms=_env_int("SOPHIA_BACKEND_STALL_TIMEOUT_MS", 8000),
         fragile_window_ms=_env_int("SOPHIA_FRAGILE_WINDOW_MS", 600),
         merge_min_new_words=_env_int("SOPHIA_MERGE_MIN_NEW_WORDS", 2),
         rhythm_min_sessions=_env_int("SOPHIA_RHYTHM_MIN_SESSIONS", 5),
         rhythm_base_min_ms=_env_int("SOPHIA_RHYTHM_BASE_MIN_MS", 800),
         rhythm_base_max_ms=_env_int("SOPHIA_RHYTHM_BASE_MAX_MS", 2400),
+        same_turn_repeat_debounce_ms=_env_int(
+            "SOPHIA_SAME_TURN_REPEAT_DEBOUNCE_MS", 1200
+        ),
     )
     settings.validate()
     return settings

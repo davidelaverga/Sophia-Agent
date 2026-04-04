@@ -172,7 +172,7 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
                     "thread_id": "thread-123",
                 }
             },
-            "stream_mode": ["messages-tuple"],
+            "stream_mode": ["messages-tuple", "values"],
         }
     ]
 
@@ -499,6 +499,108 @@ async def test_stream_events_emit_artifact_only_once() -> None:
 
     assert [event.kind for event in events] == ["text", "artifact"]
     assert events[0].text == "Hi"
+    assert events[1].artifact == artifact
+
+
+@pytest.mark.anyio
+async def test_stream_events_prefer_final_values_artifact_over_streamed_args() -> None:
+    streamed_artifact = _valid_artifact()
+    final_artifact = {
+        **streamed_artifact,
+        "takeaway": "The final state artifact should be authoritative.",
+        "voice_emotion_primary": "supportive",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: messages",
+                "data: " + json.dumps([
+                    {
+                        "type": "AIMessageChunk",
+                        "content": [{"text": "Hi", "type": "text", "index": 0}],
+                        "tool_calls": [
+                            {"name": "emit_artifact", "args": streamed_artifact, "id": "call-1", "type": "tool_call"},
+                        ],
+                    },
+                    {"id": "meta-1"},
+                ]),
+                "event: values",
+                "data: " + json.dumps({"current_artifact": final_artifact}),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["text", "artifact"]
+    assert events[0].text == "Hi"
+    assert events[1].artifact == final_artifact
+
+
+@pytest.mark.anyio
+async def test_stream_events_recover_artifact_from_final_values_after_partial_tool_args() -> None:
+    artifact = _valid_artifact()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: messages",
+                "data: " + json.dumps([
+                    {
+                        "type": "AIMessageChunk",
+                        "content": [
+                            {"text": "Hello ", "type": "text", "index": 0},
+                            {"id": "tool-1", "type": "tool_use", "name": "emit_artifact"},
+                        ],
+                        "tool_calls": [
+                            {"name": "emit_artifact", "args": {}, "id": "call-1", "type": "tool_call"},
+                        ],
+                    },
+                    {"id": "meta-1"},
+                ]),
+                "data: " + json.dumps([
+                    {
+                        "type": "tool",
+                        "name": "emit_artifact",
+                        "content": "Artifact recorded.",
+                    },
+                    {"id": "meta-2"},
+                ]),
+                "event: values",
+                "data: " + json.dumps({"values": {"current_artifact": artifact}}),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["text", "artifact"]
+    assert events[0].text == "Hello "
     assert events[1].artifact == artifact
 
 

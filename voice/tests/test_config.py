@@ -50,3 +50,14 @@ def test_deerflow_requires_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert settings.backend_mode == "deerflow"
     assert settings.langgraph_base_url == "http://127.0.0.1:2024"
+
+
+def test_turn_recovery_defaults_and_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv("SOPHIA_BACKEND_STALL_TIMEOUT_MS", "4500")
+    monkeypatch.setenv("SOPHIA_SAME_TURN_REPEAT_DEBOUNCE_MS", "250")
+
+    settings = get_settings()
+
+    assert settings.backend_stall_timeout_ms == 4500
+    assert settings.same_turn_repeat_debounce_ms == 250

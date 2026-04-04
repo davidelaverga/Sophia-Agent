@@ -1,11 +1,9 @@
 """Tests for all Sophia middleware components."""
 
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # --- User ID validation and path traversal ---
 
@@ -280,14 +278,15 @@ class TestPlatformContextMiddleware:
 
 class TestUserIdentityMiddleware:
     def test_loads_identity_file(self, tmp_path):
-        from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+        import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         import deerflow.agents.sophia_agent.paths as paths
+        from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+
         # Create a temporary user identity file
         user_dir = tmp_path / "test_user"
         user_dir.mkdir(parents=True)
         (user_dir / "identity.md").write_text("Name: Test User\nRole: Developer")
 
-        import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -301,9 +300,10 @@ class TestUserIdentityMiddleware:
             mod.USERS_DIR = original_users_dir
 
     def test_missing_identity_returns_none(self, tmp_path):
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
+        import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -327,8 +327,9 @@ class TestUserIdentityMiddleware:
 class TestSessionStateMiddleware:
     def test_smart_opener_on_greeting(self, tmp_path):
         """Greeting message → opener delivered as first_turn_instruction."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -355,8 +356,9 @@ class TestSessionStateMiddleware:
 
     def test_substantive_message_gets_context_not_instruction(self, tmp_path):
         """Real content on turn 0 → opener becomes context, not instruction."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -383,8 +385,9 @@ class TestSessionStateMiddleware:
             mod.USERS_DIR = original_users_dir
 
     def test_no_opener_on_turn_1(self, tmp_path):
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -402,8 +405,9 @@ class TestSessionStateMiddleware:
             mod.USERS_DIR = original_users_dir
 
     def test_missing_handoff_returns_none(self, tmp_path):
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -922,8 +926,10 @@ class TestArtifactMiddleware:
 
 class TestPromptAssemblyMiddleware:
     def test_assembles_blocks_into_system_message(self):
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         from langchain_core.messages import SystemMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
         state = {
             "messages": [_make_message("hello")],
@@ -993,6 +999,7 @@ class TestEmitArtifactTool:
 class TestRetrieveMemoriesTool:
     def test_tool_uses_bound_user_id(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool = make_retrieve_memories_tool("user_A")
@@ -1009,6 +1016,7 @@ class TestRetrieveMemoriesTool:
 
     def test_different_user_ids_produce_different_tools(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool_a = make_retrieve_memories_tool("user_A")
@@ -1024,6 +1032,7 @@ class TestRetrieveMemoriesTool:
 
     def test_no_results_returns_message(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool = make_retrieve_memories_tool("user_test")
@@ -1033,6 +1042,7 @@ class TestRetrieveMemoriesTool:
 
     def test_exception_returns_unavailable(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool = make_retrieve_memories_tool("user_test")

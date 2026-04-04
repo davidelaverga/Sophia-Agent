@@ -66,6 +66,8 @@ export function useSessionExitOrchestration({
   const {
     showExitConfirm,
     showDebriefOffer,
+    showEmergence,
+    showFeedback,
     debriefData,
     isNavigatingToRecap,
     openExitConfirm,
@@ -74,6 +76,9 @@ export function useSessionExitOrchestration({
     handleCancelExit,
     handleStartDebrief,
     handleSkipToRecap,
+    handleEmergenceComplete,
+    handleFeedbackComplete,
+    handleAbruptExit,
   } = useSessionExitFlow({
     isReadOnly,
     isSophiaResponding,
@@ -99,12 +104,14 @@ export function useSessionExitOrchestration({
     messages,
     updateMessages,
     openExitConfirm,
-    isExitInProgress: isEnding || isNavigatingToRecap || showDebriefOffer,
+    isExitInProgress: isEnding || isNavigatingToRecap || showDebriefOffer || showEmergence || showFeedback,
   });
 
   return {
     showExitConfirm,
     showDebriefOffer,
+    showEmergence,
+    showFeedback,
     debriefData,
     isNavigatingToRecap,
     handleEndSession,
@@ -112,5 +119,8 @@ export function useSessionExitOrchestration({
     handleCancelExit,
     handleStartDebrief,
     handleSkipToRecap,
+    handleEmergenceComplete,
+    handleFeedbackComplete,
+    handleAbruptExit,
   };
 }

@@ -1,12 +1,10 @@
 """Tests for handoffs.py and smart_opener.py — handoff generation and smart opener."""
 
 import re
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers

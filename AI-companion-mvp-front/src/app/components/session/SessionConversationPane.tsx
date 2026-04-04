@@ -20,7 +20,7 @@ import { NudgeBanner, type NudgeSuggestion } from './NudgeBanner';
 import { ReflectionPromptBubble, ReflectionResponseBubble } from './ReflectionBubble';
 import { ResolvedInterruptBadge } from './ResolvedInterruptBadge';
 import { SessionEmptyState } from './SessionEmptyState';
-import { TypingIndicator } from './TypingIndicator';
+// TypingIndicator removed — replaced with whisper text (R28)
 import { InterruptCard } from './InterruptCard';
 import { OnboardingTipGuard } from '../onboarding';
 
@@ -68,6 +68,7 @@ interface SessionConversationPaneProps {
   nudgeSuggestion: NudgeSuggestion | null;
   onNudgeAccept: (actionType: InvokeType) => void;
   onNudgeDismiss: () => void;
+  onImpulse?: () => void;
   onGoToDashboard: () => void;
 }
 
@@ -115,6 +116,7 @@ export function SessionConversationPane({
   nudgeSuggestion,
   onNudgeAccept,
   onNudgeDismiss,
+  onImpulse,
   onGoToDashboard,
 }: SessionConversationPaneProps) {
   return (
@@ -122,20 +124,20 @@ export function SessionConversationPane({
       {isReadOnly && (
         <div className="px-4 py-2 animate-fadeIn">
           <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-sophia-surface-border bg-sophia-surface/70 px-4 py-3 shadow-soft">
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.04] backdrop-blur-sm px-4 py-3">
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-sophia-purple/10 flex items-center justify-center">
-                  <Lock className="w-4 h-4 text-sophia-purple" />
+                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-white/[0.06] flex items-center justify-center">
+                  <Lock className="w-4 h-4 text-white/40" />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-sophia-text truncate">Read-only session</p>
-                  <p className="text-xs text-sophia-text2">This conversation has ended. Start a new session to continue.</p>
+                  <p className="text-sm font-medium text-white/60 truncate">Read-only session</p>
+                  <p className="text-xs text-white/30">This conversation has ended. Start a new session to continue.</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={onGoToDashboard}
-                className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium text-sophia-text bg-sophia-button border border-sophia-surface-border hover:bg-sophia-button-hover hover:border-sophia-purple/30 transition-colors"
+                className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium text-white/60 bg-white/[0.06] border border-white/[0.08] hover:bg-white/[0.10] transition-colors"
               >
                 Go to dashboard
               </button>
@@ -144,17 +146,17 @@ export function SessionConversationPane({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto scroll-pb-4 [scrollbar-width:none] [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:hidden">
+      <div className="flex-1 overflow-y-auto scroll-pb-4 [scrollbar-color:rgba(255,255,255,0.06)_transparent] [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:bg-white/[0.06] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent">
         {messages.length === 0 && isInitializingChat ? (
           <div className="p-4 pb-6 max-w-3xl lg:max-w-4xl mx-auto animate-pulse">
-            <div className="max-w-[70%] px-4 py-3 rounded-2xl bg-sophia-surface border border-sophia-surface-border">
+            <div className="max-w-[70%] px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/[0.03]">
               <div className="flex items-center gap-2 mb-2">
-                <div className="w-6 h-6 rounded-full bg-sophia-surface-hover" />
-                <div className="h-3 w-12 bg-sophia-surface-hover rounded" />
+                <div className="w-6 h-6 rounded-full bg-white/[0.06]" />
+                <div className="h-3 w-12 bg-white/[0.06] rounded" />
               </div>
               <div className="space-y-2">
-                <div className="h-4 bg-sophia-surface-hover rounded w-full" />
-                <div className="h-4 bg-sophia-surface-hover rounded w-3/4" />
+                <div className="h-4 bg-white/[0.06] rounded w-full" />
+                <div className="h-4 bg-white/[0.06] rounded w-3/4" />
               </div>
             </div>
           </div>
@@ -251,6 +253,7 @@ export function SessionConversationPane({
                       ? onInterruptSnooze
                       : undefined}
                     onDismiss={onInterruptDismiss}
+                    onImpulse={onImpulse}
                     isLoading={isResuming}
                   />
                 </InterruptCardErrorBoundary>
@@ -266,7 +269,7 @@ export function SessionConversationPane({
                 )}
 
                 {interruptQueueLength > 0 && (
-                  <p className="text-center text-[10px] text-sophia-text2/50 mt-1">
+                  <p className="text-center text-[10px] text-white/20 mt-1">
                     +{interruptQueueLength} more {interruptQueueLength === 1 ? 'question' : 'questions'} queued
                   </p>
                 )}
@@ -277,10 +280,28 @@ export function SessionConversationPane({
 
             {showThinkingIndicator && (
               <div className="px-4 py-3">
-                <TypingIndicator
-                  onCancel={onCancelThinking}
-                  cancelLabel={isVoiceThinking && !isTyping ? 'Stop' : 'Cancel'}
-                />
+                {isVoiceThinking ? (
+                  /* Voice mode: nebula handles thinking visual, just show cancel */
+                  <button
+                    onClick={onCancelThinking}
+                    className="text-[10px] tracking-[0.18em] lowercase text-white/10 hover:text-white/25 transition-colors duration-300"
+                  >
+                    stop
+                  </button>
+                ) : (
+                  /* Text mode: whisper-style reflecting indicator */
+                  <div className="flex items-center gap-3">
+                    <span className="text-[10px] tracking-[0.18em] lowercase text-white/10 transition-colors duration-1000">
+                      sophia is reflecting...
+                    </span>
+                    <button
+                      onClick={onCancelThinking}
+                      className="text-[10px] tracking-[0.18em] lowercase text-white/10 hover:text-white/25 transition-colors duration-300"
+                    >
+                      cancel
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -323,6 +344,7 @@ export function SessionConversationPane({
           suggestion={nudgeSuggestion}
           onAccept={onNudgeAccept}
           onDismiss={onNudgeDismiss}
+          onImpulse={onImpulse}
         />
       )}
     </>

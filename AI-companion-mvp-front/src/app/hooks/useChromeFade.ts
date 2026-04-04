@@ -5,22 +5,17 @@ import { usePresenceStore } from "../stores/presence-store"
 import { useUiStore } from "../stores/ui-store"
 
 const FADE_DELAY_MS = 500
-const DARK_FADED_OPACITY = 0.08
-const LIGHT_FADED_OPACITY = 0.12
+const FADED_OPACITY = 0.15
+const RESTING_OPACITY = 0.7
 
 /** Presence states that trigger chrome fade */
 const ACTIVE_STATES = new Set(["listening", "thinking", "reflecting", "speaking"])
-
-function isDarkMode(): boolean {
-  if (typeof document === "undefined") return true
-  return document.documentElement.classList.contains("dark")
-}
 
 /**
  * Manages session chrome fade based on Sophia's presence state.
  *
  * When presence enters an active state (listening/thinking/reflecting/speaking),
- * fades chrome after 500ms. When resting, restores immediately.
+ * fades chrome after 500ms. When resting, restores to 0.7 (not fully opaque).
  * Respects kill switch and text mode.
  *
  * Returns { chromeFaded, chromeOpacity } for consumers.
@@ -71,9 +66,7 @@ export function useChromeFade() {
     }
   }, [presenceStatus, disableChromeFade, mode, chromeFaded, setChromeFaded])
 
-  const chromeOpacity = chromeFaded
-    ? isDarkMode() ? DARK_FADED_OPACITY : LIGHT_FADED_OPACITY
-    : 1.0
+  const chromeOpacity = chromeFaded ? FADED_OPACITY : RESTING_OPACITY
 
   return { chromeFaded, chromeOpacity }
 }

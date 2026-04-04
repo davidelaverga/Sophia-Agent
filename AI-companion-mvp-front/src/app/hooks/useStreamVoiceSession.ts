@@ -18,9 +18,12 @@ import {
   type StreamVoiceCredentials,
 } from "./useStreamVoice"
 import { logger } from "../lib/error-logger"
+import { recordSophiaCaptureEvent } from "../lib/session-capture"
+import { useSessionStore } from "../stores/session-store"
 import { useVoiceStore } from "../stores/voice-store"
 import { usePresenceStore } from "../stores/presence-store"
 import { usePlatformSignal } from "./usePlatformSignal"
+import type { ContextMode, PresetType } from "../lib/session-types"
 import type { VoiceStage } from "../lib/voice-types"
 
 // ---------------------------------------------------------------------------
@@ -66,20 +69,27 @@ export type StreamVoiceSessionReturn = {
 // ---------------------------------------------------------------------------
 
 const THINKING_TIMEOUT_MS = 15_000
-const GATEWAY_URL = process.env.NEXT_PUBLIC_GATEWAY_URL || "http://localhost:8001"
-const TOKEN_ENDPOINT = `${GATEWAY_URL}/api/sophia`
+const STARTUP_READY_TIMEOUT_MS = 10_000
+const STARTUP_READY_TIMEOUT_MESSAGE = "Sophia voice is unavailable right now. Try again."
+const TOKEN_ENDPOINT = "/api/sophia"
+const RECENT_UTTERANCE_IDS_LIMIT = 20
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function callingStateToVoiceStage(cs: CallingState): VoiceStage {
+function callingStateToVoiceStage(
+  cs: CallingState,
+  isSophiaReady: boolean,
+  hasActiveCredentials: boolean,
+): VoiceStage {
   switch (cs) {
     case CallingState.JOINING:
     case CallingState.RECONNECTING:
       return "connecting"
     case CallingState.JOINED:
-      return "listening"
+      if (!hasActiveCredentials) return "idle"
+      return isSophiaReady ? "listening" : "connecting"
     case CallingState.LEFT:
     case CallingState.IDLE:
       return "idle"
@@ -91,11 +101,17 @@ function callingStateToVoiceStage(cs: CallingState): VoiceStage {
 async function fetchStreamCredentials(
   userId: string,
   platform: string,
+  contextMode: ContextMode,
+  ritual: string | null,
 ): Promise<StreamVoiceCredentials> {
   const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/connect`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ platform }),
+    body: JSON.stringify({
+      platform,
+      context_mode: contextMode,
+      ritual,
+    }),
   })
   if (!res.ok) {
     const body = await res.text().catch(() => "")
@@ -107,6 +123,19 @@ async function fetchStreamCredentials(
     token: data.token,
     callType: data.call_type,
     callId: data.call_id,
+    sessionId: typeof data.session_id === "string" ? data.session_id : null,
+  }
+}
+
+function resolveVoiceRitual(presetType: PresetType | null): string | null {
+  switch (presetType) {
+    case "prepare":
+    case "debrief":
+    case "reset":
+    case "vent":
+      return presetType
+    default:
+      return null
   }
 }
 
@@ -126,11 +155,17 @@ export function useStreamVoiceSession(
   const [finalReply, setFinalReply] = useState("")
   const [error, setError] = useState<string | undefined>(undefined)
   const [credentials, setCredentials] = useState<StreamVoiceCredentials | null>(null)
+  const [isSophiaReady, setIsSophiaReady] = useState(false)
 
   // --- Refs (mutable, non-render-triggering) -------------------------------
   const prevCallingStateRef = useRef<CallingState>(CallingState.IDLE)
+  const prevSophiaReadyRef = useRef(false)
   const thinkingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const startupReadyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const recentUserTranscriptIdsRef = useRef<string[]>([])
   const destroyedRef = useRef(false)
+  const errorStageLockRef = useRef(false)
+  const isSophiaReadyRef = useRef(false)
   const onArtifactsRef = useRef(onArtifacts)
   const onUserTranscriptRef = useRef(onUserTranscript)
   const onAssistantResponseRef = useRef(onAssistantResponse)
@@ -141,9 +176,12 @@ export function useStreamVoiceSession(
   useEffect(() => { onUserTranscriptRef.current = onUserTranscript }, [onUserTranscript])
   useEffect(() => { onAssistantResponseRef.current = onAssistantResponse }, [onAssistantResponse])
   useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
+  useEffect(() => { isSophiaReadyRef.current = isSophiaReady }, [isSophiaReady])
 
   // --- Platform signal ------------------------------------------------------
   const platform = usePlatformSignal()
+  const contextMode = useSessionStore((state) => state.session?.contextMode ?? "life")
+  const presetType = useSessionStore((state) => state.session?.presetType ?? null)
 
   // --- Stores --------------------------------------------------------------
   const addVoiceMessage = useVoiceStore((s) => s.addMessage)
@@ -159,6 +197,7 @@ export function useStreamVoiceSession(
     call,
     callingState,
     error: streamError,
+    remoteParticipantSessionIds,
     join,
     leave,
   } = useStreamVoice({
@@ -184,16 +223,125 @@ export function useStreamVoiceSession(
     }, THINKING_TIMEOUT_MS)
   }, [clearThinking])
 
+  const clearStartupReadyTimeout = useCallback(() => {
+    if (startupReadyTimeoutRef.current) {
+      clearTimeout(startupReadyTimeoutRef.current)
+      startupReadyTimeoutRef.current = null
+    }
+  }, [])
+
+  const hasSeenUserTranscriptId = useCallback((utteranceId: string) => {
+    return recentUserTranscriptIdsRef.current.includes(utteranceId)
+  }, [])
+
+  const rememberUserTranscriptId = useCallback((utteranceId: string) => {
+    recentUserTranscriptIdsRef.current = [
+      ...recentUserTranscriptIdsRef.current.filter((existingId) => existingId !== utteranceId),
+      utteranceId,
+    ].slice(-RECENT_UTTERANCE_IDS_LIMIT)
+  }, [])
+
+  const markSophiaReady = useCallback(
+    (
+      reason: "remote-participant" | "custom-event",
+      metadata?: Record<string, unknown>,
+    ) => {
+      if (isSophiaReadyRef.current) return
+
+      clearStartupReadyTimeout()
+      isSophiaReadyRef.current = true
+      setIsSophiaReady(true)
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "sophia-ready",
+        payload: {
+          reason,
+          voiceAgentSessionId: credentials?.sessionId ?? null,
+          sessionId: sessionIdRef.current ?? null,
+          ...metadata,
+        },
+      })
+    },
+    [clearStartupReadyTimeout, credentials?.sessionId],
+  )
+
+  const failVoiceStartup = useCallback(
+    (name: string, payload: Record<string, unknown> = {}) => {
+      errorStageLockRef.current = true
+      clearThinking()
+      clearStartupReadyTimeout()
+      isSophiaReadyRef.current = false
+      setIsSophiaReady(false)
+      setError(STARTUP_READY_TIMEOUT_MESSAGE)
+      setStage("error")
+      setVoiceFailed(STARTUP_READY_TIMEOUT_MESSAGE)
+      setListeningPresence(false)
+      setSpeakingPresence(false)
+      settlePresence()
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name,
+        payload: {
+          voiceAgentSessionId: credentials?.sessionId ?? null,
+          sessionId: sessionIdRef.current ?? null,
+          ...payload,
+        },
+      })
+      setCredentials(null)
+    },
+    [
+      clearStartupReadyTimeout,
+      clearThinking,
+      credentials?.sessionId,
+      setListeningPresence,
+      setSpeakingPresence,
+      settlePresence,
+      setVoiceFailed,
+    ],
+  )
+
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
   useEffect(() => {
-    // Only react to actual CallingState transitions — prevents stale
-    // CallingState from overriding stages set explicitly by actions
-    // (e.g. startTalking → "connecting" while CallingState is still IDLE)
-    if (callingState === prevCallingStateRef.current) return
-    prevCallingStateRef.current = callingState
+    if (
+      callingState === prevCallingStateRef.current
+      && isSophiaReady === prevSophiaReadyRef.current
+    ) return
 
-    const mapped = callingStateToVoiceStage(callingState)
-    setStage(mapped)
+    prevCallingStateRef.current = callingState
+    prevSophiaReadyRef.current = isSophiaReady
+
+    const mapped = callingStateToVoiceStage(
+      callingState,
+      isSophiaReady,
+      Boolean(credentials),
+    )
+    setStage((currentStage) => {
+      if (errorStageLockRef.current && currentStage === "error") {
+        return currentStage
+      }
+
+      if (
+        callingState === CallingState.JOINED
+        && isSophiaReady
+        && (currentStage === "speaking" || currentStage === "thinking")
+      ) {
+        return currentStage
+      }
+
+      return mapped
+    })
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "calling-state-changed",
+      payload: {
+        callingState,
+        mappedStage: mapped,
+        isSophiaReady,
+        sessionId: sessionIdRef.current ?? null,
+      },
+    })
+
+    if (errorStageLockRef.current) return
 
     // Update presence to match
     if (mapped === "listening") {
@@ -209,16 +357,90 @@ export function useStreamVoiceSession(
       setSpeakingPresence(false)
       settlePresence()
     }
-  }, [callingState, setListeningPresence, setSpeakingPresence, setMetaPresence, settlePresence])
+  }, [
+    callingState,
+    credentials,
+    isSophiaReady,
+    setListeningPresence,
+    setMetaPresence,
+    setSpeakingPresence,
+    settlePresence,
+  ])
+
+  // --- Startup readiness detection ----------------------------------------
+  useEffect(() => {
+    if (callingState !== CallingState.JOINED) return
+
+    const voiceAgentSessionId = credentials?.sessionId
+    if (!voiceAgentSessionId) return
+    if (!remoteParticipantSessionIds.includes(voiceAgentSessionId)) return
+
+    markSophiaReady("remote-participant")
+  }, [
+    callingState,
+    credentials?.sessionId,
+    markSophiaReady,
+    remoteParticipantSessionIds,
+  ])
+
+  useEffect(() => {
+    if (!credentials?.sessionId || isSophiaReady) {
+      clearStartupReadyTimeout()
+      return
+    }
+
+    if (callingState === CallingState.IDLE || callingState === CallingState.LEFT) {
+      clearStartupReadyTimeout()
+      return
+    }
+
+    if (startupReadyTimeoutRef.current) return
+
+    startupReadyTimeoutRef.current = setTimeout(() => {
+      if (destroyedRef.current || isSophiaReadyRef.current) return
+
+      logger.warn("Voice startup timed out waiting for Sophia readiness", {
+        component: "StreamVoiceSession",
+        action: "startTalking",
+        metadata: {
+          callId: credentials.callId,
+          voiceAgentSessionId: credentials.sessionId,
+        },
+      })
+      failVoiceStartup("startup-ready-timeout", {
+        callId: credentials.callId,
+        callType: credentials.callType,
+      })
+    }, STARTUP_READY_TIMEOUT_MS)
+
+    return clearStartupReadyTimeout
+  }, [
+    callingState,
+    clearStartupReadyTimeout,
+    credentials?.callId,
+    credentials?.callType,
+    credentials?.sessionId,
+    failVoiceStartup,
+    isSophiaReady,
+  ])
 
   // --- Stream error forwarding ---------------------------------------------
   useEffect(() => {
     if (streamError) {
+      clearStartupReadyTimeout()
       setStage("error")
       setError(streamError)
       setVoiceFailed(streamError)
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "stream-error",
+        payload: {
+          error: streamError,
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
     }
-  }, [streamError, setVoiceFailed])
+  }, [clearStartupReadyTimeout, setVoiceFailed, streamError])
 
   // --- Custom event listener (transcripts + artifacts) ---------------------
   useEffect(() => {
@@ -226,6 +448,17 @@ export function useStreamVoiceSession(
 
     const handleCustomEvent = (event: { type: string; custom: Record<string, unknown> }) => {
       const { type } = event.custom ?? {}
+
+      if (typeof type === "string" && type.startsWith("sophia.")) {
+        recordSophiaCaptureEvent({
+          category: "stream-custom",
+          name: type,
+          payload: {
+            data: event.custom.data,
+            sessionId: sessionIdRef.current ?? null,
+          },
+        })
+      }
 
       if (type === "sophia.transcript") {
         const data = event.custom.data as { text?: string; is_final?: boolean } | undefined
@@ -239,6 +472,29 @@ export function useStreamVoiceSession(
         } else {
           setPartialReply(data.text)
         }
+      }
+
+      if (type === "sophia.user_transcript") {
+        const data = event.custom.data as { text?: string; utterance_id?: string } | undefined
+        if (!data?.text) return
+
+        if (typeof data.utterance_id === "string") {
+          if (hasSeenUserTranscriptId(data.utterance_id)) {
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "duplicate-user-transcript-ignored",
+              payload: {
+                utteranceId: data.utterance_id,
+                sessionId: sessionIdRef.current ?? null,
+              },
+            })
+            return
+          }
+
+          rememberUserTranscriptId(data.utterance_id)
+        }
+
+        onUserTranscriptRef.current?.(data.text)
       }
 
       if (type === "sophia.artifact") {
@@ -284,22 +540,72 @@ export function useStreamVoiceSession(
     if (!userId) {
       setError("No user ID")
       setStage("error")
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "start-talking-rejected",
+        payload: {
+          reason: "missing-user-id",
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
       return
     }
 
+    errorStageLockRef.current = false
+    clearStartupReadyTimeout()
+    isSophiaReadyRef.current = false
+    recentUserTranscriptIdsRef.current = []
+    setIsSophiaReady(false)
     setStage("connecting")
     setError(undefined)
     setPartialReply("")
     setFinalReply("")
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "start-talking-requested",
+      payload: {
+        userId,
+        platform,
+        sessionId: sessionIdRef.current ?? null,
+      },
+    })
 
     try {
       logger.debug("StreamVoiceSession", "Fetching credentials", {
         userId,
         platform,
+        contextMode,
+        ritual: resolveVoiceRitual(presetType),
       })
-      const creds = await fetchStreamCredentials(userId, platform)
+      const creds = await fetchStreamCredentials(
+        userId,
+        platform,
+        contextMode,
+        resolveVoiceRitual(presetType),
+      )
+      if (!creds.sessionId) {
+        logger.warn("Voice connect returned without session_id", {
+          component: "StreamVoiceSession",
+          action: "startTalking",
+          metadata: { callId: creds.callId },
+        })
+        failVoiceStartup("missing-session-id", {
+          callId: creds.callId,
+          callType: creds.callType,
+        })
+        return
+      }
       logger.debug("StreamVoiceSession", "Credentials received", {
         callId: creds.callId,
+      })
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "credentials-received",
+        payload: {
+          callId: creds.callId,
+          callType: creds.callType,
+          sessionId: sessionIdRef.current ?? null,
+        },
       })
       setCredentials(creds)
       // join() will be triggered by useStreamVoice once credentials cause client init
@@ -308,8 +614,24 @@ export function useStreamVoiceSession(
       setError(message)
       setStage("error")
       setVoiceFailed(message)
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "start-talking-failed",
+        payload: {
+          error: message,
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
     }
-  }, [userId, platform, setVoiceFailed])
+  }, [
+    clearStartupReadyTimeout,
+    contextMode,
+    failVoiceStartup,
+    platform,
+    presetType,
+    setVoiceFailed,
+    userId,
+  ])
 
   // Auto-join when credentials arrive and call is ready
   useEffect(() => {
@@ -321,39 +643,89 @@ export function useStreamVoiceSession(
 
   const stopTalking = useCallback(async () => {
     clearThinking()
+    clearStartupReadyTimeout()
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "stop-talking-requested",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+      },
+    })
     try {
       await leave()
     } catch {
       // Best-effort
     }
+    errorStageLockRef.current = false
+    isSophiaReadyRef.current = false
+    recentUserTranscriptIdsRef.current = []
+    setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
     setListeningPresence(false)
     setSpeakingPresence(false)
     settlePresence()
-  }, [leave, clearThinking, setListeningPresence, setSpeakingPresence, settlePresence])
+  }, [
+    clearStartupReadyTimeout,
+    leave,
+    clearThinking,
+    setListeningPresence,
+    setSpeakingPresence,
+    settlePresence,
+  ])
 
   const bargeIn = useCallback(() => {
     clearThinking()
+    clearStartupReadyTimeout()
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "barge-in",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+      },
+    })
     // Leave the call — Voice Agent detects disconnect as barge-in
     leave().catch(() => {})
+    errorStageLockRef.current = false
+    isSophiaReadyRef.current = false
+    recentUserTranscriptIdsRef.current = []
+    setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
     setListeningPresence(false)
     setSpeakingPresence(false)
     settlePresence()
-  }, [leave, clearThinking, setListeningPresence, setSpeakingPresence, settlePresence])
+  }, [
+    clearStartupReadyTimeout,
+    leave,
+    clearThinking,
+    setListeningPresence,
+    setSpeakingPresence,
+    settlePresence,
+  ])
 
   const resetVoiceState = useCallback(() => {
     clearThinking()
+    clearStartupReadyTimeout()
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "reset-voice-state",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+      },
+    })
     leave().catch(() => {})
+    errorStageLockRef.current = false
+    isSophiaReadyRef.current = false
+    recentUserTranscriptIdsRef.current = []
+    setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
     setPartialReply("")
     setFinalReply("")
     setError(undefined)
     resetPresence()
-  }, [leave, clearThinking, resetPresence])
+  }, [clearStartupReadyTimeout, leave, clearThinking, resetPresence])
 
   // --- Cleanup on unmount --------------------------------------------------
   useEffect(() => {
@@ -362,8 +734,9 @@ export function useStreamVoiceSession(
       if (thinkingTimeoutRef.current) {
         clearTimeout(thinkingTimeoutRef.current)
       }
+      clearStartupReadyTimeout()
     }
-  }, [])
+  }, [clearStartupReadyTimeout])
 
   return {
     stage,

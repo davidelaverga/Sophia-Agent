@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,7 +61,7 @@ def write_session_trace(
     trace_doc = {
         "session_id": session_id,
         "user_id": user_id,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "turns": turns,
     }
 
@@ -153,7 +153,7 @@ def _extract_timestamp(msg: Any) -> str:
         meta = getattr(msg, attr, None)
         if isinstance(meta, dict) and "timestamp" in meta:
             return str(meta["timestamp"])
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _safe_float(value: Any, default: float) -> float:

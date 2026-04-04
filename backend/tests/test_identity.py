@@ -32,6 +32,10 @@ _cachetools_mod = sys.modules["cachetools"]
 if not hasattr(_cachetools_mod, "TTLCache"):
     _cachetools_mod.TTLCache = lambda maxsize, ttl: {}  # type: ignore[attr-defined]
 
+_mem0_mod = sys.modules["mem0"]
+if not hasattr(_mem0_mod, "MemoryClient"):
+    _mem0_mod.MemoryClient = MagicMock  # type: ignore[attr-defined]
+
 # Provide a default stub Anthropic class on the module
 _anthropic_mod = sys.modules["anthropic"]
 if not hasattr(_anthropic_mod, "Anthropic"):
@@ -47,7 +51,6 @@ from deerflow.sophia.identity import (  # noqa: E402
     _read_marker,
     maybe_update_identity,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from deerflow.client import DeerFlowClient, StreamEvent
+from deerflow.config import get_app_config
 
 # Skip entire module in CI or when no config.yaml exists
 _skip_reason = None
@@ -20,6 +21,13 @@ if os.environ.get("CI"):
     _skip_reason = "Live tests skipped in CI"
 elif not Path(__file__).resolve().parents[2].joinpath("config.yaml").exists():
     _skip_reason = "No config.yaml found — live tests require valid API credentials"
+else:
+    try:
+        default_model = get_app_config().models[0]
+        if "deerflow.models.dev_fake" in default_model.use:
+            _skip_reason = "Live tests require a real model provider; config.yaml is using the local fake model"
+    except Exception as exc:
+        _skip_reason = f"Unable to load live model config: {exc}"
 
 if _skip_reason:
     pytest.skip(_skip_reason, allow_module_level=True)

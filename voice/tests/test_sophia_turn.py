@@ -279,6 +279,18 @@ class TestAdaptiveSilence:
         td.update_transcript("a b c d e f g h i j k")
         assert td._trailing_silence_ms == 1800
 
+    async def test_should_stabilize_submission_for_non_final_fragment(self):
+        td = _make_detector()
+        td.update_transcript("I was")
+
+        assert td.should_stabilize_submission() is True
+
+    async def test_should_not_stabilize_submission_for_final_complete_phrase(self):
+        td = _make_detector()
+        td.update_transcript("I think the meeting went really well overall", is_final=True)
+
+        assert td.should_stabilize_submission() is False
+
 
 # ---------------------------------------------------------------------------
 # Continuation signal tests (Layer 1 — R2)
@@ -310,8 +322,8 @@ class TestContinuationSignals:
     async def test_trailing_filler_you_know(self):
         td = _make_detector()
         td.update_transcript("the thing is you know")
-        # 6 words → medium (1500) + continuation (+800) = 2300
-        assert td._trailing_silence_ms == 2300
+        # 5 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
+        assert td._trailing_silence_ms == 2800
 
     async def test_trailing_incomplete_i_think(self):
         td = _make_detector()
@@ -375,6 +387,18 @@ class TestContinuationSignals:
         # 4 words → medium (1500) + continuation (+800) = 2300
         assert td._trailing_silence_ms == 2300
 
+    async def test_trailing_wait_extends_silence(self):
+        td = _make_detector()
+        td.update_transcript("wait")
+        # 1 word → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
+
+    async def test_trailing_let_me_extends_silence(self):
+        td = _make_detector()
+        td.update_transcript("sorry let me")
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
+
 
 # ---------------------------------------------------------------------------
 # Fragment start detection tests (Layer 1 — short mid-sentence phrases)
@@ -388,57 +412,68 @@ class TestFragmentDetection:
     async def test_aux_verb_are_getting_better(self):
         td = _make_detector()
         td.update_transcript("are getting better")
-        # 3 words → short (1000) + fragment (+800) = 1800
-        assert td._trailing_silence_ms == 1800
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_aux_verb_was_thinking(self):
         td = _make_detector()
         td.update_transcript("was thinking")
-        # 2 words → short (1000) + fragment (+800) = 1800
-        assert td._trailing_silence_ms == 1800
+        # 2 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_preposition_with_my_friend(self):
         td = _make_detector()
         td.update_transcript("with my friend")
-        # 3 words → short (1000) + fragment (+800) = 1800
-        assert td._trailing_silence_ms == 1800
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_article_the_whole_point(self):
         td = _make_detector()
         td.update_transcript("the whole point")
-        # 3 words → short (1000) + fragment (+800) = 1800
-        assert td._trailing_silence_ms == 1800
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_modal_could_have_been(self):
         td = _make_detector()
         td.update_transcript("could have been")
-        # 3 words → short (1000) + fragment (+800) = 1800
-        assert td._trailing_silence_ms == 1800
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_subordinate_when_she_said(self):
         td = _make_detector()
         td.update_transcript("when she said that")
-        # 4 words → medium (1500) + fragment (+800) = 2300
-        assert td._trailing_silence_ms == 2300
+        # 4 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
+        assert td._trailing_silence_ms == 2800
 
     async def test_participle_getting_closer(self):
         td = _make_detector()
         td.update_transcript("getting closer to")
-        # 3 words → short (1000) + fragment (+800) + continuation (trailing "to") → only one bonus
-        # fragment and continuation are OR'd, not added
-        assert td._trailing_silence_ms == 1800
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_adverb_still_not_sure(self):
         td = _make_detector()
         td.update_transcript("still not sure")
-        # 3 words → short (1000) + fragment (+800) = 1800
-        assert td._trailing_silence_ms == 1800
+        # 3 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     async def test_fragment_at_five_words(self):
         td = _make_detector()
         td.update_transcript("is really hard to say")
-        # 5 words → medium (1500) + fragment (+800) = 2300
-        assert td._trailing_silence_ms == 2300
+        # 5 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
+        assert td._trailing_silence_ms == 2800
+
+    async def test_conjunction_fragment_at_six_words(self):
+        td = _make_detector()
+        td.update_transcript("but I still feel off sometimes")
+        # 6 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
+        assert td._trailing_silence_ms == 2800
+
+    async def test_final_fragment_uses_lighter_bonus(self):
+        td = _make_detector()
+        td.update_transcript("with my friend", is_final=True)
+        # Final fragment keeps the standard continuation-sized hold.
+        assert td._trailing_silence_ms == 1800
 
     async def test_fragment_not_triggered_above_max_words(self):
         td = _make_detector()
@@ -462,7 +497,13 @@ class TestFragmentDetection:
         td = _make_detector()
         td.update_transcript("Are getting better")
         # Case-insensitive: "Are" matches "are"
-        assert td._trailing_silence_ms == 1800
+        assert td._trailing_silence_ms == 2400
+
+    async def test_correction_fragment_start(self):
+        td = _make_detector()
+        td.update_transcript("wait actually")
+        # 2 words → short (1000) + non-final fragment hold (+1400) = 2400
+        assert td._trailing_silence_ms == 2400
 
     def test_is_fragment_static_method(self):
         assert SophiaTurnDetection._is_fragment("are getting better", 3) is True
@@ -475,8 +516,8 @@ class TestFragmentDetection:
         td = _make_detector()
         td.set_rhythm_offset(100)
         td.update_transcript("are getting better")
-        # 3 words → short (1000) + fragment (+800) + rhythm (+100) = 1900
-        assert td._trailing_silence_ms == 1900
+        # 3 words → short (1000) + fragment hold (+1400) + rhythm (+100) = 2500
+        assert td._trailing_silence_ms == 2500
 
 
 # ---------------------------------------------------------------------------
@@ -531,3 +572,78 @@ class TestRhythmOffset:
         td.update_transcript("I think")
         # 2 words → short (1000) + continuation (+800) + rhythm (+100) = 1900
         assert td._trailing_silence_ms == 1900
+
+
+# ---------------------------------------------------------------------------
+# Turn-ended duplicate suppression tests
+# ---------------------------------------------------------------------------
+
+class TestTurnEndedGuard:
+    pytestmark = pytest.mark.anyio
+
+    async def test_duplicate_turn_end_stays_suppressed_for_small_partial_growth(self):
+        td = _make_detector()
+        td.update_transcript("I need a second")
+
+        with patch.object(
+            SophiaTurnDetection.__mro__[1],
+            "_emit_end_turn_event",
+            new_callable=AsyncMock,
+        ) as parent_emit:
+            await td._emit_end_turn_event(MagicMock())
+            td.update_transcript("I need a second right now")
+            await td._emit_end_turn_event(MagicMock())
+
+            parent_emit.assert_awaited_once()
+
+    async def test_duplicate_turn_end_releases_on_final_transcript(self):
+        td = _make_detector()
+        td.update_transcript("I need a second")
+
+        with patch.object(
+            SophiaTurnDetection.__mro__[1],
+            "_emit_end_turn_event",
+            new_callable=AsyncMock,
+        ) as parent_emit:
+            await td._emit_end_turn_event(MagicMock())
+            td.update_transcript("I need a second", is_final=True)
+            await td._emit_end_turn_event(MagicMock())
+
+            assert parent_emit.await_count == 2
+
+    async def test_duplicate_turn_end_releases_on_substantive_complete_growth(self):
+        td = _make_detector()
+        td.update_transcript("I need a second")
+
+        with patch.object(
+            SophiaTurnDetection.__mro__[1],
+            "_emit_end_turn_event",
+            new_callable=AsyncMock,
+        ) as parent_emit:
+            await td._emit_end_turn_event(MagicMock())
+            td.update_transcript("I need a second right now")
+            await td._emit_end_turn_event(MagicMock())
+
+            parent_emit.assert_awaited_once()
+
+            td.update_transcript("I need a second to explain what happened there")
+            await td._emit_end_turn_event(MagicMock())
+
+            assert parent_emit.await_count == 2
+
+    async def test_turn_end_guard_clears_when_agent_will_speak(self):
+        td = _make_detector()
+        td.update_transcript("I need a second")
+
+        with patch.object(
+            SophiaTurnDetection.__mro__[1],
+            "_emit_end_turn_event",
+            new_callable=AsyncMock,
+        ) as parent_emit:
+            await td._emit_end_turn_event(MagicMock())
+            td.note_agent_will_speak()
+            td.reset_transcript()
+            td.update_transcript("I need a second")
+            await td._emit_end_turn_event(MagicMock())
+
+            assert parent_emit.await_count == 2

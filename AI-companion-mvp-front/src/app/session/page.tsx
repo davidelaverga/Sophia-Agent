@@ -16,7 +16,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { PanelRightClose, Sparkles } from 'lucide-react';
 import { SessionLayout } from '../components/SessionLayout';
 import { OnboardingSessionExperience } from '../components/onboarding';
 import { ProtectedRoute } from '../components/ProtectedRoute';
@@ -25,10 +24,16 @@ import {
   ArtifactsRail,
   SessionConversationPane,
   VoiceFirstComposer,
+  VoiceCaption,
+  PresenceArtifactPanel,
+  ArtifactToggleIcon,
+  WhisperIndicator,
+  ReflectionOverlay,
+  EmergenceOverlay,
+  AtmosphericFeedback,
   MobileDrawer,
   FeedbackToast,
   // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
-  EmotionBadge,
   CompanionRail,
   DebriefOfferModal,
 } from '../components/session';
@@ -38,6 +43,9 @@ import {
   ArtifactsPanelErrorBoundary,
 } from '../components/error-boundaries';
 import { ModeToggle } from '../components/ModeToggle';
+import { useChromeFade } from '../hooks/useChromeFade';
+import { useIdleTimeout } from '../hooks/useIdleTimeout';
+import { PresenceField, type PresenceFieldHandle } from '../components/presence-field';
 import { useUiStore } from '../stores/ui-store';
 import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
@@ -80,7 +88,16 @@ export default function SessionPage() {
 
   return (
     <ProtectedRoute>
-      {showOnboardingSessionExperience ? <OnboardingSessionExperience /> : <SessionPageContent />}
+      {showOnboardingSessionExperience ? (
+        <div className="relative h-screen bg-[#030308]">
+          <PresenceField />
+          <div className="relative z-10 h-full">
+            <OnboardingSessionExperience />
+          </div>
+        </div>
+      ) : (
+        <SessionPageContent />
+      )}
     </ProtectedRoute>
   );
 }
@@ -93,6 +110,17 @@ function SessionPageContent() {
   const SHOW_SESSION_MEMORY_REJECT = false;
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
+  const { chromeOpacity } = useChromeFade();
+  const presenceRef = useRef<PresenceFieldHandle | null>(null);
+  const handleImpulse = useCallback(() => {
+    presenceRef.current?.fireImpulse('coreIntensity', 0.15, 1500);
+  }, []);
+  const handleDimPresence = useCallback(() => {
+    // Dim nebula for emergence overlay (R19)
+    presenceRef.current?.fireImpulse('coreIntensity', -0.3, 8000);
+    presenceRef.current?.fireImpulse('flowEnergy', -0.2, 8000);
+  }, []);
+  const { isIdle, resetIdle } = useIdleTimeout();
   const debugEnabled = useMemo(() => {
     // 🔒 SECURITY: debug mode restricted to development only
     return process.env.NODE_ENV === 'development';
@@ -491,7 +519,7 @@ function SessionPageContent() {
     ? 'bg-amber-500 animate-pulse'
     : readyArtifactCount > 0
       ? 'bg-emerald-500'
-      : 'bg-sophia-text2/40';
+      : 'bg-white/20';
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -556,6 +584,8 @@ function SessionPageContent() {
   const {
     showExitConfirm,
     showDebriefOffer,
+    showEmergence,
+    showFeedback,
     debriefData,
     isNavigatingToRecap,
     handleEndSession,
@@ -563,6 +593,8 @@ function SessionPageContent() {
     handleCancelExit,
     handleStartDebrief,
     handleSkipToRecap,
+    handleEmergenceComplete,
+    handleFeedbackComplete,
   } = useSessionExitOrchestration({
     isReadOnly,
     isSophiaResponding,
@@ -749,15 +781,11 @@ function SessionPageContent() {
     backendSessionIdForMemory: session?.sessionId,
   });
   
-  // Loading state
+  // Loading state — the breathing nebula IS the loading indicator (R41)
   if (shouldShowLoading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-sophia-bg">
-        <div className="flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-sophia-purple animate-bounce" style={{ animationDelay: '0ms' }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-sophia-purple animate-bounce" style={{ animationDelay: '150ms' }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-sophia-purple animate-bounce" style={{ animationDelay: '300ms' }} />
-        </div>
+      <div className="h-screen bg-[#030308]">
+        <PresenceField />
       </div>
     );
   }
@@ -773,30 +801,14 @@ function SessionPageContent() {
       isEnding={isEnding}
       isSophiaResponding={isSophiaResponding}
       isReadOnly={isReadOnly}
+      presenceRef={presenceRef}
     >
       <div className="relative flex h-full animate-fadeIn">
-        {/* Context-based ambient glow */}
-        <div
-          className={cn(
-            'absolute inset-0 pointer-events-none transition-opacity duration-700',
-            'opacity-60 dark:opacity-40 -z-10',
-            sessionContextMode ? `glow-${sessionContextMode}` : 'glow-life'
-          )}
-        />
-        
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Emotion Badge - shows detected emotion */}
-          {detectedEmotion && detectedEmotion !== 'neutral' && (
-            <div className="px-4 py-2 flex justify-center animate-fadeIn">
-              <div className="flex items-center gap-2 text-xs text-sophia-text2/70">
-                <span>Sophia senses you&apos;re feeling:</span>
-                <EmotionBadge emotion={detectedEmotion} size="sm" />
-              </div>
-            </div>
-          )}
-
-          <SessionConversationPane
+          {/* Conversation pane — hidden in voice mode but stays mounted to preserve scroll */}
+          <div className={focusMode !== 'text' ? 'hidden' : 'flex-1 flex flex-col min-h-0'}>
+            <SessionConversationPane
             messages={messages}
             isInitializingChat={isInitializingChat}
             sessionPresetType={sessionPresetType}
@@ -840,16 +852,43 @@ function SessionPageContent() {
             nudgeSuggestion={nudgeSuggestion}
             onNudgeAccept={handleNudgeAccept}
             onNudgeDismiss={handleNudgeDismiss}
+            onImpulse={handleImpulse}
             onGoToDashboard={handleGoToDashboard}
           />
+          </div>
           
-          {/* Quick Actions rows removed – CompanionRail on left side now */}
+          {/* Voice Caption — ephemeral text overlay in voice mode */}
+          <VoiceCaption
+            messages={messages}
+            isVoiceMode={focusMode !== 'text'}
+          />
           
-          {/* Mode Toggle */}
-          <div className="px-4 pt-2">
-            <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
-              <ModeToggle />
-            </div>
+          {/* Whisper Indicator — atmospheric presence label */}
+          <WhisperIndicator opacity={chromeOpacity} />
+
+          {/* Reflection Overlay — center-screen atmospheric prompt (voice mode) */}
+          {focusMode !== 'text' && (
+            <ReflectionOverlay
+              question={isReflectionVoiceFlowActive ? (artifacts?.reflection_candidate?.prompt ?? null) : null}
+              onDismiss={() => {
+                const prompt = artifacts?.reflection_candidate?.prompt;
+                if (prompt) void handleReflectionTap({ prompt }, 'tap');
+              }}
+              onActivate={() => presenceRef.current?.fireImpulse('flowEnergy', 0.12, 2000)}
+            />
+          )}
+          
+          {/* Mode Toggle — whisper-style voice/text switcher */}
+          <div
+            className={cn(
+              'flex justify-center',
+              focusMode !== 'text'
+                ? 'fixed bottom-[100px] left-1/2 -translate-x-1/2 z-30'
+                : 'pt-2'
+            )}
+            style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+          >
+            <ModeToggle opacity={chromeOpacity} />
           </div>
           
           {/* Voice-First Composer */}
@@ -874,147 +913,20 @@ function SessionPageContent() {
           </VoiceComposerErrorBoundary>
         </div>
         
-        {/* Desktop Artifacts Panel */}
-        {showArtifactsUi && (
-          <div className={cn(
-            'relative z-10 hidden lg:flex flex-col transition-all duration-300 ease-out',
-            showArtifacts
-              ? 'w-[380px] bg-sophia-surface/40 backdrop-blur-sm border-l border-sophia-surface-border'
-              : 'w-0 overflow-hidden'
-          )}>
-            {showArtifacts && (
-              <div className="flex flex-col h-full relative">
-                <button
-                  onClick={handleCloseArtifactsPanel}
-                  className="absolute top-3 left-3 p-1.5 rounded-lg hover:bg-sophia-surface/80 transition-colors z-10"
-                  title="Collapse artifacts panel"
-                >
-                  <PanelRightClose className="w-4 h-4 text-sophia-text2" />
-                </button>
+        {/* Desktop Artifacts Panel — replaced by PresenceArtifactPanel bottom-sheet */}
+        <PresenceArtifactPanel
+          artifacts={artifacts}
+          isVisible={showArtifacts && showArtifactsUi}
+          onDismiss={handleCloseArtifactsPanel}
+          isVoiceMode={focusMode !== 'text'}
+        />
 
-                <ArtifactsPanelErrorBoundary>
-                  <ArtifactsPanel
-                    artifacts={artifacts}
-                    presetType={sessionPresetType}
-                    contextMode={sessionContextMode}
-                    sessionId={session.sessionId}
-                    threadId={session.threadId}
-                    className="flex-1 pt-12"
-                    artifactStatus={artifactStatus}
-                    onReflectionTap={handleReflectionTap}
-                    onMemoryApprove={handleMemoryApprove}
-                    onMemoryReject={SHOW_SESSION_MEMORY_REJECT ? handleMemoryReject : undefined}
-                  />
-                </ArtifactsPanelErrorBoundary>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Companion Rail – LEFT side (both mobile & desktop) */}
-        {showCompanionRail && (
-          <CompanionRail
-            contextMode={sessionContextMode}
-            onInvoke={handleCompanionInvoke}
-            isInvoking={isInvoking}
-            activeInvoke={activeInvoke}
-            disabled={isTyping || isReadOnly}
-            className={cn(
-              'fixed left-0 top-1/2 -translate-y-1/2 z-30',
-              'w-8 h-8 lg:w-10 lg:h-10',
-              'rounded-r-lg',
-              'cursor-pointer',
-            )}
-          />
-        )}
-
-        {/* Desktop Artifacts Rail – RIGHT side (collapsed) */}
-        {!showArtifacts && showArtifactsUi && (
-          <ArtifactsRail
-            artifactStatus={artifactStatus}
+        {/* Ghost toggle for text mode — reopens artifact panel when dismissed */}
+        {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
+          <ArtifactToggleIcon
+            hasArtifacts={!!(artifacts?.takeaway)}
             onClick={handleOpenArtifactsPanel}
-            className={cn(
-              'hidden lg:flex',
-              'fixed right-0 top-1/2 -translate-y-1/2 z-30',
-              'w-10 h-10',
-              'rounded-l-lg',
-              'cursor-pointer'
-            )}
           />
-        )}
-
-        {/* Mobile Artifacts Tab – RIGHT side */}
-        {showArtifactsUi && (
-          <button
-            onClick={handleToggleMobileArtifactsTab}
-            className={cn(
-              'lg:hidden',
-              'fixed right-0 top-1/2 -translate-y-1/2 z-30',
-              'w-9 h-9',
-              'rounded-l-lg',
-              'flex items-center justify-center',
-              'transition-all duration-200',
-              hasNewArtifacts ? 'opacity-100' : 'opacity-60 hover:opacity-100',
-              'cursor-pointer',
-              hasPendingArtifacts && 'ring-1 ring-amber-400/60 ring-offset-1 ring-offset-sophia-bg',
-            )}
-            aria-label="Open artifacts"
-            aria-live="polite"
-          >
-            <Sparkles
-              className={cn(
-                'w-4 h-4 transition-colors',
-                hasNewArtifacts ? 'text-sophia-purple' : 'text-sophia-text2 hover:text-sophia-purple',
-                hasPendingArtifacts && 'animate-pulse'
-              )}
-            />
-
-            {hasNewArtifacts && hasPendingArtifacts && (
-              <span
-                className={cn(
-                  'absolute -top-1 -left-8 min-w-[2.5rem] rounded-full px-2 py-0.5',
-                  'text-[10px] font-semibold leading-none',
-                  'bg-amber-500/90 text-white'
-                )}
-              >
-                pending
-              </span>
-            )}
-
-            {hasNewArtifacts && (
-              <span
-                className={cn(
-                  'absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full border border-sophia-bg',
-                  hasDesktopStyleBadge ? mobileIndicatorDotClass : 'bg-emerald-500'
-                )}
-              />
-            )}
-          </button>
-        )}
-        
-        {/* Mobile Artifacts Drawer */}
-        {showArtifactsUi && (
-          <MobileDrawer
-            isOpen={mobileDrawerOpen}
-            onToggle={handleToggleMobileDrawer}
-            showPeek={false}
-            artifactStatus={artifactStatus}
-          >
-            <ArtifactsPanelErrorBoundary>
-              <ArtifactsPanel
-                artifacts={artifacts}
-                presetType={sessionPresetType}
-                contextMode={sessionContextMode}
-                sessionId={session.sessionId}
-                threadId={session.threadId}
-                className="h-full"
-                artifactStatus={artifactStatus}
-                onReflectionTap={handleReflectionTap}
-                onMemoryApprove={handleMemoryApprove}
-                onMemoryReject={SHOW_SESSION_MEMORY_REJECT ? handleMemoryReject : undefined}
-              />
-            </ArtifactsPanelErrorBoundary>
-          </MobileDrawer>
         )}
       </div>
       
@@ -1025,19 +937,19 @@ function SessionPageContent() {
           onClick={handleCancelExit}
         >
           <div 
-            className="w-[90%] max-w-sm bg-sophia-surface rounded-2xl p-6 shadow-xl border border-sophia-surface-border animate-scaleIn"
+            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 shadow-xl border border-white/[0.03] animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
-              <div className="w-12 h-12 rounded-full bg-sophia-purple/10 flex items-center justify-center">
-                <div className="w-6 h-6 border-2 border-sophia-purple/30 border-t-sophia-purple rounded-full animate-spin" />
+              <div className="w-12 h-12 rounded-full bg-white/[0.04] flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-white/[0.08] border-t-white/30 rounded-full animate-spin" />
               </div>
               
               <div className="space-y-2">
-                <h3 className="text-lg font-semibold text-sophia-text1">
+                <h3 className="text-lg font-semibold text-white/80">
                   Sophia is still responding
                 </h3>
-                <p className="text-sm text-sophia-text2">
+                <p className="text-sm text-white/40">
                   If you leave now, her response will be saved but may be incomplete.
                 </p>
               </div>
@@ -1045,13 +957,13 @@ function SessionPageContent() {
               <div className="flex gap-3 w-full mt-2">
                 <button
                   onClick={handleCancelExit}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sophia-surface-elevated border border-sophia-surface-border text-sophia-text1 font-medium transition-colors hover:bg-sophia-surface-border"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.04] border border-white/[0.06] text-white/60 font-medium transition-colors hover:bg-white/[0.08]"
                 >
                   Stay
                 </button>
                 <button
                   onClick={handleEndSession}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sophia-purple text-white font-medium transition-colors hover:bg-sophia-purple/90"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.08] text-white/70 font-medium transition-colors hover:bg-white/[0.12]"
                 >
                   Leave anyway
                 </button>
@@ -1068,6 +980,49 @@ function SessionPageContent() {
           onClose={handleFeedbackToastClose}
         />
       )}
+
+      {/* Emergence Overlay — staggered session summary (R18-R19) */}
+      <EmergenceOverlay
+        artifacts={artifacts}
+        isVisible={showEmergence}
+        onComplete={handleEmergenceComplete}
+        onDimPresence={handleDimPresence}
+      />
+
+      {/* Atmospheric Feedback — session-level rating (R20, R29) */}
+      <AtmosphericFeedback
+        sessionId={sessionId}
+        isVisible={showFeedback}
+        onComplete={handleFeedbackComplete}
+      />
+
+      {/* Idle Timeout Whisper Overlay */}
+      {isIdle && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center animate-fadeIn"
+          style={{ backgroundColor: 'rgba(3, 3, 8, 0.45)' }}
+        >
+          <div className="text-center space-y-4">
+            <p className="font-cormorant italic text-[18px] text-white/40">
+              still there?
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={() => resetIdle()}
+                className="px-4 py-1.5 rounded-full text-[11px] tracking-[0.08em] uppercase bg-white/[0.06] border border-white/[0.08] text-white/40 hover:bg-white/[0.10] transition-all"
+              >
+                I&apos;m here
+              </button>
+              <button
+                onClick={() => { resetIdle(); void handleEndSession(); }}
+                className="px-4 py-1.5 rounded-full text-[11px] tracking-[0.08em] uppercase bg-white/[0.04] border border-white/[0.06] text-white/25 hover:bg-white/[0.08] transition-all"
+              >
+                end session
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Session Expired Modal */}
       <SessionExpiredModal
@@ -1083,15 +1038,7 @@ function SessionPageContent() {
         onTakeOver={handleMultiTabTakeOver}
       />
       
-      {/* Debrief Offer Modal */}
-      <DebriefOfferModal
-        isOpen={showDebriefOffer}
-        debriefPrompt={debriefData?.prompt || ''}
-        durationMinutes={debriefData?.durationMinutes || 0}
-        takeaway={debriefData?.takeaway}
-        onStartDebrief={handleStartDebrief}
-        onSkipToRecap={handleSkipToRecap}
-      />
+      {/* DebriefOfferModal removed — R34: debrief offered conversationally */}
       
       <UsageLimitModal
         open={limitModalOpen}

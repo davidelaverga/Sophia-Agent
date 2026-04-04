@@ -1,13 +1,13 @@
 """Tests for the voice gateway endpoint."""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.gateway.routers.voice import router
+from app.gateway.routers.voice import _dispatch_voice_agent, router
 
 app = FastAPI()
 app.include_router(router)
@@ -61,7 +61,11 @@ class TestVoiceConnect:
         assert data["session_id"] == "test-session-id"
 
     def test_returns_credentials_with_all_params(self):
-        with _mock_dispatch_success():
+        with patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+            return_value="test-session-id",
+        ) as dispatch:
             resp = client.post(
                 "/api/sophia/user_456/voice/connect",
                 json={"platform": "ios_voice", "context_mode": "work", "ritual": "debrief"},
@@ -72,6 +76,13 @@ class TestVoiceConnect:
         assert data["call_type"] == "default"
         assert "user_456" in data["call_id"]
         assert data["session_id"] == "test-session-id"
+        dispatch.assert_awaited_once_with(
+            call_id=ANY,
+            call_type="default",
+            platform="ios_voice",
+            context_mode="work",
+            ritual="debrief",
+        )
 
     def test_text_platform_accepted(self):
         with _mock_dispatch_success():
@@ -157,6 +168,53 @@ class TestVoiceConnect:
         assert data["session_id"] is None
 
 
+@pytest.mark.anyio
+async def test_dispatch_voice_agent_returns_none_for_invalid_json() -> None:
+    request = httpx.Request("POST", "http://test/calls/sophia-user_123-abc12345/sessions")
+    mock_response = httpx.Response(201, request=request, text="not-json")
+
+    with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        session_id = await _dispatch_voice_agent(
+            call_id="sophia-user_123-abc12345",
+            call_type="default",
+            platform="voice",
+            context_mode="gaming",
+            ritual="vent",
+        )
+
+    assert session_id is None
+
+
+@pytest.mark.anyio
+async def test_dispatch_voice_agent_returns_none_for_request_error() -> None:
+    request = httpx.Request("POST", "http://test/calls/sophia-user_123-abc12345/sessions")
+
+    with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(
+            side_effect=httpx.RequestError("socket closed", request=request)
+        )
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        session_id = await _dispatch_voice_agent(
+            call_id="sophia-user_123-abc12345",
+            call_type="default",
+            platform="voice",
+            context_mode="gaming",
+            ritual="vent",
+        )
+
+    assert session_id is None
+
+
 class TestVoiceDisconnect:
     """POST /api/sophia/{user_id}/voice/disconnect"""
 
@@ -205,9 +263,58 @@ class TestVoiceDisconnect:
         # Graceful degradation — still returns 204, relies on idle timeout
         assert resp.status_code == 204
 
+    def test_disconnect_request_error_is_swallowed(self):
+        request = httpx.Request("DELETE", "http://test/")
+        with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.delete = AsyncMock(
+                side_effect=httpx.RequestError("socket closed", request=request)
+            )
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            resp = client.post(
+                "/api/sophia/user_123/voice/disconnect",
+                json={"call_id": "sophia-user_123-abc12345", "session_id": "test-session-id"},
+            )
+        assert resp.status_code == 204
+
     def test_disconnect_missing_fields(self):
         resp = client.post(
             "/api/sophia/user_123/voice/disconnect",
             json={"call_id": "sophia-user_123-abc12345"},
         )
         assert resp.status_code == 422
+
+
+@pytest.mark.anyio
+async def test_dispatch_voice_agent_posts_runtime_context():
+    request = httpx.Request("POST", "http://test/calls/sophia-user_123-abc12345/sessions")
+    mock_response = httpx.Response(201, request=request, json={"session_id": "test-session-id"})
+
+    with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        session_id = await _dispatch_voice_agent(
+            call_id="sophia-user_123-abc12345",
+            call_type="default",
+            platform="voice",
+            context_mode="gaming",
+            ritual="vent",
+        )
+
+    assert session_id == "test-session-id"
+    mock_client.post.assert_awaited_once_with(
+        "http://localhost:8000/calls/sophia-user_123-abc12345/sessions",
+        json={
+            "call_type": "default",
+            "platform": "voice",
+            "context_mode": "gaming",
+            "ritual": "vent",
+        },
+    )

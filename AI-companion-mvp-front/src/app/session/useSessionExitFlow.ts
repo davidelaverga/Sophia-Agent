@@ -61,6 +61,9 @@ export function useSessionExitFlow({
   const [showDebriefOffer, setShowDebriefOffer] = useState(false);
   const [debriefData, setDebriefData] = useState<DebriefData | null>(null);
   const [isNavigatingToRecap, setIsNavigatingToRecap] = useState(false);
+  const [showEmergence, setShowEmergence] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [pendingRecapSessionId, setPendingRecapSessionId] = useState<string | null>(null);
 
   const openExitConfirm = useCallback(() => {
     setShowExitConfirm(true);
@@ -188,7 +191,10 @@ export function useSessionExitFlow({
       });
     }
 
-    finalizeExitToRecap(recapSessionId);
+    // Start emergence flow instead of navigating directly
+    setPendingRecapSessionId(recapSessionId);
+    setShowEmergence(true);
+    setEnding(false);
   }, [
     stopStreaming,
     setEnding,
@@ -199,6 +205,25 @@ export function useSessionExitFlow({
     messageCount,
     finalizeExitToRecap,
   ]);
+
+  // ── Emergence → Feedback → Recap flow ─────────────────────────────────────
+
+  const handleEmergenceComplete = useCallback(() => {
+    setShowEmergence(false);
+    setShowFeedback(true);
+  }, []);
+
+  const handleFeedbackComplete = useCallback(() => {
+    setShowFeedback(false);
+    if (pendingRecapSessionId) {
+      finalizeExitToRecap(pendingRecapSessionId);
+    }
+  }, [pendingRecapSessionId, finalizeExitToRecap]);
+
+  /** Skip emergence for abrupt exits (network drop, tab close) */
+  const handleAbruptExit = useCallback((recapSessionId: string) => {
+    finalizeExitToRecap(recapSessionId);
+  }, [finalizeExitToRecap]);
 
   const handleEndSession = useCallback(async () => {
     if (isReadOnly) {
@@ -320,6 +345,8 @@ export function useSessionExitFlow({
   return {
     showExitConfirm,
     showDebriefOffer,
+    showEmergence,
+    showFeedback,
     debriefData,
     isNavigatingToRecap,
     openExitConfirm,
@@ -328,5 +355,8 @@ export function useSessionExitFlow({
     handleCancelExit,
     handleStartDebrief,
     handleSkipToRecap,
+    handleEmergenceComplete,
+    handleFeedbackComplete,
+    handleAbruptExit,
   };
 }

@@ -21,8 +21,11 @@ async def test_turn_metrics_log_first_text_and_audio(caplog) -> None:
     time.sleep(0.001)
     llm.note_first_text_emitted("user-1")
     time.sleep(0.001)
+    llm.note_backend_completed("user-1")
+    time.sleep(0.001)
     llm.note_tts_audio_emitted("user-1")
     await llm.events.wait()
 
     assert "metric=first_text_ms" in caplog.text
+    assert "metric=backend_complete_ms" in caplog.text
     assert "metric=first_audio_ms" in caplog.text
