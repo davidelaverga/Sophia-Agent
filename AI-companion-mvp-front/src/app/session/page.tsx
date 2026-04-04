@@ -25,6 +25,7 @@ import {
   ArtifactsRail,
   SessionConversationPane,
   VoiceFirstComposer,
+  VoiceCaption,
   MobileDrawer,
   FeedbackToast,
   // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
@@ -776,7 +777,9 @@ function SessionPageContent() {
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-          <SessionConversationPane
+          {/* Conversation pane — hidden in voice mode but stays mounted to preserve scroll */}
+          <div className={cn(focusMode !== 'text' && 'hidden', 'flex-1 flex flex-col min-h-0')}>
+            <SessionConversationPane
             messages={messages}
             isInitializingChat={isInitializingChat}
             sessionPresetType={sessionPresetType}
@@ -821,6 +824,13 @@ function SessionPageContent() {
             onNudgeAccept={handleNudgeAccept}
             onNudgeDismiss={handleNudgeDismiss}
             onGoToDashboard={handleGoToDashboard}
+          />
+          </div>
+          
+          {/* Voice Caption — ephemeral text overlay in voice mode */}
+          <VoiceCaption
+            messages={messages}
+            isVoiceMode={focusMode !== 'text'}
           />
           
           {/* Quick Actions rows removed – CompanionRail on left side now */}

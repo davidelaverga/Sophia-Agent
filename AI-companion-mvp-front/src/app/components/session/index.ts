@@ -18,6 +18,7 @@ export { MessageBubble, type UIMessage } from './MessageBubble';
 export { ReflectionPromptBubble, ReflectionResponseBubble } from './ReflectionBubble';
 export { MessageFeedback, FeedbackToast } from './MessageFeedback';
 export { VoiceFirstComposer, type VoiceStatus } from './VoiceFirstComposer';
+export { VoiceCaption } from './VoiceCaption';
 export { MobileDrawer, type ArtifactStatusType } from './MobileDrawer';
 export { SophiaEyes } from './SophiaEyes';
 
