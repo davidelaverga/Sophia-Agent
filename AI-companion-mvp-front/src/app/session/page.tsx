@@ -29,6 +29,8 @@ import {
   ArtifactToggleIcon,
   WhisperIndicator,
   ReflectionOverlay,
+  EmergenceOverlay,
+  AtmosphericFeedback,
   MobileDrawer,
   FeedbackToast,
   // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
@@ -42,6 +44,7 @@ import {
 } from '../components/error-boundaries';
 import { ModeToggle } from '../components/ModeToggle';
 import { useChromeFade } from '../hooks/useChromeFade';
+import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import type { PresenceFieldHandle } from '../components/presence-field';
 import { useUiStore } from '../stores/ui-store';
 import { cn } from '../lib/utils';
@@ -103,6 +106,12 @@ function SessionPageContent() {
   const handleImpulse = useCallback(() => {
     presenceRef.current?.fireImpulse('coreIntensity', 0.15, 1500);
   }, []);
+  const handleDimPresence = useCallback(() => {
+    // Dim nebula for emergence overlay (R19)
+    presenceRef.current?.fireImpulse('coreIntensity', -0.3, 8000);
+    presenceRef.current?.fireImpulse('flowEnergy', -0.2, 8000);
+  }, []);
+  const { isIdle, resetIdle } = useIdleTimeout();
   const debugEnabled = useMemo(() => {
     // 🔒 SECURITY: debug mode restricted to development only
     return process.env.NODE_ENV === 'development';
@@ -566,6 +575,8 @@ function SessionPageContent() {
   const {
     showExitConfirm,
     showDebriefOffer,
+    showEmergence,
+    showFeedback,
     debriefData,
     isNavigatingToRecap,
     handleEndSession,
@@ -573,6 +584,8 @@ function SessionPageContent() {
     handleCancelExit,
     handleStartDebrief,
     handleSkipToRecap,
+    handleEmergenceComplete,
+    handleFeedbackComplete,
   } = useSessionExitOrchestration({
     isReadOnly,
     isSophiaResponding,
@@ -953,6 +966,49 @@ function SessionPageContent() {
           feedback={showFeedbackToast}
           onClose={handleFeedbackToastClose}
         />
+      )}
+
+      {/* Emergence Overlay — staggered session summary (R18-R19) */}
+      <EmergenceOverlay
+        artifacts={artifacts}
+        isVisible={showEmergence}
+        onComplete={handleEmergenceComplete}
+        onDimPresence={handleDimPresence}
+      />
+
+      {/* Atmospheric Feedback — session-level rating (R20, R29) */}
+      <AtmosphericFeedback
+        sessionId={sessionId}
+        isVisible={showFeedback}
+        onComplete={handleFeedbackComplete}
+      />
+
+      {/* Idle Timeout Whisper Overlay */}
+      {isIdle && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center animate-fadeIn"
+          style={{ backgroundColor: 'rgba(3, 3, 8, 0.45)' }}
+        >
+          <div className="text-center space-y-4">
+            <p className="font-cormorant italic text-[18px] text-white/40">
+              still there?
+            </p>
+            <div className="flex items-center justify-center gap-3">
+              <button
+                onClick={() => resetIdle()}
+                className="px-4 py-1.5 rounded-full text-[11px] tracking-[0.08em] uppercase bg-white/[0.06] border border-white/[0.08] text-white/40 hover:bg-white/[0.10] transition-all"
+              >
+                I&apos;m here
+              </button>
+              <button
+                onClick={() => { resetIdle(); void handleEndSession(); }}
+                className="px-4 py-1.5 rounded-full text-[11px] tracking-[0.08em] uppercase bg-white/[0.04] border border-white/[0.06] text-white/25 hover:bg-white/[0.08] transition-all"
+              >
+                end session
+              </button>
+            </div>
+          </div>
+        </div>
       )}
       
       {/* Session Expired Modal */}

@@ -22,6 +22,8 @@ export { VoiceCaption } from './VoiceCaption';
 export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
 export { WhisperIndicator } from './WhisperIndicator';
 export { ReflectionOverlay } from './ReflectionOverlay';
+export { EmergenceOverlay } from './EmergenceOverlay';
+export { AtmosphericFeedback } from './AtmosphericFeedback';
 export { MobileDrawer, type ArtifactStatusType } from './MobileDrawer';
 export { SophiaEyes } from './SophiaEyes';
 
