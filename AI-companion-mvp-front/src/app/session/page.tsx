@@ -16,7 +16,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { PanelRightClose, Sparkles } from 'lucide-react';
 import { SessionLayout } from '../components/SessionLayout';
 import { OnboardingSessionExperience } from '../components/onboarding';
 import { ProtectedRoute } from '../components/ProtectedRoute';
@@ -26,6 +25,8 @@ import {
   SessionConversationPane,
   VoiceFirstComposer,
   VoiceCaption,
+  PresenceArtifactPanel,
+  ArtifactToggleIcon,
   MobileDrawer,
   FeedbackToast,
   // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
@@ -491,7 +492,7 @@ function SessionPageContent() {
     ? 'bg-amber-500 animate-pulse'
     : readyArtifactCount > 0
       ? 'bg-emerald-500'
-      : 'bg-sophia-text2/40';
+      : 'bg-white/20';
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -752,11 +753,11 @@ function SessionPageContent() {
   // Loading state
   if (shouldShowLoading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-sophia-bg">
+      <div className="flex items-center justify-center h-screen bg-[#030308]">
         <div className="flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-sophia-purple animate-bounce" style={{ animationDelay: '0ms' }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-sophia-purple animate-bounce" style={{ animationDelay: '150ms' }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-sophia-purple animate-bounce" style={{ animationDelay: '300ms' }} />
+          <div className="w-1.5 h-1.5 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '0ms' }} />
+          <div className="w-1.5 h-1.5 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '150ms' }} />
+          <div className="w-1.5 h-1.5 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '300ms' }} />
         </div>
       </div>
     );
@@ -864,42 +865,13 @@ function SessionPageContent() {
           </VoiceComposerErrorBoundary>
         </div>
         
-        {/* Desktop Artifacts Panel */}
-        {showArtifactsUi && (
-          <div className={cn(
-            'relative z-10 hidden lg:flex flex-col transition-all duration-300 ease-out',
-            showArtifacts
-              ? 'w-[380px] bg-sophia-surface/40 backdrop-blur-sm border-l border-sophia-surface-border'
-              : 'w-0 overflow-hidden'
-          )}>
-            {showArtifacts && (
-              <div className="flex flex-col h-full relative">
-                <button
-                  onClick={handleCloseArtifactsPanel}
-                  className="absolute top-3 left-3 p-1.5 rounded-lg hover:bg-sophia-surface/80 transition-colors z-10"
-                  title="Collapse artifacts panel"
-                >
-                  <PanelRightClose className="w-4 h-4 text-sophia-text2" />
-                </button>
-
-                <ArtifactsPanelErrorBoundary>
-                  <ArtifactsPanel
-                    artifacts={artifacts}
-                    presetType={sessionPresetType}
-                    contextMode={sessionContextMode}
-                    sessionId={session.sessionId}
-                    threadId={session.threadId}
-                    className="flex-1 pt-12"
-                    artifactStatus={artifactStatus}
-                    onReflectionTap={handleReflectionTap}
-                    onMemoryApprove={handleMemoryApprove}
-                    onMemoryReject={SHOW_SESSION_MEMORY_REJECT ? handleMemoryReject : undefined}
-                  />
-                </ArtifactsPanelErrorBoundary>
-              </div>
-            )}
-          </div>
-        )}
+        {/* Desktop Artifacts Panel — replaced by PresenceArtifactPanel bottom-sheet */}
+        <PresenceArtifactPanel
+          artifacts={artifacts}
+          isVisible={showArtifacts && showArtifactsUi}
+          onDismiss={handleCloseArtifactsPanel}
+          isVoiceMode={focusMode !== 'text'}
+        />
 
         {/* Companion Rail – LEFT side (both mobile & desktop) */}
         {showCompanionRail && (
@@ -918,93 +890,12 @@ function SessionPageContent() {
           />
         )}
 
-        {/* Desktop Artifacts Rail – RIGHT side (collapsed) */}
-        {!showArtifacts && showArtifactsUi && (
-          <ArtifactsRail
-            artifactStatus={artifactStatus}
+        {/* Ghost toggle for text mode — reopens artifact panel when dismissed */}
+        {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
+          <ArtifactToggleIcon
+            hasArtifacts={!!(artifacts?.takeaway)}
             onClick={handleOpenArtifactsPanel}
-            className={cn(
-              'hidden lg:flex',
-              'fixed right-0 top-1/2 -translate-y-1/2 z-30',
-              'w-10 h-10',
-              'rounded-l-lg',
-              'cursor-pointer'
-            )}
           />
-        )}
-
-        {/* Mobile Artifacts Tab – RIGHT side */}
-        {showArtifactsUi && (
-          <button
-            onClick={handleToggleMobileArtifactsTab}
-            className={cn(
-              'lg:hidden',
-              'fixed right-0 top-1/2 -translate-y-1/2 z-30',
-              'w-9 h-9',
-              'rounded-l-lg',
-              'flex items-center justify-center',
-              'transition-all duration-200',
-              hasNewArtifacts ? 'opacity-100' : 'opacity-60 hover:opacity-100',
-              'cursor-pointer',
-              hasPendingArtifacts && 'ring-1 ring-amber-400/60 ring-offset-1 ring-offset-sophia-bg',
-            )}
-            aria-label="Open artifacts"
-            aria-live="polite"
-          >
-            <Sparkles
-              className={cn(
-                'w-4 h-4 transition-colors',
-                hasNewArtifacts ? 'text-sophia-purple' : 'text-sophia-text2 hover:text-sophia-purple',
-                hasPendingArtifacts && 'animate-pulse'
-              )}
-            />
-
-            {hasNewArtifacts && hasPendingArtifacts && (
-              <span
-                className={cn(
-                  'absolute -top-1 -left-8 min-w-[2.5rem] rounded-full px-2 py-0.5',
-                  'text-[10px] font-semibold leading-none',
-                  'bg-amber-500/90 text-white'
-                )}
-              >
-                pending
-              </span>
-            )}
-
-            {hasNewArtifacts && (
-              <span
-                className={cn(
-                  'absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full border border-sophia-bg',
-                  hasDesktopStyleBadge ? mobileIndicatorDotClass : 'bg-emerald-500'
-                )}
-              />
-            )}
-          </button>
-        )}
-        
-        {/* Mobile Artifacts Drawer */}
-        {showArtifactsUi && (
-          <MobileDrawer
-            isOpen={mobileDrawerOpen}
-            onToggle={handleToggleMobileDrawer}
-            showPeek={false}
-            artifactStatus={artifactStatus}
-          >
-            <ArtifactsPanelErrorBoundary>
-              <ArtifactsPanel
-                artifacts={artifacts}
-                presetType={sessionPresetType}
-                contextMode={sessionContextMode}
-                sessionId={session.sessionId}
-                threadId={session.threadId}
-                className="h-full"
-                artifactStatus={artifactStatus}
-                onReflectionTap={handleReflectionTap}
-                onMemoryApprove={handleMemoryApprove}
-                onMemoryReject={SHOW_SESSION_MEMORY_REJECT ? handleMemoryReject : undefined}
-              />
-            </ArtifactsPanelErrorBoundary>
-          </MobileDrawer>
         )}
       </div>
       
@@ -1015,19 +906,19 @@ function SessionPageContent() {
           onClick={handleCancelExit}
         >
           <div 
-            className="w-[90%] max-w-sm bg-sophia-surface rounded-2xl p-6 shadow-xl border border-sophia-surface-border animate-scaleIn"
+            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 shadow-xl border border-white/[0.03] animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
-              <div className="w-12 h-12 rounded-full bg-sophia-purple/10 flex items-center justify-center">
-                <div className="w-6 h-6 border-2 border-sophia-purple/30 border-t-sophia-purple rounded-full animate-spin" />
+              <div className="w-12 h-12 rounded-full bg-white/[0.04] flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-white/[0.08] border-t-white/30 rounded-full animate-spin" />
               </div>
               
               <div className="space-y-2">
-                <h3 className="text-lg font-semibold text-sophia-text1">
+                <h3 className="text-lg font-semibold text-white/80">
                   Sophia is still responding
                 </h3>
-                <p className="text-sm text-sophia-text2">
+                <p className="text-sm text-white/40">
                   If you leave now, her response will be saved but may be incomplete.
                 </p>
               </div>
@@ -1035,13 +926,13 @@ function SessionPageContent() {
               <div className="flex gap-3 w-full mt-2">
                 <button
                   onClick={handleCancelExit}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sophia-surface-elevated border border-sophia-surface-border text-sophia-text1 font-medium transition-colors hover:bg-sophia-surface-border"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.04] border border-white/[0.06] text-white/60 font-medium transition-colors hover:bg-white/[0.08]"
                 >
                   Stay
                 </button>
                 <button
                   onClick={handleEndSession}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sophia-purple text-white font-medium transition-colors hover:bg-sophia-purple/90"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.08] text-white/70 font-medium transition-colors hover:bg-white/[0.12]"
                 >
                   Leave anyway
                 </button>

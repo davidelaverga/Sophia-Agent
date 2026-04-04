@@ -19,6 +19,7 @@ export { ReflectionPromptBubble, ReflectionResponseBubble } from './ReflectionBu
 export { MessageFeedback, FeedbackToast } from './MessageFeedback';
 export { VoiceFirstComposer, type VoiceStatus } from './VoiceFirstComposer';
 export { VoiceCaption } from './VoiceCaption';
+export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
 export { MobileDrawer, type ArtifactStatusType } from './MobileDrawer';
 export { SophiaEyes } from './SophiaEyes';
 
