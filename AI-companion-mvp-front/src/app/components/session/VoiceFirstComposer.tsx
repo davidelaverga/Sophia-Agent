@@ -193,7 +193,7 @@ export function VoiceFirstComposer({
         
         {/* Sophia Presence Indicator — text-only gets a typing indicator */}
         <div className="flex justify-center mb-4">
-          <div className="flex items-center gap-2 text-white/40">
+          <div role="status" aria-live="polite" className="flex items-center gap-2 text-white/40">
             <span className="relative flex h-2 w-2">
               <span className={cn(
                 'absolute inline-flex h-full w-full rounded-full opacity-75',
@@ -295,7 +295,7 @@ export function VoiceFirstComposer({
               )} />
             </button>
             {isPTT && (
-              <p className="mt-2 text-center text-xs font-medium text-white/30 animate-pulse">
+              <p aria-live="assertive" className="mt-2 text-center text-xs font-medium text-white/30 animate-pulse">
                 Recording… release to send
               </p>
             )}
@@ -310,8 +310,10 @@ export function VoiceFirstComposer({
                 type="button"
                 onClick={handleTextToggle}
                 disabled={disabled}
+                aria-label="Switch to text input"
                 className={cn(
                   'w-full py-2 text-center text-sm transition-colors',
+                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded',
                   disabled
                     ? 'text-white/20 cursor-not-allowed'
                     : 'text-white/30 hover:text-white/40'
@@ -347,6 +349,7 @@ export function VoiceFirstComposer({
                     onChange={(e) => onChange(e.target.value)}
                     onKeyDown={handleKeyDown}
                     placeholder={placeholder}
+                    aria-label="Message input"
                     rows={1}
                     disabled={disabled}
                     style={{ backgroundColor: 'var(--input-bg)' }}

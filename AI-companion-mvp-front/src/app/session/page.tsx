@@ -45,7 +45,7 @@ import {
 import { ModeToggle } from '../components/ModeToggle';
 import { useChromeFade } from '../hooks/useChromeFade';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
-import type { PresenceFieldHandle } from '../components/presence-field';
+import { PresenceField, type PresenceFieldHandle } from '../components/presence-field';
 import { useUiStore } from '../stores/ui-store';
 import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
@@ -88,7 +88,16 @@ export default function SessionPage() {
 
   return (
     <ProtectedRoute>
-      {showOnboardingSessionExperience ? <OnboardingSessionExperience /> : <SessionPageContent />}
+      {showOnboardingSessionExperience ? (
+        <div className="relative h-screen bg-[#030308]">
+          <PresenceField />
+          <div className="relative z-10 h-full">
+            <OnboardingSessionExperience />
+          </div>
+        </div>
+      ) : (
+        <SessionPageContent />
+      )}
     </ProtectedRoute>
   );
 }
@@ -772,15 +781,11 @@ function SessionPageContent() {
     backendSessionIdForMemory: session?.sessionId,
   });
   
-  // Loading state
+  // Loading state — the breathing nebula IS the loading indicator (R41)
   if (shouldShowLoading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-[#030308]">
-        <div className="flex items-center gap-1.5">
-          <div className="w-1.5 h-1.5 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '0ms' }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '150ms' }} />
-          <div className="w-1.5 h-1.5 rounded-full bg-white/20 animate-bounce" style={{ animationDelay: '300ms' }} />
-        </div>
+      <div className="h-screen bg-[#030308]">
+        <PresenceField />
       </div>
     );
   }

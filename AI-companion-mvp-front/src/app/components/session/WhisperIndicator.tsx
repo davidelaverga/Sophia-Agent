@@ -23,6 +23,7 @@ export function WhisperIndicator({ opacity = 1 }: { opacity?: number }) {
 
   return (
     <div
+      aria-hidden="true"
       className="fixed bottom-[18px] left-1/2 -translate-x-1/2 z-25 pointer-events-none"
       style={{ opacity, transition: "opacity 0.6s ease" }}
     >

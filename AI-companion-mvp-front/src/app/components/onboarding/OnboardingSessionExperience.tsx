@@ -132,7 +132,7 @@ export function OnboardingSessionExperience() {
   const reflectionPrompt = useMemo(() => MOCK_ARTIFACTS.reflection_candidate?.prompt ?? '', []);
 
   return (
-    <div className="flex h-screen flex-col overflow-hidden bg-sophia-bg text-sophia-text">
+    <div className="flex h-screen flex-col overflow-hidden bg-transparent text-sophia-text">
       {/* ---- header: matches real SessionLayout ---- */}
       <header className="bg-sophia-surface/80 backdrop-blur-sm border-b border-sophia-surface-border px-4 py-3">
         <div className="max-w-5xl mx-auto flex items-center justify-between">

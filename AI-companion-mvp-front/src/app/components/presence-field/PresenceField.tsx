@@ -4,6 +4,7 @@ import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from 
 import { usePresenceStore } from "../../stores/presence-store"
 import { useEmotionColor } from "../../hooks/useEmotionColor"
 import { useExpression, type ExpressionParams } from "../../hooks/useExpression"
+import { useDeviceFidelity } from "../../hooks/useDeviceFidelity"
 import { useNebulaCanvas } from "./NebulaCanvas"
 import { useRibbonCanvas } from "./RibbonCanvas"
 import { useSparkCanvas } from "./SparkCanvas"
@@ -27,7 +28,9 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
   const mouseRef = useRef({ x: 0.5, y: 0.5 })
-  const reducedMotionRef = useRef(false)
+
+  // Device fidelity (R43, R44, R45)
+  const { reducedFidelity, reducedMotion, dprCap } = useDeviceFidelity()
 
   // Stores
   const presenceState = usePresenceStore((s) => s.status)
@@ -39,19 +42,19 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
   // Expose impulse to parent via ref
   useImperativeHandle(ref, () => ({ fireImpulse }), [fireImpulse])
 
-  // Canvas layers
-  const nebula = useNebulaCanvas()
-  const ribbon = useRibbonCanvas()
-  const spark = useSparkCanvas()
+  // Canvas layers — pass fidelity for count adjustments
+  const nebula = useNebulaCanvas({ reducedFidelity })
+  const ribbon = useRibbonCanvas({ reducedFidelity })
+  const spark = useSparkCanvas({ reducedFidelity })
 
   // ── Resize ──────────────────────────────────────────────────────────────
   const handleResize = useCallback(() => {
     const w = window.innerWidth
     const h = window.innerHeight
-    nebula.resize(w, h)
+    nebula.resize(w, h, dprCap)
     ribbon.resize(w, h)
     spark.resize(w, h)
-  }, [nebula, ribbon, spark])
+  }, [nebula, ribbon, spark, dprCap])
 
   // ── Mouse ───────────────────────────────────────────────────────────────
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -67,13 +70,10 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
 
   // ── Init + animation loop ───────────────────────────────────────────────
   useEffect(() => {
-    const mql = window.matchMedia("(prefers-reduced-motion: reduce)")
-    reducedMotionRef.current = mql.matches
-
     const w = window.innerWidth
     const h = window.innerHeight
 
-    nebula.resize(w, h)
+    nebula.resize(w, h, dprCap)
     const glOk = nebula.init()
     ribbon.resize(w, h)
     ribbon.init(w, h)
@@ -82,6 +82,11 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
 
     window.addEventListener("resize", handleResize)
     document.addEventListener("mousemove", handleMouseMove)
+
+    // Set data attribute for CSS targeting (R45)
+    if (reducedMotion) {
+      document.documentElement.setAttribute("data-reduced-motion", "")
+    }
 
     const frame = (ts: number) => {
       const time = ts * 0.001
@@ -101,7 +106,10 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
         presenceRef.current === "speaking"
       )
 
-      rafRef.current = requestAnimationFrame(frame)
+      // Reduced motion: render one static frame then stop (R45)
+      if (!reducedMotion) {
+        rafRef.current = requestAnimationFrame(frame)
+      }
     }
     rafRef.current = requestAnimationFrame(frame)
 
@@ -109,10 +117,11 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
       cancelAnimationFrame(rafRef.current)
       window.removeEventListener("resize", handleResize)
       document.removeEventListener("mousemove", handleMouseMove)
+      document.documentElement.removeAttribute("data-reduced-motion")
     }
     // Stable refs only — no reactive deps needed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [reducedMotion, reducedFidelity, dprCap])
 
   return (
     <div

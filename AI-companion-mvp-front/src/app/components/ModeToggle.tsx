@@ -44,6 +44,7 @@ export function ModeToggle({ opacity = 1 }: { opacity?: number }) {
             title={isDisabled ? canSwitchToVoice.message ?? "Cannot switch to voice" : label}
             className={[
               "text-[10px] tracking-[0.18em] lowercase transition-colors duration-300",
+              "focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded",
               isActive
                 ? "text-white/20"
                 : "text-white/10 hover:text-white/25 cursor-pointer",

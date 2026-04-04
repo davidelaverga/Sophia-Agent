@@ -76,6 +76,8 @@ export function NudgeBanner({
         isExiting && 'opacity-0 translate-y-1',
         className
       )}
+      role="status"
+      aria-label="Sophia suggestion"
     >
       {/* Whisper suggestion — Cormorant italic */}
       <p className="font-cormorant italic text-[14px] text-white/40 mb-2.5">
@@ -86,6 +88,7 @@ export function NudgeBanner({
       <div className="flex items-center justify-center gap-2.5">
         <button
           onClick={handleAccept}
+          aria-label={`Accept: ${suggestion.message}`}
           className={cn(
             'px-4 py-1.5 rounded-full',
             'text-[11px] tracking-[0.08em] uppercase',
@@ -101,6 +104,7 @@ export function NudgeBanner({
         </button>
         <button
           onClick={handleDismiss}
+          aria-label="Dismiss suggestion"
           className={cn(
             'text-[10px] tracking-[0.08em] text-white/20',
             'hover:text-white/35',
