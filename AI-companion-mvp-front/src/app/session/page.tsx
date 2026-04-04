@@ -27,6 +27,7 @@ import {
   VoiceCaption,
   PresenceArtifactPanel,
   ArtifactToggleIcon,
+  WhisperIndicator,
   MobileDrawer,
   FeedbackToast,
   // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
@@ -39,6 +40,7 @@ import {
   ArtifactsPanelErrorBoundary,
 } from '../components/error-boundaries';
 import { ModeToggle } from '../components/ModeToggle';
+import { useChromeFade } from '../hooks/useChromeFade';
 import { useUiStore } from '../stores/ui-store';
 import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
@@ -94,6 +96,7 @@ function SessionPageContent() {
   const SHOW_SESSION_MEMORY_REJECT = false;
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
+  const { chromeOpacity } = useChromeFade();
   const debugEnabled = useMemo(() => {
     // 🔒 SECURITY: debug mode restricted to development only
     return process.env.NODE_ENV === 'development';
@@ -834,13 +837,12 @@ function SessionPageContent() {
             isVoiceMode={focusMode !== 'text'}
           />
           
-          {/* Quick Actions rows removed – CompanionRail on left side now */}
+          {/* Whisper Indicator — atmospheric presence label */}
+          <WhisperIndicator opacity={chromeOpacity} />
           
-          {/* Mode Toggle */}
-          <div className="px-4 pt-2">
-            <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
-              <ModeToggle />
-            </div>
+          {/* Mode Toggle — whisper-style voice/text switcher */}
+          <div className="flex justify-center pt-2" style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}>
+            <ModeToggle opacity={chromeOpacity} />
           </div>
           
           {/* Voice-First Composer */}
