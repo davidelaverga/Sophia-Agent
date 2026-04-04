@@ -17,7 +17,6 @@ from app.gateway.routers import (
     models,
     sessions,
     skills,
-    sophia,
     suggestions,
     uploads,
     voice,
@@ -205,6 +204,8 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     app.include_router(voice.router)
 
     # Sophia API is mounted at /api/sophia
+    from app.gateway.routers import sophia
+
     app.include_router(sophia.router)
 
     @app.get("/health", tags=["health"])

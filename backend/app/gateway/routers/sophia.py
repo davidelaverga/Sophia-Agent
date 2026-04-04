@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -36,6 +35,8 @@ def _validate_user(user_id: str) -> str:
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
+        import os
+
         from mem0 import MemoryClient
 
         api_key = os.environ.get("MEM0_API_KEY")
