@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sophia", tags=["sophia"])
 
+# Strong references to background tasks to prevent GC cancellation
+_background_tasks: set = set()
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -112,7 +115,7 @@ class JournalResponse(BaseModel):
 class ToneDataPoint(BaseModel):
     date: str = Field(..., description="Date (YYYY-MM-DD)")
     avg_tone: float = Field(default=0.0, description="Average tone estimate")
-    session_count: int = Field(default=0, description="Number of sessions")
+    turn_count: int = Field(default=0, description="Number of turns with tone data")
 
 
 class WeeklyVisualResponse(BaseModel):
@@ -193,7 +196,11 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
     try:
         update_data = {}
         if body.text is not None:
-            update_data["data"] = body.text
+            update_data["text"] = body.text
+        if body.metadata is not None:
+            update_data["metadata"] = body.metadata
+        if not update_data:
+            raise HTTPException(status_code=422, detail="At least text or metadata must be provided")
         result = client.update(memory_id=memory_id, **update_data)
         from deerflow.sophia.mem0_client import invalidate_user_cache
         invalidate_user_cache(user_id)
@@ -233,7 +240,7 @@ async def bulk_review(user_id: str, body: BulkReviewRequest) -> BulkReviewRespon
     for item in body.items:
         try:
             if item.action == "approve":
-                client.update(memory_id=item.id, data=None)
+                client.update(memory_id=item.id, metadata={"status": "approved"})
                 results.append(BulkReviewResult(id=item.id, action="approve", status="ok"))
             elif item.action == "discard":
                 client.delete(memory_id=item.id)
@@ -262,7 +269,8 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
     _validate_user(user_id)
     try:
         from deerflow.sophia.reflection import generate_reflection
-        result = generate_reflection(
+        result = await asyncio.to_thread(
+            generate_reflection,
             user_id=user_id,
             query=body.query,
             period=body.period,
@@ -347,6 +355,8 @@ async def visual_weekly(user_id: str) -> WeeklyVisualResponse:
                 if ts and tone is not None:
                     try:
                         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
                         if dt >= cutoff:
                             date_key = dt.strftime("%Y-%m-%d")
                             daily.setdefault(date_key, []).append(float(tone))
@@ -359,7 +369,7 @@ async def visual_weekly(user_id: str) -> WeeklyVisualResponse:
         ToneDataPoint(
             date=date,
             avg_tone=round(sum(tones) / len(tones), 2),
-            session_count=len(tones),
+            turn_count=len(tones),
         )
         for date, tones in sorted(daily.items())
     ]
@@ -418,7 +428,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
         # Fire pipeline as background task — don't block the HTTP response
-        asyncio.create_task(
+        task = asyncio.create_task(
             asyncio.to_thread(
                 run_offline_pipeline,
                 user_id,
@@ -427,6 +437,8 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
                 None,  # thread_state — pipeline will need to fetch it
             )
         )
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
         return SessionEndResponse(status="pipeline_queued", session_id=body.session_id)
     except ImportError:
         raise HTTPException(status_code=503, detail="Offline pipeline not available")
