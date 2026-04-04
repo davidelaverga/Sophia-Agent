@@ -32,9 +32,10 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
       return
     }
 
-    // Find the last assistant message
-    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant")
-    if (!lastAssistant) return
+    // Find the last assistant message (skip the initial greeting — prototype shows only live responses)
+    const assistantMessages = messages.filter((m) => m.role === "assistant")
+    if (assistantMessages.length <= 1) return // first message is the greeting; don't caption it
+    const lastAssistant = assistantMessages[assistantMessages.length - 1]
 
     const content = lastAssistant.content?.trim()
     if (!content) return

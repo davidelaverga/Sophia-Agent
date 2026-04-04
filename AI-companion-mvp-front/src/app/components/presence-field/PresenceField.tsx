@@ -133,19 +133,19 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
       {/* Layer 1: WebGL nebula */}
       <canvas
         ref={nebula.canvasRef}
-        className="fixed inset-0"
+        className="fixed inset-0 w-full h-full"
         style={{ zIndex: 0 }}
       />
       {/* Layer 2: Canvas2D ribbons */}
       <canvas
         ref={ribbon.canvasRef}
-        className="fixed inset-0"
+        className="fixed inset-0 w-full h-full"
         style={{ zIndex: 1 }}
       />
       {/* Layer 3: Canvas2D sparkle dust */}
       <canvas
         ref={spark.canvasRef}
-        className="fixed inset-0"
+        className="fixed inset-0 w-full h-full"
         style={{ zIndex: 2 }}
       />
     </div>
