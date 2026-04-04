@@ -59,6 +59,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
         channel_service = await start_channel_service()
         logger.info("Channel service started: %s", channel_service.get_status())
+    
+    # Sophia API is mounted at /api/sophia
+    from app.gateway.routers import sophia
+    app.include_router(sophia.router)
     except Exception:
         logger.exception("No IM channels configured or channel service failed to start")
 
@@ -145,6 +149,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
                 "description": "Manage IM channel integrations (Feishu, Slack, Telegram)",
             },
             {
+                "name": "sophia",
+                "description": "Sophia companion: memory review, reflect, journal, visual artifacts",
+            },
+            {
                 "name": "health",
                 "description": "Health check and system status endpoints",
             },
@@ -190,6 +198,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
 
+<<<<<<< HEAD
     # Sessions API is mounted at /api/v1/sessions
     app.include_router(sessions.router)
 
@@ -198,6 +207,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Voice API is mounted at /api/sophia/{user_id}/voice
     app.include_router(voice.router)
+=======
+    # Sophia API is mounted at /api/sophia
+    from app.gateway.routers import sophia
+    app.include_router(sophia.router)
+>>>>>>> 79740637 (feat(sophia): add gateway API endpoints for memory, reflect, journal, visual, session-end)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
