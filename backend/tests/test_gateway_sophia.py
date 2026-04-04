@@ -5,8 +5,8 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -16,7 +16,6 @@ from fastapi.testclient import TestClient
 def client():
     """Create a test client with the Sophia router."""
     from app.gateway.routers.sophia import router
-    from fastapi import FastAPI
 
     app = FastAPI()
     app.include_router(router)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
+import os
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
@@ -36,8 +36,8 @@ def _validate_user(user_id: str) -> str:
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
-        import os
         from mem0 import MemoryClient
+
         api_key = os.environ.get("MEM0_API_KEY")
         if not api_key:
             raise HTTPException(status_code=503, detail="MEM0_API_KEY not configured")
@@ -332,8 +332,9 @@ async def journal(
 async def visual_weekly(user_id: str) -> WeeklyVisualResponse:
     _validate_user(user_id)
     try:
-        from deerflow.agents.sophia_agent.utils import safe_user_path
         from deerflow.agents.sophia_agent.paths import USERS_DIR
+        from deerflow.agents.sophia_agent.utils import safe_user_path
+
         traces_dir = safe_user_path(USERS_DIR, user_id, "traces")
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
@@ -341,8 +342,7 @@ async def visual_weekly(user_id: str) -> WeeklyVisualResponse:
     if not traces_dir.exists():
         return WeeklyVisualResponse(data_points=[])
 
-    from datetime import timedelta
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    cutoff = datetime.now(UTC) - timedelta(days=7)
     daily: dict[str, list[float]] = {}
 
     for trace_file in sorted(traces_dir.glob("*.json")):
@@ -356,7 +356,7 @@ async def visual_weekly(user_id: str) -> WeeklyVisualResponse:
                     try:
                         dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
                         if dt.tzinfo is None:
-                            dt = dt.replace(tzinfo=timezone.utc)
+                            dt = dt.replace(tzinfo=UTC)
                         if dt >= cutoff:
                             date_key = dt.strftime("%Y-%m-%d")
                             daily.setdefault(date_key, []).append(float(tone))
