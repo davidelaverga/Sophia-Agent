@@ -19,7 +19,7 @@ import { ThemeToggle } from './ThemeToggle';
 import { useConnectivityStore, selectStatus } from '../stores/connectivity-store';
 import { useUiStore } from '../stores/ui-store';
 import { debugLog } from '../lib/debug-logger';
-import { EmotionAtmosphereCanvas } from './EmotionAtmosphereCanvas';
+import { PresenceField } from './presence-field';
 import type { SessionClientStore, PresetType, ContextMode } from '../lib/session-types';
 
 interface SessionLayoutProps {
@@ -127,7 +127,7 @@ function SessionTimer({
   
   return (
     <div 
-      className="flex items-center gap-1.5 text-sm text-sophia-text2" 
+      className="flex items-center gap-1.5 text-sm text-white/40" 
       role="timer" 
       aria-live="off"
       title={isOnline ? 'Connected' : 'Offline mode'}
@@ -146,9 +146,9 @@ function SessionTimer({
       </span>
       <Clock className="w-3.5 h-3.5" />
       {isEnded && (
-        <span className="flex items-center gap-1 text-[11px] text-sophia-text2/70">
+        <span className="flex items-center gap-1 text-[11px] text-white/25">
           Ended
-          <span className="text-sophia-text2/40">·</span>
+          <span className="text-white/15">·</span>
         </span>
       )}
       <span className="tabular-nums">{elapsed}</span>
@@ -261,17 +261,17 @@ export function SessionLayout({
   return (
     <div
       className={cn(
-        'flex flex-col h-screen overflow-x-hidden bg-sophia-bg text-sophia-text transition-opacity duration-300',
+        'flex flex-col h-screen overflow-x-hidden bg-[#030308] text-white transition-opacity duration-300',
         isVisible ? 'opacity-100' : 'opacity-0'
       )}
       onPointerDown={handleRootPointerDown}
     >
-      {/* Emotion Atmosphere Canvas — renders behind all content */}
-      <EmotionAtmosphereCanvas />
+      {/* Presence Field — WebGL nebula + ribbons + sparks behind all content */}
+      <PresenceField />
       {/* Header */}
       <header
         className={cn(
-          'bg-sophia-surface/80 backdrop-blur-sm border-b border-sophia-surface-border px-4 py-3 transition-all duration-500',
+          'bg-black/20 backdrop-blur-md border-b border-white/[0.03] px-4 py-3 transition-all duration-500',
           isVisible ? 'translate-y-0' : '-translate-y-full'
         )}
         style={{ opacity: chromeOpacity, transition: 'opacity 500ms ease' }}
@@ -284,15 +284,15 @@ export function SessionLayout({
               aria-label="Back to home"
               className={cn(
                 'group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-                'border border-sophia-surface-border bg-sophia-button',
-                'hover:bg-sophia-button-hover hover:scale-105 shadow-soft',
-                'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple'
+                'border border-white/[0.06] bg-white/[0.04]',
+                'hover:bg-white/[0.08] hover:scale-105',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20'
               )}
             >
-              <ArrowLeft className="w-5 h-5 text-sophia-text2 group-hover/btn:text-sophia-purple transition-colors" />
+              <ArrowLeft className="w-5 h-5 text-white/40 group-hover/btn:text-white/60 transition-colors" />
             </button>
             <div>
-              <h1 className="font-semibold flex items-center gap-2 text-sophia-text text-sm sm:text-base">
+              <h1 className="font-semibold flex items-center gap-2 text-white/60 text-sm sm:text-base [text-shadow:_0_1px_8px_rgba(0,0,0,0.3)]">
                 <span className="text-base sm:text-lg" aria-hidden="true">{contextEmoji}</span>
                 <span className="hidden xs:inline">{presetLabel}</span>
               </h1>
@@ -301,7 +301,7 @@ export function SessionLayout({
           
           {/* Center: Timer + Status */}
           <div className="flex-1 flex justify-center">
-            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-sophia-surface/50">
+            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.04]">
               <SessionTimer
                 startedAt={store.startedAt}
                 activeElapsedSeconds={store.activeElapsedSeconds}
@@ -312,7 +312,7 @@ export function SessionLayout({
                 isEnded={store.status === 'ended'}
               />
               {isReadOnly && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-sophia-text2/80">
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-white/30">
                   <Lock className="w-3 h-3" />
                   Read-only
                 </span>
@@ -330,10 +330,10 @@ export function SessionLayout({
                 title={isOffline ? 'Cannot end session while offline' : 'End session'}
                 className={cn(
                   'hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all duration-200',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400',
+                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50',
                   isOffline 
-                    ? 'text-sophia-text2/50 cursor-not-allowed' 
-                    : 'text-sophia-text2 hover:text-red-400 hover:bg-red-500/10',
+                    ? 'text-white/20 cursor-not-allowed' 
+                    : 'text-white/40 hover:text-red-400 hover:bg-red-500/10',
                   isEnding && 'opacity-50 cursor-not-allowed'
                 )}
               >
@@ -344,7 +344,7 @@ export function SessionLayout({
               <div className="hidden sm:flex items-center gap-2 animate-fadeIn">
                 <button
                   onClick={handleCancelEnd}
-                  className="px-2 py-1 text-xs text-sophia-text2 hover:text-sophia-text transition-colors"
+                  className="px-2 py-1 text-xs text-white/30 hover:text-white/60 transition-colors"
                 >
                   Cancel
                 </button>
@@ -369,13 +369,13 @@ export function SessionLayout({
               data-onboarding="header-settings"
               className={cn(
                 'group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-                'border border-sophia-surface-border bg-sophia-button',
-                'hover:bg-sophia-button-hover hover:scale-105 shadow-soft',
-                'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple'
+                'border border-white/[0.06] bg-white/[0.04]',
+                'hover:bg-white/[0.08] hover:scale-105',
+                'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20'
               )}
               aria-label="Open settings"
             >
-              <Settings className="w-5 h-5 text-sophia-text2 group-hover/btn:text-sophia-purple transition-colors" />
+              <Settings className="w-5 h-5 text-white/40 group-hover/btn:text-white/60 transition-colors" />
             </button>
           </div>
         </div>
@@ -389,7 +389,7 @@ export function SessionLayout({
       {/* Mobile-only Footer - End Session for small screens */}
       <footer
         className={cn(
-          'sm:hidden bg-sophia-surface/80 backdrop-blur-sm border-t border-sophia-surface-border dark:border-sophia-purple/20',
+          'sm:hidden bg-black/20 backdrop-blur-md border-t border-white/[0.03]',
           'pb-[env(safe-area-inset-bottom)] pt-1.5 px-2',
           'transition-all duration-500 z-40 relative shrink-0',
           isVisible ? 'translate-y-0' : 'translate-y-full'
@@ -404,8 +404,8 @@ export function SessionLayout({
               className={cn(
                 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-200',
                 isOffline 
-                  ? 'text-sophia-text2/50' 
-                  : 'text-sophia-text2 hover:text-red-400 hover:bg-red-500/10',
+                  ? 'text-white/20' 
+                  : 'text-white/40 hover:text-red-400 hover:bg-red-500/10',
                 isEnding && 'opacity-50 cursor-not-allowed'
               )}
             >
@@ -416,7 +416,7 @@ export function SessionLayout({
             <div className="flex items-center gap-3 animate-fadeIn">
               <button
                 onClick={handleCancelEnd}
-                className="px-2.5 py-1 text-[11px] text-sophia-text2 hover:text-sophia-text transition-colors"
+                className="px-2.5 py-1 text-[11px] text-white/30 hover:text-white/60 transition-colors"
               >
                 Cancel
               </button>
@@ -443,20 +443,20 @@ export function SessionLayout({
             role="dialog"
             aria-modal="true"
             aria-labelledby="back-confirm-title"
-            className="w-[90%] max-w-sm bg-sophia-surface rounded-2xl p-6 shadow-xl border border-sophia-surface-border animate-scaleIn"
+            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 border border-white/[0.06] animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
               {/* Thinking indicator */}
-              <div className="w-12 h-12 rounded-full bg-sophia-purple/10 flex items-center justify-center">
-                <div className="w-6 h-6 border-2 border-sophia-purple/30 border-t-sophia-purple rounded-full animate-spin" />
+              <div className="w-12 h-12 rounded-full bg-white/[0.06] flex items-center justify-center">
+                <div className="w-6 h-6 border-2 border-white/10 border-t-white/40 rounded-full animate-spin" />
               </div>
               
               <div className="space-y-2">
-                <h3 id="back-confirm-title" className="text-lg font-semibold text-sophia-text1">
+                <h3 id="back-confirm-title" className="text-lg font-semibold text-white/80">
                   Sophia is still responding
                 </h3>
-                <p className="text-sm text-sophia-text2">
+                <p className="text-sm text-white/40">
                   If you leave now, her response will be saved but may be incomplete.
                 </p>
               </div>
@@ -464,13 +464,13 @@ export function SessionLayout({
               <div className="flex gap-3 w-full mt-2">
                 <button
                   onClick={handleCancelBack}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sophia-surface-elevated border border-sophia-surface-border text-sophia-text1 font-medium transition-colors hover:bg-sophia-surface-border focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white/60 font-medium transition-colors hover:bg-white/[0.10] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                 >
                   Stay
                 </button>
                 <button
                   onClick={handleConfirmBack}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-sophia-purple text-white font-medium transition-colors hover:bg-sophia-purple/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple"
+                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.12] text-white/80 font-medium transition-colors hover:bg-white/[0.16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                 >
                   Leave anyway
                 </button>
@@ -491,7 +491,7 @@ export function SessionLayout({
             role="dialog"
             aria-modal="true"
             aria-labelledby="offline-warning-title"
-            className="w-[90%] max-w-sm bg-sophia-surface rounded-2xl p-6 shadow-xl border border-sophia-surface-border animate-scaleIn"
+            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 border border-white/[0.06] animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
@@ -501,10 +501,10 @@ export function SessionLayout({
               </div>
               
               <div className="space-y-2">
-                <h3 id="offline-warning-title" className="text-lg font-semibold text-sophia-text1">
+                <h3 id="offline-warning-title" className="text-lg font-semibold text-white/80">
                   You&apos;re offline
                 </h3>
-                <p className="text-sm text-sophia-text2">
+                <p className="text-sm text-white/40">
                   Please wait until your connection is restored before ending the session. 
                   This ensures your conversation is saved properly.
                 </p>
@@ -512,7 +512,7 @@ export function SessionLayout({
               
               <button
                 onClick={() => setShowOfflineWarning(false)}
-                className="w-full py-2.5 px-4 rounded-xl bg-sophia-purple text-white font-medium transition-colors hover:bg-sophia-purple/90 focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple"
+                className="w-full py-2.5 px-4 rounded-xl bg-white/[0.12] text-white/80 font-medium transition-colors hover:bg-white/[0.16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
               >
                 Got it
               </button>

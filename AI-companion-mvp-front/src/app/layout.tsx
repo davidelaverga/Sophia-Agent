@@ -1,6 +1,6 @@
 import "./globals.css"
 import { Providers } from "./providers"
-import { inter } from "./fonts"
+import { inter, cormorant } from "./fonts"
 import { ThemeBootstrap } from "./ThemeBootstrap"
 import { LocaleProvider } from "./components/LocaleProvider"
 import { CapacitorInit } from "./components/CapacitorInit"
@@ -49,7 +49,7 @@ export default function RootLayout({
   return (
     <html
       lang={locale}
-      className={inter.variable}
+      className={`${inter.variable} ${cormorant.variable}`}
       data-sophia-theme="light"
       suppressHydrationWarning
     >
