@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
@@ -129,7 +129,7 @@ def _run_update(
     prompt = template.replace("{current_identity}", current_identity or "(No existing identity file)")
     prompt = prompt.replace("{recent_handoffs}", "(Not available in this pipeline step)")
     prompt = prompt.replace("{mem0_memories_by_category}", memories_text)
-    prompt = prompt.replace("{current_date}", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    prompt = prompt.replace("{current_date}", datetime.now(UTC).strftime("%Y-%m-%d"))
     prompt = prompt.replace("{sessions_since_update}", str(sessions_since_update))
     prompt = prompt.replace("{update_trigger}", trigger_reason)
 

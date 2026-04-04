@@ -17,7 +17,6 @@ The pipeline is idempotent via a module-level ``_processed_sessions`` set.
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from typing import Any
