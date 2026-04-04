@@ -7,12 +7,15 @@ After-model: captures emit_artifact tool call output and stores in state.
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,9 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
     @override
     def before_agent(self, state: ArtifactState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("Artifact", "skipped (crisis)", _t0)
             return None
 
         blocks = [self._instructions]
@@ -62,11 +67,13 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
         existing = list(state.get("system_prompt_blocks", []))
         existing.extend(blocks)
+        log_middleware("Artifact", "instructions injected", _t0)
         return {"system_prompt_blocks": existing}
 
     @override
     def after_model(self, state: ArtifactState, runtime: Runtime) -> dict | None:
         """Capture emit_artifact tool call result from latest messages."""
+        _t0 = time.perf_counter()
         messages = state.get("messages", [])
 
         artifact_data = None
@@ -81,9 +88,11 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
                     break
 
         if artifact_data:
+            log_middleware("Artifact", f"artifact captured: tone={artifact_data.get('tone_estimate')}", _t0)
             return {
                 "previous_artifact": state.get("current_artifact"),
                 "current_artifact": artifact_data,
             }
 
+        log_middleware("Artifact", "no artifact in response", _t0)
         return None

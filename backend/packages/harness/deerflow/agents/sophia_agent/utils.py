@@ -1,7 +1,23 @@
 """Shared utilities for the Sophia companion agent."""
 
+import logging
 import re
+import time
 from pathlib import Path
+
+_mw_logger = logging.getLogger("sophia.middleware")
+
+
+def log_middleware(name: str, context: str, start_time: float) -> None:
+    """Log middleware execution with name, context summary, and latency.
+
+    Args:
+        name: Middleware class name (e.g. "FileInjectionMiddleware")
+        context: Short description of what was added/done (e.g. "3 files injected")
+        start_time: Result of time.perf_counter() captured at method entry
+    """
+    elapsed_ms = (time.perf_counter() - start_time) * 1000
+    _mw_logger.info("[%s] %s (%.1fms)", name, context, elapsed_ms)
 
 # Strict allowlist for user identifiers used in file paths
 _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")

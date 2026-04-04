@@ -5,13 +5,14 @@ After-phase: queues session for offline extraction (does NOT write per-turn).
 """
 
 import logging
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import extract_last_message_text
+from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
 from deerflow.sophia.mem0_client import search_memories
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
     @override
     def before_agent(self, state: Mem0MemoryState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("Mem0Memory", "skipped (crisis)", _t0)
             return None
 
         ritual = state.get("active_ritual")
@@ -99,9 +102,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             )
         except Exception:
             logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
+            log_middleware("Mem0Memory", "no memories found", _t0)
             return None
 
         if not results:
+            log_middleware("Mem0Memory", "no memories found", _t0)
             return None
 
         # Format memories for prompt injection
@@ -114,6 +119,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
+        log_middleware("Mem0Memory", f"{len(results)} memories injected", _t0)
         return {
             "injected_memories": memory_ids,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],

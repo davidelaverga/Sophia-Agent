@@ -6,12 +6,15 @@ matching band per turn (~726 tokens instead of ~3,630 for the full file).
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +74,9 @@ class ToneGuidanceMiddleware(AgentMiddleware[ToneGuidanceState]):
 
     @override
     def before_agent(self, state: ToneGuidanceState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("ToneGuidance", "skipped (crisis)", _t0)
             return None
 
         prev_artifact = state.get("previous_artifact") or {}
@@ -80,6 +85,7 @@ class ToneGuidanceMiddleware(AgentMiddleware[ToneGuidanceState]):
 
         band_content = self._bands.get(band, self._bands.get(DEFAULT_BAND, ""))
 
+        log_middleware("ToneGuidance", f"band={band} ({len(band_content)} chars)", _t0)
         return {
             "active_tone_band": band,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + ([band_content] if band_content else []),

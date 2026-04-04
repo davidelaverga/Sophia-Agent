@@ -5,12 +5,15 @@ Supports multiple files with per-file crisis skip control.
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +49,7 @@ class FileInjectionMiddleware(AgentMiddleware[FileInjectionState]):
 
     @override
     def before_agent(self, state: FileInjectionState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         is_crisis = state.get("skip_expensive", False)
         blocks = []
         for content, skip_on_crisis in self._files:
@@ -54,10 +58,12 @@ class FileInjectionMiddleware(AgentMiddleware[FileInjectionState]):
             blocks.append(content)
 
         if not blocks:
+            log_middleware("FileInjection", "skipped (no blocks)", _t0)
             return None
         # NOTE: FileInjectionMiddleware is the FIRST middleware to write blocks.
         # It starts with a fresh list (not extending from state) to prevent
         # accumulation across turns via the LangGraph checkpointer.
         # All subsequent middlewares extend from state, which now contains
         # only the current turn's blocks.
+        log_middleware("FileInjection", f"{len(blocks)} files injected (crisis={is_crisis})", _t0)
         return {"system_prompt_blocks": blocks}

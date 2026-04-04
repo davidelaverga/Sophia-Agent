@@ -4,12 +4,15 @@ Runs in before_model to assemble all system_prompt_blocks accumulated by
 other middlewares into a single system message prepended to the conversation.
 """
 
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import SystemMessage
 from langgraph.runtime import Runtime
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 
 class PromptAssemblyState(AgentState):
@@ -25,8 +28,10 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
 
     @override
     def before_model(self, state: PromptAssemblyState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         blocks = state.get("system_prompt_blocks", [])
         if not blocks:
+            log_middleware("PromptAssembly", "skipped (no blocks)", _t0)
             return None
 
         system_content = "\n\n---\n\n".join(blocks)
@@ -46,4 +51,5 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         # Add the assembled system message with a stable ID
         updates.append(SystemMessage(content=system_content, id=self._SYSTEM_MSG_ID))
 
+        log_middleware("PromptAssembly", f"{len(blocks)} blocks assembled ({sum(len(b) for b in blocks)} chars)", _t0)
         return {"messages": updates}

@@ -5,12 +5,15 @@ Must run BEFORE SkillRouterMiddleware so skill routing has ritual context.
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -44,10 +47,13 @@ class RitualMiddleware(AgentMiddleware[RitualState]):
 
     @override
     def before_agent(self, state: RitualState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("Ritual", "skipped (crisis)", _t0)
             return None
 
         if not self._ritual:
+            log_middleware("Ritual", "no ritual active", _t0)
             return {"active_ritual": None, "ritual_phase": None}
 
         result: dict = {
@@ -61,4 +67,5 @@ class RitualMiddleware(AgentMiddleware[RitualState]):
         if self._content:
             result["system_prompt_blocks"] = list(state.get("system_prompt_blocks", [])) + [self._content]
 
+        log_middleware("Ritual", f"ritual={self._ritual} ({len(self._content or '')} chars)", _t0)
         return result
