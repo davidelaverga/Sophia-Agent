@@ -17,7 +17,7 @@ def log_middleware(name: str, context: str, start_time: float) -> None:
         start_time: Result of time.perf_counter() captured at method entry
     """
     elapsed_ms = (time.perf_counter() - start_time) * 1000
-    _mw_logger.info("[%s] %s (%.1fms)", name, context, elapsed_ms)
+    _mw_logger.info("[%s] %s (%.2fms)", name, context, elapsed_ms)
 
 # Strict allowlist for user identifiers used in file paths
 _USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")

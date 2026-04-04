@@ -93,6 +93,12 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Build query from last user message
         query = extract_last_message_text(messages)[:200]  # truncate for search
 
+        logger.info(
+            "[Mem0Memory] query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
+            query[:80], categories, context_mode, ritual, active_skill,
+        )
+
+        _t_search = time.perf_counter()
         try:
             results = search_memories(
                 user_id=self._user_id,
@@ -102,12 +108,20 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             )
         except Exception:
             logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
-            log_middleware("Mem0Memory", "no memories found", _t0)
+            log_middleware("Mem0Memory", "retrieval failed", _t0)
             return None
+        search_ms = (time.perf_counter() - _t_search) * 1000
 
         if not results:
-            log_middleware("Mem0Memory", "no memories found", _t0)
+            log_middleware("Mem0Memory", f"no memories found (search: {search_ms:.0f}ms)", _t0)
             return None
+
+        # Log per-memory categories
+        result_categories = [mem.get("category", "unknown") for mem in results[:10]]
+        logger.info(
+            "[Mem0Memory] %d results | search: %.0fms | categories: %s",
+            len(results), search_ms, result_categories,
+        )
 
         # Format memories for prompt injection
         memory_lines = []
@@ -119,7 +133,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
-        log_middleware("Mem0Memory", f"{len(results)} memories injected", _t0)
+        log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],

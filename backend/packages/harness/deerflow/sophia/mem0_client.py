@@ -98,8 +98,10 @@ def search_memories(
     with _cache_lock:
         cached_results = _cache.get(cache_key)
         if cached_results is not None:
+            logger.info("[Mem0Cache] HIT (%d results cached)", len(cached_results))
             return cached_results
 
+    logger.info("[Mem0Cache] MISS — calling Mem0 API")
     client = _get_client()
     if client is None:
         return []
