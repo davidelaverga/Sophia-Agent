@@ -45,9 +45,8 @@ class TestSearchMemories:
             assert mock_client.search.call_count == 1
 
     def test_cache_miss_calls_search_and_stores_result(self):
-        from deerflow.sophia.mem0_client import search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [
@@ -63,9 +62,8 @@ class TestSearchMemories:
 
     def test_cache_expires_after_ttl(self):
         """Replace the module cache with a short-TTL cache to test expiration."""
-        from deerflow.sophia.mem0_client import search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import search_memories
 
         # Swap in a cache with 100ms TTL for this test
         original_cache = mod._cache
@@ -82,7 +80,7 @@ class TestSearchMemories:
             mod._cache = original_cache
 
     def test_invalidate_user_cache(self):
-        from deerflow.sophia.mem0_client import search_memories, invalidate_user_cache
+        from deerflow.sophia.mem0_client import invalidate_user_cache, search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [{"id": "m1", "memory": "fact", "metadata": {}}]
@@ -93,9 +91,8 @@ class TestSearchMemories:
             assert mock_client.search.call_count == 2
 
     def test_invalidate_only_clears_matching_user(self):
-        from deerflow.sophia.mem0_client import search_memories, invalidate_user_cache
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import invalidate_user_cache, search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [{"id": "m1", "memory": "fact", "metadata": {}}]
@@ -166,9 +163,8 @@ class TestSearchMemories:
 
     def test_cache_bounded_by_max_size(self):
         """Replace module cache with a small-maxsize cache to test bounding."""
-        from deerflow.sophia.mem0_client import search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import search_memories
 
         original_cache = mod._cache
         mod._cache = TTLCache(maxsize=5, ttl=60)
@@ -233,9 +229,8 @@ class TestAddMemories:
             assert result == []
 
     def test_cache_invalidated_after_successful_add(self):
-        from deerflow.sophia.mem0_client import add_memories, search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import add_memories, search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [{"id": "m1", "memory": "old fact", "metadata": {}}]

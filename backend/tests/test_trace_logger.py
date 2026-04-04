@@ -178,9 +178,9 @@ class TestWriteSessionTrace:
         with patch("deerflow.sophia.trace_logger.USERS_DIR", tmp_path):
             # Patch datetime for deterministic timestamps
             with patch("deerflow.sophia.trace_logger.datetime") as mock_dt:
-                from datetime import datetime, timezone
+                from datetime import UTC, datetime
 
-                fixed_now = datetime(2026, 3, 27, 12, 0, 0, tzinfo=timezone.utc)
+                fixed_now = datetime(2026, 3, 27, 12, 0, 0, tzinfo=UTC)
                 mock_dt.now.return_value = fixed_now
                 mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
 

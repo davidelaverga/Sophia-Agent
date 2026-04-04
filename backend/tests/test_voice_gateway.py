@@ -1,7 +1,6 @@
 """Tests for the voice gateway endpoint."""
 
-from unittest.mock import ANY
-from unittest.mock import AsyncMock, patch
+from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
 import pytest
