@@ -16,61 +16,103 @@ interface VoiceCaptionProps {
 /**
  * Ephemeral voice caption — fixed bottom-center overlay.
  *
- * Shows the latest assistant message text as a fading caption during voice mode.
- * Matches prototype: Inter 15px weight 300, rgba(232,228,239,0.55), centered.
+ * Shows the latest assistant AND user message text as fading captions during voice mode.
+ * Sophia's responses: centered, rgba(232,228,239,0.55).
+ * User's speech: centered, dimmer rgba(232,228,239,0.30), slightly smaller.
  * Fade-in 0.8s, hold 4s, fade-out 2s.
  */
 export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
-  const { text, opacity, isVisible, showCaption, flush, transition } = useCaptionQueue()
-  const lastContentRef = useRef<string>("")
-  const lastMessageIdRef = useRef<string>("")
+  // Sophia caption (assistant messages)
+  const sophia = useCaptionQueue()
+  // User caption (user messages — dimmer, shorter hold)
+  const user = useCaptionQueue({ holdMs: 2500 })
 
-  // Track the latest assistant message and trigger captions
+  const lastAssistantContentRef = useRef<string>("")
+  const lastAssistantIdRef = useRef<string>("")
+  const lastUserContentRef = useRef<string>("")
+  const lastUserIdRef = useRef<string>("")
+
+  // Track assistant messages
   useEffect(() => {
     if (!isVoiceMode) {
-      flush()
+      sophia.flush()
       return
     }
 
-    // Find the last assistant message (skip the initial greeting — prototype shows only live responses)
     const assistantMessages = messages.filter((m) => m.role === "assistant")
-    if (assistantMessages.length <= 1) return // first message is the greeting; don't caption it
-    const lastAssistant = assistantMessages[assistantMessages.length - 1]
+    if (assistantMessages.length <= 1) return // skip initial greeting
+    const last = assistantMessages[assistantMessages.length - 1]
 
-    const content = lastAssistant.content?.trim()
+    const content = last.content?.trim()
     if (!content) return
 
-    // Show caption when: new message arrives OR content changes (streaming)
-    if (
-      lastAssistant.id !== lastMessageIdRef.current ||
-      content !== lastContentRef.current
-    ) {
-      lastMessageIdRef.current = lastAssistant.id
-      lastContentRef.current = content
-      showCaption(content)
+    if (last.id !== lastAssistantIdRef.current || content !== lastAssistantContentRef.current) {
+      lastAssistantIdRef.current = last.id
+      lastAssistantContentRef.current = content
+      sophia.showCaption(content)
     }
-  }, [messages, isVoiceMode, showCaption, flush])
+  }, [messages, isVoiceMode, sophia.showCaption, sophia.flush])
 
-  if (!isVoiceMode || !isVisible) return null
+  // Track user messages
+  useEffect(() => {
+    if (!isVoiceMode) {
+      user.flush()
+      return
+    }
+
+    const userMessages = messages.filter((m) => m.role === "user")
+    if (userMessages.length === 0) return
+    const last = userMessages[userMessages.length - 1]
+
+    const content = last.content?.trim()
+    if (!content) return
+
+    if (last.id !== lastUserIdRef.current || content !== lastUserContentRef.current) {
+      lastUserIdRef.current = last.id
+      lastUserContentRef.current = content
+      user.showCaption(content)
+    }
+  }, [messages, isVoiceMode, user.showCaption, user.flush])
+
+  if (!isVoiceMode) return null
+  if (!sophia.isVisible && !user.isVisible) return null
 
   return (
     <div
-      className="fixed bottom-[140px] left-1/2 -translate-x-1/2 z-30 text-center pointer-events-none max-w-[600px] w-[90vw]"
+      className="fixed bottom-[140px] left-1/2 -translate-x-1/2 z-30 text-center pointer-events-none max-w-[600px] w-[90vw] flex flex-col items-center gap-3"
       role="status"
       aria-live="polite"
-      aria-label="Voice caption"
+      aria-label="Voice captions"
     >
-      <p
-        className="font-sans text-[15px] font-light leading-[1.7] tracking-[0.01em]"
-        style={{
-          color: `rgba(232, 228, 239, ${opacity * 0.55})`,
-          opacity,
-          transition,
-          textShadow: "0 1px 8px rgba(0, 0, 0, 0.3)",
-        }}
-      >
-        {text}
-      </p>
+      {/* User speech — dimmer, smaller */}
+      {user.isVisible && (
+        <p
+          className="font-sans text-[13px] font-light leading-[1.6] tracking-[0.01em]"
+          style={{
+            color: `rgba(232, 228, 239, ${user.opacity * 0.30})`,
+            opacity: user.opacity,
+            transition: user.transition,
+            textShadow: "0 1px 8px rgba(0, 0, 0, 0.3)",
+          }}
+        >
+          {user.text}
+        </p>
+      )}
+
+      {/* Sophia response — brighter, larger */}
+      {sophia.isVisible && (
+        <p
+          className="font-sans text-[15px] font-light leading-[1.7] tracking-[0.01em]"
+          style={{
+            color: `rgba(232, 228, 239, ${sophia.opacity * 0.55})`,
+            opacity: sophia.opacity,
+            transition: sophia.transition,
+            textShadow: "0 1px 8px rgba(0, 0, 0, 0.3)",
+          }}
+        >
+          {sophia.text}
+        </p>
+      )}
     </div>
   )
 }

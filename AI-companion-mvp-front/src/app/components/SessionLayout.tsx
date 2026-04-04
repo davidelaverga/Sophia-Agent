@@ -10,17 +10,16 @@
 
 import { ReactNode, useState, useEffect, type RefObject } from 'react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Settings, Clock, X, LogOut, WifiOff, Lock } from 'lucide-react';
+import { ArrowLeft, Settings, X, WifiOff } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
 import { useFocusTrap } from '../hooks/useFocusTrap';
 import { useChromeFade } from '../hooks/useChromeFade';
-import { ThemeToggle } from './ThemeToggle';
 import { useConnectivityStore, selectStatus } from '../stores/connectivity-store';
 import { useUiStore } from '../stores/ui-store';
 import { debugLog } from '../lib/debug-logger';
 import { PresenceField, type PresenceFieldHandle } from './presence-field';
-import type { SessionClientStore, PresetType, ContextMode } from '../lib/session-types';
+import type { SessionClientStore } from '../lib/session-types';
 
 interface SessionLayoutProps {
   store: SessionClientStore;
@@ -32,129 +31,6 @@ interface SessionLayoutProps {
   /** Read-only mode for ended sessions */
   isReadOnly?: boolean;
   presenceRef?: RefObject<PresenceFieldHandle | null>;
-}
-
-const PRESET_LABELS: Record<PresetType, Record<ContextMode, string>> = {
-  prepare: {
-    gaming: 'Pre-game Prep',
-    work: 'Pre-work Focus',
-    life: 'Preparation',
-  },
-  debrief: {
-    gaming: 'Post-game Debrief',
-    work: 'Work Reflection',
-    life: 'Life Debrief',
-  },
-  reset: {
-    gaming: 'Tilt Reset',
-    work: 'Stress Reset',
-    life: 'Mental Reset',
-  },
-  vent: {
-    gaming: 'Tilt Vent',
-    work: 'Stress Vent',
-    life: 'Vent Session',
-  },
-  open: {
-    gaming: 'Open Chat',
-    work: 'Open Chat',
-    life: 'Open Chat',
-  },
-  chat: {
-    gaming: 'Chat',
-    work: 'Chat',
-    life: 'Chat',
-  },
-};
-
-const CONTEXT_EMOJIS: Record<ContextMode, string> = {
-  gaming: '🎮',
-  work: '💼',
-  life: '🌟',
-};
-
-// Live timer component with connection indicator
-function SessionTimer({
-  startedAt,
-  activeElapsedSeconds,
-  activeSegmentStartedAt,
-  isLive,
-  isEnded,
-  endedAt,
-  lastActivityAt,
-}: {
-  startedAt: string
-  activeElapsedSeconds?: number
-  activeSegmentStartedAt?: string
-  isLive: boolean
-  isEnded: boolean
-  endedAt?: string
-  lastActivityAt?: string
-}) {
-  const [elapsed, setElapsed] = useState('0:00');
-  const connectivityStatus = useConnectivityStore(selectStatus);
-  
-  // Determine dot colors based on connectivity
-  const isOnline = connectivityStatus === 'online' || connectivityStatus === 'checking';
-  const dotColors = isOnline 
-    ? { outer: 'bg-green-400', inner: 'bg-green-500' }
-    : { outer: 'bg-red-400', inner: 'bg-red-500' };
-  
-  useEffect(() => {
-    const endSource = endedAt || lastActivityAt;
-    const end = endSource ? new Date(endSource).getTime() : Date.now();
-    const startMs = new Date(startedAt).getTime();
-    const hasValidRange = Number.isFinite(startMs) && Number.isFinite(end) && end >= startMs;
-    const fallbackElapsed = hasValidRange ? Math.floor((end - startMs) / 1000) : 0;
-    const baseElapsed = (activeElapsedSeconds ?? 0) > 0 ? (activeElapsedSeconds ?? 0) : fallbackElapsed;
-
-    const updateTimer = () => {
-      const activeSegmentStartMs = new Date(activeSegmentStartedAt || startedAt).getTime();
-      const currentMs = isLive ? Date.now() : end;
-      const runningSegmentSeconds = isLive
-        ? Math.max(0, Math.floor((currentMs - activeSegmentStartMs) / 1000))
-        : 0;
-      const totalSeconds = baseElapsed + runningSegmentSeconds;
-      const minutes = Math.floor(totalSeconds / 60);
-      const seconds = totalSeconds % 60;
-      setElapsed(`${minutes}:${seconds.toString().padStart(2, '0')}`);
-    };
-
-    updateTimer();
-    if (!isLive) return;
-    const interval = setInterval(updateTimer, 1000);
-    return () => clearInterval(interval);
-  }, [startedAt, activeElapsedSeconds, activeSegmentStartedAt, endedAt, lastActivityAt, isLive]);
-  
-  return (
-    <div 
-      className="flex items-center gap-1.5 text-sm text-white/40" 
-      role="timer" 
-      aria-live="off"
-      title={isOnline ? 'Connected' : 'Offline mode'}
-    >
-      {/* Active session indicator - breathing dot (color based on connectivity) */}
-      <span className="relative flex h-2 w-2">
-        <span className={cn(
-          'absolute inline-flex h-full w-full rounded-full opacity-75',
-          isOnline && 'animate-ping',
-          dotColors.outer
-        )} />
-        <span className={cn(
-          'relative inline-flex rounded-full h-2 w-2',
-          dotColors.inner
-        )} />
-      </span>
-      <Clock className="w-3.5 h-3.5" />
-      {isEnded && (
-        <span className="flex items-center gap-1 text-[11px] text-white/25">
-          Ended
-          <span className="text-white/15">·</span>
-        </span>
-      )}
-      <span className="tabular-nums">{elapsed}</span>
-    </div>
-  );
 }
 
 export function SessionLayout({
@@ -175,10 +51,6 @@ export function SessionLayout({
   // Chrome fade during active voice
   const { chromeFaded, chromeOpacity } = useChromeFade();
   
-  // Focus mode — hide header/footer entirely in voice mode for immersive experience
-  const focusMode = useUiStore((s) => s.mode);
-  const isVoiceMode = focusMode !== 'text';
-  
   // Focus traps for modal dialogs
   const { containerRef: backConfirmRef } = useFocusTrap(showBackConfirm);
   const { containerRef: offlineWarningRef } = useFocusTrap(showOfflineWarning);
@@ -192,9 +64,6 @@ export function SessionLayout({
     const timer = setTimeout(() => setIsVisible(true), 50);
     return () => clearTimeout(timer);
   }, []);
-  
-  const presetLabel = PRESET_LABELS[store.presetType]?.[store.contextMode] || store.presetType;
-  const contextEmoji = CONTEXT_EMOJIS[store.contextMode] || '💬';
   
   const handleEndClick = () => {
     // Block end session while offline to prevent data loss
@@ -274,171 +143,78 @@ export function SessionLayout({
     >
       {/* Presence Field — WebGL nebula + ribbons + sparks behind all content */}
       <PresenceField ref={presenceRef} />
-      {/* Header — hidden in voice mode for immersive Presence Field experience */}
-      <header
+
+      {/* Floating whisper nav — always visible in both voice and text modes */}
+      <nav
         className={cn(
-          'bg-black/20 backdrop-blur-md border-b border-white/[0.03] px-4 py-3 transition-all duration-500',
-          isVisible ? 'translate-y-0' : '-translate-y-full',
-          isVoiceMode && 'hidden'
+          'fixed top-4 left-4 right-4 z-50 flex items-center justify-between pointer-events-none',
+          'transition-all duration-500',
+          isVisible ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0'
         )}
         style={{ opacity: chromeOpacity, transition: 'opacity 500ms ease' }}
       >
-        <div className="max-w-5xl mx-auto flex items-center justify-between">
-          {/* Left: Back + Title */}
-          <div className="flex items-center gap-3 flex-1">
+        {/* Left: Back */}
+        <button
+          onClick={handleBackClick}
+          aria-label="Back to home"
+          className="pointer-events-auto text-[10px] tracking-[0.14em] lowercase text-white/20 hover:text-white/40 transition-colors duration-300 px-3 py-1.5 rounded-full hover:bg-white/[0.04] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+        >
+          <ArrowLeft className="w-4 h-4" />
+        </button>
+
+        {/* Right: End + Settings */}
+        <div className="flex items-center gap-1 pointer-events-auto">
+          {!showConfirm && !isReadOnly ? (
             <button
-              onClick={handleBackClick}
-              aria-label="Back to home"
+              onClick={handleEndClick}
+              disabled={isEnding}
+              title={isOffline ? 'Cannot end session while offline' : 'End session'}
               className={cn(
-                'group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-                'border border-white/[0.06] bg-white/[0.04]',
-                'hover:bg-white/[0.08] hover:scale-105',
-                'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20'
+                'text-[10px] tracking-[0.14em] lowercase transition-colors duration-300 px-3 py-1.5 rounded-full',
+                'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                isOffline
+                  ? 'text-white/15 cursor-not-allowed'
+                  : 'text-white/20 hover:text-white/40 hover:bg-white/[0.04]',
+                isEnding && 'opacity-50 cursor-not-allowed'
               )}
             >
-              <ArrowLeft className="w-5 h-5 text-white/40 group-hover/btn:text-white/60 transition-colors" />
+              {isOffline ? 'offline' : 'end'}
             </button>
-            <div>
-              <h1 className="font-semibold flex items-center gap-2 text-white/60 text-sm sm:text-base [text-shadow:_0_1px_8px_rgba(0,0,0,0.3)]">
-                <span className="text-base sm:text-lg" aria-hidden="true">{contextEmoji}</span>
-                <span className="hidden xs:inline">{presetLabel}</span>
-              </h1>
-            </div>
-          </div>
-          
-          {/* Center: Timer + Status */}
-          <div className="flex-1 flex justify-center">
-            <div className="flex items-center gap-2 px-3 py-1 rounded-full bg-white/[0.04]">
-              <SessionTimer
-                startedAt={store.startedAt}
-                activeElapsedSeconds={store.activeElapsedSeconds}
-                activeSegmentStartedAt={store.activeSegmentStartedAt}
-                endedAt={store.endedAt}
-                lastActivityAt={store.lastActivityAt}
-                isLive={!isReadOnly && store.status === 'active'}
-                isEnded={store.status === 'ended'}
-              />
-              {isReadOnly && (
-                <span className="inline-flex items-center gap-1 text-[11px] font-medium text-white/30">
-                  <Lock className="w-3 h-3" />
-                  Read-only
-                </span>
-              )}
-            </div>
-          </div>
-          
-          {/* Right: Actions */}
-          <div className="flex items-center gap-2 flex-1 justify-end">
-            {/* End Session button - in header for cleaner UX */}
-            {!showConfirm && !isReadOnly ? (
+          ) : showConfirm ? (
+            <div className="flex items-center gap-1 animate-fadeIn">
               <button
-                onClick={handleEndClick}
-                disabled={isEnding}
-                title={isOffline ? 'Cannot end session while offline' : 'End session'}
-                className={cn(
-                  'hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-all duration-200',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-red-400/50',
-                  isOffline 
-                    ? 'text-white/20 cursor-not-allowed' 
-                    : 'text-white/40 hover:text-red-400 hover:bg-red-500/10',
-                  isEnding && 'opacity-50 cursor-not-allowed'
-                )}
+                onClick={handleCancelEnd}
+                className="text-[10px] tracking-[0.14em] lowercase text-white/20 hover:text-white/40 transition-colors duration-300 px-2.5 py-1.5 rounded-full focus:outline-none"
               >
-                {isOffline ? <WifiOff className="w-4 h-4" /> : <LogOut className="w-4 h-4" />}
-                <span className="hidden md:inline">{isOffline ? 'Offline' : 'End'}</span>
+                cancel
               </button>
-            ) : (
-              <div className="hidden sm:flex items-center gap-2 animate-fadeIn">
-                <button
-                  onClick={handleCancelEnd}
-                  className="px-2 py-1 text-xs text-white/30 hover:text-white/60 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={handleConfirmEnd}
-                  className="flex items-center gap-1 px-2 py-1 rounded-lg text-xs bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
-                >
-                  <X className="w-3 h-3" />
-                  End
-                </button>
-              </div>
-            )}
-            
-            {/* Theme toggle - reusable component */}
-            <ThemeToggle dataOnboardingId="header-theme-toggle" />
-            
-            <button
-              onClick={() => {
-                haptic('light');
-                router.push('/settings');
-              }}
-              data-onboarding="header-settings"
-              className={cn(
-                'group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-                'border border-white/[0.06] bg-white/[0.04]',
-                'hover:bg-white/[0.08] hover:scale-105',
-                'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20'
-              )}
-              aria-label="Open settings"
-            >
-              <Settings className="w-5 h-5 text-white/40 group-hover/btn:text-white/60 transition-colors" />
-            </button>
-          </div>
+              <button
+                onClick={handleConfirmEnd}
+                className="text-[10px] tracking-[0.14em] lowercase text-red-400/60 hover:text-red-400 transition-colors duration-300 px-2.5 py-1.5 rounded-full hover:bg-red-500/[0.06] focus:outline-none"
+              >
+                end session
+              </button>
+            </div>
+          ) : null}
+
+          <button
+            onClick={() => {
+              haptic('light');
+              router.push('/settings');
+            }}
+            data-onboarding="header-settings"
+            aria-label="Open settings"
+            className="text-[10px] tracking-[0.14em] lowercase text-white/20 hover:text-white/40 transition-colors duration-300 px-3 py-1.5 rounded-full hover:bg-white/[0.04] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
         </div>
-      </header>
+      </nav>
       
       {/* Main Content */}
       <main className="flex-1 overflow-hidden">
         {children}
       </main>
-      
-      {/* Mobile-only Footer - End Session for small screens — hidden in voice mode */}
-      <footer
-        className={cn(
-          'sm:hidden bg-black/20 backdrop-blur-md border-t border-white/[0.03]',
-          'pb-[env(safe-area-inset-bottom)] pt-1.5 px-2',
-          'transition-all duration-500 z-40 relative shrink-0',
-          isVisible ? 'translate-y-0' : 'translate-y-full',
-          isVoiceMode && 'hidden'
-        )}
-        style={{ opacity: chromeOpacity, transition: 'opacity 500ms ease' }}
-      >
-        <div className="flex justify-center">
-          {!showConfirm ? (
-            <button
-              onClick={handleEndClick}
-              disabled={isEnding}
-              className={cn(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs transition-all duration-200',
-                isOffline 
-                  ? 'text-white/20' 
-                  : 'text-white/40 hover:text-red-400 hover:bg-red-500/10',
-                isEnding && 'opacity-50 cursor-not-allowed'
-              )}
-            >
-              {isOffline ? <WifiOff className="w-3.5 h-3.5" /> : <LogOut className="w-3.5 h-3.5" />}
-              {isEnding ? 'Ending...' : isOffline ? 'Offline' : 'End Session'}
-            </button>
-          ) : (
-            <div className="flex items-center gap-3 animate-fadeIn">
-              <button
-                onClick={handleCancelEnd}
-                className="px-2.5 py-1 text-[11px] text-white/30 hover:text-white/60 transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleConfirmEnd}
-                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] bg-red-500/20 text-red-400 hover:bg-red-500/30 transition-colors"
-              >
-                <X className="w-3 h-3" />
-                End
-              </button>
-            </div>
-          )}
-        </div>
-      </footer>
       
       {/* Back Confirmation Modal - when Sophia is responding */}
       {showBackConfirm && (

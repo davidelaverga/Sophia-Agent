@@ -190,27 +190,17 @@ export function VoiceFirstComposer({
   return (
     <div data-onboarding={containerOnboardingId} className={cn(
       textOnly
-        ? 'p-4 sm:pb-4 pb-2 border-t border-white/[0.03]'
+        ? 'p-4 sm:pb-4 pb-2'
         : 'fixed bottom-8 left-1/2 -translate-x-1/2 z-30'
     )}>
       <div className={cn(textOnly && 'max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto')}>
         
-        {/* Sophia Presence Indicator — text mode only */}
+        {/* Sophia Presence Indicator — text mode only, atmospheric */}
         {textOnly && (
-        <div className="flex justify-center mb-4">
-          <div role="status" aria-live="polite" className="flex items-center gap-2 text-white/40">
-            <span className="relative flex h-2 w-2">
-              <span className={cn(
-                'absolute inline-flex h-full w-full rounded-full opacity-75',
-                isTyping ? 'bg-white/20 animate-ping' : 'bg-green-400 animate-pulse'
-              )} />
-              <span className={cn(
-                'relative inline-flex rounded-full h-2 w-2',
-                isTyping ? 'bg-white/30' : 'bg-green-500'
-              )} />
-            </span>
-            <span className="text-xs font-medium transition-all duration-300">
-              {isTyping ? 'Sophia is typing...' : 'Sophia — Ready'}
+        <div className="flex justify-center mb-3">
+          <div role="status" aria-live="polite" className="flex items-center gap-2">
+            <span className="text-[10px] tracking-[0.14em] lowercase text-white/20 transition-all duration-500">
+              {isTyping ? 'sophia is typing…' : ''}
             </span>
           </div>
         </div>
@@ -222,25 +212,24 @@ export function VoiceFirstComposer({
           {/* Mic Hero Button — hidden in text-only mode */}
           {!textOnly && (
           <div className="relative">
-            {/* Outer glow ring - always present but varies */}
+            {/* Outer glow ring — distinct per state */}
             <div className={cn(
               'absolute inset-[-12px] rounded-full transition-all duration-500',
-              isActive && 'bg-white/[0.04] animate-pulse',
-              isBusy && 'bg-white/[0.03]',
+              isActive && 'bg-white/[0.06] shadow-[0_0_30px_rgba(255,255,255,0.08)]',
+              isBusy && 'bg-amber-500/[0.04]',
               !isActive && !isBusy && 'bg-transparent'
             )} />
             
-            {/* Waveform visualization for listening */}
+            {/* Waveform visualization for listening — taller, more visible */}
             {isActive && (
-              <div className="absolute inset-[-20px] flex items-center justify-center">
-                {[...Array(8)].map((_, i) => (
+              <div className="absolute inset-[-24px] flex items-center justify-center">
+                {[...Array(10)].map((_, i) => (
                   <span
                     key={i}
-                    className="w-0.5 mx-0.5 bg-white/15 rounded-full animate-pulse"
+                    className="w-[3px] mx-[2px] bg-white/25 rounded-full"
                     style={{
-                      height: `${12 + Math.sin(i * 0.8) * 8}px`,
-                      animationDelay: `${i * 75}ms`,
-                      animationDuration: '600ms',
+                      height: `${14 + Math.sin(i * 0.7) * 10}px`,
+                      animation: `waveform 500ms ease-in-out ${i * 60}ms infinite alternate`,
                     }}
                   />
                 ))}
@@ -250,7 +239,7 @@ export function VoiceFirstComposer({
             {/* Shimmer effect for thinking/speaking */}
             {isBusy && (
               <div className="absolute inset-[-4px] rounded-full overflow-hidden">
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent animate-shimmer" 
+                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-amber-400/15 to-transparent animate-shimmer" 
                   style={{ 
                     backgroundSize: '200% 100%',
                     animation: 'shimmer 1.5s infinite linear'
@@ -269,29 +258,25 @@ export function VoiceFirstComposer({
               className={cn(
                 'relative flex items-center justify-center rounded-full transition-all duration-300',
                 'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20 focus-visible:ring-offset-2 focus-visible:ring-offset-[#030308]',
-                // Size
-                'w-16 h-16',
-                // States
-                isActive && 'bg-white/[0.08] text-white scale-110 shadow-[0_0_20px_rgba(255,255,255,0.04)]',
-                isBusy && 'bg-white/[0.03] text-white/30 opacity-70 cursor-not-allowed',
+                // Size — grows when listening
+                isActive ? 'w-[72px] h-[72px]' : 'w-16 h-16',
+                // States — clearly differentiated
+                isActive && 'bg-white/[0.12] text-white shadow-[0_0_24px_rgba(255,255,255,0.06)] border border-white/[0.15]',
+                isBusy && 'bg-amber-500/[0.06] text-amber-300/40 border border-amber-400/[0.08] cursor-not-allowed',
                 !isActive && !isBusy && 'bg-white/[0.04] text-white/40 border border-white/[0.06] hover:bg-white/[0.06] hover:scale-105 active:scale-95',
                 disabled && 'opacity-50 cursor-not-allowed'
               )}
             >
-              {/* Breathing aura when ready - softer */}
-              {!isActive && !isBusy && (
-                <span className="absolute inset-[-2px] rounded-full bg-white/[0.04] animate-pulse" />
-              )}
-              
-              {/* Active listening inner glow */}
+              {/* Active listening inner pulse — larger, slower */}
               {(isActive || isPTT) && (
-                <span className="absolute inset-0 rounded-full bg-white/10 animate-ping" style={{ animationDuration: '1.5s' }} />
+                <span className="absolute inset-[-6px] rounded-full bg-white/[0.05] animate-ping" style={{ animationDuration: '2s' }} />
               )}
               
               <Mic className={cn(
-                'w-7 h-7 relative z-10 transition-transform',
-                (isActive || isPTT) && 'scale-110',
-                isBusy && 'animate-pulse'
+                'relative z-10 transition-all duration-300',
+                (isActive || isPTT) && 'w-8 h-8 text-white',
+                isBusy && 'w-7 h-7 animate-pulse text-amber-300/40',
+                !isActive && !isBusy && 'w-7 h-7 text-white/40',
               )} />
             </button>
             {isPTT && (
@@ -336,12 +321,12 @@ export function VoiceFirstComposer({
                     }}
                     aria-label="Close typing"
                     className={cn(
-                      'p-2.5 rounded-xl transition-all duration-200 shrink-0',
-                      'border border-white/[0.06] bg-white/[0.04] hover:bg-white/[0.06]',
+                      'p-2.5 rounded-2xl transition-all duration-200 shrink-0',
+                      'bg-transparent hover:bg-white/[0.04]',
                       'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20'
                     )}
                   >
-                    <X className="w-4 h-4 text-white/40" />
+                    <X className="w-4 h-4 text-white/25" />
                   </button>
                   )}
                   <textarea
@@ -355,11 +340,11 @@ export function VoiceFirstComposer({
                     disabled={disabled}
                     style={{ backgroundColor: 'var(--input-bg)' }}
                     className={cn(
-                      'flex-1 px-4 py-2.5 rounded-xl border transition-all duration-200 resize-none',
-                      'text-sm text-white/70 placeholder-white/20',
-                      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/15',
+                      'flex-1 px-4 py-2.5 rounded-2xl border transition-all duration-200 resize-none',
+                      'text-sm text-white/60 placeholder-white/15',
+                      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/10',
                       'min-h-[40px] max-h-[100px]',
-                      'border-white/[0.06] bg-white/[0.03]',
+                      'border-white/[0.04] bg-white/[0.02]',
                       disabled && 'opacity-50 cursor-not-allowed'
                     )}
                   />
@@ -374,11 +359,11 @@ export function VoiceFirstComposer({
                     disabled={!value.trim() || disabled}
                     aria-label="Send message"
                     className={cn(
-                      'p-2.5 rounded-xl transition-all duration-200 shrink-0',
+                      'p-2.5 rounded-2xl transition-all duration-200 shrink-0',
                       'focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20',
                       value.trim() && !disabled
-                        ? 'bg-white/[0.08] text-white/70 hover:bg-white/[0.12] active:scale-95'
-                        : 'bg-white/[0.03] text-white/20 cursor-not-allowed'
+                        ? 'bg-white/[0.05] text-white/50 hover:bg-white/[0.08] active:scale-95'
+                        : 'bg-transparent text-white/15 cursor-not-allowed'
                     )}
                   >
                     {justSent ? (

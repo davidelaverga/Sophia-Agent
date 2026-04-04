@@ -114,14 +114,13 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
       {/* Sophia Avatar - visible for assistant messages */}
       {!isUser && (
         <div className={cn(
-          'shrink-0 w-8 h-8 rounded-full flex items-center justify-center mr-2 mt-3',
-          'bg-white/[0.04] backdrop-blur-sm',
-          'border border-white/[0.06]'
+          'shrink-0 w-7 h-7 rounded-full flex items-center justify-center mr-2 mt-3',
+          'bg-transparent'
         )}>
           <Sparkles className={cn(
-            'w-4 h-4 text-white/30 transition-all duration-500',
-            isLatest && 'animate-[sparkle_2s_ease-in-out_infinite] text-white/50',
-            !isLatest && 'opacity-60'
+            'w-3.5 h-3.5 text-white/20 transition-all duration-500',
+            isLatest && 'animate-[sparkle_2s_ease-in-out_infinite] text-white/35',
+            !isLatest && 'opacity-50'
           )} />
         </div>
       )}
@@ -131,11 +130,11 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           'max-w-[85%] sm:max-w-[75%] p-4 rounded-2xl relative group min-w-0',
           isUser
             ? cn(
-                'bg-white/[0.07] text-white/70 border border-white/[0.05]',
+                'bg-white/[0.06] text-white/70 border border-white/[0.04]',
                 isQueued && 'border-dashed border-white/10 opacity-70'
               )
             : cn(
-                'bg-white/[0.04] backdrop-blur-sm text-white/80 font-light border border-white/[0.03]'
+                'bg-transparent text-white/75 font-light'
               ),
           // Subtle glow for assistant's latest message
           !isUser && isLatest && 'shadow-[0_0_20px_rgba(255,255,255,0.02)]',

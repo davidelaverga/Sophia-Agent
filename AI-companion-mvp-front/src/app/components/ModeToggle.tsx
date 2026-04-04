@@ -25,7 +25,7 @@ export function ModeToggle({ opacity = 1 }: { opacity?: number }) {
     <div
       role="tablist"
       aria-label="Interaction mode"
-      className="inline-flex items-center gap-3"
+      className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full bg-white/[0.03] border border-white/[0.04]"
       style={{ opacity, transition: "opacity 0.6s ease" }}
     >
       {MODES.map(({ mode, label }) => {
@@ -43,11 +43,11 @@ export function ModeToggle({ opacity = 1 }: { opacity?: number }) {
             onClick={() => handleSelect(mode)}
             title={isDisabled ? canSwitchToVoice.message ?? "Cannot switch to voice" : label}
             className={[
-              "text-[10px] tracking-[0.18em] lowercase transition-colors duration-300",
-              "focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded",
+              "text-[11px] tracking-[0.14em] lowercase transition-all duration-300 px-3 py-0.5 rounded-full",
+              "focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
               isActive
-                ? "text-white/20"
-                : "text-white/10 hover:text-white/25 cursor-pointer",
+                ? "text-white/50 bg-white/[0.06]"
+                : "text-white/25 hover:text-white/40 cursor-pointer",
               isDisabled && "opacity-40 cursor-not-allowed",
             ]
               .filter(Boolean)

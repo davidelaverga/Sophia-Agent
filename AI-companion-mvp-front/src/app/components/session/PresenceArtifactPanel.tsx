@@ -73,8 +73,9 @@ export function PresenceArtifactPanel({
   return (
     <div
       className={cn(
-        "fixed bottom-0 left-1/2 -translate-x-1/2 z-35 w-full max-w-[480px] pointer-events-none",
+        "fixed left-1/2 -translate-x-1/2 z-35 w-full max-w-[480px] pointer-events-none",
         "transition-transform duration-[800ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
+        isVoiceMode ? "bottom-0" : "bottom-[68px]",
         show ? "translate-y-0 pointer-events-auto" : "translate-y-full"
       )}
       role="complementary"
@@ -84,13 +85,22 @@ export function PresenceArtifactPanel({
         {/* Palette-reactive glow edge */}
         <GlowEdge />
 
-        {/* Dismiss button */}
+        {/* Pull handle — visual affordance for dismiss */}
         <button
           onClick={onDismiss}
-          className="absolute top-2.5 right-[18px] text-white/[0.12] hover:text-white/[0.35] transition-colors duration-300 z-10"
+          className="absolute top-0 left-1/2 -translate-x-1/2 py-2 px-6 cursor-pointer group z-10"
           aria-label="Dismiss artifact"
         >
-          <X className="w-3.5 h-3.5" />
+          <div className="w-8 h-[3px] rounded-full bg-white/[0.12] group-hover:bg-white/[0.30] transition-colors duration-300" />
+        </button>
+
+        {/* Dismiss X button — visible and tappable */}
+        <button
+          onClick={onDismiss}
+          className="absolute top-3 right-4 w-7 h-7 flex items-center justify-center rounded-full bg-white/[0.04] text-white/25 hover:text-white/50 hover:bg-white/[0.08] transition-all duration-300 z-10"
+          aria-label="Dismiss artifact"
+        >
+          <X className="w-4 h-4" />
         </button>
 
         {/* Takeaway — Cormorant 18px, stagger 0ms */}
