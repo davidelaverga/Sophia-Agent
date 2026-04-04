@@ -20,7 +20,7 @@ import { NudgeBanner, type NudgeSuggestion } from './NudgeBanner';
 import { ReflectionPromptBubble, ReflectionResponseBubble } from './ReflectionBubble';
 import { ResolvedInterruptBadge } from './ResolvedInterruptBadge';
 import { SessionEmptyState } from './SessionEmptyState';
-import { TypingIndicator } from './TypingIndicator';
+// TypingIndicator removed — replaced with whisper text (R28)
 import { InterruptCard } from './InterruptCard';
 import { OnboardingTipGuard } from '../onboarding';
 
@@ -277,10 +277,28 @@ export function SessionConversationPane({
 
             {showThinkingIndicator && (
               <div className="px-4 py-3">
-                <TypingIndicator
-                  onCancel={onCancelThinking}
-                  cancelLabel={isVoiceThinking && !isTyping ? 'Stop' : 'Cancel'}
-                />
+                {isVoiceThinking ? (
+                  /* Voice mode: nebula handles thinking visual, just show cancel */
+                  <button
+                    onClick={onCancelThinking}
+                    className="text-[10px] tracking-[0.18em] lowercase text-white/10 hover:text-white/25 transition-colors duration-300"
+                  >
+                    stop
+                  </button>
+                ) : (
+                  /* Text mode: whisper-style reflecting indicator */
+                  <div className="flex items-center gap-3">
+                    <span className="text-[10px] tracking-[0.18em] lowercase text-white/10 transition-colors duration-1000">
+                      sophia is reflecting...
+                    </span>
+                    <button
+                      onClick={onCancelThinking}
+                      className="text-[10px] tracking-[0.18em] lowercase text-white/10 hover:text-white/25 transition-colors duration-300"
+                    >
+                      cancel
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

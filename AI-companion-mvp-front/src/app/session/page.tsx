@@ -875,23 +875,6 @@ function SessionPageContent() {
           isVoiceMode={focusMode !== 'text'}
         />
 
-        {/* Companion Rail – LEFT side (both mobile & desktop) */}
-        {showCompanionRail && (
-          <CompanionRail
-            contextMode={sessionContextMode}
-            onInvoke={handleCompanionInvoke}
-            isInvoking={isInvoking}
-            activeInvoke={activeInvoke}
-            disabled={isTyping || isReadOnly}
-            className={cn(
-              'fixed left-0 top-1/2 -translate-y-1/2 z-30',
-              'w-8 h-8 lg:w-10 lg:h-10',
-              'rounded-r-lg',
-              'cursor-pointer',
-            )}
-          />
-        )}
-
         {/* Ghost toggle for text mode — reopens artifact panel when dismissed */}
         {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
           <ArtifactToggleIcon
@@ -966,15 +949,7 @@ function SessionPageContent() {
         onTakeOver={handleMultiTabTakeOver}
       />
       
-      {/* Debrief Offer Modal */}
-      <DebriefOfferModal
-        isOpen={showDebriefOffer}
-        debriefPrompt={debriefData?.prompt || ''}
-        durationMinutes={debriefData?.durationMinutes || 0}
-        takeaway={debriefData?.takeaway}
-        onStartDebrief={handleStartDebrief}
-        onSkipToRecap={handleSkipToRecap}
-      />
+      {/* DebriefOfferModal removed — R34: debrief offered conversationally */}
       
       <UsageLimitModal
         open={limitModalOpen}

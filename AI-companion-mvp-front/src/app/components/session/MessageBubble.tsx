@@ -55,7 +55,7 @@ interface MessageBubbleProps {
 // COMPONENT
 // ============================================================================
 
-export function MessageBubble({ message, isLatest, onFeedback }: MessageBubbleProps) {
+export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
   const [isVisible, setIsVisible] = useState(!message.isNew);
   
   useEffect(() => {
@@ -188,18 +188,6 @@ export function MessageBubble({ message, isLatest, onFeedback }: MessageBubblePr
         >
           {timeInfo.text}
         </span>
-        
-        {/* Feedback buttons - only for assistant messages */}
-        {!isUser && onFeedback && (
-          <div className="absolute -bottom-5 right-2">
-            <MessageFeedback
-              messageId={message.id}
-              currentFeedback={message.feedback}
-              onFeedback={onFeedback}
-              compact
-            />
-          </div>
-        )}
       </div>
     </div>
   );
