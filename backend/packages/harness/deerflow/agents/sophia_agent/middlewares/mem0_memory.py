@@ -116,12 +116,22 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             log_middleware("Mem0Memory", f"no memories found (search: {search_ms:.0f}ms)", _t0)
             return None
 
-        # Log per-memory categories
-        result_categories = [mem.get("category", "unknown") for mem in results[:10]]
+        # Log per-category breakdown
+        category_counts: dict[str, int] = {}
+        for mem in results[:10]:
+            cat = mem.get("category", "unknown") or "unknown"
+            category_counts[cat] = category_counts.get(cat, 0) + 1
         logger.info(
-            "[Mem0Memory] %d results | search: %.0fms | categories: %s",
-            len(results), search_ms, result_categories,
+            "[Mem0Memory] %d results | search: %.0fms | breakdown: %s",
+            len(results), search_ms,
+            " | ".join(f"{cat}: {count}" for cat, count in sorted(category_counts.items())),
         )
+        # Log each memory's content preview for debugging
+        for i, mem in enumerate(results[:10]):
+            logger.debug(
+                "[Mem0Memory]   [%d] [%s] %s",
+                i, mem.get("category", "?"), (mem.get("content", ""))[:100],
+            )
 
         # Format memories for prompt injection
         memory_lines = []

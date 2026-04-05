@@ -129,8 +129,12 @@ def search_memories(
                     })
 
         # Filter by categories if specified
+        pre_filter_count = len(memories)
         if categories:
             memories = [m for m in memories if not m["category"] or m["category"] in categories]
+        filtered_out = pre_filter_count - len(memories)
+        if filtered_out > 0:
+            logger.info("[Mem0Search] filtered out %d/%d memories (not in requested categories)", filtered_out, pre_filter_count)
 
         # Sort by context relevance if context_mode specified
         if context_mode:
