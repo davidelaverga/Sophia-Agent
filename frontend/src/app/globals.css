@@ -1,6 +1,85 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+@source inline("bg-sophia-surface bg-sophia-bubble text-sophia-text text-sophia-text2 border-sophia-surface-border");
+
+@custom-variant dark (&:where([data-sophia-theme="moonlit-embrace"] *));
+
+@theme extend {
+  /* Colors */
+  --color-sophia-purple: var(--sophia-purple);
+  --color-sophia-glow: var(--sophia-glow);
+  --color-sophia-bg: var(--bg);
+  --color-sophia-text: var(--text);
+  --color-sophia-text2: var(--text-2);
+  --color-sophia-user: var(--user-bubble);
+  --color-sophia-bubble: var(--sophia-bubble);
+  --color-sophia-reply: var(--sophia-bubble);
+  --color-sophia-btn: var(--btn-active);
+  --color-sophia-error: var(--error);
+  --color-sophia-surface: var(--card-bg);
+  --color-sophia-surface-border: var(--card-border);
+  --color-sophia-input: var(--input-bg);
+  --color-sophia-input-border: var(--input-border);
+  --color-sophia-button: var(--button-bg);
+  --color-sophia-button-hover: var(--button-hover);
+
+  /* Breakpoints */
+  --breakpoint-xs: 400px;
+  --breakpoint-sm: 640px;
+  --breakpoint-md: 768px;
+  --breakpoint-lg: 1024px;
+  --breakpoint-xl: 1280px;
+  --breakpoint-2xl: 1536px;
+
+  /* Font families */
+  --font-sans: var(--font-inter), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-cormorant: var(--font-cormorant), Georgia, Cambria, "Times New Roman", serif;
+
+  /* Border radius */
+  --radius-md: 1rem;
+  --radius-xl: 1rem;
+  --radius-2xl: 1rem;
+  --radius-3xl: 1rem;
+  --radius-4xl: 1.25rem;
+
+  /* Box shadow */
+  --shadow-soft: var(--shadow-soft);
+
+  /* Spacing */
+  --spacing-page: 24px;
+  --spacing-bubble: 16px;
+
+  /* Animations */
+  --animate-pulseSoft: pulseSoft 2s ease-in-out infinite;
+  --animate-fadeIn: fadeIn 400ms ease-out;
+  --animate-fadeOut: fadeOut 300ms ease-out forwards;
+  --animate-fadeInUp: fadeInUp 500ms ease-out;
+  --animate-breathe: breathe 3s ease-in-out infinite;
+  --animate-breatheSlow: breatheSlow 4s ease-in-out infinite;
+  --animate-float: float 3s ease-in-out infinite;
+  --animate-shimmer: shimmer 3s ease-in-out infinite;
+  --animate-glowBreathe: glowBreathe 2.5s ease-in-out infinite;
+  --animate-ringBreathe: ringBreathe 3s ease-in-out infinite;
+  --animate-confetti: confetti 4s ease-out forwards;
+  --animate-heartbeat: heartbeat 1.5s ease-in-out infinite;
+  --animate-pulse-slow: pulse-slow 3s ease-in-out infinite;
+  --animate-badge-glow: badge-glow 2s ease-in-out infinite;
+  --animate-pulse-reply: pulse-reply 1.5s ease-in-out infinite;
+  --animate-counter-pop: counter-pop 200ms ease-out;
+  --animate-scaleIn: scaleIn 300ms ease-out forwards;
+  --animate-orbitFloat: orbitFloat 4s ease-in-out infinite;
+  --animate-keepAscend: keepAscend 600ms ease-out forwards;
+  --animate-discardDissolve: discardDissolve 500ms ease-out forwards;
+  --animate-glowPulse: glowPulse 2s ease-in-out infinite;
+  --animate-cosmicTwinkle: cosmicTwinkle 4s ease-in-out infinite;
+  --animate-bloomBreathe: bloomBreathe 6s ease-in-out infinite;
+  --animate-bloomDrift: bloomDrift 10s ease-in-out infinite;
+  --animate-bloomDriftReverse: bloomDriftReverse 12s ease-in-out infinite;
+  --animate-borderStreak: borderStreak 1.5s linear infinite;
+  --animate-bokehFloat: bokehFloat 8s ease-in-out infinite;
+  --animate-workFloat: workFloat 14s ease-in-out infinite;
+  --animate-workScreenGlow: workScreenGlow 7s ease-in-out infinite;
+}
 
 /* 📱 Mobile touch optimizations */
 * {
@@ -574,23 +653,21 @@ a {
   }
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
-  
-  /* Custom utility classes using CSS variables for theme support */
-  .bg-sophia-surface {
-    background-color: var(--card-bg);
-  }
-  
-  .bg-sophia-bubble {
-    background-color: var(--sophia-bubble);
-  }
-  
-  .border-sophia-surface-border {
-    border-color: var(--card-border);
-  }
+@utility text-balance {
+  text-wrap: balance;
+}
+
+/* Custom utility classes using CSS variables for theme support */
+@utility bg-sophia-surface {
+  background-color: var(--card-bg);
+}
+
+@utility bg-sophia-bubble {
+  background-color: var(--sophia-bubble);
+}
+
+@utility border-sophia-surface-border {
+  border-color: var(--card-border);
 }
 
 .sr-only {
@@ -1403,4 +1480,131 @@ a {
     transform: rotate(calc(var(--work-base-rotation, 0deg) + 2deg)) translateY(-8px);
     opacity: calc(var(--work-base-opacity, 0.03) * 1.5);
   }
+}
+
+/* ============================================================================
+   Additional keyframes from theme config (TW4 migration)
+   ============================================================================ */
+
+@keyframes pulseSoft {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+@keyframes fadeOut {
+  0% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+@keyframes fadeInUp {
+  0% { opacity: 0; transform: translateY(10px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes breatheSlow {
+  0%, 100% { opacity: 0.7; transform: scale(1); }
+  50% { opacity: 0.95; transform: scale(1.01); }
+}
+
+@keyframes glowBreathe {
+  0%, 100% {
+    opacity: 0.4;
+    transform: scale(0.95);
+    box-shadow: 0 0 8px rgba(139, 92, 246, 0.3);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+    box-shadow: 0 0 20px rgba(139, 92, 246, 0.6), 0 0 40px rgba(167, 139, 250, 0.3);
+  }
+}
+
+@keyframes ringBreathe {
+  0%, 100% {
+    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.2), 0 0 20px rgba(139, 92, 246, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.4), 0 0 40px rgba(139, 92, 246, 0.3), 0 0 60px rgba(167, 139, 250, 0.2);
+  }
+}
+
+@keyframes confetti {
+  0% {
+    transform: translateY(-20px) rotate(0deg);
+    opacity: 1;
+  }
+  75% { opacity: 1; }
+  100% {
+    transform: translateY(100vh) rotate(720deg);
+    opacity: 0;
+  }
+}
+
+@keyframes heartbeat {
+  0%, 100% { transform: scale(1); }
+  10%, 30% { transform: scale(1.1); }
+  20% { transform: scale(1.2); }
+}
+
+@keyframes pulse-slow {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(1.1); }
+}
+
+@keyframes badge-glow {
+  0%, 100% {
+    box-shadow: 0 4px 15px rgba(147, 51, 234, 0.3);
+  }
+  50% {
+    box-shadow: 0 4px 25px rgba(147, 51, 234, 0.5), 0 0 40px rgba(192, 132, 252, 0.3);
+  }
+}
+
+@keyframes pulse-reply {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(139, 92, 246, 0.4);
+  }
+  50% {
+    transform: scale(1.08);
+    box-shadow: 0 0 0 8px rgba(139, 92, 246, 0);
+  }
+}
+
+@keyframes counter-pop {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.1); }
+  100% { transform: scale(1); }
+}
+
+@keyframes orbitFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
+@keyframes keepAscend {
+  0% { transform: translateY(0) scale(1); opacity: 1; }
+  100% { transform: translateY(-100px) scale(0.9); opacity: 0; }
+}
+
+@keyframes discardDissolve {
+  0% { transform: scale(1); opacity: 1; filter: blur(0); }
+  100% { transform: scale(0.75); opacity: 0; filter: blur(8px); }
+}
+
+@keyframes glowPulse {
+  0%, 100% {
+    opacity: 0.3;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.1);
+  }
+}
+
+@keyframes workScreenGlow {
+  0%, 100% { opacity: 0.6; transform: scaleX(1); }
+  40% { opacity: 0.9; transform: scaleX(1.05); }
+  70% { opacity: 0.5; transform: scaleX(0.97); }
 }
