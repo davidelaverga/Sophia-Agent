@@ -9,7 +9,7 @@
 "use client"
 
 import { useCallback, useEffect } from "react"
-import { useSupabase } from "../providers"
+import { useAuth } from "../providers"
 import { useAuthTokenStore } from "../stores/auth-token-store"
 import { 
   useConversationStore,
@@ -28,7 +28,7 @@ interface UseConversationHistoryReturn {
 }
 
 export function useConversationHistory(): UseConversationHistoryReturn {
-  const { user } = useSupabase()
+  const { user } = useAuth()
   
   const conversations = useConversationStore(state => state.conversations)
   const listLoadingState = useConversationStore(state => state.listLoadingState)

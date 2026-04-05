@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
+import { headers } from "next/headers";
+import { auth } from "@/server/better-auth";
 import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
@@ -12,19 +12,11 @@ export async function POST(request: NextRequest) {
   }
 
   // 🔒 SECURITY: Authenticate user before accepting consent changes
-  let userId: string | undefined;
-  try {
-    const cookieStore = await cookies();
-    const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any });
-    const { data: { user } } = await supabase.auth.getUser();
-    userId = user?.id;
-  } catch {
-    // auth failed
+  const session = await auth.api.getSession({ headers: await headers() });
+  if (!session?.user) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-
-  if (!userId) {
-    return NextResponse.json({ error: "Authentication required" }, { status: 401 });
-  }
+  const userId = session.user.id;
 
   let body: { accept: boolean };
   try {

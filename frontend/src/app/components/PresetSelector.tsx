@@ -17,7 +17,7 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Sparkles, Check } from 'lucide-react';
-import { useSupabase } from '../providers';
+import { useAuth } from '../providers';
 import { useSessionStart } from '../hooks/useSessionStart';
 import { useSessionStore } from '../stores/session-store';
 import { cn } from '../lib/utils';
@@ -271,7 +271,7 @@ function ContextPill({ mode, isActive, onClick }: ContextPillProps) {
 
 export function PresetSelector() {
   const router = useRouter();
-  const { user, loading: userLoading } = useSupabase();
+  const { user, loading: userLoading } = useAuth();
   
   // Check if there's an active session
   const isSessionActive = useSessionStore((state) => state.isSessionActive);

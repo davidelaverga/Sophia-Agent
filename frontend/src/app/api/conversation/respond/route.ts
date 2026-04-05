@@ -14,8 +14,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server"
-import { cookies } from "next/headers"
-import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs"
+import { headers } from "next/headers"
+import { auth } from "@/server/better-auth"
 import { getServerAuthToken } from "../../../lib/auth/server-auth"
 
 // ============================================================================
@@ -212,11 +212,8 @@ function sanitizeResponse(responseText: string): { text: string; artifacts: Reco
 
 async function getAuthenticatedUser(): Promise<string | undefined> {
   try {
-    const cookieStore = await cookies()
-    const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any })
-
-    const { data: { user } } = await supabase.auth.getUser()
-    return user?.id
+    const session = await auth.api.getSession({ headers: await headers() })
+    return session?.user?.id
   } catch {
     return undefined
   }

@@ -11,8 +11,8 @@
  */
 
 import { NextResponse } from 'next/server';
-import { cookies } from 'next/headers';
-import { createRouteHandlerClient } from '@supabase/auth-helpers-nextjs';
+import { cookies, headers } from 'next/headers';
+import { auth } from '@/server/better-auth';
 
 const COOKIE_NAME = 'sophia-backend-token';
 
@@ -21,21 +21,20 @@ export async function GET() {
     const cookieStore = await cookies();
     const hasBackendToken = !!cookieStore.get(COOKIE_NAME)?.value;
 
-    // Also check Supabase session for user info
+    // Check Better Auth session for user info
     let userId: string | null = null;
     let email: string | null = null;
     let username: string | null = null;
 
     try {
-      const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any });
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        userId = user.id;
-        email = user.email ?? null;
-        username = user.user_metadata?.username ?? null;
+      const session = await auth.api.getSession({ headers: await headers() });
+      if (session?.user) {
+        userId = session.user.id;
+        email = session.user.email ?? null;
+        username = session.user.name ?? null;
       }
     } catch {
-      // Supabase auth may fail — still report backend token status
+      // Auth may fail — still report backend token status
     }
 
     return NextResponse.json({

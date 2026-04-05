@@ -1,6 +1,5 @@
 "use client"
 
-import { createClientComponentClient } from "@supabase/auth-helpers-nextjs"
 import { debugWarn } from "../debug-logger"
 
 /**
@@ -56,18 +55,10 @@ function createApiError(
 // =============================================================================
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
-  // Dev bypass: skip Supabase auth entirely
+  // Better Auth uses httpOnly cookies — sent automatically with same-origin requests.
+  // Dev bypass preserved for consistency.
   if (process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === "true") {
     return {}
-  }
-  try {
-    const supabase = createClientComponentClient()
-    const { data: { session } } = await supabase.auth.getSession()
-    if (session?.access_token) {
-      return { Authorization: `Bearer ${session.access_token}` }
-    }
-  } catch (error) {
-    debugWarn("api-client", "Failed to get auth token", { error })
   }
   return {}
 }

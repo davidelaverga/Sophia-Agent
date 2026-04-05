@@ -3,7 +3,7 @@
 import { useState, useRef, useCallback } from 'react'
 import { Mic, Square } from 'lucide-react'
 import { useCopy, useTranslation } from '../copy'
-import { useSupabase } from '../providers'
+import { useAuth } from '../providers'
 import { checkMicrophonePermission } from '../lib/microphone-permissions'
 import { logger } from '../lib/error-logger'
 import { debugLog, debugWarn } from '../lib/debug-logger'
@@ -49,7 +49,7 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
   const streamRef = useRef<MediaStream | null>(null)
   
   // 💜 Get authenticated user for rate limiting
-  const { user } = useSupabase()
+  const { user } = useAuth()
 
   const startRecording = useCallback(async () => {
     try {

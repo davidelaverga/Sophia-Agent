@@ -9,8 +9,8 @@
  */
 
 import { NextRequest, NextResponse } from "next/server";
-import { cookies } from "next/headers";
-import { createRouteHandlerClient } from "@supabase/auth-helpers-nextjs";
+import { headers } from "next/headers";
+import { auth } from "@/server/better-auth";
 import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function DELETE(_request: NextRequest) {
@@ -25,26 +25,14 @@ export async function DELETE(_request: NextRequest) {
   }
 
   // Get authenticated user
-  let userId: string | undefined;
-  try {
-    const cookieStore = await cookies();
-    const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any });
-
-    const { data: { user } } = await supabase.auth.getUser();
-    userId = user?.id;
-  } catch {
+  const session = await auth.api.getSession({ headers: await headers() });
+  if (!session?.user) {
     return NextResponse.json(
-      { error: "Authentication required" },
+      { error: "Unauthorized" },
       { status: 401 }
     );
   }
-
-  if (!userId) {
-    return NextResponse.json(
-      { error: "User not authenticated" },
-      { status: 401 }
-    );
-  }
+  const userId = session.user.id;
 
   try {
     // Delete user's memories from Mem0 (V4 backend endpoint)

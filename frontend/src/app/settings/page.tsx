@@ -9,7 +9,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, Heart, LogOut, Settings, Trash2 } from 'lucide-react';
 import { ProtectedRoute } from '../components/ProtectedRoute';
-import { useSupabase } from '../providers';
+import { useAuth } from '../providers';
 import { haptic } from '../hooks/useHaptics';
 import { PrivacyPanel } from '../components/settings/PrivacyPanel';
 import { OnboardingSettingsPanel } from '../components/settings/OnboardingSettingsPanel';
@@ -23,7 +23,7 @@ import { teardownSessionClientState } from '../lib/session-teardown';
 
 export default function SettingsPage() {
   const router = useRouter();
-  const { supabase } = useSupabase();
+  const { signOut } = useAuth();
 
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [showSignOutConfirm, setShowSignOutConfirm] = useState(false);
@@ -38,7 +38,7 @@ export default function SettingsPage() {
   const handleSignOut = async () => {
     setIsSigningOut(true);
     try {
-      await supabase.auth.signOut();
+      await signOut();
       teardownSessionClientState(v2Session?.sessionId);
       clearLocalSessionData();
       useAuthTokenStore.getState().clearToken();

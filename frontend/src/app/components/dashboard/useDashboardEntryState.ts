@@ -7,7 +7,7 @@ import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { haptic } from '../../hooks/useHaptics';
 import { useConnectivity } from '../../hooks/useConnectivity';
 import { useSessionStart } from '../../hooks/useSessionStart';
-import { useSupabase } from '../../providers';
+import { useAuth } from '../../providers';
 import {
   useSessionStore,
   selectIsSessionActive,
@@ -47,7 +47,7 @@ const GENERIC_BOOTSTRAP_OPENERS = new Set([
 
 export function useDashboardEntryState() {
   const router = useRouter();
-  const { user } = useSupabase();
+  const { user } = useAuth();
 
   const hasActiveSession = useSessionStore(selectIsSessionActive);
   const activeSession = useSessionStore(selectSession);

@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { useSupabase } from '../providers'
+import { useAuth } from '../providers'
 import { X, Shield, AlertCircle } from 'lucide-react'
 import { useCopy, useTranslation } from '../copy'
 
@@ -14,16 +14,12 @@ export default function ConsentModal({ onAccept, onClose }: ConsentModalProps) {
   const copy = useCopy()
   const { t } = useTranslation()
 
-  const { user, accessToken } = useSupabase()
+  const { user } = useAuth()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState('')
 
   const handleAccept = async () => {
     if (!user) return
-    if (!accessToken) {
-      setError('Missing authentication token. Please sign in again.')
-      return
-    }
 
     setIsSubmitting(true)
     setError('')
@@ -33,7 +29,6 @@ export default function ConsentModal({ onAccept, onClose }: ConsentModalProps) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${accessToken}`
         },
         body: JSON.stringify({
           userId: user.id,

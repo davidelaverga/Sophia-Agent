@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import { useRouter } from 'next/navigation'
-import { useSupabase } from '../providers'
+import { useAuth } from '../providers'
 import { useTranslation } from '../copy'
 import { useOnboardingStore } from '../stores/onboarding-store'
 
@@ -12,7 +12,7 @@ const IS_DEV = process.env.NODE_ENV === 'development'
 export default function DebugPage() {
   const router = useRouter()
   const [debugInfo, setDebugInfo] = useState<Record<string, unknown>>({})
-  const { supabase } = useSupabase()
+  const { user } = useAuth()
   const { t } = useTranslation()
   const { hasCompletedOnboarding, resetOnboarding } = useOnboardingStore()
 
@@ -37,15 +37,9 @@ export default function DebugPage() {
       const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
       
       // Get user session
-      let sessionInfo = { hasSession: false, sessionUser: 'No user' }
-      try {
-        const { data: session } = await supabase.auth.getSession()
-        sessionInfo = {
-          hasSession: !!session?.session,
-          sessionUser: session?.session?.user?.email || 'No user',
-        }
-      } catch {
-        sessionInfo = { hasSession: false, sessionUser: 'Error getting session' }
+      const sessionInfo = {
+        hasSession: !!user,
+        sessionUser: user?.email || 'No user',
       }
       
       // Test API connectivity
@@ -71,7 +65,7 @@ export default function DebugPage() {
     }
 
     collectDebugInfo()
-  }, [supabase.auth])
+  }, [user])
 
   // Don't render anything in production
   if (!IS_DEV) {

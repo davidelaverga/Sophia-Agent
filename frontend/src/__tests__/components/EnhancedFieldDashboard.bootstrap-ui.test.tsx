@@ -18,8 +18,10 @@ vi.mock('../../app/lib/recent-session-end', () => ({
 }));
 
 vi.mock('../../app/providers', () => ({
-  useSupabase: () => ({
+  useAuth: () => ({
     user: { id: 'user-1' },
+    loading: false,
+    signOut: vi.fn(),
   }),
 }));
 

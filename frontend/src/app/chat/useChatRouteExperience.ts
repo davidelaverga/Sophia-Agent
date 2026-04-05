@@ -16,7 +16,7 @@ import {
   recoverFromDisconnect,
   shouldAttemptRecovery,
 } from "../lib/stream-recovery"
-import { useSupabase } from "../providers"
+import { useAuth } from "../providers"
 import { useConnectivityStore } from "../stores/connectivity-store"
 import { useEmotionStore } from "../stores/emotion-store"
 import { useMessageMetadataStore } from "../stores/message-metadata-store"
@@ -141,7 +141,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
   useUsageMonitor()
   useBackendTokenSync()
 
-  const { user } = useSupabase()
+  const { user } = useAuth()
   const platform = usePlatformSignal()
 
   const conversationId = useChatStore((state) => state.conversationId)

@@ -1,6 +1,11 @@
-import { NextRequest } from 'next/server'
-import { handleDiscordOAuthCallback } from '../../lib/auth/oauth-callback'
+import { NextRequest, NextResponse } from 'next/server'
 
+/**
+ * Legacy Supabase OAuth callback route.
+ * Better Auth handles callbacks via /api/auth/callback/:provider.
+ * This route redirects stale bookmarks to the home page.
+ */
 export async function GET(request: NextRequest) {
-  return handleDiscordOAuthCallback(request)
+  const url = new URL(request.url)
+  return NextResponse.redirect(new URL('/', url.origin))
 }

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const useCompanionRuntimeMock = vi.fn()
 const useInterruptMock = vi.fn()
-const useSupabaseMock = vi.fn()
+const useAuthMock = vi.fn()
 const usePlatformSignalMock = vi.fn()
 
 vi.mock('../../app/companion-runtime/useCompanionRuntime', () => ({
@@ -15,7 +15,7 @@ vi.mock('../../app/hooks/useInterrupt', () => ({
 }))
 
 vi.mock('../../app/providers', () => ({
-  useSupabase: () => useSupabaseMock(),
+  useAuth: () => useAuthMock(),
 }))
 
 vi.mock('../../app/hooks/usePlatformSignal', () => ({
@@ -135,8 +135,10 @@ describe('useChatRouteExperience', () => {
     vi.clearAllMocks()
     resetStores()
 
-    useSupabaseMock.mockReturnValue({
+    useAuthMock.mockReturnValue({
       user: { id: 'user-1' },
+      loading: false,
+      signOut: vi.fn(),
     })
     usePlatformSignalMock.mockReturnValue('text')
     useInterruptMock.mockReturnValue({

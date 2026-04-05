@@ -6,7 +6,7 @@ import { useState, useMemo, useEffect } from "react"
 import { Sparkles, Heart, Send, Calendar, Search, ArrowLeft, Quote, Users, TrendingUp, Star, Loader2 } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useSupabase } from "../providers"
+import { useAuth } from "../providers"
 import { logger } from "../lib/error-logger"
 import { formatRelativeTime } from "../lib/format-time"
 import { useTranslation } from "../copy"
@@ -55,7 +55,7 @@ export default function ReflectionsPage() {
 function ReflectionsPageContent() {
   const { t } = useTranslation()
   const router = useRouter()
-  const { user } = useSupabase()
+  const { user } = useAuth()
   const [filter, setFilter] = useState<FilterType>("all")
   const [searchQuery, setSearchQuery] = useState("")
   

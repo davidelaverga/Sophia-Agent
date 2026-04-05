@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useRef } from "react"
 import { Sparkles } from "lucide-react"
-import { useSupabase } from "../providers"
+import { useAuth } from "../providers"
+import { authClient } from "@/server/better-auth/client"
 import { useCopy, useTranslation } from "../copy"
 
 type AuthState = "checking" | "unauthenticated" | "authenticated"
@@ -23,7 +24,7 @@ export function AuthGate({
   const copy = useCopy()
   const { t } = useTranslation()
 
-  const { supabase, user, loading } = useSupabase()
+  const { user, loading } = useAuth()
   const [authState, setAuthState] = useState<AuthState>(
     devBypass ? "authenticated" : "checking"
   )
@@ -78,21 +79,13 @@ export function AuthGate({
   }, [user, loading, onAuthenticated])
 
   const handleDiscordLogin = async () => {
-    if (!supabase) return
-    
     setIsLoggingIn(true)
     try {
-      const { error } = await supabase.auth.signInWithOAuth({
+      await authClient.signIn.social({
         provider: "discord",
-        options: {
-          redirectTo: `${window.location.origin}/auth/callback`,
-        },
+        callbackURL: "/",
       })
-      
-      if (error) {
-        setIsLoggingIn(false)
-      }
-      // If successful, user will be redirected to Discord
+      // User will be redirected to Discord
     } catch {
       setIsLoggingIn(false)
     }

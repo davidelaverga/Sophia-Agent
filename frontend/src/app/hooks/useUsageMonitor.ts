@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useRef } from "react"
-import { useSupabase } from "../providers"
+import { useAuth } from "../providers"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
 import type { UsageLimitInfo } from "../types/rate-limits"
 import { logger } from "../lib/error-logger"
@@ -27,7 +27,7 @@ const usageCache = {
  * This eliminates the need for constant polling, reducing backend load significantly.
  */
 export function useUsageMonitor() {
-  const { user } = useSupabase()
+  const { user } = useAuth()
   const initialFetchDone = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -40,7 +40,7 @@ export function useUsageMonitor() {
     }
 
     // Set user context for error tracking
-    logger.setUser(user.id, user.email, user.user_metadata?.username)
+    logger.setUser(user.id, user.email, user.name)
     logger.addBreadcrumb("User authenticated", { userId: user.id })
 
     // Only fetch once on initial load
