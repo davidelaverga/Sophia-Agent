@@ -206,6 +206,8 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
         invalidate_user_cache(user_id)
         mem = result if isinstance(result, dict) else {}
         return _to_memory_item(mem) if mem.get("id") else MemoryItem(id=memory_id, content=body.text or "")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning("Failed to update memory %s: %s", memory_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
