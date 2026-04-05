@@ -5,6 +5,7 @@ Returns empty on first session when the file doesn't exist yet.
 """
 
 import logging
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -12,7 +13,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
-from deerflow.agents.sophia_agent.utils import safe_user_path
+from deerflow.agents.sophia_agent.utils import log_middleware, safe_user_path
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +34,20 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
 
     @override
     def before_agent(self, state: UserIdentityState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("UserIdentity", "skipped (crisis)", _t0)
             return None
 
         try:
             identity_path = safe_user_path(USERS_DIR, self._user_id, "identity.md")
         except ValueError:
             logger.warning("Invalid user_id for identity lookup: %s", self._user_id)
+            log_middleware("UserIdentity", "no identity file", _t0)
             return None
 
         if not identity_path.exists():
+            log_middleware("UserIdentity", "no identity file", _t0)
             return None
 
         try:
@@ -50,8 +55,10 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
             if content.strip():
                 blocks = list(state.get("system_prompt_blocks", []))
                 blocks.append(f"<user_identity>\n{content}\n</user_identity>")
+                log_middleware("UserIdentity", f"identity loaded ({len(content)} chars)", _t0)
                 return {"system_prompt_blocks": blocks}
         except Exception:
             logger.warning("Failed to read identity file for user %s", self._user_id, exc_info=True)
 
+        log_middleware("UserIdentity", "no identity file", _t0)
         return None

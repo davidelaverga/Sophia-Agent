@@ -424,6 +424,14 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
 )
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
+
+    # Remove from inactivity tracking — session explicitly ended
+    try:
+        from app.gateway.inactivity_watcher import unregister_thread
+        unregister_thread(body.thread_id)
+    except ImportError:
+        pass
+
     try:
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
 

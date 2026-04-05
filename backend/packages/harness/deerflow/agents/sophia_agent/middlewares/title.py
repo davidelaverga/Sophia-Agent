@@ -5,11 +5,14 @@ incorporating ritual and session goal context from the artifact.
 """
 
 import logging
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +32,15 @@ class SophiaTitleMiddleware(AgentMiddleware[SophiaTitleState]):
 
     @override
     def after_model(self, state: SophiaTitleState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         # Only generate on first exchange
         if state.get("title"):
+            log_middleware("Title", "already set", _t0)
             return None
 
         turn_count = state.get("turn_count", 0)
         if turn_count > 1:
+            log_middleware("Title", "skipped (not turn 0)", _t0)
             return None
 
         artifact = state.get("current_artifact") or {}
@@ -60,4 +66,5 @@ class SophiaTitleMiddleware(AgentMiddleware[SophiaTitleState]):
         if len(title) > 50:
             title = title[:47] + "..."
 
+        log_middleware("Title", f"title='{title}'", _t0)
         return {"title": title}

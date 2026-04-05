@@ -57,7 +57,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("No IM channels configured or channel service failed to start")
 
+    # Start Sophia inactivity watcher
+    try:
+        from app.gateway.inactivity_watcher import start_watcher
+
+        await start_watcher()
+        logger.info("Sophia inactivity watcher started")
+    except Exception:
+        logger.exception("Failed to start inactivity watcher")
+
     yield
+
+    # Stop inactivity watcher
+    try:
+        from app.gateway.inactivity_watcher import stop_watcher
+
+        await stop_watcher()
+    except Exception:
+        logger.exception("Failed to stop inactivity watcher")
 
     # Stop channel service on shutdown
     try:

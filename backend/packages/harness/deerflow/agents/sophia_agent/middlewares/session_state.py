@@ -10,6 +10,7 @@ Sophia should respond to THAT, not the canned opener.
 
 import logging
 import re
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -17,7 +18,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
-from deerflow.agents.sophia_agent.utils import extract_last_message_text, safe_user_path
+from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware, safe_user_path
 
 logger = logging.getLogger(__name__)
 
@@ -59,20 +60,25 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
 
     @override
     def before_agent(self, state: SessionStateState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("SessionState", "skipped (crisis)", _t0)
             return None
 
         turn_count = state.get("turn_count", 0)
         if turn_count != 0:
+            log_middleware("SessionState", "skipped (not turn 0)", _t0)
             return None
 
         try:
             handoff_path = safe_user_path(USERS_DIR, self._user_id, "handoffs", "latest.md")
         except ValueError:
             logger.warning("Invalid user_id for session state: %s", self._user_id)
+            log_middleware("SessionState", "skipped (no handoff)", _t0)
             return None
 
         if not handoff_path.exists():
+            log_middleware("SessionState", "skipped (no handoff)", _t0)
             return None
 
         try:
@@ -104,8 +110,10 @@ class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
 
                 blocks = list(state.get("system_prompt_blocks", []))
                 blocks.append(block)
+                log_middleware("SessionState", f"smart opener injected (greeting={is_greeting})", _t0)
                 return {"system_prompt_blocks": blocks}
         except Exception:
             logger.warning("Failed to read handoff for user %s", self._user_id, exc_info=True)
 
+        log_middleware("SessionState", "skipped (no handoff)", _t0)
         return None

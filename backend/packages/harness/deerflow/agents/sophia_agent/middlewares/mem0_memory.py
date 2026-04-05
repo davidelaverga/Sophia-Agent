@@ -5,13 +5,14 @@ After-phase: queues session for offline extraction (does NOT write per-turn).
 """
 
 import logging
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import extract_last_message_text
+from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
 from deerflow.sophia.mem0_client import search_memories
 
 logger = logging.getLogger(__name__)
@@ -77,7 +78,9 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
     @override
     def before_agent(self, state: Mem0MemoryState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         if state.get("skip_expensive", False):
+            log_middleware("Mem0Memory", "skipped (crisis)", _t0)
             return None
 
         ritual = state.get("active_ritual")
@@ -90,6 +93,12 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Build query from last user message
         query = extract_last_message_text(messages)[:200]  # truncate for search
 
+        logger.info(
+            "[Mem0Memory] query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
+            query[:80], categories, context_mode, ritual, active_skill,
+        )
+
+        _t_search = time.perf_counter()
         try:
             results = search_memories(
                 user_id=self._user_id,
@@ -99,10 +108,20 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             )
         except Exception:
             logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
+            log_middleware("Mem0Memory", "retrieval failed", _t0)
             return None
+        search_ms = (time.perf_counter() - _t_search) * 1000
 
         if not results:
+            log_middleware("Mem0Memory", f"no memories found (search: {search_ms:.0f}ms)", _t0)
             return None
+
+        # Log per-memory categories
+        result_categories = [mem.get("category", "unknown") for mem in results[:10]]
+        logger.info(
+            "[Mem0Memory] %d results | search: %.0fms | categories: %s",
+            len(results), search_ms, result_categories,
+        )
 
         # Format memories for prompt injection
         memory_lines = []
@@ -114,6 +133,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
+        log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
