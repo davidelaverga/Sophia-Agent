@@ -42,5 +42,16 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 
+# Capacitor - Native projects (generated, can be recreated with `npx cap add`)
+/android/
+/ios/
+capacitor-cordova-android-plugins/
+capacitor-cordova-ios-plugins/
+
+# testing
+/test-results/
+/session-capture-profile/
+/.session-capture-profile*/
+
 # idea files
 .idea
