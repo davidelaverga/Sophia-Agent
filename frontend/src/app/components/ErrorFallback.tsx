@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useMemo } from "react"
+import Link from "next/link"
 import { RefreshCw, Home, MessageSquare } from "lucide-react"
 import { useCopy, useTranslation } from "../copy"
 import { logger } from "../lib/error-logger"
@@ -83,13 +84,13 @@ export function ErrorFallback({
           )}
 
           {showHomeLink && (
-            <a
+            <Link
               href="/"
               className="inline-flex items-center justify-center gap-2 rounded-2xl border border-sophia-surface-border bg-sophia-button px-6 py-3 text-sm font-medium text-sophia-text transition-all hover:border-sophia-purple/40 hover:bg-sophia-button-hover"
             >
               <Home className="h-4 w-4" />
               {t("errorFallback.goHome")}
-            </a>
+            </Link>
           )}
         </div>
 

@@ -32,7 +32,7 @@ describe('/api/ws-ticket POST', () => {
   });
 
   it('returns 401 when unauthenticated', async () => {
-    vi.mocked(getServerAuthToken).mockReturnValue('');
+    vi.mocked(getServerAuthToken).mockResolvedValue('');
 
     const response = await POST();
     const data = await response.json();
@@ -42,7 +42,7 @@ describe('/api/ws-ticket POST', () => {
   });
 
   it('returns token when authenticated', async () => {
-    vi.mocked(getServerAuthToken).mockReturnValue('token-123');
+    vi.mocked(getServerAuthToken).mockResolvedValue('token-123');
 
     const response = await POST();
     const data = await response.json();

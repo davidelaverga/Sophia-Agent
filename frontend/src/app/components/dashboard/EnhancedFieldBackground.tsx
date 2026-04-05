@@ -157,9 +157,9 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
     let width = 0;
     let height = 0;
 
-    let currentBg: Rgb = [...THEME_COLORS[themeKind].bg];
-    let currentParticle: Rgb = [...THEME_COLORS[themeKind].particle];
-    let currentVigEdge: Rgb = [...THEME_COLORS[themeKind].vigEdge];
+    const currentBg: Rgb = [...THEME_COLORS[themeKind].bg];
+    const currentParticle: Rgb = [...THEME_COLORS[themeKind].particle];
+    const currentVigEdge: Rgb = [...THEME_COLORS[themeKind].vigEdge];
     let currentVig = THEME_COLORS[themeKind].vigStrength;
     let currentIntensity = THEME_COLORS[themeKind].nebulaIntensity;
     let currentBoost = THEME_COLORS[themeKind].nebulaBoost;
@@ -167,7 +167,7 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
     let currentCaustics = THEME_COLORS[themeKind].caustics;
     let currentAurora = THEME_COLORS[themeKind].auroraStrength;
     let currentParticleIri = THEME_COLORS[themeKind].particleIridescence;
-    let currentPalette: [Rgb, Rgb, Rgb] = CONTEXT_PALETTES[contextMode].map((color) => [...color]) as [Rgb, Rgb, Rgb];
+    const currentPalette: [Rgb, Rgb, Rgb] = CONTEXT_PALETTES[contextMode].map((color) => [...color]) as [Rgb, Rgb, Rgb];
 
     const handleResize = () => {
       width = window.innerWidth;
