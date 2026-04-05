@@ -23,14 +23,12 @@ const nextConfig = {
   
   // Environment variables (Vercel will handle these automatically)
   env: {
-    NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
-    NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
   },
   
   // Performance optimizations
   experimental: {
-    optimizePackageImports: ['lucide-react', '@supabase/supabase-js', 'zustand'],
+    optimizePackageImports: ['lucide-react', 'zustand'],
   },
   
   // Compiler optimizations
@@ -89,8 +87,6 @@ const nextConfig = {
                       'http://127.0.0.1:8001', 'ws://127.0.0.1:8001', 'http://localhost:8001', 'ws://localhost:8001',
                     ]
                   : []),
-                process.env.NEXT_PUBLIC_SUPABASE_URL || 'https://*.supabase.co',
-                'wss://*.supabase.co', // Supabase realtime
                 'https://api.cartesia.ai', // Voice API
                 'https://cdn.jsdelivr.net', // External CDN assets
                 'https://*.mem0.ai', // Mem0 APIs
