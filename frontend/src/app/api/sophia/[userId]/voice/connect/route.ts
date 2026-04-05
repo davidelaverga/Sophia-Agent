@@ -19,7 +19,7 @@ export async function POST(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: getServerAuthHeader(),
+      Authorization: await getServerAuthHeader(),
     },
     body: await req.text(),
   });

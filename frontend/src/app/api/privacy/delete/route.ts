@@ -15,7 +15,7 @@ import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function DELETE(_request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = getServerAuthToken();
+  const apiKey = await getServerAuthToken();
 
   if (!backendUrl) {
     return NextResponse.json(
@@ -27,8 +27,8 @@ export async function DELETE(_request: NextRequest) {
   // Get authenticated user
   let userId: string | undefined;
   try {
-    const cookieStore = cookies();
-    const supabase = createRouteHandlerClient({ cookies: () => cookieStore });
+    const cookieStore = await cookies();
+    const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any });
 
     const { data: { user } } = await supabase.auth.getUser();
     userId = user?.id;

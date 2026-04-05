@@ -4,7 +4,7 @@ import { getServerAuthHeader, getServerAuthToken } from '../../../lib/auth/serve
 const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
 
 export async function GET(_request: NextRequest) {
-  const token = getServerAuthToken()
+  const token = await getServerAuthToken()
 
   if (!token) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
@@ -13,7 +13,7 @@ export async function GET(_request: NextRequest) {
   try {
     const response = await fetch(`${BACKEND_URL}/api/v1/chat/usage`, {
       headers: {
-        Authorization: getServerAuthHeader(),
+        Authorization: await getServerAuthHeader(),
         'Content-Type': 'application/json',
       },
       signal: AbortSignal.timeout(10000),

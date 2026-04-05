@@ -5,7 +5,7 @@ import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = getServerAuthToken();
+  const apiKey = await getServerAuthToken();
 
   if (!backendUrl) {
     return NextResponse.json({ error: "Server configuration incomplete" }, { status: 500 });
@@ -14,8 +14,8 @@ export async function POST(request: NextRequest) {
   // 🔒 SECURITY: Authenticate user before accepting consent changes
   let userId: string | undefined;
   try {
-    const cookieStore = cookies();
-    const supabase = createRouteHandlerClient({ cookies: () => cookieStore });
+    const cookieStore = await cookies();
+    const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any });
     const { data: { user } } = await supabase.auth.getUser();
     userId = user?.id;
   } catch {

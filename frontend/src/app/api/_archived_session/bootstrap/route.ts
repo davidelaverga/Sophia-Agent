@@ -227,7 +227,7 @@ export async function GET(request: NextRequest) {
       headers: {
         'Content-Type': 'application/json',
         // Use per-user token from cookie, fallback to env token
-        'Authorization': `Bearer ${getServerAuthToken()}`,
+        'Authorization': `Bearer ${await getServerAuthToken()}`,
       },
     });
     

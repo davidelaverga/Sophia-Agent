@@ -49,7 +49,7 @@ export async function POST(req: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': getServerAuthHeader(),
+        'Authorization': await getServerAuthHeader(),
       },
       body: JSON.stringify({
         invoke_type,

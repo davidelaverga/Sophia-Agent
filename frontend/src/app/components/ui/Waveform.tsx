@@ -49,8 +49,8 @@ export function Waveform({
   emotionRgb = [139, 92, 246],
 }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const animationFrameRef = useRef<number>();
-  const analyserRef = useRef<AnalyserNode>();
+  const animationFrameRef = useRef<number | undefined>(undefined);
+  const analyserRef = useRef<AnalyserNode | undefined>(undefined);
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const smoothedVolumeRef = useRef(0);
 

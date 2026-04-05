@@ -4,7 +4,7 @@ import { getServerAuthToken } from "../../../lib/auth/server-auth";
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function GET(request: NextRequest) {
-  const apiKey = getServerAuthToken();
+  const apiKey = await getServerAuthToken();
 
   // Get user_id from query params
   const { searchParams } = new URL(request.url);

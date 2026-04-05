@@ -25,7 +25,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid token' }, { status: 400 });
     }
 
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     cookieStore.set('sophia-backend-token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',

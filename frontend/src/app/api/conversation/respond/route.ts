@@ -212,8 +212,8 @@ function sanitizeResponse(responseText: string): { text: string; artifacts: Reco
 
 async function getAuthenticatedUser(): Promise<string | undefined> {
   try {
-    const cookieStore = cookies()
-    const supabase = createRouteHandlerClient({ cookies: () => cookieStore })
+    const cookieStore = await cookies()
+    const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any })
 
     const { data: { user } } = await supabase.auth.getUser()
     return user?.id
@@ -230,7 +230,7 @@ export async function POST(request: NextRequest) {
   // 1. Validate Configuration
   const apiBase = process.env.BACKEND_API_URL
   // Get user token or fallback to server key
-  const apiKey = getServerAuthToken()
+  const apiKey = await getServerAuthToken()
 
   if (!apiBase) {
     return NextResponse.json(

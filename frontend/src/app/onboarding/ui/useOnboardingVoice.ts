@@ -157,7 +157,7 @@ export function useOnboardingVoice(reducedMotion: boolean): UseOnboardingVoiceRe
 
             setIsPlaying(true)
             setIsConnecting(false)
-            const decodedBuffer = base64ToUint8Array(encodedAudio).buffer
+            const decodedBuffer = base64ToUint8Array(encodedAudio).buffer as ArrayBuffer
             void enqueuePcmChunk(decodedBuffer)
             return
           }

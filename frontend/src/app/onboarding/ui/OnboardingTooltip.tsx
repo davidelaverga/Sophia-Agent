@@ -10,7 +10,7 @@ import {
   TOOLTIP_MIN_WIDTH,
   TOOLTIP_TARGET_GAP,
   resolveTooltipLayout,
-} from "./layout"
+} from "./tooltip-layout"
 import { useOnboardingReducedMotion } from "./useOnboardingReducedMotion"
 import { useViewportSize } from "./useViewportSize"
 

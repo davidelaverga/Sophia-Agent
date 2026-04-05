@@ -59,7 +59,7 @@ function getDailyLearning() {
 
 export async function GET(_request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = getServerAuthToken();
+  const apiKey = await getServerAuthToken();
 
   // If no backend configured, return daily curated content
   if (!backendUrl) {

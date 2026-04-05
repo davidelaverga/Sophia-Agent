@@ -41,7 +41,7 @@ export async function POST() {
     );
   }
 
-  const token = getServerAuthToken();
+  const token = await getServerAuthToken();
 
   if (!token) {
     logger.warn('WS ticket auth missing', {

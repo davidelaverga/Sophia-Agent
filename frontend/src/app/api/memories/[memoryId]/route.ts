@@ -21,7 +21,7 @@ export async function DELETE(
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': getServerAuthHeader(),
+          'Authorization': await getServerAuthHeader(),
         },
       }
     );

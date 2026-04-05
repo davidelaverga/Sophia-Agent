@@ -15,7 +15,7 @@ import { logger } from '../../../lib/error-logger';
 const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export async function GET() {
-  const token = getServerAuthToken();
+  const token = await getServerAuthToken();
 
   if (!token) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
@@ -24,7 +24,7 @@ export async function GET() {
   try {
     const response = await fetch(`${BACKEND_URL}/api/v1/chat/usage`, {
       headers: {
-        'Authorization': getServerAuthHeader(),
+        'Authorization': await getServerAuthHeader(),
         'Content-Type': 'application/json',
       },
       signal: AbortSignal.timeout(10000),

@@ -34,7 +34,7 @@ export async function fetchBackendStreamWithBootstrap(
     body: JSON.stringify(backendPayload),
   });
 
-  let tokenForBackend = getServerAuthToken();
+  let tokenForBackend = await getServerAuthToken();
 
   if (!tokenForBackend && !IS_PRODUCTION) {
     const bootstrapToken = await getDevBootstrapToken();

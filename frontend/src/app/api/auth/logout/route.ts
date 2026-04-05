@@ -13,7 +13,7 @@ import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 
 export async function POST() {
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
 
   // Delete by setting maxAge to 0
   cookieStore.set('sophia-backend-token', '', {

@@ -1,6 +1,6 @@
 "use client"
 
-import { useRef, useEffect, useCallback, forwardRef, useImperativeHandle } from "react"
+import { useRef, useEffect, useCallback, useImperativeHandle, type Ref } from "react"
 import { usePresenceStore } from "../../stores/presence-store"
 import { useEmotionColor } from "../../hooks/useEmotionColor"
 import { useExpression, type ExpressionParams } from "../../hooks/useExpression"
@@ -24,7 +24,7 @@ export interface PresenceFieldHandle {
  * driven by a single rAF loop. Expression parameters and palettes interpolate
  * smoothly based on presence state and emotion color from the stores.
  */
-export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceField(_props, ref) {
+export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef<number>(0)
   const mouseRef = useRef({ x: 0.5, y: 0.5 })
@@ -150,4 +150,4 @@ export const PresenceField = forwardRef<PresenceFieldHandle>(function PresenceFi
       />
     </div>
   )
-})
+}

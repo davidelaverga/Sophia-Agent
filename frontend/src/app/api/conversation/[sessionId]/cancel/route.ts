@@ -11,10 +11,10 @@ const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
  */
 export async function POST(
   request: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: { params: Promise<{ sessionId: string }> }
 ) {
-  const { sessionId } = params
-  const apiKey = getServerAuthToken()
+  const { sessionId } = await params
+  const apiKey = await getServerAuthToken()
 
   if (!sessionId) {
     return NextResponse.json(

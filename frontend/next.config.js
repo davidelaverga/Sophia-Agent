@@ -15,8 +15,8 @@ const nextConfig = {
   // Disable image optimization for static export (Capacitor)
   images: process.env.CAPACITOR_BUILD === 'true' ? { unoptimized: true } : undefined,
   
-  // Skip ESLint during Capacitor builds (lint separately in CI)
-  eslint: process.env.CAPACITOR_BUILD === 'true' ? { ignoreDuringBuilds: true } : undefined,
+  // Skip ESLint during builds (lint separately in CI)
+  // Note: 'eslint' key removed in Next 16 — use CLI flags or separate lint step
   
   // Skip TypeScript errors during Capacitor builds
   typescript: process.env.CAPACITOR_BUILD === 'true' ? { ignoreBuildErrors: true } : undefined,
@@ -37,6 +37,9 @@ const nextConfig = {
   compiler: {
     removeConsole: process.env.NODE_ENV === 'production' ? { exclude: ['error', 'warn'] } : false,
   },
+
+  // Turbopack (default in Next 16) — webpack config below is kept for --webpack fallback
+  turbopack: {},
 
   // ==========================================================================
   // SECURITY HEADERS

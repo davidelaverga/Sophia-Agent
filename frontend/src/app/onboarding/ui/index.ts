@@ -1,4 +1,4 @@
-export * from "./layout"
+export * from "./tooltip-layout"
 export * from "./OnboardingTooltip"
 export * from "./SpotlightOverlay"
 export * from "./useOnboardingReducedMotion"

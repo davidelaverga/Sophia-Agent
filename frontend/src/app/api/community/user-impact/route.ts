@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Use user's backend token or fallback
-    const token = getServerAuthToken()
+    const token = await getServerAuthToken()
 
     const response = await fetch(
       `${BACKEND_URL}/api/community/user-impact?user_id=${encodeURIComponent(userId)}`,

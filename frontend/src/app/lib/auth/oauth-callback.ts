@@ -50,8 +50,8 @@ export async function handleDiscordOAuthCallback(request: NextRequest): Promise<
   }
 
   if (code) {
-    const cookieStore = cookies()
-    supabase = createRouteHandlerClient({ cookies: () => cookieStore })
+    const cookieStore = await cookies()
+    supabase = createRouteHandlerClient({ cookies: () => cookieStore as any })
 
     try {
       const { data, error: exchangeError } = await supabase.auth.exchangeCodeForSession(code)
@@ -111,7 +111,7 @@ export async function handleDiscordOAuthCallback(request: NextRequest): Promise<
           if (backendUser && backendUser.api_token) {
             backendToken = backendUser.api_token
 
-            const cookieStore = cookies()
+            const cookieStore = await cookies()
             cookieStore.set('sophia-backend-token', backendToken, {
               httpOnly: true,
               secure: process.env.NODE_ENV === 'production',

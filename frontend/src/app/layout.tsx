@@ -9,8 +9,8 @@ import { UiToast } from "./components/UiToast"
 import { getRequestLocale, getServerCopy } from "./copy/server"
 
 export async function generateMetadata() {
-  const locale = getRequestLocale()
-  const copy = getServerCopy(locale)
+  const locale = await getRequestLocale()
+  const copy = await getServerCopy(locale)
 
   return {
     title: `${copy.brand.name} – ${copy.brand.tagline}`,
@@ -39,12 +39,12 @@ export const viewport = {
   ],
 }
 
-export default function RootLayout({
+export default async function RootLayout({
   children,
 }: {
   children: React.ReactNode
 }) {
-  const locale = getRequestLocale()
+  const locale = await getRequestLocale()
 
   return (
     <html

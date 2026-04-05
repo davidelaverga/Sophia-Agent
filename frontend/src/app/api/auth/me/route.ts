@@ -18,7 +18,7 @@ const COOKIE_NAME = 'sophia-backend-token';
 
 export async function GET() {
   try {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
     const hasBackendToken = !!cookieStore.get(COOKIE_NAME)?.value;
 
     // Also check Supabase session for user info
@@ -27,7 +27,7 @@ export async function GET() {
     let username: string | null = null;
 
     try {
-      const supabase = createRouteHandlerClient({ cookies: () => cookieStore });
+      const supabase = createRouteHandlerClient({ cookies: () => cookieStore as any });
       const { data: { user } } = await supabase.auth.getUser();
       if (user) {
         userId = user.id;

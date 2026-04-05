@@ -16,15 +16,15 @@ const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_AP
 
 export async function GET(
   req: NextRequest,
-  { params }: { params: { sessionId: string } }
+  { params }: { params: Promise<{ sessionId: string }> }
 ) {
-  const token = getServerAuthToken();
+  const token = await getServerAuthToken();
 
   if (!token) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const { sessionId } = params;
+  const { sessionId } = await params;
   if (!sessionId) {
     return NextResponse.json({ error: 'Session ID required' }, { status: 400 });
   }
@@ -44,7 +44,7 @@ export async function GET(
       `${BACKEND_URL}/api/v1/conversations/sessions/${sessionId}/messages?${qs}`,
       {
         headers: {
-          'Authorization': getServerAuthHeader(),
+          'Authorization': await getServerAuthHeader(),
           'Content-Type': 'application/json',
         },
         signal: AbortSignal.timeout(10000),

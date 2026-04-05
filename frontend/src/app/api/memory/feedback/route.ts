@@ -42,7 +42,7 @@ export async function POST(request: NextRequest) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${getServerAuthToken()}`,
+          'Authorization': `Bearer ${await getServerAuthToken()}`,
         },
         body: JSON.stringify(body),
       }

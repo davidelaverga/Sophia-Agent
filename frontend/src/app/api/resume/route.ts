@@ -236,7 +236,7 @@ export async function POST(req: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${getServerAuthToken()}`,
+        'Authorization': `Bearer ${await getServerAuthToken()}`,
         // Hint to backend: UI language is English.
         // Backend may ignore this, but it helps prevent accidental Spanish replies.
         'Accept-Language': 'en',

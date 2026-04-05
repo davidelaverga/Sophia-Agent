@@ -11,24 +11,24 @@ import {
 import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
 import { getCopy, translate } from "./core"
 
-export function getRequestLocale(): Locale {
+export async function getRequestLocale(): Promise<Locale> {
   // 1) Cookie wins
-  const cookieValue = cookies().get(LOCALE_COOKIE_NAME)?.value
+  const cookieValue = (await cookies()).get(LOCALE_COOKIE_NAME)?.value
   const fromCookie = normalizeLocale(cookieValue)
   if (fromCookie) return fromCookie
 
   // 2) Accept-Language fallback
-  const acceptLanguage = headers().get("accept-language")
+  const acceptLanguage = (await headers()).get("accept-language")
   const fromHeader = localeFromAcceptLanguage(acceptLanguage)
   if (fromHeader) return fromHeader
 
   return DEFAULT_LOCALE
 }
 
-export function getServerCopy(locale?: Locale): CopyStructure {
-  return getCopy(locale ?? getRequestLocale())
+export async function getServerCopy(locale?: Locale): Promise<CopyStructure> {
+  return getCopy(locale ?? await getRequestLocale())
 }
 
-export function tServer(key: CopyKey, values?: InterpolationValues, locale?: Locale): string {
-  return translate(locale ?? getRequestLocale(), key, values)
+export async function tServer(key: CopyKey, values?: InterpolationValues, locale?: Locale): Promise<string> {
+  return translate(locale ?? await getRequestLocale(), key, values)
 }

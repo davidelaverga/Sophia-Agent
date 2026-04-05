@@ -3,7 +3,7 @@ import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = getServerAuthToken();
+  const apiKey = await getServerAuthToken();
 
   if (!backendUrl) {
     return NextResponse.json({ error: "Server configuration incomplete" }, { status: 500 });

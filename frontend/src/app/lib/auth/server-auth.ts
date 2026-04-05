@@ -21,10 +21,10 @@ const COOKIE_NAME = 'sophia-backend-token'
  * 
  * @returns The API token to use for backend calls
  */
-export function getServerAuthToken(): string {
+export async function getServerAuthToken(): Promise<string> {
   // Try to get user token from cookie
   try {
-    const cookieStore = cookies()
+    const cookieStore = await cookies()
     const userToken = cookieStore.get(COOKIE_NAME)?.value
     
     if (userToken) {
@@ -59,8 +59,8 @@ export function getServerAuthToken(): string {
  * 
  * @returns Authorization header value with Bearer prefix
  */
-export function getServerAuthHeader(): string {
-  return `Bearer ${getServerAuthToken()}`
+export async function getServerAuthHeader(): Promise<string> {
+  return `Bearer ${await getServerAuthToken()}`
 }
 
 /**
@@ -68,9 +68,9 @@ export function getServerAuthHeader(): string {
  * 
  * @returns true if user has a backend token in cookies
  */
-export function hasUserToken(): boolean {
+export async function hasUserToken(): Promise<boolean> {
   try {
-    const cookieStore = cookies()
+    const cookieStore = await cookies()
     return !!cookieStore.get(COOKIE_NAME)?.value
   } catch {
     return false

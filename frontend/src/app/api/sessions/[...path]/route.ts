@@ -23,7 +23,7 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   // 🔒 SECURITY: Read token from httpOnly cookie server-side
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
-    'Authorization': getServerAuthHeader(),
+    'Authorization': await getServerAuthHeader(),
   };
 
   const method = req.method.toUpperCase();
