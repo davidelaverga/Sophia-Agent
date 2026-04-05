@@ -8,7 +8,7 @@ export { RitualCard } from './RitualCard';
 export { MicCTA } from './MicCTA';
 export { ContextTabs } from './ContextTabs';
 export { DashboardCosmicBackground } from './DashboardCosmicBackground';
-export { RITUALS, CONTEXTS, PRESENCE_STATES, EMBRACE_DIRECTIONS } from './types';
+export { RITUALS, CONTEXTS, PRESENCE_STATES } from './types';
 export type { MicState, RitualConfig, ContextConfig } from './types';
 
 // Sidebar components for 3-column layout

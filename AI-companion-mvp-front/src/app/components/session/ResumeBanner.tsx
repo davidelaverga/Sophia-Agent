@@ -1,39 +1,27 @@
 /**
  * Resume Banner
- * Sprint 1+ - "Welcome back" UX for session continuity
- * 
- * Premium, scannable banner for session resumption.
- * Structure: [Icon + Label + Meta] [Preview] [Actions]
- * 
- * Replaced hardcoded UI values with Sophia theme tokens
+ * Compact horizontal banner matching the prototype exactly:
+ * [▶ play circle] [context · ritual · time  +  opener quote] [× dismiss]
+ * Position: top-left, glass surface, small and unobtrusive.
  */
 
 'use client';
 
-import { useMemo } from 'react';
-import { X, ArrowRight, Play } from 'lucide-react';
+import { useMemo, useCallback } from 'react';
+import { X } from 'lucide-react';
 import { cn } from '../../lib/utils';
 import { humanizeTime } from '../../lib/humanize-time';
 import type { PresetType } from '../../lib/session-types';
 
 interface ResumeBannerProps {
-  /** Type of the paused session */
   sessionType: PresetType;
-  /** Context mode (gaming/work/life) */
   contextMode?: 'gaming' | 'work' | 'life';
-  /** How long ago the session started */
   startedAt?: string;
-  /** Number of messages in the session */
   messageCount?: number;
-  /** Preview of the last message */
   lastMessagePreview?: string;
-  /** Resume the existing session */
   onResume: () => void;
-  /** Start a new session (discards old one) */
   onStartFresh: () => void;
-  /** Dismiss the banner without action */
   onDismiss?: () => void;
-  /** Additional CSS classes */
   className?: string;
 }
 
@@ -63,7 +51,6 @@ export function ResumeBanner({
   onDismiss,
   className,
 }: ResumeBannerProps) {
-  // Humanize the time
   const timeAgo = useMemo(() => {
     if (!startedAt) return null;
     return humanizeTime(startedAt, 'relative').text;
@@ -72,129 +59,70 @@ export function ResumeBanner({
   const ritualLabel = RITUAL_LABELS[sessionType] || sessionType;
   const contextLabel = CONTEXT_LABELS[contextMode] || contextMode;
 
-  return (
-    <div
-      className={cn(
-        'relative flex items-center gap-4 px-4 py-3 rounded-2xl',
-        'bg-sophia-surface',
-        'border border-sophia-surface-border',
-        'shadow-soft',
-        'animate-fadeIn',
-        'motion-reduce:animate-none',
-        className
-      )}
-      role="region"
-      aria-label="Resume session banner"
-    >
-      {/* LEFT: Icon + Label + Meta */}
-      <div className="flex items-center gap-3 shrink-0">
-        {/* Icon container */}
-        <div className="w-10 h-10 rounded-xl bg-sophia-purple/10 flex items-center justify-center">
-          <Play className="w-4 h-4 text-sophia-purple ml-0.5" />
-        </div>
-        
-        {/* Label & metadata */}
-        <div className="hidden sm:block">
-          <p className="text-xs font-medium text-sophia-text">
-            Resume session
-          </p>
-          <p className="text-[11px] text-sophia-text2 mt-0.5">
-            {contextLabel} · {ritualLabel}
-            {timeAgo && ` · ${timeAgo}`}
-          </p>
-        </div>
-      </div>
-
-      {/* MIDDLE: Preview (truncated) or spacer */}
-      {lastMessagePreview ? (
-        <div className="flex-1 min-w-0 hidden md:block">
-          <p className="text-[13px] text-sophia-text2/80 truncate italic">
-            &ldquo;{lastMessagePreview}&rdquo;
-          </p>
-        </div>
-      ) : (
-        <div className="flex-1 hidden sm:block" />
-      )}
-      
-      {/* Mobile: Compact label */}
-      <div className="flex-1 min-w-0 sm:hidden">
-        <p className="text-sm text-sophia-text truncate">
-          Resume {ritualLabel.toLowerCase()}
-          {timeAgo && <span className="text-sophia-text2"> · {timeAgo}</span>}
-        </p>
-      </div>
-
-      {/* RIGHT: Actions */}
-      <div className="flex items-center gap-2 shrink-0">
-        {/* Primary: Continue */}
-        <button
-          onClick={onResume}
-          className={cn(
-            'flex items-center gap-1.5 px-4 py-2 rounded-xl text-sm font-medium',
-            'bg-sophia-purple text-white',
-            'hover:opacity-90 active:scale-[0.98]',
-            'transition-all duration-150',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple focus-visible:ring-offset-2 focus-visible:ring-offset-sophia-bg'
-          )}
-        >
-          Continue
-          <ArrowRight className="w-3.5 h-3.5" />
-        </button>
-        
-        {/* Dismiss (minimal) */}
-        {onDismiss && (
-          <button
-            onClick={onDismiss}
-            className={cn(
-              'p-1.5 rounded-lg',
-              'text-sophia-text2/40 hover:text-sophia-text2',
-              'hover:bg-sophia-button-hover',
-              'transition-all duration-150',
-              'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple'
-            )}
-            aria-label="Dismiss banner"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// =============================================================================
-// COMPACT VARIANT (pill style for minimal intrusion)
-// =============================================================================
-
-interface CompactResumeBannerProps {
-  sessionType: PresetType;
-  onResume: () => void;
-  className?: string;
-}
-
-export function CompactResumeBanner({
-  sessionType,
-  onResume,
-  className,
-}: CompactResumeBannerProps) {
-  const ritualLabel = RITUAL_LABELS[sessionType] || sessionType;
+  const handleDismiss = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onDismiss?.();
+  }, [onDismiss]);
 
   return (
     <button
+      type="button"
       onClick={onResume}
       className={cn(
-        'flex items-center gap-1.5 px-3 py-1.5 rounded-full',
-        'bg-sophia-purple/10 text-sophia-purple text-xs font-medium',
-        'hover:bg-sophia-purple/20 active:scale-[0.97]',
-        'transition-all duration-150',
-        'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple',
+        'group flex w-full max-w-[380px] items-center gap-3 rounded-[14px] px-3 py-2.5 text-left',
+        'border backdrop-blur-[20px] transition-all duration-300',
+        'border-black/[0.06] bg-white/60',
+        'dark:border-white/[0.04] dark:bg-[rgba(8,8,18,0.45)]',
+        'hover:border-black/[0.12] dark:hover:border-white/[0.12]',
+        'cursor-pointer',
+        'animate-fadeIn motion-reduce:animate-none',
         className
       )}
+      role="region"
+      aria-label="Resume previous session"
     >
-      <Play className="w-3 h-3" />
-      <span>Continue {ritualLabel.toLowerCase()}</span>
-      <ArrowRight className="w-3 h-3" />
+      {/* Play circle */}
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[rgba(var(--sophia-glow-rgb,124,92,170),0.2)] bg-[rgba(var(--sophia-glow-rgb,124,92,170),0.12)]">
+        <svg viewBox="0 0 24 24" className="ml-[1px] h-2.5 w-2.5 fill-[rgba(var(--sophia-glow-rgb,124,92,170),0.7)]" aria-hidden="true">
+          <polygon points="8,5 19,12 8,19" />
+        </svg>
+      </span>
+
+      {/* Meta */}
+      <span className="flex min-w-0 flex-1 flex-col gap-px">
+        <span className="text-[9px] font-normal uppercase tracking-[0.08em] text-black/40 dark:text-white/28">
+          {contextLabel} · {ritualLabel}
+          {timeAgo && ` · ${timeAgo}`}
+        </span>
+        {lastMessagePreview ? (
+          <span className="truncate font-cormorant text-[13px] font-light italic text-black/40 dark:text-white/28">
+            &ldquo;{lastMessagePreview}&rdquo;
+          </span>
+        ) : (
+          <span className="truncate font-cormorant text-[13px] font-light italic text-black/40 dark:text-white/28">
+            &ldquo;Tap to continue where you left off&rdquo;
+          </span>
+        )}
+      </span>
+
+      {/* Dismiss */}
+      {onDismiss && (
+        <span
+          role="button"
+          tabIndex={0}
+          onClick={handleDismiss}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleDismiss(e as unknown as React.MouseEvent); } }}
+          className={cn(
+            'flex h-5 w-5 shrink-0 items-center justify-center rounded-full',
+            'text-black/15 transition-colors duration-200',
+            'hover:bg-black/[0.04] hover:text-black/40',
+            'dark:text-white/15 dark:hover:bg-white/[0.04] dark:hover:text-white/40',
+          )}
+          aria-label="Dismiss"
+        >
+          <X className="h-3.5 w-3.5" />
+        </span>
+      )}
     </button>
   );
 }
-

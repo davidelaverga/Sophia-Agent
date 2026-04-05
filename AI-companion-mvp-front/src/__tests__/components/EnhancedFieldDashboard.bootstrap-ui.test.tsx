@@ -118,39 +118,37 @@ vi.mock('../../app/lib/api/sessions-api', () => ({
   isSuccess: vi.fn(() => true),
 }));
 
-vi.mock('../../app/components/dashboard', () => ({
-  CONTEXTS: [
-    { value: 'gaming', title: 'Gaming', subtitle: 'sub' },
-    { value: 'work', title: 'Work', subtitle: 'sub' },
-    { value: 'life', title: 'Life', subtitle: 'sub' },
-  ],
-  RITUALS: [
-    { type: 'prepare', labels: { gaming: { title: 'Prepare' }, work: { title: 'Prepare' }, life: { title: 'Prepare' } } },
-    { type: 'debrief', labels: { gaming: { title: 'Debrief' }, work: { title: 'Debrief' }, life: { title: 'Debrief' } } },
-    { type: 'reset', labels: { gaming: { title: 'Reset' }, work: { title: 'Reset' }, life: { title: 'Reset' } } },
-    { type: 'vent', labels: { gaming: { title: 'Vent' }, work: { title: 'Vent' }, life: { title: 'Vent' } } },
-  ],
-  DashboardCosmicBackground: () => <div data-testid="bg" />,
-  ContextTabs: () => <div data-testid="context-tabs" />,
-  MicCTA: () => <button type="button">Mic</button>,
-  RitualCard: ({ ritual }: { ritual: { type: string } }) => <div>{ritual.type}</div>,
+vi.mock('../../app/components/dashboard/EnhancedFieldBackground', () => ({
+  EnhancedFieldBackground: () => <div data-testid="field-background" />,
 }));
 
-vi.mock('../../app/components/dashboard/DashboardSidebar', () => ({
-  MobileFloatingButtons: () => <div data-testid="mobile-buttons" />,
+vi.mock('../../app/components/dashboard/RitualOrbit', () => ({
+  RitualOrbit: () => <div data-testid="ritual-orbit" />,
+}));
+
+vi.mock('../../app/components/dashboard/ContextTabs', () => ({
+  ContextTabs: () => <div data-testid="context-tabs" />,
+}));
+
+vi.mock('../../app/components/ThemeToggle', () => ({
+  ThemeToggle: () => <button type="button">Theme</button>,
 }));
 
 vi.mock('../../app/components/HistoryDrawer', () => ({
   HistoryDrawer: () => <div data-testid="history-drawer" />,
 }));
 
+vi.mock('../../app/components/dashboard/SettingsDrawer', () => ({
+  SettingsDrawer: () => <div data-testid="settings-drawer" />,
+}));
+
 vi.mock('../../app/components/session/ResumeBanner', () => ({
   ResumeBanner: () => <div data-testid="resume-banner">Resume banner visible</div>,
 }));
 
-import { VoiceFirstDashboard } from '../../app/components/VoiceFirstDashboard';
+import { EnhancedFieldDashboard } from '../../app/components/EnhancedFieldDashboard';
 
-describe('VoiceFirstDashboard bootstrap UI precedence', () => {
+describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionStartLoadingMock = false;
@@ -168,7 +166,7 @@ describe('VoiceFirstDashboard bootstrap UI precedence', () => {
       },
     });
 
-    render(<VoiceFirstDashboard />);
+    render(<EnhancedFieldDashboard />);
 
     await waitFor(() => {
       expect(screen.getByTestId('resume-banner')).toBeInTheDocument();
@@ -188,14 +186,13 @@ describe('VoiceFirstDashboard bootstrap UI precedence', () => {
       },
     });
 
-    render(<VoiceFirstDashboard />);
+    render(<EnhancedFieldDashboard />);
 
     await waitFor(() => {
       expect(screen.getByText('Welcome back. Let us build momentum.')).toBeInTheDocument();
     });
 
     expect(screen.queryByTestId('resume-banner')).not.toBeInTheDocument();
-    // Suggested ritual is auto-selected rather than displayed as separate text
   });
 
   it('keeps ResumeBanner hidden while a session launch is loading', async () => {
@@ -211,7 +208,7 @@ describe('VoiceFirstDashboard bootstrap UI precedence', () => {
       },
     });
 
-    render(<VoiceFirstDashboard />);
+    render(<EnhancedFieldDashboard />);
 
     await waitFor(() => {
       expect(resolveDashboardBootstrapStateMock).not.toHaveBeenCalled();

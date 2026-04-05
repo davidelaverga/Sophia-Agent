@@ -38,13 +38,7 @@ export function PresenceIndicator({ state, modeLabel, isOffline, isConnecting, i
           {presence.label}
         </span>
       </div>
-      {/* Mode label */}
-      {modeLabel && state === 'idle' && (
-        <span className="text-[11px]">
-          <span className="text-sophia-text2/60">Mode:</span>
-          <span className="text-sophia-purple font-medium"> {modeLabel}</span>
-        </span>
-      )}
+      {modeLabel && state === 'idle' ? <span className="sr-only">Mode: {modeLabel}</span> : null}
     </div>
   );
 }

@@ -1029,6 +1029,28 @@ a {
 }
 
 /* ============================================================================
+   Mic breathing rings — matches prototype exactly
+   ============================================================================ */
+
+@keyframes mic-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.8; }
+  50% { transform: scale(1.06); opacity: 0.3; }
+}
+
+@keyframes mic-active-breathe {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.12); opacity: 0.2; }
+}
+
+.animate-mic-breathe {
+  animation: mic-breathe 5s ease-in-out infinite;
+}
+
+.animate-mic-active-breathe {
+  animation: mic-active-breathe 2s ease-in-out infinite;
+}
+
+/* ============================================================================
    Floating animation for cards (subtle, organic)
    ============================================================================ */
 

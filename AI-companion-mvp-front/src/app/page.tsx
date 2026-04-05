@@ -6,13 +6,13 @@
  * Auth flow: Discord Login → Consent Gate → Dashboard
  */
 
-import { VoiceFirstDashboard } from './components/VoiceFirstDashboard';
+import { EnhancedFieldDashboard } from './components/EnhancedFieldDashboard';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 export default function HomePage() {
   return (
     <ProtectedRoute>
-      <VoiceFirstDashboard />
+      <EnhancedFieldDashboard />
     </ProtectedRoute>
   );
 }

@@ -33,9 +33,12 @@ export interface ContextConfig {
   icon: typeof Gamepad2;
   title: string;
   subtitle: string;
-  glowClass: string;
-  auraClass: string;
-  breatheSpeed: string;
+  greetings: {
+    morning: string;
+    afternoon: string;
+    evening: string;
+  };
+  ritualPrompts: Record<Extract<PresetType, 'prepare' | 'debrief' | 'reset' | 'vent'>, string>;
 }
 
 // ============================================================================
@@ -48,9 +51,9 @@ export const RITUALS: RitualConfig[] = [
     icon: Target,
     floatDelay: '0s',
     labels: {
-      gaming: { title: 'Pre-game', description: 'Lock in before you play.' },
-      work: { title: 'Pre-work', description: 'Set your intention.' },
-      life: { title: 'Prepare', description: 'Get clear on what matters.' },
+      gaming: { title: 'Pre-game', description: 'to get your head right before you play' },
+      work: { title: 'Pre-work', description: 'to set your intention before the day starts' },
+      life: { title: 'Prepare', description: 'to get clear on what matters today' },
     },
   },
   {
@@ -58,9 +61,9 @@ export const RITUALS: RitualConfig[] = [
     icon: MessageCircle,
     floatDelay: '0.12s',
     labels: {
-      gaming: { title: 'Post-game', description: 'Process and learn.' },
-      work: { title: 'Post-work', description: 'Reflect on the day.' },
-      life: { title: 'Debrief', description: 'Talk through what happened.' },
+      gaming: { title: 'Post-game', description: 'to process what just happened in-game' },
+      work: { title: 'Post-work', description: 'to process your important work events' },
+      life: { title: 'Debrief', description: 'to talk through what just happened' },
     },
   },
   {
@@ -68,9 +71,9 @@ export const RITUALS: RitualConfig[] = [
     icon: RefreshCw,
     floatDelay: '0.25s',
     labels: {
-      gaming: { title: 'Reset', description: 'Quick mental reset.' },
-      work: { title: 'Stress Reset', description: 'Calm the overwhelm.' },
-      life: { title: 'Grounding', description: 'Come back to center.' },
+      gaming: { title: 'Reset', description: 'to clear your mind between sessions' },
+      work: { title: 'Stress Reset', description: 'to calm the overwhelm and refocus' },
+      life: { title: 'Grounding', description: 'to come back to yourself for a moment' },
     },
   },
   {
@@ -78,9 +81,9 @@ export const RITUALS: RitualConfig[] = [
     icon: Wind,
     floatDelay: '0.38s',
     labels: {
-      gaming: { title: 'Vent', description: 'Let it out. Feel lighter.' },
-      work: { title: 'Unload', description: 'Release the pressure.' },
-      life: { title: 'Let it out', description: 'No filter needed.' },
+      gaming: { title: 'Vent', description: 'to let the frustration out, no filter' },
+      work: { title: 'Unload', description: 'to release the pressure without judgment' },
+      life: { title: 'Let it out', description: 'to say what you need to say, unfiltered' },
     },
   },
 ];
@@ -95,30 +98,54 @@ export const CONTEXTS: ContextConfig[] = [
     label: 'Gaming', 
     icon: Gamepad2,
     title: "Let's lock in.",
-    subtitle: "Reset the tilt.",
-    glowClass: 'glow-gaming',
-    auraClass: 'aura-gaming',
-    breatheSpeed: '6s',
+    subtitle: "Pick a ritual or just talk — no pressure.",
+    greetings: {
+      morning: 'Morning grind?',
+      afternoon: "Let's lock in.",
+      evening: 'Late session?',
+    },
+    ritualPrompts: {
+      prepare: 'Set your intention before you queue.',
+      debrief: 'Cool down and learn from the session.',
+      reset: 'Reset your tilt in under a minute.',
+      vent: 'Let it out, then get steady.',
+    },
   },
   { 
     value: 'work', 
     label: 'Work', 
     icon: Briefcase,
     title: "Let's get clear.",
-    subtitle: "One step at a time.",
-    glowClass: 'glow-work',
-    auraClass: 'aura-work',
-    breatheSpeed: '7s',
+    subtitle: 'Set your focus or just talk.',
+    greetings: {
+      morning: 'Good morning.',
+      afternoon: "Let's get clear.",
+      evening: 'Still at it?',
+    },
+    ritualPrompts: {
+      prepare: 'Set the tone before the work begins.',
+      debrief: 'Process the important work moments.',
+      reset: 'Clear the overload and refocus.',
+      vent: 'Unload the pressure without spinning.',
+    },
   },
   { 
     value: 'life', 
     label: 'Life', 
     icon: Heart,
     title: "I'm here.",
-    subtitle: "Talk to me.",
-    glowClass: 'glow-life',
-    auraClass: 'aura-life',
-    breatheSpeed: '8s',
+    subtitle: 'Talk to me — whatever it is.',
+    greetings: {
+      morning: 'Good morning.',
+      afternoon: "I'm here.",
+      evening: 'How was today?',
+    },
+    ritualPrompts: {
+      prepare: 'Get clear on what matters today.',
+      debrief: 'Talk through what just happened.',
+      reset: 'Come back to yourself for a moment.',
+      vent: 'Say it how it feels, unfiltered.',
+    },
   },
 ];
 
@@ -134,17 +161,4 @@ export const PRESENCE_STATES: Record<MicState | 'offline' | 'connecting' | 'star
   offline: { label: 'Offline', dotClass: 'bg-red-400' },
   connecting: { label: 'Connecting...', dotClass: 'bg-amber-400 animate-pulse' },
   starting: { label: 'Waking Sophia...', dotClass: 'bg-sophia-purple animate-pulse' },
-};
-
-// ============================================================================
-// EMBRACE DIRECTIONS (for mic beam animation)
-// ============================================================================
-
-export const EMBRACE_DIRECTIONS: Record<PresetType, { x: number; y: number; rotation: string }> = {
-  'prepare': { x: -1, y: -1, rotation: '-135deg' },
-  'debrief': { x: 1, y: -1, rotation: '-45deg' },
-  'reset': { x: -1, y: 1, rotation: '135deg' },
-  'vent': { x: 1, y: 1, rotation: '45deg' },
-  'open': { x: 0, y: 0, rotation: '0deg' },
-  'chat': { x: 0, y: 0, rotation: '0deg' },
 };
