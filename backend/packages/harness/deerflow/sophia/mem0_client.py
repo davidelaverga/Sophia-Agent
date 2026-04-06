@@ -98,8 +98,10 @@ def search_memories(
     with _cache_lock:
         cached_results = _cache.get(cache_key)
         if cached_results is not None:
+            logger.info("[Mem0Cache] HIT (%d results cached)", len(cached_results))
             return cached_results
 
+    logger.info("[Mem0Cache] MISS — calling Mem0 API")
     client = _get_client()
     if client is None:
         return []
@@ -127,8 +129,12 @@ def search_memories(
                     })
 
         # Filter by categories if specified
+        pre_filter_count = len(memories)
         if categories:
             memories = [m for m in memories if not m["category"] or m["category"] in categories]
+        filtered_out = pre_filter_count - len(memories)
+        if filtered_out > 0:
+            logger.info("[Mem0Search] filtered out %d/%d memories (not in requested categories)", filtered_out, pre_filter_count)
 
         # Sort by context relevance if context_mode specified
         if context_mode:

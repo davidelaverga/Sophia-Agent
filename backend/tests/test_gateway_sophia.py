@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
@@ -14,8 +15,6 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     """Create a test client with the Sophia router."""
-    from fastapi import FastAPI
-
     from app.gateway.routers.sophia import router
 
     app = FastAPI()
@@ -84,6 +83,17 @@ class TestListMemories:
         resp = client.get("/api/sophia/test_user/memories/recent")
         assert resp.status_code == 503
 
+    def test_returns_memory_categories(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Lost the game", "categories": ["feeling"]},
+            {"id": "m2", "memory": "Works at startup", "categories": ["fact"]},
+        ]
+        resp = client.get("/api/sophia/test_user/memories/recent")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["memories"][0]["category"] == "feeling"
+        assert data["memories"][1]["category"] == "fact"
+
 
 # ---------------------------------------------------------------------------
 # Memory Update
@@ -106,6 +116,26 @@ class TestUpdateMemory:
         )
         assert resp.status_code == 400
 
+    def test_update_with_metadata(self, client, mock_mem0):
+        mock_mem0.update.return_value = {"id": "m1", "memory": "Updated text"}
+        with patch("app.gateway.routers.sophia.invalidate_user_cache", create=True):
+            resp = client.put(
+                "/api/sophia/test_user/memories/m1",
+                json={"text": "Updated text", "metadata": {"status": "approved"}},
+            )
+        assert resp.status_code == 200
+        mock_mem0.update.assert_called_once_with(
+            memory_id="m1", text="Updated text", metadata={"status": "approved"},
+        )
+
+    def test_update_no_fields_returns_422(self, client, mock_mem0):
+        with patch("app.gateway.routers.sophia.invalidate_user_cache", create=True):
+            resp = client.put(
+                "/api/sophia/test_user/memories/m1",
+                json={},
+            )
+        assert resp.status_code == 422
+
 
 # ---------------------------------------------------------------------------
 # Memory Delete
@@ -122,6 +152,13 @@ class TestDeleteMemory:
         mock_mem0.delete.side_effect = Exception("Not found")
         resp = client.delete("/api/sophia/test_user/memories/m1")
         assert resp.status_code == 503
+
+    def test_delete_invalidates_cache(self, client, mock_mem0):
+        mock_mem0.delete.return_value = None
+        with patch("deerflow.sophia.mem0_client.invalidate_user_cache") as mock_invalidate:
+            resp = client.delete("/api/sophia/test_user/memories/m1")
+        assert resp.status_code == 204
+        mock_invalidate.assert_called_once_with("test_user")
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +196,15 @@ class TestBulkReview:
         data = resp.json()
         assert data["results"][0]["status"] == "ok"
         assert data["results"][1]["status"] == "error"
+
+    def test_empty_items_returns_200(self, client, mock_mem0):
+        resp = client.post(
+            "/api/sophia/test_user/memories/bulk-review",
+            json={"items": []},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["results"] == []
 
 
 # ---------------------------------------------------------------------------

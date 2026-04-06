@@ -6,13 +6,14 @@ crisis_redirect.md are injected on the crisis path.
 """
 
 import re
+import time
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import extract_last_message_text
+from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
 
 CRISIS_SIGNALS = [
     # Direct expressions
@@ -117,17 +118,32 @@ class CrisisCheckMiddleware(AgentMiddleware[CrisisCheckState]):
 
     @override
     def before_agent(self, state: CrisisCheckState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         messages = state.get("messages", [])
         if not messages:
+            log_middleware("CrisisCheck", "no crisis signals", _t0)
             return None
 
         content = extract_last_message_text(messages)
         normalized = _normalize_text(content)
 
         if _contains_signal(normalized):
+            # Find which signal matched for logging
+            signal = "unknown"
+            for sig, whole_word in _NORMALIZED_SIGNALS:
+                if whole_word:
+                    if re.search(r"(?<![a-z0-9])" + re.escape(sig) + r"(?![a-z0-9])", normalized):
+                        signal = sig
+                        break
+                else:
+                    if sig in normalized:
+                        signal = sig
+                        break
+            log_middleware("CrisisCheck", f"CRISIS DETECTED: '{signal}'", _t0)
             return {
                 "force_skill": "crisis_redirect",
                 "skip_expensive": True,
             }
 
+        log_middleware("CrisisCheck", "no crisis signals", _t0)
         return None

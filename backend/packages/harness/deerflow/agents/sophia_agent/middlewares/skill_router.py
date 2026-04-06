@@ -6,6 +6,7 @@ based on crisis state, message content, tone, trust level, and ritual context.
 
 import hashlib
 import logging
+import time
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -13,7 +14,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import extract_last_message_text
+from deerflow.agents.sophia_agent.utils import extract_last_message_text, log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -128,15 +129,18 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
 
     @override
     def before_agent(self, state: SkillRouterState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
         # Crisis path: inject crisis_redirect only
         if state.get("skip_expensive", False) and state.get("force_skill") == "crisis_redirect":
             content = self._skill_contents.get("crisis_redirect", "")
             result: dict = {"active_skill": "crisis_redirect"}
             if content:
                 result["system_prompt_blocks"] = list(state.get("system_prompt_blocks", [])) + [content]
+            log_middleware("SkillRouter", "skill=crisis_redirect (crisis fast-path)", _t0)
             return result
 
         if state.get("skip_expensive", False):
+            log_middleware("SkillRouter", "skipped (crisis)", _t0)
             return None
 
         # Update session data
@@ -176,4 +180,5 @@ class SkillRouterMiddleware(AgentMiddleware[SkillRouterState]):
         if content:
             result["system_prompt_blocks"] = list(state.get("system_prompt_blocks", [])) + [content]
 
+        log_middleware("SkillRouter", f"skill={skill} trust={sd.get('trust_established')} sessions={sd.get('sessions_total')}", _t0)
         return result

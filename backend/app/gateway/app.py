@@ -1,25 +1,20 @@
 import logging
-import os
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
 from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
     agents,
     artifacts,
-    bootstrap,
     channels,
     mcp,
     memory,
     models,
-    sessions,
     skills,
     suggestions,
     uploads,
-    voice,
 )
 from deerflow.config.app_config import get_app_config
 
@@ -62,7 +57,24 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("No IM channels configured or channel service failed to start")
 
+    # Start Sophia inactivity watcher
+    try:
+        from app.gateway.inactivity_watcher import start_watcher
+
+        await start_watcher()
+        logger.info("Sophia inactivity watcher started")
+    except Exception:
+        logger.exception("Failed to start inactivity watcher")
+
     yield
+
+    # Stop inactivity watcher
+    try:
+        from app.gateway.inactivity_watcher import stop_watcher
+
+        await stop_watcher()
+    except Exception:
+        logger.exception("Failed to stop inactivity watcher")
 
     # Stop channel service on shutdown
     try:
@@ -155,16 +167,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         ],
     )
 
-    # CORS: In production nginx handles CORS headers.
-    # For local dev (direct gateway access without nginx), enable CORS here.
-    cors_origins = os.environ.get("CORS_ALLOW_ORIGINS", "http://localhost:3000").split(",")
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # CORS is handled by nginx - no need for FastAPI middleware
 
     # Include routers
     # Models API is mounted at /api/models
@@ -194,18 +197,8 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)
 
-    # Sessions API is mounted at /api/v1/sessions
-    app.include_router(sessions.router)
-
-    # Bootstrap API is mounted at /api/v1/bootstrap
-    app.include_router(bootstrap.router)
-
-    # Voice API is mounted at /api/sophia/{user_id}/voice
-    app.include_router(voice.router)
-
     # Sophia API is mounted at /api/sophia
     from app.gateway.routers import sophia
-
     app.include_router(sophia.router)
 
     @app.get("/health", tags=["health"])

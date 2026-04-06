@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
@@ -27,6 +28,7 @@ def _validate_user(user_id: str) -> str:
     """Validate user_id and return it, or raise 400."""
     try:
         from deerflow.agents.sophia_agent.utils import validate_user_id
+
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
@@ -35,8 +37,6 @@ def _validate_user(user_id: str) -> str:
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
-        import os
-
         from mem0 import MemoryClient
 
         api_key = os.environ.get("MEM0_API_KEY")
@@ -207,6 +207,8 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
         invalidate_user_cache(user_id)
         mem = result if isinstance(result, dict) else {}
         return _to_memory_item(mem) if mem.get("id") else MemoryItem(id=memory_id, content=body.text or "")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning("Failed to update memory %s: %s", memory_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -425,6 +427,14 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
 )
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
+
+    # Remove from inactivity tracking — session explicitly ended
+    try:
+        from app.gateway.inactivity_watcher import unregister_thread
+        unregister_thread(body.thread_id)
+    except ImportError:
+        pass
+
     try:
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
