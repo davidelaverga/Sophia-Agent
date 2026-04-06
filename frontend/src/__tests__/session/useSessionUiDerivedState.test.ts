@@ -1,8 +1,8 @@
 import { renderHook } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 
-import { useSessionUiDerivedState } from '../../app/session/useSessionUiDerivedState';
 import type { UIMessage } from '../../app/components/session';
+import { useSessionUiDerivedState } from '../../app/session/useSessionUiDerivedState';
 
 describe('useSessionUiDerivedState', () => {
   it('computes isSophiaResponding from streaming/voice/reflection state', () => {

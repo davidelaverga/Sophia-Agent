@@ -1,8 +1,8 @@
 import { act, renderHook } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { useSessionVoiceCommandSystem } from '../../app/session/useSessionVoiceCommandSystem';
 import type { InterruptPayload } from '../../app/lib/session-types';
+import { useSessionVoiceCommandSystem } from '../../app/session/useSessionVoiceCommandSystem';
 
 function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommandSystem>[0]> = {}) {
   const onUserTranscript = vi.fn();

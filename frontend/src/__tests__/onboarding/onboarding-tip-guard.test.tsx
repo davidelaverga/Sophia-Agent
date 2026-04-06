@@ -1,8 +1,12 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { OnboardingTipGuard } from '../../app/components/onboarding'
+import type * as OnboardingModule from '../../app/onboarding'
+import { useOnboardingStore } from '../../app/stores/onboarding-store'
+
 vi.mock('../../app/onboarding', async () => {
-  const actual = await vi.importActual<typeof import('../../app/onboarding')>('../../app/onboarding')
+  const actual = await vi.importActual<typeof OnboardingModule>('../../app/onboarding')
 
   return {
     ...actual,
@@ -25,9 +29,6 @@ vi.mock('../../app/onboarding', async () => {
     }),
   }
 })
-
-import { OnboardingTipGuard } from '../../app/components/onboarding'
-import { useOnboardingStore } from '../../app/stores/onboarding-store'
 
 describe('OnboardingTipGuard', () => {
   beforeEach(() => {

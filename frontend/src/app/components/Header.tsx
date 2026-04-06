@@ -1,16 +1,18 @@
 "use client"
 
-import { useState, lazy, Suspense, Fragment } from "react"
 import { Settings, History, Home } from "lucide-react"
 import { useRouter } from "next/navigation"
+import { useState, lazy, Suspense, Fragment } from "react"
+
 import { useCopy, useTranslation } from "../copy"
+import { haptic } from "../hooks/useHaptics"
+import { useChatStore } from "../stores/chat-store"
 import { getPresenceCopyKey, usePresenceStore } from "../stores/presence-store"
 import { useUiStore as useFocusModeStore } from "../stores/ui-store"
-import { useChatStore } from "../stores/chat-store"
-import { ThemeToggle } from "./ThemeToggle"
+
 import { ActiveModeIndicator } from "./ActiveModeIndicator"
 import { FoundingSupporterBadge } from "./FoundingSupporterBadge"
-import { haptic } from "../hooks/useHaptics"
+import { ThemeToggle } from "./ThemeToggle"
 
 // Lazy load HistoryDrawer
 const HistoryDrawer = lazy(() => import("./HistoryDrawer").then(mod => ({ default: mod.HistoryDrawer })))

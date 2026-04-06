@@ -354,12 +354,12 @@ export const copy: CopyStructure = {
 
   themeToggle: {
     aria: {
-      switchToMoonlitEmbrace: "Passa al tema notturno",
+      switchToMoonlitEmbrace: "Passa a Sophia Cosmica",
       switchToLightMode: "Passa al tema chiaro",
     },
     tooltip: {
       light: "Per momenti di chiarezza",
-      moonlit: "Come una chiacchierata sotto le stelle",
+      moonlit: "Sophia Cosmica in piena presenza",
     },
   },
 

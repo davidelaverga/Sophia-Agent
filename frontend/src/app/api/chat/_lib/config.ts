@@ -1,6 +1,6 @@
 import { debugLog } from '../../../lib/debug-logger';
 
-export const BACKEND_URL = process.env.SOPHIA_LANGGRAPH_BASE_URL || process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL || 'http://localhost:2024';
+export const BACKEND_URL = process.env.SOPHIA_LANGGRAPH_BASE_URL || process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL || 'http://localhost:2026/api/langgraph';
 export const BACKEND_CHAT_ENDPOINT = '/threads';
 export const SOPHIA_ASSISTANT_ID = process.env.SOPHIA_ASSISTANT_ID || 'sophia_companion';
 export const IS_PRODUCTION = process.env.NODE_ENV === 'production';

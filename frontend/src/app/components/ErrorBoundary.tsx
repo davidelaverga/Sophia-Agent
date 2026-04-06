@@ -1,6 +1,7 @@
 "use client"
 
-import React, { Component, ReactNode } from "react"
+import React, { Component, type ReactNode } from "react"
+
 import { ErrorFallback } from "./ErrorFallback"
 //import { logger } from "../lib/error-logger"
 

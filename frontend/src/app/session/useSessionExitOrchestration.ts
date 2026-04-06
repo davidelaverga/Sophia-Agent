@@ -1,6 +1,7 @@
+import type { ContextMode, PresetType, RitualArtifacts } from '../types/session';
+
 import { useSessionExitFlow } from './useSessionExitFlow';
 import { useSessionExitProtection } from './useSessionExitProtection';
-import type { ContextMode, PresetType, RitualArtifacts } from '../types/session';
 
 type ExitGuardMessage = {
   id: string;

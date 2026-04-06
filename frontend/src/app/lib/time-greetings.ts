@@ -1,4 +1,5 @@
 import type { CopyStructure } from "../copy/types"
+
 import type { PresetType, ContextMode } from "./session-types"
 
 type TimeOfDay = "morning" | "afternoon" | "evening" | "lateNight"

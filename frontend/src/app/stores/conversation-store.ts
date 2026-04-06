@@ -16,7 +16,12 @@
 
 import { create } from "zustand"
 import { persist } from "zustand/middleware"
-import { logger } from "../lib/error-logger"
+
+import { 
+  archiveConversation, 
+  getConversationSummaries,
+  deleteConversationFromHistory,
+} from "../lib/conversation-history"
 import { 
   loadConversation, 
   startNewConversation,
@@ -24,17 +29,14 @@ import {
   shouldCancelStreamOnSwitch,
   fetchBackendConversations,
 } from "../lib/conversation-loader"
-import { 
-  archiveConversation, 
-  getConversationSummaries,
-  deleteConversationFromHistory,
-} from "../lib/conversation-history"
-import { useChatStore } from "./chat-store"
+import { logger } from "../lib/error-logger"
 import type { ConversationSummary } from "../types"
 import type { 
   ConversationId, 
   BackendConversationListItem,
 } from "../types/conversation-identity"
+
+import { useChatStore } from "./chat-store"
 
 // =============================================================================
 // Types
@@ -350,7 +352,7 @@ function backendConversationToListItem(
   backend: BackendConversationListItem
 ): ConversationListItem {
   return {
-    id: backend.conversation_id || backend.session_id!,
+    id: backend.conversation_id || backend.session_id,
     title: backend.title || generateTitleFromPreview(backend.preview),
     preview: backend.preview || backend.last_message_preview || "",
     messageCount: backend.turn_count * 2, // Rough estimate

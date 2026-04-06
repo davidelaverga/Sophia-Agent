@@ -1,8 +1,9 @@
 'use client';
 
 import { Brain, Check, RefreshCw } from 'lucide-react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 
 interface RecapMemoryCandidatesIntroProps {
   candidatesCount: number;

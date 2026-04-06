@@ -9,11 +9,12 @@
 
 'use client';
 
-import { useMemo, useCallback, useState } from 'react';
 import { X } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useMemo, useCallback, useState } from 'react';
+
 import { humanizeTime } from '../../lib/humanize-time';
 import type { PresetType } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 
 interface ResumeBannerProps {
   sessionType: PresetType;
@@ -86,7 +87,7 @@ export function ResumeBanner({
       aria-label="Resume previous session"
     >
       {/* Metadata — tiny whispered context */}
-      <p className="text-[10px] font-normal uppercase tracking-[0.1em] text-black/28 dark:text-white/18">
+      <p className="text-[10px] font-normal uppercase tracking-[0.1em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
         {contextLabel} · {ritualLabel}
         {timeAgo && <> · {timeAgo}</>}
       </p>
@@ -98,11 +99,10 @@ export function ResumeBanner({
         className={cn(
           'mt-1.5 inline-block max-w-sm cursor-pointer rounded-sm',
           'transition-colors duration-300',
-          'hover:text-black/52 dark:hover:text-white/40',
-          'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sophia-purple)] focus-visible:ring-offset-4 focus-visible:ring-offset-transparent',
+          'cosmic-focus-ring hover:text-[var(--cosmic-text)]',
         )}
       >
-        <span className="font-cormorant text-[15px] font-light italic leading-relaxed text-black/36 dark:text-white/26">
+        <span className="font-cormorant text-[15px] font-light italic leading-relaxed" style={{ color: 'var(--cosmic-text-muted)' }}>
           {lastMessagePreview ? (
             <>&ldquo;{lastMessagePreview}&rdquo;</>
           ) : (
@@ -117,27 +117,17 @@ export function ResumeBanner({
           type="button"
           onClick={onResume}
           className={cn(
-            'rounded-full px-3.5 py-1 text-[11px] font-medium tracking-[0.03em]',
-            'text-[rgba(var(--sophia-glow-rgb,124,92,170),0.72)]',
-            'border border-[rgba(var(--sophia-glow-rgb,124,92,170),0.12)]',
-            'bg-[rgba(var(--sophia-glow-rgb,124,92,170),0.04)]',
-            'transition-all duration-300',
-            'hover:border-[rgba(var(--sophia-glow-rgb,124,92,170),0.22)] hover:bg-[rgba(var(--sophia-glow-rgb,124,92,170),0.08)]',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sophia-purple)]',
+            'cosmic-accent-pill cosmic-focus-ring rounded-full px-3.5 py-1 text-[11px] font-medium tracking-[0.03em] transition-all duration-300',
           )}
         >
           continue
         </button>
-        <span className="text-[10px] text-black/12 dark:text-white/8">·</span>
+        <span className="text-[10px]" style={{ color: 'var(--cosmic-text-faint)' }}>·</span>
         <button
           type="button"
           onClick={onStartFresh}
           className={cn(
-            'rounded-full px-3 py-1 text-[11px] font-normal tracking-[0.02em]',
-            'text-black/25 dark:text-white/16',
-            'transition-colors duration-300',
-            'hover:text-black/42 dark:hover:text-white/32',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sophia-purple)]',
+            'cosmic-whisper-button cosmic-focus-ring rounded-full px-3 py-1 text-[11px] font-normal tracking-[0.02em] transition-colors duration-300',
           )}
         >
           start fresh
@@ -151,10 +141,9 @@ export function ResumeBanner({
           onClick={handleDismiss}
           className={cn(
             'absolute -right-3 -top-1 flex h-5 w-5 items-center justify-center rounded-full',
-            'text-black/0 transition-all duration-300',
-            'group-hover:text-black/18 hover:!text-black/40 hover:!bg-black/[0.04]',
-            'dark:text-white/0 dark:group-hover:text-white/12 dark:hover:!text-white/35 dark:hover:!bg-white/[0.04]',
-            'focus:outline-none focus-visible:text-black/40 dark:focus-visible:text-white/35',
+            'cosmic-focus-ring text-transparent transition-all duration-300',
+            'group-hover:text-[var(--cosmic-text-whisper)] hover:!text-[var(--cosmic-text)] hover:!bg-[var(--cosmic-panel-soft)]',
+            'focus-visible:text-[var(--cosmic-text)]',
           )}
           aria-label="Dismiss"
         >

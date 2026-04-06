@@ -1,5 +1,7 @@
 import { useEffect } from 'react';
+
 import { logger } from '../lib/error-logger';
+
 import { persistRefreshInterruptHint } from './refresh-interrupt-hint';
 
 type ExitGuardMessage = {

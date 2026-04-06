@@ -1,7 +1,8 @@
 "use client"
 
-import { useMemo } from "react"
 import { Capacitor } from "@capacitor/core"
+import { useMemo } from "react"
+
 import { useUiStore, type FocusMode } from "../stores/ui-store"
 
 /**

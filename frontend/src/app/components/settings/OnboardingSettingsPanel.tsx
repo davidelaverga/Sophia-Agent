@@ -1,10 +1,11 @@
 'use client';
 
-import { useRouter } from 'next/navigation';
 import { RotateCcw, Volume2, VolumeX, Wand2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+
+import { haptic } from '../../hooks/useHaptics';
 import { useOnboardingStore } from '../../stores/onboarding-store';
 import { useUiStore } from '../../stores/ui-store';
-import { haptic } from '../../hooks/useHaptics';
 
 export function OnboardingSettingsPanel() {
   const router = useRouter();

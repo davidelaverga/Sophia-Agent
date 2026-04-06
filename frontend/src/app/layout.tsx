@@ -1,12 +1,18 @@
 import "./globals.css"
-import { Providers } from "./providers"
-import { inter, cormorant } from "./fonts"
-import { ThemeBootstrap } from "./ThemeBootstrap"
-import { LocaleProvider } from "./components/LocaleProvider"
 import { CapacitorInit } from "./components/CapacitorInit"
+import { LocaleProvider } from "./components/LocaleProvider"
 import { SessionCaptureBridge } from "./components/SessionCaptureBridge"
 import { UiToast } from "./components/UiToast"
 import { getRequestLocale, getServerCopy } from "./copy/server"
+import { inter, cormorant } from "./fonts"
+import { Providers } from "./providers"
+import {
+  COSMIC_THEME_ID,
+  DARK_THEMES,
+  LEGACY_THEME_ALIASES,
+  SOPHIA_THEME_STORAGE_KEY,
+} from "./theme"
+import { ThemeBootstrap } from "./ThemeBootstrap"
 
 export async function generateMetadata() {
   const locale = await getRequestLocale()
@@ -35,7 +41,7 @@ export const viewport = {
   maximumScale: 1,
   themeColor: [
     { media: '(prefers-color-scheme: light)', color: '#f8f7fa' },
-    { media: '(prefers-color-scheme: dark)', color: '#1e1b2e' },
+    { media: '(prefers-color-scheme: dark)', color: '#030308' },
   ],
 }
 
@@ -50,7 +56,7 @@ export default async function RootLayout({
     <html
       lang={locale}
       className={`${inter.variable} ${cormorant.variable}`}
-      data-sophia-theme="light"
+      data-sophia-theme={COSMIC_THEME_ID}
       suppressHydrationWarning
     >
       <head>
@@ -64,9 +70,15 @@ export default async function RootLayout({
             __html: `
               (function() {
                 try {
-                  var DARK_THEMES = ['moonlit-embrace', 'moonlit', 'dark', 'accessible-indigo', 'accessible-slate', 'accessible-charcoal'];
-                  var theme = localStorage.getItem('sophia-theme') || 'light';
+                  var STORAGE_KEY = ${JSON.stringify(SOPHIA_THEME_STORAGE_KEY)};
+                  var DARK_THEMES = ${JSON.stringify(DARK_THEMES)};
+                  var LEGACY_THEME_ALIASES = ${JSON.stringify(LEGACY_THEME_ALIASES)};
+                  var storedTheme = localStorage.getItem(STORAGE_KEY);
+                  var theme = LEGACY_THEME_ALIASES[storedTheme] || storedTheme || ${JSON.stringify(COSMIC_THEME_ID)};
                   document.documentElement.dataset.sophiaTheme = theme;
+                  if (storedTheme !== theme) {
+                    localStorage.setItem(STORAGE_KEY, theme);
+                  }
                   if (DARK_THEMES.indexOf(theme) !== -1) {
                     document.documentElement.classList.add('dark');
                   } else {

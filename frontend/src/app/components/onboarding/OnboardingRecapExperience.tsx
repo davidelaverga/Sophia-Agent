@@ -1,16 +1,17 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
+
 import type { MemoryDecision } from '../../lib/recap-types';
-import {
-  RecapMemoryOrbit,
-} from '../recap';
-import { mockRecapArtifacts } from '../recap/mockData';
 import {
   RecapBottomActionBar,
   RecapPageFloatingHeader,
 } from '../../recap/[sessionId]/RecapPageChrome';
 import { useOnboardingStore } from '../../stores/onboarding-store';
+import {
+  RecapMemoryOrbit,
+} from '../recap';
+import { mockRecapArtifacts } from '../recap/mockData';
 
 type DecisionMap = Record<string, { decision: MemoryDecision; editedText?: string }>;
 

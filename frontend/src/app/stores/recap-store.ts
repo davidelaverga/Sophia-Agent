@@ -8,6 +8,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+
 import { logger } from '../lib/error-logger';
 import type { 
   RecapArtifactsV1, 
@@ -99,8 +100,9 @@ export const useRecapStore = create<RecapState>()(
       
       clearArtifacts: (sessionId) => {
         set((state) => {
-          const { [sessionId]: _, ...rest } = state.artifacts;
-          return { artifacts: rest };
+          const nextArtifacts = { ...state.artifacts };
+          delete nextArtifacts[sessionId];
+          return { artifacts: nextArtifacts };
         });
       },
       
@@ -142,8 +144,9 @@ export const useRecapStore = create<RecapState>()(
       
       clearDecisions: (sessionId) => {
         set((state) => {
-          const { [sessionId]: _, ...rest } = state.decisions;
-          return { decisions: rest };
+          const nextDecisions = { ...state.decisions };
+          delete nextDecisions[sessionId];
+          return { decisions: nextDecisions };
         });
       },
       

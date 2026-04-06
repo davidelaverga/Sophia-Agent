@@ -9,8 +9,10 @@
  */
 
 import { useRef, useCallback } from "react"
-import { debugLog, debugWarn } from "../../lib/debug-logger"
+
 import { httpToWs } from "../../hooks/voice/voice-utils"
+import { debugLog, debugWarn } from "../../lib/debug-logger"
+
 import {
   parseIncomingVoiceWebSocketMessage,
   type VoiceWebSocketMessage,
@@ -46,7 +48,7 @@ export function useVoiceWebSocket() {
     }
 
     // Return pending connection if connecting
-    if (connectPromiseRef.current) {
+    if (connectPromiseRef.current !== null) {
       return connectPromiseRef.current
     }
 

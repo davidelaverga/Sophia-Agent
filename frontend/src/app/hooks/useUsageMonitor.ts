@@ -1,10 +1,11 @@
 "use client"
 
 import { useEffect, useRef } from "react"
+
+import { logger } from "../lib/error-logger"
 import { useAuth } from "../providers"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
 import type { UsageLimitInfo } from "../types/rate-limits"
-import { logger } from "../lib/error-logger"
 
 // Global cache to prevent duplicate fetches across component remounts
 const usageCache = {
@@ -122,7 +123,7 @@ export function useUsageMonitor() {
       }
     }
 
-    fetchInitialUsage()
+    void fetchInitialUsage()
     
     // Cleanup: abort pending request on unmount
     return () => {

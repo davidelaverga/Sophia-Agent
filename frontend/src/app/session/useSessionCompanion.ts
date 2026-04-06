@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
-import { haptic } from '../hooks/useHaptics';
-import { useCompanionInvoke } from '../hooks/useCompanionInvoke';
-import { useMicroBriefing } from '../hooks/useMicroBriefing';
+
 import type { UIMessage, NudgeSuggestion } from '../components/session';
+import { useCompanionInvoke } from '../hooks/useCompanionInvoke';
+import { haptic } from '../hooks/useHaptics';
+import { useMicroBriefing } from '../hooks/useMicroBriefing';
 import type { ContextMode, PresetType, InvokeType } from '../types/session';
+
 import type { StreamArtifactsPayload } from './stream-contract-adapters';
 
 interface UseSessionCompanionParams {
@@ -95,7 +97,7 @@ export function useSessionCompanion({
   const handleNudgeAccept = useCallback(
     (actionType: InvokeType) => {
       setNudgeSuggestion(null);
-      handleCompanionInvoke(actionType);
+      void handleCompanionInvoke(actionType);
     },
     [handleCompanionInvoke],
   );

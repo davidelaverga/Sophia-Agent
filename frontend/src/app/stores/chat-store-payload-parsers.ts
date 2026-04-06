@@ -1,5 +1,6 @@
-import type { UsageLimitReason } from "../types/rate-limits"
 import { asRecord, readString } from "../lib/record-parsers"
+import type { UsageLimitReason } from "../types/rate-limits"
+
 import type { BackendUsageData } from "./usage-limit-store"
 
 export type FeedbackGateMeta = {

@@ -2,11 +2,12 @@
 
 import { useState, useEffect } from "react"
 import { useShallow } from "zustand/react/shallow"
+
+import { useTranslation } from "../copy"
 import { postFeedback } from "../lib/api/feedback"
+import { emitTelemetry } from "../lib/telemetry"
 import { useChatStore } from "../stores/chat-store"
 import { selectSessionFeedbackState } from "../stores/selectors"
-import { emitTelemetry } from "../lib/telemetry"
-import { useTranslation } from "../copy"
 
 export function SessionFeedbackToast() {
   const { t } = useTranslation()

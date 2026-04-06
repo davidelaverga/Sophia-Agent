@@ -2,15 +2,16 @@
 
 /* eslint-disable react/no-unescaped-entities */
 
-import { useState, useMemo, useEffect } from "react"
 import { Sparkles, Heart, Send, Calendar, Search, ArrowLeft, Quote, Users, TrendingUp, Star, Loader2 } from "lucide-react"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
-import { useAuth } from "../providers"
+import { useState, useMemo, useEffect } from "react"
+
+import { ProtectedRoute } from "../components/ProtectedRoute"
+import { useTranslation } from "../copy"
 import { logger } from "../lib/error-logger"
 import { formatRelativeTime } from "../lib/format-time"
-import { useTranslation } from "../copy"
-import { ProtectedRoute } from "../components/ProtectedRoute"
+import { useAuth } from "../providers"
 
 // TEMPORARILY DISABLED FOR PRODUCTION LAUNCH
 // This page will redirect to home until the Reflections feature is ready
@@ -82,7 +83,7 @@ function ReflectionsPageContent() {
     }
     async function fetchReflections() {
       try {
-        const response = await fetch(`/api/reflections/list?user_id=${encodeURIComponent(user!.id)}`)
+        const response = await fetch(`/api/reflections/list?user_id=${encodeURIComponent(user.id)}`)
         if (response.ok) {
           const data = await response.json()
           // Transform API response to match Reflection type
@@ -101,8 +102,8 @@ function ReflectionsPageContent() {
         setIsLoadingReflections(false)
       }
     }
-    fetchReflections()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void fetchReflections()
+     
   }, [user?.id])
 
   // Fetch community insights on mount
@@ -121,7 +122,7 @@ function ReflectionsPageContent() {
         setIsLoadingCommunity(false)
       }
     }
-    fetchCommunityInsight()
+    void fetchCommunityInsight()
   }, [])
 
   // Fetch user impact when user is available
@@ -144,7 +145,7 @@ function ReflectionsPageContent() {
         setIsLoadingImpact(false)
       }
     }
-    fetchUserImpact()
+    void fetchUserImpact()
   }, [user?.id])
 
   const filteredReflections = useMemo(() => {

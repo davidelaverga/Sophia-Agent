@@ -1,15 +1,16 @@
 "use client"
 
-import { memo, useState, useRef, useEffect, useCallback } from "react"
 import { Volume2, Square, Mic, Check } from "lucide-react"
-import { FeedbackStrip } from "../FeedbackStrip"
+import { memo, useState, useRef, useEffect, useCallback } from "react"
+
 import { useCopy, useTranslation } from "../../copy"
 import { useHaptics } from "../../hooks/useHaptics"
-import { useChatStore } from "../../stores/chat-store"
-import type { ChatMessage } from "../../stores/chat-store"
-import { RetryAction } from "../ui/RetryAction"
-import { errorCopy } from "../../lib/error-copy"
 import { debugWarn } from "../../lib/debug-logger"
+import { errorCopy } from "../../lib/error-copy"
+import type { ChatMessage } from "../../stores/chat-store"
+import { useChatStore } from "../../stores/chat-store"
+import { FeedbackStrip } from "../FeedbackStrip"
+import { RetryAction } from "../ui/RetryAction"
 
 export const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const copy = useCopy()
@@ -38,17 +39,20 @@ export const MessageBubble = memo(function MessageBubble({ message }: { message:
   
   // Long-press to copy
   const handleTouchStart = useCallback(() => {
-    longPressRef.current = setTimeout(async () => {
-      if (message.content) {
-        try {
-          await navigator.clipboard.writeText(message.content)
+    longPressRef.current = setTimeout(() => {
+      if (!message.content) {
+        return
+      }
+
+      void navigator.clipboard.writeText(message.content)
+        .then(() => {
           haptic("success")
           setCopied(true)
           setTimeout(() => setCopied(false), 2000)
-        } catch {
+        })
+        .catch(() => {
           haptic("error")
-        }
-      }
+        })
     }, 500) // 500ms long-press
   }, [message.content, haptic])
   

@@ -10,8 +10,9 @@
  * 🔒 SECURITY: The raw token is NEVER returned to the client.
  */
 
-import { NextResponse } from 'next/server';
 import { cookies, headers } from 'next/headers';
+import { NextResponse } from 'next/server';
+
 import { auth } from '@/server/better-auth';
 
 const COOKIE_NAME = 'sophia-backend-token';

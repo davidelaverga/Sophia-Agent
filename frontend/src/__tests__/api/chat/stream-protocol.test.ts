@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+
 import { resolveChatStreamProtocol } from '../../../app/api/chat/_lib/stream-protocol';
 
 describe('resolveChatStreamProtocol', () => {

@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server'
 import { headers } from 'next/headers'
+import { type NextRequest, NextResponse } from 'next/server'
+
 import { auth } from '@/server/better-auth'
 
 async function handleConsentCheck() {
@@ -19,7 +20,7 @@ async function handleConsentCheck() {
       consentDate: null
     })
 
-  } catch (_error) {
+  } catch {
     return NextResponse.json({ 
       hasConsent: false,
       error: 'Internal server error' 

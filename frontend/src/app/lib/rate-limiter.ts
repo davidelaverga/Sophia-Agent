@@ -162,7 +162,7 @@ export class RateLimiter {
         resolve,
         timestamp: Date.now(),
       });
-      this.processQueue();
+      void this.processQueue();
     });
   }
 
@@ -210,7 +210,7 @@ export function getRateLimiter(
   if (!limiters.has(name) && config) {
     limiters.set(name, new RateLimiter(config));
   }
-  return limiters.get(name)!;
+  return limiters.get(name);
 }
 
 // Pre-configured limiters for Sophia API endpoints
@@ -371,7 +371,7 @@ export function debounce<T>(
     }
 
     // Set new timer
-    const timer = setTimeout(async () => {
+    const runDebounced = async () => {
       debounceTimers.delete(key);
       try {
         const result = await fn();
@@ -379,6 +379,10 @@ export function debounce<T>(
       } catch (error) {
         reject(error);
       }
+    };
+
+    const timer = setTimeout(() => {
+      void runDebounced();
     }, delayMs);
 
     debounceTimers.set(key, timer);

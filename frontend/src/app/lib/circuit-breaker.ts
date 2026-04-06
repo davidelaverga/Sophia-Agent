@@ -173,7 +173,7 @@ export function getCircuitBreaker(name: string, config?: CircuitBreakerConfig): 
   if (!circuitBreakers.has(name)) {
     circuitBreakers.set(name, new CircuitBreaker({ name, ...config }));
   }
-  return circuitBreakers.get(name)!;
+  return circuitBreakers.get(name);
 }
 
 // Pre-configured breakers for common services

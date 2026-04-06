@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
 import { useStreamVoiceSession } from '../hooks/useStreamVoiceSession';
+
 import type { UseCompanionVoiceRuntimeOptions, CompanionVoiceRetryState } from './types';
 
 const DEFAULT_VOICE_CANCEL_RETRY_MESSAGE = 'Voice response cancelled. Retry?';
@@ -69,7 +71,7 @@ export function useCompanionVoiceRuntime({
 
     setVoiceRetryState((prev) => {
       const transcript = lastVoiceTranscript || '';
-      if (prev && prev.transcript === transcript && prev.message === voiceState.error) {
+      if (prev?.transcript === transcript && prev.message === voiceState.error) {
         return prev;
       }
 
@@ -83,7 +85,7 @@ export function useCompanionVoiceRuntime({
   useEffect(() => {
     if (!pendingVoiceRetryPlayback) return;
     if (isTyping) return;
-    if (!latestAssistantMessage || !latestAssistantMessage.content.trim()) return;
+    if (!latestAssistantMessage?.content.trim()) return;
     if (consumedRetryAssistantIdRef.current === latestAssistantMessage.id) return;
 
     consumedRetryAssistantIdRef.current = latestAssistantMessage.id;
@@ -134,7 +136,7 @@ export function useCompanionVoiceRuntime({
     setPendingVoiceRetryPlayback(false);
     setVoiceRetryState((prev) => {
       const transcript = lastVoiceTranscript || '';
-      if (prev && prev.transcript === transcript && prev.message === (message || DEFAULT_VOICE_CANCEL_RETRY_MESSAGE)) {
+      if (prev?.transcript === transcript && prev.message === (message || DEFAULT_VOICE_CANCEL_RETRY_MESSAGE)) {
         return prev;
       }
 

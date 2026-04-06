@@ -11,7 +11,8 @@
  * - Fails silently with reasonable defaults
  */
 
-import { NextRequest, NextResponse } from "next/server"
+import { type NextRequest, NextResponse } from "next/server"
+
 import { getServerAuthToken } from "../../../lib/auth/server-auth"
 
 // Curated fallback learnings that reflect Sophia's growth

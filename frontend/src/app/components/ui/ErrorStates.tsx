@@ -8,11 +8,13 @@
 
 'use client';
 
-import { useCallback, useState } from 'react';
 import { RefreshCw, Home, MessageCircle, Wifi, AlertCircle, Clock } from 'lucide-react';
-import { cn } from '../../lib/utils';
-import { RetryAction } from './RetryAction';
+import { useCallback, useState } from 'react';
+
 import { errorCopy } from '../../lib/error-copy';
+import { cn } from '../../lib/utils';
+
+import { RetryAction } from './RetryAction';
 
 // =============================================================================
 // ERROR TYPES

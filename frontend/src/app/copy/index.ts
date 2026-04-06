@@ -2,11 +2,11 @@
 
 import { useCallback } from "react"
 
-import type { Locale as _Locale } from "./config"
-import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
-import { translate, getCopy } from "./core"
 import { useLocaleStore } from "../stores/locale-store"
+
+import { translate, getCopy } from "./core"
 import { useLocaleContext } from "./locale-context"
+import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
 
 export type { CopyKey } from "./types"
 export type { Locale } from "./config"
@@ -47,4 +47,4 @@ export const copy: CopyStructure = new Proxy({} as CopyStructure, {
     const localizedCopy = getCopy(locale) as Record<PropertyKey, unknown>
     return localizedCopy[prop as PropertyKey]
   },
-}) as CopyStructure
+})

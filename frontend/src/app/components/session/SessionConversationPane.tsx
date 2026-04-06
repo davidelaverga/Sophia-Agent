@@ -1,10 +1,8 @@
 'use client';
 
-import type { RefObject } from 'react';
 import { Lock } from 'lucide-react';
-import { InterruptCardErrorBoundary } from '../error-boundaries';
-import { StreamError } from '../ui';
-import { RetryAction } from '../ui/RetryAction';
+import type { RefObject } from 'react';
+
 import type {
   ContextMode,
   InterruptPayload,
@@ -14,6 +12,12 @@ import type {
   ResolvedInterrupt,
 } from '../../types/session';
 import type { FeedbackType } from '../../types/sophia-ui-message';
+import { InterruptCardErrorBoundary } from '../error-boundaries';
+import { OnboardingTipGuard } from '../onboarding';
+import { StreamError } from '../ui';
+import { RetryAction } from '../ui/RetryAction';
+
+import { InterruptCard } from './InterruptCard';
 import { MemoryHighlightCards } from './MemoryHighlightCard';
 import { MessageBubble, type UIMessage } from './MessageBubble';
 import { NudgeBanner, type NudgeSuggestion } from './NudgeBanner';
@@ -21,8 +25,6 @@ import { ReflectionPromptBubble, ReflectionResponseBubble } from './ReflectionBu
 import { ResolvedInterruptBadge } from './ResolvedInterruptBadge';
 import { SessionEmptyState } from './SessionEmptyState';
 // TypingIndicator removed — replaced with whisper text (R28)
-import { InterruptCard } from './InterruptCard';
-import { OnboardingTipGuard } from '../onboarding';
 
 interface SessionConversationPaneProps {
   messages: UIMessage[];
@@ -124,20 +126,20 @@ export function SessionConversationPane({
       {isReadOnly && (
         <div className="px-4 py-2 animate-fadeIn">
           <div className="max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto">
-            <div className="flex items-center justify-between gap-3 rounded-xl border border-white/[0.06] bg-white/[0.04] backdrop-blur-sm px-4 py-3">
+            <div className="cosmic-surface-panel flex items-center justify-between gap-3 rounded-xl px-4 py-3">
               <div className="flex items-center gap-3 min-w-0">
-                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-white/[0.06] flex items-center justify-center">
-                  <Lock className="w-4 h-4 text-white/40" />
+                <div className="cosmic-surface-soft flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full">
+                  <Lock className="h-4 w-4" style={{ color: 'var(--cosmic-text-muted)' }} />
                 </div>
                 <div className="min-w-0">
-                  <p className="text-sm font-medium text-white/60 truncate">Read-only session</p>
-                  <p className="text-xs text-white/30">This conversation has ended. Start a new session to continue.</p>
+                  <p className="truncate text-sm font-medium" style={{ color: 'var(--cosmic-text)' }}>Read-only session</p>
+                  <p className="text-xs" style={{ color: 'var(--cosmic-text-whisper)' }}>This conversation has ended. Start a new session to continue.</p>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={onGoToDashboard}
-                className="flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium text-white/60 bg-white/[0.06] border border-white/[0.08] hover:bg-white/[0.10] transition-colors"
+                className="cosmic-ghost-pill cosmic-focus-ring flex-shrink-0 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors"
               >
                 Go to dashboard
               </button>
@@ -146,24 +148,24 @@ export function SessionConversationPane({
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto scroll-pb-4 [scrollbar-color:rgba(255,255,255,0.06)_transparent] [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:bg-white/[0.06] [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-track]:bg-transparent">
+      <div className="flex-1 overflow-y-auto scroll-pb-4 [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent" style={{ scrollbarColor: 'var(--cosmic-border) transparent' }}>
         {messages.length === 0 && isInitializingChat ? (
           <div className="p-4 pb-6 max-w-3xl lg:max-w-4xl mx-auto animate-pulse">
-            <div className="max-w-[70%] px-4 py-3 rounded-2xl bg-white/[0.04] border border-white/[0.03]">
+            <div className="max-w-[70%] rounded-2xl border px-4 py-3" style={{ background: 'var(--cosmic-panel-soft)', borderColor: 'var(--cosmic-border-soft)' }}>
               <div className="flex items-center gap-2 mb-2">
-                <div className="w-6 h-6 rounded-full bg-white/[0.06]" />
-                <div className="h-3 w-12 bg-white/[0.06] rounded" />
+                <div className="h-6 w-6 rounded-full" style={{ background: 'var(--cosmic-panel-accent)' }} />
+                <div className="h-3 w-12 rounded" style={{ background: 'var(--cosmic-panel-accent)' }} />
               </div>
               <div className="space-y-2">
-                <div className="h-4 bg-white/[0.06] rounded w-full" />
-                <div className="h-4 bg-white/[0.06] rounded w-3/4" />
+                <div className="h-4 w-full rounded" style={{ background: 'var(--cosmic-panel-accent)' }} />
+                <div className="h-4 w-3/4 rounded" style={{ background: 'var(--cosmic-panel-accent)' }} />
               </div>
             </div>
           </div>
         ) : messages.length === 0 ? (
           <SessionEmptyState
-            presetType={sessionPresetType!}
-            contextMode={sessionContextMode!}
+            presetType={sessionPresetType}
+            contextMode={sessionContextMode}
             onPromptSelect={onPromptSelect}
             className="h-full animate-fadeIn"
           />
@@ -269,7 +271,7 @@ export function SessionConversationPane({
                 )}
 
                 {interruptQueueLength > 0 && (
-                  <p className="text-center text-[10px] text-white/20 mt-1">
+                  <p className="mt-1 text-center text-[10px]" style={{ color: 'var(--cosmic-text-faint)' }}>
                     +{interruptQueueLength} more {interruptQueueLength === 1 ? 'question' : 'questions'} queued
                   </p>
                 )}
@@ -284,19 +286,19 @@ export function SessionConversationPane({
                   /* Voice mode: nebula handles thinking visual, just show cancel */
                   <button
                     onClick={onCancelThinking}
-                    className="text-[10px] tracking-[0.18em] lowercase text-white/10 hover:text-white/25 transition-colors duration-300"
+                    className="cosmic-whisper-button text-[10px] tracking-[0.18em] lowercase transition-colors duration-300"
                   >
                     stop
                   </button>
                 ) : (
                   /* Text mode: whisper-style reflecting indicator */
                   <div className="flex items-center gap-3">
-                    <span className="text-[10px] tracking-[0.18em] lowercase text-white/10 transition-colors duration-1000">
+                    <span className="text-[10px] tracking-[0.18em] lowercase transition-colors duration-1000" style={{ color: 'var(--cosmic-text-faint)' }}>
                       sophia is reflecting...
                     </span>
                     <button
                       onClick={onCancelThinking}
-                      className="text-[10px] tracking-[0.18em] lowercase text-white/10 hover:text-white/25 transition-colors duration-300"
+                      className="cosmic-whisper-button text-[10px] tracking-[0.18em] lowercase transition-colors duration-300"
                     >
                       cancel
                     </button>

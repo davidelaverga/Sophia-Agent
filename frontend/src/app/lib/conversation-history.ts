@@ -1,15 +1,16 @@
 "use client"
 
+import type { FocusMode } from "../stores/ui-store"
 import type { 
   ChatMessage, 
   ConversationSummary, 
   ArchivedConversation, 
   ConversationHistory,
 } from "../types"
-import type { FocusMode } from "../stores/ui-store"
-import { formatRelativeTime as formatTime } from "./format-time"
+
 import { isVerboseDebugEnabled } from "./debug"
 import { debugLog, debugWarn } from "./debug-logger"
+import { formatRelativeTime as formatTime } from "./format-time"
 
 // Re-export types for backwards compatibility
 export type { ConversationSummary, ArchivedConversation, ConversationHistory }

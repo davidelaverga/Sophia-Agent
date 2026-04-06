@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+
 import type { UIMessage } from '../components/session';
-import type { ConnectivityStatus } from '../stores/connectivity-store';
 import { debugInfo, debugWarn } from '../lib/debug-logger';
+import type { ConnectivityStatus } from '../stores/connectivity-store';
 
 type ReflectionInput = { prompt: string; why?: string };
 type ReflectionSource = 'tap' | 'voice-command';

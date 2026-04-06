@@ -179,7 +179,7 @@ type EventHandler<T> = (data: T) => void
 type Unsubscribe = () => void
 
 class EventBus {
-  private listeners: Map<keyof EventMap, Set<EventHandler<unknown>>> = new Map()
+  private listeners = new Map<keyof EventMap, Set<EventHandler<unknown>>>()
 
   /**
    * Subscribe to an event
@@ -192,7 +192,7 @@ class EventBus {
       this.listeners.set(event, new Set())
     }
 
-    this.listeners.get(event)!.add(handler as EventHandler<unknown>)
+    this.listeners.get(event).add(handler as EventHandler<unknown>)
 
     // Return unsubscribe function
     return () => {
@@ -303,6 +303,7 @@ export const eventBus = new EventBus()
 // ============================================================================
 
 import { useEffect } from "react"
+
 import { logger } from "./error-logger"
 
 /**

@@ -1,10 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
-import { logger } from '../../lib/error-logger';
-import { useSessionHistoryStore } from '../../stores/session-history-store';
-import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
-import { clearRecentSessionEndHint, getRecentSessionEndHint } from '../../lib/recent-session-end';
+
 import { mockRecapArtifacts } from '../../components/recap/mockData';
+import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
+import { logger } from '../../lib/error-logger';
 import type { RecapArtifactsV1 } from '../../lib/recap-types';
+import { clearRecentSessionEndHint, getRecentSessionEndHint } from '../../lib/recent-session-end';
+import { useSessionHistoryStore } from '../../stores/session-history-store';
 
 const RECENT_END_RETRY_DELAY_MS = 1500;
 const RECENT_END_MAX_RETRIES = 6;

@@ -1,36 +1,35 @@
 "use client"
 
-import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react"
 import { Mic, X } from "lucide-react"
-import { AppShell } from "./AppShell"
-import { ErrorBoundary } from "./ErrorBoundary"
-import { SessionFeedbackToast } from "./SessionFeedbackToast"
-import { ModeToggle } from "./ModeToggle"
-import { useChatStore } from "../stores/chat-store"
-import { useReflectionPrompt } from "../hooks/useReflectionPrompt"
-import { useUiStore as useFocusModeStore } from "../stores/ui-store"
+import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react"
+
+import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
 import type { ChatRouteExperience } from "../chat/useChatRouteExperience"
+import { useTranslation } from "../copy"
+import { useModeSwitch } from "../hooks/useModeSwitch"
+import { useReflectionPrompt } from "../hooks/useReflectionPrompt"
+import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
+import { useChatStore } from "../stores/chat-store"
+import { useUiStore as useFocusModeStore } from "../stores/ui-store"
+import { useVoiceStore as useVoiceFallbackStore } from "../stores/voice-store"
+
+import { AppShell } from "./AppShell"
+import { Transcript, Composer } from "./chat"
+import { ConnectionStatusBanner } from "./ConnectionStatusBanner"
+import { DevDiagnosticsPanel } from "./DevDiagnosticsPanel"
+import { ArtifactsPanelErrorBoundary } from "./error-boundaries"
+import { ErrorBoundary } from "./ErrorBoundary"
+import { ModeToggle } from "./ModeToggle"
+import { ArtifactsPanel } from "./session"
+import { InterruptCard } from "./session/InterruptCard"
+import { SessionFeedbackToast } from "./SessionFeedbackToast"
+import { RetryAction } from "./ui/RetryAction"
 
 // Feature flag: Set to true to enable Reflections feature
 const ENABLE_REFLECTIONS = false
-import { useModeSwitch } from "../hooks/useModeSwitch"
-import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
-import { useVoiceStore as useVoiceFallbackStore } from "../stores/voice-store"
-import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
-import { useTranslation } from "../copy"
-import { ConnectionStatusBanner } from "./ConnectionStatusBanner"
-import { DevDiagnosticsPanel } from "./DevDiagnosticsPanel"
-import { ArtifactsPanel } from "./session"
-import { ArtifactsPanelErrorBoundary } from "./error-boundaries"
-import { InterruptCard } from "./session/InterruptCard"
-import { RetryAction } from "./ui/RetryAction"
-
-// Import extracted chat components
-import { Transcript, Composer } from "./chat"
 
 // Lazy load heavy components that aren't needed immediately
 const VoiceFocusView = lazy(() => import("./VoiceFocusView").then(mod => ({ default: mod.VoiceFocusView })))
-const VoiceCollapsed = lazy(() => import("./VoiceCollapsed").then(mod => ({ default: mod.VoiceCollapsed })))
 const ReflectionModal = lazy(() => import("./reflection/ReflectionModal").then(mod => ({ default: mod.ReflectionModal })))
 
 type ConversationViewProps = {
@@ -131,7 +130,9 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
       }
     }
     
-    const timer = setTimeout(checkSupport, 300)
+    const timer = setTimeout(() => {
+      void checkSupport()
+    }, 300)
     return () => clearTimeout(timer)
   }, [focusMode])
   
@@ -320,22 +321,6 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
 
       <DevDiagnosticsPanel />
     </AppShell>
-  )
-}
-
-// Skeleton that matches VoiceCollapsed layout for smooth transition
-function VoiceCollapsedSkeleton() {
-  return (
-    <div className="w-full rounded-2xl bg-sophia-surface p-4 shadow-soft">
-      <div className="flex items-center gap-4">
-        <div className="w-12 h-12 rounded-full bg-sophia-purple/10 animate-pulse" />
-        <div className="flex-1 space-y-2">
-          <div className="h-4 w-32 rounded bg-sophia-purple/15 animate-pulse" />
-          <div className="h-3 w-48 rounded bg-sophia-purple/10 animate-pulse" />
-        </div>
-        <div className="w-5 h-5 rounded bg-sophia-purple/10 animate-pulse" />
-      </div>
-    </div>
   )
 }
 

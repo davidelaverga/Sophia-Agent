@@ -1,6 +1,7 @@
 "use client"
 
 import { useConsentStore } from "../stores/consent-store"
+
 import { debugLog, debugWarn } from "./debug-logger"
 
 type TelemetryEvent = {

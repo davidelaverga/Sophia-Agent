@@ -8,8 +8,9 @@
  * Storage key: sophia.session.snapshot.v1
  */
 
-import type { ChatMessage } from './conversation';
 import type { FocusMode } from '../stores/ui-store';
+
+import type { ChatMessage } from './conversation';
 import type { PresetType, ContextMode, MemoryHighlight } from './session';
 
 // =============================================================================

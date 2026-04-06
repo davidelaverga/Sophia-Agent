@@ -1,4 +1,5 @@
 import type { ActiveSessionResponse } from '../types/session';
+
 import type { ApiResponse, BootstrapOpenerResponse } from './api/bootstrap-api';
 
 type ActiveSessionRecord = NonNullable<ActiveSessionResponse['session']>;

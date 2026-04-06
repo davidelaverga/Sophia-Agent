@@ -1,7 +1,8 @@
 "use client"
 
 import { useRef, useCallback } from "react"
-import type { ExpressionParams, Palette, NormalizedRGB } from "../../hooks/useExpression"
+
+import type { ExpressionParams, Palette } from "../../hooks/useExpression"
 
 // ─── Particle data ───────────────────────────────────────────────────────────
 

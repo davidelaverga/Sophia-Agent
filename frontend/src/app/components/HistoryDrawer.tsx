@@ -1,18 +1,20 @@
 "use client"
 
-import { useEffect, useCallback, useRef, useState, useMemo } from "react"
 import { X, History, RefreshCw, ArrowUpRight, Target, MessageCircle, Wind } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { useEffect, useCallback, useRef, useState, useMemo } from "react"
+
 import { useTranslation } from "../copy"
+import { haptic } from "../hooks/useHaptics"
+import { humanizeTime } from "../lib/humanize-time"
+import type { PresetType } from "../lib/session-types"
 import { 
   useConversationStore, 
   selectIsLoadingConversation,
 } from "../stores/conversation-store"
 import { useSessionHistoryStore } from "../stores/session-history-store"
 import { useUiStore } from "../stores/ui-store"
-import { haptic } from "../hooks/useHaptics"
-import { useRouter } from "next/navigation"
-import { humanizeTime } from "../lib/humanize-time"
-import type { PresetType } from "../lib/session-types"
+
 
 /** Max recent sessions shown in the quick-access drawer */
 const MAX_RECENT = 7

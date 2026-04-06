@@ -1,9 +1,10 @@
 "use client"
 
 import { useEffect, useState, useRef, useCallback } from "react"
+
+import { logger } from "../lib/error-logger"
 import { emitTelemetry } from "../lib/telemetry"
 import { useChatStore } from "../stores/chat-store"
-import { logger } from "../lib/error-logger"
 
 export type ReflectionChunk = {
   id: string
@@ -111,7 +112,7 @@ export function useReflectionPrompt(conversationId?: string, turnId?: string) {
       }
     }
 
-    fetchPrompt()
+    void fetchPrompt()
 
     return () => {
       cancelled = true

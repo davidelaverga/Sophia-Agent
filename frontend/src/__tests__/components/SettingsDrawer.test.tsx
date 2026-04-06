@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
+import { describe, it, expect, vi, beforeEach } from "vitest"
+
 import { SettingsDrawer } from "../../app/components/dashboard/SettingsDrawer"
 
 const pushMock = vi.fn()
@@ -77,7 +78,7 @@ describe("SettingsDrawer", () => {
     // Click the backdrop (first child of the fixed overlay)
     const backdrop = container.querySelector(".bg-black\\/40")
     expect(backdrop).toBeTruthy()
-    fireEvent.click(backdrop!)
+    fireEvent.click(backdrop)
     expect(onClose).toHaveBeenCalled()
   })
 

@@ -6,12 +6,12 @@
  * Handles field name variations, defaults, and caps memory candidates at 3.
  */
 
-import type { PresetType, ContextMode } from '../types/session';
 import type { 
   RecapArtifactsV1, 
   MemoryCandidateV1, 
   BackendArtifactsPayload,
 } from '../types/recap';
+import type { PresetType, ContextMode } from '../types/session';
 
 
 // =============================================================================

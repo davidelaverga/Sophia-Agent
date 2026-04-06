@@ -1,8 +1,9 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, act } from "@testing-library/react"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
+
+import { SessionLayout } from "../../app/components/SessionLayout"
 import { usePresenceStore } from "../../app/stores/presence-store"
 import { useUiStore } from "../../app/stores/ui-store"
-import { SessionLayout } from "../../app/components/SessionLayout"
 
 // Mock next/navigation
 vi.mock("next/navigation", () => ({
@@ -81,7 +82,7 @@ describe("SessionLayout Chrome Fade", () => {
 
     const header = container.querySelector("header")
     expect(header).toBeTruthy()
-    expect(header!.style.opacity).toBe("1")
+    expect(header.style.opacity).toBe("1")
   })
 
   it("header fades when presence enters 'listening' after 500ms", () => {
@@ -97,14 +98,14 @@ describe("SessionLayout Chrome Fade", () => {
 
     // Not yet faded
     const header = container.querySelector("header")
-    expect(header!.style.opacity).toBe("1")
+    expect(header.style.opacity).toBe("1")
 
     // After 500ms
     act(() => {
       vi.advanceTimersByTime(500)
     })
 
-    expect(header!.style.opacity).toBe("0.08")
+    expect(header.style.opacity).toBe("0.08")
   })
 
   it("footer also fades during voice activity", () => {
@@ -123,7 +124,7 @@ describe("SessionLayout Chrome Fade", () => {
 
     const footer = container.querySelector("footer")
     expect(footer).toBeTruthy()
-    expect(footer!.style.opacity).toBe("0.08")
+    expect(footer.style.opacity).toBe("0.08")
   })
 
   it("header/footer restore to full opacity on resting", () => {
@@ -142,14 +143,14 @@ describe("SessionLayout Chrome Fade", () => {
     })
 
     const header = container.querySelector("header")
-    expect(header!.style.opacity).toBe("0.08")
+    expect(header.style.opacity).toBe("0.08")
 
     // Restore
     act(() => {
       usePresenceStore.setState({ status: "resting", isListening: false })
     })
 
-    expect(header!.style.opacity).toBe("1")
+    expect(header.style.opacity).toBe("1")
   })
 
   it("does not fade when kill switch is enabled", () => {
@@ -171,7 +172,7 @@ describe("SessionLayout Chrome Fade", () => {
     })
 
     const header = container.querySelector("header")
-    expect(header!.style.opacity).toBe("1")
+    expect(header.style.opacity).toBe("1")
   })
 
   it("tap on empty space unfades chrome", () => {
@@ -190,7 +191,7 @@ describe("SessionLayout Chrome Fade", () => {
     })
 
     const header = container.querySelector("header")
-    expect(header!.style.opacity).toBe("0.08")
+    expect(header.style.opacity).toBe("0.08")
 
     // Tap on the root div (empty space)
     const rootDiv = container.firstElementChild as HTMLElement
@@ -200,7 +201,7 @@ describe("SessionLayout Chrome Fade", () => {
       )
     })
 
-    expect(header!.style.opacity).toBe("1")
+    expect(header.style.opacity).toBe("1")
   })
 
   it("does not fade in text mode", () => {
@@ -222,6 +223,6 @@ describe("SessionLayout Chrome Fade", () => {
     })
 
     const header = container.querySelector("header")
-    expect(header!.style.opacity).toBe("1")
+    expect(header.style.opacity).toBe("1")
   })
 })

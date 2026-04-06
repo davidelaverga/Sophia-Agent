@@ -1,8 +1,10 @@
 "use client"
 
 import { useId } from "react"
-import type { OnboardingTargetRect, OnboardingTargetShape } from "../types"
+
 import { cn } from "../../lib/utils"
+import type { OnboardingTargetRect, OnboardingTargetShape } from "../types"
+
 import { useOnboardingReducedMotion } from "./useOnboardingReducedMotion"
 import { useViewportSize } from "./useViewportSize"
 

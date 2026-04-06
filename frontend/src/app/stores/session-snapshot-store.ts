@@ -13,9 +13,9 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+
 import { logger } from '../lib/error-logger';
 import type { ChatMessage } from '../types/conversation';
-import type { FocusMode } from './ui-store';
 import type { 
   SessionSnapshot, 
   ActiveSessionMeta,
@@ -27,9 +27,10 @@ import {
   SESSION_SNAPSHOT_SCHEMA_VERSION,
   isSnapshotStale,
   isSnapshotVersionValid,
-  createEmptySnapshot as _createEmptySnapshot,
   getSnapshotSummary,
 } from '../types/session-snapshot';
+
+import type { FocusMode } from './ui-store';
 
 // =============================================================================
 // STORE STATE INTERFACE

@@ -15,12 +15,13 @@
 'use client';
 
 import { useCallback } from 'react';
-import { useSessionStore, selectIsSessionActive, selectSessionSummary } from '../stores/session-store';
-import { useChatStore } from '../stores/chat-store';
+
+import { endSession as endSessionAPI, isSuccess } from '../lib/api/sessions-api';
 import { archiveConversation } from '../lib/conversation-history';
 import { logger } from '../lib/error-logger';
 import { teardownSessionClientState } from '../lib/session-teardown';
-import { endSession as endSessionAPI, isSuccess } from '../lib/api/sessions-api';
+import { useChatStore } from '../stores/chat-store';
+import { useSessionStore, selectIsSessionActive, selectSessionSummary } from '../stores/session-store';
 
 // =============================================================================
 // TYPES

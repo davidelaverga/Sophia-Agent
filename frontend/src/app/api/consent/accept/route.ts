@@ -1,5 +1,6 @@
-import { NextRequest, NextResponse } from 'next/server'
 import { headers } from 'next/headers'
+import { type NextRequest, NextResponse } from 'next/server'
+
 import { auth } from '@/server/better-auth'
 
 export async function POST(request: NextRequest) {
@@ -9,7 +10,6 @@ export async function POST(request: NextRequest) {
     if (!session?.user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
-    const userId = session.user.id
 
     const body = await request.json()
     const { timestamp } = body
@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
       message: 'Consent recorded successfully'
     })
 
-  } catch (_error) {
+  } catch {
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

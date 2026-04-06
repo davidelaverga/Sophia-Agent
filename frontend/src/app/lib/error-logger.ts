@@ -8,6 +8,7 @@
  */
 
 import * as Sentry from "@sentry/nextjs"
+
 import { debugLog } from "./debug-logger"
 
 type ErrorContext = {
@@ -54,7 +55,6 @@ class ErrorLogger {
     severity: ErrorSeverity = 'error'
   ) {
     const errorMessage = error instanceof Error ? error.message : String(error)
-    const _errorStack = error instanceof Error ? error.stack : undefined
     
     // Send to monitoring service (Sentry)
     try {

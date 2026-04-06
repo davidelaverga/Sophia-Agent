@@ -8,9 +8,10 @@
 'use client';
 
 import { useState } from 'react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
 import type { InvokeType } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 
 // =============================================================================
 // TYPES
@@ -80,7 +81,7 @@ export function NudgeBanner({
       aria-label="Sophia suggestion"
     >
       {/* Whisper suggestion — Cormorant italic */}
-      <p className="font-cormorant italic text-[14px] text-white/40 mb-2.5">
+      <p className="mb-2.5 font-cormorant italic text-[14px]" style={{ color: 'var(--cosmic-text)' }}>
         {suggestion.message}
       </p>
 
@@ -90,14 +91,10 @@ export function NudgeBanner({
           onClick={handleAccept}
           aria-label={`Accept: ${suggestion.message}`}
           className={cn(
-            'px-4 py-1.5 rounded-full',
+            'cosmic-accent-pill cosmic-focus-ring rounded-full px-4 py-1.5',
             'text-[11px] tracking-[0.08em] uppercase',
-            'bg-white/[0.06] border border-white/[0.08]',
-            'text-white/60',
             'transition-all duration-200',
-            'hover:bg-white/[0.10] hover:text-white/80',
             'active:scale-[0.97]',
-            'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
           )}
         >
           yes
@@ -106,10 +103,8 @@ export function NudgeBanner({
           onClick={handleDismiss}
           aria-label="Dismiss suggestion"
           className={cn(
-            'text-[10px] tracking-[0.08em] text-white/20',
-            'hover:text-white/35',
+            'cosmic-whisper-button cosmic-focus-ring rounded text-[10px] tracking-[0.08em]',
             'transition-all duration-200',
-            'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded'
           )}
         >
           not now
@@ -188,7 +183,7 @@ export function MiniNudge({
       'mx-auto max-w-sm py-2 text-center',
       className
     )}>
-      <p className="font-cormorant italic text-[13px] text-white/35 mb-2">
+      <p className="mb-2 font-cormorant italic text-[13px]" style={{ color: 'var(--cosmic-text)' }}>
         {message}
       </p>
       <div className="flex items-center justify-center gap-2.5">
@@ -199,13 +194,9 @@ export function MiniNudge({
             onAccept();
           }}
           className={cn(
-            'px-3 py-1 rounded-full',
+            'cosmic-accent-pill cosmic-focus-ring rounded-full px-3 py-1',
             'text-[10px] tracking-[0.08em] uppercase',
-            'bg-white/[0.06] border border-white/[0.08]',
-            'text-white/50',
             'transition-all duration-200',
-            'hover:bg-white/[0.10] hover:text-white/70',
-            'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
           )}
         >
           yes
@@ -216,10 +207,8 @@ export function MiniNudge({
             onDismiss();
           }}
           className={cn(
-            'text-[10px] tracking-[0.08em] text-white/20',
-            'hover:text-white/35',
+            'cosmic-whisper-button cosmic-focus-ring rounded text-[10px] tracking-[0.08em]',
             'transition-all duration-200',
-            'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded'
           )}
         >
           not now

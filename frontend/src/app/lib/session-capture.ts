@@ -5,6 +5,7 @@ import { useMessageMetadataStore } from '../stores/message-metadata-store';
 import { useRecapStore } from '../stores/recap-store';
 import { useSessionStore } from '../stores/session-store';
 import { useVoiceStore } from '../stores/voice-store';
+
 import { getDebugSnapshot, type DebugSnapshot } from './debug-tools';
 
 const CAPTURE_FLAG_STORAGE_KEY = 'sophia.capture.enabled';
@@ -483,22 +484,6 @@ function ensureMicrophoneTrackSummary(
   state.microphone.tracks.push(created);
   refreshMicrophoneSummary(state);
   return created;
-}
-
-function getMicrophoneTrackSummary(
-  streamId: string,
-  trackId: string
-): SophiaCaptureMicrophoneTrackSummary | null {
-  const state = getCaptureState();
-  if (!state) {
-    return null;
-  }
-
-  return (
-    state.microphone.tracks.find(
-      (entry) => entry.trackId === trackId && entry.streamId === streamId
-    ) ?? null
-  );
 }
 
 function pushMicrophoneError(message: string): void {

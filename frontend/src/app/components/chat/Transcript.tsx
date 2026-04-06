@@ -1,20 +1,22 @@
 "use client"
 
+import { ArrowDown } from "lucide-react"
 import { Fragment, useEffect, useRef, useState, useCallback, useMemo } from "react"
 import type { UIEvent } from "react"
-import { ArrowDown } from "lucide-react"
 import { useShallow } from "zustand/react/shallow"
-import { useChatStore } from "../../stores/chat-store"
-import { selectTranscriptState } from "../../stores/selectors"
-import { useSessionPersistence } from "../../hooks/useSessionPersistence"
-import { WelcomeBack } from "../WelcomeBack"
-import { MessageBubble } from "./MessageBubble"
-import { EmptyState } from "./EmptyState"
-import { StreamingIndicator } from "./StreamingIndicator"
-import { formatError } from "../../lib/error-messages"
+
 import { useCopy } from "../../copy"
 import { useHaptics } from "../../hooks/useHaptics"
+import { useSessionPersistence } from "../../hooks/useSessionPersistence"
 import { logger } from "../../lib/error-logger"
+import { formatError } from "../../lib/error-messages"
+import { useChatStore } from "../../stores/chat-store"
+import { selectTranscriptState } from "../../stores/selectors"
+import { WelcomeBack } from "../WelcomeBack"
+
+import { EmptyState } from "./EmptyState"
+import { MessageBubble } from "./MessageBubble"
+import { StreamingIndicator } from "./StreamingIndicator"
 
 type TranscriptProps = {
   onPromptSelect: (prompt: string) => void

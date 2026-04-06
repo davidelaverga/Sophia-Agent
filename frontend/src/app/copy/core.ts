@@ -1,10 +1,10 @@
-import type { Locale } from "./config"
-import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
 import { debugWarn } from "../lib/debug-logger"
 
+import type { Locale } from "./config"
 import { copy as enCopy } from "./locales/en"
 import { copy as esCopy } from "./locales/es"
 import { copy as itCopy } from "./locales/it"
+import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
 
 export const TRANSLATIONS: Record<Locale, CopyStructure> = {
   en: enCopy,

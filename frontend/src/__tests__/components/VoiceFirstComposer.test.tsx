@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import { createRef } from "react"
+import { describe, it, expect, vi, beforeEach } from "vitest"
+
 import { VoiceFirstComposer } from "../../app/components/session/VoiceFirstComposer"
 
 // --- Mocks -----------------------------------------------------------------

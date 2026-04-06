@@ -5,21 +5,22 @@
 
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { ArrowLeft, Heart, LogOut, Settings, Trash2 } from 'lucide-react';
+import { useRouter } from 'next/navigation';
+import { useState } from 'react';
+
 import { ProtectedRoute } from '../components/ProtectedRoute';
-import { useAuth } from '../providers';
-import { haptic } from '../hooks/useHaptics';
-import { PrivacyPanel } from '../components/settings/PrivacyPanel';
 import { OnboardingSettingsPanel } from '../components/settings/OnboardingSettingsPanel';
-import { useSessionStore, selectSession } from '../stores/session-store';
-import { useAuthTokenStore } from '../stores/auth-token-store';
-import { useUsageLimitStore } from '../stores/usage-limit-store';
+import { PrivacyPanel } from '../components/settings/PrivacyPanel';
+import { haptic } from '../hooks/useHaptics';
 import { clearLocalSessionData } from '../lib/debug-tools';
 import { logger } from '../lib/error-logger';
-import { useUiStore } from '../stores/ui-store';
 import { teardownSessionClientState } from '../lib/session-teardown';
+import { useAuth } from '../providers';
+import { useAuthTokenStore } from '../stores/auth-token-store';
+import { useSessionStore, selectSession } from '../stores/session-store';
+import { useUiStore } from '../stores/ui-store';
+import { useUsageLimitStore } from '../stores/usage-limit-store';
 
 export default function SettingsPage() {
   const router = useRouter();
@@ -187,7 +188,7 @@ export default function SettingsPage() {
                     type="button"
                     onClick={() => {
                       haptic('error');
-                      handleSignOut();
+                      void handleSignOut();
                     }}
                     disabled={isSigningOut}
                     className="flex-1 h-11 rounded-xl bg-red-500 hover:bg-red-600 text-sm font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"

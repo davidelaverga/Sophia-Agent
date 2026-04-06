@@ -9,6 +9,7 @@
 "use client"
 
 import { useCallback, useEffect } from "react"
+
 import { useAuth } from "../providers"
 import { useAuthTokenStore } from "../stores/auth-token-store"
 import { 
@@ -42,7 +43,7 @@ export function useConversationHistory(): UseConversationHistoryReturn {
   // Initial load on mount when authenticated
   useEffect(() => {
     if (conversations.length === 0) {
-      refreshConversations()
+      void refreshConversations()
     }
   }, [conversations.length, refreshConversations])
   

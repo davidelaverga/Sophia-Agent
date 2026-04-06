@@ -6,11 +6,12 @@
 
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
 import { ArrowUpRight, Clock3, Settings, Sparkles, X } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useState } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 import { ThemeToggle } from '../ThemeToggle';
 
 interface SettingsDrawerProps {
@@ -81,7 +82,7 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
       {/* Backdrop */}
       <div
         className={cn(
-          'absolute inset-0 bg-black/35 backdrop-blur-md transition-opacity duration-300',
+          'cosmic-modal-backdrop absolute inset-0 transition-opacity duration-300',
           isClosing || isAnimatingIn ? 'opacity-0' : 'opacity-100'
         )}
         onClick={handleClose}
@@ -91,7 +92,7 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
       {/* Sheet */}
       <div
         className={cn(
-          'absolute bottom-0 left-0 right-0 max-h-[68vh] overflow-hidden rounded-t-[2rem] border-t border-black/8 bg-white/86 shadow-[0_24px_80px_rgba(0,0,0,0.16)] backdrop-blur-2xl transition-transform duration-300 ease-out dark:border-white/[0.08] dark:bg-black/42 dark:shadow-[0_28px_90px_rgba(0,0,0,0.45)]',
+          'cosmic-surface-panel-strong absolute bottom-0 left-0 right-0 max-h-[68vh] overflow-hidden rounded-t-[2rem] border-t transition-transform duration-300 ease-out',
           'sm:bottom-auto sm:left-auto sm:right-0 sm:top-0 sm:h-full sm:max-h-none sm:w-[380px] sm:rounded-none sm:rounded-l-[2rem] sm:border-l sm:border-t-0',
           isClosing || isAnimatingIn ? 'translate-y-full sm:translate-x-full sm:translate-y-0' : 'translate-y-0 sm:translate-x-0'
         )}
@@ -101,11 +102,11 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
       >
         {/* Handle */}
         <div className="flex justify-center pt-3 pb-2 sm:hidden">
-          <div className="h-1 w-10 rounded-full bg-black/12 dark:bg-white/18" />
+          <div className="h-1 w-10 rounded-full" style={{ background: 'var(--cosmic-text-faint)' }} />
         </div>
 
         {/* Header */}
-        <div className="relative flex items-center justify-between border-b border-black/8 px-5 pb-4 pt-1 dark:border-white/[0.08] sm:pt-5">
+        <div className="relative flex items-center justify-between border-b px-5 pb-4 pt-1 sm:pt-5" style={{ borderColor: 'var(--cosmic-border-soft)' }}>
           <div
             className="pointer-events-none absolute inset-0 opacity-30"
             style={{
@@ -115,17 +116,17 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
           />
 
           <div className="relative flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-2xl border border-black/8 bg-white/80 text-[var(--sophia-purple)] shadow-[0_10px_24px_rgba(0,0,0,0.08)] dark:border-white/[0.08] dark:bg-white/[0.06] dark:shadow-[0_14px_36px_rgba(0,0,0,0.35)]">
+            <div className="cosmic-surface-panel flex h-10 w-10 items-center justify-center rounded-2xl text-[var(--sophia-purple)]">
               <Sparkles className="h-4.5 w-4.5" />
             </div>
             <div>
-              <h3 id="settings-drawer-title" className="font-cormorant text-[1.5rem] leading-none text-black/80 dark:text-white/82">Field controls</h3>
-              <p className="mt-1 text-[11px] tracking-[0.04em] text-black/42 dark:text-white/42">Preferences and utility surfaces</p>
+              <h3 id="settings-drawer-title" className="font-cormorant text-[1.5rem] leading-none" style={{ color: 'var(--cosmic-text-strong)' }}>Field controls</h3>
+              <p className="mt-1 text-[11px] tracking-[0.04em]" style={{ color: 'var(--cosmic-text-muted)' }}>Preferences and utility surfaces</p>
             </div>
           </div>
           <button
             onClick={handleClose}
-            className="relative flex h-10 w-10 items-center justify-center rounded-2xl border border-black/8 bg-white/74 text-black/48 transition-all hover:bg-white/90 hover:text-black/68 focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-white/52 dark:hover:bg-white/[0.08] dark:hover:text-white/74"
+            className="cosmic-chrome-button cosmic-focus-ring relative flex h-10 w-10 items-center justify-center rounded-2xl transition-all"
             aria-label="Close"
           >
             <X className="h-4 w-4" />
@@ -139,20 +140,19 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
               handleAction(() => router.push('/settings'));
             }}
             className={cn(
-              'w-full rounded-[1.4rem] border border-black/8 bg-white/78 p-4 text-left shadow-[0_14px_34px_rgba(0,0,0,0.08)] backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:border-sophia-purple/24 hover:bg-white/90 hover:shadow-[0_18px_40px_rgba(0,0,0,0.11)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:shadow-[0_18px_40px_rgba(0,0,0,0.35)] dark:hover:border-sophia-purple/28 dark:hover:bg-white/[0.07]',
-              'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple',
+              'cosmic-surface-panel cosmic-focus-ring w-full rounded-[1.4rem] p-4 text-left transition-all hover:-translate-y-0.5',
             )}
           >
             <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/8 bg-black/[0.03] text-black/52 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-white/58">
+              <div className="cosmic-surface-soft flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ color: 'var(--cosmic-text-muted)' }}>
                 <Settings className="h-4 w-4" />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium text-black/72 dark:text-white/78">Settings</span>
-                  <ArrowUpRight className="h-4 w-4 text-black/34 dark:text-white/38" />
+                  <span className="text-sm font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>Settings</span>
+                  <ArrowUpRight className="h-4 w-4" style={{ color: 'var(--cosmic-text-whisper)' }} />
                 </div>
-                <p className="mt-1 text-[12px] text-black/52 dark:text-white/52">
+                <p className="mt-1 text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
                   Voice, account, memory, and conversation preferences.
                 </p>
               </div>
@@ -164,37 +164,36 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
               handleAction(() => onShowHistory?.());
             }}
             className={cn(
-              'w-full rounded-[1.4rem] border border-black/8 bg-white/78 p-4 text-left shadow-[0_14px_34px_rgba(0,0,0,0.08)] backdrop-blur-xl transition-all hover:-translate-y-0.5 hover:border-sophia-purple/24 hover:bg-white/90 hover:shadow-[0_18px_40px_rgba(0,0,0,0.11)] dark:border-white/[0.08] dark:bg-white/[0.05] dark:shadow-[0_18px_40px_rgba(0,0,0,0.35)] dark:hover:border-sophia-purple/28 dark:hover:bg-white/[0.07]',
-              'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple',
+              'cosmic-surface-panel cosmic-focus-ring w-full rounded-[1.4rem] p-4 text-left transition-all hover:-translate-y-0.5',
             )}
           >
             <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/8 bg-black/[0.03] text-black/52 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-white/58">
+              <div className="cosmic-surface-soft flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ color: 'var(--cosmic-text-muted)' }}>
                 <Clock3 className="h-4 w-4" />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium text-black/72 dark:text-white/78">History</span>
-                  <ArrowUpRight className="h-4 w-4 text-black/34 dark:text-white/38" />
+                  <span className="text-sm font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>History</span>
+                  <ArrowUpRight className="h-4 w-4" style={{ color: 'var(--cosmic-text-whisper)' }} />
                 </div>
-                <p className="mt-1 text-[12px] text-black/52 dark:text-white/52">
+                <p className="mt-1 text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
                   Open the full session archive and revisit recap artifacts.
                 </p>
               </div>
             </div>
           </button>
 
-          <div className="rounded-[1.4rem] border border-black/8 bg-white/78 p-4 shadow-[0_14px_34px_rgba(0,0,0,0.08)] backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.05] dark:shadow-[0_18px_40px_rgba(0,0,0,0.35)]">
+          <div className="cosmic-surface-panel rounded-[1.4rem] p-4">
             <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-black/8 bg-black/[0.03] text-black/52 dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-white/58">
+              <div className="cosmic-surface-soft flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ color: 'var(--cosmic-text-muted)' }}>
                 <Sparkles className="h-4 w-4" />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <span className="block text-sm font-medium text-black/72 dark:text-white/78">Theme</span>
-                    <p className="mt-1 text-[12px] text-black/52 dark:text-white/52">
-                      Switch between the bright field and moonlit atmosphere.
+                    <span className="block text-sm font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>Theme</span>
+                    <p className="mt-1 text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
+                      Cosmic Sophia is the default field. You can still switch to a brighter surface when needed.
                     </p>
                   </div>
                   <ThemeToggle />
@@ -203,7 +202,7 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
             </div>
           </div>
 
-          <div className="px-1 pt-1 text-[11px] tracking-[0.04em] text-black/38 dark:text-white/38">
+          <div className="px-1 pt-1 text-[11px] tracking-[0.04em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
             These controls stay close so the field feels like one continuous surface.
           </div>
         </div>

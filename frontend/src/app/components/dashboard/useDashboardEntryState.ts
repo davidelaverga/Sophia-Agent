@@ -1,34 +1,34 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { useConnectivity } from '../../hooks/useConnectivity';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { haptic } from '../../hooks/useHaptics';
-import { useConnectivity } from '../../hooks/useConnectivity';
 import { useSessionStart } from '../../hooks/useSessionStart';
+import { fetchBootstrapOpener, type BootstrapOpenerResponse } from '../../lib/api/bootstrap-api';
+import { endSession as endSessionAPI, isSuccess } from '../../lib/api/sessions-api';
+import { resolveDashboardBootstrapState } from '../../lib/dashboard-bootstrap-orchestration';
+import { debugLog, debugWarn } from '../../lib/debug-logger';
+import {
+  clearRecentSessionEndHint,
+  getRecentSessionEndHint,
+  markRecentSessionEnd,
+} from '../../lib/recent-session-end';
+import { teardownSessionClientState } from '../../lib/session-teardown';
+import { emitTiming } from '../../lib/telemetry';
+import { isUuid } from '../../lib/utils';
 import { useAuth } from '../../providers';
+import { useConnectivityStore, selectStatus } from '../../stores/connectivity-store';
+import { useSessionHistoryStore } from '../../stores/session-history-store';
 import {
   useSessionStore,
   selectIsSessionActive,
   selectSession,
   selectSessionSummary,
 } from '../../stores/session-store';
-import { useSessionHistoryStore } from '../../stores/session-history-store';
-import { useConnectivityStore, selectStatus } from '../../stores/connectivity-store';
 import { useUiStore } from '../../stores/ui-store';
-import { endSession as endSessionAPI, isSuccess } from '../../lib/api/sessions-api';
-import { fetchBootstrapOpener, type BootstrapOpenerResponse } from '../../lib/api/bootstrap-api';
-import { isUuid } from '../../lib/utils';
-import { teardownSessionClientState } from '../../lib/session-teardown';
-import { emitTiming } from '../../lib/telemetry';
-import { debugLog, debugWarn } from '../../lib/debug-logger';
-import { resolveDashboardBootstrapState } from '../../lib/dashboard-bootstrap-orchestration';
-import {
-  clearRecentSessionEndHint,
-  getRecentSessionEndHint,
-  markRecentSessionEnd,
-} from '../../lib/recent-session-end';
 import type { ContextMode, PresetType } from '../../types/session';
 
 type MicState = 'idle' | 'listening' | 'thinking' | 'speaking';

@@ -8,6 +8,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+
 import { logger } from '../lib/error-logger';
 import { queueFeedback } from '../lib/offline-queue';
 import type { FeedbackType, MessageFeedback } from '../types/sophia-ui-message';
@@ -72,9 +73,10 @@ export const useFeedbackStore = create<FeedbackState>()(
       
       clearFeedback: (messageId) => {
         set((state) => {
-          const { [messageId]: _, ...rest } = state.feedbackByMessage;
+          const nextFeedbackByMessage = { ...state.feedbackByMessage };
+          delete nextFeedbackByMessage[messageId];
           return {
-            feedbackByMessage: rest,
+            feedbackByMessage: nextFeedbackByMessage,
             pendingSync: state.pendingSync.filter(f => f.message_id !== messageId),
           };
         });

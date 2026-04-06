@@ -10,17 +10,18 @@
 
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
-import { useRouter } from 'next/navigation';
 import { CheckCircle, Home, Share2, Sparkles, Clock, Target, Heart } from 'lucide-react';
-import { useSessionStore, selectSession, selectArtifacts } from '../stores/session-store';
-import { cn } from '../lib/utils';
-import { logger } from '../lib/error-logger';
-import { haptic } from '../hooks/useHaptics';
-import { getClosingMessage } from '../lib/time-greetings';
-import { SharedHeader } from '../components/SharedHeader';
-import { SessionFeedback } from '../components/session/SessionFeedback';
+import { useRouter } from 'next/navigation';
+import { useEffect, useState, useMemo } from 'react';
+
 import { ProtectedRoute } from '../components/ProtectedRoute';
+import { SessionFeedback } from '../components/session/SessionFeedback';
+import { SharedHeader } from '../components/SharedHeader';
+import { haptic } from '../hooks/useHaptics';
+import { logger } from '../lib/error-logger';
+import { getClosingMessage } from '../lib/time-greetings';
+import { cn } from '../lib/utils';
+import { useSessionStore, selectSession, selectArtifacts } from '../stores/session-store';
 
 // Hook: respect prefers-reduced-motion
 function useReducedMotion() {

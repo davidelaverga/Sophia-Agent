@@ -8,8 +8,9 @@
 
 'use client';
 
-import { useState, useCallback } from 'react';
 import { ThumbsUp, ThumbsDown, Flag, X } from 'lucide-react';
+import { useState, useCallback } from 'react';
+
 import { cn } from '../../lib/utils';
 import type { FeedbackType } from '../../types/sophia-ui-message';
 

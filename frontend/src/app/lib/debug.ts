@@ -18,7 +18,7 @@ type LogLevel = 'log' | 'warn' | 'error' | 'debug' | 'info'
 const createLogger = (level: LogLevel) => {
   return (...args: unknown[]) => {
     if (isDev) {
-      // eslint-disable-next-line no-console
+       
       console[level](...args)
     }
   }
@@ -41,7 +41,7 @@ export const isVerboseDebugEnabled = (): boolean => {
 const createVerboseLogger = (level: LogLevel) => {
   return (...args: unknown[]) => {
     if (isVerboseDebugEnabled()) {
-      // eslint-disable-next-line no-console
+       
       console[level](...args)
     }
   }
@@ -73,10 +73,10 @@ export const debug = {
    */
   group: (label: string, fn: () => void) => {
     if (isDev) {
-      // eslint-disable-next-line no-console
+       
       console.group(label)
       fn()
-      // eslint-disable-next-line no-console
+       
       console.groupEnd()
     }
   },
@@ -86,10 +86,10 @@ export const debug = {
    */
   time: <T>(label: string, fn: () => T): T => {
     if (isDev) {
-      // eslint-disable-next-line no-console
+       
       console.time(label)
       const result = fn()
-      // eslint-disable-next-line no-console
+       
       console.timeEnd(label)
       return result
     }

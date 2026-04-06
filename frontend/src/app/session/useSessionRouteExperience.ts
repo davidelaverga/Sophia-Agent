@@ -6,8 +6,9 @@ import { getCompanionRouteProfile } from '../companion-runtime/route-profiles';
 import { useCompanionStreamContract } from '../companion-runtime/stream-contract';
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
 import { debugLog } from '../lib/debug-logger';
-import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
+import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
+
 import { useSessionMessageViewModel } from './useSessionMessageViewModel';
 import { useSessionOutboundSend } from './useSessionSendActions';
 import { useSessionVoiceMessages } from './useSessionVoiceMessages';

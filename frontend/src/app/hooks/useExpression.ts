@@ -1,7 +1,9 @@
 "use client"
 
 import { useRef, useCallback } from "react"
+
 import type { PresenceState } from "../stores/presence-store"
+
 import type { EmotionColor } from "./useEmotionColor"
 
 // ─── Expression parameters ───────────────────────────────────────────────────

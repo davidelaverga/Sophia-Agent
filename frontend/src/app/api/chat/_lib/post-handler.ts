@@ -1,6 +1,10 @@
-import { NextRequest } from 'next/server';
-import { apiLimiters } from '../../../lib/rate-limiter';
+import { type NextRequest } from 'next/server';
+
 import { logger } from '../../../lib/error-logger';
+import { apiLimiters } from '../../../lib/rate-limiter';
+
+import { fetchBackendStreamWithBootstrap } from './backend-client';
+import { parseAndValidateChatPayload } from './chat-request';
 import {
   AI_SDK_STREAM_HEADER,
   BACKEND_CHAT_ENDPOINT,
@@ -10,8 +14,6 @@ import {
   secureLog,
 } from './config';
 import { getMockResponse } from './mock';
-import { parseAndValidateChatPayload } from './chat-request';
-import { fetchBackendStreamWithBootstrap } from './backend-client';
 import {
   createSSEToUIMessageStream,
   createUIMessageStreamFromText,
@@ -28,7 +30,7 @@ function parseBackendErrorMessage(errorText: string, status: number): string {
       parsedError.message ||
       backendErrorMessage;
   } catch {
-    if (errorText && errorText.trim()) {
+    if (errorText.trim()) {
       backendErrorMessage = errorText;
     }
   }

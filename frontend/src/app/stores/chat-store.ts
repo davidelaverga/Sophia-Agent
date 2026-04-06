@@ -1,17 +1,19 @@
 "use client"
 
 import { create } from "zustand"
-import { usePresenceStore } from "./presence-store"
+
 import { copy } from "../copy"
 import { logger } from "../lib/error-logger"
-import type { ChatMessage } from "../types"
 import { createMessageId } from "../lib/utils"
-import { useConnectivityStore } from "./connectivity-store"
+import type { ChatMessage } from "../types"
+
 import { emitChatMessageReceived } from "./chat-store-events"
 import {
   isRecoverableStreamStatus,
   isRetryableStreamStatus,
 } from "./chat-store-recovery-policies"
+import { useConnectivityStore } from "./connectivity-store"
+import { usePresenceStore } from "./presence-store"
 
 // Re-export ChatMessage for backwards compatibility
 export type { ChatMessage }

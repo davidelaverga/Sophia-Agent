@@ -14,11 +14,12 @@
  * - Micro-dialogs (breathing style, plan choice, etc.)
  */
 
-import { NextRequest } from 'next/server';
-import type { InterruptKind } from '../../lib/session-types';
+import { type NextRequest } from 'next/server';
+
 import { getServerAuthToken } from '../../lib/auth/server-auth';
 import { debugLog } from '../../lib/debug-logger';
 import { logger } from '../../lib/error-logger';
+import type { InterruptKind } from '../../lib/session-types';
 
 // ============================================================================
 // CONFIGURATION

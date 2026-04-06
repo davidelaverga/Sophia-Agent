@@ -1,5 +1,6 @@
+import { render, act } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
-import { render, screen, act } from "@testing-library/react"
+
 import { EmotionAtmosphereCanvas } from "../../app/components/EmotionAtmosphereCanvas"
 
 // --- Mocks -----------------------------------------------------------------
@@ -173,7 +174,7 @@ describe("EmotionAtmosphereCanvas", () => {
       // Should draw immediately with CALM colors
       expect(mockCtx.createRadialGradient).toHaveBeenCalled()
       // Advance past idle timeout (5 minutes)
-      act(() => vi.advanceTimersByTime(5 * 60 * 1000 + 100))
+      void act(() => vi.advanceTimersByTime(5 * 60 * 1000 + 100))
       // After idle timeout, a transition to WARM should have been scheduled
       // (The transition changes targetRgb internally)
     } finally {

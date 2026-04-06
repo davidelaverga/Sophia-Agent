@@ -1,3 +1,4 @@
+import { secureLog } from './config';
 import {
   extractRawMessage,
   isValidSessionId,
@@ -6,7 +7,6 @@ import {
   validateContextMode,
   validateSessionType,
 } from './request-validation';
-import { secureLog } from './config';
 
 export interface ValidatedChatRequest {
   userMessage: string;

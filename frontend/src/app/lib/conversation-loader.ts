@@ -13,11 +13,8 @@
  */
 
 import { useChatStore } from "../stores/chat-store"
-import { useSessionStore } from "../stores/session-store"
 import { useSessionHistoryStore } from "../stores/session-history-store"
-import { loadConversationFromHistory } from "./conversation-history"
-import { dedupeMessages, normalizeMessages } from "./message-dedupe"
-import { logger } from "./error-logger"
+import { useSessionStore } from "../stores/session-store"
 import type { ChatMessage } from "../types"
 import type { 
   ConversationId, 
@@ -25,6 +22,10 @@ import type {
   BackendConversationListItem,
   ConversationCursor,
 } from "../types/conversation-identity"
+
+import { loadConversationFromHistory } from "./conversation-history"
+import { logger } from "./error-logger"
+import { dedupeMessages, normalizeMessages } from "./message-dedupe"
 
 // =============================================================================
 // Types
@@ -190,7 +191,7 @@ function backendMessageToChatMessage(msg: BackendMessage): ChatMessage {
     status: "complete",
     audioUrl: msg.audio_url ?? undefined,
     turnId: msg.turn_id,
-    source: msg.meta?.source as "voice" | "text" | undefined,
+    source: msg.meta?.source,
     meta: msg.meta,
   }
 }
@@ -335,7 +336,7 @@ export async function loadConversation(
     const elapsedSecondsFromRange = hasValidRange
       ? Math.floor((endedMs - startedMs) / 1000)
       : sessionStore.session?.activeElapsedSeconds
-    if (!sessionStore.session || sessionStore.session.sessionId !== conversationId) {
+    if (sessionStore.session?.sessionId !== conversationId) {
       // Create a minimal session for history viewing
       useSessionStore.setState({
         session: {

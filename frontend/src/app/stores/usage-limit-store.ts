@@ -1,6 +1,7 @@
 "use client"
 
 import { create } from "zustand";
+
 import type { UsageLimitInfo, PlanTier } from "../types/rate-limits";
 
 // Type for backend usage response (from /api/v1/chat/text)
@@ -97,7 +98,6 @@ export const useUsageLimitStore = create<UsageLimitStore>((set, get) => ({
     }
   },
   closeModal: () => {
-    const _state = get()
     // If user is still at 100%, keep blocking even if modal is closed
     // The modal will reappear if they try to use Sophia
     set({ 

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
-import type { SessionMessage } from '../lib/session-types';
+
 import type { UIMessage } from '../components/session';
+import type { SessionMessage } from '../lib/session-types';
 
 interface UseSessionStreamPersistenceParams {
   messages: UIMessage[];

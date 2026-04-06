@@ -1,7 +1,7 @@
 import { mapBackendArtifactsToRecapV1 } from '../lib/artifacts-adapter';
-import type { RitualArtifacts, MemoryCategory } from '../types/session';
 import type { BackendArtifactsPayload } from '../types/recap';
 import type { RecapArtifactsV1 } from '../types/recap';
+import type { RitualArtifacts, MemoryCategory } from '../types/session';
 
 type PersistArtifacts = (sessionId: string, artifacts: RecapArtifactsV1) => void;
 

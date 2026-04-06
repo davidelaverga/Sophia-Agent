@@ -8,6 +8,7 @@
  */
 
 import type { PresenceState } from "../stores/presence-store";
+
 import { Waveform as UIWaveform, type WaveformState } from "./ui/Waveform";
 
 interface WaveformProps {

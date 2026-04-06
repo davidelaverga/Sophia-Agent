@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { resolveTooltipLayout } from '../../app/onboarding/ui/tooltip-layout'
 import type { OnboardingTargetRect } from '../../app/onboarding/types'
+import { resolveTooltipLayout } from '../../app/onboarding/ui/tooltip-layout'
 
 const targetRect: OnboardingTargetRect = {
   x: 200,

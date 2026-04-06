@@ -1,9 +1,10 @@
 "use client"
 
 import { Mic, ChevronRight } from "lucide-react"
+
+import { useTranslation } from "../copy"
 import { useModeSwitch } from "../hooks/useModeSwitch"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
-import { useTranslation } from "../copy"
 
 /**
  * VoiceCollapsed

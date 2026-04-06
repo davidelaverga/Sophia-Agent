@@ -1,6 +1,5 @@
 'use client';
 
-import { useCallback, useState } from 'react';
 import {
   Brain,
   Check,
@@ -10,7 +9,8 @@ import {
   Pencil,
   X,
 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useCallback, useState } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
 import type {
   MemoryCandidateV1,
@@ -20,6 +20,7 @@ import {
   CATEGORY_ICONS,
   CATEGORY_LABELS,
 } from '../../lib/recap-types';
+import { cn } from '../../lib/utils';
 
 interface RecapMemoryCandidateRowProps {
   candidate: MemoryCandidateV1;

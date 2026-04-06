@@ -1,9 +1,11 @@
 import { useEffect } from 'react';
+
 import { useInterrupt } from '../hooks/useInterrupt';
 import { debugLog } from '../lib/debug-logger';
 import type { ContextMode, PresetType, RitualArtifacts } from '../lib/session-types';
-import type { StreamArtifactsPayload } from './stream-contract-adapters';
 import type { InterruptPayload } from '../types/session';
+
+import type { StreamArtifactsPayload } from './stream-contract-adapters';
 
 type ChatMessage = {
   id: string;

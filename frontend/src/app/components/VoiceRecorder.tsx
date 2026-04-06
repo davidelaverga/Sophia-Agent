@@ -1,12 +1,13 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
 import { Mic, Square } from 'lucide-react'
+import { useState, useRef, useCallback } from 'react'
+
 import { useCopy, useTranslation } from '../copy'
-import { useAuth } from '../providers'
-import { checkMicrophonePermission } from '../lib/microphone-permissions'
-import { logger } from '../lib/error-logger'
 import { debugLog, debugWarn } from '../lib/debug-logger'
+import { logger } from '../lib/error-logger'
+import { checkMicrophonePermission } from '../lib/microphone-permissions'
+import { useAuth } from '../providers'
 
 // Legacy browser support type
 type LegacyGetUserMedia = (
@@ -74,7 +75,7 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
       const legacyNav = navigator as LegacyNavigator
       
       // Try modern API first
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+      if (navigator.mediaDevices?.getUserMedia) {
         stream = await navigator.mediaDevices.getUserMedia({
           audio: {
             sampleRate: 16000,
@@ -88,7 +89,7 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
       // Fallback for older browsers
       else if (legacyNav.getUserMedia) {
         stream = await new Promise<MediaStream>((resolve, reject) => {
-          legacyNav.getUserMedia!(
+          legacyNav.getUserMedia(
             { audio: true },
             resolve,
             reject
@@ -98,7 +99,7 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
       // Fallback for webkit browsers
       else if (legacyNav.webkitGetUserMedia) {
         stream = await new Promise<MediaStream>((resolve, reject) => {
-          legacyNav.webkitGetUserMedia!(
+          legacyNav.webkitGetUserMedia(
             { audio: true },
             resolve,
             reject
@@ -108,7 +109,7 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
       // Fallback for moz browsers
       else if (legacyNav.mozGetUserMedia) {
         stream = await new Promise<MediaStream>((resolve, reject) => {
-          legacyNav.mozGetUserMedia!(
+          legacyNav.mozGetUserMedia(
             { audio: true },
             resolve,
             reject
@@ -303,12 +304,6 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
         })
       }
 
-      const _processLine = (line: string) => {
-        if (!line.trim()) return
-        // Expect SSE lines like: "event: token" or "data: ..."
-        // We'll collect per-event until a blank line separates events
-      }
-
       // Simple SSE parser state
       let currentEvent: string | null = null
       let currentData: string[] = []
@@ -345,7 +340,9 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
             const mock = !!payload.mock_audio
             updateSophiaMessage(accumulated, { audioUrl: payload.audio_url, emotion: payload.sophia_emotion })
             if (audioUrl && !mock && /^https?:\/\//.test(audioUrl)) {
-              setTimeout(() => playAudio(audioUrl!), 300)
+              setTimeout(() => {
+                void playAudio(audioUrl)
+              }, 300)
             }
           } else if (event === 'error') {
             debugWarn('VoiceRecorder', 'SSE error', { data })

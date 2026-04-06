@@ -166,7 +166,7 @@ export async function fetchWithRetry<T>(
       }
       
       // Check if we should retry this status
-      if (!shouldRetryStatus(response.status, cfg.retryOnStatus || DEFAULT_CONFIG.retryOnStatus!)) {
+      if (!shouldRetryStatus(response.status, cfg.retryOnStatus || DEFAULT_CONFIG.retryOnStatus)) {
         // Non-retryable error
         const errorData = await response.json().catch(() => ({}));
         const errorMessage = (errorData as { error?: string; detail?: string }).error 
@@ -211,7 +211,7 @@ export async function fetchWithRetry<T>(
       const delay = calculateDelay(attempt, cfg.baseDelay, cfg.maxDelay);
       
       // Callback for retry notification
-      cfg.onRetry?.(attempt + 1, lastError!, delay);
+      cfg.onRetry?.(attempt + 1, lastError, delay);
       
       logger.debug('fetchWithRetry', `Retry ${attempt + 1}/${cfg.maxRetries} in ${delay}ms`, {
         url,
@@ -256,7 +256,7 @@ export async function fetchJsonWithRetry<T>(
     throw result.error || new Error('Request failed');
   }
   
-  return result.data!;
+  return result.data;
 }
 
 /**

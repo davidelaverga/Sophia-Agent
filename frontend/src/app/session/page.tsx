@@ -14,14 +14,17 @@
 
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { SessionLayout } from '../components/SessionLayout';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import {
+  VoiceComposerErrorBoundary,
+} from '../components/error-boundaries';
+import { ModeToggle } from '../components/ModeToggle';
 import { OnboardingSessionExperience } from '../components/onboarding';
+import { PresenceField, type PresenceFieldHandle } from '../components/presence-field';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { 
-  ArtifactsPanel, 
-  ArtifactsRail,
   SessionConversationPane,
   VoiceFirstComposer,
   VoiceCaption,
@@ -31,50 +34,42 @@ import {
   ReflectionOverlay,
   EmergenceOverlay,
   AtmosphericFeedback,
-  MobileDrawer,
   FeedbackToast,
-  // BootstrapCards archived - dead code (see _archived_BootstrapCards.tsx)
-  CompanionRail,
-  DebriefOfferModal,
 } from '../components/session';
+import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
-import {
-  VoiceComposerErrorBoundary,
-  ArtifactsPanelErrorBoundary,
-} from '../components/error-boundaries';
-import { ModeToggle } from '../components/ModeToggle';
-import { useChromeFade } from '../hooks/useChromeFade';
-import { useIdleTimeout } from '../hooks/useIdleTimeout';
-import { PresenceField, type PresenceFieldHandle } from '../components/presence-field';
-import { useUiStore } from '../stores/ui-store';
-import { cn } from '../lib/utils';
-import { haptic } from '../hooks/useHaptics';
-import { useSessionPersistence } from '../hooks/useSessionPersistence';
-import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
-import { errorCopy } from '../lib/error-copy';
 import { UsageLimitModal } from '../components/UsageLimitModal';
-import { useSessionUiInteractions } from './useSessionUiInteractions';
+import { useChromeFade } from '../hooks/useChromeFade';
+import { haptic } from '../hooks/useHaptics';
+import { useIdleTimeout } from '../hooks/useIdleTimeout';
+import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
+import { useSessionPersistence } from '../hooks/useSessionPersistence';
+import { debugLog } from '../lib/debug-logger';
+import { errorCopy } from '../lib/error-copy';
+import { cn } from '../lib/utils';
+import { getFirstRunStepById } from '../onboarding';
+import { useOnboardingStore } from '../stores/onboarding-store';
+import { useUiStore } from '../stores/ui-store';
+
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
 import { useSessionConversationArchive } from './useSessionConversationArchive';
-import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
-import { useSessionStreamPersistence } from './useSessionStreamPersistence';
-import { SESSION_REFLECTION_PREFIX, useSessionReflectionVoiceFlow } from './useSessionReflectionVoiceFlow';
-import { useSessionUiDerivedState } from './useSessionUiDerivedState';
+import { useSessionExitOrchestration } from './useSessionExitOrchestration';
+import { useSessionInfrastructure } from './useSessionInfrastructure';
+import { useSessionInitializationOrchestration } from './useSessionInitializationOrchestration';
+import { useSessionInteractionOrchestration } from './useSessionInteractionOrchestration';
+import { useSessionInterruptOrchestration } from './useSessionInterruptOrchestration';
 import { useSessionInterruptRetryState } from './useSessionInterruptRetryState';
 import { useSessionPageContext } from './useSessionPageContext';
 import { useSessionPageGuards } from './useSessionPageGuards';
-import { useSessionInteractionOrchestration } from './useSessionInteractionOrchestration';
-import { useSessionInfrastructure } from './useSessionInfrastructure';
-import { useSessionValidationState } from './useSessionValidationState';
-import { useSessionInitializationOrchestration } from './useSessionInitializationOrchestration';
-import { useSessionInterruptOrchestration } from './useSessionInterruptOrchestration';
-import { useSessionQueueOrchestration } from './useSessionQueueOrchestration';
-import { useSessionExitOrchestration } from './useSessionExitOrchestration';
 import { useSessionPageLocalState } from './useSessionPageLocalState';
+import { useSessionQueueOrchestration } from './useSessionQueueOrchestration';
+import { SESSION_REFLECTION_PREFIX, useSessionReflectionVoiceFlow } from './useSessionReflectionVoiceFlow';
 import { useSessionRouteExperience } from './useSessionRouteExperience';
-import { debugLog } from '../lib/debug-logger';
-import { getFirstRunStepById } from '../onboarding';
-import { useOnboardingStore } from '../stores/onboarding-store';
+import { useSessionStreamPersistence } from './useSessionStreamPersistence';
+import { useSessionUiDerivedState } from './useSessionUiDerivedState';
+import { useSessionUiInteractions } from './useSessionUiInteractions';
+import { useSessionValidationState } from './useSessionValidationState';
+import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 
 // ============================================================================
 // PROTECTED SESSION PAGE WRAPPER
@@ -89,7 +84,7 @@ export default function SessionPage() {
   return (
     <ProtectedRoute>
       {showOnboardingSessionExperience ? (
-        <div className="relative h-screen bg-[#030308]">
+        <div className="relative h-screen bg-[var(--bg)]">
           <PresenceField />
           <div className="relative z-10 h-full">
             <OnboardingSessionExperience />
@@ -107,7 +102,6 @@ export default function SessionPage() {
 // ============================================================================
 
 function SessionPageContent() {
-  const SHOW_SESSION_MEMORY_REJECT = false;
   const router = useRouter();
   const focusMode = useUiStore((s) => s.mode);
   const { chromeOpacity } = useChromeFade();
@@ -359,7 +353,6 @@ function SessionPageContent() {
     interruptQueue,
     resolvedInterrupts,
     isResuming,
-    detectedEmotion,
     handleInterruptSnooze,
     handleInterruptDismiss,
   } = useSessionInterruptOrchestration({
@@ -379,10 +372,7 @@ function SessionPageContent() {
   });
 
   const {
-    activeInvoke,
     nudgeSuggestion,
-    isInvoking,
-    handleCompanionInvoke,
     handleNudgeAccept,
     handleNudgeDismiss,
   } = useSessionCompanionIntegration({
@@ -451,7 +441,6 @@ function SessionPageContent() {
 
   const {
     showArtifactsUi,
-    showCompanionRail,
     isSophiaResponding,
     exitProtectionResponseMode,
     isVoiceThinking,
@@ -515,11 +504,6 @@ function SessionPageContent() {
   }, [artifacts]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
-  const mobileIndicatorDotClass = hasPendingArtifacts
-    ? 'bg-amber-500 animate-pulse'
-    : readyArtifactCount > 0
-      ? 'bg-emerald-500'
-      : 'bg-white/20';
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -583,22 +567,20 @@ function SessionPageContent() {
   
   const {
     showExitConfirm,
-    showDebriefOffer,
     showEmergence,
     showFeedback,
-    debriefData,
     isNavigatingToRecap,
     handleEndSession,
     handleVoiceEndSession,
     handleCancelExit,
-    handleStartDebrief,
-    handleSkipToRecap,
     handleEmergenceComplete,
     handleFeedbackComplete,
   } = useSessionExitOrchestration({
     isReadOnly,
     isSophiaResponding,
-    stopStreaming,
+    stopStreaming: () => {
+      void stopStreaming();
+    },
     setEnding,
     sessionId,
     sessionStartedAt: session?.startedAt,
@@ -608,7 +590,9 @@ function SessionPageContent() {
     endSessionStore: endSession,
     clearSessionStore: clearSession,
     clearBootstrap,
-    navigateTo: router.push,
+    navigateTo: (href) => {
+      void router.push(href);
+    },
     promoteToDebriefMode: () => {
       updateSession({
         presetType: 'debrief',
@@ -658,10 +642,7 @@ function SessionPageContent() {
     isEnding,
   });
 
-  const {
-    handleVoiceTranscript: _handleVoiceTranscript,
-    isAssistantResponseSuppressed: _isAssistantResponseSuppressed,
-  } = useSessionVoiceCommandSystem({
+  useSessionVoiceCommandSystem({
     onUserTranscript: appendVoiceUserMessage,
     reflectionCandidate: artifacts?.reflection_candidate,
     handleReflectionTap,
@@ -687,8 +668,6 @@ function SessionPageContent() {
     focusComposer,
     handleCloseArtifactsPanel,
     handleOpenArtifactsPanel,
-    handleToggleMobileArtifactsTab,
-    handleToggleMobileDrawer,
   } = useSessionUiInteractions({
     messages,
     isTyping,
@@ -708,7 +687,9 @@ function SessionPageContent() {
     hasSession: !!session,
     isEnding,
     isNavigatingToRecap,
-    navigateTo: router.push,
+    navigateTo: (href) => {
+      void router.push(href);
+    },
   });
 
   const {
@@ -747,7 +728,9 @@ function SessionPageContent() {
     setDismissedError,
     setLastUserMessageContent,
     setCancelledMessageId,
-    stopStreaming,
+    stopStreaming: () => {
+      void stopStreaming();
+    },
     voiceState,
     queueVoiceRetryFromCancel,
     cancelledRetryMessage: errorCopy.responseCancelled,
@@ -771,10 +754,16 @@ function SessionPageContent() {
     setShowFeedbackToast,
     focusComposer,
     messages,
-    navigateHome,
+    navigateHome: () => {
+      void navigateHome();
+    },
     clearSessionError,
-    endSession,
-    takeOverSession,
+    endSession: () => {
+      void endSession();
+    },
+    takeOverSession: () => {
+      void takeOverSession();
+    },
     artifacts,
     applyMemoryCandidates,
     isOffline,
@@ -785,7 +774,7 @@ function SessionPageContent() {
   // Loading state — the breathing nebula IS the loading indicator (R41)
   if (shouldShowLoading) {
     return (
-      <div className="h-screen bg-[#030308]">
+      <div className="h-screen bg-[var(--bg)]">
         <PresenceField />
       </div>
     );
@@ -812,10 +801,7 @@ function SessionPageContent() {
               transparent at the edges, letting the cosmic field breathe through. */}
           {focusMode === 'text' && (
             <div
-              className="absolute inset-0 z-0 pointer-events-none"
-              style={{
-                background: 'radial-gradient(ellipse 60% 75% at 50% 50%, rgba(3,3,8,0.52) 0%, rgba(3,3,8,0.30) 55%, transparent 100%)',
-              }}
+              className="cosmic-reading-corridor absolute inset-0 z-0 pointer-events-none"
             />
           )}
 
@@ -966,23 +952,23 @@ function SessionPageContent() {
       {/* Exit Confirmation Modal */}
       {showExitConfirm && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn"
+          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
           onClick={handleCancelExit}
         >
           <div 
-            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 shadow-xl border border-white/[0.03] animate-scaleIn"
+            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
-              <div className="w-12 h-12 rounded-full bg-white/[0.04] flex items-center justify-center">
-                <div className="w-6 h-6 border-2 border-white/[0.08] border-t-white/30 rounded-full animate-spin" />
+              <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: 'var(--cosmic-panel-soft)' }}>
+                <div className="h-6 w-6 animate-spin rounded-full border-2" style={{ borderColor: 'var(--cosmic-border-soft)', borderTopColor: 'var(--cosmic-text-whisper)' }} />
               </div>
               
               <div className="space-y-2">
-                <h3 className="text-lg font-semibold text-white/80">
+                <h3 className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
                   Sophia is still responding
                 </h3>
-                <p className="text-sm text-white/40">
+                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
                   If you leave now, her response will be saved but may be incomplete.
                 </p>
               </div>
@@ -990,13 +976,13 @@ function SessionPageContent() {
               <div className="flex gap-3 w-full mt-2">
                 <button
                   onClick={handleCancelExit}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.04] border border-white/[0.06] text-white/60 font-medium transition-colors hover:bg-white/[0.08]"
+                  className="cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
                 >
                   Stay
                 </button>
                 <button
                   onClick={handleEndSession}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.08] text-white/70 font-medium transition-colors hover:bg-white/[0.12]"
+                  className="cosmic-accent-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
                 >
                   Leave anyway
                 </button>
@@ -1033,22 +1019,22 @@ function SessionPageContent() {
       {isIdle && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center animate-fadeIn"
-          style={{ backgroundColor: 'rgba(3, 3, 8, 0.45)' }}
+          style={{ backgroundColor: 'var(--cosmic-modal-backdrop)' }}
         >
           <div className="text-center space-y-4">
-            <p className="font-cormorant italic text-[18px] text-white/40">
+            <p className="font-cormorant italic text-[18px]" style={{ color: 'var(--cosmic-text-muted)' }}>
               still there?
             </p>
             <div className="flex items-center justify-center gap-3">
               <button
                 onClick={() => resetIdle()}
-                className="px-4 py-1.5 rounded-full text-[11px] tracking-[0.08em] uppercase bg-white/[0.06] border border-white/[0.08] text-white/40 hover:bg-white/[0.10] transition-all"
+                className="cosmic-accent-pill cosmic-focus-ring rounded-full px-4 py-1.5 text-[11px] tracking-[0.08em] uppercase transition-all"
               >
                 I&apos;m here
               </button>
               <button
                 onClick={() => { resetIdle(); void handleEndSession(); }}
-                className="px-4 py-1.5 rounded-full text-[11px] tracking-[0.08em] uppercase bg-white/[0.04] border border-white/[0.06] text-white/25 hover:bg-white/[0.08] transition-all"
+                className="cosmic-ghost-pill cosmic-focus-ring rounded-full px-4 py-1.5 text-[11px] tracking-[0.08em] uppercase transition-all"
               >
                 end session
               </button>

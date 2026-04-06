@@ -7,9 +7,8 @@ import {
   normalizeLocale,
   type Locale,
 } from "./config"
-
-import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
 import { getCopy, translate } from "./core"
+import type { CopyKey, CopyStructure, InterpolationValues } from "./types"
 
 export async function getRequestLocale(): Promise<Locale> {
   // 1) Cookie wins

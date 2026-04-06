@@ -13,11 +13,13 @@
 
 'use client';
 
-import { useState, lazy, Suspense } from 'react';
-import { useRouter, usePathname } from 'next/navigation';
 import { Settings, History, Home, MessageCircle, ArrowLeft, Clock } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { useRouter, usePathname } from 'next/navigation';
+import { useState, lazy, Suspense } from 'react';
+
 import { haptic } from '../hooks/useHaptics';
+import { cn } from '../lib/utils';
+
 import { ThemeToggle } from './ThemeToggle';
 
 // Lazy load HistoryDrawer for /chat route

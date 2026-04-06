@@ -13,10 +13,12 @@
 'use client';
 
 import { Check, Sparkles } from 'lucide-react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
-import type { RitualConfig, ContextConfig } from './types';
+import { cn } from '../../lib/utils';
 import { OnboardingTipGuard } from '../onboarding';
+
+import type { RitualConfig, ContextConfig } from './types';
 
 interface RitualCardProps {
   ritual: RitualConfig;

@@ -6,6 +6,7 @@
 'use client';
 
 import { cn } from '../../lib/utils';
+
 import { PRESENCE_STATES, type MicState } from './types';
 
 interface PresenceIndicatorProps {

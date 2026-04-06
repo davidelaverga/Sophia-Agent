@@ -14,17 +14,18 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import { Sparkles, Check } from 'lucide-react';
-import { useAuth } from '../providers';
-import { useSessionStart } from '../hooks/useSessionStart';
-import { useSessionStore } from '../stores/session-store';
-import { cn } from '../lib/utils';
+import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+
 import { haptic } from '../hooks/useHaptics';
-import { logger } from '../lib/error-logger';
+import { useSessionStart } from '../hooks/useSessionStart';
 import { debugLog } from '../lib/debug-logger';
+import { logger } from '../lib/error-logger';
 import type { PresetType, ContextMode, PresetConfig, ContextModeConfig } from '../lib/session-types';
+import { cn } from '../lib/utils';
+import { useAuth } from '../providers';
+import { useSessionStore } from '../stores/session-store';
 
 // ============================================================================
 // PRESET CONFIGURATIONS
@@ -277,7 +278,7 @@ export function PresetSelector() {
   const isSessionActive = useSessionStore((state) => state.isSessionActive);
   
   // Use the session start hook that calls backend API
-  const { startSessionEntry, isLoading: _isSessionStarting } = useSessionStart({
+  const { startSessionEntry } = useSessionStart({
     navigateOnSuccess: true,
     onSuccess: (result) => {
       debugLog('PresetSelector', 'Session started successfully', { sessionId: result.sessionId });
@@ -441,9 +442,9 @@ export function PresetSelector() {
         <button
           onClick={() => {
             if (!user && !userLoading) {
-              router.push('/auth');
+              void router.push('/auth');
             } else {
-              handleStartSession();
+              void handleStartSession();
             }
           }}
           disabled={isStarting || (!selectedPreset && !!user)}

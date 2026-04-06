@@ -10,10 +10,11 @@
 
 'use client';
 
-import { useEffect } from 'react';
 import { AlertTriangle, WifiOff, Clock, TabletSmartphone, X } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useEffect } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 
 // =============================================================================
 // TYPES

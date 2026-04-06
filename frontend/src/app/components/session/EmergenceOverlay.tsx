@@ -10,6 +10,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+
 import { cn } from '../../lib/utils';
 import type { RitualArtifacts } from '../../types/session';
 
@@ -117,7 +118,7 @@ export function EmergenceOverlay({
         'transition-opacity duration-[2500ms] ease-out',
         isActive ? 'opacity-100' : 'opacity-0',
       )}
-      style={{ backgroundColor: 'rgba(3, 3, 8, 0.55)' }}
+      style={{ backgroundColor: 'var(--cosmic-modal-backdrop)' }}
       onClick={handleTap}
       role="dialog"
       aria-label="Session summary"
@@ -127,10 +128,11 @@ export function EmergenceOverlay({
         {takeaway && (
           <p
             className={cn(
-              'font-cormorant text-[24px] leading-snug text-white/[0.92]',
+              'font-cormorant text-[24px] leading-snug',
               'transition-all duration-1000',
               revealStep >= 1 && !isExiting ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-3',
             )}
+            style={{ color: 'var(--cosmic-text-strong)' }}
           >
             {takeaway}
           </p>
@@ -139,20 +141,22 @@ export function EmergenceOverlay({
         {/* Divider */}
         <div
           className={cn(
-            'mx-auto w-12 h-px bg-white/[0.08]',
+            'mx-auto h-px w-12',
             'transition-all duration-700',
             revealStep >= 2 && !isExiting ? 'opacity-100 scale-x-100' : 'opacity-0 scale-x-0',
           )}
+          style={{ background: 'var(--cosmic-border-soft)' }}
         />
 
         {/* Reflection — Cormorant italic 17px */}
         {reflection && (
           <p
             className={cn(
-              'font-cormorant italic text-[17px] leading-relaxed text-white/60',
+              'font-cormorant italic text-[17px] leading-relaxed',
               'transition-all duration-1000',
               revealStep >= 3 && !isExiting ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-2',
             )}
+            style={{ color: 'var(--cosmic-text)' }}
           >
             {reflection}
           </p>
@@ -170,7 +174,7 @@ export function EmergenceOverlay({
             {memoryTags.map((tag, i) => (
               <span
                 key={i}
-                className="px-3 py-1 rounded-full text-[10px] tracking-[0.08em] uppercase bg-white/[0.04] border border-white/[0.06] text-white/35"
+                className="cosmic-ghost-pill px-3 py-1 text-[10px] tracking-[0.08em] uppercase"
               >
                 {tag.memory}
               </span>
@@ -181,10 +185,11 @@ export function EmergenceOverlay({
         {/* Skip hint */}
         <p
           className={cn(
-            'text-[10px] tracking-[0.12em] uppercase text-white/10',
+            'text-[10px] tracking-[0.12em] uppercase',
             'transition-opacity duration-1000 delay-[5000ms]',
             isActive ? 'opacity-100' : 'opacity-0',
           )}
+          style={{ color: 'var(--cosmic-text-faint)' }}
         >
           tap to continue
         </p>

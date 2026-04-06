@@ -1,9 +1,10 @@
 "use client"
 
-/* eslint-disable react/no-unescaped-entities */
+ 
 
-import Link from "next/link"
 import { ArrowLeft, Shield, Eye, Database, Lock, Users, Mail, Calendar, Heart, Sparkles } from "lucide-react"
+import Link from "next/link"
+
 import { useTranslation } from "../copy"
 
 const LAST_UPDATED = "December 7, 2025"

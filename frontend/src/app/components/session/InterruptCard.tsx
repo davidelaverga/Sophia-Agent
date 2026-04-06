@@ -9,13 +9,14 @@
 
 'use client';
 
-import { useState, useCallback } from 'react';
 import { Loader2 } from 'lucide-react';
-import { cn } from '../../lib/utils';
-import { errorCopy } from '../../lib/error-copy';
+import { useState, useCallback } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
+import { errorCopy } from '../../lib/error-copy';
 import { logger } from '../../lib/error-logger';
 import type { InterruptPayload, InterruptOption } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 
 // ============================================================================
 // TYPES
@@ -41,7 +42,7 @@ export function InterruptCard({
   interrupt,
   onSelect,
   onSnooze,
-  onDismiss,
+  onDismiss: _onDismiss,
   onImpulse,
   className,
   isLoading: externalLoading = false,
@@ -54,7 +55,7 @@ export function InterruptCard({
   // Get primary and secondary options (max 2 pills)
   const primaryOption = interrupt.options.find(o => o.style === 'primary');
   const secondaryOption = interrupt.options.find(o => o.style === 'secondary' || o.style !== 'primary');
-  const mainOptions = [primaryOption, secondaryOption].filter(Boolean).slice(0, 2) as InterruptOption[];
+  const mainOptions = [primaryOption, secondaryOption].filter(Boolean).slice(0, 2);
   const tertiaryOption = interrupt.options.find((option) =>
     option.style === 'ghost' && !mainOptions.some((visibleOption) => visibleOption.id === option.id)
   );
@@ -82,11 +83,6 @@ export function InterruptCard({
     onSnooze?.();
   }, [onSnooze]);
 
-  const _handleDismiss = useCallback(() => {
-    haptic('light');
-    onDismiss?.();
-  }, [onDismiss]);
-
   return (
     <div
       className={cn(
@@ -101,7 +97,7 @@ export function InterruptCard({
       aria-busy={isLoading}
     >
       {/* Whisper prompt — Cormorant italic */}
-      <p className="text-center font-cormorant italic text-[14px] text-white/40 mb-3">
+      <p className="mb-3 text-center font-cormorant italic text-[14px]" style={{ color: 'var(--cosmic-text)' }}>
         {interrupt.message}
       </p>
 
@@ -116,15 +112,13 @@ export function InterruptCard({
               onClick={() => handleOptionClick(option)}
               disabled={isLoading}
               className={cn(
-                'px-4 py-1.5 rounded-full',
+                'rounded-full px-4 py-1.5',
                 'text-[11px] tracking-[0.08em] uppercase',
-                'bg-white/[0.06] border border-white/[0.08]',
-                'text-white/60',
                 'transition-all duration-200',
-                'hover:bg-white/[0.10] hover:text-white/80',
                 'active:scale-[0.97]',
                 'disabled:cursor-not-allowed disabled:opacity-50',
-                'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                'cosmic-focus-ring',
+                isSelected ? 'cosmic-accent-pill' : 'cosmic-ghost-pill',
               )}
             >
               {isSelected && isLoading ? (
@@ -146,11 +140,9 @@ export function InterruptCard({
             onClick={() => void handleOptionClick(tertiaryOption)}
             disabled={isLoading}
             className={cn(
-              'text-[10px] tracking-[0.08em] text-white/25',
-              'hover:text-white/40',
+              'cosmic-whisper-button cosmic-focus-ring rounded text-[10px] tracking-[0.08em]',
               'transition-all duration-200',
               'disabled:cursor-not-allowed',
-              'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded'
             )}
           >
             {tertiaryOption.label}
@@ -165,11 +157,9 @@ export function InterruptCard({
             onClick={handleSnooze}
             disabled={isLoading}
             className={cn(
-              'text-[10px] tracking-[0.08em] text-white/20',
-              'hover:text-white/35',
+              'cosmic-whisper-button cosmic-focus-ring rounded text-[10px] tracking-[0.08em]',
               'transition-all duration-200',
               'disabled:cursor-not-allowed',
-              'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded'
             )}
           >
             remind me later

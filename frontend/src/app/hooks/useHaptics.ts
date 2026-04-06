@@ -42,10 +42,7 @@ function canVibrate(): boolean {
   return true
 }
 
-/**
- * Trigger haptic feedback using Capacitor on native, Vibration API on web
- */
-export async function haptic(pattern: HapticPattern = 'light'): Promise<void> {
+async function triggerHaptic(pattern: HapticPattern): Promise<void> {
   // Check for reduced motion preference
   if (typeof window !== 'undefined') {
     const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -91,6 +88,14 @@ export async function haptic(pattern: HapticPattern = 'light'): Promise<void> {
   } catch {
     // Silently fail if vibration not available
   }
+}
+
+/**
+ * Trigger haptic feedback using Capacitor on native, Vibration API on web.
+ * This is intentionally fire-and-forget for UI handlers.
+ */
+export function haptic(pattern: HapticPattern = 'light'): void {
+  void triggerHaptic(pattern)
 }
 
 /**

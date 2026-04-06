@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
 import { Mic, MessageCircle, Shield, Sparkles, ChevronRight, X } from "lucide-react"
-import { useOnboardingStore, type OnboardingStep } from "../stores/onboarding-store"
+import { useEffect, useState, useCallback } from "react"
+
 import { useTranslation } from "../copy"
 import { useHaptics } from "../hooks/useHaptics"
+import { useOnboardingStore, type OnboardingStep } from "../stores/onboarding-store"
 
 // Step configuration with icons
 const STEPS: OnboardingStep[] = ["welcome", "voice", "text", "privacy"]

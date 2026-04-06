@@ -322,20 +322,6 @@ function getNestedRecord(root: unknown, path: string[]): Record<string, unknown>
   return asRecord(current);
 }
 
-function getNestedString(root: unknown, path: string[]): string | null {
-  let current: unknown = root;
-
-  for (const key of path) {
-    const record = asRecord(current);
-    if (!record) {
-      return null;
-    }
-    current = record[key];
-  }
-
-  return asString(current);
-}
-
 function hasArtifactReceipt(artifact: Record<string, unknown> | null): boolean {
   if (!artifact) {
     return false;

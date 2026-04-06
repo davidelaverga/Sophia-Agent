@@ -1,6 +1,7 @@
 "use client"
 
 import { useMemo } from "react"
+
 import { useEmotionStore } from "../stores/emotion-store"
 
 // ─── Color bands ─────────────────────────────────────────────────────────────

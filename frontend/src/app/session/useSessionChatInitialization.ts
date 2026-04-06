@@ -1,9 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import type { MutableRefObject } from 'react';
+
+import type { BootstrapData } from '../hooks/useSessionBootstrap';
 import { normalizeGreetingForDisplay } from '../lib/greeting-normalizer';
 import type { ContextMode, PresetType, SessionClientStore, SessionMessage } from '../lib/session-types';
-import type { BootstrapData } from '../hooks/useSessionBootstrap';
 import type { MemoryHighlight } from '../types/session';
+
 import { consumeRefreshInterruptHint } from './refresh-interrupt-hint';
 
 type ChatMessage = {
@@ -174,8 +176,8 @@ export function useSessionChatInitialization({
       effectiveGreeting = session.greetingMessage!;
       effectiveGreetingId = session.greetingMessageId || greetingMessageId;
     } else if (hasBootstrapGreeting) {
-      effectiveGreeting = bootstrap!.greetingMessage;
-      effectiveGreetingId = bootstrap!.messageId;
+      effectiveGreeting = bootstrap.greetingMessage;
+      effectiveGreetingId = bootstrap.messageId;
     } else {
       effectiveGreeting = initialGreeting;
       effectiveGreetingId = greetingMessageId;

@@ -10,9 +10,10 @@
  * Auth flow: Discord Login → Consent Gate → Chat (protected)
  */
 
-import { useChatRouteExperience } from "./useChatRouteExperience";
 import { ConversationView } from "../components/ConversationView";
 import { ProtectedRoute } from "../components/ProtectedRoute";
+
+import { useChatRouteExperience } from "./useChatRouteExperience";
 
 function ChatRouteShell() {
   const routeExperience = useChatRouteExperience();

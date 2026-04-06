@@ -1,8 +1,6 @@
 "use client"
 
-import { debugWarn } from "../debug-logger"
 import { authBypassEnabled } from "../auth/dev-bypass"
-
 /**
  * Unified API Client
  * ==================

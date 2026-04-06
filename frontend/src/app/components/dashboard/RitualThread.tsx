@@ -7,6 +7,7 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+
 import { useDeviceFidelity } from '../../hooks/useDeviceFidelity';
 
 interface RitualThreadProps {
@@ -62,10 +63,10 @@ export function RitualThread({ selectedRitual, isActive }: RitualThreadProps) {
       if (selectedRitual && !isActive) {
         const ritualDot = document.querySelector(
           `[data-ritual="${selectedRitual}"] span:first-child`
-        ) as HTMLElement | null;
+        );
 
         // Target the actual mic element, not viewport center
-        const micEl = document.querySelector('[data-onboarding="mic-cta"]') as HTMLElement | null;
+        const micEl = document.querySelector('[data-onboarding="mic-cta"]');
 
         if (ritualDot && micEl) {
           const rect = ritualDot.getBoundingClientRect();

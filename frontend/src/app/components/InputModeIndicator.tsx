@@ -1,9 +1,10 @@
 "use client"
 
 import { MessageSquare, AlertCircle, RotateCcw } from "lucide-react"
+
+import { useTranslation } from "../copy"
 import { useUiStore as useFocusModeStore } from "../stores/ui-store"
 import { useVoiceStore as useVoiceFallbackStore } from "../stores/voice-store"
-import { useTranslation } from "../copy"
 
 export function InputModeIndicator() {
   const { t } = useTranslation()

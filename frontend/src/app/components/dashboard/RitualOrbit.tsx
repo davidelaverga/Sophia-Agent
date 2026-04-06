@@ -77,9 +77,9 @@ export function RitualOrbit({
   return (
     <div className="relative mx-auto aspect-square w-[clamp(320px,50vmin,440px)]">
       {/* Orbit trace rings */}
-      <div className="absolute inset-1/2 h-[10rem] w-[10rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/5 dark:border-white/[0.06]" />
-      <div className="absolute inset-1/2 h-[15rem] w-[15rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/[0.03] dark:border-white/[0.04]" />
-      <div className="absolute inset-1/2 h-[18.5rem] w-[18.5rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-black/[0.02] dark:border-white/[0.03]" />
+      <div className="absolute inset-1/2 h-[10rem] w-[10rem] -translate-x-1/2 -translate-y-1/2 rounded-full border" style={{ borderColor: 'var(--cosmic-border)' }} />
+      <div className="absolute inset-1/2 h-[15rem] w-[15rem] -translate-x-1/2 -translate-y-1/2 rounded-full border" style={{ borderColor: 'var(--cosmic-border-soft)' }} />
+      <div className="absolute inset-1/2 h-[18.5rem] w-[18.5rem] -translate-x-1/2 -translate-y-1/2 rounded-full border" style={{ borderColor: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)' }} />
 
       {/* Thread is rendered by RitualThread canvas overlay (EnhancedFieldDashboard) */}
 

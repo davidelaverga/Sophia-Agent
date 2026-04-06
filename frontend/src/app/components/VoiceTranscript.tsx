@@ -1,10 +1,12 @@
 "use client"
 
-import { useRef, useEffect, useState, useMemo, useCallback, memo } from "react"
 import { Eye, EyeOff } from "lucide-react"
+import { useRef, useEffect, useState, useMemo, useCallback, memo } from "react"
+
+import { useCopy, useTranslation } from "../copy"
 import { useChatStore } from "../stores/chat-store"
 import type { ChatMessage } from "../stores/chat-store"
-import { useCopy, useTranslation } from "../copy"
+
 import { MessageBubble } from "./chat/MessageBubble"
 
 const STORAGE_KEY = "sophia-voice-transcript-visible"

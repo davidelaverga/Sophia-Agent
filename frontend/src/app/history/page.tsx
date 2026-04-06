@@ -1,7 +1,5 @@
 "use client"
 
-import { useState, useMemo, useCallback } from "react"
-import { useRouter } from "next/navigation"
 import {
   ArrowLeft,
   History,
@@ -12,16 +10,19 @@ import {
   MessageCircle,
   BookOpen,
 } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { useState, useMemo, useCallback } from "react"
+
+import { haptic } from "../hooks/useHaptics"
+import { humanizeTime } from "../lib/humanize-time"
+import type { PresetType } from "../lib/session-types"
 import {
   useConversationStore,
   selectIsLoadingConversation,
 } from "../stores/conversation-store"
-import { useSessionHistoryStore, type SessionHistoryEntry } from "../stores/session-history-store"
 import { useRecapStore } from "../stores/recap-store"
+import { useSessionHistoryStore, type SessionHistoryEntry } from "../stores/session-history-store"
 import { useUiStore } from "../stores/ui-store"
-import { haptic } from "../hooks/useHaptics"
-import { humanizeTime } from "../lib/humanize-time"
-import type { PresetType } from "../lib/session-types"
 
 // ─── Tab definitions ──────────────────────────────────────────────────────────
 

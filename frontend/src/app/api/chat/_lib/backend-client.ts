@@ -1,4 +1,5 @@
 import { getServerAuthToken } from '../../../lib/auth/server-auth';
+
 import { BACKEND_URL, IS_PRODUCTION, SOPHIA_ASSISTANT_ID, secureLog } from './config';
 
 export interface BackendStreamPayload {

@@ -8,8 +8,6 @@
 
 'use client';
 
-import { useMemo } from 'react';
-import { useRouter } from 'next/navigation';
 import { 
   Clock, 
   ChevronRight, 
@@ -20,13 +18,16 @@ import {
   Sparkles,
   Brain,
 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useRouter } from 'next/navigation';
+import { useMemo } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
+import { humanizeTime } from '../../lib/humanize-time';
+import type { PresetType, ContextMode } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 import { useConversationStore } from '../../stores/conversation-store';
 import { useSessionHistoryStore, type SessionHistoryEntry } from '../../stores/session-history-store';
 import { useUiStore } from '../../stores/ui-store';
-import { humanizeTime } from '../../lib/humanize-time';
-import type { PresetType, ContextMode } from '../../lib/session-types';
 
 // =============================================================================
 // CONFIGS

@@ -1,12 +1,14 @@
 import { useCallback, useRef } from 'react';
+
 import { emitTiming } from '../lib/telemetry';
-import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 import {
   extractStreamMetadata,
   normalizeStreamDataPart,
   parseArtifactsPayload,
   parseInterruptPayload,
 } from '../session/stream-contract-adapters';
+import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
+
 import type { UseCompanionStreamContractParams } from './types';
 
 export function useCompanionStreamContract({

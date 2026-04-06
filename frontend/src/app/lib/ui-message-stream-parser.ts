@@ -49,7 +49,7 @@ export function extractTextFromUiMessageStreamDump(value: string): string {
 
   const text = chunks
     .filter((chunk) => chunk.type === 'text-delta' && typeof chunk.delta === 'string')
-    .map((chunk) => chunk.delta as string)
+    .map((chunk) => chunk.delta)
     .join('');
 
   const extracted = text.trim().length > 0 ? text : value;

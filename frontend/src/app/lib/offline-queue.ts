@@ -69,11 +69,11 @@ export type ProcessorFn<T = unknown> = (
 
 export class OfflineSyncQueue<T = unknown> {
   private queue: QueueItem<T>[] = [];
-  private processors: Map<string, ProcessorFn<T>> = new Map();
+  private processors = new Map<string, ProcessorFn<T>>();
   private isProcessing = false;
   private processIntervalId: ReturnType<typeof setInterval> | null = null;
   private config: Required<QueueConfig>;
-  private listeners: Set<(queue: QueueItem<T>[]) => void> = new Set();
+  private listeners = new Set<(queue: QueueItem<T>[]) => void>();
 
   constructor(config: QueueConfig = {}) {
     this.config = {
@@ -137,7 +137,7 @@ export class OfflineSyncQueue<T = unknown> {
 
     // Try to process immediately if online
     if (this.isOnline()) {
-      this.processQueue();
+      void this.processQueue();
     }
 
     return item;
@@ -198,7 +198,7 @@ export class OfflineSyncQueue<T = unknown> {
    */
   retry(id: string): boolean {
     const item = this.queue.find((item) => item.id === id);
-    if (!item || item.status !== 'failed') return false;
+    if (item?.status !== 'failed') return false;
 
     item.status = 'pending';
     item.nextRetryAt = null;
@@ -206,7 +206,7 @@ export class OfflineSyncQueue<T = unknown> {
     this.notifyListeners();
 
     if (this.isOnline()) {
-      this.processQueue();
+      void this.processQueue();
     }
 
     return true;
@@ -229,7 +229,7 @@ export class OfflineSyncQueue<T = unknown> {
       this.saveToStorage();
       this.notifyListeners();
       if (this.isOnline()) {
-        this.processQueue();
+        void this.processQueue();
       }
     }
 
@@ -277,7 +277,7 @@ export class OfflineSyncQueue<T = unknown> {
 
     this.processIntervalId = setInterval(() => {
       if (this.isOnline()) {
-        this.processQueue();
+        void this.processQueue();
       }
     }, this.config.processInterval);
   }
@@ -481,7 +481,7 @@ export class OfflineSyncQueue<T = unknown> {
 
   private handleOnline = (): void => {
     if (this.config.autoProcessOnOnline) {
-      this.processQueue();
+      void this.processQueue();
     }
   };
 

@@ -68,7 +68,7 @@ export async function connectVoiceSessionFreshSafely(
   try {
     const ws = await connect(baseUrl, sessionId, handlers, token)
     return { result: ws }
-  } catch (firstError) {
+  } catch {
     if (!useSingleRetry) {
       return { result: null }
     }

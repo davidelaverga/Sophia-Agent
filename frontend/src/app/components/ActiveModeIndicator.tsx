@@ -1,8 +1,9 @@
 "use client"
 
 import { Mic } from "lucide-react"
-import { useUiStore as useFocusModeStore } from "../stores/ui-store"
+
 import { useTranslation } from "../copy"
+import { useUiStore as useFocusModeStore } from "../stores/ui-store"
 
 export function ActiveModeIndicator() {
   const { t } = useTranslation()

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+
 import { logger } from '../lib/error-logger';
 import type { InterruptPayload } from '../lib/session-types';
 
@@ -176,7 +177,7 @@ export function useSessionVoiceCommandSystem({
 
     const primaryOption = options.find((option) => option.style === 'primary');
     const secondaryOption = options.find((option) => option.style === 'secondary' || option.style !== 'primary');
-    const visibleOptions = [primaryOption, secondaryOption].filter(Boolean) as typeof options;
+    const visibleOptions = [primaryOption, secondaryOption].filter(Boolean);
 
     const optionById = (optionId: string) => options.find((option) => option.id === optionId);
     const selectOption = (optionId: string) => {

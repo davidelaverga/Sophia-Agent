@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
+
 import { haptic } from '../hooks/useHaptics';
-import { chatSanitizer } from '../lib/sanitize';
 import { debugLog } from '../lib/debug-logger';
+import { chatSanitizer } from '../lib/sanitize';
+
 import { shouldBlockOutboundDuplicate, shouldBlockSubmitDuplicate } from './send-gate';
 
 type ChatMessage = {

@@ -1,11 +1,12 @@
 import { fireEvent, render, screen } from '@testing-library/react'
+import type * as NextNavigationModule from 'next/navigation'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const pushMock = vi.fn()
 const showToastMock = vi.fn()
 
 vi.mock('next/navigation', async () => {
-  const actual = await vi.importActual<typeof import('next/navigation')>('next/navigation')
+  const actual = await vi.importActual<typeof NextNavigationModule>('next/navigation')
   return {
     ...actual,
     useRouter: () => ({

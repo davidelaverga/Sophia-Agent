@@ -1,18 +1,19 @@
 import { useCallback, useState } from 'react';
+
 import { haptic } from '../hooks/useHaptics';
-import { useSessionHistoryStore } from '../stores/session-history-store';
-import { useRecapStore } from '../stores/recap-store';
-import { useUiStore as useUiToastStore } from '../stores/ui-store';
 import {
   endSession as endSessionAPI,
   isSuccess,
   submitDebriefDecision,
 } from '../lib/api/sessions-api';
 import { mapBackendArtifactsToRecapV1 } from '../lib/artifacts-adapter';
-import { logger } from '../lib/error-logger';
-import { teardownSessionClientState } from '../lib/session-teardown';
-import { markRecentSessionEnd } from '../lib/recent-session-end';
 import { errorCopy } from '../lib/error-copy';
+import { logger } from '../lib/error-logger';
+import { markRecentSessionEnd } from '../lib/recent-session-end';
+import { teardownSessionClientState } from '../lib/session-teardown';
+import { useRecapStore } from '../stores/recap-store';
+import { useSessionHistoryStore } from '../stores/session-history-store';
+import { useUiStore as useUiToastStore } from '../stores/ui-store';
 import type { PresetType, ContextMode, RitualArtifacts } from '../types/session';
 
 interface DebriefData {
@@ -303,7 +304,6 @@ export function useSessionExitFlow({
     sessionContextMode,
     messageCount,
     currentArtifacts,
-    finalizeExitToRecap,
   ]);
 
   // ── Emergence → Feedback → Recap flow ─────────────────────────────────────

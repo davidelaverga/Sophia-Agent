@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
-import { renderHook, act } from "@testing-library/react"
 import { CallingState } from "@stream-io/video-react-sdk"
+import { renderHook, act } from "@testing-library/react"
+import { describe, it, expect, vi, beforeEach } from "vitest"
+
 import { useStreamVoice, type StreamVoiceCredentials } from "../../app/hooks/useStreamVoice"
 
 // --- Stream SDK mocks ---
@@ -11,7 +12,6 @@ const mockCameraDisable = vi.fn().mockResolvedValue(undefined)
 const mockMicrophoneEnable = vi.fn().mockResolvedValue(undefined)
 const mockDisconnectUser = vi.fn().mockResolvedValue(undefined)
 
-let callingStateCallback: ((state: CallingState) => void) | null = null
 let remoteParticipantsCallbacks: Array<
   (participants: Array<{ sessionId: string }>) => void
 > = []
@@ -24,8 +24,7 @@ const mockCall = {
   bindAudioElement: vi.fn(() => vi.fn()),
   state: {
     callingState$: {
-      subscribe: vi.fn((cb: (state: CallingState) => void) => {
-        callingStateCallback = cb
+      subscribe: vi.fn((_cb: (state: CallingState) => void) => {
         return { unsubscribe: vi.fn() }
       }),
     },
@@ -61,7 +60,6 @@ const validCredentials: StreamVoiceCredentials = {
 describe("useStreamVoice", () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    callingStateCallback = null
     remoteParticipantsCallbacks = []
   })
 

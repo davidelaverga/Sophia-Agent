@@ -2,11 +2,12 @@
 
 import { useEffect, useState } from "react"
 import { useShallow } from "zustand/react/shallow"
+
+import { useTranslation } from "../copy"
 import { postFeedback, type FeedbackTag } from "../lib/api/feedback"
+import { emitTelemetry } from "../lib/telemetry"
 import { useChatStore } from "../stores/chat-store"
 import { selectFeedbackState } from "../stores/selectors"
-import { emitTelemetry } from "../lib/telemetry"
-import { useTranslation } from "../copy"
 
 const TAGS = [
   { id: "clarity", key: "feedback.tags.clarity" },
@@ -106,7 +107,7 @@ export function FeedbackStrip({ turnId }: FeedbackStripProps) {
                 disabled={submitting}
                 onClick={() => {
                   setSelectedTag(tag.id)
-                  handleSubmit(submitted, tag.id)
+                  void handleSubmit(submitted, tag.id)
                 }}
               >
                 {t(tag.key)}

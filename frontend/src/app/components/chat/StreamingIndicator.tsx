@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
 import { RefreshCw } from "lucide-react"
-import { usePresenceStore } from "../../stores/presence-store"
-import { useChatStore } from "../../stores/chat-store"
+import { useEffect, useMemo, useState } from "react"
+
 import { useCopy, useTranslation } from "../../copy"
+import { useChatStore } from "../../stores/chat-store"
+import { usePresenceStore } from "../../stores/presence-store"
 
 export function StreamingIndicator() {
   const copy = useCopy()

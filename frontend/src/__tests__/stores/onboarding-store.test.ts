@@ -1,10 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { extractFirstName, resolveOnboardingCopy } from '../../app/onboarding/personalization'
+import type * as OnboardingStoreModule from '../../app/stores/onboarding-store'
 
-type OnboardingStoreModule = typeof import('../../app/stores/onboarding-store')
-
-async function loadOnboardingStore(): Promise<OnboardingStoreModule> {
+async function loadOnboardingStore(): Promise<typeof OnboardingStoreModule> {
   vi.resetModules()
   return import('../../app/stores/onboarding-store')
 }

@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server"
+import { type NextRequest, NextResponse } from "next/server"
 
 import { DEFAULT_LOCALE, LOCALE_COOKIE_NAME, localeFromAcceptLanguage } from "./src/app/copy/config"
 

@@ -116,7 +116,7 @@ function installStartEndTracker(page: Page): void {
 async function assertCalledStart(page: Page): Promise<void> {
   const state = trackerByPage.get(page);
   expect(state, 'Tracker no inicializado para la página').toBeDefined();
-  expect(state!.startCalls, 'Expected at least one POST /api/sessions/start call').toBeGreaterThan(0);
+  expect(state.startCalls, 'Expected at least one POST /api/sessions/start call').toBeGreaterThan(0);
 }
 
 async function clearSophiaStorage(page: Page): Promise<void> {

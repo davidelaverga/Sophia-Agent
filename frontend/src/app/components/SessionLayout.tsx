@@ -8,18 +8,20 @@
 
 'use client';
 
-import { ReactNode, useState, useEffect, type RefObject } from 'react';
+import { ArrowLeft, Settings, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Settings, X, WifiOff } from 'lucide-react';
-import { cn } from '../lib/utils';
-import { haptic } from '../hooks/useHaptics';
-import { useFocusTrap } from '../hooks/useFocusTrap';
+import { type ReactNode, useState, useEffect, type RefObject } from 'react';
+
 import { useChromeFade } from '../hooks/useChromeFade';
+import { useFocusTrap } from '../hooks/useFocusTrap';
+import { haptic } from '../hooks/useHaptics';
+import { debugLog } from '../lib/debug-logger';
+import type { SessionClientStore } from '../lib/session-types';
+import { cn } from '../lib/utils';
 import { useConnectivityStore, selectStatus } from '../stores/connectivity-store';
 import { useUiStore } from '../stores/ui-store';
-import { debugLog } from '../lib/debug-logger';
+
 import { PresenceField, type PresenceFieldHandle } from './presence-field';
-import type { SessionClientStore } from '../lib/session-types';
 
 interface SessionLayoutProps {
   store: SessionClientStore;
@@ -34,7 +36,7 @@ interface SessionLayoutProps {
 }
 
 export function SessionLayout({
-  store,
+  store: _store,
   children,
   onEndSession,
   isEnding,
@@ -136,7 +138,7 @@ export function SessionLayout({
   return (
     <div
       className={cn(
-        'flex flex-col h-screen overflow-x-hidden bg-[#030308] text-white transition-opacity duration-300',
+        'flex h-screen flex-col overflow-x-hidden bg-[var(--bg)] text-white transition-opacity duration-300',
         isVisible ? 'opacity-100' : 'opacity-0'
       )}
       onPointerDown={handleRootPointerDown}
@@ -157,7 +159,7 @@ export function SessionLayout({
         <button
           onClick={handleBackClick}
           aria-label="Back to home"
-          className="pointer-events-auto text-[10px] tracking-[0.14em] lowercase text-white/20 hover:text-white/40 transition-colors duration-300 px-3 py-1.5 rounded-full hover:bg-white/[0.04] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+          className="cosmic-whisper-button cosmic-focus-ring pointer-events-auto rounded-full px-3 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300"
         >
           <ArrowLeft className="w-4 h-4" />
         </button>
@@ -170,11 +172,10 @@ export function SessionLayout({
               disabled={isEnding}
               title={isOffline ? 'Cannot end session while offline' : 'End session'}
               className={cn(
-                'text-[10px] tracking-[0.14em] lowercase transition-colors duration-300 px-3 py-1.5 rounded-full',
-                'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                'cosmic-focus-ring rounded-full px-3 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300',
                 isOffline
-                  ? 'text-white/15 cursor-not-allowed'
-                  : 'text-white/20 hover:text-white/40 hover:bg-white/[0.04]',
+                  ? 'cursor-not-allowed text-[var(--cosmic-text-faint)]'
+                  : 'cosmic-whisper-button',
                 isEnding && 'opacity-50 cursor-not-allowed'
               )}
             >
@@ -184,13 +185,14 @@ export function SessionLayout({
             <div className="flex items-center gap-1 animate-fadeIn">
               <button
                 onClick={handleCancelEnd}
-                className="text-[10px] tracking-[0.14em] lowercase text-white/20 hover:text-white/40 transition-colors duration-300 px-2.5 py-1.5 rounded-full focus:outline-none"
+                className="cosmic-whisper-button cosmic-focus-ring rounded-full px-2.5 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300"
               >
                 cancel
               </button>
               <button
                 onClick={handleConfirmEnd}
-                className="text-[10px] tracking-[0.14em] lowercase text-red-400/60 hover:text-red-400 transition-colors duration-300 px-2.5 py-1.5 rounded-full hover:bg-red-500/[0.06] focus:outline-none"
+                className="cosmic-focus-ring rounded-full px-2.5 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300 hover:bg-[color-mix(in_srgb,var(--sophia-error)_10%,transparent)]"
+                style={{ color: 'color-mix(in srgb, var(--sophia-error) 70%, white 10%)' }}
               >
                 end session
               </button>
@@ -204,7 +206,7 @@ export function SessionLayout({
             }}
             data-onboarding="header-settings"
             aria-label="Open settings"
-            className="text-[10px] tracking-[0.14em] lowercase text-white/20 hover:text-white/40 transition-colors duration-300 px-3 py-1.5 rounded-full hover:bg-white/[0.04] focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+            className="cosmic-whisper-button cosmic-focus-ring rounded-full px-3 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300"
           >
             <Settings className="w-4 h-4" />
           </button>
@@ -219,7 +221,7 @@ export function SessionLayout({
       {/* Back Confirmation Modal - when Sophia is responding */}
       {showBackConfirm && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn"
+          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
           onClick={handleCancelBack}
         >
           <div 
@@ -227,20 +229,20 @@ export function SessionLayout({
             role="dialog"
             aria-modal="true"
             aria-labelledby="back-confirm-title"
-            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 border border-white/[0.06] animate-scaleIn"
+            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
               {/* Thinking indicator */}
-              <div className="w-12 h-12 rounded-full bg-white/[0.06] flex items-center justify-center">
-                <div className="w-6 h-6 border-2 border-white/10 border-t-white/40 rounded-full animate-spin" />
+              <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: 'var(--cosmic-panel-soft)' }}>
+                <div className="h-6 w-6 animate-spin rounded-full border-2" style={{ borderColor: 'var(--cosmic-border-soft)', borderTopColor: 'var(--cosmic-text-whisper)' }} />
               </div>
               
               <div className="space-y-2">
-                <h3 id="back-confirm-title" className="text-lg font-semibold text-white/80">
+                <h3 id="back-confirm-title" className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
                   Sophia is still responding
                 </h3>
-                <p className="text-sm text-white/40">
+                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
                   If you leave now, her response will be saved but may be incomplete.
                 </p>
               </div>
@@ -248,13 +250,13 @@ export function SessionLayout({
               <div className="flex gap-3 w-full mt-2">
                 <button
                   onClick={handleCancelBack}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.06] border border-white/[0.08] text-white/60 font-medium transition-colors hover:bg-white/[0.10] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                  className="cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
                 >
                   Stay
                 </button>
                 <button
                   onClick={handleConfirmBack}
-                  className="flex-1 py-2.5 px-4 rounded-xl bg-white/[0.12] text-white/80 font-medium transition-colors hover:bg-white/[0.16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                  className="cosmic-accent-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
                 >
                   Leave anyway
                 </button>
@@ -267,7 +269,7 @@ export function SessionLayout({
       {/* Offline Warning Modal - prevents ending session while offline */}
       {showOfflineWarning && (
         <div 
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm animate-fadeIn"
+          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
           onClick={() => setShowOfflineWarning(false)}
         >
           <div 
@@ -275,20 +277,20 @@ export function SessionLayout({
             role="dialog"
             aria-modal="true"
             aria-labelledby="offline-warning-title"
-            className="w-[90%] max-w-sm bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-2xl p-6 border border-white/[0.06] animate-scaleIn"
+            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex flex-col items-center text-center gap-4">
               {/* Offline indicator */}
-              <div className="w-12 h-12 rounded-full bg-amber-500/10 flex items-center justify-center">
-                <WifiOff className="w-6 h-6 text-amber-500" />
+              <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: 'color-mix(in srgb, var(--cosmic-amber) 12%, transparent)' }}>
+                <WifiOff className="h-6 w-6" style={{ color: 'var(--cosmic-amber)' }} />
               </div>
               
               <div className="space-y-2">
-                <h3 id="offline-warning-title" className="text-lg font-semibold text-white/80">
+                <h3 id="offline-warning-title" className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
                   You&apos;re offline
                 </h3>
-                <p className="text-sm text-white/40">
+                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
                   Please wait until your connection is restored before ending the session. 
                   This ensures your conversation is saved properly.
                 </p>
@@ -296,7 +298,7 @@ export function SessionLayout({
               
               <button
                 onClick={() => setShowOfflineWarning(false)}
-                className="w-full py-2.5 px-4 rounded-xl bg-white/[0.12] text-white/80 font-medium transition-colors hover:bg-white/[0.16] focus:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                className="cosmic-accent-pill cosmic-focus-ring w-full rounded-xl px-4 py-2.5 font-medium transition-colors"
               >
                 Got it
               </button>

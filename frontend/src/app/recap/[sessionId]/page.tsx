@@ -14,17 +14,19 @@
 
 'use client';
 
-import { useCallback, useMemo } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { haptic } from '../../hooks/useHaptics';
-import { useRecapStore } from '../../stores/recap-store';
-import { useUiStore } from '../../stores/ui-store';
-import type { MemoryDecision } from '../../lib/recap-types';
+import { useCallback, useMemo } from 'react';
+
+import { DevDiagnosticsPanel } from '../../components/DevDiagnosticsPanel';
 import {
   RecapMemoryOrbit,
   RecapEmptyState,
 } from '../../components/recap';
-import { DevDiagnosticsPanel } from '../../components/DevDiagnosticsPanel';
+import { haptic } from '../../hooks/useHaptics';
+import type { MemoryDecision } from '../../lib/recap-types';
+import { useRecapStore } from '../../stores/recap-store';
+import { useUiStore } from '../../stores/ui-store';
+
 import {
   RecapBottomActionBar,
   RecapPageFloatingHeader,

@@ -1,13 +1,13 @@
 "use client";
 
 import { useChatStore } from "../stores/chat-store";
-import { useSessionStore } from "../stores/session-store";
+import { useConnectivityStore } from "../stores/connectivity-store";
+import { useConversationStore } from "../stores/conversation-store";
 import { useMessageMetadataStore } from "../stores/message-metadata-store";
 import { useRecapStore } from "../stores/recap-store";
-import { useConnectivityStore } from "../stores/connectivity-store";
 import { useSessionHistoryStore } from "../stores/session-history-store";
 import { useSessionSnapshotStore } from "../stores/session-snapshot-store";
-import { useConversationStore } from "../stores/conversation-store";
+import { useSessionStore } from "../stores/session-store";
 import { SESSION_SNAPSHOT_STORAGE_KEY } from "../types/session-snapshot";
 
 const PENDING_INTERRUPT_STORAGE_KEY = "sophia_pending_interrupt";

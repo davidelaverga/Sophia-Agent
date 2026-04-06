@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+
 import { shouldBlockOutboundDuplicate, shouldBlockSubmitDuplicate, type SendFingerprint } from '../../app/session/send-gate';
 
 describe('send-gate', () => {

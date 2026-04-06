@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+
 import { extractTextFromUiMessageStreamDump, isUiMessageStreamDump } from '../../app/lib/ui-message-stream-parser';
 
 describe('ui-message-stream-parser', () => {

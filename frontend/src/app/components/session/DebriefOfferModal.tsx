@@ -8,10 +8,11 @@
 
 'use client';
 
-import { useCallback } from 'react';
 import { MessageCircle } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useCallback } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 
 // ============================================================================
 // TYPES

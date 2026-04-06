@@ -9,6 +9,7 @@
  */
 
 import { NextResponse } from 'next/server';
+
 import { getServerAuthHeader, getServerAuthToken } from '../../../lib/auth/server-auth';
 import { logger } from '../../../lib/error-logger';
 

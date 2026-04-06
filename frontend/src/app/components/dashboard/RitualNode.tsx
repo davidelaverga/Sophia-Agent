@@ -2,8 +2,8 @@
 
 import { useState } from 'react';
 
-import { cn } from '../../lib/utils';
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 import type { ContextMode } from '../../types/session';
 
 import type { RitualConfig } from './types';
@@ -84,11 +84,12 @@ export function RitualNode({
     >
       <span
         className={cn(
-          'relative flex h-[50px] w-[50px] items-center justify-center rounded-full border backdrop-blur-xl transition-all duration-300',
-          'bg-white/92 border-black/10 shadow-[0_10px_30px_rgba(0,0,0,0.08)]',
-          'dark:bg-white/[0.06] dark:border-white/[0.08] dark:shadow-[0_12px_40px_rgba(0,0,0,0.35)]',
-          isSelected && 'border-black/20 shadow-[0_14px_40px_rgba(0,0,0,0.12)] dark:border-white/[0.16] dark:shadow-[0_0_32px_rgba(124,92,170,0.22)]'
+          'cosmic-surface-panel relative flex h-[50px] w-[50px] items-center justify-center rounded-full transition-all duration-300'
         )}
+        style={isSelected ? {
+          borderColor: 'var(--cosmic-border-strong)',
+          boxShadow: '0 0 32px color-mix(in srgb, var(--sophia-purple) 22%, transparent)',
+        } : undefined}
       >
         {isSuggested && !isSelected && (
           <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--sophia-glow)] shadow-[0_0_10px_var(--sophia-glow)]" />
@@ -96,22 +97,22 @@ export function RitualNode({
         <Icon
           className={cn(
             'h-5 w-5 transition-colors duration-300',
-            isSelected ? 'text-[var(--sophia-purple)]' : 'text-black/45 dark:text-white/55',
-            showDescription && !isSelected && 'text-black/60 dark:text-white/72'
           )}
+          style={{ color: isSelected ? 'var(--sophia-purple)' : showDescription ? 'var(--cosmic-text)' : 'var(--cosmic-text-muted)' }}
         />
       </span>
 
-      <span className={cn('whitespace-nowrap text-[11px] font-normal tracking-[0.05em]', isSelected ? 'text-black/65 dark:text-white/65' : 'text-black/28 dark:text-white/28')}>
+      <span className="whitespace-nowrap text-[11px] font-normal tracking-[0.05em]" style={{ color: isSelected ? 'var(--cosmic-text)' : 'var(--cosmic-text-whisper)' }}>
         {label.title}
       </span>
 
       <span
         data-visible={showDescription ? 'true' : 'false'}
         className={cn(
-          'whitespace-nowrap text-[10px] font-light leading-snug text-black/28 transition-all duration-300 dark:text-white/22',
+          'whitespace-nowrap text-[10px] font-light leading-snug transition-all duration-300',
           showDescription ? 'translate-y-0 opacity-100' : '-translate-y-1 opacity-0'
         )}
+        style={{ color: 'var(--cosmic-text-whisper)' }}
       >
         {label.description}
       </span>

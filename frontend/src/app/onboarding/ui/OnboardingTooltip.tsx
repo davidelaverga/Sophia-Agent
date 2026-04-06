@@ -1,9 +1,11 @@
 "use client"
 
-import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { ChevronLeft, ChevronRight, Sparkles, Volume2, VolumeX } from "lucide-react"
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react"
+
 import { cn } from "../../lib/utils"
 import type { OnboardingTargetRect, OnboardingTooltipPosition } from "../types"
+
 import {
   TOOLTIP_DEFAULT_HEIGHT,
   TOOLTIP_MAX_WIDTH,

@@ -11,19 +11,19 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+
+import { logger } from '../lib/error-logger';
 import type { 
   InterruptPayload, 
   PendingInterrupt,
   ResolvedInterrupt,
   ResumePayload,
-  InterruptOption as _InterruptOption,
   ContextMode,
   PresetType,
 } from '../lib/session-types';
-import { useUiStore as useUiToastStore } from '../stores/ui-store';
-import { useMessageMetadataStore } from '../stores/message-metadata-store';
-import { logger } from '../lib/error-logger';
 import { emitTiming } from '../lib/telemetry';
+import { useMessageMetadataStore } from '../stores/message-metadata-store';
+import { useUiStore as useUiToastStore } from '../stores/ui-store';
 
 // ============================================================================
 // CONSTANTS
@@ -173,7 +173,7 @@ function loadInterruptFromStorage(sessionId: string): StorageLoadResult {
     const pending = stored[sessionId];
     
     // Check if expired (interrupts expire after 10 minutes)
-    if (pending && pending.receivedAt) {
+    if (pending?.receivedAt) {
       const receivedAt = new Date(pending.receivedAt).getTime();
       const now = Date.now();
       const tenMinutes = 10 * 60 * 1000;

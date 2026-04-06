@@ -27,7 +27,7 @@ export function WhisperIndicator({ opacity = 1 }: { opacity?: number }) {
       className="fixed bottom-[18px] left-1/2 -translate-x-1/2 z-25 pointer-events-none"
       style={{ opacity, transition: "opacity 0.6s ease" }}
     >
-      <span className="text-[10px] tracking-[0.18em] lowercase text-white/10 transition-colors duration-1000">
+      <span className="text-[10px] tracking-[0.18em] lowercase transition-colors duration-1000" style={{ color: 'var(--cosmic-text-faint)' }}>
         {label}
       </span>
     </div>

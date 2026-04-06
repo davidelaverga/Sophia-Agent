@@ -1,7 +1,9 @@
 import type { MutableRefObject } from 'react';
+
 import type { BootstrapData } from '../hooks/useSessionBootstrap';
 import type { ContextMode, PresetType, SessionClientStore, SessionMessage } from '../lib/session-types';
 import type { MemoryHighlight } from '../types/session';
+
 import { useSessionChatInitialization } from './useSessionChatInitialization';
 
 type ChatMessage = {

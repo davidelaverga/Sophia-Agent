@@ -1,7 +1,8 @@
 import { useMemo } from 'react';
+
 import type { UIMessage } from '../components/session';
-import { getPresenceDisplay, getContextualPlaceholder } from '../lib/sophia-presence';
 import type { RitualArtifacts } from '../lib/session-types';
+import { getPresenceDisplay, getContextualPlaceholder } from '../lib/sophia-presence';
 import type { ContextMode, PresetType } from '../types/session';
 
 interface UseSessionUiDerivedStateParams {

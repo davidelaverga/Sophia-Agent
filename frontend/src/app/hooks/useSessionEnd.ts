@@ -10,15 +10,17 @@
 
 'use client';
 
-import { useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSessionStore } from '../stores/session-store';
-import { useSessionHistoryStore } from '../stores/session-history-store';
+import { useState, useCallback } from 'react';
+
 import { endSession as endSessionAPI, isSuccess } from '../lib/api/sessions-api';
+import { logger } from '../lib/error-logger';
+import { teardownSessionClientState } from '../lib/session-teardown';
+import { useSessionHistoryStore } from '../stores/session-history-store';
+import { useSessionStore } from '../stores/session-store';
+
 // SessionEndResponse type used indirectly via API
 import { haptic } from './useHaptics';
-import { teardownSessionClientState } from '../lib/session-teardown';
-import { logger } from '../lib/error-logger';
 
 // ============================================================================
 // TYPES

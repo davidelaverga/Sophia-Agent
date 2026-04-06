@@ -8,9 +8,11 @@
  * Full account deletion still requires a separate support-side account removal flow.
  */
 
-import { NextRequest, NextResponse } from "next/server";
 import { headers } from "next/headers";
+import { type NextRequest, NextResponse } from "next/server";
+
 import { auth } from "@/server/better-auth";
+
 import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function DELETE(_request: NextRequest) {

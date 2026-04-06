@@ -17,9 +17,10 @@
  */
 
 import { NextResponse } from 'next/server';
+
 import { getServerAuthToken } from '../../lib/auth/server-auth';
-import { apiLimiters } from '../../lib/rate-limiter';
 import { logger } from '../../lib/error-logger';
+import { apiLimiters } from '../../lib/rate-limiter';
 
 export async function POST() {
   if (!apiLimiters.wsTicket.checkSync()) {

@@ -10,16 +10,17 @@
 
 'use client';
 
-import { useState } from 'react';
 import { 
   Sparkles,
   Check,
   Loader2
 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useState } from 'react';
+import React from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
 import type { RitualArtifacts, PresetType, ContextMode } from '../../lib/session-types';
-import React from 'react';
+import { cn } from '../../lib/utils';
 import { OnboardingTipGuard } from '../onboarding';
 
 function formatMemoryCategoryLabel(category: string): string {
@@ -146,28 +147,33 @@ function ArtifactSection({
       data-onboarding={dataOnboarding}
       className={cn(
         'group rounded-xl px-3.5 py-3 transition-all duration-500',
-        'border border-white/[0.03]',
+        'border',
         effectiveStatus === 'waiting' && 'opacity-30',
-        isClickable && 'cursor-pointer hover:border-white/[0.06] active:scale-[0.995]',
+        isClickable && 'cursor-pointer active:scale-[0.995]',
       )}
-      style={effectiveStatus !== 'waiting' ? {
-        background: 'rgba(232,228,239,0.015)',
-      } : undefined}
+      style={effectiveStatus !== 'waiting'
+        ? {
+            background: 'var(--cosmic-panel-soft)',
+            borderColor: 'var(--cosmic-border-soft)',
+          }
+        : {
+            borderColor: 'var(--cosmic-border-soft)',
+          }}
       onClick={isClickable ? () => { haptic('light'); onTap?.(); } : undefined}
       role={isClickable ? 'button' : undefined}
       tabIndex={isClickable ? 0 : undefined}
     >
       {/* Title row — whisper label */}
       <div className="flex items-center gap-2 mb-1.5">
-        <h4 className={cn(
-          'text-[9px] tracking-[0.18em] lowercase',
-          effectiveStatus === 'ready' ? 'text-white/[0.22]' : 'text-white/[0.10]',
-        )}>
+        <h4
+          className="text-[9px] tracking-[0.18em] lowercase"
+          style={{ color: effectiveStatus === 'ready' ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text-faint)' }}
+        >
           {title.toLowerCase()}
         </h4>
         
         {effectiveStatus === 'capturing' && (
-          <span className="flex items-center gap-1 text-[9px] text-white/[0.15]">
+          <span className="flex items-center gap-1 text-[9px]" style={{ color: 'var(--cosmic-text-faint)' }}>
             <Loader2 className="w-2.5 h-2.5 animate-spin opacity-40" />
             detecting
           </span>
@@ -175,7 +181,7 @@ function ArtifactSection({
         {effectiveStatus === 'ready' && (
           <span
             className="w-1 h-1 rounded-full"
-            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 35%, rgba(232,228,239,0.10))' }}
+            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 35%, var(--cosmic-panel-soft))' }}
           />
         )}
       </div>
@@ -187,11 +193,11 @@ function ArtifactSection({
           <ShimmerLine className="h-2 w-[60%]" />
         </div>
       ) : hasContent && !hasMemories ? (
-        <p className="font-cormorant text-[14px] leading-relaxed line-clamp-3" style={{ color: 'rgba(232,228,239,0.45)' }}>
+        <p className="font-cormorant text-[14px] leading-relaxed line-clamp-3" style={{ color: 'var(--cosmic-text)' }}>
           {content}
         </p>
       ) : !hasMemories ? (
-        <p className="font-cormorant text-[11px] italic" style={{ color: 'rgba(232,228,239,0.10)' }}>
+        <p className="font-cormorant text-[11px] italic" style={{ color: 'var(--cosmic-text-faint)' }}>
           {placeholder}
         </p>
       ) : null}
@@ -199,7 +205,7 @@ function ArtifactSection({
       {/* Memory candidates */}
       {hasMemories && (
         <div className="mt-2 space-y-2">
-          {memories!.slice(0, 3).map((candidate, index) => (
+          {memories.slice(0, 3).map((candidate, index) => (
             <MemoryCard
               key={`${index}-${candidate?.memory?.slice(0, 18) || 'c'}`}
               memory={candidate?.memory || ''}
@@ -250,13 +256,13 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
         <div className="flex items-center gap-2 mb-1.5">
           <span
             className="w-1 h-1 rounded-full"
-            style={{ background: 'rgba(232,228,239,0.10)' }}
+            style={{ background: 'var(--cosmic-text-faint)' }}
           />
-          <h4 className="text-[9px] tracking-[0.18em] lowercase text-white/[0.15]">
+          <h4 className="text-[9px] tracking-[0.18em] lowercase" style={{ color: 'var(--cosmic-text-faint)' }}>
             reflection
           </h4>
         </div>
-        <p className="font-cormorant text-[12px] text-white/[0.10] italic">{placeholder}</p>
+        <p className="font-cormorant text-[12px] italic" style={{ color: 'var(--cosmic-text-faint)' }}>{placeholder}</p>
       </div>
     );
   }
@@ -266,9 +272,10 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
     return (
       <div
         data-onboarding={dataOnboarding}
-        className="relative rounded-xl px-3.5 py-3 border border-white/[0.03] overflow-hidden"
+        className="relative overflow-hidden rounded-xl border px-3.5 py-3"
         style={{
-          background: 'rgba(232,228,239,0.015)',
+          background: 'var(--cosmic-panel-soft)',
+          borderColor: 'var(--cosmic-border-soft)',
         }}
       >
         {/* Nebula filament accent */}
@@ -281,12 +288,12 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
         <div className="flex items-center gap-2 mb-2">
           <span
             className="w-1 h-1 rounded-full"
-            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.12))' }}
+            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, var(--cosmic-panel-soft))' }}
           />
-          <h4 className="text-[9px] tracking-[0.18em] lowercase text-white/[0.18]">
+          <h4 className="text-[9px] tracking-[0.18em] lowercase" style={{ color: 'var(--cosmic-text-whisper)' }}>
             reflection
           </h4>
-          <span className="flex items-center gap-1 text-[9px] text-white/[0.15]">
+          <span className="flex items-center gap-1 text-[9px]" style={{ color: 'var(--cosmic-text-faint)' }}>
             <Loader2 className="w-2.5 h-2.5 animate-spin opacity-40" />
             composing
           </span>
@@ -324,9 +331,10 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
 
       {/* Inner content — transparent, cosmic */}
       <div
-        className="relative rounded-2xl px-4 py-3.5 border border-white/[0.04]"
+        className="relative rounded-2xl border px-4 py-3.5"
         style={{
-          background: 'linear-gradient(135deg, rgba(232,228,239,0.025), rgba(184,164,232,0.015))',
+          background: 'var(--cosmic-panel-accent)',
+          borderColor: 'var(--cosmic-border-soft)',
           backdropFilter: 'blur(6px)',
         }}
       >
@@ -334,20 +342,20 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
         <div className="flex items-center gap-2 mb-2.5 relative">
           <span
             className="w-1.5 h-1.5 rounded-full"
-            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.12))' }}
+            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, var(--cosmic-panel-soft))' }}
           />
-          <h4 className="text-[9px] tracking-[0.18em] lowercase text-white/[0.20]">
+          <h4 className="text-[9px] tracking-[0.18em] lowercase" style={{ color: 'var(--cosmic-text-whisper)' }}>
             reflection
           </h4>
           {tapped && (
-            <span className="ml-auto text-[9px] tracking-[0.12em] lowercase text-white/[0.12]">
+            <span className="ml-auto text-[9px] tracking-[0.12em] lowercase" style={{ color: 'var(--cosmic-text-faint)' }}>
               sent
             </span>
           )}
         </div>
 
         {/* Prompt — Cormorant, floating */}
-        <p className="font-cormorant text-[15px] leading-[1.7] font-light relative" style={{ color: 'rgba(232,228,239,0.50)' }}>
+        <p className="relative font-cormorant text-[15px] leading-[1.7] font-light" style={{ color: 'var(--cosmic-text)' }}>
           {prompt}
         </p>
 
@@ -355,7 +363,7 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
         {why && (
           <p
             className="mt-2 font-cormorant text-[12px] leading-relaxed italic"
-            style={{ color: 'rgba(232,228,239,0.18)' }}
+            style={{ color: 'var(--cosmic-text-whisper)' }}
           >
             {why}
           </p>
@@ -363,10 +371,10 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
 
         {/* CTA — cosmic whisper */}
         {isClickable && !tapped && (
-          <div className="mt-3 pt-2.5" style={{ borderTop: '1px solid rgba(232,228,239,0.03)' }}>
+          <div className="mt-3 pt-2.5" style={{ borderTop: '1px solid var(--cosmic-border-soft)' }}>
             <span
               className="text-[9px] tracking-[0.14em] lowercase"
-              style={{ color: 'color-mix(in srgb, var(--sophia-purple) 40%, rgba(232,228,239,0.15))' }}
+              style={{ color: 'color-mix(in srgb, var(--sophia-purple) 40%, var(--cosmic-text-faint))' }}
             >
               tap to reflect
             </span>
@@ -399,23 +407,25 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
   return (
     <div className={cn(
       'group/card relative rounded-xl p-3 transition-all duration-300',
-      'border border-white/[0.03]',
+      'border',
     )}
     style={{
-      background: 'rgba(232,228,239,0.015)',
+      background: 'var(--cosmic-panel-soft)',
+      borderColor: 'var(--cosmic-border-soft)',
     }}
     >
       {/* Memory text */}
-      <p className="font-cormorant text-[13px] leading-relaxed pr-14 line-clamp-2" style={{ color: 'rgba(232,228,239,0.45)' }}>
+      <p className="font-cormorant text-[13px] leading-relaxed pr-14 line-clamp-2" style={{ color: 'var(--cosmic-text)' }}>
         {memory}
       </p>
       
       {/* Category badge */}
       {badge && (
         <span 
-          className="inline-flex items-center gap-1 mt-2 text-[8px] tracking-[0.14em] lowercase px-2 py-0.5 rounded-full border border-white/[0.03]"
+          className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[8px] tracking-[0.14em] lowercase"
           style={{
-            color: 'rgba(232,228,239,0.18)',
+            color: 'var(--cosmic-text-whisper)',
+            borderColor: 'var(--cosmic-border-soft)',
           }}
         >
           <span aria-hidden="true">{badge.emoji}</span>
@@ -452,7 +462,8 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
       )}>
         <button
           onClick={(e) => { e.stopPropagation(); onApprove(); }}
-          className="w-6 h-6 rounded-lg flex items-center justify-center text-white/[0.12] hover:text-white/40 transition-all active:scale-90"
+          className="flex h-6 w-6 items-center justify-center rounded-lg transition-all active:scale-90 hover:text-[var(--cosmic-text)]"
+          style={{ color: 'var(--cosmic-text-faint)' }}
           title="Save memory"
           aria-label="Save memory"
         >
@@ -461,7 +472,8 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
         {onReject && (
           <button
             onClick={(e) => { e.stopPropagation(); onReject(); }}
-            className="w-6 h-6 rounded-lg flex items-center justify-center text-white/[0.08] hover:text-white/30 transition-all active:scale-90"
+            className="flex h-6 w-6 items-center justify-center rounded-lg transition-all active:scale-90 hover:text-[var(--cosmic-text-muted)]"
+            style={{ color: 'var(--cosmic-text-faint)' }}
             title="Skip memory"
             aria-label="Skip memory"
           >
@@ -515,12 +527,12 @@ export function ArtifactsPanel({
     <div className={cn('flex flex-col h-full', className)} data-onboarding="artifacts-panel">
       <OnboardingTipGuard tipId="tip-first-artifacts" isTriggered={hasArtifacts} />
       {/* Header — cosmic whisper */}
-      <div className="flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: '1px solid rgba(232,228,239,0.04)' }}>
+      <div className="flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: '1px solid var(--cosmic-border-soft)' }}>
         <span
           className="w-1.5 h-1.5 rounded-full"
-          style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.12))' }}
+          style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, var(--cosmic-panel-soft))' }}
         />
-        <h3 className="text-[10px] tracking-[0.16em] lowercase text-white/[0.20]">artifacts</h3>
+        <h3 className="text-[10px] tracking-[0.16em] lowercase" style={{ color: 'var(--cosmic-text-whisper)' }}>artifacts</h3>
         
         {/* Progress dots */}
         <div className="ml-auto flex items-center gap-1">
@@ -534,10 +546,10 @@ export function ArtifactsPanel({
               )}
               style={{
                 background: s === 'ready'
-                  ? 'color-mix(in srgb, var(--sophia-purple) 40%, rgba(232,228,239,0.15))'
+                  ? 'color-mix(in srgb, var(--sophia-purple) 40%, var(--cosmic-text-faint))'
                   : s === 'capturing'
-                    ? 'color-mix(in srgb, var(--sophia-purple) 20%, rgba(232,228,239,0.08))'
-                    : 'rgba(232,228,239,0.06)',
+                    ? 'color-mix(in srgb, var(--sophia-purple) 20%, var(--cosmic-panel-soft))'
+                    : 'var(--cosmic-text-faint)',
               }}
             />
           ))}
@@ -625,17 +637,16 @@ export function ArtifactsRail({ artifactStatus, onClick, className, dataOnboardi
     >
       <div className="relative">
         <Sparkles className={cn(
-          'w-[16px] h-[16px] text-white/30 transition-colors duration-500',
-          'hover:text-white/50',
+          'h-[16px] w-[16px] transition-colors duration-500 hover:text-[var(--cosmic-text)]',
           shouldPulse && 'animate-pulse'
-        )} />
+        )} style={{ color: 'var(--cosmic-text-whisper)' }} />
         
         {/* Subtle bloom dot when ready */}
         {readyCount > 0 && (
           <span
             className="absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full transition-all duration-700"
             style={{
-              background: 'color-mix(in srgb, var(--sophia-purple) 40%, rgba(232,228,239,0.15))',
+              background: 'color-mix(in srgb, var(--sophia-purple) 40%, var(--cosmic-panel-soft))',
               boxShadow: capturingCount > 0 ? '0 0 6px color-mix(in srgb, var(--sophia-purple) 25%, transparent)' : 'none',
             }}
           />

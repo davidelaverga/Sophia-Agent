@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { extractTextFromUiMessageStreamDump } from '../lib/ui-message-stream-parser';
-import { debugLog } from '../lib/debug-logger';
+
 import type { UIMessage } from '../components/session';
+import { debugLog } from '../lib/debug-logger';
+import { extractTextFromUiMessageStreamDump } from '../lib/ui-message-stream-parser';
 
 type ChatMessagePart = {
   type?: string;
@@ -84,8 +85,7 @@ export function useSessionMessageViewModel({
     for (const message of mapped) {
       const previous = deduped[deduped.length - 1];
       const sameConsecutiveUserMessage =
-        previous &&
-        previous.role === 'user' &&
+        previous?.role === 'user' &&
         message.role === 'user' &&
         previous.content.trim() === message.content.trim();
 

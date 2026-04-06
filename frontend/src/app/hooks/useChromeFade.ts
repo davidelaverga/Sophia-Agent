@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef } from "react"
+
 import { usePresenceStore } from "../stores/presence-store"
 import { useUiStore } from "../stores/ui-store"
 

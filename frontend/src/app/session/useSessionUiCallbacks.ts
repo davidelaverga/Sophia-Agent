@@ -1,8 +1,9 @@
 import { useCallback } from 'react';
-import type { FeedbackType } from '../types/sophia-ui-message';
-import type { UIMessage } from '../components/session';
 import type { Dispatch, SetStateAction } from 'react';
+
+import type { UIMessage } from '../components/session';
 import { haptic } from '../hooks/useHaptics';
+import type { FeedbackType } from '../types/sophia-ui-message';
 
 interface UseSessionUiCallbacksParams {
   setFeedback: (messageId: string, feedback: FeedbackType) => void;
@@ -49,7 +50,7 @@ export function useSessionUiCallbacks({
     setDismissedError(true);
     const lastUserMsg = [...messages].reverse().find((message) => message.role === 'user');
     if (lastUserMsg) {
-      sendMessage({ text: lastUserMsg.content });
+      void sendMessage({ text: lastUserMsg.content });
     }
   }, [messages, sendMessage, setDismissedError]);
 

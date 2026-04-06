@@ -10,11 +10,18 @@
 
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
 import { Settings, Sun, Moon } from 'lucide-react';
-import { cn } from '../lib/utils';
+import { useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
+
 import { haptic } from '../hooks/useHaptics';
+import { cn } from '../lib/utils';
+import {
+  COSMIC_THEME_ID,
+  SOPHIA_THEME_STORAGE_KEY,
+  getThemeToggleTarget,
+  normalizeSophiaTheme,
+} from '../theme';
 import { setSophiaTheme } from '../ThemeBootstrap';
 
 export function DashboardHeader() {
@@ -23,18 +30,13 @@ export function DashboardHeader() {
   
   // Initialize theme from localStorage
   useEffect(() => {
-    const storedTheme = localStorage.getItem('sophia-theme');
-    if (storedTheme) {
-      setTheme(storedTheme);
-    } else {
-      const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-      setTheme(prefersDark ? 'moonlit-embrace' : 'light');
-    }
+    const storedTheme = localStorage.getItem(SOPHIA_THEME_STORAGE_KEY);
+    setTheme(normalizeSophiaTheme(storedTheme));
   }, []);
   
   const toggleTheme = () => {
     haptic('light');
-    const newTheme = theme === 'light' ? 'moonlit-embrace' : 'light';
+    const newTheme = getThemeToggleTarget(theme ?? COSMIC_THEME_ID);
     setTheme(newTheme);
     setSophiaTheme(newTheme); // Use centralized function
   };
@@ -56,10 +58,7 @@ export function DashboardHeader() {
       <button
         onClick={toggleTheme}
         className={cn(
-          'group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-          'border border-sophia-surface-border bg-sophia-button',
-          'hover:border-sophia-purple/40 hover:scale-105 shadow-md',
-          'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple'
+          'cosmic-chrome-button group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 hover:scale-105'
         )}
         aria-label={isLight ? 'Switch to dark mode' : 'Switch to light mode'}
       >
@@ -84,10 +83,7 @@ export function DashboardHeader() {
           router.push('/settings');
         }}
         className={cn(
-          'group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-          'border border-sophia-surface-border bg-sophia-button',
-          'hover:border-sophia-purple/40 hover:scale-105 shadow-md',
-          'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple'
+          'cosmic-chrome-button group/btn relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200 hover:scale-105'
         )}
         aria-label="Settings"
       >

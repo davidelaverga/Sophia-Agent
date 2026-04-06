@@ -1,9 +1,10 @@
 "use client"
 
-import { useState, useEffect, useCallback, useMemo } from "react"
 import { MessageSquare, Plus, Clock, ChevronRight, History } from "lucide-react"
+import { useState, useEffect, useCallback, useMemo } from "react"
+
 import { useCopy, useTranslation } from "../copy"
-import { getTimeBasedGreeting } from "../lib/time-greetings"
+import { haptic } from "../hooks/useHaptics"
 import { useSessionPersistence } from "../hooks/useSessionPersistence"
 import { 
   getCurrentSessionPreview, 
@@ -11,9 +12,10 @@ import {
   formatRelativeTime,
   type ConversationSummary 
 } from "../lib/conversation-history"
-import { HistoryDrawer } from "./HistoryDrawer"
-import { haptic } from "../hooks/useHaptics"
+import { getTimeBasedGreeting } from "../lib/time-greetings"
 import type { PresetType } from "../types/session"
+
+import { HistoryDrawer } from "./HistoryDrawer"
 
 type WelcomeBackProps = {
   onContinue: () => void
@@ -85,7 +87,7 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
   const handleContinue = useCallback(() => {
     haptic('medium')
     // Restore from snapshot (Phase 4 - Week 4)
-    const _restored = restoreSession()
+    restoreSession()
     // Always proceed - even if restore fails, let user continue
     onContinue()
   }, [restoreSession, onContinue])

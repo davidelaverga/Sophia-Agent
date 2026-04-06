@@ -15,6 +15,7 @@
 "use client"
 
 import { useEffect, useCallback } from 'react'
+
 import { useAuthTokenStore, needsTokenValidation } from '../stores/auth-token-store'
 
 /**
@@ -51,7 +52,6 @@ export interface BackendAuthState {
  */
 export function useBackendAuth(): BackendAuthState {
   const token = useAuthTokenStore(state => state.token)
-  const _user = useAuthTokenStore(state => state.user)
   const isValidating = useAuthTokenStore(state => state.isValidating)
   const setToken = useAuthTokenStore(state => state.setToken)
   const clearToken = useAuthTokenStore(state => state.clearToken)
@@ -82,7 +82,7 @@ export function useBackendAuth(): BackendAuthState {
       }
     };
     
-    checkServerAuth();
+    void checkServerAuth();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []) // Only run on mount
   
@@ -111,7 +111,7 @@ export function useBackendAuth(): BackendAuthState {
       }
     }
     
-    validate()
+    void validate()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, needsValidation, isValidating])
   

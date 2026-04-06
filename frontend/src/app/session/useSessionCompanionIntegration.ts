@@ -1,10 +1,12 @@
 import { useCallback } from 'react';
 import type React from 'react';
+
 import type { UIMessage } from '../components/session';
-import type { ContextMode, PresetType } from '../types/session';
 import { useUiStore as useUiToastStore } from '../stores/ui-store';
-import { useSessionCompanion } from './useSessionCompanion';
+import type { ContextMode, PresetType } from '../types/session';
+
 import type { StreamArtifactsPayload } from './stream-contract-adapters';
+import { useSessionCompanion } from './useSessionCompanion';
 
 type ChatMessagePart = {
   type?: string;

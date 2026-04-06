@@ -1,12 +1,13 @@
 "use client"
 
-import { useEffect, useMemo, useState, useCallback } from "react"
-import { ReflectionChunk } from "../../hooks/useReflectionPrompt"
-import { createReflection, ReflectionAction } from "../../lib/api/reflections"
-import { emitTelemetry } from "../../lib/telemetry"
-import { useFocusTrap } from "../../hooks/useFocusTrap"
 import { Sparkles, Heart, Send, Check, Loader2, X, ChevronDown, RefreshCw, Quote, Eye, Shield } from "lucide-react"
+import { useEffect, useMemo, useState, useCallback } from "react"
+
 import { useTranslation } from "../../copy"
+import { useFocusTrap } from "../../hooks/useFocusTrap"
+import { type ReflectionChunk } from "../../hooks/useReflectionPrompt"
+import { createReflection, type ReflectionAction } from "../../lib/api/reflections"
+import { emitTelemetry } from "../../lib/telemetry"
 
 type ReflectionModalProps = {
   conversationId: string
@@ -97,7 +98,7 @@ export function ReflectionModal({ conversationId, chunks, onClose }: ReflectionM
 
   const handleRetry = () => {
     if (lastAction) {
-      handleSubmit(lastAction)
+      void handleSubmit(lastAction)
     }
   }
 

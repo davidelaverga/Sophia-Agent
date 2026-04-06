@@ -8,6 +8,7 @@
 
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+
 import { asRecord, readString } from '../lib/record-parsers';
 import type { SophiaMessageMetadata, EmotionalWeather } from '../types/sophia-ui-message';
 

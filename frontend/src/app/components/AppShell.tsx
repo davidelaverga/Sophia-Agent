@@ -1,14 +1,15 @@
 "use client"
 
 import { type ReactNode, useState } from "react"
-import { Header } from "./Header"
+
+import { useTranslation } from "../copy"
+import { useUsageLimitStore } from "../stores/usage-limit-store"
+
 import { AuthGate } from "./AuthGate"
 import { ConsentGate } from "./ConsentGate"
-import { GentleUsageToast } from "./GentleUsageToast"
-import { useUsageLimitStore } from "../stores/usage-limit-store"
 import { ErrorBoundary } from "./ErrorBoundary"
-import { useTranslation } from "../copy"
-
+import { GentleUsageToast } from "./GentleUsageToast"
+import { Header } from "./Header"
 // Import UsageLimitModal directly - it needs to be immediately available
 // when limit is reached (lazy loading could delay the modal appearing)
 import { UsageLimitModal } from "./UsageLimitModal"

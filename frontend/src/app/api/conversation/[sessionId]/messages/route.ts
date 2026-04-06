@@ -8,7 +8,8 @@
  * Auth from httpOnly cookie (server-side).
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
+
 import { getServerAuthHeader, getServerAuthToken } from '../../../../lib/auth/server-auth';
 import { logger } from '../../../../lib/error-logger';
 

@@ -11,13 +11,14 @@
 
 'use client';
 
-import { cn } from '../../lib/utils';
 import type { 
   MemoryCandidateV1, 
   MemoryDecision,
 } from '../../lib/recap-types';
-import { RecapMemoryCandidateRow } from './RecapMemoryCandidateRow';
+import { cn } from '../../lib/utils';
+
 import { RecapEmptyStateViews } from './RecapEmptyStateViews';
+import { RecapMemoryCandidateRow } from './RecapMemoryCandidateRow';
 export { TakeawayCard, ReflectionCard } from './RecapInsightCards';
 import {
   RecapMemoryCandidatesFooter,

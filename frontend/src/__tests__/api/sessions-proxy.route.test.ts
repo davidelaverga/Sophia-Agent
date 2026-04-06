@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
@@ -23,7 +24,7 @@ describe('/api/sessions/[...path] proxy', () => {
       method: 'GET',
       nextUrl: new URL('http://localhost:3000/api/sessions/active?page=2&page_size=10'),
       text: async () => '',
-    } as unknown as import('next/server').NextRequest;
+    } as unknown as NextRequest;
 
     const response = await GET(req, { params: Promise.resolve({ path: ['active'] }) });
 
@@ -53,7 +54,7 @@ describe('/api/sessions/[...path] proxy', () => {
       method: 'POST',
       nextUrl: new URL('http://localhost:3000/api/sessions/start'),
       text: async () => JSON.stringify(payload),
-    } as unknown as import('next/server').NextRequest;
+    } as unknown as NextRequest;
 
     const response = await POST(req, { params: Promise.resolve({ path: ['start'] }) });
 

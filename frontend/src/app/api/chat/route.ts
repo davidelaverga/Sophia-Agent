@@ -1,6 +1,7 @@
 export const runtime = 'nodejs';
 
-import { NextRequest } from 'next/server';
+import { type NextRequest } from 'next/server';
+
 import { handleChatPost } from './_lib/post-handler';
 
 export async function POST(req: NextRequest) {

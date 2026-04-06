@@ -1,17 +1,18 @@
 "use client"
 
-import { useCallback, useMemo, useState, useEffect, type RefObject, type KeyboardEventHandler, type ClipboardEventHandler } from "react"
 import { Send, Loader2 } from "lucide-react"
+import { useCallback, useMemo, useState, useEffect, type RefObject, type KeyboardEventHandler, type ClipboardEventHandler } from "react"
 import { useShallow } from "zustand/react/shallow"
+
+import { useCopy, useTranslation } from "../../copy"
+import { haptic } from "../../hooks/useHaptics"
+import { getRandomPlaceholder } from "../../lib/time-greetings"
 import { useChatStore } from "../../stores/chat-store"
 import { getPresenceCopyKey, usePresenceStore } from "../../stores/presence-store"
-import { useUsageLimitStore } from "../../stores/usage-limit-store"
 import { selectComposerState, selectPresenceDisplay, selectIsModalOpen } from "../../stores/selectors"
-import { UsageHint } from "../UsageHint"
+import { useUsageLimitStore } from "../../stores/usage-limit-store"
 import { InputModeIndicator } from "../InputModeIndicator"
-import { useCopy, useTranslation } from "../../copy"
-import { getRandomPlaceholder } from "../../lib/time-greetings"
-import { haptic } from "../../hooks/useHaptics"
+import { UsageHint } from "../UsageHint"
 
 type ComposerProps = {
   textareaRef: RefObject<HTMLTextAreaElement>
@@ -70,7 +71,7 @@ export function Composer({ textareaRef, onFocusChange }: ComposerProps) {
     if (isModalOpen || isOverLimit) return
     // Haptic feedback on send
     haptic('medium')
-    sendMessage()
+    void sendMessage()
   }, [isModalOpen, isOverLimit, sendMessage])
 
   const onKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = useCallback((event) => {
@@ -118,7 +119,7 @@ export function Composer({ textareaRef, onFocusChange }: ComposerProps) {
     // Only blur if focus is moving outside the composer area
     // Don't blur if clicking on buttons within the chat (like play audio)
     const relatedTarget = e.relatedTarget as HTMLElement
-    if (relatedTarget && relatedTarget.closest('.composer-container')) {
+    if (relatedTarget?.closest('.composer-container')) {
       return
     }
     onFocusChange?.(false)

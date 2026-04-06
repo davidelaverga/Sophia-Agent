@@ -9,9 +9,7 @@
 "use client"
 
 import { useCallback, useMemo } from "react"
-import { useUiStore as useFocusModeStore } from "../stores/ui-store"
-import { useChatStore } from "../stores/chat-store"
-import { usePresenceStore } from "../stores/presence-store"
+
 import {
   canSwitchToVoice,
   canSwitchToChat,
@@ -20,6 +18,9 @@ import {
   type AppOperationState,
   type ModeSwitchValidation
 } from "../lib/mode-switching"
+import { useChatStore } from "../stores/chat-store"
+import { usePresenceStore } from "../stores/presence-store"
+import { useUiStore as useFocusModeStore } from "../stores/ui-store"
 
 export interface UseModeSwitch {
   /** Validation result for switching to voice mode */

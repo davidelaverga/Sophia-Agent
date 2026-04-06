@@ -3,7 +3,8 @@
  * Proxies POST /api/memory/feedback -> backend /api/v1/memories/feedback
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
+
 import { getServerAuthToken } from '../../../lib/auth/server-auth';
 import { logger } from '../../../lib/error-logger';
 

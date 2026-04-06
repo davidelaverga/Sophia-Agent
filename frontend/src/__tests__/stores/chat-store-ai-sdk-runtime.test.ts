@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+
 import { useChatStore, type ChatMessage } from '../../app/stores/chat-store'
 
 function resetChatStoreForTest() {

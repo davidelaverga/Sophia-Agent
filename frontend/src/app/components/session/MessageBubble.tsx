@@ -10,14 +10,13 @@
 
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
 import { Sparkles, Clock, Mic, Volume2 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useState, useEffect, useMemo } from 'react';
+
 import { humanizeTime } from '../../lib/humanize-time';
 import { parseInlineMarkdown } from '../../lib/parse-inline-markdown';
-import { detectMessageType, getMessageTypeStyle } from '../../lib/message-type-detection';
-import { MessageFeedback } from './MessageFeedback';
 import type { SessionMessage } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 import type { FeedbackType } from '../../types/sophia-ui-message';
 
 // ============================================================================
@@ -71,17 +70,6 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
   const isVoiceTranscript = isUser && message.voiceTranscript === true;
   const isVoiceResponse = !isUser && message.voiceResponse === true;
   
-  // Detect message type for Sophia messages (for visual differentiation)
-  const messageType = useMemo(() => {
-    if (isUser) return null;
-    return detectMessageType(message.content);
-  }, [isUser, message.content]);
-  
-  const messageTypeStyle = useMemo(() => {
-    if (!messageType) return null;
-    return getMessageTypeStyle(messageType);
-  }, [messageType]);
-  
   // Parse markdown content for Sophia messages
   const renderedContent = useMemo(() => {
     if (isUser) return message.content;
@@ -118,10 +106,11 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           'bg-transparent'
         )}>
           <Sparkles className={cn(
-            'w-3.5 h-3.5 text-white/20 transition-all duration-500',
-            isLatest && 'animate-[sparkle_2s_ease-in-out_infinite] text-white/35',
+            'w-3.5 h-3.5 transition-all duration-500',
+            isLatest && 'animate-[sparkle_2s_ease-in-out_infinite]',
             !isLatest && 'opacity-50'
-          )} />
+          )}
+          style={{ color: isLatest ? 'var(--cosmic-text)' : 'var(--cosmic-text-faint)' }} />
         </div>
       )}
       
@@ -130,26 +119,28 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           'max-w-[85%] sm:max-w-[75%] p-4 rounded-2xl relative group min-w-0',
           isUser
             ? cn(
-                'border border-white/[0.05]',
-                isQueued && 'border-dashed border-white/10 opacity-70'
+                'border',
+                isQueued && 'border-dashed opacity-70'
               )
             : cn(
                 'bg-transparent font-light'
               ),
           // Subtle glow for assistant's latest message
-          !isUser && isLatest && 'shadow-[0_0_20px_rgba(255,255,255,0.02)]',
+          !isUser && isLatest && 'shadow-[0_0_20px_var(--cosmic-glow-soft)]',
           // Dashed border for incomplete messages
           isIncomplete && 'border-dashed border-amber-400/50'
         )}
         style={isUser ? {
-          background: 'rgba(232,228,239,0.04)',
+          background: 'var(--cosmic-panel-soft)',
+          borderColor: isQueued ? 'var(--cosmic-text-faint)' : 'var(--cosmic-border-soft)',
           backdropFilter: 'blur(12px) saturate(1.1)',
           WebkitBackdropFilter: 'blur(12px) saturate(1.1)',
         } : undefined}
       >
         {(isVoiceTranscript || isVoiceResponse) && (
           <span
-            className="absolute top-2 right-2 text-white/20 pointer-events-none"
+            className="absolute top-2 right-2 pointer-events-none"
+            style={{ color: 'var(--cosmic-text-whisper)' }}
             title={isVoiceTranscript ? 'Voice transcript' : 'Voice reply'}
             aria-hidden="true"
           >
@@ -165,7 +156,7 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           isIncomplete && 'opacity-80'
         )}
         style={{
-          color: isUser ? 'rgba(232,228,239,0.72)' : 'rgba(232,228,239,0.82)',
+          color: isUser ? 'var(--cosmic-text)' : 'var(--cosmic-text-strong)',
           textShadow: '0 1px 8px rgba(0,0,0,0.25)',
         }}
         >
@@ -181,7 +172,7 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
         
         {/* Queued message indicator */}
         {isQueued && (
-          <span className="flex items-center gap-1 mt-2 text-[11px] text-white/25 italic">
+          <span className="mt-2 flex items-center gap-1 text-[11px] italic" style={{ color: 'var(--cosmic-text-whisper)' }}>
             <Clock className="w-3 h-3" />
             Queued - will send when online
           </span>
@@ -190,9 +181,10 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
         {/* Timestamp - revealed on hover, humanized */}
         <span 
           className={cn(
-            'absolute -bottom-5 text-[10px] text-white/20 opacity-0 group-hover:opacity-100 transition-opacity cursor-default',
+            'absolute -bottom-5 text-[10px] opacity-0 transition-opacity cursor-default group-hover:opacity-100',
             isUser ? 'right-2' : 'left-2'
           )}
+          style={{ color: 'var(--cosmic-text-faint)' }}
           title={timeInfo.tooltip}
         >
           {timeInfo.text}

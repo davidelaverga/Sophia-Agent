@@ -4,6 +4,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
 import {
   RateLimiter,
   getRateLimiter,
@@ -123,8 +124,8 @@ describe('RateLimiter', () => {
       await limiter.acquire();
 
       // Queue 2 requests (don't await - they'll hang)
-      limiter.acquire(); // queued 1
-      limiter.acquire(); // queued 2
+      void limiter.acquire(); // queued 1
+      void limiter.acquire(); // queued 2
 
       // Third should be rejected (queue full)
       const rejected = await limiter.acquire();
@@ -290,7 +291,7 @@ describe('debounce', () => {
     const fn = vi.fn().mockReturnValue('final');
     
     // First call
-    debounce('debounce-reset', fn, 500);
+    void debounce('debounce-reset', fn, 500);
     
     // Advance partway
     vi.advanceTimersByTime(300);
@@ -334,7 +335,7 @@ describe('cancelDebounce', () => {
   it('should cancel pending debounced call', async () => {
     const fn = vi.fn();
     
-    debounce('cancel-test', fn, 500);
+    void debounce('cancel-test', fn, 500);
     
     // Cancel before execution
     cancelDebounce('cancel-test');

@@ -11,8 +11,9 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -107,13 +108,14 @@ export function ReflectionOverlay({
         {/* Reflective question */}
         <p
           className={cn(
-            'font-cormorant text-[20px] leading-relaxed text-white/70',
+            'font-cormorant text-[20px] leading-relaxed',
             'transition-all',
             isEntering && 'opacity-0 translate-y-2',
             isVisible && 'opacity-100 translate-y-0',
             isExiting && 'opacity-0 -translate-y-1',
           )}
           style={{
+            color: 'var(--cosmic-text)',
             transitionDuration: isEntering ? `${FADE_IN_MS}ms` : `${FADE_OUT_MS}ms`,
           }}
         >
@@ -124,11 +126,11 @@ export function ReflectionOverlay({
         {response && (
           <p
             className={cn(
-              'mt-4 font-cormorant italic text-[16px] text-white/45',
+              'mt-4 font-cormorant italic text-[16px]',
               'transition-all',
               phase === 'response' ? 'opacity-100' : 'opacity-0',
             )}
-            style={{ transitionDuration: '800ms' }}
+            style={{ color: 'var(--cosmic-text-muted)', transitionDuration: '800ms' }}
           >
             {response}
           </p>
@@ -138,10 +140,11 @@ export function ReflectionOverlay({
         {isVisible && !response && (
           <p
             className={cn(
-              'mt-6 text-[10px] tracking-[0.12em] uppercase text-white/15',
+              'mt-6 text-[10px] tracking-[0.12em] uppercase',
               'transition-opacity duration-1000',
               phase === 'active' ? 'opacity-100' : 'opacity-0',
             )}
+            style={{ color: 'var(--cosmic-text-faint)' }}
           >
             tap anywhere to dismiss
           </p>

@@ -1,10 +1,12 @@
 "use client"
 
 import { useRef, useEffect, useCallback, useImperativeHandle, type Ref } from "react"
-import { usePresenceStore } from "../../stores/presence-store"
+
+import { useDeviceFidelity } from "../../hooks/useDeviceFidelity"
 import { useEmotionColor } from "../../hooks/useEmotionColor"
 import { useExpression, type ExpressionParams } from "../../hooks/useExpression"
-import { useDeviceFidelity } from "../../hooks/useDeviceFidelity"
+import { usePresenceStore } from "../../stores/presence-store"
+
 import { useNebulaCanvas } from "./NebulaCanvas"
 import { useRibbonCanvas } from "./RibbonCanvas"
 import { useSparkCanvas } from "./SparkCanvas"

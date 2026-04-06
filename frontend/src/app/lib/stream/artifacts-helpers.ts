@@ -5,14 +5,15 @@
  * These helpers extract structured data from Lane B stream parts.
  */
 
+import type { SophiaMessageMetadata } from '../../types/sophia-ui-message';
+
 import { 
-  ArtifactsPayload, 
+  type ArtifactsPayload, 
   MAX_MEMORY_CANDIDATES,
   isArtifactsDataPart,
   isTraceDataPart,
   type TraceDataPart,
 } from './artifacts-types';
-import type { SophiaMessageMetadata } from '../../types/sophia-ui-message';
 
 // =============================================================================
 // ARTIFACTS EXTRACTION

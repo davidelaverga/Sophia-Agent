@@ -1,7 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+import { debugWarn } from '../../lib/debug-logger';
 import {
   FIRST_RUN_ONBOARDING_STEPS,
   getUnionTargetRect,
@@ -13,11 +15,11 @@ import {
 } from '../../onboarding';
 import { OnboardingTooltip, SpotlightOverlay, useOnboardingReducedMotion, useOnboardingVoice, useTargetRects } from '../../onboarding';
 import { useOnboardingStore } from '../../stores/onboarding-store';
+
 import {
   ArtifactsConceptPreview,
   MemoryConceptPreview,
 } from './OnboardingConceptPreview';
-import { debugWarn } from '../../lib/debug-logger';
 
 function getConceptPreview(stepId: string): React.ReactNode | null {
   switch (stepId) {

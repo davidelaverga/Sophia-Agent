@@ -1,6 +1,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from "react"
+
 import type { OnboardingTargetRect } from "../types"
 
 type ResolveTargetOptions = {

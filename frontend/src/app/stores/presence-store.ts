@@ -1,10 +1,11 @@
 "use client"
 
 import { create } from "zustand"
+
 import type { CopyKey } from "../copy"
-import { eventBus } from "../lib/events"
 import { isVerboseDebugEnabled } from "../lib/debug"
 import { debugLog } from "../lib/debug-logger"
+import { eventBus } from "../lib/events"
 
 const PRESENCE_STATES = ["resting", "listening", "thinking", "reflecting", "speaking"] as const
 

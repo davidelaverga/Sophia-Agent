@@ -10,6 +10,7 @@
 'use client';
 
 import { memo, useState, useEffect } from 'react';
+
 import { cn } from '../../lib/utils';
 import type { MemoryHighlight } from '../../types/session';
 
@@ -150,7 +151,7 @@ export function MemoryHighlightCards({
           hasEntered ? 'opacity-100' : 'opacity-0'
         )}
         style={{
-          background: 'radial-gradient(ellipse at 50% 50%, rgba(139,92,246,0.06), transparent 70%)',
+          background: 'radial-gradient(ellipse at 50% 50%, color-mix(in srgb, var(--sophia-purple) 6%, transparent), transparent 70%)',
           filter: 'blur(12px)',
         }}
         aria-hidden="true"
@@ -167,7 +168,7 @@ export function MemoryHighlightCards({
         <div 
           className="absolute top-0 left-3 right-3 h-px pointer-events-none"
           style={{
-            background: 'linear-gradient(90deg, transparent, rgba(139,92,246,0.25), transparent)',
+            background: 'linear-gradient(90deg, transparent, color-mix(in srgb, var(--sophia-purple) 25%, transparent), transparent)',
           }}
           aria-hidden="true"
         />
@@ -177,7 +178,7 @@ export function MemoryHighlightCards({
           className="absolute inset-0 pointer-events-none animate-memory-shimmer"
           style={{ 
             animationDelay: '600ms',
-            background: 'linear-gradient(90deg, transparent, rgba(139,92,246,0.06), transparent)',
+            background: 'linear-gradient(90deg, transparent, color-mix(in srgb, var(--sophia-purple) 6%, transparent), transparent)',
           }}
           aria-hidden="true"
         />

@@ -15,10 +15,10 @@
 'use client';
 
 import { useState, useCallback, useRef, useEffect } from 'react';
+
 import { getMicroBriefing, isSuccess } from '../lib/api/sessions-api';
 import type { 
   MicroBriefingIntent, 
-  MicroBriefingResponse as _MicroBriefingResponse,
   MemoryHighlight,
   ContextMode,
   PresetType,
@@ -172,7 +172,7 @@ export function useMicroBriefing(options: UseMicroBriefingOptions): UseMicroBrie
     if (autoNudgeIntervalMinutes > 0) {
       const intervalMs = autoNudgeIntervalMinutes * 60 * 1000;
       timerRef.current = setInterval(() => {
-        triggerNudge();
+        void triggerNudge();
       }, intervalMs);
     }
   }, [autoNudgeIntervalMinutes, triggerNudge]);

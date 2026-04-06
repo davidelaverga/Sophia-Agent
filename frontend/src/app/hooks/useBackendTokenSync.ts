@@ -15,6 +15,7 @@
 "use client"
 
 import { useEffect, useRef, useState } from 'react'
+
 import { useAuth } from '../providers'
 import { useAuthTokenStore } from '../stores/auth-token-store'
 
@@ -85,7 +86,7 @@ export function useBackendTokenSync(): BackendTokenSyncState {
   useEffect(() => {
     if (loading || !needsSync || syncAttemptedRef.current || isSyncing) return
     syncAttemptedRef.current = true
-    doSync()
+    void doSync()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, needsSync, isSyncing])
 

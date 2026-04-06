@@ -2,9 +2,10 @@
  * Tests for Offline Sync Queue
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+
 import {
   OfflineSyncQueue,
-  QueueItem,
+  type QueueItem,
   queueApiCall,
   queueFeedback,
   queueReflection,

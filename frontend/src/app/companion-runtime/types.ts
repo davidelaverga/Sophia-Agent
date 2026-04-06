@@ -1,6 +1,7 @@
+import type { StreamArtifactsPayload } from '../session/stream-contract-adapters';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
-import type { StreamArtifactsPayload } from '../session/stream-contract-adapters';
+
 import type { CompanionRouteProfile, CompanionRouteProfileId } from './route-profiles';
 
 export type CompanionArtifactSource = 'stream' | 'interrupt' | 'companion' | 'voice';

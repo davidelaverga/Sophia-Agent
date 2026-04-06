@@ -1,10 +1,12 @@
 'use client'
 
-import { useEffect, useState } from 'react'
-import { authBypassEnabled } from '@/app/lib/auth/dev-bypass'
 import { useRouter } from 'next/navigation'
-import { useAuth } from '../providers'
+import { useEffect, useState } from 'react'
+
+import { authBypassEnabled } from '@/app/lib/auth/dev-bypass'
+
 import { useTranslation } from '../copy'
+import { useAuth } from '../providers'
 import { useOnboardingStore } from '../stores/onboarding-store'
 
 // 🔒 SECURITY: Only allow debug page in development
@@ -65,7 +67,7 @@ export default function DebugPage() {
       })
     }
 
-    collectDebugInfo()
+    void collectDebugInfo()
   }, [user])
 
   // Don't render anything in production

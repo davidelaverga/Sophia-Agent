@@ -1,8 +1,8 @@
 import { act, renderHook } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import type { RecapArtifactsV1 } from '../../app/types/recap';
 import { useChatArtifactsPanelActions } from '../../app/chat/useChatArtifactsPanelActions';
+import type { RecapArtifactsV1 } from '../../app/types/recap';
 
 describe('useChatArtifactsPanelActions', () => {
   afterEach(() => {

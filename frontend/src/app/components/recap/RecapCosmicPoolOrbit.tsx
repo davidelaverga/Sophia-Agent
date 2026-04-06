@@ -9,6 +9,7 @@ import {
   useState,
   type RefObject,
 } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
 import { logger } from '../../lib/error-logger';
 import {
@@ -19,6 +20,7 @@ import {
 } from '../../lib/recap-types';
 import { cn } from '../../lib/utils';
 import { OnboardingTipGuard } from '../onboarding';
+
 import {
   getOrbitCandidateBuckets,
   getSafeFocusedIndex,
@@ -677,9 +679,9 @@ function CosmicPool({
       <div
         className="pointer-events-none absolute left-[8%] right-[8%] top-0 h-[2px]"
         style={{
-          background: 'linear-gradient(to right, transparent 0%, rgba(184,164,232,0.12) 30%, rgba(212,196,255,0.18) 50%, rgba(184,164,232,0.12) 70%, transparent 100%)',
+          background: 'linear-gradient(to right, transparent 0%, color-mix(in srgb, var(--sophia-purple) 12%, transparent) 30%, color-mix(in srgb, var(--sophia-glow) 18%, transparent) 50%, color-mix(in srgb, var(--sophia-purple) 12%, transparent) 70%, transparent 100%)',
           filter: 'blur(1px)',
-          boxShadow: '0 0 12px rgba(184,164,232,0.08), 0 0 30px rgba(184,164,232,0.04)',
+          boxShadow: '0 0 12px color-mix(in srgb, var(--sophia-purple) 8%, transparent), 0 0 30px color-mix(in srgb, var(--sophia-purple) 4%, transparent)',
         }}
       />
     </div>
@@ -834,8 +836,8 @@ function MemoryDrop({
         dropEl.style.transform = `translate(-50%, -50%) scale(${scale})`;
       }
 
-      const trail = el.querySelector('[data-trail]') as HTMLElement | null;
-      if (trail) {
+      const trail = el.querySelector('[data-trail]');
+      if (trail instanceof HTMLElement) {
         trail.style.height = `${trailHeight}px`;
         trail.style.opacity = String(Math.min(progress * 2, 0.6));
       }
@@ -861,14 +863,14 @@ function MemoryDrop({
         <div
           className="h-4 w-4 rounded-full"
           style={{
-            background: 'radial-gradient(circle at 35% 35%, rgba(255,252,245,0.95), rgba(212,196,255,0.7) 45%, rgba(184,164,232,0.3) 75%, transparent)',
-            boxShadow: '0 0 18px rgba(212,196,255,0.5), 0 0 40px rgba(184,164,232,0.2)',
+            background: 'radial-gradient(circle at 35% 35%, color-mix(in srgb, white 95%, transparent), color-mix(in srgb, var(--sophia-glow) 70%, transparent) 45%, color-mix(in srgb, var(--sophia-purple) 30%, transparent) 75%, transparent)',
+            boxShadow: '0 0 18px color-mix(in srgb, var(--sophia-glow) 50%, transparent), 0 0 40px color-mix(in srgb, var(--sophia-purple) 20%, transparent)',
           }}
         />
         <div
           className="absolute left-1/2 top-1/2 h-10 w-10 -translate-x-1/2 -translate-y-1/2 rounded-full"
           style={{
-            background: 'radial-gradient(circle, rgba(184,164,232,0.25), transparent 70%)',
+            background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 25%, transparent), transparent 70%)',
             filter: 'blur(6px)',
           }}
         />
@@ -878,7 +880,7 @@ function MemoryDrop({
           style={{
             height: 6,
             opacity: 0,
-            background: 'linear-gradient(to top, rgba(212,196,255,0.6), rgba(184,164,232,0.15), transparent)',
+            background: 'linear-gradient(to top, color-mix(in srgb, var(--sophia-glow) 60%, transparent), color-mix(in srgb, var(--sophia-purple) 15%, transparent), transparent)',
             filter: 'blur(1px)',
           }}
         />
@@ -921,8 +923,8 @@ function ImpactFlash({ x, y, onDone }: { x: number; y: number; onDone: () => voi
           width: 60,
           height: 60,
           borderRadius: '50%',
-          border: '1.5px solid rgba(212,196,255,0.5)',
-          boxShadow: '0 0 20px rgba(184,164,232,0.3), inset 0 0 20px rgba(184,164,232,0.08)',
+          border: '1.5px solid color-mix(in srgb, var(--sophia-glow) 50%, transparent)',
+          boxShadow: '0 0 20px color-mix(in srgb, var(--sophia-purple) 30%, transparent), inset 0 0 20px color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
         }}
       />
       <div
@@ -934,7 +936,7 @@ function ImpactFlash({ x, y, onDone }: { x: number; y: number; onDone: () => voi
           width: 24,
           height: 24,
           borderRadius: '50%',
-          background: 'radial-gradient(circle, rgba(255,250,240,0.8), rgba(212,196,255,0.4), transparent)',
+          background: 'radial-gradient(circle, color-mix(in srgb, white 80%, transparent), color-mix(in srgb, var(--sophia-glow) 40%, transparent), transparent)',
           filter: 'blur(3px)',
         }}
       />
@@ -1060,14 +1062,14 @@ function ProgressIndicator({ total, reviewed }: { total: number; reviewed: numbe
               height: 3,
               borderRadius: 2,
               background: index < reviewed
-                ? 'linear-gradient(to right, rgba(184,164,232,0.5), rgba(212,196,255,0.4))'
-                : 'rgba(255,255,255,0.08)',
-              boxShadow: index < reviewed ? '0 0 8px rgba(184,164,232,0.15)' : 'none',
+                ? 'linear-gradient(to right, color-mix(in srgb, var(--sophia-purple) 50%, transparent), color-mix(in srgb, var(--sophia-glow) 40%, transparent))'
+                : 'var(--cosmic-text-faint)',
+              boxShadow: index < reviewed ? '0 0 8px color-mix(in srgb, var(--sophia-purple) 15%, transparent)' : 'none',
             }}
           />
         ))}
       </div>
-      <span className="text-[9px] tracking-[0.1em] text-white/15">{reviewed}/{total}</span>
+      <span className="text-[9px] tracking-[0.1em]" style={{ color: 'var(--cosmic-text-faint)' }}>{reviewed}/{total}</span>
     </div>
   );
 }
@@ -1133,20 +1135,20 @@ function MemoryOrb({
             className="absolute -z-30 rounded-full"
             style={{
               inset: '-55%',
-              background: 'radial-gradient(circle, rgba(184,164,232,0.04) 0%, rgba(89,190,173,0.015) 35%, transparent 55%)',
+              background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 4%, transparent) 0%, color-mix(in srgb, var(--cosmic-teal) 2%, transparent) 35%, transparent 55%)',
               filter: 'blur(70px)',
             }}
           />
           <div
             className="absolute inset-[-3px] -z-10 rounded-full"
             style={{
-              boxShadow: '0 0 40px 2px rgba(184,164,232,0.06), 0 0 75px 4px rgba(212,196,255,0.025), inset 0 0 28px 2px rgba(184,164,232,0.035)',
+              boxShadow: '0 0 40px 2px color-mix(in srgb, var(--sophia-purple) 6%, transparent), 0 0 75px 4px color-mix(in srgb, var(--sophia-glow) 3%, transparent), inset 0 0 28px 2px color-mix(in srgb, var(--sophia-purple) 4%, transparent)',
             }}
           />
           <div
             className="absolute left-1/2 top-[70%] -z-20 h-[120%] w-[60%] -translate-x-1/2 rounded-full"
             style={{
-              background: 'radial-gradient(ellipse 100% 70%, rgba(184,164,232,0.03) 0%, transparent 60%)',
+              background: 'radial-gradient(ellipse 100% 70%, color-mix(in srgb, var(--sophia-purple) 3%, transparent) 0%, transparent 60%)',
               filter: 'blur(40px)',
             }}
           />
@@ -1158,7 +1160,7 @@ function MemoryOrb({
           className="absolute inset-0 -z-10 rounded-full animate-pulse"
           style={{
             transform: 'scale(1.8)',
-            background: 'radial-gradient(circle, rgba(212,196,255,0.30) 0%, transparent 50%)',
+            background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-glow) 30%, transparent) 0%, transparent 50%)',
             filter: 'blur(40px)',
           }}
         />
@@ -1201,11 +1203,11 @@ function MemoryOrb({
         )}
         style={{
           background: isCenter
-            ? 'radial-gradient(ellipse 120% 100% at 50% 100%, rgba(184,164,232,0.07) 0%, transparent 40%), radial-gradient(ellipse 100% 120% at 50% 0%, rgba(89,190,173,0.03) 0%, transparent 35%), radial-gradient(circle at 50% 50%, rgba(10,10,18,0.88), rgba(3,3,8,0.95))'
-            : 'radial-gradient(circle at 50% 55%, rgba(10,10,18,0.7), rgba(3,3,8,0.85) 85%)',
+            ? 'radial-gradient(ellipse 120% 100% at 50% 100%, color-mix(in srgb, var(--sophia-purple) 7%, transparent) 0%, transparent 40%), radial-gradient(ellipse 100% 120% at 50% 0%, color-mix(in srgb, var(--cosmic-teal) 3%, transparent) 0%, transparent 35%), radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 92%, black 8%), color-mix(in srgb, var(--bg) 95%, black 5%))'
+            : 'radial-gradient(circle at 50% 55%, color-mix(in srgb, var(--card-bg) 76%, black 24%), color-mix(in srgb, var(--bg) 85%, black 15%) 85%)',
           boxShadow: isCenter
-            ? 'inset 0 -28px 65px -28px rgba(184,164,232,0.10), inset 0 28px 45px -28px rgba(89,190,173,0.04), inset 0 0 0 1px rgba(255,255,255,0.05), 0 0 55px -15px rgba(184,164,232,0.05), 0 14px 45px -25px rgba(0,0,0,0.5)'
-            : 'inset 0 -15px 30px -15px rgba(184,164,232,0.05), inset 0 0 0 1px rgba(255,255,255,0.03)',
+            ? 'inset 0 -28px 65px -28px color-mix(in srgb, var(--sophia-purple) 10%, transparent), inset 0 28px 45px -28px color-mix(in srgb, var(--cosmic-teal) 4%, transparent), inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent), 0 14px 45px -25px color-mix(in srgb, var(--bg) 55%, transparent)'
+            : 'inset 0 -15px 30px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent), inset 0 0 0 1px var(--cosmic-border-soft)',
           backdropFilter: isCenter ? 'blur(2px)' : undefined,
         }}
       >
@@ -1218,7 +1220,7 @@ function MemoryOrb({
             left: '12%',
             width: '42%',
             height: '18%',
-            background: 'radial-gradient(ellipse at 40% 40%, rgba(255,252,245,0.10), rgba(255,252,245,0.02) 40%, transparent 70%)',
+            background: 'radial-gradient(ellipse at 40% 40%, color-mix(in srgb, var(--cosmic-ivory) 10%, transparent), color-mix(in srgb, var(--cosmic-ivory) 2%, transparent) 40%, transparent 70%)',
             filter: 'blur(5px)',
           }}
         />
@@ -1231,7 +1233,7 @@ function MemoryOrb({
               right: '5%',
               width: '16%',
               height: '46%',
-              background: 'radial-gradient(ellipse at 80% 50%, rgba(89,190,173,0.05), transparent 70%)',
+              background: 'radial-gradient(ellipse at 80% 50%, color-mix(in srgb, var(--cosmic-teal) 5%, transparent), transparent 70%)',
               filter: 'blur(10px)',
             }}
           />
@@ -1241,7 +1243,7 @@ function MemoryOrb({
           <div
             className="pointer-events-none absolute inset-[1px] rounded-full"
             style={{
-              background: 'linear-gradient(175deg, rgba(255,252,245,0.05) 0%, transparent 20%, transparent 80%, rgba(184,164,232,0.03) 100%)',
+              background: 'linear-gradient(175deg, color-mix(in srgb, var(--cosmic-ivory) 5%, transparent) 0%, transparent 20%, transparent 80%, color-mix(in srgb, var(--sophia-purple) 3%, transparent) 100%)',
             }}
           />
         )}
@@ -1251,7 +1253,7 @@ function MemoryOrb({
             className="pointer-events-none absolute bottom-0 left-[10%] right-[10%]"
             style={{
               height: '32%',
-              background: 'radial-gradient(ellipse 100% 70% at 50% 100%, rgba(184,164,232,0.05), transparent 70%)',
+              background: 'radial-gradient(ellipse 100% 70% at 50% 100%, color-mix(in srgb, var(--sophia-purple) 5%, transparent), transparent 70%)',
               filter: 'blur(12px)',
             }}
           />
@@ -1261,14 +1263,14 @@ function MemoryOrb({
           className="pointer-events-none absolute inset-[1px] rounded-full"
           style={{
             boxShadow: isCenter
-              ? 'inset 0 3px 35px rgba(0,0,0,0.35), inset 0 -3px 22px rgba(184,164,232,0.025)'
-              : 'inset 0 2px 18px rgba(0,0,0,0.25)',
+              ? 'inset 0 3px 35px color-mix(in srgb, var(--bg) 42%, transparent), inset 0 -3px 22px color-mix(in srgb, var(--sophia-purple) 2.5%, transparent)'
+              : 'inset 0 2px 18px color-mix(in srgb, var(--bg) 28%, transparent)',
           }}
         />
 
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center px-8 sm:px-11">
           {isCenter && (
-            <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'rgba(184,164,232,0.4)' }}>
+            <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 40%, transparent)' }}>
               <span aria-hidden="true">{category.icon}</span>{' '}
               <span>{category.label}</span>
             </span>
@@ -1281,10 +1283,11 @@ function MemoryOrb({
                 onChange={(event) => setEditValue(event.target.value)}
                 rows={4}
                 autoFocus
-                className="w-full resize-none rounded-2xl px-4 py-3 text-sm leading-relaxed text-white/70 placeholder:text-white/20 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20"
+                className="cosmic-focus-ring w-full resize-none rounded-2xl px-4 py-3 text-sm leading-relaxed placeholder:text-[var(--cosmic-text-faint)] focus-visible:ring-1 focus-visible:ring-[var(--cosmic-border-strong)]"
                 style={{
-                  background: 'rgba(255,255,255,0.04)',
-                  border: '1px solid rgba(255,255,255,0.08)',
+                  background: 'var(--cosmic-panel-soft)',
+                  border: '1px solid var(--cosmic-border)',
+                  color: 'var(--cosmic-text)',
                 }}
                 aria-label="Refine memory text"
                 placeholder="Refine this memory"
@@ -1301,11 +1304,7 @@ function MemoryOrb({
                   }}
                   disabled={!canSaveEdit}
                   aria-label="Save refinement"
-                  className="rounded-full px-4 py-2 text-[11px] tracking-[0.06em] text-white/60 transition-all duration-300 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 disabled:cursor-not-allowed disabled:opacity-40"
-                  style={{
-                    background: 'rgba(255,255,255,0.08)',
-                    border: '1px solid rgba(255,255,255,0.10)',
-                  }}
+                  className="cosmic-accent-pill cosmic-focus-ring rounded-full px-4 py-2 text-[11px] tracking-[0.06em] transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   Save refinement
                 </button>
@@ -1316,18 +1315,17 @@ function MemoryOrb({
                     setIsEditing(false);
                   }}
                   aria-label="Cancel"
-                  className="rounded-full px-4 py-2 text-[11px] tracking-[0.06em] text-white/30 transition-all duration-300 hover:text-white/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-white/10"
-                  style={{
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.06)',
-                  }}
+                  className="cosmic-ghost-pill cosmic-focus-ring rounded-full px-4 py-2 text-[11px] tracking-[0.06em] transition-all duration-300"
                 >
                   Cancel
                 </button>
               </div>
             </div>
           ) : (
-            <p className={cn('font-cormorant text-center leading-relaxed', isCenter ? 'text-[16px] text-white/80 sm:text-[19px]' : 'text-[14px] text-white/25')}>
+            <p
+              className={cn('font-cormorant text-center leading-relaxed', isCenter ? 'text-[16px] sm:text-[19px]' : 'text-[14px]')}
+              style={{ color: isCenter ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text-whisper)' }}
+            >
               {displayText}
             </p>
           )}
@@ -1339,14 +1337,14 @@ function MemoryOrb({
                 setShowReason((previous) => !previous);
               }}
               className="mt-3 text-[9px] uppercase tracking-[0.1em] transition-colors"
-              style={{ color: showReason ? 'rgba(184,164,232,0.4)' : 'rgba(255,255,255,0.10)' }}
+              style={{ color: showReason ? 'color-mix(in srgb, var(--sophia-purple) 40%, transparent)' : 'var(--cosmic-text-faint)' }}
             >
               {showReason ? 'Hide' : 'Why this?'}
             </button>
           )}
 
           {showReason && isCenter && !isEditing && (
-            <p className="mt-2 max-w-[200px] text-center text-[11px] text-[rgba(184,164,232,0.3)] motion-safe:animate-fadeIn">
+            <p className="mt-2 max-w-[200px] text-center text-[11px] motion-safe:animate-fadeIn" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 30%, transparent)' }}>
               {candidate.reason}
             </p>
           )}
@@ -1361,8 +1359,7 @@ function MemoryOrb({
                 disabled={disabled}
                 data-onboarding="recap-memory-keep"
                 aria-label="Keep this memory"
-                className="group flex items-center gap-2 rounded-full border bg-white/[0.04] px-5 py-2 text-white/40 transition-all duration-300 hover:bg-white/[0.08] hover:text-white/75 disabled:cursor-not-allowed disabled:opacity-30"
-                style={{ borderColor: 'rgba(184,164,232,0.08)' }}
+                className="cosmic-accent-pill cosmic-focus-ring group flex items-center gap-2 rounded-full px-5 py-2 transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-30"
               >
                 <Check className="h-3.5 w-3.5 transition-transform group-hover:scale-110" />
                 <span className="text-[10px] uppercase tracking-[0.08em]">Keep this</span>
@@ -1377,7 +1374,7 @@ function MemoryOrb({
                 }}
                 disabled={disabled}
                 aria-label="Refine this memory"
-                className="rounded-full border border-white/[0.05] bg-white/[0.03] p-2 text-white/20 transition-all hover:bg-white/[0.06] hover:text-white/45 disabled:opacity-30"
+                className="cosmic-ghost-pill cosmic-focus-ring rounded-full p-2 transition-all disabled:opacity-30"
               >
                 <Pencil className="h-3.5 w-3.5" />
               </button>
@@ -1389,7 +1386,8 @@ function MemoryOrb({
                 disabled={disabled}
                 data-onboarding="recap-memory-discard"
                 aria-label="Let this memory go"
-                className="group flex items-center gap-2 rounded-full border border-white/[0.05] bg-white/[0.04] px-5 py-2 text-white/25 transition-all duration-300 hover:border-red-400/[0.10] hover:bg-red-500/[0.06] hover:text-red-300/45 disabled:cursor-not-allowed disabled:opacity-30"
+                className="cosmic-focus-ring group flex items-center gap-2 rounded-full border px-5 py-2 text-[var(--cosmic-text-whisper)] transition-all duration-300 hover:bg-[color-mix(in_srgb,var(--sophia-error)_10%,transparent)] hover:text-[color-mix(in_srgb,var(--sophia-error)_72%,white_10%)] disabled:cursor-not-allowed disabled:opacity-30"
+                style={{ borderColor: 'var(--cosmic-border-soft)', background: 'var(--cosmic-panel-soft)' }}
               >
                 <X className="h-3.5 w-3.5 transition-transform group-hover:scale-110" />
                 <span className="text-[10px] uppercase tracking-[0.08em]">Let it go</span>
@@ -1428,23 +1426,22 @@ function ReflectionCard({
       <div
         className="relative w-full overflow-hidden rounded-2xl px-6 py-5 backdrop-blur-xl"
         style={{
-          background: 'rgba(10,8,16,0.50)',
-          border: '1px solid rgba(184,164,232,0.06)',
-          boxShadow: '0 0 35px rgba(0,0,0,0.3), inset 0 0 25px rgba(184,164,232,0.015)',
+          background: 'var(--cosmic-panel)',
+          border: '1px solid var(--cosmic-border-soft)',
+          boxShadow: 'var(--cosmic-shadow-lg)',
         }}
       >
         <div className="mb-3 flex items-center gap-2">
           <span className="text-base">💭</span>
-          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'rgba(184,164,232,0.35)' }}>
+          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 35%, transparent)' }}>
             {tag ? TAG_LABELS[tag] ?? 'Something to reflect on' : 'Something to reflect on'}
           </p>
         </div>
-        <p className="text-left font-cormorant text-[17px] leading-relaxed text-white/50">{prompt}</p>
+        <p className="text-left font-cormorant text-[17px] leading-relaxed" style={{ color: 'var(--cosmic-text)' }}>{prompt}</p>
         {onReflect && (
           <button
             onClick={onReflect}
-            className="mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] text-white/22 transition-all duration-300 hover:text-white/45"
-            style={{ background: 'rgba(184,164,232,0.04)', border: '1px solid rgba(184,164,232,0.07)' }}
+            className="cosmic-ghost-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
           >
             Sit with this for a moment →
           </button>
@@ -1456,19 +1453,19 @@ function ReflectionCard({
 
 function LoadingState() {
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[#030308]">
+    <div className="relative min-h-screen overflow-hidden bg-[var(--bg)]">
       <AuroraBackground />
       <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-4 text-center">
         <div
           className="relative h-[240px] w-[240px] rounded-full sm:h-[280px] sm:w-[280px]"
           style={{
-            background: 'radial-gradient(circle at 50% 50%, rgba(10,10,18,0.88), rgba(3,3,8,0.95))',
-            boxShadow: 'inset 0 -28px 65px -28px rgba(184,164,232,0.10), inset 0 28px 45px -28px rgba(89,190,173,0.04), inset 0 0 0 1px rgba(255,255,255,0.05), 0 0 55px -15px rgba(184,164,232,0.05)',
+            background: 'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 92%, black 8%), color-mix(in srgb, var(--bg) 95%, black 5%))',
+            boxShadow: 'inset 0 -28px 65px -28px color-mix(in srgb, var(--sophia-purple) 10%, transparent), inset 0 28px 45px -28px color-mix(in srgb, var(--cosmic-teal) 4%, transparent), inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent)',
           }}
         >
-          <div className="absolute inset-[22%] rounded-full border border-white/[0.05] bg-white/[0.02] animate-pulse" />
+          <div className="absolute inset-[22%] animate-pulse rounded-full border" style={{ borderColor: 'var(--cosmic-border-soft)', background: 'var(--cosmic-panel-soft)' }} />
         </div>
-        <p className="mt-8 font-cormorant text-[20px] text-white/55">Composing recap…</p>
+        <p className="mt-8 font-cormorant text-[20px]" style={{ color: 'var(--cosmic-text)' }}>Composing recap…</p>
       </div>
     </div>
   );
@@ -1476,20 +1473,20 @@ function LoadingState() {
 
 function EmptyState() {
   return (
-    <div className="relative min-h-screen overflow-hidden bg-[#030308]">
+    <div className="relative min-h-screen overflow-hidden bg-[var(--bg)]">
       <AuroraBackground />
       <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-4 text-center">
         <div
           className="w-full max-w-lg rounded-[28px] border px-8 py-10 backdrop-blur-xl"
           style={{
-            background: 'rgba(10,8,16,0.48)',
-            borderColor: 'rgba(184,164,232,0.08)',
-            boxShadow: '0 0 40px rgba(0,0,0,0.25), inset 0 0 30px rgba(184,164,232,0.02)',
+            background: 'var(--cosmic-panel)',
+            borderColor: 'var(--cosmic-border)',
+            boxShadow: 'var(--cosmic-shadow-lg)',
           }}
         >
-          <div className="mx-auto mb-4 h-12 w-12 rounded-full" style={{ background: 'radial-gradient(circle, rgba(184,164,232,0.12), transparent 70%)' }} />
-          <p className="font-cormorant text-[24px] text-white/65">No new memories from this session.</p>
-          <p className="mt-3 text-sm text-white/28">Sophia did not surface anything that felt worth carrying forward this time.</p>
+          <div className="mx-auto mb-4 h-12 w-12 rounded-full" style={{ background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 12%, transparent), transparent 70%)' }} />
+          <p className="font-cormorant text-[24px]" style={{ color: 'var(--cosmic-text-strong)' }}>No new memories from this session.</p>
+          <p className="mt-3 text-sm" style={{ color: 'var(--cosmic-text-whisper)' }}>Sophia did not surface anything that felt worth carrying forward this time.</p>
         </div>
       </div>
     </div>
@@ -1517,20 +1514,20 @@ function CompletedState({
         <div
           className="relative flex h-[280px] w-[280px] flex-col items-center justify-center overflow-hidden rounded-full"
           style={{
-            background: 'radial-gradient(ellipse 120% 100% at 50% 100%, rgba(184,164,232,0.08), transparent 40%), radial-gradient(circle at 50% 50%, rgba(10,10,18,0.9), rgba(3,3,8,0.95))',
-            boxShadow: 'inset 0 -28px 65px -28px rgba(184,164,232,0.12), inset 0 28px 45px -28px rgba(89,190,173,0.03), inset 0 0 0 1px rgba(255,255,255,0.05), 0 0 55px -15px rgba(184,164,232,0.05)',
+            background: 'radial-gradient(ellipse 120% 100% at 50% 100%, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent 40%), radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 92%, black 8%), color-mix(in srgb, var(--bg) 95%, black 5%))',
+            boxShadow: 'inset 0 -28px 65px -28px color-mix(in srgb, var(--sophia-purple) 12%, transparent), inset 0 28px 45px -28px color-mix(in srgb, var(--cosmic-teal) 3%, transparent), inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent)',
           }}
         >
           <OrbMistCanvas active />
           <div className="relative z-10 flex flex-col items-center">
             <div
               className="mb-3 flex h-12 w-12 items-center justify-center rounded-full"
-              style={{ background: 'rgba(184,164,232,0.06)', border: '1px solid rgba(184,164,232,0.1)' }}
+              style={{ background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)', border: '1px solid var(--cosmic-border)' }}
             >
-              <Check className="h-6 w-6" style={{ color: 'rgba(184,164,232,0.45)' }} />
+              <Check className="h-6 w-6" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 45%, transparent)' }} />
             </div>
-            <p className="font-cormorant text-[22px] text-white/68">All memories reviewed</p>
-            <p className="mt-1 text-[11px] tracking-[0.06em] text-white/22">
+            <p className="font-cormorant text-[22px]" style={{ color: 'var(--cosmic-text-strong)' }}>All memories reviewed</p>
+            <p className="mt-1 text-[11px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
               {approvedCount === 0
                 ? 'Nothing was carried into memory this time'
                 : `${approvedCount} ${approvedCount === 1 ? 'memory' : 'memories'} in the pool`}
@@ -1546,19 +1543,19 @@ function CompletedState({
               key={memory.id}
               className="flex items-start justify-between gap-3 rounded-2xl px-4 py-3 backdrop-blur-xl"
               style={{
-                background: 'rgba(10,8,16,0.42)',
-                border: '1px solid rgba(184,164,232,0.06)',
-                boxShadow: 'inset 0 0 20px rgba(184,164,232,0.012)',
+                background: 'var(--cosmic-panel)',
+                border: '1px solid var(--cosmic-border-soft)',
+                boxShadow: 'inset 0 0 20px color-mix(in srgb, var(--sophia-purple) 1.2%, transparent)',
               }}
             >
-              <p className="font-cormorant text-[17px] leading-relaxed text-white/62">{memory.text}</p>
+              <p className="font-cormorant text-[17px] leading-relaxed" style={{ color: 'var(--cosmic-text)' }}>{memory.text}</p>
               {memory.isEdited && (
                 <span
                   className="shrink-0 rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.12em]"
                   style={{
-                    background: 'rgba(184,164,232,0.10)',
-                    border: '1px solid rgba(184,164,232,0.14)',
-                    color: 'rgba(212,196,255,0.75)',
+                    background: 'color-mix(in srgb, var(--sophia-purple) 10%, transparent)',
+                    border: '1px solid var(--cosmic-border)',
+                    color: 'color-mix(in srgb, var(--sophia-glow) 75%, transparent)',
                   }}
                 >
                   Refined
@@ -1789,7 +1786,7 @@ export function RecapCosmicPoolOrbit({
   const allDone = activeCandidates.length === 0 && processedCandidates.length > 0;
 
   return (
-    <div className={cn('relative min-h-screen overflow-hidden bg-[#030308]', className)}>
+    <div className={cn('relative min-h-screen overflow-hidden bg-[var(--bg)]', className)}>
       <OnboardingTipGuard tipId="tip-first-recap" isTriggered={Boolean(takeaway || reflectionPrompt || normalizedCandidates.length > 0)} />
       <OnboardingTipGuard tipId="tip-first-memory-candidate" isTriggered={normalizedCandidates.length > 0} />
 
@@ -1808,7 +1805,7 @@ export function RecapCosmicPoolOrbit({
           bottom: '44%',
           height: 100,
           opacity: settledMemories.length > 0 ? 0.5 : 0.15,
-          background: `linear-gradient(to top, rgba(184,164,232,${0.015 + settledMemories.length * 0.008}), transparent)`,
+          background: `linear-gradient(to top, color-mix(in srgb, var(--sophia-purple) ${1.5 + settledMemories.length * 0.8}%, transparent), transparent)`,
           filter: 'blur(40px)',
         }}
       />
@@ -1826,33 +1823,33 @@ export function RecapCosmicPoolOrbit({
           )}
           data-onboarding="recap-summary"
         >
-          <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'rgba(184,164,232,0.3)' }}>
+          <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 30%, transparent)' }}>
             key takeaway
           </span>
           <div className="relative max-w-2xl">
             <div
               className="absolute inset-0 -z-10"
               style={{
-                background: 'radial-gradient(ellipse 80% 60% at 50% 50%, rgba(184,164,232,0.05), rgba(89,190,173,0.02) 40%, transparent 65%)',
+                background: 'radial-gradient(ellipse 80% 60% at 50% 50%, color-mix(in srgb, var(--sophia-purple) 5%, transparent), color-mix(in srgb, var(--cosmic-teal) 2%, transparent) 40%, transparent 65%)',
                 filter: 'blur(45px)',
                 transform: 'scale(2) translateY(10%)',
               }}
             />
-            <h1 className="font-cormorant text-[26px] font-light leading-snug text-white/[0.88] sm:text-[32px] md:text-[38px]">
+            <h1 className="font-cormorant text-[26px] font-light leading-snug sm:text-[32px] md:text-[38px]" style={{ color: 'var(--cosmic-text-strong)' }}>
               {takeaway ?? 'A thread worth carrying forward'}
             </h1>
           </div>
 
           <div className="mt-6 flex items-center gap-0" aria-hidden="true">
-            <div className="h-px w-16 sm:w-24" style={{ background: 'linear-gradient(to right, transparent, rgba(184,164,232,0.2))' }} />
+            <div className="h-px w-16 sm:w-24" style={{ background: 'linear-gradient(to right, transparent, color-mix(in srgb, var(--sophia-purple) 20%, transparent))' }} />
             <div className="relative mx-0">
-              <div className="h-[5px] w-[5px] rounded-full" style={{ background: 'rgba(184,164,232,0.5)' }} />
+              <div className="h-[5px] w-[5px] rounded-full" style={{ background: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }} />
               <div
                 className="absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 rounded-full"
-                style={{ background: 'radial-gradient(circle, rgba(184,164,232,0.35), transparent 70%)' }}
+                style={{ background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 35%, transparent), transparent 70%)' }}
               />
             </div>
-            <div className="h-px w-16 sm:w-24" style={{ background: 'linear-gradient(to left, transparent, rgba(184,164,232,0.2))' }} />
+            <div className="h-px w-16 sm:w-24" style={{ background: 'linear-gradient(to left, transparent, color-mix(in srgb, var(--sophia-purple) 20%, transparent))' }} />
           </div>
 
           <ProgressIndicator total={normalizedCandidates.length} reviewed={reviewedCount} />
@@ -1869,20 +1866,20 @@ export function RecapCosmicPoolOrbit({
             {safeFocusedIndex > 0 && (
               <button
                 onClick={navigatePrev}
-                className="absolute left-2 z-30 rounded-full border border-white/[0.06] bg-white/[0.03] p-2.5 backdrop-blur-sm transition-all hover:bg-white/[0.08] sm:left-8"
+                className="cosmic-chrome-button absolute left-2 z-30 rounded-full p-2.5 transition-all sm:left-8"
                 aria-label="Previous"
               >
-                <ChevronLeft className="h-5 w-5 text-white/20" />
+                <ChevronLeft className="h-5 w-5" style={{ color: 'var(--cosmic-text-muted)' }} />
               </button>
             )}
 
             {safeFocusedIndex < activeCandidates.length - 1 && (
               <button
                 onClick={navigateNext}
-                className="absolute right-2 z-30 rounded-full border border-white/[0.06] bg-white/[0.03] p-2.5 backdrop-blur-sm transition-all hover:bg-white/[0.08] sm:right-8"
+                className="cosmic-chrome-button absolute right-2 z-30 rounded-full p-2.5 transition-all sm:right-8"
                 aria-label="Next"
               >
-                <ChevronRight className="h-5 w-5 text-white/20" />
+                <ChevronRight className="h-5 w-5" style={{ color: 'var(--cosmic-text-muted)' }} />
               </button>
             )}
 

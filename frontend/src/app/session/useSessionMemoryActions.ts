@@ -1,8 +1,8 @@
 import { useCallback } from 'react';
 
 import { logger } from '../lib/error-logger';
-import { emitTelemetry } from '../lib/telemetry';
 import type { RitualArtifacts } from '../lib/session-types';
+import { emitTelemetry } from '../lib/telemetry';
 
 type ShowToastFn = (input: {
   message: string;

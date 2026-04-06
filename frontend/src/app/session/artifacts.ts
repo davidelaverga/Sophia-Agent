@@ -1,6 +1,6 @@
 
-import type { RitualArtifacts } from '../lib/session-types';
 import { asRecord } from '../lib/record-parsers';
+import type { RitualArtifacts } from '../lib/session-types';
 
 const FALLBACK_REFLECTIONS = new Set([
   'what mattered most in this conversation?',

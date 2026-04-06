@@ -1,6 +1,7 @@
 'use client';
 
 import { MessageSquare, Sparkles } from 'lucide-react';
+
 import { haptic } from '../../hooks/useHaptics';
 import { TAG_LABELS } from '../../lib/recap-types';
 import { cn } from '../../lib/utils';

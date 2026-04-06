@@ -1,7 +1,9 @@
 "use client"
 
 import { useEffect, useRef } from "react"
+
 import { useCaptionQueue } from "../../hooks/useCaptionQueue"
+
 import type { UIMessage } from "./MessageBubble"
 
 interface VoiceCaptionProps {
@@ -17,15 +19,29 @@ interface VoiceCaptionProps {
  * Ephemeral voice caption — fixed bottom-center overlay.
  *
  * Shows the latest assistant AND user message text as fading captions during voice mode.
- * Sophia's responses: centered, rgba(232,228,239,0.55).
- * User's speech: centered, dimmer rgba(232,228,239,0.30), slightly smaller.
+ * Sophia's responses: centered, brighter cosmic text.
+ * User's speech: centered, dimmer cosmic text, slightly smaller.
  * Fade-in 0.8s, hold 4s, fade-out 2s.
  */
 export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
   // Sophia caption (assistant messages)
-  const sophia = useCaptionQueue()
+  const {
+    flush: flushSophiaCaption,
+    isVisible: isSophiaVisible,
+    opacity: sophiaOpacity,
+    showCaption: showSophiaCaption,
+    text: sophiaText,
+    transition: sophiaTransition,
+  } = useCaptionQueue()
   // User caption (user messages — dimmer, shorter hold)
-  const user = useCaptionQueue({ holdMs: 2500 })
+  const {
+    flush: flushUserCaption,
+    isVisible: isUserVisible,
+    opacity: userOpacity,
+    showCaption: showUserCaption,
+    text: userText,
+    transition: userTransition,
+  } = useCaptionQueue({ holdMs: 2500 })
 
   const lastAssistantContentRef = useRef<string>("")
   const lastAssistantIdRef = useRef<string>("")
@@ -35,7 +51,7 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
   // Track assistant messages
   useEffect(() => {
     if (!isVoiceMode) {
-      sophia.flush()
+      flushSophiaCaption()
       return
     }
 
@@ -49,14 +65,14 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
     if (last.id !== lastAssistantIdRef.current || content !== lastAssistantContentRef.current) {
       lastAssistantIdRef.current = last.id
       lastAssistantContentRef.current = content
-      sophia.showCaption(content)
+      showSophiaCaption(content)
     }
-  }, [messages, isVoiceMode, sophia.showCaption, sophia.flush])
+  }, [flushSophiaCaption, isVoiceMode, messages, showSophiaCaption])
 
   // Track user messages
   useEffect(() => {
     if (!isVoiceMode) {
-      user.flush()
+      flushUserCaption()
       return
     }
 
@@ -70,12 +86,12 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
     if (last.id !== lastUserIdRef.current || content !== lastUserContentRef.current) {
       lastUserIdRef.current = last.id
       lastUserContentRef.current = content
-      user.showCaption(content)
+      showUserCaption(content)
     }
-  }, [messages, isVoiceMode, user.showCaption, user.flush])
+  }, [flushUserCaption, isVoiceMode, messages, showUserCaption])
 
   if (!isVoiceMode) return null
-  if (!sophia.isVisible && !user.isVisible) return null
+  if (!isSophiaVisible && !isUserVisible) return null
 
   return (
     <div
@@ -85,32 +101,32 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
       aria-label="Voice captions"
     >
       {/* User speech — dimmer, smaller */}
-      {user.isVisible && (
+      {isUserVisible && (
         <p
           className="font-sans text-[13px] font-light leading-[1.6] tracking-[0.01em]"
           style={{
-            color: `rgba(232, 228, 239, ${user.opacity * 0.30})`,
-            opacity: user.opacity,
-            transition: user.transition,
-            textShadow: "0 1px 8px rgba(0, 0, 0, 0.3)",
+            color: `color-mix(in srgb, var(--cosmic-text) ${userOpacity * 30}%, transparent)`,
+            opacity: userOpacity,
+            transition: userTransition,
+            textShadow: '0 1px 8px color-mix(in srgb, var(--bg) 30%, transparent)',
           }}
         >
-          {user.text}
+          {userText}
         </p>
       )}
 
       {/* Sophia response — brighter, larger */}
-      {sophia.isVisible && (
+      {isSophiaVisible && (
         <p
           className="font-sans text-[15px] font-light leading-[1.7] tracking-[0.01em]"
           style={{
-            color: `rgba(232, 228, 239, ${sophia.opacity * 0.55})`,
-            opacity: sophia.opacity,
-            transition: sophia.transition,
-            textShadow: "0 1px 8px rgba(0, 0, 0, 0.3)",
+            color: `color-mix(in srgb, var(--cosmic-text-strong) ${sophiaOpacity * 55}%, transparent)`,
+            opacity: sophiaOpacity,
+            transition: sophiaTransition,
+            textShadow: '0 1px 8px color-mix(in srgb, var(--bg) 30%, transparent)',
           }}
         >
-          {sophia.text}
+          {sophiaText}
         </p>
       )}
     </div>

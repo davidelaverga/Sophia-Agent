@@ -1,11 +1,12 @@
 import { useEffect } from 'react';
-import { isUuid } from '../lib/utils';
+
+import { usePlatformSignal } from '../hooks/usePlatformSignal';
 import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
 import { getSessionGreetingMessage } from '../lib/time-greetings';
-import type { MemoryHighlight } from '../types/session';
+import { isUuid } from '../lib/utils';
 import { useChatStore } from '../stores/chat-store';
 import { useSessionStore, selectSession, selectArtifacts, selectMessages } from '../stores/session-store';
-import { usePlatformSignal } from '../hooks/usePlatformSignal';
+import type { MemoryHighlight } from '../types/session';
 
 interface UseSessionPageContextParams {
   bootstrapSessionId?: string;

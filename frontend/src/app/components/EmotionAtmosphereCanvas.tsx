@@ -1,7 +1,8 @@
 "use client"
 
 import { useRef, useEffect, useCallback } from "react"
-import { useEmotionColor, getEmotionColor, type EmotionColor } from "../hooks/useEmotionColor"
+
+import { useEmotionColor, getEmotionColor } from "../hooks/useEmotionColor"
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

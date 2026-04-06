@@ -1,9 +1,10 @@
 'use client'
 
-import { useState } from 'react'
-import { useAuth } from '../providers'
 import { X, Shield, AlertCircle } from 'lucide-react'
+import { useState } from 'react'
+
 import { useCopy, useTranslation } from '../copy'
+import { useAuth } from '../providers'
 
 interface ConsentModalProps {
   onAccept: () => void

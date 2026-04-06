@@ -13,9 +13,11 @@
  * - POST /api/v4/chat
  */
 
-import { NextRequest, NextResponse } from "next/server"
 import { headers } from "next/headers"
+import { type NextRequest, NextResponse } from "next/server"
+
 import { auth } from "@/server/better-auth"
+
 import { getServerAuthToken } from "../../../lib/auth/server-auth"
 
 // ============================================================================
@@ -197,7 +199,7 @@ function sanitizeResponse(responseText: string): { text: string; artifacts: Reco
     .trim()
 
   const assistantMatch = cleaned.match(/\bASSISTANT\s*:\s*/i)
-  if (assistantMatch && assistantMatch.index !== undefined) {
+  if (assistantMatch?.index !== undefined) {
     cleaned = cleaned.slice(assistantMatch.index + assistantMatch[0].length).trim()
   }
 

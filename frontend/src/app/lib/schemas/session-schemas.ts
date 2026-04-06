@@ -7,6 +7,7 @@
  */
 
 import { z } from 'zod';
+
 import { debugWarn } from '../debug-logger';
 import { logger } from '../error-logger';
 
@@ -337,7 +338,7 @@ export function parseWithFallback<T>(
   context?: string
 ): T {
   const result = validateResponse(schema, data, context);
-  return result.success ? result.data! : fallback;
+  return result.success ? result.data : fallback;
 }
 
 /**

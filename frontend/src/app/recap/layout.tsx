@@ -9,11 +9,12 @@
 'use client';
 
 import type { ReactNode } from 'react';
+
 import { PresenceField } from '../components/presence-field';
 
 export default function RecapLayout({ children }: { children: ReactNode }) {
   return (
-    <div className="relative min-h-screen bg-[#030308]">
+    <div className="relative min-h-screen bg-[var(--bg)]">
       {/* PresenceField at resting state — pure ambient, no expression changes */}
       <div className="fixed inset-0 z-0 pointer-events-none" aria-hidden="true">
         <PresenceField />

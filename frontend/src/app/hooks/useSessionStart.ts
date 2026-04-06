@@ -12,12 +12,20 @@
 
 'use client';
 
-import { useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { useSessionStore } from '../stores/session-store';
+import { useState, useCallback, useRef } from 'react';
+
 import { startSession, getActiveSession, isSuccess, getErrorMessage } from '../lib/api/sessions-api';
-import { SessionStartResponseSchema, validateResponse } from '../lib/schemas/session-schemas';
 import { logger } from '../lib/error-logger';
+import { SessionStartResponseSchema, validateResponse } from '../lib/schemas/session-schemas';
+import type { PresetType, ContextMode } from '../lib/session-types';
+import { useSessionStore } from '../stores/session-store';
+import type { 
+  MemoryHighlight, 
+  ActiveSessionResponse,
+} from '../types/session';
+
+import { haptic } from './useHaptics';
 
 // Cache to prevent duplicate checkActiveSession calls
 const activeSessionCache = {
@@ -58,13 +66,6 @@ function disableSessionStart(): void {
     // ignore storage errors
   }
 }
-import type { 
-  SessionStartResponse as _SessionStartResponse, 
-  MemoryHighlight, 
-  ActiveSessionResponse,
-} from '../types/session';
-import type { PresetType, ContextMode } from '../lib/session-types';
-import { haptic } from './useHaptics';
 
 // ============================================================================
 // TYPES
@@ -232,7 +233,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
     
     try {
       // 1. Create local session first (optimistic)
-      const _localSession = createSession(userId, presetType, contextMode, {
+      createSession(userId, presetType, contextMode, {
         voiceMode: options?.voiceMode,
         intention: options?.intention,
         focusCue: options?.focusCue,

@@ -10,8 +10,9 @@
 'use client';
 
 import { ChevronUp, Sparkles } from 'lucide-react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 
 // ============================================================================
 // TYPES
@@ -66,7 +67,7 @@ export function MobileDrawer({
       {/* Backdrop */}
       {isOpen && (
         <div 
-          className="fixed inset-0 z-20 bg-black/30 backdrop-blur-sm lg:hidden animate-fadeIn"
+          className="cosmic-modal-backdrop fixed inset-0 z-20 lg:hidden animate-fadeIn"
           onClick={() => {
             haptic('light');
             onToggle();
@@ -86,11 +87,9 @@ export function MobileDrawer({
             // Position above composer
             'bottom-[calc(12rem+env(safe-area-inset-bottom))]',
             'sm:bottom-48',
-            'px-4 py-2.5 rounded-full transition-all duration-300',
-            'bg-sophia-surface border border-sophia-surface-border',
-            'shadow-lg',
+            'cosmic-surface-panel cosmic-focus-ring rounded-full px-4 py-2.5 transition-all duration-300',
             'flex items-center gap-2',
-            'hover:border-sophia-purple/30 active:scale-95'
+            'active:scale-95'
           )}
         >
           <div className="relative w-4 h-4 flex items-center justify-center">
@@ -118,9 +117,9 @@ export function MobileDrawer({
               </span>
             ))}
           </div>
-          <span className="text-xs font-medium text-sophia-text">Artifacts</span>
-          <span className="text-[10px] text-sophia-text2">• {statusText}</span>
-          <ChevronUp className="w-3.5 h-3.5 text-sophia-text2 ml-1" />
+          <span className="text-xs font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>Artifacts</span>
+          <span className="text-[10px]" style={{ color: 'var(--cosmic-text-muted)' }}>• {statusText}</span>
+          <ChevronUp className="ml-1 h-3.5 w-3.5" style={{ color: 'var(--cosmic-text-muted)' }} />
         </button>
       )}
       
@@ -129,7 +128,7 @@ export function MobileDrawer({
         className={cn(
           'fixed inset-x-0 z-30 lg:hidden',
           isOpen
-            ? 'bg-sophia-surface rounded-t-2xl shadow-[0_-2px_0_var(--card-border),0_-12px_40px_rgba(0,0,0,0.25)]'
+            ? 'cosmic-surface-panel-strong rounded-t-2xl'
             : 'bg-transparent shadow-none pointer-events-none',
           'transition-transform duration-300 ease-out',
           isOpen 
@@ -149,7 +148,7 @@ export function MobileDrawer({
           }}
         >
           <div className="w-10 h-1 rounded-full bg-sophia-surface-border" />
-          <span className="text-[10px] text-sophia-text2/50 mt-1">Tap to close</span>
+          <span className="mt-1 text-[10px]" style={{ color: 'var(--cosmic-text-faint)' }}>Tap to close</span>
         </div>
         
         {/* Content */}

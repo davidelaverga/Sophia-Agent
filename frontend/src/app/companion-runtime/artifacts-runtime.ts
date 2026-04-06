@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import type { ArtifactStatusType } from '../components/session';
+import { debugLog } from '../lib/debug-logger';
+import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import {
   getLiveArtifactStatus,
   getPersistedArtifactStatus,
   mergeRitualArtifacts,
 } from '../session/artifacts';
-import { debugLog } from '../lib/debug-logger';
-import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { RitualArtifacts } from '../types/session';
+
 import type { ArtifactStatusState, UseCompanionArtifactsRuntimeParams } from './artifacts-runtime.types';
 import type { CompanionArtifactSource } from './types';
 
@@ -101,7 +101,7 @@ export function useCompanionArtifactsRuntime({
       memoryCandidatesCount: merged.memory_candidates?.length ?? 0,
       status: nextStatus,
     });
-  }, [storeArtifacts]);
+  }, [sessionId, storeArtifacts]);
 
   const applyMemoryCandidates = useCallback((nextCandidates: RitualArtifacts['memory_candidates']) => {
     const currentArtifacts: RitualArtifacts = artifactsRef.current || { takeaway: '' };
@@ -125,7 +125,7 @@ export function useCompanionArtifactsRuntime({
         status: nextStatus,
       },
     });
-  }, [storeArtifacts]);
+  }, [sessionId, storeArtifacts]);
 
   useEffect(() => {
     if (!artifacts) return;

@@ -13,11 +13,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { cn } from '../../lib/utils';
-import { MemoryHighlights } from './MemoryHighlights';
-import { WeatherBadge } from './EmotionalWeather';
-import type { BootstrapResponse } from '../../types/sophia-ui-message';
+
 import type { PresetType } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
+import type { BootstrapResponse } from '../../types/sophia-ui-message';
+
+import { WeatherBadge } from './EmotionalWeather';
+import { MemoryHighlights } from './MemoryHighlights';
 
 type BootstrapFetchParams = {
   userId: string;
@@ -142,7 +144,7 @@ export function BootstrapCards({
       }
     }
     
-    loadBootstrap();
+    void loadBootstrap();
     
     return () => {
       controller.abort();
@@ -246,7 +248,7 @@ export function useBootstrap(
       setIsLoading(false);
     }
     
-    load();
+    void load();
     
     return () => controller.abort();
   }, [userId, options?.sessionType, options?.contextMode, options?.enabled]);

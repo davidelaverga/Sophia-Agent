@@ -1,8 +1,9 @@
 "use client"
 
 import { useEffect, useRef } from "react"
-import { getPresenceCopyKey, usePresenceStore } from "../stores/presence-store"
+
 import { useTranslation } from "../copy"
+import { getPresenceCopyKey, usePresenceStore } from "../stores/presence-store"
 
 const stageAccent: Record<string, string> = {
   listening: "bg-sophia-glow",

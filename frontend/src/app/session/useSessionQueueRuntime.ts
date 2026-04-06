@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+
 import type { ConnectivityStatus } from '../stores/connectivity-store';
 
 type ChatMessagePart = {

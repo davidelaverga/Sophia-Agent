@@ -1,6 +1,8 @@
-import { NextRequest, NextResponse } from "next/server";
 import { headers } from "next/headers";
+import { type NextRequest, NextResponse } from "next/server";
+
 import { auth } from "@/server/better-auth";
+
 import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
@@ -16,7 +18,6 @@ export async function POST(request: NextRequest) {
   if (!session?.user) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
-  const userId = session.user.id;
 
   let body: { accept: boolean };
   try {

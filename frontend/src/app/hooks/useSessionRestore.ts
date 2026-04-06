@@ -11,6 +11,7 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
+
 import { logger } from '../lib/error-logger';
 import type { PresetType, ContextMode, SessionClientStore } from '../lib/session-types';
 
@@ -169,26 +170,6 @@ export function useSessionRestore(
     }
   }, []);
   
-  /**
-   * Mark snapshot as ended (but don't remove for recap access)
-   */
-  const _markEnded = useCallback(() => {
-    if (!snapshot) return;
-    
-    const updated: SessionSnapshot = {
-      ...snapshot,
-      status: 'ended',
-      lastActivityAt: new Date().toISOString(),
-    };
-    
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(updated));
-      setSnapshot(updated);
-    } catch (error) {
-      logger.logError(error, { component: 'SessionRestore', action: 'mark_ended' });
-    }
-  }, [snapshot]);
-  
   // Auto-load on mount
   useEffect(() => {
     if (autoLoad) {
@@ -198,7 +179,7 @@ export function useSessionRestore(
   
   // Update last activity periodically (every 30 seconds if active)
   useEffect(() => {
-    if (!snapshot || snapshot.status !== 'active') return;
+    if (snapshot?.status !== 'active') return;
     
     const interval = setInterval(() => {
       const updated: SessionSnapshot = {

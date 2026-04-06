@@ -8,7 +8,8 @@
  * Handles batch operations and partial failures.
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
+
 import { debugLog, debugWarn } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
 

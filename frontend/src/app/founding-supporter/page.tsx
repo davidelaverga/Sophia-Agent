@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
-import Link from "next/link";
-import { useCopy } from "../copy";
 import { Check, Heart } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useState } from "react";
+
+import { useCopy } from "../copy";
 import { useUsageLimitStore } from "../stores/usage-limit-store";
 
 export default function FoundingSupporterPage() {

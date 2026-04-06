@@ -9,7 +9,6 @@
 
 'use client';
 
-import { useState, useCallback, lazy, Suspense } from 'react';
 import { 
   Clock, 
   ChevronLeft, 
@@ -22,12 +21,14 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { cn } from '../../lib/utils';
+import { useState, useCallback, lazy, Suspense } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
-import { useSessionHistoryStore, type SessionHistoryEntry } from '../../stores/session-history-store';
-import { useConversationStore } from '../../stores/conversation-store';
 import { humanizeTime } from '../../lib/humanize-time';
 import type { PresetType, ContextMode } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
+import { useConversationStore } from '../../stores/conversation-store';
+import { useSessionHistoryStore, type SessionHistoryEntry } from '../../stores/session-history-store';
 
 // Lazy load HistoryDrawer
 const HistoryDrawer = lazy(() => 
@@ -304,7 +305,7 @@ export function ConversationHistorySidebar({
   // Refresh on expand
   const handleToggle = useCallback(() => {
     if (!isExpanded) {
-      refreshConversations();
+      void refreshConversations();
     }
     onToggle();
   }, [isExpanded, onToggle, refreshConversations]);
@@ -511,34 +512,33 @@ export function MobileBottomSheet({
     <div className="lg:hidden fixed inset-0 z-50">
       {/* Backdrop */}
       <div 
-        className="absolute inset-0 bg-black/50 backdrop-blur-sm"
+        className="cosmic-modal-backdrop absolute inset-0"
         onClick={onClose}
       />
       
       {/* Sheet */}
       <div className={cn(
         'absolute bottom-0 left-0 right-0',
-        'bg-sophia-surface rounded-t-3xl',
-        'border-t border-sophia-surface-border',
+        'cosmic-surface-panel-strong rounded-t-3xl border-t',
         'max-h-[70vh] overflow-hidden',
         'animate-in slide-in-from-bottom duration-300'
       )}>
         {/* Handle */}
         <div className="flex justify-center pt-3 pb-2">
-          <div className="w-10 h-1 rounded-full bg-sophia-text2/20" />
+          <div className="h-1 w-10 rounded-full" style={{ background: 'var(--cosmic-text-faint)' }} />
         </div>
         
         {/* Header */}
         <div className="flex items-center justify-between px-5 pb-4">
           <div className="flex items-center gap-2">
             {icon}
-            <h3 className="text-lg font-semibold text-sophia-text">{title}</h3>
+            <h3 className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>{title}</h3>
           </div>
           <button
             onClick={onClose}
-            className="p-2 rounded-xl hover:bg-sophia-button transition-colors"
+            className="cosmic-chrome-button cosmic-focus-ring rounded-xl p-2 transition-colors"
           >
-            <X className="w-5 h-5 text-sophia-text2" />
+            <X className="h-5 w-5" style={{ color: 'var(--cosmic-text-muted)' }} />
           </button>
         </div>
         

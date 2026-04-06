@@ -7,9 +7,11 @@
  * Exports user's memories as a JSON file for GDPR compliance.
  */
 
-import { NextRequest, NextResponse } from "next/server";
 import { headers } from "next/headers";
+import { type NextRequest, NextResponse } from "next/server";
+
 import { auth } from "@/server/better-auth";
+
 import { getServerAuthToken } from "../../../lib/auth/server-auth";
 
 export async function GET(_request: NextRequest) {

@@ -1,9 +1,10 @@
 "use client"
 
-import { useRouter } from "next/navigation"
-import { useUsageLimitStore } from "../stores/usage-limit-store"
-import { useTranslation } from "../copy"
 import { Sparkles } from "lucide-react"
+import { useRouter } from "next/navigation"
+
+import { useTranslation } from "../copy"
+import { useUsageLimitStore } from "../stores/usage-limit-store"
 
 /**
  * Subtle, non-intrusive usage hint that appears in the footer

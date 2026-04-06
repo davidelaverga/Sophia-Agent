@@ -85,7 +85,7 @@ export function Waveform({
     return () => {
       source.disconnect();
       analyser.disconnect();
-      audioContext.close();
+      void audioContext.close();
     };
   }, [stream, isListening]);
 
@@ -266,8 +266,7 @@ export function Waveform({
         // Calculate average volume and frequency distribution
         let sum = 0;
         let maxFreq = 0;
-        for (let i = 0; i < dataArrayRef.current.length; i++) {
-          const value = dataArrayRef.current[i];
+        for (const value of dataArrayRef.current) {
           sum += value;
           if (value > maxFreq) maxFreq = value;
         }

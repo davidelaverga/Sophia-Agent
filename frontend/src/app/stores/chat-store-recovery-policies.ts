@@ -1,5 +1,5 @@
-import type { ChatMessage } from '../types'
 import { createMessageId } from '../lib/utils'
+import type { ChatMessage } from '../types'
 
 type RetryableStreamStatus = 'cancelled' | 'interrupted' | 'error'
 type RecoverableStreamStatus = 'interrupted' | 'error'

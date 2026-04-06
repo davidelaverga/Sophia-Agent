@@ -1,6 +1,7 @@
 "use client"
 
-import { useRef, useEffect, useCallback } from "react"
+import { useRef, useCallback } from "react"
+
 import type { ExpressionParams, Palette } from "../../hooks/useExpression"
 
 // ─── Shader source ───────────────────────────────────────────────────────────
@@ -186,12 +187,12 @@ export function useNebulaCanvas({ reducedFidelity = false }: { reducedFidelity?:
     const FRAG = makeFrag(reducedFidelity ? 4 : 6)
 
     function compile(src: string, type: number): WebGLShader | null {
-      const s = gl!.createShader(type)
+      const s = gl.createShader(type)
       if (!s) return null
-      gl!.shaderSource(s, src)
-      gl!.compileShader(s)
-      if (!gl!.getShaderParameter(s, gl!.COMPILE_STATUS)) {
-        console.error(gl!.getShaderInfoLog(s))
+      gl.shaderSource(s, src)
+      gl.compileShader(s)
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        console.error(gl.getShaderInfoLog(s))
         return null
       }
       return s
@@ -280,7 +281,7 @@ export function useNebulaCanvas({ reducedFidelity = false }: { reducedFidelity?:
  * Thin DOM wrapper for the nebula canvas element.
  * The actual rendering is driven by the parent via the hook.
  */
-export function NebulaCanvas({ className }: NebulaCanvasProps) {
+export function NebulaCanvas({ className: _className }: NebulaCanvasProps) {
   // This is just the mount-point. PresenceField uses useNebulaCanvas
   // and attaches the ref to this canvas.
   return null

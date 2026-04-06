@@ -13,8 +13,8 @@
 
 'use client';
 
-import { cn } from '../../lib/utils';
 import type { PresetType } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 import type { EmotionalTrend, UICard, BootstrapResponse } from '../../types/sophia-ui-message';
 
 // =============================================================================
@@ -80,7 +80,7 @@ export function MemoryHighlights({
       {/* Emotional Weather */}
       {emotionalCard && (
         <EmotionalWeatherCard 
-          trend={emotionalCard.trend as EmotionalTrend} 
+          trend={emotionalCard.trend} 
           label={emotionalCard.label}
         />
       )}

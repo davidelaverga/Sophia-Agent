@@ -1,8 +1,9 @@
 "use client"
 
-import { useEffect, useMemo } from "react"
-import Link from "next/link"
 import { RefreshCw, Home, MessageSquare } from "lucide-react"
+import Link from "next/link"
+import { useEffect, useMemo } from "react"
+
 import { useCopy, useTranslation } from "../copy"
 import { logger } from "../lib/error-logger"
 

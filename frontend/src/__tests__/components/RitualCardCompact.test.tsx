@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from "vitest"
 import { render, screen, fireEvent } from "@testing-library/react"
+import { describe, it, expect, vi } from "vitest"
+
 import { RitualCard } from "../../app/components/dashboard/RitualCard"
 import type { RitualConfig } from "../../app/components/dashboard/types"
 
@@ -72,7 +73,7 @@ describe("RitualCard compact variant", () => {
   })
 
   it("compact card shows selected indicator when isSelected", () => {
-    const { container } = render(
+    render(
       <RitualCard
         ritual={MOCK_RITUAL}
         context="gaming"
@@ -106,7 +107,7 @@ describe("RitualCard compact variant", () => {
   })
 
   it("compact card shows suggested indicator", () => {
-    const { container } = render(
+    render(
       <RitualCard
         ritual={MOCK_RITUAL}
         context="gaming"

@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect } from "react";
 import { useRouter } from "next/navigation";
-import type { UsageLimitInfo } from "../types/rate-limits";
+import { useEffect } from "react";
+
 import { useCopy, useTranslation } from "../copy";
-import { useUsageLimitStore } from "../stores/usage-limit-store";
 import { useFocusTrap } from "../hooks/useFocusTrap";
+import { useUsageLimitStore } from "../stores/usage-limit-store";
+import type { UsageLimitInfo } from "../types/rate-limits";
+
 import { FoundingSupporterBadge } from "./FoundingSupporterBadge";
 
 type UsageLimitModalProps = {

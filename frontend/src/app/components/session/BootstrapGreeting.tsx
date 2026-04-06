@@ -14,10 +14,12 @@
 'use client';
 
 import { useEffect, useRef, memo } from 'react';
+
 import { cn } from '../../lib/utils';
+import type { MemoryHighlight, PresetType, ContextMode } from '../../types/session';
+
 import { MemoryHighlightCards } from './MemoryHighlightCard';
 import { ResumeBanner } from './ResumeBanner';
-import type { MemoryHighlight, PresetType, ContextMode } from '../../types/session';
 
 // =============================================================================
 // TYPES

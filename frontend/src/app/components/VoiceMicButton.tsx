@@ -9,6 +9,7 @@
 "use client"
 
 import { Mic } from "lucide-react"
+
 import { useTranslation } from "../copy"
 
 export type VoiceStage = "idle" | "connecting" | "listening" | "thinking" | "speaking" | "error"

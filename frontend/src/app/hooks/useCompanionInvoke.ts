@@ -7,14 +7,15 @@
  */
 
 import { useState, useCallback } from 'react';
-import { useSessionStore } from '../stores/session-store';
-import { isUuid } from '../lib/utils';
+
 import { logger } from '../lib/error-logger';
 import type { 
   InvokeType, 
   CompanionInvokeRequest, 
   CompanionInvokeResponse 
 } from '../lib/session-types';
+import { isUuid } from '../lib/utils';
+import { useSessionStore } from '../stores/session-store';
 
 interface UseCompanionInvokeOptions {
   threadId?: string;

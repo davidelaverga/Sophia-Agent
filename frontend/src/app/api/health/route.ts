@@ -9,7 +9,7 @@
  * Used by useConnectivity hook for offline detection.
  */
 
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 
 // Backend URL for deep health check - check multiple env vars
 const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || '';

@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
-import { copy } from "../copy"
 import { useCompanionRuntime } from "../companion-runtime/useCompanionRuntime"
+import { copy } from "../copy"
 import { useBackendTokenSync } from "../hooks/useBackendTokenSync"
 import { useInterrupt } from "../hooks/useInterrupt"
 import { usePlatformSignal } from "../hooks/usePlatformSignal"
@@ -17,25 +17,26 @@ import {
   shouldAttemptRecovery,
 } from "../lib/stream-recovery"
 import { useAuth } from "../providers"
-import { useConnectivityStore } from "../stores/connectivity-store"
-import { useEmotionStore } from "../stores/emotion-store"
-import { useMessageMetadataStore } from "../stores/message-metadata-store"
-import { usePresenceStore } from "../stores/presence-store"
-import { useRecapStore } from "../stores/recap-store"
+import {
+  useChatStore,
+  type ChatMessage,
+} from "../stores/chat-store"
+import { emitChatStreamRecovered } from "../stores/chat-store-events"
 import {
   applyRecoveredResponse,
   isRecoverableStreamStatus,
   selectLastUserMessage,
 } from "../stores/chat-store-recovery-policies"
-import { emitChatStreamRecovered } from "../stores/chat-store-events"
+import { useConnectivityStore } from "../stores/connectivity-store"
+import { useEmotionStore } from "../stores/emotion-store"
+import { useMessageMetadataStore } from "../stores/message-metadata-store"
+import { usePresenceStore } from "../stores/presence-store"
+import { useRecapStore } from "../stores/recap-store"
 import { useUiStore } from "../stores/ui-store"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
-import {
-  useChatStore,
-  type ChatMessage,
-} from "../stores/chat-store"
 import type { RecapArtifactsV1 } from "../types/recap"
 import type { InterruptPayload, RitualArtifacts } from "../types/session"
+
 import {
   applyChatRouteArtifacts,
   mapRecapArtifactsToRitualArtifacts,
@@ -64,7 +65,7 @@ export function mapRouteMessagesToChatMessages(
     const content = Array.isArray(message.parts)
       ? message.parts
           .filter((part) => part?.type === "text" && typeof part?.text === "string")
-          .map((part) => part.text as string)
+          .map((part) => part.text)
           .join("")
       : ""
 
@@ -425,7 +426,9 @@ export function useChatRouteExperience(): ChatRouteExperience {
       handleFinish: companionRuntime.streamContract.handleFinish,
       markStreamTurnStarted: companionRuntime.streamContract.markStreamTurnStarted,
       sendChatMessage: companionRuntime.chatRuntime.sendChatMessage as ChatSendMessage,
-      stopStreaming: companionRuntime.chatRuntime.stopStreaming,
+      stopStreaming: () => {
+        void companionRuntime.chatRuntime.stopStreaming()
+      },
     }
   }, [companionRuntime.chatRuntime, companionRuntime.streamContract])
 

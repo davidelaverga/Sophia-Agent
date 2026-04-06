@@ -1,4 +1,5 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
+
 import { getServerAuthHeader } from '../../../lib/auth/server-auth';
 import { logger } from '../../../lib/error-logger';
 

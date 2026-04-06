@@ -1,11 +1,13 @@
 "use client"
 
-import { useEffect, useState, useRef } from "react"
 import { Sparkles } from "lucide-react"
-import { useAuth } from "../providers"
-import { authClient } from "@/server/better-auth/client"
+import { useEffect, useState, useRef } from "react"
+
 import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
+import { authClient } from "@/server/better-auth/client"
+
 import { useCopy, useTranslation } from "../copy"
+import { useAuth } from "../providers"
 
 type AuthState = "checking" | "unauthenticated" | "authenticated"
 

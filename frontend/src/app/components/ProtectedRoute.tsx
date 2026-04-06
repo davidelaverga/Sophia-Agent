@@ -10,6 +10,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
+
 import { AuthGate } from './AuthGate';
 import { ConsentGate } from './ConsentGate';
 import { ErrorBoundary } from './ErrorBoundary';

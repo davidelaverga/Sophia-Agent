@@ -1,6 +1,6 @@
+import { act } from '@testing-library/react';
 import React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { act } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('next/navigation', () => ({
@@ -17,9 +17,9 @@ vi.mock('next/navigation', () => ({
   useParams: () => ({ sessionId: 'test-session' }),
 }));
 
-import RecapPage from '../../app/recap/[sessionId]/page';
-import { mapBackendArtifactsToRecapV1 } from '../../app/lib/artifacts-adapter';
 import { RecapMemoryOrbit } from '../../app/components/recap/RecapMemoryOrbit';
+import { mapBackendArtifactsToRecapV1 } from '../../app/lib/artifacts-adapter';
+import RecapPage from '../../app/recap/[sessionId]/page';
 import { useRecapStore } from '../../app/stores/recap-store';
 
 function createRenderTarget() {
@@ -64,15 +64,15 @@ async function waitForText(container: HTMLElement, text: string, timeoutMs = 300
 }
 
 function findButtonByAria(container: HTMLElement, label: string): HTMLButtonElement {
-  const button = container.querySelector(`button[aria-label="${label}"]`) as HTMLButtonElement | null;
+  const button = container.querySelector(`button[aria-label="${label}"]`);
   if (!button) throw new Error(`Button not found: ${label}`);
-  return button;
+  return button as HTMLButtonElement;
 }
 
 function findButtonByText(container: HTMLElement, text: string): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find(
     (node) => node.textContent?.trim() === text
-  ) as HTMLButtonElement | undefined;
+  );
   if (!button) throw new Error(`Button not found with text: ${text}`);
   return button;
 }

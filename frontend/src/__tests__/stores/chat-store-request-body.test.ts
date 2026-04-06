@@ -21,7 +21,7 @@ describe('buildChatRouteBody', () => {
     const payload = buildChatRouteBody({
       conversationId: 'conv-voice',
       userId: 'user-voice',
-    }) as Record<string, unknown>;
+    });
 
     expect(payload.skill).toBeUndefined();
     expect(payload.skills).toBeUndefined();

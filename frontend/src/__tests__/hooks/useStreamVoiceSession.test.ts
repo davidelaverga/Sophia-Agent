@@ -1,6 +1,7 @@
-import { describe, it, expect, vi, beforeEach, type Mock } from "vitest"
-import { renderHook, act } from "@testing-library/react"
 import { CallingState } from "@stream-io/video-react-sdk"
+import { renderHook, act } from "@testing-library/react"
+import { describe, it, expect, vi, beforeEach } from "vitest"
+
 import { useStreamVoiceSession } from "../../app/hooks/useStreamVoiceSession"
 import type { ContextMode, PresetType } from "../../app/lib/session-types"
 
@@ -14,7 +15,7 @@ let mockRemoteParticipantSessionIds: string[] = []
 const mockJoin = vi.fn().mockResolvedValue(undefined)
 const mockLeave = vi.fn().mockResolvedValue(undefined)
 let mockCall: Record<string, unknown> | null = null
-const callEventHandlers: Map<string, (e: unknown) => void> = new Map()
+const callEventHandlers = new Map<string, (e: unknown) => void>()
 
 vi.mock("../../app/hooks/useStreamVoice", () => ({
   useStreamVoice: () => ({

@@ -1,10 +1,11 @@
 "use client"
 
-import { useEffect, useState } from "react"
-import { useRouter } from "next/navigation"
-import { useUsageLimitStore } from "../stores/usage-limit-store"
-import { useCopy, useTranslation } from "../copy"
 import { Sparkles, X } from "lucide-react"
+import { useRouter } from "next/navigation"
+import { useEffect, useState } from "react"
+
+import { useCopy, useTranslation } from "../copy"
+import { useUsageLimitStore } from "../stores/usage-limit-store"
 
 /**
  * Gentle, non-blocking toast that appears when user reaches 80% of their limit

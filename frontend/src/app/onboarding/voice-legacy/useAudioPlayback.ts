@@ -8,12 +8,13 @@
  */
 
 import { useRef, useCallback, useEffect } from "react"
-import { logger } from "../../lib/error-logger"
-import { debugLog, debugWarn } from "../../lib/debug-logger"
+
+import { PREBUFFER_CHUNKS, FIRST_AUDIO_TARGET_MS, base64ToUint8Array } from "../../hooks/voice/voice-utils"
 import { isVerboseDebugEnabled } from "../../lib/debug"
+import { debugLog, debugWarn } from "../../lib/debug-logger"
+import { logger } from "../../lib/error-logger"
 import { emitTelemetry } from "../../lib/telemetry"
 import type { QueuedChunk, RouterPath } from "../../lib/voice-types"
-import { PREBUFFER_CHUNKS, FIRST_AUDIO_TARGET_MS, base64ToUint8Array } from "../../hooks/voice/voice-utils"
 
 type UseAudioPlaybackProps = {
   path?: RouterPath
@@ -60,12 +61,9 @@ export function useAudioPlayback({ path, onPlaybackComplete }: UseAudioPlaybackP
       // Close AudioContext to release system resources
       if (audioContextRef.current && audioContextRef.current.state !== "closed") {
         try {
-          const closeResult = audioContextRef.current.close()
-          if (closeResult && typeof closeResult.catch === 'function') {
-            closeResult.catch(() => {
-              // Ignore close errors
-            })
-          }
+          void audioContextRef.current.close().catch(() => {
+            // Ignore close errors
+          })
         } catch {
           // Ignore close errors
         }
@@ -285,7 +283,7 @@ export function useAudioPlayback({ path, onPlaybackComplete }: UseAudioPlaybackP
       !needsPrebuffer || prebufferOverrideRef.current || playbackQueueRef.current.length >= PREBUFFER_CHUNKS
     if (!prebufferReady) return
 
-    const nextChunk = playbackQueueRef.current.shift()!
+    const nextChunk = playbackQueueRef.current.shift()
     if (!hasStartedPlaybackRef.current) {
       hasStartedPlaybackRef.current = true
       prebufferOverrideRef.current = false

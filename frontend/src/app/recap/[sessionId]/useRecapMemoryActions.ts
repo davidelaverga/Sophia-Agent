@@ -1,9 +1,10 @@
 import { useCallback, useState } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
-import { logger } from '../../lib/error-logger';
 import { errorCopy } from '../../lib/error-copy';
-import { useSessionHistoryStore } from '../../stores/session-history-store';
+import { logger } from '../../lib/error-logger';
 import type { MemoryCandidateV1, MemoryDecision, RecapArtifactsV1 } from '../../lib/recap-types';
+import { useSessionHistoryStore } from '../../stores/session-history-store';
 
 type DecisionMap = Array<{ candidateId: string; decision: MemoryDecision; editedText?: string }>;
 

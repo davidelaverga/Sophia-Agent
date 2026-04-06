@@ -28,6 +28,7 @@
 'use client';
 
 import { useMemo, memo } from 'react';
+
 import type { ContextMode } from '../../types/session';
 
 // =============================================================================
@@ -251,14 +252,14 @@ const GamingAtmosphere = memo(function GamingAtmosphere() {
       }} />
       {/* Vignette */}
       <div className="absolute inset-0" style={{
-        background: `radial-gradient(ellipse 70% 65% at 50% 45%, transparent 30%, rgba(0,0,0,0.25) 70%, rgba(0,0,0,0.55) 100%)`,
+        background: `radial-gradient(ellipse 70% 65% at 50% 45%, transparent 30%, color-mix(in srgb, var(--bg) 25%, transparent) 70%, color-mix(in srgb, var(--bg) 55%, transparent) 100%)`,
       }} />
       <div className="absolute inset-0" style={{
         background: `
-          radial-gradient(ellipse 100% 70% at 0% 0%, rgba(0,0,0,0.3) 0%, transparent 50%),
-          radial-gradient(ellipse 100% 70% at 100% 0%, rgba(0,0,0,0.25) 0%, transparent 50%),
-          radial-gradient(ellipse 100% 70% at 0% 100%, rgba(0,0,0,0.3) 0%, transparent 50%),
-          radial-gradient(ellipse 100% 70% at 100% 100%, rgba(0,0,0,0.3) 0%, transparent 50%)
+          radial-gradient(ellipse 100% 70% at 0% 0%, color-mix(in srgb, var(--bg) 30%, transparent) 0%, transparent 50%),
+          radial-gradient(ellipse 100% 70% at 100% 0%, color-mix(in srgb, var(--bg) 25%, transparent) 0%, transparent 50%),
+          radial-gradient(ellipse 100% 70% at 0% 100%, color-mix(in srgb, var(--bg) 30%, transparent) 0%, transparent 50%),
+          radial-gradient(ellipse 100% 70% at 100% 100%, color-mix(in srgb, var(--bg) 30%, transparent) 0%, transparent 50%)
         `,
         opacity: 0.5,
       }} />

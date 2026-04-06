@@ -14,6 +14,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+
 import { logger } from '../lib/error-logger';
 import { useSessionStore, selectSession } from '../stores/session-store';
 import type { MemoryHighlight } from '../types/session';

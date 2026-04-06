@@ -15,12 +15,14 @@
 "use client"
 
 import { useEffect, useCallback } from "react"
-import { useUsageLimitStore } from "../stores/usage-limit-store"
-import { useUiStore as useFocusModeStore } from "../stores/ui-store"
-import { selectIsModalOpen } from "../stores/selectors"
+
 import { logger } from "../lib/error-logger"
-import { haptic } from "./useHaptics"
 import type { VoiceStage } from "../lib/voice-types"
+import { selectIsModalOpen } from "../stores/selectors"
+import { useUiStore as useFocusModeStore } from "../stores/ui-store"
+import { useUsageLimitStore } from "../stores/usage-limit-store"
+
+import { haptic } from "./useHaptics"
 
 type WaveformState = "resting" | "listening" | "thinking" | "speaking"
 

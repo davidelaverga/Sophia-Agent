@@ -10,8 +10,9 @@
 'use client';
 
 import { useState, useCallback } from 'react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
+import { cn } from '../../lib/utils';
 import { useFeedbackStore } from '../../stores/feedback-store';
 import type { FeedbackType } from '../../types/sophia-ui-message';
 
@@ -82,18 +83,18 @@ export function AtmosphericFeedback({
         'fixed inset-0 z-50 flex items-center justify-center',
         'animate-fadeIn',
       )}
-      style={{ backgroundColor: 'rgba(3, 3, 8, 0.55)' }}
+      style={{ backgroundColor: 'var(--cosmic-modal-backdrop)' }}
     >
       <div className="max-w-sm w-full mx-6 text-center space-y-6">
         {submitted ? (
           /* Thank you state */
-          <p className="font-cormorant text-[20px] text-white/60 animate-fadeIn">
+          <p className="font-cormorant text-[20px] animate-fadeIn" style={{ color: 'var(--cosmic-text)' }}>
             thank you
           </p>
         ) : (
           <>
             {/* Prompt */}
-            <p className="font-cormorant text-[18px] text-white/50">
+            <p className="font-cormorant text-[18px]" style={{ color: 'var(--cosmic-text)' }}>
               how was this session?
             </p>
 
@@ -104,12 +105,12 @@ export function AtmosphericFeedback({
                   key={value}
                   onClick={() => handleRating(value)}
                   className={cn(
-                    'w-10 h-10 rounded-full',
+                    'h-10 w-10 rounded-full',
                     'transition-all duration-200',
-                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                    'cosmic-focus-ring',
                     rating && value <= rating
-                      ? 'bg-white/[0.12] text-white/70'
-                      : 'bg-white/[0.04] text-white/20 hover:bg-white/[0.08] hover:text-white/40',
+                      ? 'cosmic-accent-pill'
+                      : 'cosmic-ghost-pill',
                   )}
                   aria-label={`Rate ${value} of 5`}
                 >
@@ -126,13 +127,13 @@ export function AtmosphericFeedback({
                     key={tag.id}
                     onClick={() => handleTag(tag.id)}
                     className={cn(
-                      'px-3 py-1.5 rounded-full',
+                      'rounded-full px-3 py-1.5',
                       'text-[11px] tracking-[0.06em]',
                       'transition-all duration-200',
-                      'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                      'cosmic-focus-ring',
                       selectedTags.includes(tag.id)
-                        ? 'bg-white/[0.10] border border-white/[0.12] text-white/60'
-                        : 'bg-white/[0.04] border border-white/[0.06] text-white/30 hover:bg-white/[0.07]',
+                        ? 'cosmic-accent-pill'
+                        : 'cosmic-ghost-pill',
                     )}
                   >
                     {tag.label}
@@ -147,13 +148,7 @@ export function AtmosphericFeedback({
                 <button
                   onClick={handleSubmit}
                   className={cn(
-                    'px-5 py-2 rounded-full',
-                    'text-[11px] tracking-[0.08em] uppercase',
-                    'bg-white/[0.08] border border-white/[0.10]',
-                    'text-white/60',
-                    'transition-all duration-200',
-                    'hover:bg-white/[0.12] hover:text-white/80',
-                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20',
+                    'cosmic-accent-pill cosmic-focus-ring rounded-full px-5 py-2 text-[11px] tracking-[0.08em] uppercase transition-all duration-200',
                   )}
                 >
                   done
@@ -162,10 +157,8 @@ export function AtmosphericFeedback({
               <button
                 onClick={handleSkip}
                 className={cn(
-                  'text-[10px] tracking-[0.08em] text-white/15',
-                  'hover:text-white/30',
+                  'cosmic-whisper-button cosmic-focus-ring rounded text-[10px] tracking-[0.08em]',
                   'transition-all duration-200',
-                  'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20 rounded',
                 )}
               >
                 skip

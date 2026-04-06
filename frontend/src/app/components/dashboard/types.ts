@@ -3,7 +3,6 @@
  * Extracted from VoiceFirstDashboard for reusability
  */
 
-import type { PresetType, ContextMode } from '../../types/session';
 import { 
   Target, 
   MessageCircle, 
@@ -13,6 +12,8 @@ import {
   Briefcase,
   Heart,
 } from 'lucide-react';
+
+import type { PresetType, ContextMode } from '../../types/session';
 
 // ============================================================================
 // TYPES

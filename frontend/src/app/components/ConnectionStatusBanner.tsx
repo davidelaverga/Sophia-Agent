@@ -1,11 +1,12 @@
 "use client";
 
-import { useMemo } from "react";
 import { Wifi, WifiOff, RotateCw, AlertTriangle } from "lucide-react";
+import { useMemo } from "react";
+
+import { errorCopy } from "../lib/error-copy";
+import { cn } from "../lib/utils";
 import { useChatStore } from "../stores/chat-store";
 import { useConnectivityStore } from "../stores/connectivity-store";
-import { cn } from "../lib/utils";
-import { errorCopy } from "../lib/error-copy";
 
 export function ConnectionStatusBanner() {
   const streamStatus = useChatStore((state) => state.streamStatus);

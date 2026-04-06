@@ -1,15 +1,17 @@
 "use client"
 
 import { Square } from "lucide-react"
-import type { VoiceStateProps } from "../lib/voice-types"
-import { useVoiceToggle } from "../hooks/useVoiceToggle"
-import { useEmotionColor } from "../hooks/useEmotionColor"
-import { Waveform } from "./Waveform"
-import { ChatCollapsed } from "./ChatCollapsed"
-import { VoiceTranscript } from "./VoiceTranscript"
-import { VoiceMicButton, VoiceStatusText } from "./VoiceMicButton"
-import { UsageHint } from "./UsageHint"
+
 import { useTranslation } from "../copy"
+import { useEmotionColor } from "../hooks/useEmotionColor"
+import { useVoiceToggle } from "../hooks/useVoiceToggle"
+import type { VoiceStateProps } from "../lib/voice-types"
+
+import { ChatCollapsed } from "./ChatCollapsed"
+import { UsageHint } from "./UsageHint"
+import { VoiceMicButton, VoiceStatusText } from "./VoiceMicButton"
+import { VoiceTranscript } from "./VoiceTranscript"
+import { Waveform } from "./Waveform"
 
 /**
  * VoiceFocusView
@@ -40,14 +42,15 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
   // Use unified voice toggle hook (start-recording behavior for focus view)
   const { isModalOpen, handleToggle, handleKeyPress, getWaveformState } = useVoiceToggle({
     stage,
-    stopTalking,
-    startTalking,
+    stopTalking: () => {
+      void stopTalking()
+    },
+    startTalking: () => startTalking(),
     idleBehavior: "start-recording",
   })
 
   const emotionColor = useEmotionColor()
 
-  const _activeReply = partialReply || finalReply
   const showInterrupt = stage === "speaking"
 
   return (

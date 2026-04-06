@@ -1,7 +1,8 @@
+import type { OnboardingStore } from "../stores/onboarding-store"
+
 import { getContextualTipById } from "./contextual-tips"
 import { getFirstRunStepById } from "./first-run-steps"
 import type { ContextualTipId, FirstRunStepId, OnboardingTipState } from "./types"
-import type { OnboardingStore } from "../stores/onboarding-store"
 
 export function selectHasCompletedFirstRun(state: OnboardingStore): boolean {
   return state.hasCompletedFirstRun

@@ -7,10 +7,12 @@
 'use client';
 
 import { Mic, Square } from 'lucide-react';
-import { cn } from '../../lib/utils';
+
 import { haptic } from '../../hooks/useHaptics';
-import { RITUALS, type MicState } from './types';
+import { cn } from '../../lib/utils';
 import type { PresetType, ContextMode } from '../../types/session';
+
+import { RITUALS, type MicState } from './types';
 
 interface MicCTAProps {
   selectedRitual: PresetType | null;
@@ -41,7 +43,7 @@ export function MicCTA({
 
   return (
     <div
-      className="flex flex-col items-center gap-[10px]"
+      className="group flex flex-col items-center gap-[10px]"
       role="button"
       tabIndex={0}
       onClick={() => {
@@ -85,64 +87,70 @@ export function MicCTA({
         <span
           className={cn(
             'absolute inset-0 rounded-full border transition-colors duration-1000',
-            'border-black/[0.04] dark:border-white/[0.04]',
-            isActive && 'border-[rgba(var(--sophia-glow-rgb,124,92,170),0.1)]',
             isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
           )}
+          style={{ borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)' }}
         />
         <span
           className={cn(
             'absolute inset-[-10px] rounded-full border transition-colors duration-1000',
-            'border-black/[0.04] dark:border-white/[0.04]',
-            isActive && 'border-[rgba(var(--sophia-glow-rgb,124,92,170),0.1)]',
             isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
           )}
-          style={{ animationDelay: isActive ? '0.3s' : '0.8s' }}
+          style={{
+            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
+            animationDelay: isActive ? '0.3s' : '0.8s',
+          }}
         />
         <span
           className={cn(
             'absolute inset-[-20px] rounded-full border transition-colors duration-1000',
-            'border-black/[0.04] dark:border-white/[0.04]',
-            isActive && 'border-[rgba(var(--sophia-glow-rgb,124,92,170),0.1)]',
             isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
           )}
-          style={{ animationDelay: isActive ? '0.6s' : '1.6s' }}
+          style={{
+            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
+            animationDelay: isActive ? '0.6s' : '1.6s',
+          }}
         />
 
         {/* mic-core — 60×60 glass circle */}
         <span
           className={cn(
-            'relative z-10 flex h-[60px] w-[60px] items-center justify-center rounded-full backdrop-blur-[20px] transition-all duration-500',
-            'border bg-white/60 border-black/[0.06]',
-            'dark:bg-[rgba(8,8,18,0.45)] dark:border-white/[0.04]',
-            // hover glow
-            'group-hover:border-[rgba(124,92,170,0.18)] group-hover:shadow-[0_0_50px_rgba(124,92,170,0.08),inset_0_0_20px_rgba(124,92,170,0.04)]',
-            // active glow
-            isActive && 'border-[rgba(124,92,170,0.28)] bg-[rgba(124,92,170,0.05)] shadow-[0_0_60px_rgba(124,92,170,0.12),inset_0_0_25px_rgba(124,92,170,0.06)]',
-            // selected ritual glow
-            selectedRitual && !isActive && 'border-[rgba(124,92,170,0.18)] shadow-[0_0_40px_rgba(124,92,170,0.12)]',
+            'cosmic-surface-panel relative z-10 flex h-[60px] w-[60px] items-center justify-center rounded-full transition-all duration-500',
           )}
+          style={isActive ? {
+            background: 'color-mix(in srgb, var(--sophia-purple) 5%, var(--cosmic-panel-strong))',
+            borderColor: 'var(--cosmic-border-strong)',
+            boxShadow: '0 0 60px color-mix(in srgb, var(--sophia-purple) 14%, transparent), inset 0 0 25px color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+          } : selectedRitual ? {
+            borderColor: 'var(--cosmic-border)',
+            boxShadow: '0 0 40px color-mix(in srgb, var(--sophia-purple) 12%, transparent)',
+          } : undefined}
         >
           {/* Status dot — top-right */}
           <span
             className={cn(
               'absolute right-[2px] top-[2px] z-20 h-2 w-2 rounded-full transition-all duration-500',
-              isActive
-                ? 'bg-[rgba(124,92,170,0.8)] shadow-[0_0_10px_rgba(124,92,170,0.4)] animate-pulse'
-                : 'bg-[rgba(72,199,142,0.7)] shadow-[0_0_8px_rgba(72,199,142,0.3)]',
+              isActive ? 'animate-pulse' : '',
             )}
+            style={isActive ? {
+              background: 'var(--sophia-purple)',
+              boxShadow: '0 0 10px color-mix(in srgb, var(--sophia-purple) 40%, transparent)',
+            } : {
+              background: 'color-mix(in srgb, var(--cosmic-teal) 70%, transparent)',
+              boxShadow: '0 0 8px color-mix(in srgb, var(--cosmic-teal) 30%, transparent)',
+            }}
           />
 
           {/* Icon — mic or stop */}
           {isActive && micState !== 'idle' ? (
-            <Square className="h-[22px] w-[22px] stroke-[1.5] text-[rgba(124,92,170,0.85)]" />
+            <Square className="h-[22px] w-[22px] stroke-[1.5]" style={{ color: 'var(--sophia-purple)' }} />
           ) : (
             <Mic
               className={cn(
                 'h-[22px] w-[22px] stroke-[1.5] transition-colors duration-300',
-                'text-black/35 dark:text-white/35',
-                isActive && 'text-[rgba(124,92,170,0.85)]',
+                isActive ? '' : 'group-hover:text-[var(--cosmic-text)]',
               )}
+              style={{ color: isActive ? 'var(--sophia-purple)' : 'var(--cosmic-text-muted)' }}
             />
           )}
         </span>
@@ -152,10 +160,8 @@ export function MicCTA({
       <span
         className={cn(
           'min-h-[14px] text-center text-[10px] lowercase tracking-[0.12em] transition-colors duration-500',
-          isActive
-            ? 'text-[rgba(124,92,170,0.5)]'
-            : 'text-black/[0.08] dark:text-white/[0.08]',
         )}
+        style={{ color: isActive ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-faint)' }}
         role="status"
         aria-live="polite"
       >

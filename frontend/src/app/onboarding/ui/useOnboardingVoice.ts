@@ -1,17 +1,18 @@
 "use client"
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+import { base64ToUint8Array } from '../../hooks/voice/voice-utils'
+import { useOnboardingStore } from '../../stores/onboarding-store'
+import { getOnboardingVoiceOnlineState, shouldEnableOnboardingVoice } from '../voice'
 import { useAudioPlayback } from '../voice-legacy/useAudioPlayback'
+import { useVoiceWebSocket } from '../voice-legacy/useVoiceWebSocket'
 import { buildSpeakTextCommand } from '../voice-legacy/voice-loop-command-helpers'
 import {
   connectVoiceSessionFreshSafely,
   generateVoiceSessionId,
   resolveVoiceWsBaseUrl,
 } from '../voice-legacy/voice-loop-connection-helpers'
-import { base64ToUint8Array } from '../../hooks/voice/voice-utils'
-import { useVoiceWebSocket } from '../voice-legacy/useVoiceWebSocket'
-import { useOnboardingStore } from '../../stores/onboarding-store'
-import { getOnboardingVoiceOnlineState, shouldEnableOnboardingVoice } from '../voice'
 
 type UseOnboardingVoiceResult = {
   canPlayVoiceOver: boolean

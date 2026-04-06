@@ -1,12 +1,12 @@
 import { act, renderHook } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useRecapArtifactsLoader } from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
 import {
   clearRecentSessionEndHint,
   getRecentSessionEndHint,
   markRecentSessionEnd,
 } from '../../app/lib/recent-session-end';
+import { useRecapArtifactsLoader } from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {

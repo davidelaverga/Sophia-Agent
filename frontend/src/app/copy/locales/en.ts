@@ -317,12 +317,12 @@ export const copy = {
 
   themeToggle: {
     aria: {
-      switchToMoonlitEmbrace: "Switch to Moonlit Embrace",
+      switchToMoonlitEmbrace: "Switch to Cosmic Sophia",
       switchToLightMode: "Switch to Light Mode",
     },
     tooltip: {
       light: "Moments of clarity and focus",
-      moonlit: "Like a conversation under the stars",
+      moonlit: "Cosmic Sophia at full presence",
     },
   },
 

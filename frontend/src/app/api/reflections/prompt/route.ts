@@ -11,7 +11,7 @@
  * call the backend for more sophisticated analysis.
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 
 /**
  * Generic reflection prompts for when no context is available.

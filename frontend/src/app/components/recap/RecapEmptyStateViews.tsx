@@ -1,9 +1,10 @@
 'use client';
 
 import { RefreshCw, Sparkles } from 'lucide-react';
+
+import { errorCopy } from '../../lib/error-copy';
 import { cn } from '../../lib/utils';
 import { RetryAction } from '../ui/RetryAction';
-import { errorCopy } from '../../lib/error-copy';
 
 type RecapEmptyStatus = 'processing' | 'unavailable' | 'not_found';
 

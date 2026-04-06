@@ -7,6 +7,7 @@
  */
 
 import { useState, useCallback } from 'react';
+
 import {
   startSession,
   endSession,
@@ -21,14 +22,11 @@ import {
 import type {
   SessionStartRequest,
   SessionStartResponse,
-  SessionEndRequest as _SessionEndRequest,
   SessionEndResponse,
   ActiveSessionResponse,
   MicroBriefingRequest,
   MicroBriefingResponse,
   SessionContext,
-  PresetType as _PresetType,
-  ContextMode as _ContextMode,
 } from '../types/session';
 
 // ============================================================================

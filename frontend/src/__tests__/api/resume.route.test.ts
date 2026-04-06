@@ -1,3 +1,4 @@
+import type { NextRequest } from 'next/server';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
@@ -16,7 +17,7 @@ describe('/api/resume POST', () => {
       method: 'POST',
       body: JSON.stringify({ thread_id: 't1' }),
       headers: { 'Content-Type': 'application/json' },
-    }) as unknown as import('next/server').NextRequest;
+    }) as unknown as NextRequest;
 
     const response = await POST(req);
     const data = await response.json();
@@ -39,7 +40,7 @@ describe('/api/resume POST', () => {
         selected_option_id: 'accept',
       }),
       headers: { 'Content-Type': 'application/json' },
-    }) as unknown as import('next/server').NextRequest;
+    }) as unknown as NextRequest;
 
     const response = await POST(req);
     const data = await response.json();
@@ -62,7 +63,7 @@ describe('/api/resume POST', () => {
         selected_option_id: 'accept',
       }),
       headers: { 'Content-Type': 'application/json' },
-    }) as unknown as import('next/server').NextRequest;
+    }) as unknown as NextRequest;
 
     const response = await POST(req);
     const data = await response.json();
@@ -75,7 +76,7 @@ describe('/api/resume POST', () => {
     const req = new Request('http://localhost:3000/api/resume', {
       method: 'OPTIONS',
       headers: { Origin: 'http://localhost:3000' },
-    }) as unknown as import('next/server').NextRequest;
+    }) as unknown as NextRequest;
 
     const response = await OPTIONS(req);
 
@@ -89,7 +90,7 @@ describe('/api/resume POST', () => {
     const req = new Request('http://localhost:3000/api/resume', {
       method: 'OPTIONS',
       headers: { Origin: 'http://localhost:3000' },
-    }) as unknown as import('next/server').NextRequest;
+    }) as unknown as NextRequest;
 
     const response = await OPTIONS(req);
 

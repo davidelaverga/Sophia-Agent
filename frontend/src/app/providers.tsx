@@ -1,8 +1,9 @@
 'use client'
 
 import { createContext, useContext, useMemo } from 'react'
-import { authClient } from '@/server/better-auth/client'
+
 import { authBypassEnabled, authBypassUserId } from '@/app/lib/auth/dev-bypass'
+import { authClient } from '@/server/better-auth/client'
 
 // Shape exposed to consumers
 type AuthUser = {

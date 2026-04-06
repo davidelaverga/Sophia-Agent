@@ -1,12 +1,13 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
 import {
   StreamVideoClient,
   type Call,
   type User,
   CallingState,
 } from "@stream-io/video-react-sdk"
+import { useCallback, useEffect, useRef, useState } from "react"
+
 import { logger } from "../lib/error-logger"
 
 /**

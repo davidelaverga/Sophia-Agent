@@ -1,11 +1,13 @@
 "use client"
 
-import { useEffect, useState } from "react"
 import { Shield, AlertTriangle } from "lucide-react"
-import { useCopy, useTranslation } from "../copy"
-import { getConsentStatus, postConsentAccept } from "../lib/api/privacy"
-import { useFocusTrap } from "../hooks/useFocusTrap"
+import { useEffect, useState } from "react"
+
 import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
+
+import { useCopy, useTranslation } from "../copy"
+import { useFocusTrap } from "../hooks/useFocusTrap"
+import { getConsentStatus, postConsentAccept } from "../lib/api/privacy"
 
 type GateState = "checking" | "needsConsent" | "error" | "ready"
 
@@ -82,7 +84,7 @@ export function ConsentGate({ onReady }: { onReady: () => void }) {
       }
     }
 
-    fetchStatus()
+    void fetchStatus()
     return () => {
       aborted = true
     }

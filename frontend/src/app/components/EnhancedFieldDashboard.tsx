@@ -1,21 +1,22 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
 import { History, Settings } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { cn } from '../lib/utils';
 import { haptic } from '../hooks/useHaptics';
-import { ThemeToggle } from './ThemeToggle';
-import { HistoryDrawer } from './HistoryDrawer';
-import { ResumeBanner } from './session/ResumeBanner';
+import { cn } from '../lib/utils';
+import type { ContextMode } from '../types/session';
+
+import { ContextTabs } from './dashboard/ContextTabs';
 import { EnhancedFieldBackground } from './dashboard/EnhancedFieldBackground';
+import { RitualOrbit } from './dashboard/RitualOrbit';
 import { RitualThread } from './dashboard/RitualThread';
 import { SettingsDrawer } from './dashboard/SettingsDrawer';
-import { RitualOrbit } from './dashboard/RitualOrbit';
-import { ContextTabs } from './dashboard/ContextTabs';
 import { CONTEXTS } from './dashboard/types';
 import { useDashboardEntryState } from './dashboard/useDashboardEntryState';
-import type { ContextMode } from '../types/session';
+import { HistoryDrawer } from './HistoryDrawer';
+import { ResumeBanner } from './session/ResumeBanner';
+import { ThemeToggle } from './ThemeToggle';
 
 function getGreeting(contextValue: (typeof CONTEXTS)[number]) {
   const hour = new Date().getHours();
@@ -38,10 +39,7 @@ function FieldChromeButton({
       onClick={onClick}
       aria-label={ariaLabel}
       className={cn(
-        'flex h-10 w-10 items-center justify-center rounded-full border transition-all duration-200',
-        'border-black/8 bg-white/78 text-black/55 shadow-[0_12px_30px_rgba(0,0,0,0.08)] hover:bg-white/90 hover:text-black/72',
-        'dark:border-white/[0.08] dark:bg-white/[0.05] dark:text-white/55 dark:shadow-[0_16px_40px_rgba(0,0,0,0.35)] dark:hover:bg-white/[0.08] dark:hover:text-white/78',
-        'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sophia-purple)]'
+        'cosmic-chrome-button flex h-10 w-10 items-center justify-center rounded-full transition-all duration-200'
       )}
     >
       {children}
@@ -172,7 +170,7 @@ export function EnhancedFieldDashboard() {
           <button
             type="button"
             aria-label="Close"
-            className="absolute inset-0 bg-black/30 backdrop-blur-[2px] dark:bg-black/40"
+            className="cosmic-modal-backdrop absolute inset-0"
             onClick={handleCancelReplaceSession}
           />
           <div
@@ -181,18 +179,17 @@ export function EnhancedFieldDashboard() {
             aria-modal="true"
             aria-labelledby="replace-session-title"
             className={cn(
-              'relative w-full max-w-sm rounded-[14px] p-5 backdrop-blur-[20px]',
-              'border border-black/[0.06] bg-white/60',
-              'dark:border-white/[0.04] dark:bg-[rgba(8,8,18,0.45)]'
+              'cosmic-surface-panel-strong relative w-full max-w-sm rounded-[14px] p-5'
             )}
           >
             <h3
               id="replace-session-title"
-              className="font-cormorant text-[1.35rem] font-light leading-snug text-black/72 dark:text-white/72"
+              className="font-cormorant text-[1.35rem] font-light leading-snug"
+              style={{ color: 'var(--cosmic-text-strong)' }}
             >
               You have an active session
             </h3>
-            <p className="mt-1.5 text-[13px] font-light text-black/40 dark:text-white/28">
+            <p className="mt-1.5 text-[13px] font-light" style={{ color: 'var(--cosmic-text-muted)' }}>
               Would you like to continue where you left off, or start over?
             </p>
             <div className="mt-5 flex gap-2.5">
@@ -200,11 +197,7 @@ export function EnhancedFieldDashboard() {
                 type="button"
                 onClick={handleContinueSession}
                 className={cn(
-                  'flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em]',
-                  'bg-[rgba(var(--sophia-glow-rgb,124,92,170),0.12)] text-[rgba(var(--sophia-glow-rgb,124,92,170),0.85)]',
-                  'border border-[rgba(var(--sophia-glow-rgb,124,92,170),0.2)]',
-                  'transition-all duration-300 hover:bg-[rgba(var(--sophia-glow-rgb,124,92,170),0.18)]',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sophia-purple)]'
+                  'cosmic-accent-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300'
                 )}
               >
                 Continue
@@ -213,11 +206,7 @@ export function EnhancedFieldDashboard() {
                 type="button"
                 onClick={handleConfirmReplaceSession}
                 className={cn(
-                  'flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em]',
-                  'text-black/40 dark:text-white/28',
-                  'border border-black/[0.06] dark:border-white/[0.04]',
-                  'transition-all duration-300 hover:text-black/55 hover:border-black/[0.12] dark:hover:text-white/40 dark:hover:border-white/[0.08]',
-                  'focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--sophia-purple)]'
+                  'cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300'
                 )}
               >
                 Start fresh
@@ -235,9 +224,10 @@ export function EnhancedFieldDashboard() {
               'font-cormorant text-[clamp(24px,3.5vw,32px)] font-light leading-[1.4] tracking-[0.01em]',
               'transition-all duration-[1.8s] ease-out',
               greetingVisible
-                ? 'translate-y-0 text-black/88 dark:text-white/72'
+                ? 'translate-y-0'
                 : 'translate-y-2 text-transparent',
             )}
+            style={greetingVisible ? { color: 'var(--cosmic-text-strong)' } : undefined}
           >
             {greeting}
           </h1>
@@ -246,9 +236,10 @@ export function EnhancedFieldDashboard() {
               'mt-2 text-[13px] font-light tracking-[0.02em]',
               'transition-all duration-[2s] ease-out delay-[0.4s]',
               greetingVisible
-                ? 'translate-y-0 text-black/52 dark:text-white/44'
+                ? 'translate-y-0'
                 : 'translate-y-1.5 text-transparent',
             )}
+            style={greetingVisible ? { color: 'var(--cosmic-text)' } : undefined}
           >
             {subtitle}
           </p>
@@ -273,7 +264,7 @@ export function EnhancedFieldDashboard() {
               />
             </div>
           ) : hasMeaningfulBootstrapOpener ? (
-            <p className="mx-auto mt-3 max-w-md font-cormorant italic text-[13px] text-black/34 dark:text-white/28">
+            <p className="mx-auto mt-3 max-w-md font-cormorant italic text-[13px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
               {bootstrapOpener?.opener_text}
             </p>
           ) : null}

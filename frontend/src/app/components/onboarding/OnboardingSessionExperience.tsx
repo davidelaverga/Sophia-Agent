@@ -1,7 +1,9 @@
 'use client';
 
-import { useMemo, useRef, useState } from 'react';
 import { ArrowLeft, Clock, Settings } from 'lucide-react';
+import { useMemo, useRef, useState } from 'react';
+
+import { useOnboardingStore } from '../../stores/onboarding-store';
 import type { MemoryHighlight, RitualArtifacts } from '../../types/session';
 import {
   ArtifactsPanel,
@@ -12,7 +14,6 @@ import {
   type UIMessage,
 } from '../session';
 import { ThemeToggle } from '../ThemeToggle';
-import { useOnboardingStore } from '../../stores/onboarding-store';
 
 /* ---------- mock data ---------- */
 

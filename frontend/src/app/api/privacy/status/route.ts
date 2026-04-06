@@ -10,7 +10,7 @@
  * - Allows UI to function without backend support
  */
 
-import { NextRequest, NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 
 // Default privacy status - backend endpoint does not exist
 const DEFAULT_PRIVACY_STATUS = {

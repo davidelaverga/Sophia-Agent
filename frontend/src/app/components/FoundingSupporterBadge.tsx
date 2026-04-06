@@ -1,8 +1,9 @@
 "use client"
 
 import { Heart } from "lucide-react"
-import { useUsageLimitStore } from "../stores/usage-limit-store"
+
 import { useCopy } from "../copy"
+import { useUsageLimitStore } from "../stores/usage-limit-store"
 
 type FoundingSupporterBadgeProps = {
   /** Show compact version (just icon + short label) */

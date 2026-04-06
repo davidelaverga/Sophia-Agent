@@ -1,5 +1,6 @@
 import { useCallback } from 'react';
 import type { MutableRefObject } from 'react';
+
 import { logger } from '../lib/error-logger';
 import { recoverFromDisconnect } from '../lib/stream-recovery';
 
@@ -91,7 +92,7 @@ export function useSessionRetryHandlers<TChatMessage extends ChatMessage>({
                 setMessageTimestamp(message.id, recoveredAt);
                 return {
                   ...message,
-                  parts: buildAssistantTextParts(recovery.existingResponse!),
+                  parts: buildAssistantTextParts(recovery.existingResponse),
                 } as TChatMessage;
               }
               return message;
@@ -103,7 +104,7 @@ export function useSessionRetryHandlers<TChatMessage extends ChatMessage>({
               next.push({
                 id: recoveredId,
                 role: 'assistant' as const,
-                parts: buildAssistantTextParts(recovery.existingResponse!),
+                parts: buildAssistantTextParts(recovery.existingResponse),
               } as TChatMessage);
             }
 

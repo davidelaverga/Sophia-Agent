@@ -8,11 +8,12 @@
 
 'use client';
 
-import { useMemo } from 'react';
 import { MessageCircle, Sparkles, Mic } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useMemo } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
 import type { PresetType, ContextMode } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 
 // ============================================================================
 // TYPES

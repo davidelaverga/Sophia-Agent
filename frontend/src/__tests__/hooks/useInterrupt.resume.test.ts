@@ -69,7 +69,7 @@ describe('useInterrupt resume payload', () => {
     const fetchCall = fetchSpy.mock.calls[0];
     expect(fetchCall[0]).toBe('/api/resume');
 
-    const init = fetchCall[1] as RequestInit;
+    const init = fetchCall[1];
     const body = JSON.parse(String(init.body));
 
     expect(body).toMatchObject({

@@ -1,10 +1,11 @@
 "use client"
 
 import { useCallback, useEffect, useRef, useState } from "react"
-import { cn } from "../../lib/utils"
-import type { RitualArtifacts } from "../../types/session"
-import { usePresenceStore } from "../../stores/presence-store"
+
 import { haptic } from "../../hooks/useHaptics"
+import { cn } from "../../lib/utils"
+import { usePresenceStore } from "../../stores/presence-store"
+import type { RitualArtifacts } from "../../types/session"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
@@ -124,7 +125,7 @@ export function PresenceArtifactPanel({
     status === "speaking"
       ? "var(--sophia-glow)"
       : status === "listening"
-        ? "rgba(120, 180, 255, 0.5)"
+        ? "var(--cosmic-teal)"
         : "var(--sophia-purple)"
 
   return (
@@ -163,10 +164,11 @@ export function PresenceArtifactPanel({
           onClick={(e) => { e.stopPropagation(); handleDismiss(); }}
           className={cn(
             "absolute -top-1 -right-1 z-10 w-6 h-6 flex items-center justify-center",
-            "text-white/[0.08] hover:text-white/25 transition-all duration-700",
+            "transition-all duration-700",
             "pointer-events-auto cursor-pointer",
             revealStep >= 1 ? "opacity-100" : "opacity-0"
           )}
+          style={{ color: 'var(--cosmic-text-faint)' }}
           aria-label="Dismiss"
         >
           <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1">
@@ -185,11 +187,11 @@ export function PresenceArtifactPanel({
             <p
               className="font-cormorant text-[17px] leading-[1.75] font-light text-center"
               style={{
-                color: `rgba(232, 228, 239, ${revealStep >= 1 ? 0.50 : 0})`,
+                color: revealStep >= 1 ? 'var(--cosmic-text)' : 'transparent',
                 textShadow: isActive
                   ? `0 0 20px color-mix(in srgb, ${bloomColor} 15%, transparent)`
                   : "none",
-                transition: "color 1.4s ease, text-shadow 2s ease",
+                transition: 'color 1.4s ease, text-shadow 2s ease',
               }}
             >
               {takeaway}
@@ -207,7 +209,7 @@ export function PresenceArtifactPanel({
             style={{
               width: "32px",
               height: "1px",
-              background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${bloomColor} 25%, rgba(232,228,239,0.12)), transparent)`,
+              background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${bloomColor} 25%, var(--cosmic-text-faint)), transparent)`,
               transformOrigin: "center",
             }}
           />
@@ -238,30 +240,30 @@ export function PresenceArtifactPanel({
               <p
                 className="font-cormorant text-[15px] italic leading-[1.7] font-light"
                 style={{
-                  color: `rgba(232, 228, 239, ${reflectionTapped ? 0.20 : 0.35})`,
+                  color: reflectionTapped ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text)',
                   textShadow: !reflectionTapped && isActive
                     ? `0 0 16px color-mix(in srgb, ${bloomColor} 12%, transparent)`
                     : "none",
                   transition: "color 0.7s ease, text-shadow 1s ease",
                 }}
               >
-                {reflection_candidate!.prompt}
+                {reflection_candidate.prompt}
               </p>
-              {reflection_candidate!.why && !reflectionTapped && (
-                <p className="mt-1.5 text-[10px] tracking-[0.08em] text-white/[0.12] font-light">
-                  {reflection_candidate!.why}
+              {reflection_candidate.why && !reflectionTapped && (
+                <p className="mt-1.5 text-[10px] tracking-[0.08em] font-light" style={{ color: 'var(--cosmic-text-faint)' }}>
+                  {reflection_candidate.why}
                 </p>
               )}
               {!reflectionTapped && onReflectionTap && (
                 <span
                   className="inline-block mt-2.5 text-[9px] tracking-[0.14em] uppercase transition-colors duration-700"
-                  style={{ color: `color-mix(in srgb, ${bloomColor} 40%, rgba(232,228,239,0.15))` }}
+                  style={{ color: `color-mix(in srgb, ${bloomColor} 40%, var(--cosmic-text-faint))` }}
                 >
                   tap to reflect
                 </span>
               )}
               {reflectionTapped && (
-                <span className="inline-block mt-1.5 text-[9px] tracking-[0.14em] uppercase text-white/[0.10]">
+                <span className="inline-block mt-1.5 text-[9px] tracking-[0.14em] uppercase" style={{ color: 'var(--cosmic-text-faint)' }}>
                   sent
                 </span>
               )}
@@ -277,7 +279,7 @@ export function PresenceArtifactPanel({
               revealStep >= 4 ? "opacity-100" : "opacity-0"
             )}
           >
-            {memory_candidates!.slice(0, 5).map((mem, i) => (
+            {memory_candidates.slice(0, 5).map((mem, i) => (
               <span
                 key={i}
                 className={cn(
@@ -285,7 +287,7 @@ export function PresenceArtifactPanel({
                   "transition-all duration-[800ms] cursor-default",
                 )}
                 style={{
-                  color: `rgba(232, 228, 239, 0.18)`,
+                  color: 'var(--cosmic-text-whisper)',
                   animationDelay: `${i * 200}ms`,
                 }}
                 onClick={(e) => e.stopPropagation()}
@@ -297,7 +299,8 @@ export function PresenceArtifactPanel({
                     {onMemoryApprove && (
                       <button
                         onClick={() => { haptic("light"); onMemoryApprove(i) }}
-                        className="text-white/[0.15] hover:text-white/40 transition-colors"
+                        className="transition-colors hover:text-[var(--cosmic-text)]"
+                        style={{ color: 'var(--cosmic-text-faint)' }}
                         aria-label="Save memory"
                       >
                         ✓
@@ -306,7 +309,8 @@ export function PresenceArtifactPanel({
                     {onMemoryReject && (
                       <button
                         onClick={() => { haptic("light"); onMemoryReject(i) }}
-                        className="text-white/[0.10] hover:text-white/30 transition-colors"
+                        className="transition-colors hover:text-[var(--cosmic-text-muted)]"
+                        style={{ color: 'var(--cosmic-text-faint)' }}
                         aria-label="Skip memory"
                       >
                         ×
@@ -342,16 +346,16 @@ export function ArtifactToggleIcon({
       onClick={() => { haptic("light"); onClick() }}
       className={cn(
         "group flex items-center gap-1.5",
-        "text-white/[0.10] hover:text-white/[0.25]",
         "transition-all duration-700 cursor-pointer",
       )}
+      style={{ color: 'var(--cosmic-text-faint)' }}
       aria-label="Show insights"
     >
       {/* Tiny bloom dot */}
       <span
-        className="w-1.5 h-1.5 rounded-full transition-all duration-700 group-hover:shadow-[0_0_8px_rgba(184,164,232,0.25)]"
+        className="w-1.5 h-1.5 rounded-full transition-all duration-700 group-hover:shadow-[0_0_8px_var(--cosmic-border)]"
         style={{
-          background: "color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.15))",
+          background: 'color-mix(in srgb, var(--sophia-purple) 30%, var(--cosmic-panel-soft))',
         }}
       />
       <span className="text-[9px] tracking-[0.14em] lowercase">

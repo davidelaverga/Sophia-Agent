@@ -6,7 +6,7 @@ const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-
 export function sanitizeMessage(input: string): string {
   if (typeof input !== 'string') return '';
 
-  // eslint-disable-next-line no-control-regex
+   
   const sanitized = input.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
   return sanitized.slice(0, MAX_MESSAGE_LENGTH).trim();
 }

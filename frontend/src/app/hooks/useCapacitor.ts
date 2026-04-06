@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect, useState } from 'react'
 import { Capacitor } from '@capacitor/core'
-import { StatusBar, Style } from '@capacitor/status-bar'
 import { SplashScreen } from '@capacitor/splash-screen'
+import { StatusBar, Style } from '@capacitor/status-bar'
+import { useEffect, useState } from 'react'
+
 import { logger } from '../lib/error-logger'
 
 /**
@@ -52,7 +53,7 @@ export function useCapacitor() {
       setIsReady(true)
     }
 
-    initializeCapacitor()
+    void initializeCapacitor()
   }, [isNative, platform])
 
   // Update status bar when theme changes
@@ -61,7 +62,7 @@ export function useCapacitor() {
 
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
     
-    const handleThemeChange = async (e: MediaQueryListEvent) => {
+    const updateThemeChange = async (e: MediaQueryListEvent) => {
       try {
         await StatusBar.setStyle({ 
           style: e.matches ? Style.Dark : Style.Light 
@@ -78,6 +79,10 @@ export function useCapacitor() {
           action: 'status_bar_update',
         })
       }
+    }
+
+    const handleThemeChange = (e: MediaQueryListEvent) => {
+      void updateThemeChange(e)
     }
 
     mediaQuery.addEventListener('change', handleThemeChange)

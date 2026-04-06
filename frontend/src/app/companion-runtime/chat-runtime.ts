@@ -1,9 +1,11 @@
-import { useEffect, useMemo } from 'react';
 import { useChat } from '@ai-sdk/react';
 import { DefaultChatTransport } from 'ai';
-import { parseUsageLimitFromError } from '../lib/usage-limit-parser';
-import { errorCopy } from '../lib/error-copy';
+import { useEffect, useMemo } from 'react';
+
 import { debugWarn } from '../lib/debug-logger';
+import { errorCopy } from '../lib/error-copy';
+import { parseUsageLimitFromError } from '../lib/usage-limit-parser';
+
 import type { UseCompanionChatRuntimeParams } from './types';
 
 export function useCompanionChatRuntime({
@@ -66,7 +68,7 @@ export function useCompanionChatRuntime({
 
   useEffect(() => {
     return () => {
-      stopStreaming();
+      void stopStreaming();
     };
   }, [stopStreaming]);
 

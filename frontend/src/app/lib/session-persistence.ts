@@ -1,7 +1,8 @@
 "use client"
 
-import { ChatMessage } from "../stores/chat-store"
+import { type ChatMessage } from "../stores/chat-store"
 import type { FocusMode } from "../stores/ui-store"
+
 import { debugWarn } from "./debug-logger"
 
 const STORAGE_KEY = "sophia-session"

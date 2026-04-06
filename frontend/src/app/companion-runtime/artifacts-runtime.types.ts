@@ -1,5 +1,5 @@
-import type { RitualArtifacts } from '../types/session';
 import type { ArtifactStatusType } from '../components/session';
+import type { RitualArtifacts } from '../types/session';
 
 export type ArtifactStatusState = {
   takeaway: ArtifactStatusType;

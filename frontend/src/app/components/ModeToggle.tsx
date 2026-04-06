@@ -1,7 +1,7 @@
 "use client"
 
-import { useUiStore, type FocusMode } from "../stores/ui-store"
 import { useModeSwitch } from "../hooks/useModeSwitch"
+import { useUiStore, type FocusMode } from "../stores/ui-store"
 
 const MODES: { mode: FocusMode; label: string }[] = [
   { mode: "voice", label: "voice" },

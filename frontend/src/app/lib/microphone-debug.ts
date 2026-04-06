@@ -85,10 +85,10 @@ export async function diagnoseMicrophoneAccess(): Promise<MicrophoneDiagnostics>
   )
   
   // Check MediaDevices API
-  diagnostics.hasMediaDevices = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)
+  diagnostics.hasMediaDevices = !!navigator.mediaDevices?.getUserMedia
 
   // Check Permissions API
-  diagnostics.hasPermissionsAPI = !!(navigator.permissions && navigator.permissions.query)
+  diagnostics.hasPermissionsAPI = !!navigator.permissions?.query
 
   // Try to check permission state
   if (diagnostics.hasPermissionsAPI) {

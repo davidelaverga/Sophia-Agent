@@ -17,8 +17,9 @@
 'use client';
 
 import { useEffect, useRef, useCallback } from 'react';
-import { useConnectivityStore, selectStatus, selectIsOnline } from '../stores/connectivity-store';
+
 import { useChatStore } from '../stores/chat-store';
+import { useConnectivityStore, selectStatus, selectIsOnline } from '../stores/connectivity-store';
 
 // ============================================================================
 // CONFIGURATION
@@ -115,13 +116,17 @@ export function useConnectivity() {
           currentBackoffRef.current * BACKOFF_MULTIPLIER,
           MAX_RECOVERY_INTERVAL
         );
-        recoveryIntervalRef.current = setTimeout(attemptRecovery, currentBackoffRef.current);
+        recoveryIntervalRef.current = setTimeout(() => {
+          void attemptRecovery();
+        }, currentBackoffRef.current);
       }
       // If online, polling stops naturally
     };
     
     // Start first recovery attempt
-    recoveryIntervalRef.current = setTimeout(attemptRecovery, currentBackoffRef.current);
+    recoveryIntervalRef.current = setTimeout(() => {
+      void attemptRecovery();
+    }, currentBackoffRef.current);
   }, [checkHealth]);
   
   // Stop recovery polling
@@ -145,7 +150,7 @@ export function useConnectivity() {
         // Throttle visibility checks
         if (now - lastVisibilityCheckRef.current > VISIBILITY_CHECK_THROTTLE) {
           lastVisibilityCheckRef.current = now;
-          checkHealth();
+          void checkHealth();
         }
       }
     }
@@ -158,7 +163,7 @@ export function useConnectivity() {
     // Browser online/offline events
     const handleOnline = () => {
       // Browser says we're online - verify with backend
-      checkHealth();
+      void checkHealth();
       stopRecoveryPolling();
       
       // Phase 4 Week 4: Attempt stream recovery when coming back online
@@ -166,7 +171,7 @@ export function useConnectivity() {
       if (chatStore.streamStatus === 'error' || chatStore.streamStatus === 'interrupted') {
         // Give backend a moment to complete any pending processing
         setTimeout(() => {
-          useChatStore.getState().attemptRecovery();
+          void useChatStore.getState().attemptRecovery();
         }, 2000);
       }
     };

@@ -1,7 +1,8 @@
 import { cookies, headers } from 'next/headers'
 import { NextResponse } from 'next/server'
-import { auth } from '@/server/better-auth'
+
 import { discordLogin } from '@/app/lib/auth/backend-auth'
+import { auth } from '@/server/better-auth'
 
 /**
  * POST /api/auth/sync-backend

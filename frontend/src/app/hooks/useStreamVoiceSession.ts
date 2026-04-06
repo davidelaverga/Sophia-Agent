@@ -11,20 +11,22 @@
  * - Transcript and artifact forwarding via Stream custom events
  */
 
-import { useCallback, useEffect, useRef, useState } from "react"
 import { CallingState } from "@stream-io/video-react-sdk"
+import { useCallback, useEffect, useRef, useState } from "react"
+
+import { logger } from "../lib/error-logger"
+import { recordSophiaCaptureEvent } from "../lib/session-capture"
+import type { ContextMode, PresetType } from "../lib/session-types"
+import type { VoiceStage } from "../lib/voice-types"
+import { usePresenceStore } from "../stores/presence-store"
+import { useSessionStore } from "../stores/session-store"
+import { useVoiceStore } from "../stores/voice-store"
+
+import { usePlatformSignal } from "./usePlatformSignal"
 import {
   useStreamVoice,
   type StreamVoiceCredentials,
 } from "./useStreamVoice"
-import { logger } from "../lib/error-logger"
-import { recordSophiaCaptureEvent } from "../lib/session-capture"
-import { useSessionStore } from "../stores/session-store"
-import { useVoiceStore } from "../stores/voice-store"
-import { usePresenceStore } from "../stores/presence-store"
-import { usePlatformSignal } from "./usePlatformSignal"
-import type { ContextMode, PresetType } from "../lib/session-types"
-import type { VoiceStage } from "../lib/voice-types"
 
 // ---------------------------------------------------------------------------
 // Types
@@ -532,7 +534,7 @@ export function useStreamVoiceSession(
     return () => {
       unsubscribe()
     }
-  }, [call, callingState, addVoiceMessage, clearThinking, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
+  }, [call, callingState, addVoiceMessage, clearThinking, hasSeenUserTranscriptId, rememberUserTranscriptId, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
 
   // --- Actions -------------------------------------------------------------
 
@@ -637,7 +639,7 @@ export function useStreamVoiceSession(
   useEffect(() => {
     if (credentials && call && callingState === CallingState.IDLE) {
       logger.debug("StreamVoiceSession", "Auto-join triggered")
-      join()
+      void join()
     }
   }, [credentials, call, callingState, join])
 

@@ -13,7 +13,6 @@
 
 'use client';
 
-import { useState, useCallback } from 'react';
 import { 
   HelpCircle, 
   ClipboardList, 
@@ -22,9 +21,11 @@ import {
   Loader2,
   ChevronDown,
 } from 'lucide-react';
-import { cn } from '../../lib/utils';
+import { useState, useCallback } from 'react';
+
 import { haptic } from '../../hooks/useHaptics';
 import type { InvokeType, ContextMode } from '../../lib/session-types';
+import { cn } from '../../lib/utils';
 
 // =============================================================================
 // TYPES & CONFIG
@@ -163,7 +164,7 @@ export function CompanionButtons({
                   onClick={() => {
                     if (!isDisabled && !isInvoking) {
                       haptic('light');
-                      handleInvoke(action.type);
+                      void handleInvoke(action.type);
                     }
                   }}
                   disabled={isDisabled || isInvoking}
@@ -285,7 +286,7 @@ export function CompanionButtonsCompact({
                     onClick={() => {
                       if (!isDisabled && !isInvoking) {
                         haptic('light');
-                        handleInvoke(action.type);
+                        void handleInvoke(action.type);
                       }
                     }}
                     disabled={isDisabled || isInvoking}
@@ -421,7 +422,7 @@ export function CompanionRail({
                     onClick={() => {
                       if (!isActionDisabled && !isInvoking) {
                         haptic('light');
-                        handleInvoke(action.type);
+                        void handleInvoke(action.type);
                       }
                     }}
                     disabled={isActionDisabled || isInvoking}

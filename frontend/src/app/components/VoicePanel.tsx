@@ -1,14 +1,16 @@
 "use client"
 
 import { Square, Zap } from "lucide-react"
-import type { VoiceStateProps } from "../lib/voice-types"
-import { useVoiceToggle } from "../hooks/useVoiceToggle"
-import { useEmotionColor } from "../hooks/useEmotionColor"
-import { Waveform } from "./Waveform"
-import { VoiceTranscript } from "./VoiceTranscript"
-import { VoiceMicButton, VoiceStatusText } from "./VoiceMicButton"
+
 import { useTranslation } from "../copy"
+import { useEmotionColor } from "../hooks/useEmotionColor"
 import { haptic } from "../hooks/useHaptics"
+import { useVoiceToggle } from "../hooks/useVoiceToggle"
+import type { VoiceStateProps } from "../lib/voice-types"
+
+import { VoiceMicButton, VoiceStatusText } from "./VoiceMicButton"
+import { VoiceTranscript } from "./VoiceTranscript"
+import { Waveform } from "./Waveform"
 
 type VoicePanelProps = {
   voiceState: VoiceStateProps
@@ -23,7 +25,9 @@ export function VoicePanel({ voiceState }: VoicePanelProps) {
   // Use unified voice toggle hook (switch-mode behavior for panel)
   const { isModalOpen, handleToggle, handleKeyPress, getWaveformState } = useVoiceToggle({
     stage,
-    stopTalking,
+    stopTalking: () => {
+      void stopTalking()
+    },
     idleBehavior: "switch-mode",
   })
 

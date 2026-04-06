@@ -2,7 +2,7 @@
 
 @source inline("bg-sophia-surface bg-sophia-bubble text-sophia-text text-sophia-text2 border-sophia-surface-border");
 
-@custom-variant dark (&:where([data-sophia-theme="moonlit-embrace"] *));
+@custom-variant dark (&:where(.dark, .dark *));
 
 @theme extend {
   /* Colors */
@@ -102,6 +102,8 @@ button, a, [role="button"] {
 :root[data-sophia-theme="light"] {
   --sophia-purple: #7c5caa;        /* WCAG AA compliant on light bg (4.6:1) */
   --sophia-glow: #9d7cc9;          /* lighter glow for effects */
+  --sophia-purple-rgb: 124, 92, 170;
+  --sophia-glow-rgb: 157, 124, 201;
   --bg: #f8f7fa;
   --text: #2d2833;
   --text-2: #5a5662;               /* Darker for better contrast */
@@ -341,12 +343,15 @@ button, a, [role="button"] {
   --life-vignette-edge: rgba(0, 0, 0, 0.32);
 }
 
-/* 🌙 Dark Mode – Proposal 4: Moonlit Embrace (Abrazo Lunar) */
+/* 🌌 Canonical Dark Theme – Cosmic Sophia */
+:root[data-sophia-theme="cosmic-sophia"],
 :root[data-sophia-theme="moonlit-embrace"],
 :root[data-sophia-theme="moonlit"],
 :root[data-sophia-theme="dark"] {
   --sophia-purple: #b8a4e8;        /* violeta luminoso brillante */
   --sophia-glow: #d4c4ff;          /* glow lunar vibrante */
+  --sophia-purple-rgb: 184, 164, 232;
+  --sophia-glow-rgb: 212, 196, 255;
   --bg: #0a0a0f;                   /* fondo negro profundo */
   --text: #f5f3fa;                 /* texto blanco cálido */
   --text-2: #a8a3b8;               /* texto secundario gris lavanda */
@@ -532,6 +537,27 @@ button, a, [role="button"] {
 :root,
 :root[data-sophia-theme] {
   scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  --cosmic-teal: #59bead;
+  --cosmic-amber: #f2b36b;
+  --cosmic-ivory: #fffaf2;
+  --cosmic-panel-soft: color-mix(in srgb, var(--card-bg) 48%, transparent);
+  --cosmic-panel: color-mix(in srgb, var(--card-bg) 66%, transparent);
+  --cosmic-panel-strong: color-mix(in srgb, var(--card-bg) 84%, transparent);
+  --cosmic-panel-accent: linear-gradient(135deg, color-mix(in srgb, var(--card-bg) 84%, transparent), color-mix(in srgb, var(--sophia-purple) 6%, transparent));
+  --cosmic-border-soft: color-mix(in srgb, var(--sophia-purple) 10%, transparent);
+  --cosmic-border: color-mix(in srgb, var(--sophia-purple) 18%, transparent);
+  --cosmic-border-strong: color-mix(in srgb, var(--sophia-glow) 26%, transparent);
+  --cosmic-text-strong: color-mix(in srgb, var(--text) 86%, transparent);
+  --cosmic-text: color-mix(in srgb, var(--text) 64%, transparent);
+  --cosmic-text-muted: color-mix(in srgb, var(--text) 46%, transparent);
+  --cosmic-text-whisper: color-mix(in srgb, var(--text) 26%, transparent);
+  --cosmic-text-faint: color-mix(in srgb, var(--text) 14%, transparent);
+  --cosmic-shadow-sm: 0 12px 30px color-mix(in srgb, var(--bg) 22%, transparent);
+  --cosmic-shadow-md: 0 18px 48px color-mix(in srgb, var(--bg) 38%, transparent);
+  --cosmic-shadow-lg: 0 30px 100px color-mix(in srgb, var(--bg) 48%, transparent), inset 0 0 30px color-mix(in srgb, var(--sophia-purple) 2%, transparent);
+  --cosmic-reading-corridor: radial-gradient(ellipse 60% 75% at 50% 50%, color-mix(in srgb, var(--bg) 82%, transparent) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 55%, transparent 100%);
+  --cosmic-modal-backdrop: color-mix(in srgb, var(--bg) 55%, transparent);
+  --cosmic-bottom-bar-bg: color-mix(in srgb, var(--bg) 72%, transparent);
 }
 
 /* WebKit/Blink */
@@ -668,6 +694,97 @@ a {
 
 @utility border-sophia-surface-border {
   border-color: var(--card-border);
+}
+
+.cosmic-chrome-button {
+  border: 1px solid var(--cosmic-border-soft);
+  background: var(--cosmic-panel);
+  color: var(--cosmic-text-muted);
+  box-shadow: var(--cosmic-shadow-sm);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.cosmic-chrome-button:hover {
+  border-color: var(--cosmic-border);
+  background: var(--cosmic-panel-strong);
+  color: var(--cosmic-text-strong);
+}
+
+.cosmic-chrome-button:focus-visible,
+.cosmic-focus-ring:focus-visible {
+  outline: 2px solid var(--sophia-purple);
+  outline-offset: 2px;
+}
+
+.cosmic-surface-panel {
+  border: 1px solid var(--cosmic-border-soft);
+  background: var(--cosmic-panel);
+  box-shadow: var(--cosmic-shadow-md);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+}
+
+.cosmic-surface-panel-strong {
+  border: 1px solid var(--cosmic-border-soft);
+  background: var(--cosmic-panel-strong);
+  box-shadow: var(--cosmic-shadow-lg);
+  backdrop-filter: blur(28px);
+  -webkit-backdrop-filter: blur(28px);
+}
+
+.cosmic-surface-soft {
+  border: 1px solid var(--cosmic-border-soft);
+  background: var(--cosmic-panel-soft);
+}
+
+.cosmic-accent-pill {
+  border: 1px solid var(--cosmic-border);
+  background: color-mix(in srgb, var(--sophia-glow) 10%, transparent);
+  color: var(--sophia-glow);
+}
+
+.cosmic-accent-pill:hover {
+  border-color: var(--cosmic-border-strong);
+  background: color-mix(in srgb, var(--sophia-glow) 16%, transparent);
+}
+
+.cosmic-ghost-pill {
+  border: 1px solid var(--cosmic-border-soft);
+  background: color-mix(in srgb, var(--card-bg) 48%, transparent);
+  color: var(--cosmic-text);
+}
+
+.cosmic-ghost-pill:hover {
+  border-color: var(--cosmic-border);
+  background: color-mix(in srgb, var(--card-bg) 60%, transparent);
+  color: var(--cosmic-text-strong);
+}
+
+.cosmic-whisper-button {
+  color: var(--cosmic-text-whisper);
+}
+
+.cosmic-whisper-button:hover {
+  color: var(--cosmic-text);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.cosmic-modal-backdrop {
+  background: var(--cosmic-modal-backdrop);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.cosmic-bottom-bar {
+  border-top: 1px solid var(--cosmic-border-soft);
+  background: var(--cosmic-bottom-bar-bg);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+}
+
+.cosmic-reading-corridor {
+  background: var(--cosmic-reading-corridor);
 }
 
 .sr-only {

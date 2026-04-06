@@ -14,6 +14,7 @@
 'use client';
 
 import { useState, useCallback } from 'react';
+
 import { cn } from '../../lib/utils';
 import { useFeedbackStore } from '../../stores/feedback-store';
 import type { FeedbackType } from '../../types/sophia-ui-message';
@@ -152,7 +153,9 @@ export function SessionFeedback({
               onClick={() => {
                 setRating(star as SessionRating);
                 // Auto-submit on compact
-                setTimeout(() => handleSubmit(), 100);
+                setTimeout(() => {
+                  void handleSubmit();
+                }, 100);
               }}
               disabled={isSubmitting}
               className={cn(
@@ -262,7 +265,7 @@ export function SessionFeedback({
         >
           {isSubmitting ? (
             <span className="flex items-center gap-2">
-              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-[color:var(--cosmic-border)] border-t-[color:var(--cosmic-text)]" />
               Sending...
             </span>
           ) : (

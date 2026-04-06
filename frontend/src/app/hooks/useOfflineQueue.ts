@@ -12,9 +12,10 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
+
+import { logger } from '../lib/error-logger';
 import { useConnectivityStore, selectStatus, selectIsOnline } from '../stores/connectivity-store';
 import { useUiStore as useUiToastStore } from '../stores/ui-store';
-import { logger } from '../lib/error-logger';
 
 // ============================================================================
 // TYPES
@@ -80,7 +81,6 @@ export function useOfflineQueue(options: UseOfflineQueueOptions): UseOfflineQueu
   const removeFromQueue = useConnectivityStore((state) => state.removeFromQueue);
   const getQueuedMessages = useConnectivityStore((state) => state.getQueuedMessages);
   const incrementRetry = useConnectivityStore((state) => state.incrementRetry);
-  const _clearQueueStore = useConnectivityStore((state) => state.clearQueue);
   const showToast = useUiToastStore((state) => state.showToast);
   
   // Processing state
@@ -198,7 +198,7 @@ export function useOfflineQueue(options: UseOfflineQueueOptions): UseOfflineQueu
     if (isOnline && queuedCount > 0) {
       // Small delay to ensure connection is stable
       processTimeoutRef.current = setTimeout(() => {
-        processQueue();
+        void processQueue();
       }, 1000);
     }
     

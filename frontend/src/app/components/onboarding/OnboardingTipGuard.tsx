@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
 import { usePathname } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
+
 import {
   getContextualTipById,
   OnboardingTooltip,

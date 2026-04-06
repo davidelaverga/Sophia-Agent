@@ -13,11 +13,12 @@
  * In dev/mock: Returns contextual mock data
  */
 
-import { NextRequest, NextResponse } from 'next/server';
-import type { BootstrapResponse, EmotionalTrend, UICard } from '../../../types/sophia-ui-message';
+import { type NextRequest, NextResponse } from 'next/server';
+
 import { getServerAuthToken } from '../../../lib/auth/server-auth';
 import { debugLog, debugWarn } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
+import type { BootstrapResponse, EmotionalTrend, UICard } from '../../../types/sophia-ui-message';
 
 // ============================================================================
 // CONFIGURATION

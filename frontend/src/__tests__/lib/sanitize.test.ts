@@ -2,6 +2,7 @@
  * Tests for Input Sanitization Utilities
  */
 import { describe, it, expect } from 'vitest';
+
 import {
   escapeHtml,
   sanitizeText,

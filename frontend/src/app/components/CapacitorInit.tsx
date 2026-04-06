@@ -1,9 +1,10 @@
 "use client"
 
-import { useEffect } from 'react'
 import { Capacitor } from '@capacitor/core'
-import { StatusBar, Style } from '@capacitor/status-bar'
 import { SplashScreen } from '@capacitor/splash-screen'
+import { StatusBar, Style } from '@capacitor/status-bar'
+import { useEffect } from 'react'
+
 import { logger } from '../lib/error-logger'
 
 /**
@@ -47,7 +48,9 @@ export function CapacitorInit() {
     }
 
     // Run after a short delay to ensure DOM is ready
-    const timer = setTimeout(initCapacitor, 100)
+    const timer = setTimeout(() => {
+      void initCapacitor()
+    }, 100)
     return () => clearTimeout(timer)
   }, [])
 
@@ -55,7 +58,7 @@ export function CapacitorInit() {
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return
 
-    const observer = new MutationObserver(async (mutations) => {
+    const updateStatusBar = async (mutations: MutationRecord[]) => {
       for (const mutation of mutations) {
         if (mutation.attributeName === 'data-sophia-theme') {
           const newTheme = document.documentElement.dataset.sophiaTheme
@@ -77,6 +80,10 @@ export function CapacitorInit() {
           }
         }
       }
+    }
+
+    const observer = new MutationObserver((mutations) => {
+      void updateStatusBar(mutations)
     })
 
     observer.observe(document.documentElement, {

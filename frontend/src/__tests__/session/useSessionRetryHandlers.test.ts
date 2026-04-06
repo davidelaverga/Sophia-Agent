@@ -63,7 +63,7 @@ describe('useSessionRetryHandlers', () => {
       retryResult = await result.current.handleRetry();
     });
 
-    expect(retryResult!).toEqual({ kind: 'recovered', response: 'Recovered answer' });
+    expect(retryResult).toEqual({ kind: 'recovered', response: 'Recovered answer' });
     expect(sendMessage).not.toHaveBeenCalled();
     expect(messages[1].parts).toEqual([{ type: 'text', text: 'Recovered answer' }]);
     expect(showToast).toHaveBeenCalledWith(
@@ -115,7 +115,7 @@ describe('useSessionRetryHandlers', () => {
       retryResult = await result.current.handleRetry();
     });
 
-    expect(retryResult!).toEqual({ kind: 'resent' });
+    expect(retryResult).toEqual({ kind: 'resent' });
     expect(sendMessage).toHaveBeenCalledWith({ text: 'hello' });
   });
 });
