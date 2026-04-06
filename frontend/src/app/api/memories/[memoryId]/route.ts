@@ -1,12 +1,10 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthHeader } from '../../../lib/auth/server-auth';
+import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
 
-const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-
 export async function DELETE(
-  _req: NextRequest,
+  req: NextRequest,
   { params }: { params: Promise<{ memoryId: string }> }
 ) {
   try {
@@ -16,16 +14,25 @@ export async function DELETE(
       return NextResponse.json({ error: 'memoryId is required' }, { status: 400 });
     }
 
-    const backendResponse = await fetch(
-      `${BACKEND_URL}/api/v1/memories/${encodeURIComponent(memoryId)}`,
+    if (isSyntheticMemoryId(memoryId)) {
+      return new NextResponse(null, { status: 204 });
+    }
+
+    const userId = await resolveSophiaUserId(req.nextUrl.searchParams.get('user_id'));
+    if (!userId) {
+      return NextResponse.json({ error: 'Unable to resolve user_id' }, { status: 401 });
+    }
+
+    const backendResponse = await fetchSophiaApi(
+      `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(memoryId)}`,
       {
         method: 'DELETE',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': await getServerAuthHeader(),
-        },
       }
     );
+
+    if (backendResponse.status === 204) {
+      return new NextResponse(null, { status: 204 });
+    }
 
     const responseText = await backendResponse.text();
 

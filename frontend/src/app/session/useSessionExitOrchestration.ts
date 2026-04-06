@@ -36,6 +36,8 @@ type UseSessionExitOrchestrationParams = {
     sessionId: string;
   }) => void;
   currentArtifacts?: RitualArtifacts | null;
+  userId?: string;
+  threadId?: string;
   persistedSessionId?: string;
   responseMode: 'text' | 'voice';
   messages: ExitGuardMessage[];
@@ -60,6 +62,8 @@ export function useSessionExitOrchestration({
   promoteToDebriefMode,
   startDebriefWithLLM,
   currentArtifacts,
+  userId,
+  threadId,
   persistedSessionId,
   responseMode,
   messages,
@@ -99,6 +103,9 @@ export function useSessionExitOrchestration({
     promoteToDebriefMode,
     startDebriefWithLLM,
     currentArtifacts,
+    userId,
+    threadId,
+    messages,
   });
 
   useSessionExitProtection({

@@ -73,6 +73,7 @@ export function useSessionMemoryActions({
           memory_text: candidate.memory,
           category: candidate.category,
           session_id: backendSessionId,
+          original_memory_id: candidate.id,
         }),
       });
 
@@ -138,6 +139,7 @@ export function useSessionMemoryActions({
           memory_text: candidate.memory,
           category: candidate.category,
           session_id: backendSessionId,
+          original_memory_id: candidate.id,
         }),
       });
 

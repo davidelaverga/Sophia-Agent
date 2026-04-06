@@ -1,14 +1,12 @@
 /**
  * Memory Feedback API Route
- * Proxies POST /api/memory/feedback -> backend /api/v1/memories/feedback
+ * Bridges POST /api/memory/feedback -> backend /api/sophia/{user_id}/memories
  */
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthToken } from '../../../lib/auth/server-auth';
+import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
-
-const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface MemoryFeedbackRequest {
   action: 'approve' | 'reject';
@@ -17,6 +15,7 @@ interface MemoryFeedbackRequest {
   session_id?: string;
   original_memory_id?: string;
   reason?: string;
+  user_id?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -37,17 +36,69 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const backendResponse = await fetch(
-      `${BACKEND_URL}/api/v1/memories/feedback`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${await getServerAuthToken()}`,
-        },
-        body: JSON.stringify(body),
+    const userId = await resolveSophiaUserId(body.user_id);
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unable to resolve user_id' },
+        { status: 401 }
+      );
+    }
+
+    if (body.action === 'reject') {
+      if (isSyntheticMemoryId(body.original_memory_id)) {
+        return NextResponse.json({ status: 'discarded' });
       }
-    );
+
+      const backendResponse = await fetchSophiaApi(
+        `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id as string)}`,
+        {
+          method: 'DELETE',
+        }
+      );
+
+      if (backendResponse.status === 204) {
+        return NextResponse.json({ status: 'discarded' });
+      }
+
+      const responseText = await backendResponse.text();
+
+      return new NextResponse(responseText, {
+        status: backendResponse.status,
+        headers: {
+          'Content-Type': backendResponse.headers.get('content-type') || 'application/json',
+        },
+      });
+    }
+
+    const metadata = {
+      status: 'approved',
+      ...(body.session_id ? { session_id: body.session_id } : {}),
+      ...(body.reason ? { reason: body.reason } : {}),
+      ...(body.original_memory_id ? { original_memory_id: body.original_memory_id } : {}),
+    };
+
+    const backendResponse = !isSyntheticMemoryId(body.original_memory_id)
+      ? await fetchSophiaApi(
+          `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id as string)}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              text: body.memory_text,
+              metadata,
+            }),
+          }
+        )
+      : await fetchSophiaApi(
+          `/api/sophia/${encodeURIComponent(userId)}/memories`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              text: body.memory_text,
+              ...(body.category ? { category: body.category } : {}),
+              metadata,
+            }),
+          }
+        );
 
     const responseText = await backendResponse.text();
 

@@ -68,7 +68,7 @@ export function useRecapArtifactsLoader({
       }
 
       try {
-        const response = await fetch(`/api/sessions/${sessionId}`, {
+        const response = await fetch(`/api/sophia/sessions/${sessionId}/recap`, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',

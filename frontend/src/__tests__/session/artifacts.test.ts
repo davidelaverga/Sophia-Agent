@@ -10,18 +10,24 @@ describe('session artifacts helpers', () => {
   it('normalizes memory candidates and filters non-string tags', () => {
     const normalized = normalizeMemoryCandidates([
       {
+        id: 'mem-123',
         text: 'I feel focused after short breaks',
         category: 'emotional_patterns',
         confidence: 0.9,
+        created_at: '2026-04-04T12:00:00Z',
+        reason: 'User repeated this insight twice',
         tags: ['focus', 123, 'breaks'],
       },
     ]);
 
     expect(normalized).toEqual([
       {
+        id: 'mem-123',
         memory: 'I feel focused after short breaks',
         category: 'emotional_patterns',
         confidence: 0.9,
+        created_at: '2026-04-04T12:00:00Z',
+        reason: 'User repeated this insight twice',
         tags: ['focus', 'breaks'],
       },
     ]);

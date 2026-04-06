@@ -1,20 +1,19 @@
 /**
  * Memory Save API Route
- * Proxies POST /api/memory/save -> backend /api/v1/memories/save
+ * Bridges POST /api/memory/save -> backend /api/sophia/{user_id}/memories
  */
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthToken } from '../../../lib/auth/server-auth';
+import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
-
-const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 interface SaveMemoryRequest {
   memory_text: string;
   category?: string;
   session_id?: string;
   original_memory_id?: string;
+  user_id?: string;
 }
 
 export async function POST(request: NextRequest) {
@@ -28,17 +27,42 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const backendResponse = await fetch(
-      `${BACKEND_URL}/api/v1/memories/save`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${await getServerAuthToken()}`,
-        },
-        body: JSON.stringify(body),
-      }
-    );
+    const userId = await resolveSophiaUserId(body.user_id);
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unable to resolve user_id' },
+        { status: 401 }
+      );
+    }
+
+    const metadata = {
+      status: 'approved',
+      ...(body.session_id ? { session_id: body.session_id } : {}),
+      ...(body.original_memory_id ? { original_memory_id: body.original_memory_id } : {}),
+    };
+
+    const backendResponse = !isSyntheticMemoryId(body.original_memory_id)
+      ? await fetchSophiaApi(
+          `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id as string)}`,
+          {
+            method: 'PUT',
+            body: JSON.stringify({
+              text: body.memory_text,
+              metadata,
+            }),
+          }
+        )
+      : await fetchSophiaApi(
+          `/api/sophia/${encodeURIComponent(userId)}/memories`,
+          {
+            method: 'POST',
+            body: JSON.stringify({
+              text: body.memory_text,
+              ...(body.category ? { category: body.category } : {}),
+              metadata,
+            }),
+          }
+        );
 
     const responseText = await backendResponse.text();
 

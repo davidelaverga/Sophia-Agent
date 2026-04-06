@@ -635,6 +635,8 @@ function SessionPageContent() {
       setTimeout(() => removeInternalDebriefTriggerBubble(debriefTrigger), 180);
     },
     currentArtifacts: artifacts,
+    userId,
+    threadId: session?.threadId,
     persistedSessionId: session?.sessionId,
     responseMode: exitProtectionResponseMode,
     messages,

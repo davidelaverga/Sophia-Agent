@@ -61,11 +61,21 @@ export function normalizeMemoryCandidates(raw: unknown): RitualArtifacts['memory
       const tags = Array.isArray(record.tags)
         ? record.tags.filter((tag): tag is string => typeof tag === 'string')
         : undefined;
+      const id = typeof record.id === 'string'
+        ? record.id
+        : typeof record.candidate_id === 'string'
+          ? record.candidate_id
+          : undefined;
+      const createdAt = typeof record.created_at === 'string' ? record.created_at : undefined;
+      const reason = typeof record.reason === 'string' ? record.reason : undefined;
 
       return {
+        ...(id ? { id } : {}),
         memory: String(text),
         category,
         confidence,
+        ...(createdAt ? { created_at: createdAt } : {}),
+        ...(reason ? { reason } : {}),
         ...(tags ? { tags } : {}),
       };
     })

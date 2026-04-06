@@ -1,6 +1,8 @@
 import { act, renderHook } from '@testing-library/react';
+import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { useSessionPageGuards } from '../../app/session/useSessionPageGuards';
 import { useSessionExitFlow } from '../../app/session/useSessionExitFlow';
 
 const hapticMock = vi.fn();
@@ -113,6 +115,11 @@ describe('useSessionExitFlow', () => {
       await result.current.handleEndSession();
     });
 
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
+      session_id: 'session-1',
+      offer_debrief: true,
+    }));
+
     expect(result.current.showDebriefOffer).toBe(true);
 
     await act(async () => {
@@ -188,10 +195,10 @@ describe('useSessionExitFlow', () => {
       await result.current.handleEndSession();
     });
 
-    expect(endSessionApiMock).toHaveBeenCalledWith({
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
       session_id: 'session-2',
       offer_debrief: false,
-    });
+    }));
     expect(result.current.showDebriefOffer).toBe(false);
     expect(result.current.showEmergence).toBe(true);
 
@@ -263,6 +270,14 @@ describe('useSessionExitFlow', () => {
       await result.current.handleEndSession();
     });
 
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
+      session_id: 'session-3',
+      recap_artifacts: expect.objectContaining({
+        takeaway: 'You settled into the truth instead of pushing past it.',
+      }),
+      messages: [],
+    }));
+
     expect(setRecapArtifactsMock).toHaveBeenCalledWith(
       'session-3',
       expect.objectContaining({
@@ -272,5 +287,76 @@ describe('useSessionExitFlow', () => {
         }),
       }),
     );
+  });
+
+  it('does not redirect home when recap navigation clears the session store', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-guard',
+        ended_at: '2026-03-03T21:00:00.000Z',
+        duration_minutes: 9,
+        turn_count: 5,
+        offer_debrief: false,
+        debrief_prompt: undefined,
+        recap_artifacts: {
+          takeaway: 'The exit flow should hold its recap route.',
+        },
+      },
+    });
+
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const navigateToMock = vi.fn();
+
+    const { result } = renderHook(() => {
+      const [hasSession, setHasSession] = useState(true);
+      const [isEnding, setIsEnding] = useState(false);
+
+      const flow = useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        setEnding: setIsEnding,
+        sessionId: 'session-guard',
+        sessionStartedAt: '2026-03-03T20:50:00.000Z',
+        sessionPresetType: 'debrief',
+        sessionContextMode: 'life',
+        messageCount: 5,
+        endSessionStore: vi.fn(),
+        clearSessionStore: () => setHasSession(false),
+        clearBootstrap: vi.fn(),
+        navigateTo: navigateToMock,
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+      });
+
+      useSessionPageGuards({
+        hasSession,
+        isEnding,
+        isNavigatingToRecap: flow.isNavigatingToRecap,
+        navigateTo: navigateToMock,
+      });
+
+      return flow;
+    });
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(result.current.showEmergence).toBe(true);
+
+    await act(async () => {
+      result.current.handleEmergenceComplete();
+    });
+
+    await act(async () => {
+      result.current.handleFeedbackComplete();
+    });
+
+    const paths = navigateToMock.mock.calls.map(([path]) => path);
+    expect(paths).toContain('/recap/session-guard');
+    expect(paths).not.toContain('/');
   });
 });

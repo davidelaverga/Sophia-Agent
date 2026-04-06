@@ -197,7 +197,7 @@ export const useRecapStore = create<RecapState>()(
         });
       },
       
-      commitMemories: async (sessionId, _threadId) => {
+      commitMemories: async (sessionId, threadId) => {
         const artifacts = get().artifacts[sessionId];
         const decisions = get().decisions[sessionId] || [];
         const approvedCandidates = decisions.filter(
@@ -220,55 +220,37 @@ export const useRecapStore = create<RecapState>()(
         }
         
         try {
-          const saveRequests = approvedCandidates.map((decision) => {
-            const candidate = artifacts?.memoryCandidates?.find(c => c.id === decision.candidateId);
-            return {
-              candidateId: decision.candidateId,
-              payload: {
-                memory_text: decision.editedText || candidate?.text || '',
-                category: candidate?.category,
-                session_id: sessionId,
-                original_memory_id: candidate?.id || decision.candidateId,
-              },
-            };
+          const response = await fetch('/api/memory/commit-candidates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              session_id: sessionId,
+              ...(threadId ? { thread_id: threadId } : {}),
+              decisions: approvedCandidates.map((decision) => {
+                const candidate = artifacts?.memoryCandidates?.find(c => c.id === decision.candidateId);
+                return {
+                  candidate_id: decision.candidateId,
+                  decision: 'approve',
+                  text: (decision.editedText || candidate?.text || '').trim(),
+                  category: candidate?.category,
+                  source: 'recap',
+                  metadata: {
+                    session_type: artifacts?.sessionType,
+                    preset: artifacts?.contextMode,
+                  },
+                };
+              }),
+            }),
           });
 
-          const results = await Promise.allSettled(
-            saveRequests.map(async (request) => {
-              if (!request.payload.memory_text) {
-                throw new Error('Missing memory text');
-              }
-              const response = await fetch('/api/memory/save', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(request.payload),
-              });
+          if (!response.ok) {
+            throw new Error(`Failed to commit memories: ${response.status}`);
+          }
 
-              if (!response.ok) {
-                throw new Error(`Failed to save: ${response.status}`);
-              }
-
-              return request.candidateId;
-            })
-          );
-
-          const result: CommitMemoriesResponse = {
-            committed: [],
-            discarded: discardedCandidates.map(d => d.candidateId),
-            errors: [],
-          };
-
-          results.forEach((saveResult, index) => {
-            const candidateId = saveRequests[index].candidateId;
-            if (saveResult.status === 'fulfilled') {
-              result.committed.push(candidateId);
-            } else {
-              result.errors.push({
-                candidate_id: candidateId,
-                message: saveResult.reason instanceof Error ? saveResult.reason.message : 'Unknown error',
-              });
-            }
-          });
+          const result = await response.json() as CommitMemoriesResponse;
+          result.discarded = [
+            ...new Set([...result.discarded, ...discardedCandidates.map(d => d.candidateId)]),
+          ];
           
           // Update statuses based on response
           for (const id of result.committed) {

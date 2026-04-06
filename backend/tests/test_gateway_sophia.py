@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -93,6 +94,43 @@ class TestListMemories:
         data = resp.json()
         assert data["memories"][0]["category"] == "feeling"
         assert data["memories"][1]["category"] == "fact"
+
+
+# ---------------------------------------------------------------------------
+# Memory Create
+# ---------------------------------------------------------------------------
+
+class TestCreateMemory:
+    def test_create_memory_returns_item(self, client, mock_mem0):
+        mock_mem0.add.return_value = [{"id": "m1", "memory": "Likes pizza", "categories": ["food"]}]
+        with patch("deerflow.sophia.mem0_client.invalidate_user_cache") as mock_invalidate:
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Likes pizza", "category": "food", "metadata": {"status": "approved"}},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == "m1"
+        assert data["content"] == "Likes pizza"
+        mock_mem0.add.assert_called_once()
+        mock_invalidate.assert_called_once_with("test_user")
+
+    def test_create_memory_falls_back_without_metadata(self, client, mock_mem0):
+        mock_mem0.add.side_effect = [TypeError("metadata unsupported"), [{"id": "m2", "memory": "Keeps going"}]]
+        with patch("deerflow.sophia.mem0_client.invalidate_user_cache"):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Keeps going", "metadata": {"status": "approved"}},
+            )
+        assert resp.status_code == 200
+        assert mock_mem0.add.call_count == 2
+
+    def test_create_memory_invalid_user_returns_400(self, client):
+        resp = client.post(
+            "/api/sophia/user;hack/memories",
+            json={"text": "test"},
+        )
+        assert resp.status_code == 400
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +252,7 @@ class TestBulkReview:
 class TestReflect:
     def test_reflect_success(self, client):
         mock_result = {"voice_context": "You've been focused on work.", "visual_parts": []}
-        with patch("app.gateway.routers.sophia.generate_reflection", return_value=mock_result, create=True):
+        with patch("deerflow.sophia.reflection.generate_reflection", return_value=mock_result):
             resp = client.post(
                 "/api/sophia/test_user/reflect",
                 json={"query": "How have I been?", "period": "this_week"},
@@ -260,6 +298,34 @@ class TestJournal:
 
 
 # ---------------------------------------------------------------------------
+# Session Recap
+# ---------------------------------------------------------------------------
+
+class TestSessionRecap:
+    def test_returns_persisted_recap(self, client, tmp_path):
+        recap_dir = tmp_path / "test_user" / "recaps"
+        recap_dir.mkdir(parents=True, exist_ok=True)
+        (recap_dir / "sess-001.json").write_text(
+            '{"session_id": "sess-001", "thread_id": "thread-001", "status": "ready", "ended_at": "2026-04-05T10:00:00+00:00", "turn_count": 4, "recap_artifacts": {"takeaway": "You stayed with the hard part."}}',
+            encoding="utf-8",
+        )
+
+        with patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
+            resp = client.get("/api/sophia/test_user/sessions/sess-001/recap")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == "sess-001"
+        assert data["recap_artifacts"]["takeaway"] == "You stayed with the hard part."
+
+    def test_missing_recap_returns_404(self, client, tmp_path):
+        with patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
+            resp = client.get("/api/sophia/test_user/sessions/missing/recap")
+
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Visual Weekly
 # ---------------------------------------------------------------------------
 
@@ -301,16 +367,45 @@ class TestVisualCategories:
 # ---------------------------------------------------------------------------
 
 class TestSessionEnd:
-    def test_returns_202(self, client):
-        with patch("app.gateway.routers.sophia.run_offline_pipeline", create=True):
+    def test_returns_202(self, client, tmp_path):
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
             resp = client.post(
                 "/api/sophia/test_user/end-session",
-                json={"session_id": "sess-001", "thread_id": "thread-001"},
+                json={
+                    "session_id": "sess-001",
+                    "thread_id": "thread-001",
+                    "started_at": "2026-04-05T09:52:00+00:00",
+                    "ended_at": "2026-04-05T10:00:00+00:00",
+                    "offer_debrief": True,
+                    "session_type": "open",
+                    "context_mode": "life",
+                    "turn_count": 4,
+                    "messages": [
+                        {"role": "user", "content": "I needed to talk this through."},
+                        {"role": "assistant", "content": "You stayed with it."},
+                    ],
+                    "recap_artifacts": {
+                        "takeaway": "You stayed with it.",
+                        "reflection_candidate": {"prompt": "What shifted once you slowed down?"},
+                    },
+                },
             )
         assert resp.status_code == 202
         data = resp.json()
         assert data["status"] == "pipeline_queued"
         assert data["session_id"] == "sess-001"
+        assert data["turn_count"] == 4
+        assert data["offer_debrief"] is True
+        assert data["recap_artifacts"]["takeaway"] == "You stayed with it."
+
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-001.json").read_text(encoding="utf-8"))
+        assert saved["status"] == "ready"
+        assert saved["recap_artifacts"]["takeaway"] == "You stayed with it."
+        mock_queue.assert_called_once()
+        queued_state = mock_queue.call_args.args[3]
+        assert queued_state is not None
+        assert queued_state["messages"][0]["content"] == "I needed to talk this through."
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

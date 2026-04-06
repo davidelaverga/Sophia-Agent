@@ -7,10 +7,14 @@ import json
 import logging
 import os
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+
+from deerflow.agents.sophia_agent.paths import USERS_DIR
+from deerflow.agents.sophia_agent.utils import safe_user_path
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +72,12 @@ class MemoryListResponse(BaseModel):
 class MemoryUpdateRequest(BaseModel):
     text: str | None = Field(default=None, description="Updated memory text")
     metadata: dict | None = Field(default=None, description="Updated metadata")
+
+
+class MemoryCreateRequest(BaseModel):
+    text: str = Field(..., min_length=1, description="Memory content text")
+    category: str | None = Field(default=None, description="Optional memory category")
+    metadata: dict | None = Field(default=None, description="Optional memory metadata")
 
 
 class BulkReviewItem(BaseModel):
@@ -128,14 +138,57 @@ class CategoryMemoryResponse(BaseModel):
     count: int = Field(default=0)
 
 
+class SessionMessageInput(BaseModel):
+    role: str = Field(..., description="Message role")
+    content: str = Field(default="", description="Message text content")
+    created_at: str | None = Field(default=None, description="Client timestamp")
+
+
+class SessionRecapArtifactsPayload(BaseModel):
+    takeaway: str | None = Field(default=None)
+    session_takeaway: str | None = Field(default=None)
+    reflection_candidate: dict | None = Field(default=None)
+    reflection: dict | None = Field(default=None)
+    memory_candidates: list[dict] | None = Field(default=None)
+    memories_created: int | None = Field(default=None)
+    status: str | None = Field(default=None)
+
+
+class SessionRecapResponse(BaseModel):
+    session_id: str = Field(..., description="Session identifier")
+    thread_id: str | None = Field(default=None, description="LangGraph thread ID")
+    session_type: str | None = Field(default=None)
+    context_mode: str | None = Field(default=None)
+    started_at: str | None = Field(default=None)
+    ended_at: str | None = Field(default=None)
+    turn_count: int = Field(default=0)
+    status: str = Field(default="processing")
+    recap_artifacts: dict | None = Field(default=None)
+
+
 class SessionEndRequest(BaseModel):
     session_id: str = Field(..., description="Session ID to process")
     thread_id: str = Field(..., description="LangGraph thread ID")
+    offer_debrief: bool = Field(default=False, description="Whether UI should offer debrief")
+    session_type: str | None = Field(default=None)
+    context_mode: str | None = Field(default=None)
+    started_at: str | None = Field(default=None)
+    ended_at: str | None = Field(default=None)
+    turn_count: int | None = Field(default=None)
+    platform: str | None = Field(default=None)
+    messages: list[SessionMessageInput] = Field(default_factory=list)
+    recap_artifacts: SessionRecapArtifactsPayload | None = Field(default=None)
 
 
 class SessionEndResponse(BaseModel):
     status: str = Field(default="pipeline_queued")
     session_id: str = Field(default="")
+    ended_at: str | None = Field(default=None)
+    duration_minutes: int = Field(default=0)
+    turn_count: int = Field(default=0)
+    recap_artifacts: dict | None = Field(default=None)
+    offer_debrief: bool = Field(default=False)
+    debrief_prompt: str | None = Field(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +204,123 @@ def _to_memory_item(mem: dict) -> MemoryItem:
         created_at=mem.get("created_at"),
         updated_at=mem.get("updated_at"),
     )
+
+
+def _get_session_recap_path(user_id: str, session_id: str) -> Path:
+    return safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
+
+
+def _read_session_recap(user_id: str, session_id: str) -> dict | None:
+    recap_path = _get_session_recap_path(user_id, session_id)
+    if not recap_path.exists():
+        return None
+    return json.loads(recap_path.read_text(encoding="utf-8"))
+
+
+def _write_session_recap(user_id: str, session_id: str, payload: dict) -> None:
+    recap_path = _get_session_recap_path(user_id, session_id)
+    recap_path.parent.mkdir(parents=True, exist_ok=True)
+    recap_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> int:
+    start_dt = _parse_iso_datetime(started_at)
+    end_dt = _parse_iso_datetime(ended_at)
+    if start_dt is None or end_dt is None:
+        return 0
+    return max(0, int((end_dt - start_dt).total_seconds() // 60))
+
+
+def _build_session_recap_payload(body: SessionEndRequest, ended_at: str) -> dict:
+    recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
+    turn_count = body.turn_count if body.turn_count is not None else len(body.messages)
+    return {
+        "session_id": body.session_id,
+        "thread_id": body.thread_id,
+        "session_type": body.session_type,
+        "context_mode": body.context_mode,
+        "started_at": body.started_at,
+        "ended_at": ended_at,
+        "turn_count": turn_count,
+        "status": "ready" if recap_artifacts else "processing",
+        "recap_artifacts": recap_artifacts,
+    }
+
+
+def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None:
+    serialized_messages = [
+        {
+            "role": message.role,
+            "content": message.content,
+        }
+        for message in body.messages
+        if message.content.strip()
+    ]
+    recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
+
+    if not serialized_messages and not recap_artifacts:
+        return None
+
+    thread_state: dict = {
+        "messages": serialized_messages,
+        "platform": body.platform or "text",
+        "context_mode": body.context_mode or "life",
+        "configurable": {
+            "platform": body.platform or "text",
+            "context_mode": body.context_mode or "life",
+        },
+    }
+
+    if recap_artifacts:
+        thread_state["current_artifact"] = recap_artifacts
+        thread_state["artifacts"] = [recap_artifacts]
+
+    return thread_state
+
+
+def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:
+    if not body.offer_debrief or duration_minutes < 5:
+        return None
+    if body.session_type == "debrief":
+        return None
+
+    reflection = recap_artifacts.get("reflection_candidate") if isinstance(recap_artifacts, dict) else None
+    if isinstance(reflection, dict) and isinstance(reflection.get("prompt"), str):
+        return reflection["prompt"]
+
+    takeaway = recap_artifacts.get("takeaway") if isinstance(recap_artifacts, dict) else None
+    if isinstance(takeaway, str) and takeaway.strip():
+        return f"Want to debrief this for a minute? {takeaway.strip()}"
+
+    return "Want a quick debrief before you go?"
+
+
+def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, thread_state: dict | None) -> None:
+    from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            run_offline_pipeline,
+            user_id,
+            session_id,
+            thread_id,
+            thread_state,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +355,56 @@ async def list_memories(
 # ---------------------------------------------------------------------------
 # 2. Memory CRUD
 # ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/memories",
+    response_model=MemoryItem,
+    summary="Create a memory",
+)
+async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
+    _validate_user(user_id)
+    client = _get_mem0_client()
+    try:
+        memory_metadata = dict(body.metadata or {})
+        if body.category and "category" not in memory_metadata:
+            memory_metadata["category"] = body.category
+
+        add_kwargs = {
+            "messages": [{"role": "user", "content": body.text}],
+            "user_id": user_id,
+        }
+        if memory_metadata:
+            add_kwargs["metadata"] = memory_metadata
+
+        try:
+            result = client.add(**add_kwargs)
+        except TypeError:
+            add_kwargs.pop("metadata", None)
+            result = client.add(**add_kwargs)
+
+        from deerflow.sophia.mem0_client import invalidate_user_cache
+        invalidate_user_cache(user_id)
+
+        if isinstance(result, dict):
+            created = result.get("results", [result])
+        elif isinstance(result, list):
+            created = result
+        else:
+            created = [result] if result else []
+
+        first = created[0] if created else None
+        if isinstance(first, dict) and first.get("id"):
+            return _to_memory_item(first)
+
+        return MemoryItem(
+            id=str(first.get("id", "")) if isinstance(first, dict) else "",
+            content=body.text,
+            category=body.category or memory_metadata.get("category"),
+            metadata=memory_metadata or None,
+        )
+    except Exception as e:
+        logger.warning("Failed to create memory for %s: %s", user_id, e)
+        raise HTTPException(status_code=503, detail="Memory service unavailable")
 
 @router.put(
     "/{user_id}/memories/{memory_id}",
@@ -324,7 +544,30 @@ async def journal(
 
 
 # ---------------------------------------------------------------------------
-# 5. Visual Artifacts
+# 5. Session Recap
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{user_id}/sessions/{session_id}/recap",
+    response_model=SessionRecapResponse,
+    summary="Get persisted recap for a completed Sophia session",
+)
+async def get_session_recap(user_id: str, session_id: str) -> SessionRecapResponse:
+    _validate_user(user_id)
+    try:
+        recap = _read_session_recap(user_id, session_id)
+    except json.JSONDecodeError as e:
+        logger.warning("Invalid recap JSON for %s/%s: %s", user_id, session_id, e)
+        raise HTTPException(status_code=503, detail="Session recap unavailable")
+
+    if recap is None:
+        raise HTTPException(status_code=404, detail="Session recap not found")
+
+    return SessionRecapResponse(**recap)
+
+
+# ---------------------------------------------------------------------------
+# 6. Visual Artifacts
 # ---------------------------------------------------------------------------
 
 @router.get(
@@ -416,7 +659,7 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
 
 
 # ---------------------------------------------------------------------------
-# 6. Session End Trigger
+# 7. Session End Trigger
 # ---------------------------------------------------------------------------
 
 @router.post(
@@ -428,6 +671,18 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
 
+    ended_at = body.ended_at or datetime.now(UTC).isoformat()
+    recap_payload = _build_session_recap_payload(body, ended_at)
+    duration_minutes = _compute_duration_minutes(body.started_at, ended_at)
+    turn_count = recap_payload.get("turn_count", 0)
+    recap_artifacts = recap_payload.get("recap_artifacts")
+    debrief_prompt = _build_debrief_prompt(body, recap_artifacts, duration_minutes)
+
+    try:
+        _write_session_recap(user_id, body.session_id, recap_payload)
+    except OSError as e:
+        logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
+
     # Remove from inactivity tracking — session explicitly ended
     try:
         from app.gateway.inactivity_watcher import unregister_thread
@@ -436,20 +691,21 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         pass
 
     try:
-        from deerflow.sophia.offline_pipeline import run_offline_pipeline
-
-        # Fire pipeline as background task — don't block the HTTP response
-        task = asyncio.create_task(
-            asyncio.to_thread(
-                run_offline_pipeline,
-                user_id,
-                body.session_id,
-                body.thread_id,
-                None,  # thread_state — pipeline will need to fetch it
-            )
+        _queue_offline_pipeline(
+            user_id,
+            body.session_id,
+            body.thread_id,
+            _build_thread_state_from_end_request(body),
         )
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
-        return SessionEndResponse(status="pipeline_queued", session_id=body.session_id)
+        return SessionEndResponse(
+            status="pipeline_queued",
+            session_id=body.session_id,
+            ended_at=ended_at,
+            duration_minutes=duration_minutes,
+            turn_count=turn_count,
+            recap_artifacts=recap_artifacts,
+            offer_debrief=debrief_prompt is not None,
+            debrief_prompt=debrief_prompt,
+        )
     except ImportError:
         raise HTTPException(status_code=503, detail="Offline pipeline not available")

@@ -132,13 +132,52 @@ export interface SessionStartResponse {
  */
 export interface SessionEndRequest {
   session_id: string;
+  thread_id?: string;
+  user_id?: string;
   offer_debrief?: boolean;
+  session_type?: PresetType;
+  context_mode?: ContextMode;
+  started_at?: string;
+  ended_at?: string;
+  turn_count?: number;
+  platform?: 'voice' | 'text' | 'ios_voice';
+  messages?: Array<{
+    role: 'user' | 'assistant' | 'system';
+    content: string;
+    created_at?: string;
+  }>;
+  recap_artifacts?: {
+    takeaway?: string;
+    session_takeaway?: string;
+    reflection?: {
+      prompt?: string;
+      tag?: string;
+    };
+    reflection_candidate?: {
+      prompt?: string;
+      tag?: string;
+    };
+    memory_candidates?: Array<{
+      id?: string;
+      candidate_id?: string;
+      text?: string;
+      memory?: string;
+      category?: string;
+      created_at?: string;
+      confidence?: number;
+      reason?: string;
+      source?: string;
+    }>;
+    memories_created?: number;
+    status?: string;
+  };
 }
 
 /**
  * POST /api/v1/sessions/end - Response
  */
 export interface SessionEndResponse {
+  status?: string;
   session_id: string;
   ended_at: string;
   duration_minutes: number;
@@ -374,10 +413,13 @@ export interface ReflectionCandidate {
 }
 
 export interface MemoryCandidate {
+  id?: string;
   memory: string;
   category: MemoryCategory;
   confidence: number;
   tags?: string[];
+  created_at?: string;
+  reason?: string;
   source_turn?: number;
 }
 

@@ -4,13 +4,12 @@
  * 
  * POST /api/memory/commit-candidates
  * 
- * Commits user-approved memory candidates to Mem0 via backend.
- * Handles batch operations and partial failures.
+ * Commits recap-reviewed memory candidates through the Sophia gateway.
  */
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { debugLog, debugWarn } from '../../../lib/debug-logger';
+import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
 
 // =============================================================================
@@ -33,6 +32,7 @@ interface CommitRequest {
   session_id: string;
   thread_id?: string;
   decisions: CommitDecision[];
+  user_id?: string;
 }
 
 interface CommitResponse {
@@ -44,39 +44,6 @@ interface CommitResponse {
   }>;
 }
 
-// =============================================================================
-// MOCK RESPONSES (for development)
-// =============================================================================
-
-function getMockResponse(request: CommitRequest): CommitResponse {
-  const committed: string[] = [];
-  const discarded: string[] = [];
-  const errors: Array<{ candidate_id: string; message: string }> = [];
-  
-  for (const decision of request.decisions) {
-    // Simulate occasional errors (10% chance)
-    if (Math.random() < 0.1) {
-      errors.push({
-        candidate_id: decision.candidate_id,
-        message: 'Simulated error for testing',
-      });
-      continue;
-    }
-    
-    if (decision.decision === 'approve') {
-      committed.push(decision.candidate_id);
-    } else {
-      discarded.push(decision.candidate_id);
-    }
-  }
-  
-  return { committed, discarded, errors };
-}
-
-// =============================================================================
-// ROUTE HANDLER
-// =============================================================================
-
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as CommitRequest;
@@ -86,6 +53,14 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { error: 'session_id is required' },
         { status: 400 }
+      );
+    }
+
+    const userId = await resolveSophiaUserId(body.user_id);
+    if (!userId) {
+      return NextResponse.json(
+        { error: 'Unable to resolve user_id' },
+        { status: 401 }
       );
     }
     
@@ -112,52 +87,90 @@ export async function POST(request: NextRequest) {
       }
     }
     
-    // Try to call backend
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
-    
-    if (apiUrl) {
-      try {
-        const backendResponse = await fetch(
-          `${apiUrl}/api/v1/memory/commit-candidates`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(10000), // 10s timeout
-          }
-        );
-        
-        if (backendResponse.ok) {
-          const data = await backendResponse.json();
-          return NextResponse.json(data);
-        }
-        
-        // If backend returns error, fall through to mock
-        debugWarn('API memory commit-candidates', 'Backend commit-candidates failed', {
-          status: backendResponse.status,
-          body: await backendResponse.text().catch(() => 'No body'),
-        });
-        
-      } catch (error) {
-        debugWarn('API memory commit-candidates', 'Backend commit-candidates error', { error });
-        // Fall through to mock
-      }
-    }
-    
-    // 🔒 SECURITY: Mock responses are dev-only — return error in production
-    if (process.env.NODE_ENV === 'production') {
-      return NextResponse.json(
-        { error: 'Memory commit service unavailable' },
-        { status: 503 }
-      );
-    }
+    const outcome = await Promise.allSettled(body.decisions.map(async (decision) => {
+      if (decision.decision === 'discard') {
+        if (!isSyntheticMemoryId(decision.candidate_id)) {
+          const response = await fetchSophiaApi(
+            `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(decision.candidate_id)}`,
+            { method: 'DELETE' }
+          );
 
-    debugLog('API memory commit-candidates', 'Using mock commit-candidates response');
-    await new Promise(resolve => setTimeout(resolve, 500));
-    const mockResponse = getMockResponse(body);
-    return NextResponse.json(mockResponse);
+          if (!response.ok && response.status !== 204) {
+            throw new Error(`Discard failed: ${response.status}`);
+          }
+        }
+
+        return { kind: 'discarded' as const, candidateId: decision.candidate_id };
+      }
+
+      if (!decision.text.trim()) {
+        throw new Error('Missing memory text');
+      }
+
+      const metadata = {
+        status: 'approved',
+        source: decision.source,
+        session_id: body.session_id,
+        ...(decision.metadata || {}),
+      };
+
+      const response = !isSyntheticMemoryId(decision.candidate_id)
+        ? await fetchSophiaApi(
+            `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(decision.candidate_id)}`,
+            {
+              method: 'PUT',
+              body: JSON.stringify({
+                text: decision.text,
+                metadata,
+              }),
+            }
+          )
+        : await fetchSophiaApi(
+            `/api/sophia/${encodeURIComponent(userId)}/memories`,
+            {
+              method: 'POST',
+              body: JSON.stringify({
+                text: decision.text,
+                ...(decision.category ? { category: decision.category } : {}),
+                metadata: {
+                  ...metadata,
+                  original_memory_id: decision.candidate_id,
+                },
+              }),
+            }
+          );
+
+      if (!response.ok) {
+        throw new Error(`Commit failed: ${response.status}`);
+      }
+
+      return { kind: 'committed' as const, candidateId: decision.candidate_id };
+    }));
+
+    const result: CommitResponse = {
+      committed: [],
+      discarded: [],
+      errors: [],
+    };
+
+    outcome.forEach((item, index) => {
+      const candidateId = body.decisions[index].candidate_id;
+      if (item.status === 'fulfilled') {
+        if (item.value.kind === 'committed') {
+          result.committed.push(item.value.candidateId);
+        } else {
+          result.discarded.push(item.value.candidateId);
+        }
+        return;
+      }
+
+      result.errors.push({
+        candidate_id: candidateId,
+        message: item.reason instanceof Error ? item.reason.message : 'Unknown error',
+      });
+    });
+
+    return NextResponse.json(result);
     
   } catch (error) {
     logger.logError(error, { component: 'api/memory/commit-candidates', action: 'commit_candidates' });

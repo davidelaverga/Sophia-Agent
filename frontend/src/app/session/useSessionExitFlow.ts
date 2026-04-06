@@ -1,4 +1,5 @@
 import { useCallback, useState } from 'react';
+import { flushSync } from 'react-dom';
 
 import { haptic } from '../hooks/useHaptics';
 import {
@@ -22,6 +23,12 @@ interface DebriefData {
   takeaway?: string;
   sessionId: string;
 }
+
+type ExitSessionMessage = {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  createdAt?: string;
+};
 
 function mapLiveArtifactsToRecapV1({
   sessionId,
@@ -68,15 +75,72 @@ function mapLiveArtifactsToRecapV1({
         : undefined,
       memory_candidates: hasMemories
         ? currentArtifacts.memory_candidates?.map((candidate) => ({
+            ...(candidate.id ? { id: candidate.id } : {}),
             text: candidate.memory,
             memory: candidate.memory,
             category: candidate.category,
             confidence: candidate.confidence,
+            ...(candidate.created_at ? { created_at: candidate.created_at } : {}),
+            ...(candidate.reason ? { reason: candidate.reason } : {}),
           }))
         : undefined,
     },
     sessionId,
   );
+}
+
+function serializeLiveArtifactsForSessionEnd(
+  currentArtifacts?: RitualArtifacts | null,
+): NonNullable<import('../types/session').SessionEndRequest['recap_artifacts']> | undefined {
+  if (!currentArtifacts) {
+    return undefined;
+  }
+
+  const hasTakeaway = typeof currentArtifacts.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
+  const hasReflection = typeof currentArtifacts.reflection_candidate?.prompt === 'string'
+    && currentArtifacts.reflection_candidate.prompt.trim().length > 0;
+  const hasMemories = Array.isArray(currentArtifacts.memory_candidates)
+    && currentArtifacts.memory_candidates.length > 0;
+
+  if (!hasTakeaway && !hasReflection && !hasMemories) {
+    return undefined;
+  }
+
+  return {
+    takeaway: hasTakeaway ? currentArtifacts.takeaway : undefined,
+    reflection_candidate: hasReflection
+      ? {
+          prompt: currentArtifacts.reflection_candidate?.prompt,
+          tag: currentArtifacts.reflection_candidate?.category,
+        }
+      : undefined,
+    memory_candidates: hasMemories
+      ? currentArtifacts.memory_candidates?.map((candidate) => ({
+          ...(candidate.id ? { id: candidate.id } : {}),
+          text: candidate.memory,
+          memory: candidate.memory,
+          category: candidate.category,
+          confidence: candidate.confidence,
+          ...(candidate.created_at ? { created_at: candidate.created_at } : {}),
+          ...(candidate.reason ? { reason: candidate.reason } : {}),
+        }))
+      : undefined,
+    status: 'ready',
+  };
+}
+
+function serializeSessionMessages(messages?: ExitSessionMessage[]): NonNullable<import('../types/session').SessionEndRequest['messages']> {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  return messages
+    .map((message) => ({
+      role: message.role,
+      content: typeof message.content === 'string' ? message.content.trim() : '',
+      created_at: message.createdAt,
+    }))
+    .filter((message) => message.content.length > 0);
 }
 
 interface UseSessionExitFlowParams {
@@ -96,6 +160,9 @@ interface UseSessionExitFlowParams {
   promoteToDebriefMode: () => void;
   startDebriefWithLLM: (debriefData: DebriefData) => void;
   currentArtifacts?: RitualArtifacts | null;
+  userId?: string;
+  threadId?: string;
+  messages?: ExitSessionMessage[];
 }
 
 export function useSessionExitFlow({
@@ -115,6 +182,9 @@ export function useSessionExitFlow({
   promoteToDebriefMode,
   startDebriefWithLLM,
   currentArtifacts,
+  userId,
+  threadId,
+  messages,
 }: UseSessionExitFlowParams) {
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [showDebriefOffer, setShowDebriefOffer] = useState(false);
@@ -130,7 +200,12 @@ export function useSessionExitFlow({
 
   const finalizeExitToRecap = useCallback(
     (recapSessionId: string) => {
-      setIsNavigatingToRecap(true);
+      flushSync(() => {
+        setIsNavigatingToRecap(true);
+        setPendingRecapSessionId(null);
+        setShowEmergence(false);
+        setShowFeedback(false);
+      });
       markRecentSessionEnd(recapSessionId);
       endSessionStore();
       clearSessionStore();
@@ -166,11 +241,21 @@ export function useSessionExitFlow({
     const presetType = sessionPresetType || 'open';
     const contextMode = sessionContextMode || 'life';
     const shouldOfferDebrief = presetType !== 'debrief';
+    const serializedMessages = serializeSessionMessages(messages);
+    const serializedArtifacts = serializeLiveArtifactsForSessionEnd(currentArtifacts);
 
     try {
       const result = await endSessionAPI({
         session_id: recapSessionId,
+        thread_id: threadId || recapSessionId,
+        user_id: userId,
         offer_debrief: shouldOfferDebrief,
+        session_type: presetType,
+        context_mode: contextMode,
+        started_at: startedAt,
+        turn_count: messageCount,
+        messages: serializedMessages,
+        recap_artifacts: serializedArtifacts,
       });
 
       if (isSuccess(result)) {
@@ -304,6 +389,9 @@ export function useSessionExitFlow({
     sessionContextMode,
     messageCount,
     currentArtifacts,
+    userId,
+    threadId,
+    messages,
   ]);
 
   // ── Emergence → Feedback → Recap flow ─────────────────────────────────────

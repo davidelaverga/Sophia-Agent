@@ -59,6 +59,7 @@ export function useChatArtifactsPanelActions({
           memory_text: memoryText,
           category: candidate.category,
           session_id: conversationId,
+          original_memory_id: candidate.id,
         }),
       });
 
@@ -110,6 +111,7 @@ export function useChatArtifactsPanelActions({
           memory_text: memoryText,
           category: candidate.category,
           session_id: conversationId,
+          original_memory_id: candidate.id,
         }),
       });
 

@@ -40,7 +40,7 @@ function getDisplayText(candidate: MemoryCandidateV1): string {
 }
 
 function isLegacyCandidateId(candidateId: string): boolean {
-  return candidateId.startsWith('candidate-');
+  return candidateId.startsWith('candidate-') || /^mem_\d+$/.test(candidateId);
 }
 
 export function useRecapMemoryActions({

@@ -124,7 +124,7 @@ describe('Memory Candidates v2 smoke', () => {
   it('accept does not fire network and persists reviewed state after refresh; empty state message renders', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url.includes('/api/sessions/test-session') && (!init?.method || init.method === 'GET')) {
+      if (url.includes('/api/sophia/sessions/test-session/recap') && (!init?.method || init.method === 'GET')) {
         return new Response(
           JSON.stringify({
             session_id: 'test-session',
@@ -191,7 +191,7 @@ describe('Memory Candidates v2 smoke', () => {
       const url = String(input);
       const method = init?.method || 'GET';
 
-      if (url.includes('/api/sessions/test-session') && method === 'GET') {
+      if (url.includes('/api/sophia/sessions/test-session/recap') && method === 'GET') {
         return new Response(
           JSON.stringify({
             session_id: 'test-session',

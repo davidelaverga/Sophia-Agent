@@ -8,13 +8,16 @@ from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
     agents,
     artifacts,
+    bootstrap,
     channels,
     mcp,
     memory,
     models,
+    sessions,
     skills,
     suggestions,
     uploads,
+    voice,
 )
 from deerflow.config.app_config import get_app_config
 
@@ -193,6 +196,15 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Suggestions API is mounted at /api/threads/{thread_id}/suggestions
     app.include_router(suggestions.router)
+
+    # Bootstrap API is mounted at /api/v1/bootstrap
+    app.include_router(bootstrap.router)
+
+    # Sessions API is mounted at /api/v1/sessions
+    app.include_router(sessions.router)
+
+    # Voice API is mounted at /api/sophia/{user_id}/voice/*
+    app.include_router(voice.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

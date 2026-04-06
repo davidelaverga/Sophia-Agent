@@ -31,6 +31,7 @@ import type {
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_SESSIONS_PROXY_URL || '';
 const SESSIONS_BASE = '/api/sessions';
+const SOPHIA_END_SESSION_ENDPOINT = '/api/sophia/end-session';
 const DEFAULT_TIMEOUT_MS = 10000;
 
 // ============================================================================
@@ -192,7 +193,7 @@ export async function endSession(
   request: SessionEndRequest
 ): Promise<ApiResponse<SessionEndResponse>> {
   return fetchWithAuth<SessionEndResponse>(
-    `${SESSIONS_BASE}/end`,
+    SOPHIA_END_SESSION_ENDPOINT,
     {
       method: 'POST',
       body: JSON.stringify(request),
