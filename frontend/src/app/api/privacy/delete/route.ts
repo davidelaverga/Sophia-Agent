@@ -5,7 +5,7 @@
  * Uses V4 backend's Mem0 delete endpoint: DELETE /mem0/{user_id}/memories
  * 
  * This clears the user's long-term memories from the system.
- * Full account deletion requires Supabase admin operations.
+ * Full account deletion still requires a separate support-side account removal flow.
  */
 
 import { NextRequest, NextResponse } from "next/server";

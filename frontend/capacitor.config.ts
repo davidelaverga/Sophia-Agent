@@ -18,9 +18,8 @@ const config: CapacitorConfig = {
     url: isDev ? 'http://localhost:3000' : undefined,
     cleartext: isDev,
     
-    // Allow navigation to external URLs (Supabase auth, Discord, etc.)
+    // Allow navigation to external URLs used by auth and backend services.
     allowNavigation: [
-      'qtyqgvdkbhjfmnfkxyvm.supabase.co',
       'sophia-backend-g8fe.onrender.com',
       '*.discord.com',
       'discord.com',

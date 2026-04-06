@@ -39,6 +39,7 @@ function mockResponse(sessionId: string, sessionType: string | undefined): Respo
   const preset = sessionType?.replace('_', '') || 'default';
   const mockText = getMockResponse(preset);
   const stream = createUIMessageStreamFromText(mockText, {
+    thread_id: sessionId,
     session_id: sessionId,
   });
   return new Response(stream, {
@@ -113,6 +114,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       userMessage,
       sessionId,
       userId,
+      threadId,
       sessionType,
       contextMode,
       platform,
@@ -127,6 +129,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       message: userMessage,
       session_id: sessionId,
       user_id: userId,
+      thread_id: threadId,
       session_type: sessionType,
       context_mode: contextMode,
       platform,
@@ -138,11 +141,8 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
 
     try {
       const backendFetch = await fetchBackendStreamWithBootstrap(backendUrl, backendPayload);
-      if (backendFetch.ok === false) {
-        return backendFetch.response;
-      }
-
       const upstream = backendFetch.upstream;
+      const responseThreadId = backendFetch.threadId;
 
       if (!upstream.ok) {
         const errorText = await upstream.text();
@@ -217,7 +217,10 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       if (contentType.includes('text/event-stream') && upstream.body) {
         secureLog('[/api/chat] Proxying SSE stream');
 
-        const transformStream = createSSEToUIMessageStream(upstream.body);
+        const transformStream = createSSEToUIMessageStream(upstream.body, {
+          thread_id: responseThreadId,
+          session_id: sessionId,
+        });
         return new Response(transformStream, {
           headers: {
             'Content-Type': 'text/event-stream; charset=utf-8',
@@ -240,11 +243,11 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         ?? backendResponse?.meta?.pending_interrupt
         ?? backendResponse?.metadata?.pending_interrupt
         ?? null;
-      const threadId = backendResponse.thread_id || sessionId;
+      const resolvedThreadId = backendResponse.thread_id || responseThreadId || threadId || sessionId;
 
       const artifacts = normalizeArtifactsV1(backendResponse.artifacts || backendResponse.ritual_artifacts);
       const stream = createUIMessageStreamFromText(responseText, {
-        thread_id: threadId,
+        thread_id: resolvedThreadId,
         session_id: sessionId,
         skill_used: backendResponse.skill_used,
         emotion_detected: backendResponse.emotion_detected,

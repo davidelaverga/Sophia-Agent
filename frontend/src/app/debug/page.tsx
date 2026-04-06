@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import { authBypassEnabled } from '@/app/lib/auth/dev-bypass'
 import { useRouter } from 'next/navigation'
 import { useAuth } from '../providers'
 import { useTranslation } from '../copy'
@@ -34,7 +35,7 @@ export default function DebugPage() {
       
       // Get environment variables
       const apiUrl = process.env.NEXT_PUBLIC_API_URL
-      const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
+      const devBypass = authBypassEnabled
       
       // Get user session
       const sessionInfo = {
@@ -56,7 +57,7 @@ export default function DebugPage() {
         currentUrl,
         origin,
         apiUrl,
-        supabaseUrl,
+        devBypass,
         ...sessionInfo,
         apiTest,
         redirectUrl: `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback`,

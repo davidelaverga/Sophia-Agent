@@ -10,7 +10,7 @@
  * (e.g., backend was down during auth callback).
  * 
  * Security: Must only be called from the client after a successful
- * syncBackendToken() call — token is already validated by that flow.
+ * backend sync flow — token is already validated by that route.
  */
 
 import { cookies } from 'next/headers';

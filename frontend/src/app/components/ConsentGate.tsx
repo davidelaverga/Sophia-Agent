@@ -5,6 +5,7 @@ import { Shield, AlertTriangle } from "lucide-react"
 import { useCopy, useTranslation } from "../copy"
 import { getConsentStatus, postConsentAccept } from "../lib/api/privacy"
 import { useFocusTrap } from "../hooks/useFocusTrap"
+import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
 
 type GateState = "checking" | "needsConsent" | "error" | "ready"
 
@@ -37,11 +38,9 @@ export function ConsentGate({ onReady }: { onReady: () => void }) {
   const copy = useCopy()
   const { t } = useTranslation()
 
-  const devBypass = process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === "true"
-
   // Start as "ready" if we have cached consent or dev bypass (prevents flash)
   const [state, setState] = useState<GateState>(() => 
-    devBypass || getCachedConsent() ? "ready" : "checking"
+    authBypassEnabled || getCachedConsent() ? "ready" : "checking"
   )
   const [error, setError] = useState<string>()
   const [retryCount, setRetryCount] = useState(0)
@@ -49,14 +48,14 @@ export function ConsentGate({ onReady }: { onReady: () => void }) {
 
   // If cached consent or dev bypass, call onReady immediately
   useEffect(() => {
-    if (devBypass || getCachedConsent()) {
+    if (authBypassEnabled || getCachedConsent()) {
       onReady()
     }
-  }, [devBypass, onReady])
+  }, [onReady])
 
   useEffect(() => {
     // Skip fetch if we already have cached consent or dev bypass
-    if (devBypass || getCachedConsent()) {
+    if (authBypassEnabled || getCachedConsent()) {
       setState("ready")
       return
     }

@@ -1,6 +1,7 @@
 "use client"
 
 import { debugWarn } from "../debug-logger"
+import { authBypassEnabled } from "../auth/dev-bypass"
 
 /**
  * Unified API Client
@@ -57,7 +58,7 @@ function createApiError(
 async function getAuthHeaders(): Promise<Record<string, string>> {
   // Better Auth uses httpOnly cookies — sent automatically with same-origin requests.
   // Dev bypass preserved for consistency.
-  if (process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === "true") {
+  if (authBypassEnabled) {
     return {}
   }
   return {}

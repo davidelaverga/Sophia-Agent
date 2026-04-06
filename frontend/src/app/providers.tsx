@@ -2,9 +2,7 @@
 
 import { createContext, useContext, useMemo } from 'react'
 import { authClient } from '@/server/better-auth/client'
-
-// Dev bypass: skip auth entirely (no OAuth, no session)
-const devBypass = process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === 'true'
+import { authBypassEnabled, authBypassUserId } from '@/app/lib/auth/dev-bypass'
 
 // Shape exposed to consumers
 type AuthUser = {
@@ -30,15 +28,14 @@ export function Providers({ children }: { children: React.ReactNode }) {
 }
 
 function useAuthInternal(): AuthHookResult {
-  const { data: session, isPending } = devBypass
+  const { data: session, isPending } = authBypassEnabled
     ? { data: null, isPending: false }
     : authClient.useSession()
 
   return useMemo(() => {
-    if (devBypass) {
-      const devUserId = process.env.NEXT_PUBLIC_SOPHIA_USER_ID || 'dev-user'
+    if (authBypassEnabled) {
       return {
-        user: { id: devUserId, email: 'dev@localhost', name: 'Dev User' },
+        user: { id: authBypassUserId, email: 'dev@localhost', name: 'Dev User' },
         loading: false,
         signOut: async () => {},
       }
@@ -59,17 +56,3 @@ function useAuthInternal(): AuthHookResult {
  * Returns { user, loading, signOut }.
  */
 export const useAuth = () => useContext(AuthContext)
-
-/**
- * Legacy alias — migrate call-sites to useAuth().
- * @deprecated Use useAuth() instead.
- */
-export const useSupabase = (): {
-  supabase: null
-  user: AuthUser | null
-  loading: boolean
-  accessToken: string | null
-} => {
-  const { user, loading } = useAuth()
-  return { supabase: null, user, loading, accessToken: null }
-}

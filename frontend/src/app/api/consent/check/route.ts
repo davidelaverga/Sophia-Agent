@@ -10,9 +10,8 @@ async function handleConsentCheck() {
       return NextResponse.json({ hasConsent: false }, { status: 401 })
     }
 
-    // TODO: Move consent storage to backend API
-    // The Supabase DB check against the 'user_consents' table has been removed.
-    // Consent checking should be handled by the backend service.
+    // TODO: Move consent storage to the backend API.
+    // Consent checking is temporarily stubbed here until backend persistence lands.
     // For now, return true to unblock the client flow.
 
     return NextResponse.json({ 

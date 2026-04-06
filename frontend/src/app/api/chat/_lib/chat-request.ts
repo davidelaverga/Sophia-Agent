@@ -12,6 +12,7 @@ export interface ValidatedChatRequest {
   userMessage: string;
   sessionId: string;
   userId: string;
+  threadId?: string;
   sessionType: ReturnType<typeof validateSessionType>;
   contextMode: ReturnType<typeof validateContextMode>;
   platform: string | undefined;
@@ -40,6 +41,8 @@ export function parseAndValidateChatPayload(payload: unknown): ParseChatRequestR
 
   const sessionId = String(record.session_id || record.sessionId || 'default-session');
   const userId = String(record.user_id || record.userId || 'anonymous');
+  const threadIdCandidate = record.thread_id || record.threadId || record.backend_thread_id || record.backendThreadId;
+  const threadId = typeof threadIdCandidate === 'string' ? threadIdCandidate : undefined;
   const sessionTypeInput = typeof (record.session_type || record.sessionType) === 'string'
     ? String(record.session_type || record.sessionType)
     : undefined;
@@ -77,6 +80,7 @@ export function parseAndValidateChatPayload(payload: unknown): ParseChatRequestR
       userMessage,
       sessionId,
       userId,
+      threadId,
       sessionType,
       contextMode,
       platform,

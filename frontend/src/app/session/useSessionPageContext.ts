@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { isUuid } from '../lib/utils';
+import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
 import { getSessionGreetingMessage } from '../lib/time-greetings';
 import type { MemoryHighlight } from '../types/session';
 import { useChatStore } from '../stores/chat-store';
@@ -36,7 +37,7 @@ export function useSessionPageContext({
   const sessionId = session?.sessionId || chatConversationId || 'default-session';
   const backendSessionId = session?.sessionId || bootstrapSessionId;
   const hasValidBackendSessionId = isUuid(backendSessionId);
-  const userId = session?.userId || 'anonymous';
+  const userId = session?.userId || (authBypassEnabled ? authBypassUserId : 'anonymous');
   const sessionPresetType = session?.presetType;
   const sessionContextMode = session?.contextMode;
   const isReadOnly = !!session && (session.status === 'ended' || session.isActive === false);
@@ -52,6 +53,7 @@ export function useSessionPageContext({
     ? {
         session_id: safeSessionId,
         user_id: userId,
+        thread_id: session?.threadId,
         session_type: sessionPresetType,
         context_mode: sessionContextMode,
         platform,

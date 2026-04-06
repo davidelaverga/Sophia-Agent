@@ -2,7 +2,7 @@
  * Hook for managing WebSocket connection to voice backend
  * Handles connection lifecycle, message handling, and reconnection
  * 
- * Compatible with V4 backend (AI-companion-mvp) which expects:
+ * Compatible with the Sophia voice backend, which expects:
  * - Query param: session_id
  * - Binary data: audio chunks
  * - Text commands: BARGE_IN, END_OF_SPEECH

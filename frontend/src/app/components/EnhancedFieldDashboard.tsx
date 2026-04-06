@@ -143,22 +143,7 @@ export function EnhancedFieldDashboard() {
       <EnhancedFieldBackground contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
-      <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex items-start justify-between px-4 py-4 sm:px-6">
-        <div className="pointer-events-auto">
-          {shouldShowResumeSurface && (backendActiveSession || sessionSummary) ? (
-            <ResumeBanner
-              sessionType={(backendActiveSession?.session_type || sessionSummary?.sessionType || 'open') as never}
-              contextMode={(backendActiveSession?.preset_context || activeSession?.contextMode || 'gaming') as 'gaming' | 'work' | 'life'}
-              startedAt={backendActiveSession?.started_at || sessionSummary?.startedAt || new Date().toISOString()}
-              messageCount={backendActiveSession?.turn_count || sessionSummary?.messageCount || 0}
-              lastMessagePreview={sessionSummary?.lastMessagePreview}
-              onResume={handleResumeBanner}
-              onStartFresh={handleStartFresh}
-              onDismiss={handleDismissResumeBanner}
-            />
-          ) : null}
-        </div>
-
+      <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex items-start justify-end px-4 py-4 sm:px-6">
         <div className="pointer-events-auto flex items-center gap-2">
           <ThemeToggle />
           <FieldChromeButton
@@ -267,7 +252,27 @@ export function EnhancedFieldDashboard() {
           >
             {subtitle}
           </p>
-          {hasMeaningfulBootstrapOpener && !shouldShowResumeSurface ? (
+          {shouldShowResumeSurface && (backendActiveSession || sessionSummary) ? (
+            <div
+              className={cn(
+                'pointer-events-auto transition-all duration-[1.6s] ease-out delay-[0.5s]',
+                greetingVisible
+                  ? 'translate-y-0 opacity-100'
+                  : 'translate-y-1 opacity-0',
+              )}
+            >
+              <ResumeBanner
+                sessionType={(backendActiveSession?.session_type || sessionSummary?.sessionType || 'open') as never}
+                contextMode={(backendActiveSession?.preset_context || activeSession?.contextMode || 'gaming') as 'gaming' | 'work' | 'life'}
+                startedAt={backendActiveSession?.started_at || sessionSummary?.startedAt || new Date().toISOString()}
+                messageCount={backendActiveSession?.turn_count || sessionSummary?.messageCount || 0}
+                lastMessagePreview={sessionSummary?.lastMessagePreview}
+                onResume={handleResumeBanner}
+                onStartFresh={handleStartFresh}
+                onDismiss={handleDismissResumeBanner}
+              />
+            </div>
+          ) : hasMeaningfulBootstrapOpener ? (
             <p className="mx-auto mt-3 max-w-md font-cormorant italic text-[13px] text-black/34 dark:text-white/28">
               {bootstrapOpener?.opener_text}
             </p>

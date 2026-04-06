@@ -19,9 +19,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Timestamp is required' }, { status: 400 })
     }
 
-    // TODO: Move consent storage to backend API
-    // The Supabase DB write to the 'consents' table has been removed.
-    // Consent persistence should be handled by the backend service.
+    // TODO: Move consent storage to the backend API.
+    // Consent persistence is temporarily stubbed here until backend persistence lands.
     // For now, return success to unblock the client flow.
 
     return NextResponse.json({ 

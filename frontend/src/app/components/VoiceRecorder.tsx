@@ -236,7 +236,7 @@ export default function VoiceRecorder({ onMessage, setIsLoading, accessToken }: 
 
     try {
       if (!accessToken) {
-        throw new Error('Missing Supabase access token. Please refresh the page or sign in again.')
+        throw new Error('Missing backend access token. Please refresh the page or sign in again.')
       }
 
       const mimeType = mediaRecorderRef.current?.mimeType || 'audio/webm;codecs=opus'

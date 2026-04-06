@@ -130,17 +130,22 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           'max-w-[85%] sm:max-w-[75%] p-4 rounded-2xl relative group min-w-0',
           isUser
             ? cn(
-                'bg-white/[0.06] text-white/70 border border-white/[0.04]',
+                'border border-white/[0.05]',
                 isQueued && 'border-dashed border-white/10 opacity-70'
               )
             : cn(
-                'bg-transparent text-white/75 font-light'
+                'bg-transparent font-light'
               ),
           // Subtle glow for assistant's latest message
           !isUser && isLatest && 'shadow-[0_0_20px_rgba(255,255,255,0.02)]',
           // Dashed border for incomplete messages
           isIncomplete && 'border-dashed border-amber-400/50'
         )}
+        style={isUser ? {
+          background: 'rgba(232,228,239,0.04)',
+          backdropFilter: 'blur(12px) saturate(1.1)',
+          WebkitBackdropFilter: 'blur(12px) saturate(1.1)',
+        } : undefined}
       >
         {(isVoiceTranscript || isVoiceResponse) && (
           <span
@@ -158,7 +163,12 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           !isUser && 'text-[15px]',
           // Dim incomplete text slightly
           isIncomplete && 'opacity-80'
-        )}>
+        )}
+        style={{
+          color: isUser ? 'rgba(232,228,239,0.72)' : 'rgba(232,228,239,0.82)',
+          textShadow: '0 1px 8px rgba(0,0,0,0.25)',
+        }}
+        >
           {renderedContent}
         </div>
         

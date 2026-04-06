@@ -1,6 +1,4 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
-import fs from 'node:fs';
-import path from 'node:path';
 
 type RawHighlight = {
   id?: string | number | null;
@@ -33,76 +31,7 @@ type TrackerState = {
   endCalls: number;
 };
 
-const APP_URL = process.env.E2E_BASE_URL ?? 'http://127.0.0.1:3000';
 const trackerByPage = new WeakMap<Page, TrackerState>();
-
-function readSupabaseUrlFromEnvFiles(): string {
-  const candidates = ['.env.local', '.env'];
-  for (const file of candidates) {
-    const fullPath = path.join(process.cwd(), file);
-    if (!fs.existsSync(fullPath)) continue;
-
-    const raw = fs.readFileSync(fullPath, 'utf8');
-    const line = raw.split(/\r?\n/).find((entry) => entry.startsWith('NEXT_PUBLIC_SUPABASE_URL='));
-    if (line) {
-      return line.split('=').slice(1).join('=').trim();
-    }
-  }
-  return '';
-}
-
-function getSupabaseCookieKey(): string | null {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || readSupabaseUrlFromEnvFiles();
-  if (!supabaseUrl) return null;
-  try {
-    const host = new URL(supabaseUrl).hostname;
-    const projectRef = host.split('.')[0];
-    return `sb-${projectRef}-auth-token`;
-  } catch {
-    return null;
-  }
-}
-
-function base64UrlEncode(obj: object): string {
-  return Buffer.from(JSON.stringify(obj))
-    .toString('base64')
-    .replace(/=/g, '')
-    .replace(/\+/g, '-')
-    .replace(/\//g, '_');
-}
-
-function createFakeJwt(): string {
-  const header = base64UrlEncode({ alg: 'HS256', typ: 'JWT' });
-  const payload = base64UrlEncode({
-    exp: Math.floor(Date.now() / 1000) + 3600,
-    sub: '00000000-0000-4000-8000-00000000e2e1',
-    email: 'e2e@sophia.local',
-    role: 'authenticated',
-    aud: 'authenticated',
-    app_metadata: { provider: 'discord', providers: ['discord'] },
-    user_metadata: { full_name: 'E2E User' },
-  });
-  return `${header}.${payload}.signature`;
-}
-
-async function installSupabaseAuthCookie(page: Page): Promise<void> {
-  const cookieKey = getSupabaseCookieKey();
-  if (!cookieKey) return;
-
-  const appHost = new URL(APP_URL).hostname;
-  const cookieSession = JSON.stringify([createFakeJwt(), 'fake-refresh-token', null, null, null]);
-
-  await page.context().addCookies([
-    {
-      name: cookieKey,
-      value: cookieSession,
-      domain: appHost,
-      path: '/',
-      httpOnly: false,
-      sameSite: 'Lax',
-    },
-  ]);
-}
 
 function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
@@ -251,7 +180,7 @@ async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
   const deadline = Date.now() + 30_000;
 
   while (Date.now() < deadline) {
-    const micButton = page.locator('button[aria-label*="Sophia"]').first();
+    const micButton = page.locator('[data-onboarding="mic-cta"]').first();
     if (await micButton.isVisible({ timeout: 500 }).catch(() => false)) {
       return;
     }
@@ -279,17 +208,17 @@ async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
     'AuthGate quedó en loading (Opening a gentle space...). Provee sesión autenticada o storageState para E2E.',
   );
 
-  const micButton = page.locator('button[aria-label*="Sophia"]').first();
+  const micButton = page.locator('[data-onboarding="mic-cta"]').first();
   await expect(micButton).toBeVisible({ timeout: 10_000 });
 }
 
 async function startFromHomeAndCapture(page: Page): Promise<NormalizedHighlight[]> {
   const capturePromise = captureStartHighlights(page);
 
-  const micButton = page.locator('button[aria-label*="Sophia"]').first();
+  const micButton = page.locator('[data-onboarding="mic-cta"]').first();
   await micButton.click();
 
-  const replaceStartFresh = page.getByRole('button', { name: /^Start Fresh$/ }).first();
+  const replaceStartFresh = page.getByRole('button', { name: /start fresh/i }).first();
   if (await replaceStartFresh.isVisible({ timeout: 1200 }).catch(() => false)) {
     await replaceStartFresh.click();
   }
@@ -311,7 +240,7 @@ async function endSessionAndWaitRequest(page: Page): Promise<void> {
   await expect(headerEndButton).toBeVisible({ timeout: 10_000 });
   await headerEndButton.click();
 
-  const confirmEndButton = page.getByRole('button', { name: /^End$/ }).first();
+  const confirmEndButton = page.getByRole('button', { name: /^end session$/i }).first();
   await expect(confirmEndButton).toBeVisible({ timeout: 5_000 });
   await confirmEndButton.click();
 
@@ -426,53 +355,35 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
       body: JSON.stringify({ ok: true }),
     });
   });
-
-  await page.route('**/auth/v1/user**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        id: '00000000-0000-4000-8000-00000000e2e1',
-        aud: 'authenticated',
-        role: 'authenticated',
-        email: 'e2e@sophia.local',
-        app_metadata: { provider: 'discord', providers: ['discord'] },
-        user_metadata: { full_name: 'E2E User' },
-      }),
-    });
-  });
-
-  await page.route('**/auth/v1/token**', async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: 'application/json',
-      body: JSON.stringify({
-        access_token: createFakeJwt(),
-        token_type: 'bearer',
-        expires_in: 3600,
-        expires_at: Math.floor(Date.now() / 1000) + 3600,
-        refresh_token: 'fake-refresh-token',
-        user: {
-          id: '00000000-0000-4000-8000-00000000e2e1',
-          aud: 'authenticated',
-          role: 'authenticated',
-          email: 'e2e@sophia.local',
-          app_metadata: { provider: 'discord', providers: ['discord'] },
-          user_metadata: { full_name: 'E2E User' },
-        },
-      }),
-    });
-  });
 }
 
 test.describe('Memory highlights stale investigation (network-driven)', () => {
   test.beforeEach(async ({ page }) => {
     installStartEndTracker(page);
-    await installSupabaseAuthCookie(page);
 
     await page.addInitScript(() => {
       try {
+        const onboardingCompletedAt = new Date().toISOString();
+
         localStorage.setItem('sophia_consent_accepted', 'true');
+        localStorage.setItem('sophia-onboarding-v2', JSON.stringify({
+          state: {
+            firstRun: {
+              status: 'completed',
+              currentStepId: null,
+              completedSteps: [],
+              skippedAt: null,
+              completedAt: onboardingCompletedAt,
+            },
+            contextualTips: {},
+            preferences: {
+              voiceOverEnabled: false,
+              reducedMotion: true,
+            },
+            legacyStep: 'complete',
+          },
+          version: 2,
+        }));
       } catch {
         // ignore
       }
@@ -492,7 +403,7 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
 
     await setupMockNetwork(page, [firstStart]);
 
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const fromNetwork = await startFromHomeAndCapture(page);
@@ -527,7 +438,7 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
 
     await setupMockNetwork(page, [startA, startB]);
 
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const first = await startFromHomeAndCapture(page);
@@ -535,7 +446,7 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
 
     await endSessionAndWaitRequest(page);
 
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const second = await startFromHomeAndCapture(page);
@@ -567,7 +478,7 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
 
     await setupMockNetwork(page, [startOld, startFresh]);
 
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const beforeClear = await startFromHomeAndCapture(page);
@@ -575,7 +486,7 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
 
     await clearSophiaStorage(page);
 
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const afterClear = await startFromHomeAndCapture(page);
@@ -607,13 +518,13 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
 
     await setupMockNetwork(page, [hotStart, coldStart]);
 
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const hot = await startFromHomeAndCapture(page);
 
     await clearSophiaStorage(page);
-    await page.goto(`${APP_URL}/`, { waitUntil: 'domcontentloaded' });
+    await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);
 
     const cold = await startFromHomeAndCapture(page);

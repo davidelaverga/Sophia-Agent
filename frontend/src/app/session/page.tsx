@@ -650,6 +650,7 @@ function SessionPageContent() {
       setTimeout(() => removeInternalDebriefTriggerBubble(debriefTrigger), 0);
       setTimeout(() => removeInternalDebriefTriggerBubble(debriefTrigger), 180);
     },
+    currentArtifacts: artifacts,
     persistedSessionId: session?.sessionId,
     responseMode: exitProtectionResponseMode,
     messages,
@@ -806,6 +807,18 @@ function SessionPageContent() {
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
+          {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
+              A radial vignette that darkens the center (where text lives) and fades to
+              transparent at the edges, letting the cosmic field breathe through. */}
+          {focusMode === 'text' && (
+            <div
+              className="absolute inset-0 z-0 pointer-events-none"
+              style={{
+                background: 'radial-gradient(ellipse 60% 75% at 50% 50%, rgba(3,3,8,0.52) 0%, rgba(3,3,8,0.30) 55%, transparent 100%)',
+              }}
+            />
+          )}
+
           {/* Conversation pane — hidden in voice mode but stays mounted to preserve scroll */}
           <div className={focusMode !== 'text' ? 'hidden' : 'flex-1 flex flex-col min-h-0'}>
             <SessionConversationPane
@@ -891,6 +904,29 @@ function SessionPageContent() {
             <ModeToggle opacity={chromeOpacity} />
           </div>
           
+          {/* Inline Artifact Panel — text mode: above composer, voice mode: floating above mic */}
+          {focusMode === 'text' && showArtifacts && showArtifactsUi && (
+            <PresenceArtifactPanel
+              artifacts={artifacts}
+              isVisible={showArtifacts && showArtifactsUi}
+              onDismiss={handleCloseArtifactsPanel}
+              isVoiceMode={false}
+              onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
+              onMemoryApprove={handleMemoryApprove}
+              onMemoryReject={handleMemoryReject}
+            />
+          )}
+
+          {/* Artifact toggle pill — centered above composer when dismissed in text mode */}
+          {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
+            <div className="flex justify-center mb-2">
+              <ArtifactToggleIcon
+                hasArtifacts={!!(artifacts?.takeaway)}
+                onClick={handleOpenArtifactsPanel}
+              />
+            </div>
+          )}
+          
           {/* Voice-First Composer */}
           <VoiceComposerErrorBoundary>
             <VoiceFirstComposer
@@ -913,19 +949,16 @@ function SessionPageContent() {
           </VoiceComposerErrorBoundary>
         </div>
         
-        {/* Desktop Artifacts Panel — replaced by PresenceArtifactPanel bottom-sheet */}
-        <PresenceArtifactPanel
-          artifacts={artifacts}
-          isVisible={showArtifacts && showArtifactsUi}
-          onDismiss={handleCloseArtifactsPanel}
-          isVoiceMode={focusMode !== 'text'}
-        />
-
-        {/* Ghost toggle for text mode — reopens artifact panel when dismissed */}
-        {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
-          <ArtifactToggleIcon
-            hasArtifacts={!!(artifacts?.takeaway)}
-            onClick={handleOpenArtifactsPanel}
+        {/* Voice mode: Floating artifact panel above mic */}
+        {focusMode !== 'text' && (
+          <PresenceArtifactPanel
+            artifacts={artifacts}
+            isVisible={showArtifacts && showArtifactsUi}
+            onDismiss={handleCloseArtifactsPanel}
+            isVoiceMode={true}
+            onReflectionTap={handleReflectionTap ? (r) => handleReflectionTap(r, 'tap') : undefined}
+            onMemoryApprove={handleMemoryApprove}
+            onMemoryReject={handleMemoryReject}
           />
         )}
       </div>

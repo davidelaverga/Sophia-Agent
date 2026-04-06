@@ -1,5 +1,3 @@
-import { BACKEND_REGISTER_ENDPOINT, BACKEND_URL } from './config';
-
 const MOCK_RESPONSES: Record<string, string[]> = {
   default: [
     "I hear you. Tell me more about what's going on.",
@@ -30,43 +28,10 @@ const MOCK_RESPONSES: Record<string, string[]> = {
 };
 
 let mockResponseIndex = 0;
-let devBootstrapToken: string | null = null;
 
 export function getMockResponse(preset: string): string {
   const responses = MOCK_RESPONSES[preset] || MOCK_RESPONSES.default;
   const response = responses[mockResponseIndex % responses.length];
   mockResponseIndex++;
   return response;
-}
-
-export async function getDevBootstrapToken(): Promise<string | null> {
-  if (devBootstrapToken) return devBootstrapToken;
-
-  try {
-    const suffix = Math.random().toString(36).slice(2, 10);
-    const response = await fetch(`${BACKEND_URL}${BACKEND_REGISTER_ENDPOINT}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        email: `proxy-dev-${suffix}@example.com`,
-        username: 'proxy-dev',
-      }),
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = await response.json() as { api_token?: string };
-    if (typeof data.api_token === 'string' && data.api_token.startsWith('sk_')) {
-      devBootstrapToken = data.api_token;
-      return devBootstrapToken;
-    }
-  } catch {
-    return null;
-  }
-
-  return null;
 }

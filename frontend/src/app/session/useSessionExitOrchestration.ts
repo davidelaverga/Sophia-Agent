@@ -1,6 +1,6 @@
 import { useSessionExitFlow } from './useSessionExitFlow';
 import { useSessionExitProtection } from './useSessionExitProtection';
-import type { ContextMode, PresetType } from '../types/session';
+import type { ContextMode, PresetType, RitualArtifacts } from '../types/session';
 
 type ExitGuardMessage = {
   id: string;
@@ -34,6 +34,7 @@ type UseSessionExitOrchestrationParams = {
     takeaway?: string;
     sessionId: string;
   }) => void;
+  currentArtifacts?: RitualArtifacts | null;
   persistedSessionId?: string;
   responseMode: 'text' | 'voice';
   messages: ExitGuardMessage[];
@@ -57,6 +58,7 @@ export function useSessionExitOrchestration({
   navigateTo,
   promoteToDebriefMode,
   startDebriefWithLLM,
+  currentArtifacts,
   persistedSessionId,
   responseMode,
   messages,
@@ -95,6 +97,7 @@ export function useSessionExitOrchestration({
     navigateTo,
     promoteToDebriefMode,
     startDebriefWithLLM,
+    currentArtifacts,
   });
 
   useSessionExitProtection({

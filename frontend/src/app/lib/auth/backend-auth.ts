@@ -2,12 +2,12 @@
  * Backend Authentication Client
  * ==============================
  * 
- * Handles authentication with the AI-companion-mvp backend.
- * After Discord OAuth via Supabase, we register the user with
+ * Handles authentication with the Sophia backend.
+ * After Discord OAuth via Better Auth, we register the user with
  * the backend to get a per-user api_token.
  * 
  * Flow:
- * 1. User completes Discord OAuth via Supabase
+ * 1. User completes Discord OAuth via Better Auth
  * 2. Frontend calls loginOrRegister() with Discord data
  * 3. Backend returns api_token (creates user if new, returns existing if not)
  * 4. Token is stored and used for all subsequent API calls
@@ -313,55 +313,3 @@ export async function refreshToken(
   return await response.json()
 }
 
-/**
- * Sync backend token from Supabase user data.
- * Call this when user has Supabase session but no backend token.
- * 
- * @param supabaseUser User data from Supabase session
- * @returns BackendUserResponse with api_token, or null if sync failed
- */
-export async function syncBackendToken(
-  supabaseUser: {
-    id: string
-    email?: string | null
-    user_metadata?: Record<string, unknown>
-  }
-): Promise<BackendUserResponse | null> {
-  try {
-    const metadata = supabaseUser.user_metadata || {}
-    
-    // Extract Discord ID from various possible locations
-    const discordId =
-      metadata.provider_id ||
-      metadata.sub ||
-      metadata.provider_token ||
-      metadata.user_id ||
-      null
-    
-    if (!discordId) {
-      return null
-    }
-    
-    // Extract username
-    const username = (
-      metadata.full_name ||
-      metadata.name ||
-      metadata.preferred_username ||
-      null
-    ) as string | null
-    
-    const backendUser = await discordLogin({
-      discord_id: String(discordId),
-      email: supabaseUser.email || `${supabaseUser.id}@placeholder.sophia`,
-      username: username || undefined,
-    })
-    
-    if (backendUser?.api_token) {
-      return backendUser
-    }
-    
-    return null
-  } catch {
-    return null
-  }
-}

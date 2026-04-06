@@ -13,13 +13,69 @@ import { logger } from '../lib/error-logger';
 import { teardownSessionClientState } from '../lib/session-teardown';
 import { markRecentSessionEnd } from '../lib/recent-session-end';
 import { errorCopy } from '../lib/error-copy';
-import type { PresetType, ContextMode } from '../types/session';
+import type { PresetType, ContextMode, RitualArtifacts } from '../types/session';
 
 interface DebriefData {
   prompt: string;
   durationMinutes: number;
   takeaway?: string;
   sessionId: string;
+}
+
+function mapLiveArtifactsToRecapV1({
+  sessionId,
+  startedAt,
+  endedAt,
+  presetType,
+  contextMode,
+  currentArtifacts,
+}: {
+  sessionId: string;
+  startedAt: string;
+  endedAt: string;
+  presetType: PresetType;
+  contextMode: ContextMode;
+  currentArtifacts?: RitualArtifacts | null;
+}) {
+  if (!currentArtifacts) {
+    return null;
+  }
+
+  const hasTakeaway = typeof currentArtifacts.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
+  const hasReflection = typeof currentArtifacts.reflection_candidate?.prompt === 'string'
+    && currentArtifacts.reflection_candidate.prompt.trim().length > 0;
+  const hasMemories = Array.isArray(currentArtifacts.memory_candidates)
+    && currentArtifacts.memory_candidates.length > 0;
+
+  if (!hasTakeaway && !hasReflection && !hasMemories) {
+    return null;
+  }
+
+  return mapBackendArtifactsToRecapV1(
+    {
+      session_id: sessionId,
+      session_type: presetType,
+      context_mode: contextMode,
+      started_at: startedAt,
+      ended_at: endedAt,
+      takeaway: hasTakeaway ? currentArtifacts.takeaway : undefined,
+      reflection_candidate: hasReflection
+        ? {
+            prompt: currentArtifacts.reflection_candidate?.prompt,
+            tag: currentArtifacts.reflection_candidate?.category,
+          }
+        : undefined,
+      memory_candidates: hasMemories
+        ? currentArtifacts.memory_candidates?.map((candidate) => ({
+            text: candidate.memory,
+            memory: candidate.memory,
+            category: candidate.category,
+            confidence: candidate.confidence,
+          }))
+        : undefined,
+    },
+    sessionId,
+  );
 }
 
 interface UseSessionExitFlowParams {
@@ -38,6 +94,7 @@ interface UseSessionExitFlowParams {
   navigateTo: (path: string) => void;
   promoteToDebriefMode: () => void;
   startDebriefWithLLM: (debriefData: DebriefData) => void;
+  currentArtifacts?: RitualArtifacts | null;
 }
 
 export function useSessionExitFlow({
@@ -56,6 +113,7 @@ export function useSessionExitFlow({
   navigateTo,
   promoteToDebriefMode,
   startDebriefWithLLM,
+  currentArtifacts,
 }: UseSessionExitFlowParams) {
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [showDebriefOffer, setShowDebriefOffer] = useState(false);
@@ -115,6 +173,31 @@ export function useSessionExitFlow({
       });
 
       if (isSuccess(result)) {
+        const mappedArtifactsFromResponse = result.data.recap_artifacts
+          ? mapBackendArtifactsToRecapV1(
+              {
+                ...result.data.recap_artifacts,
+                session_id: recapSessionId,
+                session_type: presetType,
+                context_mode: contextMode,
+                started_at: startedAt,
+                ended_at: result.data.ended_at,
+              },
+              recapSessionId,
+            )
+          : null;
+
+        const mappedArtifactsFromLiveSession = mapLiveArtifactsToRecapV1({
+          sessionId: recapSessionId,
+          startedAt,
+          endedAt: result.data.ended_at,
+          presetType,
+          contextMode,
+          currentArtifacts,
+        });
+
+        const resolvedRecapArtifacts = mappedArtifactsFromResponse ?? mappedArtifactsFromLiveSession;
+
         useSessionHistoryStore.getState().addSession({
           sessionId: recapSessionId,
           presetType,
@@ -122,25 +205,11 @@ export function useSessionExitFlow({
           startedAt,
           endedAt: result.data.ended_at,
           messageCount: result.data.turn_count || messageCount,
-          takeawayPreview: result.data.recap_artifacts?.takeaway,
+          takeawayPreview: resolvedRecapArtifacts?.takeaway,
         });
 
-        if (result.data.recap_artifacts) {
-          const mappedArtifacts = mapBackendArtifactsToRecapV1(
-            {
-              ...result.data.recap_artifacts,
-              session_id: recapSessionId,
-              session_type: presetType,
-              context_mode: contextMode,
-              started_at: startedAt,
-              ended_at: result.data.ended_at,
-            },
-            recapSessionId,
-          );
-
-          if (mappedArtifacts) {
-            useRecapStore.getState().setArtifacts(recapSessionId, mappedArtifacts);
-          }
+        if (resolvedRecapArtifacts) {
+          useRecapStore.getState().setArtifacts(recapSessionId, resolvedRecapArtifacts);
         }
 
         if (
@@ -152,7 +221,7 @@ export function useSessionExitFlow({
           setDebriefData({
             prompt: result.data.debrief_prompt,
             durationMinutes: result.data.duration_minutes,
-            takeaway: result.data.recap_artifacts?.takeaway,
+            takeaway: resolvedRecapArtifacts?.takeaway,
             sessionId: recapSessionId,
           });
           setShowDebriefOffer(true);
@@ -165,30 +234,60 @@ export function useSessionExitFlow({
           action: 'end_session',
           metadata: { error: result.error },
         });
+
+        const localEndedAt = new Date().toISOString();
+        const mappedArtifactsFromLiveSession = mapLiveArtifactsToRecapV1({
+          sessionId: recapSessionId,
+          startedAt,
+          endedAt: localEndedAt,
+          presetType,
+          contextMode,
+          currentArtifacts,
+        });
+
         useSessionHistoryStore.getState().addSession({
           sessionId: recapSessionId,
           presetType,
           contextMode,
           startedAt,
-          endedAt: new Date().toISOString(),
+          endedAt: localEndedAt,
           messageCount,
-          takeawayPreview: undefined,
+          takeawayPreview: mappedArtifactsFromLiveSession?.takeaway,
         });
+
+        if (mappedArtifactsFromLiveSession) {
+          useRecapStore.getState().setArtifacts(recapSessionId, mappedArtifactsFromLiveSession);
+        }
       }
     } catch (error) {
       logger.logError(error, {
         component: 'SessionPage',
         action: 'end_session_network',
       });
+
+      const localEndedAt = new Date().toISOString();
+      const mappedArtifactsFromLiveSession = mapLiveArtifactsToRecapV1({
+        sessionId: recapSessionId,
+        startedAt,
+        endedAt: localEndedAt,
+        presetType,
+        contextMode,
+        currentArtifacts,
+      });
+
       useSessionHistoryStore.getState().addSession({
         sessionId: recapSessionId,
         presetType,
         contextMode,
         startedAt,
-        endedAt: new Date().toISOString(),
+        endedAt: localEndedAt,
         messageCount,
-        takeawayPreview: undefined,
+        takeawayPreview: mappedArtifactsFromLiveSession?.takeaway,
       });
+
+      if (mappedArtifactsFromLiveSession) {
+        useRecapStore.getState().setArtifacts(recapSessionId, mappedArtifactsFromLiveSession);
+      }
     }
 
     // Start emergence flow instead of navigating directly
@@ -203,6 +302,7 @@ export function useSessionExitFlow({
     sessionPresetType,
     sessionContextMode,
     messageCount,
+    currentArtifacts,
     finalizeExitToRecap,
   ]);
 

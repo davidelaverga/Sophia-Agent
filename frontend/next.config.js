@@ -11,6 +11,9 @@ const websocketUrl = (() => {
 const nextConfig = {
   // Enable static export for Capacitor mobile builds
   output: process.env.CAPACITOR_BUILD === 'true' ? 'export' : undefined,
+
+  // Allow local Playwright runs against 127.0.0.1 without dev-origin warnings.
+  allowedDevOrigins: ['127.0.0.1', 'localhost'],
   
   // Disable image optimization for static export (Capacitor)
   images: process.env.CAPACITOR_BUILD === 'true' ? { unoptimized: true } : undefined,

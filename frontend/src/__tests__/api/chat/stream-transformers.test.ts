@@ -122,6 +122,30 @@ describe('stream-transformers token sanitization', () => {
     expect(extracted).toContain('Hello world');
   });
 
+  it('transforms DeerFlow messages and values SSE into UI stream parts', async () => {
+    const upstream = buildSseStream([
+      'event: messages\r\ndata: [{"type":"AIMessageChunk","content":[{"type":"text","text":"Hello"}]},{"run_id":"run_123"}]\r\n\r\n',
+      'event: messages\r\ndata: [{"type":"AIMessageChunk","content":[{"type":"text","text":" world"}]},{}]\r\n\r\n',
+      'event: values\r\ndata: {"values":{"current_artifact":{"takeaway":"Stay grounded","reflection":"What felt different this time?","skill_loaded":"active_listening","voice_emotion_primary":"calm"}}}\r\n\r\n',
+    ]);
+
+    const transformed = createSSEToUIMessageStream(upstream, {
+      session_id: 'session_123',
+      thread_id: 'thread_abc',
+    });
+    const rawDump = await readStreamAsString(transformed);
+    const events = parseDataEventsFromDump(rawDump);
+    const objectEvents = events.filter(
+      (event): event is Record<string, unknown> => typeof event === 'object' && event !== null,
+    );
+
+    expect(objectEvents.some((event) => event.type === 'data-artifactsV1')).toBe(true);
+    expect(objectEvents.some((event) => event.type === 'data-sophia_meta')).toBe(true);
+
+    const extracted = extractTextFromUiMessageStreamDump(rawDump);
+    expect(extracted).toContain('Hello world');
+  });
+
   it('emits canonical envelope and metadata for synthetic text stream fallback', async () => {
     const stream = createUIMessageStreamFromText(
       'Centered response',

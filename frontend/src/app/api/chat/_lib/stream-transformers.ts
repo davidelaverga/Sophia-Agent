@@ -45,6 +45,11 @@ interface SSEToken {
   position: number;
 }
 
+type LangGraphToolAccumulator = {
+  name: string;
+  jsonParts: string[];
+};
+
 const LEAK_LEAD_LABELS = [
   'USER MESSAGE:',
   'SYSTEM:',
@@ -194,9 +199,14 @@ export function normalizeArtifactsV1(raw: unknown): Record<string, unknown> | nu
   let reflectionCandidate: string | undefined;
   if (typeof payload.reflection_candidate === 'string') {
     reflectionCandidate = payload.reflection_candidate;
+  } else if (typeof payload.reflection === 'string') {
+    reflectionCandidate = payload.reflection;
   } else if (payload.reflection_candidate && typeof payload.reflection_candidate === 'object') {
     const rc = payload.reflection_candidate as Record<string, unknown>;
     if (typeof rc.prompt === 'string') reflectionCandidate = rc.prompt;
+  } else if (payload.reflection && typeof payload.reflection === 'object') {
+    const reflection = payload.reflection as Record<string, unknown>;
+    if (typeof reflection.prompt === 'string') reflectionCandidate = reflection.prompt;
   }
 
   const memoryCandidatesRaw = Array.isArray(payload.memory_candidates)
@@ -226,6 +236,67 @@ export function normalizeArtifactsV1(raw: unknown): Record<string, unknown> | nu
     ...(reflectionCandidate ? { reflection_candidate: reflectionCandidate } : {}),
     ...(memory_candidates.length > 0 ? { memory_candidates } : {}),
   };
+}
+
+function extractRunId(metadata: unknown): string | undefined {
+  if (!metadata || typeof metadata !== 'object') return undefined;
+
+  const record = metadata as Record<string, unknown>;
+  const runId = record.run_id || record.runId || record.langgraph_run_id;
+  return typeof runId === 'string' ? runId : undefined;
+}
+
+function parseAccumulatedArtifact(toolCalls: Record<string, LangGraphToolAccumulator>): Record<string, unknown> | null {
+  for (const toolCall of Object.values(toolCalls)) {
+    if (toolCall.name !== 'emit_artifact') continue;
+    const raw = toolCall.jsonParts.join('');
+    if (!raw.trim()) continue;
+
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
+function extractToolCallArtifact(toolCalls: unknown): Record<string, unknown> | null {
+  if (!Array.isArray(toolCalls)) return null;
+
+  for (const toolCall of toolCalls) {
+    if (!toolCall || typeof toolCall !== 'object') continue;
+    const record = toolCall as Record<string, unknown>;
+    if (record.name !== 'emit_artifact') continue;
+    if (record.args && typeof record.args === 'object') {
+      return record.args as Record<string, unknown>;
+    }
+  }
+
+  return null;
+}
+
+function extractValuesArtifact(data: unknown): Record<string, unknown> | null {
+  if (!data || typeof data !== 'object') return null;
+
+  const record = data as Record<string, unknown>;
+  if (record.current_artifact && typeof record.current_artifact === 'object') {
+    return record.current_artifact as Record<string, unknown>;
+  }
+
+  const values = record.values;
+  if (!values || typeof values !== 'object') return null;
+
+  const artifact = (values as Record<string, unknown>).current_artifact;
+  if (artifact && typeof artifact === 'object') {
+    return artifact as Record<string, unknown>;
+  }
+
+  return null;
 }
 
 export function createUIMessageStreamFromText(
@@ -278,7 +349,10 @@ export function createUIMessageStreamFromText(
 /**
  * Transform backend SSE stream to AI SDK data stream protocol.
  */
-export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+export function createSSEToUIMessageStream(
+  upstream: ReadableStream<Uint8Array>,
+  initialMeta?: StreamMeta,
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
 
@@ -293,12 +367,17 @@ export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>)
   let stopTextStreaming = false;
   const leadFilterState: LeadFilterState = { resolved: false, buffer: '' };
   const tokenOutputState: TokenOutputState = { hasEmittedText: false, stopped: false };
+  const activeToolCalls: Record<string, LangGraphToolAccumulator> = {};
+  let sawArtifactTool = false;
+  let finalArtifacts: Record<string, unknown> | null = null;
+  let initialValuesArtifact: Record<string, unknown> | null = null;
 
-  const meta: StreamMeta = {};
+  const meta: StreamMeta = { ...(initialMeta || {}) };
 
   return new ReadableStream({
     async start(controller) {
       const reader = upstream.getReader();
+      let lastArtifactsSignature: string | null = null;
 
       const emit = (payload: unknown) => {
         if (isClosed) return;
@@ -307,6 +386,16 @@ export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>)
         } catch {
           isClosed = true;
         }
+      };
+
+      const emitArtifacts = (artifacts: Record<string, unknown>) => {
+        const signature = JSON.stringify(artifacts);
+        if (signature === lastArtifactsSignature) {
+          return;
+        }
+
+        lastArtifactsSignature = signature;
+        emit({ type: 'data-artifactsV1', data: artifacts });
       };
 
       const ensureStart = () => {
@@ -346,6 +435,10 @@ export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>)
           if (done) {
             ensureTextEnd();
 
+            if (finalArtifacts) {
+              emitArtifacts(finalArtifacts);
+            }
+
             if (meta && Object.keys(meta).length > 0) {
               emit({ type: 'data-sophia_meta', data: meta });
               if (meta.pending_interrupt) {
@@ -359,6 +452,7 @@ export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>)
           }
 
           buffer += decoder.decode(value, { stream: true });
+          buffer = buffer.replace(/\r\n/g, '\n');
 
           const events = buffer.split('\n\n');
           buffer = events.pop() || '';
@@ -397,6 +491,143 @@ export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>)
               if (!normalizedEventType) continue;
 
               switch (normalizedEventType) {
+                case 'messages':
+                case 'messages-tuple': {
+                  if (!Array.isArray(data) || data.length < 1) {
+                    break;
+                  }
+
+                  const msg = data[0];
+                  const metadata = data.length > 1 ? data[1] : undefined;
+                  const runId = extractRunId(metadata);
+                  if (runId) {
+                    meta.run_id = runId;
+                  }
+
+                  if (!msg || typeof msg !== 'object') {
+                    break;
+                  }
+
+                  const record = msg as Record<string, unknown>;
+                  const msgType = typeof record.type === 'string' ? record.type : '';
+
+                  if (msgType === 'tool') {
+                    const toolName = typeof record.name === 'string' ? record.name : '';
+                    if (toolName === 'emit_artifact') {
+                      sawArtifactTool = true;
+                      const artifact = parseAccumulatedArtifact(activeToolCalls);
+                      const normalizedArtifact = normalizeArtifactsV1(artifact);
+                      if (normalizedArtifact) {
+                        finalArtifacts = normalizedArtifact;
+                        emitArtifacts(normalizedArtifact);
+                      }
+                    }
+                    break;
+                  }
+
+                  if (!['AIMessageChunk', 'AIMessage', 'ai', 'assistant'].includes(msgType)) {
+                    break;
+                  }
+
+                  const directArtifact = extractToolCallArtifact(record.tool_calls);
+                  if (directArtifact) {
+                    sawArtifactTool = true;
+                    const normalizedArtifact = normalizeArtifactsV1(directArtifact);
+                    if (normalizedArtifact) {
+                      finalArtifacts = normalizedArtifact;
+                      emitArtifacts(normalizedArtifact);
+                    }
+                  }
+
+                  const content = record.content;
+                  if (typeof content === 'string' && content) {
+                    const tokenText = sanitizeTokenChunkForOutput(content, leadFilterState, tokenOutputState);
+                    if (tokenText) {
+                      ensureStart();
+                      emit({ type: 'text-delta', id: textId, delta: tokenText });
+                      tokenCount++;
+                    }
+                    break;
+                  }
+
+                  if (!Array.isArray(content)) {
+                    break;
+                  }
+
+                  for (const block of content) {
+                    if (!block || typeof block !== 'object') continue;
+                    const blockRecord = block as Record<string, unknown>;
+                    const blockType = typeof blockRecord.type === 'string' ? blockRecord.type : '';
+
+                    if (blockType === 'text') {
+                      const tokenText = sanitizeTokenChunkForOutput(
+                        String(blockRecord.text || ''),
+                        leadFilterState,
+                        tokenOutputState,
+                      );
+                      if (!tokenText) {
+                        continue;
+                      }
+
+                      ensureStart();
+                      emit({ type: 'text-delta', id: textId, delta: tokenText });
+                      tokenCount++;
+                      continue;
+                    }
+
+                    if (blockType === 'tool_use') {
+                      const toolId = typeof blockRecord.id === 'string' ? blockRecord.id : '';
+                      const toolName = typeof blockRecord.name === 'string' ? blockRecord.name : '';
+                      if (toolName === 'emit_artifact') {
+                        sawArtifactTool = true;
+                      }
+                      if (toolId) {
+                        activeToolCalls[toolId] = { name: toolName, jsonParts: [] };
+                      }
+                      continue;
+                    }
+
+                    if (blockType === 'input_json_delta') {
+                      const partialJson = typeof blockRecord.partial_json === 'string' ? blockRecord.partial_json : '';
+                      if (!partialJson) continue;
+                      for (const toolCall of Object.values(activeToolCalls).reverse()) {
+                        toolCall.jsonParts.push(partialJson);
+                        break;
+                      }
+                    }
+                  }
+
+                  break;
+                }
+                case 'values': {
+                  const artifact = extractValuesArtifact(data);
+                  if (!artifact) {
+                    break;
+                  }
+
+                  if (initialValuesArtifact === null) {
+                    initialValuesArtifact = artifact;
+                  }
+
+                  const normalizedArtifact = normalizeArtifactsV1(artifact);
+                  if (!normalizedArtifact) {
+                    break;
+                  }
+
+                  finalArtifacts = normalizedArtifact;
+
+                  if (sawArtifactTool || artifact !== initialValuesArtifact) {
+                    emitArtifacts(normalizedArtifact);
+                  }
+
+                  if (typeof artifact.skill_loaded === 'string') {
+                    meta.skill_used = artifact.skill_loaded;
+                  }
+                  if (typeof artifact.voice_emotion_primary === 'string') {
+                    meta.emotion_detected = artifact.voice_emotion_primary;
+                  }
+                  break;
+                }
                 case 'session_start':
                 case 'agent_thinking':
                   break;
@@ -485,7 +716,7 @@ export function createSSEToUIMessageStream(upstream: ReadableStream<Uint8Array>)
                   const extractedArtifacts = artifactsData.artifacts || (artifactsData as Record<string, unknown>).ritual_artifacts;
                   const normalizedArtifacts = normalizeArtifactsV1(extractedArtifacts);
                   if (normalizedArtifacts) {
-                    emit({ type: 'data-artifactsV1', data: normalizedArtifacts });
+                    emitArtifacts(normalizedArtifacts);
                   }
                   break;
                 }

@@ -41,7 +41,10 @@ jobs:
       - name: Run memory highlights E2E
         env:
           CI: 'true'
+          NEXT_PUBLIC_DEV_BYPASS_AUTH: 'true'
+          NEXT_PUBLIC_SOPHIA_USER_ID: 'e2e-user'
           PLAYWRIGHT_TEST_BASE_URL: http://127.0.0.1:3000
+          PLAYWRIGHT_TEST_HOST: 127.0.0.1
         run: pnpm run test:e2e:ci
 
       - name: Upload Playwright report

@@ -193,6 +193,84 @@ describe('useSessionExitFlow', () => {
       offer_debrief: false,
     });
     expect(result.current.showDebriefOffer).toBe(false);
+    expect(result.current.showEmergence).toBe(true);
+
+    await act(async () => {
+      result.current.handleEmergenceComplete();
+    });
+
+    expect(result.current.showFeedback).toBe(true);
+
+    await act(async () => {
+      result.current.handleFeedbackComplete();
+    });
+
     expect(navigateToMock).toHaveBeenCalledWith('/recap/session-2');
+  });
+
+  it('persists live session artifacts for recap when the end-session response has no recap_artifacts', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-3',
+        ended_at: '2026-03-03T20:00:00.000Z',
+        duration_minutes: 14,
+        turn_count: 6,
+        offer_debrief: false,
+        debrief_prompt: undefined,
+        recap_artifacts: undefined,
+      },
+    });
+
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const navigateToMock = vi.fn();
+
+    const { result } = renderHook(() =>
+      useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        setEnding: vi.fn(),
+        sessionId: 'session-3',
+        sessionStartedAt: '2026-03-03T19:46:00.000Z',
+        sessionPresetType: 'open',
+        sessionContextMode: 'life',
+        messageCount: 6,
+        endSessionStore: vi.fn(),
+        clearSessionStore: vi.fn(),
+        clearBootstrap: vi.fn(),
+        navigateTo: navigateToMock,
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+        currentArtifacts: {
+          takeaway: 'You settled into the truth instead of pushing past it.',
+          reflection_candidate: {
+            prompt: 'What changed once you stopped forcing the outcome?',
+          },
+          memory_candidates: [
+            {
+              memory: 'I can slow down without losing momentum.',
+              category: 'reflective',
+              confidence: 0.91,
+            },
+          ],
+        },
+      })
+    );
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(setRecapArtifactsMock).toHaveBeenCalledWith(
+      'session-3',
+      expect.objectContaining({
+        takeaway: 'You settled into the truth instead of pushing past it.',
+        reflectionCandidate: expect.objectContaining({
+          prompt: 'What changed once you stopped forcing the outcome?',
+        }),
+      }),
+    );
   });
 });

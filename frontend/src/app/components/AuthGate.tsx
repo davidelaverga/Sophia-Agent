@@ -4,6 +4,7 @@ import { useEffect, useState, useRef } from "react"
 import { Sparkles } from "lucide-react"
 import { useAuth } from "../providers"
 import { authClient } from "@/server/better-auth/client"
+import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
 import { useCopy, useTranslation } from "../copy"
 
 type AuthState = "checking" | "unauthenticated" | "authenticated"
@@ -18,28 +19,25 @@ export function AuthGate({
   children: React.ReactNode
   onAuthenticated?: () => void 
 }) {
-  // Dev bypass: skip auth entirely when NEXT_PUBLIC_DEV_BYPASS_AUTH is set
-  const devBypass = process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === "true"
-
   const copy = useCopy()
   const { t } = useTranslation()
 
   const { user, loading } = useAuth()
   const [authState, setAuthState] = useState<AuthState>(
-    devBypass ? "authenticated" : "checking"
+    authBypassEnabled ? "authenticated" : "checking"
   )
   const [isLoggingIn, setIsLoggingIn] = useState(false)
   const timeoutRef = useRef<NodeJS.Timeout | null>(null)
-  const hasResolvedRef = useRef(devBypass)
+  const hasResolvedRef = useRef(authBypassEnabled)
 
   // Fire onAuthenticated immediately in dev bypass mode
   useEffect(() => {
-    if (devBypass) onAuthenticated?.()
-  }, [devBypass, onAuthenticated])
+    if (authBypassEnabled) onAuthenticated?.()
+  }, [onAuthenticated])
 
   // Single effect to handle all auth state transitions
   useEffect(() => {
-    if (devBypass) return
+    if (authBypassEnabled) return
     // Already resolved - do nothing
     if (hasResolvedRef.current) return
 

@@ -1,7 +1,17 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const port = Number(process.env.PORT ?? 3000);
-const baseURL = process.env.PLAYWRIGHT_TEST_BASE_URL ?? `http://127.0.0.1:${port}`;
+const host = process.env.PLAYWRIGHT_TEST_HOST ?? '127.0.0.1';
+const baseURL =
+  process.env.PLAYWRIGHT_TEST_BASE_URL ??
+  process.env.E2E_BASE_URL ??
+  `http://${host}:${port}`;
+
+const webServerEnv = {
+  ...process.env,
+  NEXT_PUBLIC_DEV_BYPASS_AUTH: process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH ?? 'true',
+  NEXT_PUBLIC_SOPHIA_USER_ID: process.env.NEXT_PUBLIC_SOPHIA_USER_ID ?? 'e2e-user',
+};
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -28,8 +38,10 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: `npm run dev -- --port ${port}`,
+    // E2E runs against the real app shell but bypasses external OAuth.
+    command: `pnpm exec next dev --hostname ${host} --port ${port}`,
     url: baseURL,
+    env: webServerEnv,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
   },

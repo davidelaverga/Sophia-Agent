@@ -29,6 +29,7 @@ describe('parseAndValidateChatPayload', () => {
       messages: [{ role: 'user', content: 'Hello Sophia' }],
       session_id: '123e4567-e89b-12d3-a456-426614174000',
       user_id: 'user_1',
+      thread_id: 'thread_1',
       session_type: 'chat',
       context_mode: 'life',
     });
@@ -38,6 +39,7 @@ describe('parseAndValidateChatPayload', () => {
       expect(result.data.userMessage).toBe('Hello Sophia');
       expect(result.data.sessionId).toBe('123e4567-e89b-12d3-a456-426614174000');
       expect(result.data.userId).toBe('user_1');
+      expect(result.data.threadId).toBe('thread_1');
       expect(result.data.sessionType).toBe('chat');
       expect(result.data.contextMode).toBe('life');
     }

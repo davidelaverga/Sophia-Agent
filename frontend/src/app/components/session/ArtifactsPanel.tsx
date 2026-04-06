@@ -12,7 +12,6 @@
 
 import { useState } from 'react';
 import { 
-  ChevronDown,
   Sparkles,
   Check,
   Loader2
@@ -146,41 +145,38 @@ function ArtifactSection({
     <div 
       data-onboarding={dataOnboarding}
       className={cn(
-        'group rounded-xl px-3.5 py-3 transition-all duration-300',
-        'border',
-        effectiveStatus === 'ready' && 'bg-sophia-surface border-sophia-surface-border shadow-soft',
-        effectiveStatus === 'capturing' && 'border-sophia-surface-border',
-        effectiveStatus === 'waiting' && 'border-transparent opacity-40',
-        isClickable && 'cursor-pointer hover:shadow-soft hover:border-sophia-purple/25 active:scale-[0.995]',
+        'group rounded-xl px-3.5 py-3 transition-all duration-500',
+        'border border-white/[0.03]',
+        effectiveStatus === 'waiting' && 'opacity-30',
+        isClickable && 'cursor-pointer hover:border-white/[0.06] active:scale-[0.995]',
       )}
-      style={effectiveStatus === 'capturing' ? {
-        background: 'color-mix(in srgb, var(--sophia-purple) 4%, var(--card-bg))',
+      style={effectiveStatus !== 'waiting' ? {
+        background: 'rgba(232,228,239,0.015)',
       } : undefined}
       onClick={isClickable ? () => { haptic('light'); onTap?.(); } : undefined}
       role={isClickable ? 'button' : undefined}
       tabIndex={isClickable ? 0 : undefined}
     >
-      {/* Title row */}
+      {/* Title row — whisper label */}
       <div className="flex items-center gap-2 mb-1.5">
         <h4 className={cn(
-          'text-[11px] font-semibold uppercase tracking-wider',
-          effectiveStatus === 'ready' ? 'text-sophia-purple' : 'text-sophia-text2/60',
+          'text-[9px] tracking-[0.18em] lowercase',
+          effectiveStatus === 'ready' ? 'text-white/[0.22]' : 'text-white/[0.10]',
         )}>
-          {title}
+          {title.toLowerCase()}
         </h4>
         
         {effectiveStatus === 'capturing' && (
-          <span className="flex items-center gap-1 text-[10px] text-sophia-purple/60">
-            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+          <span className="flex items-center gap-1 text-[9px] text-white/[0.15]">
+            <Loader2 className="w-2.5 h-2.5 animate-spin opacity-40" />
             detecting
           </span>
         )}
         {effectiveStatus === 'ready' && (
-          <div className="w-4 h-4 rounded-full flex items-center justify-center"
-            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 15%, transparent)' }}
-          >
-            <Check className="w-2.5 h-2.5 text-sophia-purple" />
-          </div>
+          <span
+            className="w-1 h-1 rounded-full"
+            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 35%, rgba(232,228,239,0.10))' }}
+          />
         )}
       </div>
       
@@ -191,11 +187,11 @@ function ArtifactSection({
           <ShimmerLine className="h-2 w-[60%]" />
         </div>
       ) : hasContent && !hasMemories ? (
-        <p className="text-[13px] leading-relaxed text-sophia-text/85 line-clamp-3">
+        <p className="font-cormorant text-[14px] leading-relaxed line-clamp-3" style={{ color: 'rgba(232,228,239,0.45)' }}>
           {content}
         </p>
       ) : !hasMemories ? (
-        <p className="text-[11px] text-sophia-text2/25 italic">
+        <p className="font-cormorant text-[11px] italic" style={{ color: 'rgba(232,228,239,0.10)' }}>
           {placeholder}
         </p>
       ) : null}
@@ -247,46 +243,51 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
     onTap?.();
   };
 
-  // Waiting — subdued
+  // Waiting — nearly invisible
   if (effectiveStatus === 'waiting') {
     return (
-      <div className="rounded-xl px-3.5 py-3 border border-transparent opacity-40">
+      <div className="rounded-xl px-3.5 py-3 border border-transparent opacity-30">
         <div className="flex items-center gap-2 mb-1.5">
-          <h4 className="text-[11px] font-semibold uppercase tracking-wider text-sophia-text2/60">
-            Reflection
+          <span
+            className="w-1 h-1 rounded-full"
+            style={{ background: 'rgba(232,228,239,0.10)' }}
+          />
+          <h4 className="text-[9px] tracking-[0.18em] lowercase text-white/[0.15]">
+            reflection
           </h4>
         </div>
-        <p className="text-[11px] text-sophia-text2/25 italic">{placeholder}</p>
+        <p className="font-cormorant text-[12px] text-white/[0.10] italic">{placeholder}</p>
       </div>
     );
   }
 
-  // Capturing — shimmer with gradient hint
+  // Capturing — subtle cosmic shimmer
   if (effectiveStatus === 'capturing') {
     return (
       <div
         data-onboarding={dataOnboarding}
-        className="relative rounded-xl px-3.5 py-3 border overflow-hidden"
+        className="relative rounded-xl px-3.5 py-3 border border-white/[0.03] overflow-hidden"
         style={{
-          borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--card-border))',
-          background: 'color-mix(in srgb, var(--sophia-purple) 4%, var(--card-bg))',
+          background: 'rgba(232,228,239,0.015)',
         }}
       >
-        {/* top accent bar */}
+        {/* Nebula filament accent */}
         <div
-          className="absolute inset-x-0 top-0 h-[2px]"
+          className="absolute inset-x-0 top-0 h-px"
           style={{
-            background: 'linear-gradient(90deg, transparent, var(--sophia-purple), var(--sophia-glow), transparent)',
-            opacity: 0.6,
+            background: 'linear-gradient(90deg, transparent, color-mix(in srgb, var(--sophia-glow) 25%, transparent), transparent)',
           }}
         />
         <div className="flex items-center gap-2 mb-2">
-          <Sparkles className="w-3.5 h-3.5 text-sophia-purple/50 animate-pulse" />
-          <h4 className="text-[11px] font-semibold uppercase tracking-wider text-sophia-purple/60">
-            Reflection
+          <span
+            className="w-1 h-1 rounded-full"
+            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.12))' }}
+          />
+          <h4 className="text-[9px] tracking-[0.18em] lowercase text-white/[0.18]">
+            reflection
           </h4>
-          <span className="flex items-center gap-1 text-[10px] text-sophia-purple/50">
-            <Loader2 className="w-2.5 h-2.5 animate-spin" />
+          <span className="flex items-center gap-1 text-[9px] text-white/[0.15]">
+            <Loader2 className="w-2.5 h-2.5 animate-spin opacity-40" />
             composing
           </span>
         </div>
@@ -298,92 +299,77 @@ function ReflectionCard({ prompt, why, placeholder, status, dataOnboarding, onTa
     );
   }
 
-  // Ready — the star of the show
+  // Ready — cosmic, transparent, nebula shows through
   return (
     <div
       data-onboarding={dataOnboarding}
       className={cn(
-        'relative rounded-2xl overflow-hidden transition-all duration-500',
+        'relative rounded-2xl overflow-hidden transition-all duration-700',
         'animate-fadeInUp',
         isClickable && !tapped && 'cursor-pointer hover:scale-[1.01] active:scale-[0.99]',
-        tapped && 'opacity-60 pointer-events-none',
+        tapped && 'opacity-40 pointer-events-none',
       )}
       onClick={handleTap}
       role={isClickable ? 'button' : undefined}
       tabIndex={isClickable ? 0 : undefined}
     >
-      {/* Gradient border via outer wrapper */}
+      {/* Bloom halo — replaces gradient border */}
       <div
-        className="absolute inset-0 rounded-2xl"
+        className="absolute -inset-3 rounded-3xl pointer-events-none"
         style={{
-          padding: '1px',
-          background: 'linear-gradient(135deg, var(--sophia-purple), var(--sophia-glow), var(--sophia-purple))',
-          WebkitMask: 'linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0)',
-          WebkitMaskComposite: 'xor',
-          maskComposite: 'exclude',
+          background: 'radial-gradient(ellipse 80% 70% at 50% 40%, color-mix(in srgb, var(--sophia-purple) 8%, transparent) 0%, transparent 70%)',
+          filter: 'blur(20px)',
         }}
       />
 
-      {/* Inner content */}
+      {/* Inner content — transparent, cosmic */}
       <div
-        className="relative rounded-2xl px-4 py-3.5"
+        className="relative rounded-2xl px-4 py-3.5 border border-white/[0.04]"
         style={{
-          background: 'linear-gradient(135deg, color-mix(in srgb, var(--sophia-purple) 6%, var(--card-bg)), color-mix(in srgb, var(--sophia-glow) 4%, var(--card-bg)))',
+          background: 'linear-gradient(135deg, rgba(232,228,239,0.025), rgba(184,164,232,0.015))',
+          backdropFilter: 'blur(6px)',
         }}
       >
-        {/* Subtle glow orb */}
-        <div
-          className="absolute -top-6 -right-6 w-24 h-24 rounded-full blur-2xl pointer-events-none animate-pulse-slow"
-          style={{
-            background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-glow) 18%, transparent), transparent 70%)',
-          }}
-        />
-
-        {/* Header */}
+        {/* Header — whisper label */}
         <div className="flex items-center gap-2 mb-2.5 relative">
-          <div
-            className="w-5 h-5 rounded-lg flex items-center justify-center"
-            style={{
-              background: 'linear-gradient(135deg, color-mix(in srgb, var(--sophia-purple) 20%, transparent), color-mix(in srgb, var(--sophia-glow) 15%, transparent))',
-            }}
-          >
-            <Sparkles className="w-3 h-3 text-sophia-purple" />
-          </div>
-          <h4 className="text-[11px] font-bold uppercase tracking-wider text-sophia-purple">
-            Reflection
+          <span
+            className="w-1.5 h-1.5 rounded-full"
+            style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.12))' }}
+          />
+          <h4 className="text-[9px] tracking-[0.18em] lowercase text-white/[0.20]">
+            reflection
           </h4>
           {tapped && (
-            <span className="ml-auto text-[10px] text-sophia-purple/50 flex items-center gap-1">
-              <Check className="w-3 h-3" /> sent
+            <span className="ml-auto text-[9px] tracking-[0.12em] lowercase text-white/[0.12]">
+              sent
             </span>
           )}
         </div>
 
-        {/* Prompt — styled as a thoughtful question */}
-        <p className="text-[14px] leading-relaxed text-sophia-text font-medium relative">
+        {/* Prompt — Cormorant, floating */}
+        <p className="font-cormorant text-[15px] leading-[1.7] font-light relative" style={{ color: 'rgba(232,228,239,0.50)' }}>
           {prompt}
         </p>
 
-        {/* Why context line */}
+        {/* Why context */}
         {why && (
           <p
-            className="mt-2 text-[11px] leading-relaxed italic"
-            style={{ color: 'color-mix(in srgb, var(--sophia-purple) 70%, var(--sophia-text2))' }}
+            className="mt-2 font-cormorant text-[12px] leading-relaxed italic"
+            style={{ color: 'rgba(232,228,239,0.18)' }}
           >
             {why}
           </p>
         )}
 
-        {/* CTA */}
+        {/* CTA — cosmic whisper */}
         {isClickable && !tapped && (
-          <div className="flex items-center gap-1.5 mt-3 pt-2.5 border-t" style={{ borderColor: 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)' }}>
+          <div className="mt-3 pt-2.5" style={{ borderTop: '1px solid rgba(232,228,239,0.03)' }}>
             <span
-              className="text-[11px] font-semibold tracking-wide"
-              style={{ color: 'var(--sophia-purple)' }}
+              className="text-[9px] tracking-[0.14em] lowercase"
+              style={{ color: 'color-mix(in srgb, var(--sophia-purple) 40%, rgba(232,228,239,0.15))' }}
             >
-              Tap to reflect
+              tap to reflect
             </span>
-            <ChevronDown className="w-3 h-3 text-sophia-purple -rotate-90" />
           </div>
         )}
       </div>
@@ -412,28 +398,24 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
   
   return (
     <div className={cn(
-      'group/card relative rounded-xl p-3 transition-all duration-200',
-      'border',
-      'hover:shadow-soft',
+      'group/card relative rounded-xl p-3 transition-all duration-300',
+      'border border-white/[0.03]',
     )}
     style={{
-      background: 'color-mix(in srgb, var(--sophia-purple) 3%, var(--card-bg))',
-      borderColor: 'color-mix(in srgb, var(--sophia-purple) 12%, var(--card-border))',
+      background: 'rgba(232,228,239,0.015)',
     }}
     >
       {/* Memory text */}
-      <p className="text-[12px] leading-relaxed text-sophia-text/80 pr-14 line-clamp-2">
+      <p className="font-cormorant text-[13px] leading-relaxed pr-14 line-clamp-2" style={{ color: 'rgba(232,228,239,0.45)' }}>
         {memory}
       </p>
       
       {/* Category badge */}
       {badge && (
         <span 
-          className="inline-flex items-center gap-1 mt-2 text-[9px] font-semibold tracking-wide px-2 py-0.5 rounded-full"
+          className="inline-flex items-center gap-1 mt-2 text-[8px] tracking-[0.14em] lowercase px-2 py-0.5 rounded-full border border-white/[0.03]"
           style={{
-            background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
-            border: '1px solid color-mix(in srgb, var(--sophia-purple) 14%, transparent)',
-            color: 'var(--sophia-purple)',
+            color: 'rgba(232,228,239,0.18)',
           }}
         >
           <span aria-hidden="true">{badge.emoji}</span>
@@ -462,35 +444,24 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
         </div>
       )}
       
-      {/* Actions – visible on hover (desktop), always on mobile */}
+      {/* Actions — near-invisible until hover */}
       <div className={cn(
         'absolute top-2.5 right-2.5 flex items-center gap-0.5',
         'opacity-100 lg:opacity-0 lg:group-hover/card:opacity-100',
-        'transition-opacity duration-150',
+        'transition-opacity duration-300',
       )}>
         <button
           onClick={(e) => { e.stopPropagation(); onApprove(); }}
-          className={cn(
-            'w-7 h-7 rounded-lg flex items-center justify-center',
-            'transition-all active:scale-90',
-          )}
-          style={{
-            color: 'var(--sophia-purple)',
-            background: 'color-mix(in srgb, var(--sophia-purple) 10%, transparent)',
-          }}
+          className="w-6 h-6 rounded-lg flex items-center justify-center text-white/[0.12] hover:text-white/40 transition-all active:scale-90"
           title="Save memory"
           aria-label="Save memory"
         >
-          <Check className="w-3.5 h-3.5" />
+          <Check className="w-3 h-3" />
         </button>
         {onReject && (
           <button
             onClick={(e) => { e.stopPropagation(); onReject(); }}
-            className={cn(
-              'w-7 h-7 rounded-lg flex items-center justify-center',
-              'text-sophia-text2/35 hover:text-sophia-text2',
-              'transition-all active:scale-90',
-            )}
+            className="w-6 h-6 rounded-lg flex items-center justify-center text-white/[0.08] hover:text-white/30 transition-all active:scale-90"
             title="Skip memory"
             aria-label="Skip memory"
           >
@@ -543,15 +514,13 @@ export function ArtifactsPanel({
   return (
     <div className={cn('flex flex-col h-full', className)} data-onboarding="artifacts-panel">
       <OnboardingTipGuard tipId="tip-first-artifacts" isTriggered={hasArtifacts} />
-      {/* Header – Sophia branded */}
-      <div className="flex items-center gap-2.5 px-4 py-3 border-b border-sophia-surface-border">
-        <div
-          className="w-6 h-6 rounded-lg flex items-center justify-center"
-          style={{ background: 'color-mix(in srgb, var(--sophia-purple) 12%, transparent)' }}
-        >
-          <Sparkles className="w-3 h-3 text-sophia-purple" />
-        </div>
-        <h3 className="text-sm font-semibold text-sophia-text">Artifacts</h3>
+      {/* Header — cosmic whisper */}
+      <div className="flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: '1px solid rgba(232,228,239,0.04)' }}>
+        <span
+          className="w-1.5 h-1.5 rounded-full"
+          style={{ background: 'color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.12))' }}
+        />
+        <h3 className="text-[10px] tracking-[0.16em] lowercase text-white/[0.20]">artifacts</h3>
         
         {/* Progress dots */}
         <div className="ml-auto flex items-center gap-1">
@@ -559,11 +528,17 @@ export function ArtifactsPanel({
             <div
               key={i}
               className={cn(
-                'w-1.5 h-1.5 rounded-full transition-all duration-500',
-                s === 'ready' && 'bg-sophia-purple scale-110',
-                s === 'capturing' && 'bg-sophia-purple/40 animate-pulse',
-                s === 'waiting' && 'bg-sophia-text2/15',
+                'w-1 h-1 rounded-full transition-all duration-700',
+                s === 'ready' && 'scale-110',
+                s === 'capturing' && 'animate-pulse',
               )}
+              style={{
+                background: s === 'ready'
+                  ? 'color-mix(in srgb, var(--sophia-purple) 40%, rgba(232,228,239,0.15))'
+                  : s === 'capturing'
+                    ? 'color-mix(in srgb, var(--sophia-purple) 20%, rgba(232,228,239,0.08))'
+                    : 'rgba(232,228,239,0.06)',
+              }}
             />
           ))}
         </div>
@@ -632,14 +607,6 @@ export function ArtifactsRail({ artifactStatus, onClick, className, dataOnboardi
   const readyCount = statuses.filter(s => s === 'ready').length;
   const shouldPulse = capturingCount > 0;
   
-  // Determine badge display
-  const hasBadge = pendingCount > 0 || capturingCount > 0;
-  const badgeClass = capturingCount > 0 
-    ? 'bg-amber-500 animate-pulse' 
-    : readyCount > 0 
-      ? 'bg-emerald-500' 
-      : 'bg-sophia-text2/40';
-  
   return (
     <button
       data-onboarding={dataOnboardingId}
@@ -649,8 +616,8 @@ export function ArtifactsRail({ artifactStatus, onClick, className, dataOnboardi
       }}
       className={cn(
         'flex items-center justify-center w-full h-full',
-        'transition-all duration-200',
-        'opacity-40 hover:opacity-100',
+        'transition-all duration-500',
+        'opacity-25 hover:opacity-60',
         className
       )}
       title="Open Artifacts panel"
@@ -658,22 +625,20 @@ export function ArtifactsRail({ artifactStatus, onClick, className, dataOnboardi
     >
       <div className="relative">
         <Sparkles className={cn(
-          'w-[18px] h-[18px] text-sophia-text2 transition-colors',
-          'hover:text-sophia-purple',
+          'w-[16px] h-[16px] text-white/30 transition-colors duration-500',
+          'hover:text-white/50',
           shouldPulse && 'animate-pulse'
         )} />
         
-        {/* Badge dot */}
-        {hasBadge && (
-          <span className={cn(
-            'absolute -top-1 -right-1.5 w-2 h-2 rounded-full',
-            badgeClass
-          )} />
-        )}
-        
-        {/* Ready indicator */}
-        {readyCount === 3 && !hasBadge && (
-          <span className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-1.5 h-1.5 rounded-full bg-emerald-500" />
+        {/* Subtle bloom dot when ready */}
+        {readyCount > 0 && (
+          <span
+            className="absolute -top-0.5 -right-1 w-1.5 h-1.5 rounded-full transition-all duration-700"
+            style={{
+              background: 'color-mix(in srgb, var(--sophia-purple) 40%, rgba(232,228,239,0.15))',
+              boxShadow: capturingCount > 0 ? '0 0 6px color-mix(in srgb, var(--sophia-purple) 25%, transparent)' : 'none',
+            }}
+          />
         )}
       </div>
     </button>

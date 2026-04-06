@@ -1,160 +1,319 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
-import { X } from "lucide-react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { cn } from "../../lib/utils"
 import type { RitualArtifacts } from "../../types/session"
 import { usePresenceStore } from "../../stores/presence-store"
-import { useUiStore } from "../../stores/ui-store"
+import { haptic } from "../../hooks/useHaptics"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
   isVisible: boolean
   onDismiss: () => void
-  /** Voice mode: auto-dismiss after 12s. Text mode: persistent */
   isVoiceMode: boolean
+  onReflectionTap?: (reflection: { prompt: string; why?: string }) => void
+  onMemoryApprove?: (index: number) => void
+  onMemoryReject?: (index: number) => void
 }
 
 /**
- * Atmospheric bottom-sheet artifact panel.
+ * Cosmic artifact panel — part of the presence field.
  *
- * Slides up from bottom-center, max-width 480px.
- * Frosted glass: bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px].
- * Staggered reveal: takeaway → divider → reflection → memory tags.
- * Palette-reactive glow edge at top.
- * Voice mode: auto-dismiss after 12s. Text mode: persistent.
+ * No card. No border. No solid background. The artifacts emerge from
+ * the nebula like constellations becoming visible — text materialises
+ * at ultra-low opacity, gains presence through gentle bloom, and the
+ * nebula shows through everything.
+ *
+ * Voice: floats above mic, translucent veil. Text: inline above composer.
+ * Dismiss via tap on the whisper-thin close zone or swipe-down.
  */
 export function PresenceArtifactPanel({
   artifacts,
   isVisible,
   onDismiss,
   isVoiceMode,
+  onReflectionTap,
+  onMemoryApprove,
+  onMemoryReject,
 }: PresenceArtifactPanelProps) {
-  const [show, setShow] = useState(false)
-  const autoDismissRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [phase, setPhase] = useState<"hidden" | "entering" | "visible" | "exiting">("hidden")
+  const [revealStep, setRevealStep] = useState(0)
+  const [reflectionTapped, setReflectionTapped] = useState(false)
+  const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const status = usePresenceStore((s) => s.status)
 
-  // Slide-up on visible change
+  // Phase lifecycle
   useEffect(() => {
     if (isVisible && artifacts) {
-      // Small delay for paint before animation
-      requestAnimationFrame(() => setShow(true))
-    } else {
-      setShow(false)
+      setPhase("entering")
+      setRevealStep(0)
+      setReflectionTapped(false)
+      requestAnimationFrame(() => setPhase("visible"))
+    } else if (phase !== "hidden") {
+      setPhase("exiting")
+      const t = setTimeout(() => setPhase("hidden"), 800)
+      return () => clearTimeout(t)
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isVisible, artifacts])
 
-  // Auto-dismiss in voice mode after 12s
+  // Staggered reveal — each piece fades in like a star brightening
   useEffect(() => {
-    if (autoDismissRef.current) {
-      clearTimeout(autoDismissRef.current)
-      autoDismissRef.current = null
+    staggerRef.current.forEach(clearTimeout)
+    staggerRef.current = []
+
+    if (phase === "visible") {
+      const delays = [100, 800, 1600, 2800]
+      delays.forEach((d, i) => {
+        staggerRef.current.push(setTimeout(() => setRevealStep(i + 1), d))
+      })
+    } else if (phase === "hidden") {
+      setRevealStep(0)
     }
 
-    if (show && isVoiceMode) {
-      autoDismissRef.current = setTimeout(() => {
-        autoDismissRef.current = null
+    return () => staggerRef.current.forEach(clearTimeout)
+  }, [phase])
+
+  // Voice mode: auto-dismiss after 18s (long enough to read)
+  useEffect(() => {
+    if (autoCollapseRef.current) {
+      clearTimeout(autoCollapseRef.current)
+      autoCollapseRef.current = null
+    }
+    if (phase === "visible" && isVoiceMode) {
+      autoCollapseRef.current = setTimeout(() => {
+        autoCollapseRef.current = null
         onDismiss()
-      }, 12000)
+      }, 18000)
     }
-
     return () => {
-      if (autoDismissRef.current) {
-        clearTimeout(autoDismissRef.current)
-      }
+      if (autoCollapseRef.current) clearTimeout(autoCollapseRef.current)
     }
-  }, [show, isVoiceMode, onDismiss])
+  }, [phase, isVoiceMode, onDismiss])
 
-  if (!artifacts) return null
+  const handleDismiss = useCallback(() => {
+    haptic("light")
+    onDismiss()
+  }, [onDismiss])
+
+  const handleReflectionTap = useCallback(() => {
+    if (!artifacts?.reflection_candidate || reflectionTapped) return
+    haptic("medium")
+    setReflectionTapped(true)
+    onReflectionTap?.({
+      prompt: artifacts.reflection_candidate.prompt,
+      why: artifacts.reflection_candidate.why,
+    })
+  }, [artifacts?.reflection_candidate, reflectionTapped, onReflectionTap])
+
+  if (!artifacts || phase === "hidden") return null
 
   const { takeaway, reflection_candidate, memory_candidates } = artifacts
-  const hasReflection = reflection_candidate?.prompt
+  const hasReflection = !!reflection_candidate?.prompt
   const hasMemories = memory_candidates && memory_candidates.length > 0
+  const hasTakeaway = !!takeaway?.trim()
+  const hasContent = hasTakeaway || hasReflection || hasMemories
+
+  if (!hasContent) return null
+
+  const isActive = phase === "visible"
+
+  // Presence-reactive bloom color
+  const bloomColor =
+    status === "speaking"
+      ? "var(--sophia-glow)"
+      : status === "listening"
+        ? "rgba(120, 180, 255, 0.5)"
+        : "var(--sophia-purple)"
 
   return (
     <div
       className={cn(
-        "fixed left-1/2 -translate-x-1/2 z-35 w-full max-w-[480px] pointer-events-none",
-        "transition-transform duration-[800ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
-        isVoiceMode ? "bottom-0" : "bottom-[68px]",
-        show ? "translate-y-0 pointer-events-auto" : "translate-y-full"
+        "pointer-events-none select-none",
+        "transition-all duration-[1200ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
+        isVoiceMode
+          ? "fixed left-1/2 -translate-x-1/2 bottom-[155px] z-25 w-full max-w-[440px] px-6"
+          : "relative z-10 w-full max-w-2xl mx-auto px-6 mb-3",
+        isActive ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3"
       )}
       role="complementary"
-      aria-label="Session artifact"
+      aria-label="Session artifacts"
     >
-      <div className="relative px-8 py-6 pb-7 bg-[rgba(8,8,18,0.78)] backdrop-blur-[28px] rounded-t-[20px] border-t border-white/[0.03] max-h-[180px] overflow-hidden">
-        {/* Palette-reactive glow edge */}
-        <GlowEdge />
+      {/* Bloom halo — the nebula glow behind the content */}
+      <div
+        className="absolute inset-0 -inset-x-8 -inset-y-4 rounded-full pointer-events-none transition-opacity duration-[2000ms]"
+        style={{
+          background: `radial-gradient(ellipse 80% 70% at 50% 40%, color-mix(in srgb, ${bloomColor} 8%, transparent) 0%, transparent 70%)`,
+          filter: "blur(30px)",
+          opacity: isActive ? 1 : 0,
+        }}
+      />
 
-        {/* Pull handle — visual affordance for dismiss */}
-        <button
-          onClick={onDismiss}
-          className="absolute top-0 left-1/2 -translate-x-1/2 py-2 px-6 cursor-pointer group z-10"
-          aria-label="Dismiss artifact"
-        >
-          <div className="w-8 h-[3px] rounded-full bg-white/[0.12] group-hover:bg-white/[0.30] transition-colors duration-300" />
-        </button>
-
-        {/* Dismiss X button — visible and tappable */}
-        <button
-          onClick={onDismiss}
-          className="absolute top-3 right-4 w-7 h-7 flex items-center justify-center rounded-full bg-white/[0.04] text-white/25 hover:text-white/50 hover:bg-white/[0.08] transition-all duration-300 z-10"
-          aria-label="Dismiss artifact"
-        >
-          <X className="w-4 h-4" />
-        </button>
-
-        {/* Takeaway — Cormorant 18px, stagger 0ms */}
-        {takeaway && (
-          <p
-            className={cn(
-              "font-cormorant text-lg font-light leading-[1.65] tracking-[0.01em]",
-              "transition-colors duration-[1200ms] ease-out",
-              show ? "text-[rgba(232,228,239,0.65)]" : "text-transparent"
-            )}
-          >
-            {takeaway}
-          </p>
+      {/* Dismiss zone — entire panel, tap to dismiss in voice mode */}
+      <div
+        className={cn(
+          "relative pointer-events-auto",
+          isVoiceMode && "cursor-pointer"
         )}
+        onClick={isVoiceMode ? handleDismiss : undefined}
+      >
+        {/* Dismiss hint — whisper-thin, top-right */}
+        <button
+          onClick={(e) => { e.stopPropagation(); handleDismiss(); }}
+          className={cn(
+            "absolute -top-1 -right-1 z-10 w-6 h-6 flex items-center justify-center",
+            "text-white/[0.08] hover:text-white/25 transition-all duration-700",
+            "pointer-events-auto cursor-pointer",
+            revealStep >= 1 ? "opacity-100" : "opacity-0"
+          )}
+          aria-label="Dismiss"
+        >
+          <svg className="w-3 h-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1">
+            <path d="M2 2l8 8M10 2l-8 8" strokeLinecap="round" />
+          </svg>
+        </button>
 
-        {/* Divider — stagger 600ms */}
-        {takeaway && hasReflection && (
+        {/* === TAKEAWAY === emerges like a fading-in constellation */}
+        {hasTakeaway && (
           <div
             className={cn(
-              "w-7 h-px my-3",
-              "transition-[background] duration-1000 delay-[600ms] ease-out",
-              show ? "bg-[rgba(232,228,239,0.1)]" : "bg-transparent"
+              "transition-all duration-[1400ms] ease-out",
+              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
+          >
+            <p
+              className="font-cormorant text-[17px] leading-[1.75] font-light text-center"
+              style={{
+                color: `rgba(232, 228, 239, ${revealStep >= 1 ? 0.50 : 0})`,
+                textShadow: isActive
+                  ? `0 0 20px color-mix(in srgb, ${bloomColor} 15%, transparent)`
+                  : "none",
+                transition: "color 1.4s ease, text-shadow 2s ease",
+              }}
+            >
+              {takeaway}
+            </p>
+          </div>
+        )}
+
+        {/* === DIVIDER === thin luminous line, like a nebula filament */}
+        {hasTakeaway && (hasReflection || hasMemories) && (
+          <div
+            className={cn(
+              "mx-auto my-4 transition-all duration-[1200ms] ease-out",
+              revealStep >= 2 ? "opacity-100 scale-x-100" : "opacity-0 scale-x-0"
+            )}
+            style={{
+              width: "32px",
+              height: "1px",
+              background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${bloomColor} 25%, rgba(232,228,239,0.12)), transparent)`,
+              transformOrigin: "center",
+            }}
           />
         )}
 
-        {/* Reflection — Cormorant italic 14px, stagger 800ms */}
+        {/* === REFLECTION === the invitation, slightly brighter, interactive */}
         {hasReflection && (
-          <p
+          <div
             className={cn(
-              "font-cormorant text-sm font-light italic leading-[1.7] tracking-[0.01em]",
-              "transition-colors duration-[1200ms] delay-[800ms] ease-out",
-              show ? "text-[rgba(232,228,239,0.35)]" : "text-transparent"
+              "transition-all duration-[1400ms] ease-out",
+              revealStep >= 3 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
             )}
           >
-            {reflection_candidate!.prompt}
-          </p>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                handleReflectionTap()
+              }}
+              disabled={reflectionTapped || !onReflectionTap}
+              className={cn(
+                "w-full text-center transition-all duration-700",
+                !reflectionTapped && onReflectionTap
+                  ? "cursor-pointer hover:scale-[1.01] active:scale-[0.99]"
+                  : "cursor-default",
+                reflectionTapped && "opacity-40"
+              )}
+            >
+              <p
+                className="font-cormorant text-[15px] italic leading-[1.7] font-light"
+                style={{
+                  color: `rgba(232, 228, 239, ${reflectionTapped ? 0.20 : 0.35})`,
+                  textShadow: !reflectionTapped && isActive
+                    ? `0 0 16px color-mix(in srgb, ${bloomColor} 12%, transparent)`
+                    : "none",
+                  transition: "color 0.7s ease, text-shadow 1s ease",
+                }}
+              >
+                {reflection_candidate!.prompt}
+              </p>
+              {reflection_candidate!.why && !reflectionTapped && (
+                <p className="mt-1.5 text-[10px] tracking-[0.08em] text-white/[0.12] font-light">
+                  {reflection_candidate!.why}
+                </p>
+              )}
+              {!reflectionTapped && onReflectionTap && (
+                <span
+                  className="inline-block mt-2.5 text-[9px] tracking-[0.14em] uppercase transition-colors duration-700"
+                  style={{ color: `color-mix(in srgb, ${bloomColor} 40%, rgba(232,228,239,0.15))` }}
+                >
+                  tap to reflect
+                </span>
+              )}
+              {reflectionTapped && (
+                <span className="inline-block mt-1.5 text-[9px] tracking-[0.14em] uppercase text-white/[0.10]">
+                  sent
+                </span>
+              )}
+            </button>
+          </div>
         )}
 
-        {/* Memory tags — Inter 9px, stagger 1400ms */}
+        {/* === MEMORY CONSTELLATION === tiny stars, each a memory */}
         {hasMemories && (
           <div
             className={cn(
-              "flex gap-2 flex-wrap mt-3.5",
-              "transition-opacity duration-[1200ms] delay-[1400ms] ease-out",
-              show ? "opacity-100" : "opacity-0"
+              "mt-4 flex justify-center gap-2 flex-wrap transition-all duration-[1200ms] ease-out",
+              revealStep >= 4 ? "opacity-100" : "opacity-0"
             )}
           >
             {memory_candidates!.slice(0, 5).map((mem, i) => (
               <span
                 key={i}
-                className="font-sans text-[9px] tracking-[0.12em] lowercase text-[rgba(232,228,239,0.2)] px-2.5 py-[3px] border border-[rgba(232,228,239,0.04)] rounded-xl hover:border-[rgba(232,228,239,0.1)] hover:text-[rgba(232,228,239,0.35)] transition-[border-color,color] duration-[800ms]"
+                className={cn(
+                  "group/mem relative text-[9px] tracking-[0.12em] lowercase px-2 py-[3px]",
+                  "transition-all duration-[800ms] cursor-default",
+                )}
+                style={{
+                  color: `rgba(232, 228, 239, 0.18)`,
+                  animationDelay: `${i * 200}ms`,
+                }}
+                onClick={(e) => e.stopPropagation()}
               >
                 {mem.memory || mem.category}
+                {/* Approve/reject on hover — tiny cosmic dust */}
+                {(onMemoryApprove || onMemoryReject) && (
+                  <span className="hidden group-hover/mem:inline-flex items-center gap-0.5 ml-1">
+                    {onMemoryApprove && (
+                      <button
+                        onClick={() => { haptic("light"); onMemoryApprove(i) }}
+                        className="text-white/[0.15] hover:text-white/40 transition-colors"
+                        aria-label="Save memory"
+                      >
+                        ✓
+                      </button>
+                    )}
+                    {onMemoryReject && (
+                      <button
+                        onClick={() => { haptic("light"); onMemoryReject(i) }}
+                        className="text-white/[0.10] hover:text-white/30 transition-colors"
+                        aria-label="Skip memory"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
+                )}
               </span>
             ))}
           </div>
@@ -164,36 +323,11 @@ export function PresenceArtifactPanel({
   )
 }
 
-/** Palette-reactive glow — reads emotion palette from presence store */
-function GlowEdge() {
-  // Use the palette accent color from presence store if available
-  const status = usePresenceStore((s) => s.status)
-  const mode = useUiStore((s) => s.mode)
-
-  // Map presence states to accent colors
-  const accentColor =
-    status === "speaking"
-      ? "rgba(168, 148, 240, 0.25)"  // soft purple
-      : status === "listening"
-        ? "rgba(120, 180, 255, 0.25)"  // soft blue
-        : status === "reflecting"
-          ? "rgba(200, 160, 255, 0.25)" // lavender
-          : "rgba(160, 160, 200, 0.15)" // neutral
-
-  return (
-    <div
-      className="absolute -top-px left-[10%] right-[10%] h-px rounded-full pointer-events-none"
-      style={{
-        background: accentColor,
-        opacity: 0.25,
-        filter: "blur(6px)",
-        transition: "background 3s ease, opacity 1s ease",
-      }}
-    />
-  )
-}
-
-/** Ghost toggle icon for text mode — shows at screen edge when panel is hidden */
+/**
+ * Cosmic toggle — a faint constellation marker that glows when tapped.
+ * Shows when artifacts are dismissed but available.
+ * Matches the whisper-indicator aesthetic: near-invisible, part of the field.
+ */
 export function ArtifactToggleIcon({
   hasArtifacts,
   onClick,
@@ -205,21 +339,24 @@ export function ArtifactToggleIcon({
 
   return (
     <button
-      onClick={onClick}
+      onClick={() => { haptic("light"); onClick() }}
       className={cn(
-        "fixed right-0 top-1/2 -translate-y-1/2 z-30",
-        "w-8 h-8 flex items-center justify-center",
-        "rounded-l-lg",
-        "bg-white/[0.03] hover:bg-white/[0.06]",
-        "border border-r-0 border-white/[0.04]",
-        "transition-all duration-300",
-        "text-white/15 hover:text-white/30"
+        "group flex items-center gap-1.5",
+        "text-white/[0.10] hover:text-white/[0.25]",
+        "transition-all duration-700 cursor-pointer",
       )}
-      aria-label="Show artifacts"
+      aria-label="Show insights"
     >
-      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-        <path d="M12 3v18M3 12h18" strokeLinecap="round" />
-      </svg>
+      {/* Tiny bloom dot */}
+      <span
+        className="w-1.5 h-1.5 rounded-full transition-all duration-700 group-hover:shadow-[0_0_8px_rgba(184,164,232,0.25)]"
+        style={{
+          background: "color-mix(in srgb, var(--sophia-purple) 30%, rgba(232,228,239,0.15))",
+        }}
+      />
+      <span className="text-[9px] tracking-[0.14em] lowercase">
+        insights
+      </span>
     </button>
   )
 }

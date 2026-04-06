@@ -2,8 +2,12 @@ import { useEffect, useState, useCallback } from 'react';
 import { logger } from '../../lib/error-logger';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
+import { clearRecentSessionEndHint, getRecentSessionEndHint } from '../../lib/recent-session-end';
 import { mockRecapArtifacts } from '../../components/recap/mockData';
 import type { RecapArtifactsV1 } from '../../lib/recap-types';
+
+const RECENT_END_RETRY_DELAY_MS = 1500;
+const RECENT_END_MAX_RETRIES = 6;
 
 export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'unavailable' | 'not_found';
 
@@ -24,12 +28,39 @@ export function useRecapArtifactsLoader({
   setArtifacts,
 }: UseRecapArtifactsLoaderParams): UseRecapArtifactsLoaderResult {
   const [status, setStatus] = useState<RecapPageStatus>('loading');
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
     const loadArtifacts = async () => {
       setStatus('loading');
 
+      const recentEndHint = getRecentSessionEndHint();
+      const isRecentEndedSession = recentEndHint?.sessionId === sessionId;
+
+      const scheduleRecentRetry = () => {
+        if (!isRecentEndedSession) {
+          return false;
+        }
+
+        if (retryCount >= RECENT_END_MAX_RETRIES) {
+          clearRecentSessionEndHint();
+          setStatus('unavailable');
+          return true;
+        }
+
+        setStatus('processing');
+        retryTimer = setTimeout(() => {
+          setRetryCount((current) => current + 1);
+        }, RECENT_END_RETRY_DELAY_MS);
+        return true;
+      };
+
       if (artifacts) {
+        if (isRecentEndedSession) {
+          clearRecentSessionEndHint();
+        }
         useSessionHistoryStore.getState().markRecapViewed(sessionId);
         setStatus('ready');
         return;
@@ -80,9 +111,16 @@ export function useRecapArtifactsLoader({
           const mapped = mapBackendArtifactsToRecapV1(artifactsPayload, sessionId);
 
           if (mapped) {
+            if (isRecentEndedSession) {
+              clearRecentSessionEndHint();
+            }
             setArtifacts(sessionId, mapped);
             useSessionHistoryStore.getState().markRecapViewed(sessionId);
             setStatus('ready');
+            return;
+          }
+
+          if (scheduleRecentRetry()) {
             return;
           }
 
@@ -91,6 +129,10 @@ export function useRecapArtifactsLoader({
         }
 
         if (response.status === 404) {
+          if (scheduleRecentRetry()) {
+            return;
+          }
+
           setStatus('not_found');
           return;
         }
@@ -116,7 +158,13 @@ export function useRecapArtifactsLoader({
     };
 
     void loadArtifacts();
-  }, [sessionId, artifacts, setArtifacts]);
+
+    return () => {
+      if (retryTimer !== null) {
+        clearTimeout(retryTimer);
+      }
+    };
+  }, [sessionId, artifacts, setArtifacts, retryCount]);
 
   const reload = useCallback(() => {
     setStatus('loading');

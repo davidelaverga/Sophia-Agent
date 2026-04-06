@@ -2,7 +2,7 @@
  * Auth Module - Public Exports
  * =============================
  * 
- * This module provides authentication with the AI-companion-mvp backend.
+ * This module provides authentication with the Sophia backend.
  * 
  * Client-side usage:
  * ```tsx
