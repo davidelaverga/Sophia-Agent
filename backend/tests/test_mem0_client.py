@@ -45,9 +45,8 @@ class TestSearchMemories:
             assert mock_client.search.call_count == 1
 
     def test_cache_miss_calls_search_and_stores_result(self):
-        from deerflow.sophia.mem0_client import search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [
@@ -63,9 +62,8 @@ class TestSearchMemories:
 
     def test_cache_expires_after_ttl(self):
         """Replace the module cache with a short-TTL cache to test expiration."""
-        from deerflow.sophia.mem0_client import search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import search_memories
 
         # Swap in a cache with 100ms TTL for this test
         original_cache = mod._cache
@@ -82,7 +80,7 @@ class TestSearchMemories:
             mod._cache = original_cache
 
     def test_invalidate_user_cache(self):
-        from deerflow.sophia.mem0_client import search_memories, invalidate_user_cache
+        from deerflow.sophia.mem0_client import invalidate_user_cache, search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [{"id": "m1", "memory": "fact", "metadata": {}}]
@@ -93,9 +91,8 @@ class TestSearchMemories:
             assert mock_client.search.call_count == 2
 
     def test_invalidate_only_clears_matching_user(self):
-        from deerflow.sophia.mem0_client import search_memories, invalidate_user_cache
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import invalidate_user_cache, search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [{"id": "m1", "memory": "fact", "metadata": {}}]
@@ -166,9 +163,8 @@ class TestSearchMemories:
 
     def test_cache_bounded_by_max_size(self):
         """Replace module cache with a small-maxsize cache to test bounding."""
-        from deerflow.sophia.mem0_client import search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import search_memories
 
         original_cache = mod._cache
         mod._cache = TTLCache(maxsize=5, ttl=60)
@@ -233,9 +229,8 @@ class TestAddMemories:
             assert result == []
 
     def test_cache_invalidated_after_successful_add(self):
-        from deerflow.sophia.mem0_client import add_memories, search_memories
-
         import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import add_memories, search_memories
 
         mock_client = MagicMock()
         mock_client.search.return_value = [{"id": "m1", "memory": "old fact", "metadata": {}}]
@@ -256,14 +251,18 @@ class TestAddMemories:
             with mod._cache_lock:
                 assert len(mod._cache) == 0
 
-    def test_no_metadata_passed_to_sdk(self):
-        """Mem0 v2 silently drops memories with custom metadata."""
+    def test_metadata_preserved_via_update_after_add(self):
+        """Metadata should be backfilled via direct REST after add()."""
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = []
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            add_memories(
+        mock_client.add.return_value = [{"id": "mem_1", "memory": "hello"}]
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch("deerflow.sophia.mem0_client._update_memory_metadata_via_rest", return_value={"id": "mem_1", "memory": "hello"}) as mock_rest_update,
+            patch("deerflow.sophia.mem0_client.upsert_review_metadata") as mock_store,
+        ):
+            result = add_memories(
                 user_id="user1",
                 messages=[{"role": "user", "content": "hello"}],
                 session_id="sess_123",
@@ -272,9 +271,18 @@ class TestAddMemories:
             call_kwargs = mock_client.add.call_args[1]
             assert call_kwargs["messages"] == [{"role": "user", "content": "hello"}]
             assert call_kwargs["user_id"] == "user1"
+            assert call_kwargs["async_mode"] is False
             assert "agent_id" not in call_kwargs
             assert "metadata" not in call_kwargs
             assert "run_id" not in call_kwargs
+            mock_rest_update.assert_called_once_with(
+                client=mock_client,
+                memory_id="mem_1",
+                metadata={"importance": "structural"},
+            )
+            mock_client.update.assert_not_called()
+            assert mock_store.call_count == 2
+            assert result[0]["metadata"] == {"importance": "structural"}
 
     def test_dict_with_results_key_normalized(self):
         from deerflow.sophia.mem0_client import add_memories
@@ -292,20 +300,75 @@ class TestAddMemories:
             assert len(result) == 1
             assert result[0]["id"] == "m1"
 
-    def test_metadata_param_ignored_by_sdk_call(self):
-        """Even when metadata is passed to add_memories, it must NOT reach the SDK."""
+    def test_metadata_not_forwarded_to_add_sdk_call(self):
+        """Metadata still must not be passed directly to the SDK add() call."""
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = []
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+        mock_client.add.return_value = [{"id": "mem_1", "memory": "hello"}]
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch("deerflow.sophia.mem0_client._update_memory_metadata_via_rest", return_value={"id": "mem_1", "memory": "hello"}),
+            patch("deerflow.sophia.mem0_client.upsert_review_metadata"),
+        ):
             add_memories(
                 user_id="user1",
                 messages=[{"role": "user", "content": "hello"}],
                 session_id="sess_123",
+                metadata={"status": "pending_review"},
             )
             _, kwargs = mock_client.add.call_args
             assert "metadata" not in kwargs
+            assert kwargs["async_mode"] is False
+
+    def test_metadata_preserved_when_add_returns_null_id(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"id": None, "memory": "hello"}]
+        mock_client.get_all.return_value = [{"id": "mem_2", "memory": "hello"}]
+
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch("deerflow.sophia.mem0_client._update_memory_metadata_via_rest", return_value={"id": "mem_2", "memory": "hello"}) as mock_rest_update,
+            patch("deerflow.sophia.mem0_client.upsert_review_metadata") as mock_store,
+        ):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+                metadata={"status": "pending_review"},
+            )
+
+        mock_client.get_all.assert_called_once_with(filters={"user_id": "user1"})
+        mock_rest_update.assert_called_once_with(
+            client=mock_client,
+            memory_id="mem_2",
+            metadata={"status": "pending_review"},
+        )
+        assert mock_store.call_count == 2
+        assert result[0]["id"] == "mem_2"
+        assert result[0]["metadata"] == {"status": "pending_review"}
+
+    def test_metadata_update_failure_keeps_add_result(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"id": "mem_1", "memory": "hello"}]
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch("deerflow.sophia.mem0_client._update_memory_metadata_via_rest", side_effect=Exception("update failed")),
+            patch("deerflow.sophia.mem0_client.upsert_review_metadata") as mock_store,
+        ):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+                metadata={"status": "pending_review"},
+            )
+
+        assert mock_store.call_count == 2
+        assert result == [{"id": "mem_1", "memory": "hello", "metadata": {"status": "pending_review"}}]
 
 
 class TestClientSingleton:

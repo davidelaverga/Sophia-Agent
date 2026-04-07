@@ -9,7 +9,10 @@ with RemoveMessage and ensures the system prompt is always the first message.
 """
 
 import time
+<<<<<<< HEAD
 from collections.abc import Awaitable, Callable
+=======
+>>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -39,12 +42,18 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
 
     _SYSTEM_MSG_ID = "sophia-system-prompt"
 
+<<<<<<< HEAD
     def _assemble_messages(self, request: ModelRequest) -> ModelRequest | None:
         """Build messages with the assembled system prompt prepended."""
         _t0 = time.perf_counter()
 
         # Access system_prompt_blocks from the current state
         state = request.state
+=======
+    @override
+    def before_model(self, state: PromptAssemblyState, runtime: Runtime) -> dict | None:
+        _t0 = time.perf_counter()
+>>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
         blocks = state.get("system_prompt_blocks", [])
         if not blocks:
             log_middleware("PromptAssembly", "skipped (no blocks)", _t0)
@@ -70,6 +79,7 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         )
         return request.override(messages=assembled)
 
+<<<<<<< HEAD
     @override
     def wrap_model_call(
         self,
@@ -99,3 +109,7 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         elapsed = (time.perf_counter() - _t0) * 1000
         log_middleware("LLM", f"model call completed ({elapsed:.0f}ms)", _t0)
         return result
+=======
+        log_middleware("PromptAssembly", f"{len(blocks)} blocks assembled ({sum(len(b) for b in blocks)} chars)", _t0)
+        return {"messages": updates}
+>>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11

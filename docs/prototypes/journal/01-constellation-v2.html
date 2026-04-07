@@ -1,0 +1,1260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia Journal — Constellation v2</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --sophia-purple: #b8a4e8;
+    --sophia-glow: #d4c4ff;
+    --sophia-amber: #f2b870;
+    --sophia-teal: #59bf9a;
+    --sophia-rose: #d0829c;
+    --bg: #0a0a0f;
+    --text: #f5f3fa;
+    --text-2: #a8a3b8;
+    --card-bg: rgba(20, 18, 30, 0.80);
+    --border-soft: rgba(184, 164, 232, 0.12);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+    cursor: default;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    user-select: none;
+  }
+
+  #nebula-canvas { position: fixed; inset: 0; z-index: 0; }
+  #star-canvas   { position: fixed; inset: 0; z-index: 1; }
+
+  .header {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 10;
+    padding: 24px 36px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: linear-gradient(to bottom, rgba(10,10,15,0.85) 0%, rgba(10,10,15,0.3) 70%, transparent 100%);
+    pointer-events: none;
+  }
+
+  .header > * { pointer-events: auto; }
+
+  .header h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 300;
+    font-size: 24px;
+    letter-spacing: 0.08em;
+    color: var(--sophia-glow);
+    text-shadow: 0 0 40px rgba(184,164,232,0.3);
+  }
+
+  .header .subtitle {
+    font-size: 12px;
+    color: var(--text-2);
+    letter-spacing: 0.04em;
+    font-weight: 300;
+    margin-top: 2px;
+  }
+
+  /* ─── Legend (acts as filter) ─── */
+  .legend {
+    position: fixed;
+    bottom: 80px;
+    left: 36px;
+    z-index: 10;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    opacity: 0;
+    animation: fadeInUp 600ms ease-out 1.4s forwards;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 11px;
+    color: var(--text-2);
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    padding: 4px 10px 4px 6px;
+    border-radius: 20px;
+    border: 1px solid transparent;
+    transition: all 200ms ease;
+  }
+
+  .legend-item:hover { border-color: var(--border-soft); color: var(--text); }
+  .legend-item.active { border-color: rgba(184,164,232,0.25); background: rgba(184,164,232,0.06); color: var(--text); }
+  .legend-item.dimmed { opacity: 0.3; }
+
+  .legend-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  /* ─── Stats ─── */
+  .stats-bar {
+    position: fixed;
+    bottom: 80px;
+    right: 36px;
+    z-index: 10;
+    display: flex;
+    gap: 28px;
+    opacity: 0;
+    animation: fadeInUp 600ms ease-out 1.6s forwards;
+  }
+
+  .stat { text-align: center; }
+
+  .stat-value {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 26px;
+    font-weight: 300;
+    color: var(--sophia-glow);
+  }
+
+  .stat-label {
+    font-size: 10px;
+    color: var(--text-2);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-top: 2px;
+  }
+
+  /* ─── Timeline slider ─── */
+  .timeline {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    z-index: 10;
+    height: 56px;
+    padding: 0 36px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: linear-gradient(to top, rgba(10,10,15,0.85) 0%, rgba(10,10,15,0.3) 70%, transparent 100%);
+    opacity: 0;
+    animation: fadeInUp 600ms ease-out 2s forwards;
+  }
+
+  .timeline-label {
+    font-size: 11px;
+    color: var(--text-2);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    min-width: 56px;
+  }
+
+  .timeline-track {
+    flex: 1;
+    position: relative;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    cursor: pointer;
+  }
+
+  .timeline-bar {
+    width: 100%;
+    height: 2px;
+    background: rgba(184,164,232,0.1);
+    border-radius: 1px;
+    position: relative;
+  }
+
+  .timeline-fill {
+    height: 100%;
+    border-radius: 1px;
+    background: linear-gradient(90deg, rgba(184,164,232,0.15), rgba(184,164,232,0.5));
+    width: 100%;
+    transition: width 100ms;
+  }
+
+  .timeline-thumb {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--sophia-purple);
+    box-shadow: 0 0 12px rgba(184,164,232,0.5), 0 0 24px rgba(184,164,232,0.2);
+    cursor: grab;
+    transition: transform 150ms ease;
+    left: 100%;
+  }
+
+  .timeline-thumb:hover { transform: translate(-50%, -50%) scale(1.2); }
+
+  .timeline-ticks {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    pointer-events: none;
+    padding-bottom: 10px;
+  }
+
+  .timeline-tick {
+    font-size: 9px;
+    color: rgba(184,164,232,0.25);
+    letter-spacing: 0.04em;
+  }
+
+  /* ─── Memory tooltip ─── */
+  .memory-tooltip {
+    position: fixed;
+    z-index: 20;
+    max-width: 300px;
+    padding: 18px 22px;
+    background: var(--card-bg);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border: 1px solid var(--border-soft);
+    border-radius: 16px;
+    box-shadow:
+      0 18px 48px rgba(10,10,15,0.65),
+      0 0 60px rgba(184,164,232,0.06),
+      inset 0 1px 0 rgba(255,255,255,0.04);
+    pointer-events: none;
+    opacity: 0;
+    transform: translateY(8px) scale(0.96);
+    transition: opacity 240ms ease-out, transform 240ms ease-out;
+  }
+
+  .memory-tooltip.visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+
+  .memory-tooltip .badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 3px 10px; border-radius: 20px;
+    font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  .memory-tooltip .text {
+    font-size: 13px; line-height: 1.6; color: var(--text); font-weight: 300;
+  }
+
+  .memory-tooltip .date {
+    font-size: 10px; color: var(--text-2); margin-top: 8px; letter-spacing: 0.02em;
+  }
+
+  /* ─── Detail panel (click-lock) ─── */
+  .detail-panel {
+    position: fixed;
+    right: 36px;
+    top: 50%;
+    transform: translateY(-50%) translateX(16px);
+    z-index: 15;
+    width: 340px;
+    padding: 26px;
+    background: var(--card-bg);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    border: 1px solid var(--border-soft);
+    border-radius: 20px;
+    box-shadow:
+      0 24px 60px rgba(10,10,15,0.7),
+      0 0 80px rgba(184,164,232,0.06),
+      inset 0 1px 0 rgba(255,255,255,0.04);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 300ms ease-out, transform 300ms ease-out;
+  }
+
+  .detail-panel.visible {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+    pointer-events: auto;
+  }
+
+  .detail-panel .dp-category {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 12px; border-radius: 20px;
+    font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+
+  .detail-panel .dp-text {
+    font-size: 15px; line-height: 1.65; color: var(--text); font-weight: 300;
+    margin-bottom: 14px;
+  }
+
+  .detail-panel .dp-date {
+    font-size: 11px; color: var(--text-2); letter-spacing: 0.02em;
+    margin-bottom: 18px;
+  }
+
+  .detail-panel .dp-cluster {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px; font-style: italic;
+    color: rgba(184,164,232,0.5);
+    letter-spacing: 0.06em;
+    margin-bottom: 16px;
+  }
+
+  .detail-panel .dp-connected-title {
+    font-size: 10px; color: var(--text-2);
+    letter-spacing: 0.06em; text-transform: uppercase;
+    margin-bottom: 10px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .detail-panel .dp-conn {
+    font-size: 12px; line-height: 1.5; color: var(--text); font-weight: 300;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(184,164,232,0.04);
+    opacity: 0.7;
+    cursor: pointer;
+    transition: opacity 150ms;
+  }
+
+  .detail-panel .dp-conn:hover { opacity: 1; }
+  .detail-panel .dp-conn:last-child { border-bottom: none; }
+
+  .detail-panel .dp-close {
+    position: absolute; top: 14px; right: 14px;
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    border: 1px solid var(--border-soft);
+    background: transparent;
+    color: var(--text-2);
+    font-size: 14px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 150ms;
+  }
+
+  .detail-panel .dp-close:hover { background: rgba(184,164,232,0.1); color: var(--text); }
+
+  /* ─── Zoom controls ─── */
+  .zoom-controls {
+    position: fixed;
+    bottom: 80px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    display: flex;
+    gap: 6px;
+    opacity: 0;
+    animation: fadeInUp 600ms ease-out 1.8s forwards;
+  }
+
+  .zoom-btn {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    border: 1px solid var(--border-soft);
+    background: rgba(20,18,30,0.5);
+    backdrop-filter: blur(12px);
+    color: var(--text-2);
+    font-size: 15px;
+    cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    transition: all 150ms;
+  }
+
+  .zoom-btn:hover { border-color: rgba(184,164,232,0.3); color: var(--text); background: rgba(184,164,232,0.08); }
+
+  .zoom-reset {
+    padding: 0 12px; height: 32px;
+    border-radius: 16px;
+    border: 1px solid var(--border-soft);
+    background: rgba(20,18,30,0.5);
+    backdrop-filter: blur(12px);
+    color: var(--text-2);
+    font-size: 10px;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: all 150ms;
+  }
+
+  .zoom-reset:hover { border-color: rgba(184,164,232,0.3); color: var(--text); }
+
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="nebula-canvas"></canvas>
+<canvas id="star-canvas"></canvas>
+
+<div class="header">
+  <div>
+    <h1>Your Constellation</h1>
+    <div class="subtitle" id="subtitle">42 memories across 18 sessions</div>
+  </div>
+</div>
+
+<div class="legend" id="legend"></div>
+
+<div class="stats-bar">
+  <div class="stat"><div class="stat-value">42</div><div class="stat-label">Memories</div></div>
+  <div class="stat"><div class="stat-value">5</div><div class="stat-label">Constellations</div></div>
+  <div class="stat"><div class="stat-value">18</div><div class="stat-label">Sessions</div></div>
+</div>
+
+<div class="zoom-controls">
+  <button class="zoom-btn" id="zoom-in">+</button>
+  <button class="zoom-btn" id="zoom-out">−</button>
+  <button class="zoom-reset" id="zoom-reset">RESET</button>
+</div>
+
+<!-- Timeline -->
+<div class="timeline">
+  <span class="timeline-label" id="tl-start">Mar 12</span>
+  <div class="timeline-track" id="tl-track">
+    <div class="timeline-bar"><div class="timeline-fill" id="tl-fill"></div></div>
+    <div class="timeline-thumb" id="tl-thumb"></div>
+    <div class="timeline-ticks">
+      <span class="timeline-tick">Mar 12</span>
+      <span class="timeline-tick">Mar 20</span>
+      <span class="timeline-tick">Mar 28</span>
+      <span class="timeline-tick">Apr 6</span>
+    </div>
+  </div>
+  <span class="timeline-label" id="tl-end" style="text-align:right">Apr 6</span>
+</div>
+
+<!-- Tooltip -->
+<div class="memory-tooltip" id="tooltip">
+  <div class="badge" id="tt-badge"></div>
+  <div class="text" id="tt-text"></div>
+  <div class="date" id="tt-date"></div>
+</div>
+
+<!-- Detail panel -->
+<div class="detail-panel" id="detail">
+  <button class="dp-close" id="dp-close">×</button>
+  <div class="dp-cluster" id="dp-cluster"></div>
+  <div class="dp-category" id="dp-cat"></div>
+  <div class="dp-text" id="dp-text"></div>
+  <div class="dp-date" id="dp-date"></div>
+  <div class="dp-connected-title">Connected memories</div>
+  <div id="dp-connections"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA
+// ═══════════════════════════════════════════════════════════════════════════════
+const CATEGORIES = {
+  feeling:      { color: [184,164,232], label: '💜 Feeling',      bg: 'rgba(184,164,232,0.15)', text: '#b8a4e8', dotClr: '#b8a4e8' },
+  decision:     { color: [242,184,112], label: '🔥 Decision',     bg: 'rgba(242,184,112,0.15)', text: '#f2b870', dotClr: '#f2b870' },
+  lesson:       { color: [89,191,154],  label: '✨ Lesson',       bg: 'rgba(89,191,154,0.15)',  text: '#59bf9a', dotClr: '#59bf9a' },
+  relationship: { color: [208,130,156], label: '💗 Relationship', bg: 'rgba(208,130,156,0.15)', text: '#d0829c', dotClr: '#d0829c' },
+  fact:         { color: [139,164,212], label: '📌 Fact',         bg: 'rgba(139,164,212,0.15)', text: '#8ba4d4', dotClr: '#8ba4d4' },
+  commitment:   { color: [232,200,140], label: '🎯 Commitment',  bg: 'rgba(232,200,140,0.15)', text: '#e8c88c', dotClr: '#e8c88c' },
+  pattern:      { color: [168,140,210], label: '🔮 Pattern',     bg: 'rgba(168,140,210,0.15)', text: '#a88cd2', dotClr: '#a88cd2' },
+  preference:   { color: [190,170,220], label: '💎 Preference',  bg: 'rgba(190,170,220,0.15)', text: '#beaadc', dotClr: '#beaadc' },
+};
+
+// Cluster definitions
+const CLUSTERS = [
+  { name: 'Growth',      labelPos: { cx: -0.27, cy: 0.44 }, nebulaHue: [89,191,154],  indices: [0,1,2,3,4,5,6] },
+  { name: 'Inner World',  labelPos: { cx: 0.00, cy: 0.16 }, nebulaHue: [184,164,232], indices: [7,8,9,10,11,12,13] },
+  { name: 'Ambition',     labelPos: { cx: 0.33, cy: 0.28 }, nebulaHue: [242,184,112], indices: [14,15,16,17,18,19] },
+  { name: 'Rest',         labelPos: { cx: -0.27, cy: -0.40 }, nebulaHue: [208,130,156], indices: [20,21,22,23,24,25] },
+  { name: 'Vision',       labelPos: { cx: 0.25, cy: -0.38 }, nebulaHue: [139,164,212], indices: [26,27,28,29,30,31] },
+];
+
+const memories = [
+  // Growth (0-6)
+  { text: "Realized that avoiding conflict doesn't protect relationships — it slowly erodes them.", category: 'lesson', date: 'Mar 28', dateVal: 16, cx: -0.32, cy: 0.28 },
+  { text: "Decided to have the difficult conversation with my co-founder about equity split.", category: 'decision', date: 'Mar 29', dateVal: 17, cx: -0.28, cy: 0.22 },
+  { text: "Felt genuinely relieved after the conversation, even though it was hard.", category: 'feeling', date: 'Mar 30', dateVal: 18, cx: -0.22, cy: 0.30 },
+  { text: "My co-founder Alex actually thanked me for bringing it up first.", category: 'relationship', date: 'Mar 30', dateVal: 18, cx: -0.35, cy: 0.36 },
+  { text: "I handle confrontation better when I prepare what I want to say the night before.", category: 'pattern', date: 'Mar 31', dateVal: 19, cx: -0.25, cy: 0.38 },
+  { text: "Committed to weekly founder sync — no more letting things build up.", category: 'commitment', date: 'Apr 1', dateVal: 20, cx: -0.18, cy: 0.26 },
+  { text: "The preparation ritual (debrief) genuinely helped me process after the equity talk.", category: 'lesson', date: 'Apr 1', dateVal: 20, cx: -0.30, cy: 0.18 },
+
+  // Inner World (7-13)
+  { text: "Noticed I always minimize good news about myself. 'It's not a big deal' reflex.", category: 'pattern', date: 'Mar 22', dateVal: 10, cx: 0.02, cy: 0.04 },
+  { text: "Felt unexpectedly emotional when Sophia reflected back a pattern I hadn't seen.", category: 'feeling', date: 'Mar 23', dateVal: 11, cx: -0.06, cy: -0.05 },
+  { text: "The pitch deck is 80% done. Investor meeting scheduled for April 8th.", category: 'fact', date: 'Mar 25', dateVal: 13, cx: 0.08, cy: 0.08 },
+  { text: "I work better in 3-hour deep blocks, not Pomodoro.", category: 'preference', date: 'Mar 24', dateVal: 12, cx: 0.12, cy: -0.02 },
+  { text: "Decided to stop checking Slack before 10am — the morning is for creation.", category: 'decision', date: 'Mar 26', dateVal: 14, cx: -0.02, cy: 0.12 },
+  { text: "My sister called to check in — first time in two months. It meant more than I expected.", category: 'relationship', date: 'Mar 27', dateVal: 15, cx: 0.05, cy: -0.08 },
+  { text: "Felt a kind of quiet pride after shipping the landing page alone.", category: 'feeling', date: 'Mar 28', dateVal: 16, cx: -0.10, cy: 0.06 },
+
+  // Ambition (14-19)
+  { text: "The investor meeting went better than I prepared for. They want a follow-up.", category: 'fact', date: 'Apr 2', dateVal: 21, cx: 0.30, cy: 0.10 },
+  { text: "Felt the imposter syndrome hit hard right after the positive investor feedback.", category: 'feeling', date: 'Apr 2', dateVal: 21, cx: 0.35, cy: 0.16 },
+  { text: "Lesson: good things triggering anxiety is a signal, not a verdict.", category: 'lesson', date: 'Apr 3', dateVal: 22, cx: 0.28, cy: 0.20 },
+  { text: "Committed to treating the follow-up meeting as practice, not performance.", category: 'commitment', date: 'Apr 3', dateVal: 22, cx: 0.38, cy: 0.08 },
+  { text: "I underestimate myself when I'm tired. Need to stop making self-assessments after 9pm.", category: 'pattern', date: 'Apr 4', dateVal: 23, cx: 0.32, cy: 0.24 },
+  { text: "Alex said 'You carried that meeting' — I'm learning to receive that.", category: 'relationship', date: 'Apr 4', dateVal: 23, cx: 0.24, cy: 0.14 },
+
+  // Rest (20-25)
+  { text: "Realized I haven't taken a real day off in 6 weeks.", category: 'lesson', date: 'Mar 18', dateVal: 6, cx: -0.28, cy: -0.22 },
+  { text: "Decided to block Sundays completely. No exceptions.", category: 'decision', date: 'Mar 19', dateVal: 7, cx: -0.22, cy: -0.28 },
+  { text: "Felt guilty the entire first Sunday off. But slept 9 hours.", category: 'feeling', date: 'Mar 20', dateVal: 8, cx: -0.34, cy: -0.26 },
+  { text: "The guilt faded by the second Sunday. Body remembered what rest feels like.", category: 'feeling', date: 'Mar 27', dateVal: 15, cx: -0.26, cy: -0.34 },
+  { text: "I prefer walking without podcasts — just ambient sound and thoughts.", category: 'preference', date: 'Mar 21', dateVal: 9, cx: -0.30, cy: -0.32 },
+  { text: "Mom asked if I'm eating well. I lied. Need to fix that.", category: 'relationship', date: 'Mar 22', dateVal: 10, cx: -0.20, cy: -0.20 },
+
+  // Vision (26-31)
+  { text: "Wrote the company mission statement. First version that felt true.", category: 'fact', date: 'Apr 4', dateVal: 23, cx: 0.22, cy: -0.20 },
+  { text: "The mission is: 'Make the tools we wished existed when we started.'", category: 'fact', date: 'Apr 4', dateVal: 23, cx: 0.28, cy: -0.26 },
+  { text: "Felt clarity I haven't felt since the first week of starting the company.", category: 'feeling', date: 'Apr 5', dateVal: 24, cx: 0.18, cy: -0.28 },
+  { text: "Decided the product serves indie founders first, enterprises later.", category: 'decision', date: 'Apr 5', dateVal: 24, cx: 0.32, cy: -0.22 },
+  { text: "Alex and I are aligned for the first time in months. The mission crystallized it.", category: 'relationship', date: 'Apr 5', dateVal: 24, cx: 0.26, cy: -0.16 },
+  { text: "Committed to revisiting the mission statement every quarter.", category: 'commitment', date: 'Apr 6', dateVal: 25, cx: 0.20, cy: -0.32 },
+
+  // Scattered (32-41)
+  { text: "Started the day with the reset ritual. Felt grounded for the first time this week.", category: 'feeling', date: 'Apr 1', dateVal: 20, cx: -0.05, cy: -0.35 },
+  { text: "I default to humor when I'm uncomfortable. It's a shield.", category: 'pattern', date: 'Mar 20', dateVal: 8, cx: 0.38, cy: -0.05 },
+  { text: "Prefers voice sessions in the morning, text in the evening.", category: 'preference', date: 'Mar 15', dateVal: 3, cx: -0.38, cy: 0.05 },
+  { text: "The vent ritual is most useful on Mondays and Thursdays.", category: 'pattern', date: 'Mar 24', dateVal: 12, cx: 0.00, cy: 0.36 },
+  { text: "Learned that 'I don't know' is a complete answer.", category: 'lesson', date: 'Apr 3', dateVal: 22, cx: -0.12, cy: -0.18 },
+  { text: "There's a version of me that's already good enough. I just keep forgetting.", category: 'lesson', date: 'Apr 6', dateVal: 25, cx: 0.10, cy: -0.38 },
+  { text: "Name: Davide. Based in Barcelona. Building a dev tools startup.", category: 'fact', date: 'Mar 12', dateVal: 0, cx: -0.38, cy: -0.12 },
+  { text: "Gaming helps me decompress but only for 1 hour max. After that it's avoidance.", category: 'pattern', date: 'Mar 16', dateVal: 4, cx: 0.15, cy: 0.32 },
+  { text: "Committed to shipping the MVP by April 15th.", category: 'commitment', date: 'Apr 1', dateVal: 20, cx: -0.15, cy: 0.18 },
+  { text: "The vent ritual works differently than I expected — more cathartic than analytical.", category: 'lesson', date: 'Apr 6', dateVal: 25, cx: 0.05, cy: -0.28 },
+];
+
+// dateVal range: 0 = Mar 12, 25 = Apr 6
+const DATE_MIN = 0, DATE_MAX = 25;
+
+const constellationLines = [
+  [0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,0],[1,5],
+  [7,8],[8,9],[9,10],[10,11],[11,12],[12,13],[13,7],[8,11],
+  [14,15],[15,16],[16,17],[17,18],[18,19],[19,14],[15,18],
+  [20,21],[21,22],[22,23],[23,24],[24,25],[25,20],[21,24],
+  [26,27],[27,28],[28,29],[29,30],[30,31],[31,26],[27,30],
+];
+
+// Build adjacency
+const adjacency = memories.map(() => []);
+for (const [a,b] of constellationLines) { adjacency[a].push(b); adjacency[b].push(a); }
+
+// Cluster lookup
+const memoryCluster = new Array(memories.length).fill(-1);
+CLUSTERS.forEach((c, ci) => c.indices.forEach(i => memoryCluster[i] = ci));
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BUILD LEGEND (as filter)
+// ═══════════════════════════════════════════════════════════════════════════════
+let activeFilter = null;
+const legendEl = document.getElementById('legend');
+const catNames = ['feeling','decision','lesson','relationship','fact','commitment','pattern','preference'];
+catNames.forEach(key => {
+  const cat = CATEGORIES[key];
+  const el = document.createElement('div');
+  el.className = 'legend-item';
+  el.innerHTML = `<div class="legend-dot" style="background:${cat.dotClr};box-shadow:0 0 6px ${cat.dotClr}"></div><span>${key.charAt(0).toUpperCase()+key.slice(1)}</span>`;
+  el.addEventListener('click', () => {
+    if (activeFilter === key) {
+      activeFilter = null;
+      document.querySelectorAll('.legend-item').forEach(l => l.classList.remove('active','dimmed'));
+    } else {
+      activeFilter = key;
+      document.querySelectorAll('.legend-item').forEach(l => {
+        l.classList.remove('active','dimmed');
+        if (l.dataset.cat !== key) l.classList.add('dimmed');
+        else l.classList.add('active');
+      });
+    }
+  });
+  el.dataset.cat = key;
+  legendEl.appendChild(el);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+let mouseX = 0.5, mouseY = 0.5;
+let mouseSX = 0.5, mouseSY = 0.5;
+let mouseClientX = 0, mouseClientY = 0;
+
+// Camera: pan + zoom
+let camX = 0, camY = 0, camZoom = 1;
+let camTargetX = 0, camTargetY = 0, camTargetZoom = 1;
+let isPanning = false, panStartX = 0, panStartY = 0, panStartCamX = 0, panStartCamY = 0;
+
+// Timeline
+let timelineCutoff = DATE_MAX; // only show memories with dateVal <= this
+let isDraggingTimeline = false;
+
+// Hover / selection
+let hoveredIndex = -1;
+let selectedIndex = -1;
+let hoveredCluster = -1;
+
+// Mouse trail particles
+const dustTrail = [];
+
+// Traveling light particles along edges
+const edgeParticles = constellationLines.map((_, i) => ({
+  progress: Math.random(),
+  speed: 0.0015 + Math.random() * 0.002,
+  size: Math.random() * 1.2 + 0.6,
+  alpha: Math.random() * 0.3 + 0.2,
+}));
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT HANDLERS
+// ═══════════════════════════════════════════════════════════════════════════════
+const starCanvas = document.getElementById('star-canvas');
+
+document.addEventListener('mousemove', e => {
+  mouseX = e.clientX / window.innerWidth;
+  mouseY = 1 - e.clientY / window.innerHeight;
+  mouseClientX = e.clientX;
+  mouseClientY = e.clientY;
+});
+
+// Zoom
+document.getElementById('zoom-in').addEventListener('click', () => { camTargetZoom = Math.min(camTargetZoom * 1.4, 5); });
+document.getElementById('zoom-out').addEventListener('click', () => { camTargetZoom = Math.max(camTargetZoom / 1.4, 0.5); });
+document.getElementById('zoom-reset').addEventListener('click', () => { camTargetZoom = 1; camTargetX = 0; camTargetY = 0; });
+
+starCanvas.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.1 : 0.9;
+  camTargetZoom = Math.max(0.5, Math.min(5, camTargetZoom * factor));
+}, { passive: false });
+
+// Pan
+starCanvas.addEventListener('mousedown', e => {
+  if (e.button === 0 && hoveredIndex < 0) {
+    isPanning = true;
+    panStartX = e.clientX; panStartY = e.clientY;
+    panStartCamX = camTargetX; panStartCamY = camTargetY;
+    starCanvas.style.cursor = 'grabbing';
+  }
+});
+document.addEventListener('mouseup', () => {
+  if (isPanning) {
+    isPanning = false;
+    starCanvas.style.cursor = hoveredIndex >= 0 ? 'pointer' : 'default';
+  }
+});
+document.addEventListener('mousemove', e => {
+  if (isPanning) {
+    camTargetX = panStartCamX + (e.clientX - panStartX) / camZoom;
+    camTargetY = panStartCamY + (e.clientY - panStartY) / camZoom;
+  }
+});
+
+// Click on memory star
+starCanvas.addEventListener('click', e => {
+  if (isPanning) return;
+  if (hoveredIndex >= 0) {
+    selectedIndex = hoveredIndex;
+    showDetailPanel(hoveredIndex);
+  } else {
+    selectedIndex = -1;
+    document.getElementById('detail').classList.remove('visible');
+  }
+});
+
+document.getElementById('dp-close').addEventListener('click', () => {
+  selectedIndex = -1;
+  document.getElementById('detail').classList.remove('visible');
+});
+
+// Timeline drag
+const tlTrack = document.getElementById('tl-track');
+const tlThumb = document.getElementById('tl-thumb');
+const tlFill = document.getElementById('tl-fill');
+
+function updateTimeline(clientX) {
+  const rect = tlTrack.getBoundingClientRect();
+  const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  timelineCutoff = DATE_MIN + pct * (DATE_MAX - DATE_MIN);
+  tlThumb.style.left = (pct * 100) + '%';
+  tlFill.style.width = (pct * 100) + '%';
+}
+
+tlTrack.addEventListener('mousedown', e => {
+  isDraggingTimeline = true;
+  updateTimeline(e.clientX);
+});
+document.addEventListener('mousemove', e => {
+  if (isDraggingTimeline) updateTimeline(e.clientX);
+});
+document.addEventListener('mouseup', () => { isDraggingTimeline = false; });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DETAIL PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+function showDetailPanel(idx) {
+  const mem = memories[idx];
+  const cat = CATEGORIES[mem.category];
+  const cluster = memoryCluster[idx];
+  const panel = document.getElementById('detail');
+
+  document.getElementById('dp-cluster').textContent = cluster >= 0 ? `${CLUSTERS[cluster].name} constellation` : 'Wandering star';
+  document.getElementById('dp-cat').textContent = cat.label;
+  document.getElementById('dp-cat').style.background = cat.bg;
+  document.getElementById('dp-cat').style.color = cat.text;
+  document.getElementById('dp-text').textContent = mem.text;
+  document.getElementById('dp-date').textContent = mem.date + ', 2026';
+
+  const connEl = document.getElementById('dp-connections');
+  connEl.innerHTML = '';
+  const conns = adjacency[idx];
+  if (conns.length > 0) {
+    conns.slice(0, 5).forEach(ci => {
+      const div = document.createElement('div');
+      div.className = 'dp-conn';
+      div.textContent = memories[ci].text;
+      div.addEventListener('click', () => { selectedIndex = ci; showDetailPanel(ci); });
+      connEl.appendChild(div);
+    });
+  } else {
+    const p = document.createElement('div');
+    p.style.cssText = 'font-size:12px;color:var(--text-2);font-style:italic;opacity:0.6';
+    p.textContent = 'This memory stands alone';
+    connEl.appendChild(p);
+  }
+  panel.classList.add('visible');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WebGL NEBULA
+// ═══════════════════════════════════════════════════════════════════════════════
+const nebulaCanvas = document.getElementById('nebula-canvas');
+const gl = nebulaCanvas.getContext('webgl', { alpha: false, antialias: false });
+
+const VERT = `attribute vec2 pos; void main(){ gl_Position=vec4(pos,0,1); }`;
+const FRAG = `
+precision highp float;
+uniform float u_time;
+uniform vec2  u_res;
+uniform vec2  u_mouse;
+// Focus cluster (UV-space center + color)
+uniform vec2  u_focus;
+uniform float u_focusStr;
+uniform vec3  u_focusCol;
+// Hovered star for local brightening
+uniform vec2  u_starFocus;
+uniform float u_starStr;
+
+vec3 hash3(vec3 p){
+  p=vec3(dot(p,vec3(127.1,311.7,74.7)),dot(p,vec3(269.5,183.3,246.1)),dot(p,vec3(113.5,271.9,124.6)));
+  return -1.0+2.0*fract(sin(p)*43758.5453);
+}
+float gnoise(vec3 p){
+  vec3 i=floor(p),f=fract(p);vec3 u=f*f*(3.0-2.0*f);
+  return mix(mix(mix(dot(hash3(i),f),dot(hash3(i+vec3(1,0,0)),f-vec3(1,0,0)),u.x),
+    mix(dot(hash3(i+vec3(0,1,0)),f-vec3(0,1,0)),dot(hash3(i+vec3(1,1,0)),f-vec3(1,1,0)),u.x),u.y),
+    mix(mix(dot(hash3(i+vec3(0,0,1)),f-vec3(0,0,1)),dot(hash3(i+vec3(1,0,1)),f-vec3(1,0,1)),u.x),
+    mix(dot(hash3(i+vec3(0,1,1)),f-vec3(0,1,1)),dot(hash3(i+vec3(1,1,1)),f-vec3(1,1,1)),u.x),u.y),u.z);
+}
+float fbm(vec3 p){float v=0.0,a=0.5;for(int i=0;i<6;i++){v+=a*gnoise(p);p=p*2.0+100.0;a*=0.5;}return v;}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/u_res;
+  vec2 p=(gl_FragCoord.xy-0.5*u_res)/min(u_res.x,u_res.y);
+  float t=u_time;
+
+  p+=(u_mouse-0.5)*0.018;
+
+  float n1=fbm(vec3(p*1.1,t*0.014));
+  float n2=fbm(vec3(p*0.75+3.0,t*0.009));
+
+  vec3 col=vec3(0.005,0.005,0.015);
+
+  // Base nebula
+  vec3 purple=vec3(0.36,0.26,0.60);
+  vec3 teal=vec3(0.16,0.40,0.36);
+  vec3 amber=vec3(0.50,0.36,0.20);
+
+  float neb=smoothstep(-0.2,0.6,n1)*0.55;
+  col+=purple*neb*0.16;
+  col+=teal*smoothstep(0.15,0.7,n2)*0.07;
+
+  // Aurora bands
+  float b1=sin(p.y*2.5+n1*3.0+t*0.028)*0.5+0.5;
+  b1=pow(b1,6.0)*0.13;
+  float b2=sin(p.x*2.0-p.y*1.5+n2*2.5+t*0.018)*0.5+0.5;
+  b2=pow(b2,7.0)*0.07;
+  col+=purple*b1;
+  col+=amber*b2*0.45;
+
+  // Cluster color bleed — soft radial tint around active cluster
+  if(u_focusStr>0.01){
+    vec2 fp=(u_focus-0.5)*vec2(u_res.x/u_res.y,1.0);
+    float fd=length(p-fp);
+    float glow=exp(-fd*fd*4.0)*u_focusStr;
+    col+=u_focusCol*glow*0.25;
+    // Also add a subtle noise-modulated halo
+    col+=u_focusCol*glow*neb*0.15;
+  }
+
+  // Star hover glow — local brightening
+  if(u_starStr>0.01){
+    vec2 sp=(u_starFocus-0.5)*vec2(u_res.x/u_res.y,1.0);
+    float sd=length(p-sp);
+    float sg=exp(-sd*sd*12.0)*u_starStr;
+    col+=vec3(0.45,0.35,0.72)*sg*0.20;
+  }
+
+  // Vignette
+  float vig=1.0-dot(uv-0.5,uv-0.5)*1.7;
+  col*=smoothstep(0.0,0.48,vig);
+  col=col/(col+0.58);
+  col=pow(col,vec3(0.91));
+
+  gl_FragColor=vec4(col,1.0);
+}
+`;
+
+function mkS(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, mkS(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, mkS(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+
+const posA = gl.getAttribLocation(prog, 'pos');
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+
+const uTime      = gl.getUniformLocation(prog, 'u_time');
+const uRes       = gl.getUniformLocation(prog, 'u_res');
+const uMouse     = gl.getUniformLocation(prog, 'u_mouse');
+const uFocus     = gl.getUniformLocation(prog, 'u_focus');
+const uFocusStr  = gl.getUniformLocation(prog, 'u_focusStr');
+const uFocusCol  = gl.getUniformLocation(prog, 'u_focusCol');
+const uStarFocus = gl.getUniformLocation(prog, 'u_starFocus');
+const uStarStr   = gl.getUniformLocation(prog, 'u_starStr');
+
+// Smoothed values for nebula uniforms
+let focusUV = [0.5, 0.5], focusStr = 0, focusStrTarget = 0, focusCol = [0.45, 0.35, 0.72];
+let starUV = [0.5, 0.5], starStr = 0, starStrTarget = 0;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STAR CANVAS
+// ═══════════════════════════════════════════════════════════════════════════════
+const ctx = starCanvas.getContext('2d');
+
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+const CX = () => W() / 2;
+const CY = () => H() / 2;
+const SCALE = () => Math.min(W(), H()) * 1.1;
+
+function starScreen(mem) {
+  const sx = CX() + mem.cx * SCALE() * camZoom + camX;
+  const sy = CY() - mem.cy * SCALE() * camZoom + camY;
+  return { x: sx, y: sy };
+}
+
+// To convert screen pos to UV for shader
+function screenToUV(sx, sy) {
+  return [sx / W(), 1 - sy / H()];
+}
+
+// 3-layer background stars
+const BG_LAYERS = [
+  { count: 200, depthMul: 0.10, sizeMin: 0.2, sizeMax: 0.8, alphaMax: 0.20 },
+  { count: 120, depthMul: 0.25, sizeMin: 0.4, sizeMax: 1.2, alphaMax: 0.35 },
+  { count: 80,  depthMul: 0.50, sizeMin: 0.6, sizeMax: 1.8, alphaMax: 0.55 },
+];
+
+const bgStars = BG_LAYERS.flatMap(layer =>
+  Array.from({ length: layer.count }, () => ({
+    x: Math.random(), y: Math.random(),
+    size: layer.sizeMin + Math.random() * (layer.sizeMax - layer.sizeMin),
+    alpha: Math.random() * layer.alphaMax + 0.05,
+    depthMul: layer.depthMul,
+    speed: Math.random() * 2 + 0.5,
+    phase: Math.random() * Math.PI * 2,
+  }))
+);
+
+// Shooting stars
+let shooters = [];
+function maybeShoot() {
+  if (Math.random() < 0.0025 && shooters.length < 2) {
+    const angle = Math.random() * 0.5 + 0.2;
+    shooters.push({
+      x: Math.random() * W(), y: Math.random() * H() * 0.4,
+      vx: Math.cos(angle) * (5 + Math.random() * 4),
+      vy: Math.sin(angle) * (5 + Math.random() * 4),
+      life: 1.0, decay: 0.007 + Math.random() * 0.005,
+      len: 60 + Math.random() * 50,
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TOOLTIP
+// ═══════════════════════════════════════════════════════════════════════════════
+const tooltip   = document.getElementById('tooltip');
+const ttBadge   = document.getElementById('tt-badge');
+const ttText    = document.getElementById('tt-text');
+const ttDate    = document.getElementById('tt-date');
+
+function updateHover() {
+  if (isPanning || isDraggingTimeline) return;
+  const mx = mouseClientX, my = mouseClientY;
+  let closest = -1, closestDist = 22 / camZoom;
+
+  for (let i = 0; i < memories.length; i++) {
+    if (memories[i].dateVal > timelineCutoff) continue;
+    if (activeFilter && memories[i].category !== activeFilter) continue;
+    const pos = starScreen(memories[i]);
+    const d = Math.hypot(mx - pos.x, my - pos.y);
+    if (d < closestDist) { closest = i; closestDist = d; }
+  }
+
+  hoveredIndex = closest;
+  hoveredCluster = closest >= 0 ? memoryCluster[closest] : -1;
+
+  if (closest >= 0) {
+    const mem = memories[closest];
+    const cat = CATEGORIES[mem.category];
+    const pos = starScreen(mem);
+    ttBadge.textContent = cat.label;
+    ttBadge.style.background = cat.bg;
+    ttBadge.style.color = cat.text;
+    ttText.textContent = mem.text;
+    ttDate.textContent = mem.date + ', 2026';
+    let tx = pos.x + 18, ty = pos.y - 18;
+    if (tx + 310 > W()) tx = pos.x - 310;
+    if (ty < 16) ty = pos.y + 18;
+    if (ty + 140 > H()) ty = H() - 160;
+    tooltip.style.left = tx + 'px';
+    tooltip.style.top = ty + 'px';
+    tooltip.classList.add('visible');
+    starCanvas.style.cursor = 'pointer';
+
+    // Nebula focus on hovered star
+    const uv = screenToUV(pos.x, pos.y);
+    starUV = uv; starStrTarget = 1;
+
+    // Nebula cluster tint
+    if (hoveredCluster >= 0) {
+      const cl = CLUSTERS[hoveredCluster];
+      const labelPos = starScreen(cl.labelPos);
+      focusUV = screenToUV(labelPos.x, labelPos.y);
+      focusCol = cl.nebulaHue.map(c => c / 255);
+      focusStrTarget = 1;
+    }
+  } else {
+    tooltip.classList.remove('visible');
+    starCanvas.style.cursor = isPanning ? 'grabbing' : 'default';
+    starStrTarget = 0;
+    focusStrTarget = 0;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DUST TRAIL
+// ═══════════════════════════════════════════════════════════════════════════════
+let lastDustTime = 0;
+function emitDust(now) {
+  if (now - lastDustTime < 30) return;
+  lastDustTime = now;
+  if (dustTrail.length > 60) return;
+  dustTrail.push({
+    x: mouseClientX + (Math.random() - 0.5) * 4,
+    y: mouseClientY + (Math.random() - 0.5) * 4,
+    vx: (Math.random() - 0.5) * 0.4,
+    vy: (Math.random() - 0.5) * 0.4 - 0.2,
+    life: 1.0,
+    size: Math.random() * 1.5 + 0.5,
+    hue: Math.random() * 30 + 250, // purple range
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RENDER LOOP
+// ═══════════════════════════════════════════════════════════════════════════════
+const startTime = performance.now();
+let revealProgress = 0;
+const REVEAL_MS = 3500;
+
+function resize() {
+  const dpr = Math.min(devicePixelRatio, 2);
+  for (const c of [nebulaCanvas, starCanvas]) {
+    c.width = W() * dpr; c.height = H() * dpr;
+    c.style.width = W() + 'px'; c.style.height = H() + 'px';
+  }
+  gl.viewport(0, 0, nebulaCanvas.width, nebulaCanvas.height);
+  ctx.setTransform(Math.min(devicePixelRatio, 2), 0, 0, Math.min(devicePixelRatio, 2), 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+function frame(now) {
+  const t = (now - startTime) / 1000;
+  revealProgress = Math.min((now - startTime) / REVEAL_MS, 1);
+  const reveal = 1 - Math.pow(1 - revealProgress, 3);
+
+  // Smooth camera
+  camX += (camTargetX - camX) * 0.08;
+  camY += (camTargetY - camY) * 0.08;
+  camZoom += (camTargetZoom - camZoom) * 0.08;
+
+  // Smooth mouse
+  mouseSX += (mouseX - mouseSX) * 0.04;
+  mouseSY += (mouseY - mouseSY) * 0.04;
+
+  // Smooth nebula uniforms
+  focusStr += (focusStrTarget - focusStr) * 0.06;
+  starStr += (starStrTarget - starStr) * 0.08;
+
+  updateHover();
+  emitDust(now);
+
+  // ── WebGL Nebula ──
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(posA);
+  gl.vertexAttribPointer(posA, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform1f(uTime, t);
+  gl.uniform2f(uRes, nebulaCanvas.width, nebulaCanvas.height);
+  gl.uniform2f(uMouse, mouseSX, mouseSY);
+  gl.uniform2f(uFocus, focusUV[0], focusUV[1]);
+  gl.uniform1f(uFocusStr, focusStr);
+  gl.uniform3f(uFocusCol, focusCol[0], focusCol[1], focusCol[2]);
+  gl.uniform2f(uStarFocus, starUV[0], starUV[1]);
+  gl.uniform1f(uStarStr, starStr);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // ── 2D Stars ──
+  ctx.clearRect(0, 0, W(), H());
+
+  const plxX = (mouseSX - 0.5) * 18;
+  const plxY = (mouseSY - 0.5) * 18;
+
+  // Background stars (3 depth layers)
+  for (const s of bgStars) {
+    const tw = Math.sin(t * s.speed + s.phase) * 0.3 + 0.7;
+    const px = s.depthMul * plxX;
+    const py = s.depthMul * plxY;
+    ctx.beginPath();
+    ctx.arc(s.x * W() + px, s.y * H() - py, s.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(210,200,235,${s.alpha * tw})`;
+    ctx.fill();
+  }
+
+  // Shooting stars
+  maybeShoot();
+  for (let i = shooters.length - 1; i >= 0; i--) {
+    const ss = shooters[i];
+    ss.x += ss.vx; ss.y += ss.vy; ss.life -= ss.decay;
+    if (ss.life <= 0) { shooters.splice(i, 1); continue; }
+    const g = ctx.createLinearGradient(ss.x, ss.y, ss.x - ss.vx * ss.len / 5, ss.y - ss.vy * ss.len / 5);
+    g.addColorStop(0, `rgba(220,210,255,${ss.life * 0.8})`);
+    g.addColorStop(0.3, `rgba(184,164,232,${ss.life * 0.35})`);
+    g.addColorStop(1, 'rgba(184,164,232,0)');
+    ctx.beginPath();
+    ctx.moveTo(ss.x, ss.y);
+    ctx.lineTo(ss.x - ss.vx * ss.len / 5, ss.y - ss.vy * ss.len / 5);
+    ctx.strokeStyle = g; ctx.lineWidth = 1.5; ctx.stroke();
+    ctx.beginPath();
+    ctx.arc(ss.x, ss.y, 2, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,250,255,${ss.life * 0.9})`; ctx.fill();
+  }
+
+  // ── Constellation lines ──
+  const activeCluster = selectedIndex >= 0 ? memoryCluster[selectedIndex] : hoveredCluster;
+
+  for (let li = 0; li < constellationLines.length; li++) {
+    const [a, b] = constellationLines[li];
+    // Time filter
+    if (memories[a].dateVal > timelineCutoff || memories[b].dateVal > timelineCutoff) continue;
+    // Category filter
+    if (activeFilter && memories[a].category !== activeFilter && memories[b].category !== activeFilter) continue;
+
+    const pa = starScreen(memories[a]);
+    const pb = starScreen(memories[b]);
+    pa.x += plxX; pa.y -= plxY;
+    pb.x += plxX; pb.y -= plxY;
+
+    // Reveal animation
+    const delay = li / constellationLines.length;
+    const lp = Math.max(0, Math.min(1, (reveal - delay * 0.5) / 0.5));
+    if (lp <= 0) continue;
+
+    // Cluster dimming
+    const lineCluster = memoryCluster[a];
+    const isDimmed = activeCluster >= 0 && lineCluster !== activeCluster && lineCluster >= 0;
+    const dimFactor = isDimmed ? 0.12 : 1;
+
+    const breath = Math.sin(t * 0.5 + a * 0.3) * 0.15 + 0.85;
+    let alpha = 0.10 * lp * breath * dimFactor;
+
+    // Highlight when cluster is active
+    if (activeCluster >= 0 && lineCluster === activeCluster) alpha *= 2.5;
+
+    const ex = pa.x + (pb.x - pa.x) * lp;
+    const ey = pa.y + (pb.y - pa.y) * lp;
+
+    const lg = ctx.createLinearGradient(pa.x, pa.y, ex, ey);
+    lg.addColorStop(0, `rgba(184,164,232,${alpha * 1.4})`);
+    lg.addColorStop(0.5, `rgba(184,164,232,${alpha})`);
+    lg.addColorStop(1, `rgba(184,164,232,${alpha * 0.4})`);
+
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y); ctx.lineTo(ex, ey);
+    ctx.strokeStyle = lg; ctx.lineWidth = isDimmed ? 0.6 : 1; ctx.stroke();
+
+    // ── Traveling light particle along edge ──
+    if (lp >= 1 && !isDimmed) {
+      const ep = edgeParticles[li];
+      ep.progress = (ep.progress + ep.speed) % 1;
+      const epx = pa.x + (pb.x - pa.x) * ep.progress;
+      const epy = pa.y + (pb.y - pa.y) * ep.progress;
+      const epA = Math.sin(ep.progress * Math.PI) * ep.alpha * dimFactor;
+      if (epA > 0.02) {
+        const sg = ctx.createRadialGradient(epx, epy, 0, epx, epy, ep.size * 4);
+        sg.addColorStop(0, `rgba(212,196,255,${epA})`);
+        sg.addColorStop(1, 'rgba(212,196,255,0)');
+        ctx.beginPath();
+        ctx.arc(epx, epy, ep.size * 4, 0, Math.PI * 2);
+        ctx.fillStyle = sg; ctx.fill();
+        ctx.beginPath();
+        ctx.arc(epx, epy, ep.size, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,250,255,${epA * 1.5})`; ctx.fill();
+      }
+    }
+  }
+
+  // ── Memory stars ──
+  for (let i = 0; i < memories.length; i++) {
+    const mem = memories[i];
+    if (mem.dateVal > timelineCutoff) continue;
+
+    const cat = CATEGORIES[mem.category];
+    const [r, g, b] = cat.color;
+    const pos = starScreen(mem);
+    const sx = pos.x + plxX;
+    const sy = pos.y - plxY;
+
+    // Reveal
+    const sd = i / memories.length * 0.6;
+    const sp = Math.max(0, Math.min(1, (reveal - sd) / 0.4));
+    if (sp <= 0) continue;
+
+    // Dim logic: category filter OR cluster focus
+    const mc = memoryCluster[i];
+    const catVisible = !activeFilter || mem.category === activeFilter;
+    const clusterDimmed = activeCluster >= 0 && mc !== activeCluster && mc >= 0;
+    let nodeAlpha = sp;
+    if (!catVisible) nodeAlpha *= 0.08;
+    else if (clusterDimmed) nodeAlpha *= 0.15;
+
+    const isHov = i === hoveredIndex;
+    const isSel = i === selectedIndex;
+    const tw = Math.sin(t * (1.5 + i * 0.1) + i * 1.7) * 0.25 + 0.75;
+    const baseR = isHov ? 5.5 : isSel ? 5 : 2.5 + tw;
+    const size = baseR * sp * (catVisible && !clusterDimmed ? 1 : 0.7);
+
+    // Glow
+    const glowR = (isHov || isSel) ? 38 : 16 + tw * 5;
+    const glowA = ((isHov || isSel) ? 0.30 : 0.08 * tw) * nodeAlpha;
+    const glow = ctx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+    glow.addColorStop(0, `rgba(${r},${g},${b},${glowA})`);
+    glow.addColorStop(0.5, `rgba(${r},${g},${b},${glowA * 0.25})`);
+    glow.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.beginPath(); ctx.arc(sx, sy, glowR, 0, Math.PI * 2); ctx.fillStyle = glow; ctx.fill();
+
+    // Cross flare
+    if (sp > 0.4 && nodeAlpha > 0.3) {
+      const fa = ((isHov || isSel) ? 0.40 : 0.10 * tw) * nodeAlpha;
+      const fl = (isHov || isSel) ? 20 : 7 + tw * 3;
+      ctx.strokeStyle = `rgba(${r},${g},${b},${fa})`;
+      ctx.lineWidth = 0.7;
+      ctx.beginPath(); ctx.moveTo(sx - fl, sy); ctx.lineTo(sx + fl, sy); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(sx, sy - fl); ctx.lineTo(sx, sy + fl); ctx.stroke();
+      // Diagonal flare for hovered/selected
+      if (isHov || isSel) {
+        const dfl = fl * 0.55;
+        ctx.strokeStyle = `rgba(${r},${g},${b},${fa * 0.4})`;
+        ctx.beginPath(); ctx.moveTo(sx - dfl, sy - dfl); ctx.lineTo(sx + dfl, sy + dfl); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sx + dfl, sy - dfl); ctx.lineTo(sx - dfl, sy + dfl); ctx.stroke();
+      }
+    }
+
+    // Core
+    const cg = ctx.createRadialGradient(sx, sy, 0, sx, sy, size);
+    cg.addColorStop(0, `rgba(255,255,255,${0.95 * nodeAlpha})`);
+    cg.addColorStop(0.35, `rgba(${r},${g},${b},${0.9 * nodeAlpha})`);
+    cg.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.beginPath(); ctx.arc(sx, sy, size, 0, Math.PI * 2); ctx.fillStyle = cg; ctx.fill();
+
+    // Ring pulse
+    if (isHov || isSel) {
+      const rp = Math.sin(t * 2.8) * 0.2 + 0.8;
+      ctx.beginPath(); ctx.arc(sx, sy, 12 + rp * 4, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.25 * rp * nodeAlpha})`;
+      ctx.lineWidth = 1; ctx.stroke();
+      ctx.beginPath(); ctx.arc(sx, sy, 20 + rp * 6, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.08 * rp * nodeAlpha})`;
+      ctx.stroke();
+    }
+  }
+
+  // ── Constellation cluster labels ──
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  for (const cl of CLUSTERS) {
+    const pos = starScreen(cl.labelPos);
+    const sx = pos.x + plxX;
+    const sy = pos.y - plxY;
+
+    const isActive = activeCluster >= 0 && CLUSTERS.indexOf(cl) === activeCluster;
+    const isDimmed = activeCluster >= 0 && CLUSTERS.indexOf(cl) !== activeCluster;
+
+    const labelBreath = Math.sin(t * 0.4 + CLUSTERS.indexOf(cl) * 1.1) * 0.15 + 0.85;
+    let labelAlpha = isDimmed ? 0.06 : (isActive ? 0.45 : 0.18);
+    labelAlpha *= labelBreath * reveal;
+
+    ctx.font = 'italic 300 14px "Cormorant Garamond", serif';
+    ctx.fillStyle = `rgba(184,164,232,${labelAlpha})`;
+    ctx.fillText(cl.name, sx, sy);
+  }
+
+  // ── Dust trail ──
+  for (let i = dustTrail.length - 1; i >= 0; i--) {
+    const d = dustTrail[i];
+    d.x += d.vx; d.y += d.vy; d.life -= 0.018;
+    if (d.life <= 0) { dustTrail.splice(i, 1); continue; }
+    const a = d.life * 0.35;
+    const dg = ctx.createRadialGradient(d.x, d.y, 0, d.x, d.y, d.size * 3);
+    dg.addColorStop(0, `rgba(184,164,232,${a})`);
+    dg.addColorStop(1, 'rgba(184,164,232,0)');
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.size * 3, 0, Math.PI * 2); ctx.fillStyle = dg; ctx.fill();
+    ctx.beginPath(); ctx.arc(d.x, d.y, d.size * 0.6, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(220,210,250,${a * 1.2})`; ctx.fill();
+  }
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

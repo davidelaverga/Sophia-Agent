@@ -10,7 +10,7 @@ The handoff is always overwritten, never accumulated (per spec).
 
 import logging
 import tempfile
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anthropic
@@ -112,7 +112,7 @@ def _build_frontmatter(
     SessionStateMiddleware._extract_smart_opener():
         ^smart_opener:\\s*[\"']?(.+?)[\"']?\\s*$
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     date_str = session_date or now.strftime("%Y-%m-%d")
     iso_ts = now.isoformat()
 
@@ -159,7 +159,7 @@ def generate_handoff(
     handoff_path = safe_user_path(USERS_DIR, user_id, "handoffs", "latest.md")
 
     opener = smart_opener_text or "How are you doing today?"
-    session_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    session_date = datetime.now(UTC).strftime("%Y-%m-%d")
 
     # Generate the handoff body via LLM, or use fallback
     handoff_body = _generate_handoff_body(
@@ -235,7 +235,7 @@ def _generate_handoff_body(
     prompt = prompt.replace("{context_mode}", "life")
     prompt = prompt.replace("{ritual_type}", "none")
     prompt = prompt.replace("{turn_count}", str(len(messages)))
-    prompt = prompt.replace("{iso_timestamp}", datetime.now(timezone.utc).isoformat())
+    prompt = prompt.replace("{iso_timestamp}", datetime.now(UTC).isoformat())
     prompt = prompt.replace("{final_tone}", "unknown")
 
     # Append the transcript as additional context

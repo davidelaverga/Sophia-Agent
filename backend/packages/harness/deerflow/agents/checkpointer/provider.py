@@ -129,9 +129,9 @@ def get_checkpointer() -> Checkpointer:
     # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
     # but hasn't been loaded yet
     from deerflow.config.app_config import _app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config
+    from deerflow.config.checkpointer_config import get_checkpointer_config, is_checkpointer_config_initialized
 
-    if _app_config is None:
+    if _app_config is None and not is_checkpointer_config_initialized():
         # Only load config if it hasn't been initialized yet
         # In tests, config may be set directly via set_checkpointer_config()
         try:

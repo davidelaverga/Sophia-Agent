@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "docker.sh"
+
+pytestmark = pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required for docker.sh detection tests")
 
 
 def _detect_mode_with_config(config_content: str) -> str:

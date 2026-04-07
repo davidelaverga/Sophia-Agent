@@ -9,8 +9,11 @@ module level (singleton).
 import logging
 import os
 import threading
+import time
 
 from cachetools import TTLCache
+
+from deerflow.sophia.review_metadata_store import reconcile_review_metadata_entries, upsert_review_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -190,11 +193,15 @@ def add_memories(
 ) -> list[dict]:
     """Write memories to Mem0 for a user session.
 
-    Calls Mem0 SDK client.add() with user_id scoping and full metadata dict.
-    NOTE: agent_id is NOT passed — Mem0 v2 creates a separate namespace for
+    Calls Mem0 SDK client.add() with user_id scoping.
+    NOTE: the installed Mem0 SDK strips metadata from add() requests, so when
+    metadata is provided this wrapper backfills it with per-memory update()
+    calls after creation. This path forces synchronous add() responses so the
+    created memory IDs are available immediately for the metadata backfill.
+    agent_id is NOT passed — Mem0 v2 creates a separate namespace for
     agent-scoped memories that is unreachable from user_id-only searches.
-    Thread-safe: acquires lock around SDK call, then invalidates the user
-    cache so subsequent searches reflect the new data.
+    Thread-safe: acquires lock around SDK call, then invalidates the user cache
+    so subsequent searches reflect the new data.
 
     Returns the result from the SDK (typically a list of memory dicts),
     or an empty list if Mem0 is unavailable or the call fails.
@@ -204,34 +211,269 @@ def add_memories(
         return []
 
     try:
-        # Explicitly pass org_id/project_id to ensure memories land in the
-        # correct project scope (the SDK's _prepare_params should do this
-        # automatically, but being explicit prevents the orphaned-memory
-        # issue seen when the client's init ping hasn't completed yet).
-        # NOTE: Do NOT pass metadata={} to client.add().
-        # Mem0 v2 silently drops memories that include custom metadata.
-        # All context (category, importance, etc.) is embedded in the
-        # memory text by the extraction prompt instead.
         add_kwargs = {
             "messages": messages,
             "user_id": user_id,
+            "async_mode": False,
         }
 
         result = client.add(**add_kwargs)
 
+        normalized_result = _normalize_add_result(result)
+        first_item = normalized_result[0] if normalized_result else None
+        logger.info(
+            "session.finalization mem0_add_response user_id=%s session_id=%s result_type=%s normalized_count=%s first_item_id=%s metadata_keys=%s first_item_keys=%s",
+            user_id,
+            session_id,
+            type(result).__name__,
+            len(normalized_result),
+            first_item.get("id") if isinstance(first_item, dict) else None,
+            sorted(metadata.keys()) if isinstance(metadata, dict) else None,
+            sorted(first_item.keys()) if isinstance(first_item, dict) else None,
+        )
+
+        if metadata:
+            normalized_result = _apply_metadata_updates(
+                client=client,
+                memories=normalized_result,
+                messages=messages,
+                metadata=metadata,
+                user_id=user_id,
+                session_id=session_id,
+            )
+
         # Invalidate cache so searches reflect new memories
         invalidate_user_cache(user_id)
 
-        # Normalize to list
-        if isinstance(result, dict) and "results" in result:
-            return result["results"]
-        if isinstance(result, list):
-            return result
-        return [result] if result else []
+        return normalized_result
 
     except Exception:
         logger.warning("Mem0 add failed for user %s", user_id, exc_info=True)
         return []
+
+
+def _normalize_add_result(result: object) -> list[dict]:
+    if isinstance(result, dict) and "results" in result:
+        nested_results = result["results"]
+        return nested_results if isinstance(nested_results, list) else [nested_results]
+    if isinstance(result, list):
+        return result
+    return [result] if isinstance(result, dict) and result else []
+
+
+def _apply_metadata_updates(
+    *,
+    client,
+    memories: list[dict],
+    messages: list[dict],
+    metadata: dict,
+    user_id: str,
+    session_id: str,
+) -> list[dict]:
+    updated_memories: list[dict] = []
+
+    for memory in memories:
+        memory_text = _extract_memory_text(memory, messages)
+        memory_id = _resolve_memory_id_for_update(
+            client=client,
+            memory=memory,
+            memory_text=memory_text,
+            user_id=user_id,
+            session_id=session_id,
+        )
+
+        upsert_review_metadata(
+            user_id,
+            memory_id=memory_id,
+            content=memory_text,
+            metadata=metadata,
+            session_id=session_id,
+            sync_state="pending",
+        )
+
+        merged_memory = dict(memory) if isinstance(memory, dict) else {}
+        if memory_id:
+            merged_memory["id"] = memory_id
+        if memory_text and not merged_memory.get("memory"):
+            merged_memory["memory"] = memory_text
+        merged_memory["metadata"] = dict(metadata)
+
+        category = metadata.get("category") if isinstance(metadata, dict) else None
+        if category:
+            if merged_memory.get("category") is None:
+                merged_memory["category"] = category
+            if not merged_memory.get("categories"):
+                merged_memory["categories"] = [category]
+
+        if not memory_id:
+            updated_memories.append(merged_memory)
+            continue
+
+        try:
+            logger.info(
+                "session.finalization mem0_update_attempt user_id=%s session_id=%s memory_id=%s metadata_keys=%s",
+                user_id,
+                session_id,
+                memory_id,
+                sorted(metadata.keys()),
+            )
+            updated_memory = _update_memory_metadata_via_rest(
+                client=client,
+                memory_id=memory_id,
+                metadata=metadata,
+            )
+            upsert_review_metadata(
+                user_id,
+                memory_id=memory_id,
+                content=memory_text,
+                metadata=metadata,
+                session_id=session_id,
+                sync_state="synced",
+            )
+        except Exception:
+            logger.warning(
+                "Mem0 metadata update failed for user %s session %s memory %s",
+                user_id,
+                session_id,
+                memory_id,
+                exc_info=True,
+            )
+            upsert_review_metadata(
+                user_id,
+                memory_id=memory_id,
+                content=memory_text,
+                metadata=metadata,
+                session_id=session_id,
+                sync_state="local_only",
+            )
+            updated_memories.append(merged_memory)
+            continue
+
+        if isinstance(updated_memory, dict):
+            merged_memory.update(updated_memory)
+        merged_memory["id"] = memory_id
+        merged_memory["metadata"] = metadata
+        updated_memories.append(merged_memory)
+
+    return updated_memories
+
+
+def _resolve_memory_id_for_update(
+    *,
+    client,
+    memory: dict,
+    memory_text: str | None,
+    user_id: str,
+    session_id: str,
+) -> str | None:
+    if not isinstance(memory, dict):
+        return None
+
+    memory_id = memory.get("id")
+    if memory_id:
+        return memory_id
+
+    resolved_memory_text = memory_text or memory.get("memory") or memory.get("content")
+    if not resolved_memory_text:
+        return None
+
+    for attempt in range(3):
+        try:
+            recent_memories = client.get_all(filters={"user_id": user_id})
+        except Exception:
+            logger.warning(
+                "Mem0 memory-id resolution failed for user %s session %s",
+                user_id,
+                session_id,
+                exc_info=True,
+            )
+            return None
+
+        normalized_recent = _normalize_get_all_result(recent_memories)
+        for recent_memory in reversed(normalized_recent):
+            if not isinstance(recent_memory, dict):
+                continue
+            recent_text = recent_memory.get("memory") or recent_memory.get("content")
+            recent_id = recent_memory.get("id")
+            if recent_id and recent_text == resolved_memory_text:
+                logger.info(
+                    "session.finalization mem0_id_resolved_from_get_all user_id=%s session_id=%s memory_id=%s attempt=%s",
+                    user_id,
+                    session_id,
+                    recent_id,
+                    attempt + 1,
+                )
+                return recent_id
+
+        if attempt < 2:
+            time.sleep(0.25)
+
+    logger.warning(
+        "Mem0 returned no usable id for user %s session %s",
+        user_id,
+        session_id,
+    )
+    return None
+
+
+def _normalize_get_all_result(result: object) -> list[dict]:
+    if isinstance(result, dict) and "results" in result:
+        nested_results = result["results"]
+        return nested_results if isinstance(nested_results, list) else [nested_results]
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def _extract_memory_text(memory: dict, messages: list[dict]) -> str:
+    if isinstance(memory, dict):
+        text = memory.get("memory") or memory.get("content")
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+
+    return ""
+
+
+def _update_memory_metadata_via_rest(*, client, memory_id: str, metadata: dict) -> dict:
+    params = {}
+    if getattr(client, "org_id", None):
+        params["org_id"] = client.org_id
+    if getattr(client, "project_id", None):
+        params["project_id"] = client.project_id
+
+    response = client.client.put(
+        f"/v1/memories/{memory_id}/",
+        json={"metadata": metadata},
+        params=params or None,
+    )
+    response.raise_for_status()
+    result = response.json()
+    return result if isinstance(result, dict) else {}
+
+
+def reconcile_review_metadata_with_mem0(user_id: str) -> int:
+    client = _get_client()
+    if client is None:
+        return 0
+
+    try:
+        result = client.get_all(filters={"user_id": user_id})
+    except Exception:
+        logger.warning("Mem0 reconciliation fetch failed for user %s", user_id, exc_info=True)
+        return 0
+
+    reconciled = reconcile_review_metadata_entries(user_id, _normalize_get_all_result(result))
+    if reconciled:
+        invalidate_user_cache(user_id)
+        logger.info("session.finalization review_metadata_reconciled user_id=%s count=%s", user_id, reconciled)
+    return reconciled
 
 
 def invalidate_user_cache(user_id: str) -> None:

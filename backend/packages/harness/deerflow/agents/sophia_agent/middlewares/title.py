@@ -46,7 +46,6 @@ class SophiaTitleMiddleware(AgentMiddleware[SophiaTitleState]):
         artifact = state.get("current_artifact") or {}
         session_goal = artifact.get("session_goal", "")
         ritual = state.get("active_ritual")
-        ritual_phase = state.get("ritual_phase")
 
         # Build a simple title from available context
         parts = []

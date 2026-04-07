@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "memory_id": "8613e706-3054-4571-9658-b914165170c8",
+      "content": "User experiences significant anxiety about upcoming investor pitch scheduled for 2026-04-07, specifically worried about freezing or blanking out during the presentation.",
+      "content_hash": "702217587f0cc1003f5b7acd2f529a417be98d4d3bd23e5c14a31a71154ddad3",
+      "session_id": "sess-live-fix10-1775513300",
+      "metadata": {
+        "status": "approved"
+      },
+      "updated_at": "2026-04-06T22:47:53.471744+00:00",
+      "sync_state": "reconciled"
+    },
+    {
+      "memory_id": null,
+      "content": "User has an investor pitch scheduled for 2026-04-07.",
+      "content_hash": "64ae9701e9e45e32d34ff5cb0dbc4224dc4620c99996e5a9ebfc4639eadf552d",
+      "session_id": "sess-live-fix10-1775513300",
+      "metadata": {
+        "category": "fact",
+        "importance": "structural",
+        "importance_score": 0.85,
+        "confidence": 0.95,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "work",
+        "target_date": "2026-04-07",
+        "tags": [
+          "work",
+          "commitment"
+        ]
+      },
+      "updated_at": "2026-04-06T22:29:04.276711+00:00",
+      "sync_state": "pending"
+    }
+  ]
+}

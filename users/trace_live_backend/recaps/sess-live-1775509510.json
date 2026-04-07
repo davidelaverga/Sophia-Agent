@@ -1,0 +1,17 @@
+{
+  "session_id": "sess-live-1775509510",
+  "thread_id": "sess-live-1775509510",
+  "session_type": "prepare",
+  "context_mode": "work",
+  "started_at": "2026-04-06T20:53:10.4805452Z",
+  "ended_at": "2026-04-06T21:05:10.528441+00:00",
+  "turn_count": 4,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Protect quiet mornings and ship the hiring plan by Friday.",
+    "reflection_candidate": {
+      "prompt": "What boundary will make the rest of the week easier?"
+    },
+    "status": "ready"
+  }
+}

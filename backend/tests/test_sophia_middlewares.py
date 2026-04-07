@@ -1,13 +1,9 @@
 """Tests for all Sophia middleware components."""
 
-import json
-import os
-import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-
 
 # --- User ID validation and path traversal ---
 
@@ -282,8 +278,8 @@ class TestPlatformContextMiddleware:
 
 class TestUserIdentityMiddleware:
     def test_loads_identity_file(self, tmp_path):
-        from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
         import deerflow.agents.sophia_agent.paths as paths
+        from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
         # Create a temporary user identity file
         user_dir = tmp_path / "test_user"
         user_dir.mkdir(parents=True)
@@ -303,8 +299,8 @@ class TestUserIdentityMiddleware:
             mod.USERS_DIR = original_users_dir
 
     def test_missing_identity_returns_none(self, tmp_path):
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
+        import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
@@ -329,8 +325,8 @@ class TestUserIdentityMiddleware:
 class TestSessionStateMiddleware:
     def test_smart_opener_on_greeting(self, tmp_path):
         """Greeting message → opener delivered as first_turn_instruction."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -357,8 +353,8 @@ class TestSessionStateMiddleware:
 
     def test_substantive_message_gets_context_not_instruction(self, tmp_path):
         """Real content on turn 0 → opener becomes context, not instruction."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -385,8 +381,8 @@ class TestSessionStateMiddleware:
             mod.USERS_DIR = original_users_dir
 
     def test_no_opener_on_turn_1(self, tmp_path):
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -404,8 +400,8 @@ class TestSessionStateMiddleware:
             mod.USERS_DIR = original_users_dir
 
     def test_missing_handoff_returns_none(self, tmp_path):
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -419,8 +415,8 @@ class TestSessionStateMiddleware:
 
     def test_greeting_gets_first_turn_instruction(self, tmp_path):
         """Greeting on turn 0 with handoff file injects <first_turn_instruction>."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -448,8 +444,8 @@ class TestSessionStateMiddleware:
 
     def test_substantive_message_gets_session_context(self, tmp_path):
         """Substantive user message on turn 0 injects <session_context>, not <first_turn_instruction>."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -478,8 +474,8 @@ class TestSessionStateMiddleware:
 
     def test_no_handoff_file_no_error(self, tmp_path):
         """No handoff file on disk — middleware returns None gracefully."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -500,8 +496,8 @@ class TestSessionStateMiddleware:
 
     def test_not_turn_zero_skips(self, tmp_path):
         """turn_count=1 causes the middleware to skip entirely."""
-        import deerflow.agents.sophia_agent.paths as paths
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -1058,8 +1054,9 @@ class TestPromptAssemblyMiddleware:
         return request
 
     def test_assembles_blocks_into_system_message(self):
+        from langchain_core.messages import SystemMessage
+
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        from langchain_core.messages import HumanMessage, SystemMessage
         mw = PromptAssemblyMiddleware()
 
         human_msg = HumanMessage(content="hello")
@@ -1186,6 +1183,7 @@ class TestEmitArtifactTool:
 class TestRetrieveMemoriesTool:
     def test_tool_uses_bound_user_id(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool = make_retrieve_memories_tool("user_A")
@@ -1202,6 +1200,7 @@ class TestRetrieveMemoriesTool:
 
     def test_different_user_ids_produce_different_tools(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool_a = make_retrieve_memories_tool("user_A")
@@ -1217,6 +1216,7 @@ class TestRetrieveMemoriesTool:
 
     def test_no_results_returns_message(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool = make_retrieve_memories_tool("user_test")
@@ -1226,6 +1226,7 @@ class TestRetrieveMemoriesTool:
 
     def test_exception_returns_unavailable(self):
         from unittest.mock import patch
+
         from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 
         tool = make_retrieve_memories_tool("user_test")
@@ -1307,7 +1308,8 @@ class TestMem0CategorySelection:
 
     def test_work_context_sorts_work_memories_first(self):
         from unittest.mock import patch
-        from deerflow.sophia.mem0_client import search_memories, _cache
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
 
         _cache.clear()
 
@@ -1336,7 +1338,8 @@ class TestMem0CategorySelection:
 
     def test_gaming_context_sorts_gaming_memories_first(self):
         from unittest.mock import patch
-        from deerflow.sophia.mem0_client import search_memories, _cache
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
 
         _cache.clear()
 
@@ -1364,7 +1367,8 @@ class TestMem0CategorySelection:
 
     def test_no_context_mode_preserves_original_order(self):
         from unittest.mock import patch
-        from deerflow.sophia.mem0_client import search_memories, _cache
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
 
         _cache.clear()
 
@@ -1387,7 +1391,8 @@ class TestMem0CategorySelection:
 
     def test_cross_context_memories_still_returned(self):
         from unittest.mock import patch
-        from deerflow.sophia.mem0_client import search_memories, _cache
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
 
         _cache.clear()
 

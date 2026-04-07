@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia Journal — Memory River</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --sophia-purple: #b8a4e8;
+    --sophia-glow: #d4c4ff;
+    --sophia-amber: #f2b870;
+    --sophia-teal: #59bf9a;
+    --sophia-rose: #d0829c;
+    --bg: #0a0a0f;
+    --text: #f5f3fa;
+    --text-2: #a8a3b8;
+    --card-bg: rgba(20, 18, 30, 0.80);
+    --border-soft: rgba(184, 164, 232, 0.12);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  canvas { position: fixed; inset: 0; }
+  #bg-canvas { z-index: 0; }
+  #river-canvas { z-index: 1; }
+  #ui-canvas { z-index: 2; pointer-events: none; }
+
+  .header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    padding: 28px 40px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    background: linear-gradient(to bottom, rgba(10, 10, 15, 0.85) 0%, rgba(10, 10, 15, 0.4) 60%, transparent 100%);
+    pointer-events: none;
+  }
+
+  .header h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 300;
+    font-size: 26px;
+    letter-spacing: 0.08em;
+    color: var(--sophia-glow);
+    text-shadow: 0 0 40px rgba(184, 164, 232, 0.3);
+  }
+
+  .header .subtitle {
+    font-size: 13px;
+    color: var(--text-2);
+    letter-spacing: 0.04em;
+    font-weight: 300;
+    margin-top: 4px;
+  }
+
+  .time-labels {
+    position: fixed;
+    bottom: 24px;
+    left: 40px;
+    right: 40px;
+    z-index: 10;
+    display: flex;
+    justify-content: space-between;
+    pointer-events: none;
+    opacity: 0;
+    animation: fadeInUp 800ms ease-out 2s forwards;
+  }
+
+  .time-label {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 13px;
+    color: rgba(184, 164, 232, 0.35);
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  .scroll-hint {
+    position: fixed;
+    bottom: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 10;
+    text-align: center;
+    opacity: 0;
+    animation: fadeInUp 600ms ease-out 3s forwards;
+  }
+
+  .scroll-hint span {
+    font-size: 11px;
+    color: var(--text-2);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .scroll-hint .arrow {
+    display: block;
+    margin: 6px auto 0;
+    font-size: 16px;
+    color: var(--sophia-purple);
+    animation: bobDown 2s ease-in-out infinite;
+  }
+
+  /* Memory detail panel */
+  .memory-panel {
+    position: fixed;
+    right: 40px;
+    top: 50%;
+    transform: translateY(-50%) translateX(20px);
+    z-index: 15;
+    width: 340px;
+    padding: 28px 28px 24px;
+    background: var(--card-bg);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    border: 1px solid var(--border-soft);
+    border-radius: 20px;
+    box-shadow: 
+      0 24px 60px rgba(10, 10, 15, 0.7),
+      0 0 80px rgba(184, 164, 232, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 350ms ease-out, transform 350ms ease-out;
+  }
+
+  .memory-panel.visible {
+    opacity: 1;
+    transform: translateY(-50%) translateX(0);
+    pointer-events: auto;
+  }
+
+  .memory-panel .panel-category {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 16px;
+  }
+
+  .memory-panel .panel-text {
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--text);
+    font-weight: 300;
+    margin-bottom: 16px;
+  }
+
+  .memory-panel .panel-date {
+    font-size: 12px;
+    color: var(--text-2);
+    letter-spacing: 0.02em;
+  }
+
+  .memory-panel .panel-tone {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border-soft);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .tone-bar {
+    flex: 1;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(184, 164, 232, 0.1);
+    position: relative;
+    overflow: hidden;
+  }
+
+  .tone-fill {
+    height: 100%;
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--sophia-purple), var(--sophia-glow));
+    transition: width 600ms ease-out;
+  }
+
+  .tone-value {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 16px;
+    color: var(--sophia-glow);
+    min-width: 28px;
+    text-align: right;
+  }
+
+  .tone-label {
+    font-size: 11px;
+    color: var(--text-2);
+    letter-spacing: 0.04em;
+  }
+
+  @keyframes fadeInUp {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @keyframes bobDown {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(4px); }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+<canvas id="river-canvas"></canvas>
+
+<div class="header">
+  <div>
+    <h1>Memory River</h1>
+    <div class="subtitle">Your journey flows through 42 memories</div>
+  </div>
+</div>
+
+<div class="time-labels">
+  <div class="time-label">March 12</div>
+  <div class="time-label">March 22</div>
+  <div class="time-label">April 1</div>
+  <div class="time-label">Today</div>
+</div>
+
+<div class="scroll-hint">
+  <span>Scroll to navigate time</span>
+  <span class="arrow">↕</span>
+</div>
+
+<div class="memory-panel" id="panel">
+  <div class="panel-category" id="panel-cat"></div>
+  <div class="panel-text" id="panel-text"></div>
+  <div class="panel-date" id="panel-date"></div>
+  <div class="panel-tone">
+    <span class="tone-label">Tone</span>
+    <div class="tone-bar"><div class="tone-fill" id="panel-tone-fill"></div></div>
+    <span class="tone-value" id="panel-tone-val"></span>
+  </div>
+</div>
+
+<script>
+// ─── Data ─────────────────────────────────────────────────────────────────────
+const CATEGORIES = {
+  feeling:      { color: [184, 164, 232], label: '💜 Feeling',      bg: 'rgba(184,164,232,0.15)', text: '#b8a4e8' },
+  decision:     { color: [242, 184, 112], label: '🔥 Decision',     bg: 'rgba(242,184,112,0.15)', text: '#f2b870' },
+  lesson:       { color: [89, 191, 154],  label: '✨ Lesson',       bg: 'rgba(89,191,154,0.15)',  text: '#59bf9a' },
+  relationship: { color: [208, 130, 156], label: '💗 Relationship', bg: 'rgba(208,130,156,0.15)', text: '#d0829c' },
+  fact:         { color: [139, 164, 212], label: '📌 Fact',         bg: 'rgba(139,164,212,0.15)', text: '#8ba4d4' },
+  commitment:   { color: [232, 200, 140], label: '🎯 Commitment',  bg: 'rgba(232,200,140,0.15)', text: '#e8c88c' },
+  pattern:      { color: [168, 140, 210], label: '🔮 Pattern',     bg: 'rgba(168,140,210,0.15)', text: '#a88cd2' },
+  preference:   { color: [190, 170, 220], label: '💎 Preference',  bg: 'rgba(190,170,220,0.15)', text: '#beaadc' },
+};
+
+// Memories ordered chronologically
+const memories = [
+  { text: "Name: Davide. Based in Barcelona. Building a dev tools startup.", category: 'fact', date: 'Mar 12', tone: 2.5 },
+  { text: "Prefers voice sessions in the morning, text in the evening.", category: 'preference', date: 'Mar 15', tone: 2.8 },
+  { text: "Gaming helps me decompress but only for 1 hour max. After that it's avoidance.", category: 'pattern', date: 'Mar 16', tone: 2.2 },
+  { text: "Realized I haven't taken a real day off in 6 weeks.", category: 'lesson', date: 'Mar 18', tone: 1.4 },
+  { text: "Decided to block Sundays completely. No exceptions.", category: 'decision', date: 'Mar 19', tone: 2.0 },
+  { text: "I default to humor when I'm uncomfortable. It's a shield.", category: 'pattern', date: 'Mar 20', tone: 1.8 },
+  { text: "Felt guilty the entire first Sunday off. But slept 9 hours.", category: 'feeling', date: 'Mar 20', tone: 1.5 },
+  { text: "I prefer walking without podcasts — just ambient sound and thoughts.", category: 'preference', date: 'Mar 21', tone: 2.6 },
+  { text: "Noticed I always minimize good news about myself. 'It's not a big deal' reflex.", category: 'pattern', date: 'Mar 22', tone: 1.6 },
+  { text: "Mom asked if I'm eating well. I lied. Need to fix that.", category: 'relationship', date: 'Mar 22', tone: 1.3 },
+  { text: "Felt unexpectedly emotional when Sophia reflected back a pattern I hadn't seen.", category: 'feeling', date: 'Mar 23', tone: 1.8 },
+  { text: "I work better in 3-hour deep blocks, not Pomodoro.", category: 'preference', date: 'Mar 24', tone: 2.5 },
+  { text: "The vent ritual is most useful on Mondays and Thursdays.", category: 'pattern', date: 'Mar 24', tone: 2.4 },
+  { text: "The pitch deck is 80% done. Investor meeting scheduled for April 8th.", category: 'fact', date: 'Mar 25', tone: 3.0 },
+  { text: "Decided to stop checking Slack before 10am — the morning is for creation.", category: 'decision', date: 'Mar 26', tone: 2.8 },
+  { text: "My sister called to check in — first time in two months. It meant more than I expected.", category: 'relationship', date: 'Mar 27', tone: 2.5 },
+  { text: "The guilt faded by the second Sunday. Body remembered what rest feels like.", category: 'feeling', date: 'Mar 27', tone: 2.9 },
+  { text: "Realized that avoiding conflict doesn't protect relationships — it slowly erodes them.", category: 'lesson', date: 'Mar 28', tone: 2.0 },
+  { text: "Felt a kind of quiet pride after shipping the landing page alone.", category: 'feeling', date: 'Mar 28', tone: 3.2 },
+  { text: "Decided to have the difficult conversation with my co-founder about equity split.", category: 'decision', date: 'Mar 29', tone: 2.1 },
+  { text: "Felt genuinely relieved after the conversation, even though it was hard.", category: 'feeling', date: 'Mar 30', tone: 3.0 },
+  { text: "My co-founder Alex actually thanked me for bringing it up first.", category: 'relationship', date: 'Mar 30', tone: 3.3 },
+  { text: "I handle confrontation better when I prepare what I want to say the night before.", category: 'pattern', date: 'Mar 31', tone: 2.8 },
+  { text: "Committed to weekly founder sync — no more letting things build up.", category: 'commitment', date: 'Apr 1', tone: 3.0 },
+  { text: "Started the day with the reset ritual. Felt grounded for the first time this week.", category: 'feeling', date: 'Apr 1', tone: 2.7 },
+  { text: "The preparation ritual (debrief) genuinely helped me process after the equity talk.", category: 'lesson', date: 'Apr 1', tone: 3.1 },
+  { text: "Committed to shipping the MVP by April 15th.", category: 'commitment', date: 'Apr 1', tone: 3.2 },
+  { text: "The investor meeting went better than I prepared for. They want a follow-up.", category: 'fact', date: 'Apr 2', tone: 3.5 },
+  { text: "Felt the imposter syndrome hit hard right after the positive investor feedback.", category: 'feeling', date: 'Apr 2', tone: 1.5 },
+  { text: "Lesson: good things triggering anxiety is a signal, not a verdict.", category: 'lesson', date: 'Apr 3', tone: 2.4 },
+  { text: "Committed to treating the follow-up meeting as practice, not performance.", category: 'commitment', date: 'Apr 3', tone: 2.8 },
+  { text: "Learned that 'I don't know' is a complete answer.", category: 'lesson', date: 'Apr 3', tone: 2.6 },
+  { text: "Wrote the company mission statement. First version that felt true.", category: 'fact', date: 'Apr 4', tone: 3.4 },
+  { text: "The mission is: 'Make the tools we wished existed when we started.'", category: 'fact', date: 'Apr 4', tone: 3.5 },
+  { text: "I underestimate myself when I'm tired. Need to stop making self-assessments after 9pm.", category: 'pattern', date: 'Apr 4', tone: 2.0 },
+  { text: "Alex said 'You carried that meeting' — I'm learning to receive that.", category: 'relationship', date: 'Apr 4', tone: 3.2 },
+  { text: "Felt clarity I haven't felt since the first week of starting the company.", category: 'feeling', date: 'Apr 5', tone: 3.6 },
+  { text: "Decided the product serves indie founders first, enterprises later.", category: 'decision', date: 'Apr 5', tone: 3.3 },
+  { text: "Alex and I are aligned for the first time in months. The mission crystallized it.", category: 'relationship', date: 'Apr 5', tone: 3.5 },
+  { text: "Committed to revisiting the mission statement every quarter.", category: 'commitment', date: 'Apr 6', tone: 3.2 },
+  { text: "There's a version of me that's already good enough. I just keep forgetting.", category: 'lesson', date: 'Apr 6', tone: 3.0 },
+  { text: "The vent ritual is most useful on Mondays and Thursdays.", category: 'pattern', date: 'Apr 6', tone: 2.8 },
+];
+
+// ─── River geometry ───────────────────────────────────────────────────────────
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+
+// The river is a sinusoidal path that flows left-to-right
+// User scrolls to pan the river horizontally
+let scrollOffset = 0;
+const RIVER_LENGTH = 4000; // virtual pixel length
+const MEMORY_SPACING = RIVER_LENGTH / (memories.length + 1);
+
+function riverY(x) {
+  // Main sine wave + harmonics for organic feel
+  const nx = x / RIVER_LENGTH;
+  return H() * 0.5
+    + Math.sin(nx * Math.PI * 3.5) * H() * 0.12
+    + Math.sin(nx * Math.PI * 7.2 + 1.2) * H() * 0.05
+    + Math.sin(nx * Math.PI * 13 + 2.8) * H() * 0.025;
+}
+
+function riverTangent(x) {
+  const dx = 2;
+  const y1 = riverY(x - dx);
+  const y2 = riverY(x + dx);
+  const len = Math.sqrt(dx * dx * 4 + (y2 - y1) * (y2 - y1));
+  return { tx: (dx * 2) / len, ty: (y2 - y1) / len };
+}
+
+// Compute memory positions along the river
+const memoryPositions = memories.map((m, i) => {
+  const riverX = MEMORY_SPACING * (i + 1);
+  const ry = riverY(riverX);
+  // Offset perpendicular to river flow, alternating sides
+  const tang = riverTangent(riverX);
+  const perpX = -tang.ty;
+  const perpY = tang.tx;
+  const side = (i % 3 === 0) ? 0 : ((i % 2 === 0) ? 1 : -1);
+  const dist = 5 + Math.random() * 15;
+  return {
+    riverX,
+    x: riverX,
+    y: ry + perpY * dist * side,
+    offsetX: perpX * dist * side,
+    offsetY: perpY * dist * side,
+  };
+});
+
+// Scroll handling
+document.addEventListener('wheel', e => {
+  scrollOffset += e.deltaY * 1.2;
+  scrollOffset = Math.max(0, Math.min(RIVER_LENGTH - W() * 0.8, scrollOffset));
+}, { passive: true });
+
+// Touch scrolling
+let touchStartX = 0;
+document.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; });
+document.addEventListener('touchmove', e => {
+  const dx = touchStartX - e.touches[0].clientX;
+  scrollOffset += dx * 2;
+  scrollOffset = Math.max(0, Math.min(RIVER_LENGTH - W() * 0.8, scrollOffset));
+  touchStartX = e.touches[0].clientX;
+});
+
+// ─── Background Canvas ────────────────────────────────────────────────────────
+const bgCanvas = document.getElementById('bg-canvas');
+const bgCtx = bgCanvas.getContext('2d');
+
+// Background stars
+const bgStars = Array.from({ length: 200 }, () => ({
+  x: Math.random(), y: Math.random(),
+  size: Math.random() * 1.2 + 0.3,
+  alpha: Math.random() * 0.4 + 0.1,
+  speed: Math.random() * 1.5 + 0.5,
+  phase: Math.random() * Math.PI * 2,
+}));
+
+function drawBackground(t) {
+  bgCtx.fillStyle = '#0a0a0f';
+  bgCtx.fillRect(0, 0, W(), H());
+
+  // Subtle gradient
+  const grad = bgCtx.createRadialGradient(W() * 0.3, H() * 0.3, 0, W() * 0.3, H() * 0.3, H());
+  grad.addColorStop(0, 'rgba(60, 40, 100, 0.06)');
+  grad.addColorStop(1, 'rgba(10, 10, 15, 0)');
+  bgCtx.fillStyle = grad;
+  bgCtx.fillRect(0, 0, W(), H());
+
+  // Stars
+  for (const s of bgStars) {
+    const twinkle = Math.sin(t * s.speed + s.phase) * 0.3 + 0.7;
+    bgCtx.beginPath();
+    bgCtx.arc(s.x * W(), s.y * H(), s.size, 0, Math.PI * 2);
+    bgCtx.fillStyle = `rgba(200, 190, 230, ${s.alpha * twinkle})`;
+    bgCtx.fill();
+  }
+}
+
+// ─── River Canvas ─────────────────────────────────────────────────────────────
+const riverCanvas = document.getElementById('river-canvas');
+const rCtx = riverCanvas.getContext('2d');
+
+// River particles (flow along the river path)
+const PARTICLE_COUNT = 180;
+const riverParticles = Array.from({ length: PARTICLE_COUNT }, () => ({
+  progress: Math.random(), // 0-1 along river
+  lateral: (Math.random() - 0.5) * 60, // perpendicular offset
+  speed: 0.00005 + Math.random() * 0.00012,
+  size: Math.random() * 2 + 0.5,
+  alpha: Math.random() * 0.4 + 0.1,
+  phase: Math.random() * Math.PI * 2,
+  hueShift: Math.random() * 30 - 15,
+}));
+
+let hoveredMemory = -1;
+let smoothScroll = 0;
+
+riverCanvas.addEventListener('mousemove', e => {
+  const mx = e.clientX;
+  const my = e.clientY;
+  let closest = -1;
+  let closestDist = 25;
+
+  for (let i = 0; i < memories.length; i++) {
+    const mp = memoryPositions[i];
+    const sx = mp.x - smoothScroll + W() * 0.15;
+    const sy = mp.y;
+    const dx = mx - sx;
+    const dy = my - sy;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < closestDist) {
+      closest = i;
+      closestDist = dist;
+    }
+  }
+
+  if (closest !== hoveredMemory) {
+    hoveredMemory = closest;
+    const panel = document.getElementById('panel');
+    if (closest >= 0) {
+      const mem = memories[closest];
+      const cat = CATEGORIES[mem.category];
+      document.getElementById('panel-cat').textContent = cat.label;
+      document.getElementById('panel-cat').style.background = cat.bg;
+      document.getElementById('panel-cat').style.color = cat.text;
+      document.getElementById('panel-text').textContent = mem.text;
+      document.getElementById('panel-date').textContent = mem.date + ', 2026';
+      document.getElementById('panel-tone-fill').style.width = (mem.tone / 4 * 100) + '%';
+      document.getElementById('panel-tone-val').textContent = mem.tone.toFixed(1);
+      panel.classList.add('visible');
+      riverCanvas.style.cursor = 'pointer';
+    } else {
+      panel.classList.remove('visible');
+      riverCanvas.style.cursor = 'default';
+    }
+  }
+});
+
+function drawRiver(t) {
+  rCtx.clearRect(0, 0, W(), H());
+
+  // Smooth scroll interpolation
+  smoothScroll += (scrollOffset - smoothScroll) * 0.08;
+  const off = smoothScroll;
+
+  // Draw the river body (wide glowing band)
+  const RIVER_WIDTH = 80;
+  const steps = 200;
+  const stepSize = (W() + 400) / steps;
+
+  // River glow (wider, softer)
+  for (let pass = 0; pass < 3; pass++) {
+    const widthMul = [3.0, 2.0, 1.0][pass];
+    const alpha = [0.02, 0.04, 0.08][pass];
+    
+    rCtx.beginPath();
+    for (let i = 0; i <= steps; i++) {
+      const worldX = off - 200 + i * stepSize;
+      const screenX = worldX - off + W() * 0.15;
+      const ry = riverY(worldX);
+      if (i === 0) rCtx.moveTo(screenX, ry - RIVER_WIDTH * widthMul);
+      else rCtx.lineTo(screenX, ry - RIVER_WIDTH * widthMul);
+    }
+    for (let i = steps; i >= 0; i--) {
+      const worldX = off - 200 + i * stepSize;
+      const screenX = worldX - off + W() * 0.15;
+      const ry = riverY(worldX);
+      rCtx.lineTo(screenX, ry + RIVER_WIDTH * widthMul);
+    }
+    rCtx.closePath();
+    
+    const grad = rCtx.createLinearGradient(0, 0, W(), 0);
+    grad.addColorStop(0, `rgba(100, 80, 180, 0)`);
+    grad.addColorStop(0.1, `rgba(100, 80, 180, ${alpha})`);
+    grad.addColorStop(0.5, `rgba(140, 100, 220, ${alpha * 1.2})`);
+    grad.addColorStop(0.9, `rgba(100, 80, 180, ${alpha})`);
+    grad.addColorStop(1, `rgba(100, 80, 180, 0)`);
+    rCtx.fillStyle = grad;
+    rCtx.fill();
+  }
+
+  // River center line (bright core)
+  rCtx.beginPath();
+  for (let i = 0; i <= steps; i++) {
+    const worldX = off - 200 + i * stepSize;
+    const screenX = worldX - off + W() * 0.15;
+    const ry = riverY(worldX);
+    if (i === 0) rCtx.moveTo(screenX, ry);
+    else rCtx.lineTo(screenX, ry);
+  }
+  rCtx.strokeStyle = 'rgba(184, 164, 232, 0.06)';
+  rCtx.lineWidth = 2;
+  rCtx.stroke();
+
+  // River particles
+  for (const p of riverParticles) {
+    p.progress += p.speed + Math.sin(t + p.phase) * 0.00002;
+    if (p.progress > 1) p.progress -= 1;
+
+    const worldX = p.progress * RIVER_LENGTH;
+    const screenX = worldX - off + W() * 0.15;
+    
+    if (screenX < -50 || screenX > W() + 50) continue;
+    
+    const ry = riverY(worldX);
+    const tang = riverTangent(worldX);
+    const perpX = -tang.ty;
+    const perpY = tang.tx;
+    const lateralOsc = p.lateral + Math.sin(t * 0.5 + p.phase) * 8;
+    
+    const px = screenX + perpX * lateralOsc;
+    const py = ry + perpY * lateralOsc;
+    
+    const twinkle = Math.sin(t * 2 + p.phase) * 0.3 + 0.7;
+    const alpha = p.alpha * twinkle;
+    
+    // Glow
+    const glow = rCtx.createRadialGradient(px, py, 0, px, py, p.size * 4);
+    glow.addColorStop(0, `rgba(184, 164, 232, ${alpha * 0.4})`);
+    glow.addColorStop(1, 'rgba(184, 164, 232, 0)');
+    rCtx.beginPath();
+    rCtx.arc(px, py, p.size * 4, 0, Math.PI * 2);
+    rCtx.fillStyle = glow;
+    rCtx.fill();
+    
+    // Core
+    rCtx.beginPath();
+    rCtx.arc(px, py, p.size, 0, Math.PI * 2);
+    rCtx.fillStyle = `rgba(212, 196, 255, ${alpha})`;
+    rCtx.fill();
+  }
+
+  // Memory orbs
+  for (let i = 0; i < memories.length; i++) {
+    const mem = memories[i];
+    const mp = memoryPositions[i];
+    const cat = CATEGORIES[mem.category];
+    const [r, g, b] = cat.color;
+    
+    const sx = mp.x - off + W() * 0.15;
+    const sy = mp.y;
+    
+    if (sx < -60 || sx > W() + 60) continue;
+    
+    const isHovered = i === hoveredMemory;
+    const breathe = Math.sin(t * 1.2 + i * 0.8) * 0.2 + 0.8;
+    
+    // Connection line to river center
+    const ry = riverY(mp.riverX);
+    rCtx.beginPath();
+    rCtx.moveTo(sx, sy);
+    rCtx.lineTo(sx - mp.offsetX, ry);
+    rCtx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${isHovered ? 0.25 : 0.06})`;
+    rCtx.lineWidth = isHovered ? 1.5 : 0.8;
+    rCtx.stroke();
+
+    // Outer glow
+    const glowR = isHovered ? 40 : 20;
+    const glowA = isHovered ? 0.25 : 0.08 * breathe;
+    const glow = rCtx.createRadialGradient(sx, sy, 0, sx, sy, glowR);
+    glow.addColorStop(0, `rgba(${r}, ${g}, ${b}, ${glowA})`);
+    glow.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, ${glowA * 0.3})`);
+    glow.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+    rCtx.beginPath();
+    rCtx.arc(sx, sy, glowR, 0, Math.PI * 2);
+    rCtx.fillStyle = glow;
+    rCtx.fill();
+
+    // Core orb
+    const coreR = isHovered ? 6 : 3.5;
+    const coreGrad = rCtx.createRadialGradient(sx, sy, 0, sx, sy, coreR);
+    coreGrad.addColorStop(0, `rgba(255, 255, 255, 0.95)`);
+    coreGrad.addColorStop(0.5, `rgba(${r}, ${g}, ${b}, 0.85)`);
+    coreGrad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`);
+    rCtx.beginPath();
+    rCtx.arc(sx, sy, coreR, 0, Math.PI * 2);
+    rCtx.fillStyle = coreGrad;
+    rCtx.fill();
+
+    // Hover ring
+    if (isHovered) {
+      const ringPulse = Math.sin(t * 3) * 0.2 + 0.8;
+      rCtx.beginPath();
+      rCtx.arc(sx, sy, 14 + ringPulse * 3, 0, Math.PI * 2);
+      rCtx.strokeStyle = `rgba(${r}, ${g}, ${b}, ${0.3 * ringPulse})`;
+      rCtx.lineWidth = 1;
+      rCtx.stroke();
+    }
+
+    // Tone indicator (vertical position relative to river center)
+    // Higher tone = higher above river = "rising"
+  }
+
+  // Tone wave overlay (subtle)
+  rCtx.beginPath();
+  rCtx.lineWidth = 1.5;
+  for (let i = 0; i < memories.length; i++) {
+    const mp = memoryPositions[i];
+    const sx = mp.x - off + W() * 0.15;
+    if (sx < -60 || sx > W() + 60) continue;
+    
+    const ry = riverY(mp.riverX);
+    const toneOffset = (memories[i].tone / 4) * -50; // higher tone = higher position
+    
+    if (i === 0 || memoryPositions[i].x - off + W() * 0.15 < -60) {
+      rCtx.moveTo(sx, ry + toneOffset);
+    } else {
+      rCtx.lineTo(sx, ry + toneOffset);
+    }
+  }
+  rCtx.strokeStyle = 'rgba(184, 164, 232, 0.06)';
+  rCtx.stroke();
+}
+
+// ─── Resize & Loop ────────────────────────────────────────────────────────────
+function resize() {
+  const dpr = Math.min(devicePixelRatio, 2);
+  for (const c of [bgCanvas, riverCanvas]) {
+    c.width = W() * dpr;
+    c.height = H() * dpr;
+    c.style.width = W() + 'px';
+    c.style.height = H() + 'px';
+    c.getContext('2d').setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+}
+window.addEventListener('resize', resize);
+resize();
+
+const start = performance.now();
+function frame(now) {
+  const t = (now - start) / 1000;
+  drawBackground(t);
+  drawRiver(t);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

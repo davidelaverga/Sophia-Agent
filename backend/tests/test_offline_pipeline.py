@@ -55,6 +55,7 @@ def _fake_msg(msg_type: str, content: str) -> MagicMock:
 _PATCHES = {
     "trace": "deerflow.sophia.offline_pipeline.write_session_trace",
     "extraction": "deerflow.sophia.offline_pipeline.extract_session_memories",
+    "reconcile": "deerflow.sophia.offline_pipeline.reconcile_review_metadata_with_mem0",
     "smart_opener": "deerflow.sophia.offline_pipeline.generate_smart_opener",
     "handoff": "deerflow.sophia.offline_pipeline.generate_handoff",
     "identity": "deerflow.sophia.offline_pipeline.maybe_update_identity",
@@ -76,6 +77,7 @@ def mock_steps():
     mocks["extraction"].return_value = [
         {"content": "User had a tough day", "category": "feeling", "importance": "potential"},
     ]
+    mocks["reconcile"].return_value = 0
     mocks["smart_opener"].return_value = "How are you feeling today?"
     mocks["identity"].return_value = False
 
@@ -124,6 +126,7 @@ class TestHappyPath:
 
         mock_steps["trace"].assert_called_once()
         mock_steps["extraction"].assert_called_once()
+        mock_steps["reconcile"].assert_called_once_with("user_abc")
         mock_steps["smart_opener"].assert_called_once()
         mock_steps["handoff"].assert_called_once()
         mock_steps["identity"].assert_called_once()
@@ -158,6 +161,19 @@ class TestHappyPath:
         )
 
         mock_steps["identity"].assert_called_once_with("user_abc", memories)
+
+    def test_reconcile_runs_after_extraction(self, mock_steps):
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_reconcile",
+            thread_id="thread_reconcile",
+            thread_state=_make_thread_state(),
+        )
+
+        assert mock_steps["extraction"].call_count == 1
+        assert mock_steps["reconcile"].call_count == 1
 
 
 # ==================================================================

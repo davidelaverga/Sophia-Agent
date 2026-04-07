@@ -6,7 +6,7 @@ realistic state, verifying ordering constraints and crisis fast-path.
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -84,14 +84,14 @@ class TestMiddlewareChainOrdering:
 
     def test_normal_turn_all_middlewares_fire(self, skills_path):
         """All middlewares contribute to state on a normal turn."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
-        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
-        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
-        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 
         middlewares = [
             CrisisCheckMiddleware(),
@@ -133,14 +133,14 @@ class TestMiddlewareChainOrdering:
 
     def test_crisis_fast_path(self, skills_path):
         """Crisis message activates fast-path — only soul.md + crisis_redirect injected."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
-        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
-        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
-        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 
         middlewares = [
             CrisisCheckMiddleware(),
@@ -214,10 +214,10 @@ class TestMiddlewareChainOrdering:
         assert "2-5 sentences" in text_result["system_prompt_blocks"][0]
 
     def test_prompt_assembly_creates_system_message(self, skills_path):
-        """PromptAssemblyMiddleware joins all blocks into a system message via wrap_model_call."""
-        from unittest.mock import MagicMock
+        """PromptAssemblyMiddleware joins all blocks into a system message."""
+        from langchain_core.messages import SystemMessage
+
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        from langchain_core.messages import HumanMessage, SystemMessage
 
         mw = PromptAssemblyMiddleware()
         human_msg = HumanMessage(content="hello")
