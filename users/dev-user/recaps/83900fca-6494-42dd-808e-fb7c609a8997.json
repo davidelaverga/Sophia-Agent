@@ -1,0 +1,17 @@
+{
+  "session_id": "83900fca-6494-42dd-808e-fb7c609a8997",
+  "thread_id": "46ed3f4e-ed3c-4c0a-b4d8-306cf062c00d",
+  "session_type": "prepare",
+  "context_mode": "gaming",
+  "started_at": "2026-04-06T17:41:29.138Z",
+  "ended_at": "2026-04-06T18:05:48.127022+00:00",
+  "turn_count": 33,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Real connection doesn't require reassuring the other person you're connected \u2014 it requires staying honest about what's yours to carry and what's theirs.",
+    "reflection_candidate": {
+      "prompt": "What would it feel like to receive care instead of always circulating it \u2014 to let something flow *toward* you and just say thank you?"
+    },
+    "status": "ready"
+  }
+}

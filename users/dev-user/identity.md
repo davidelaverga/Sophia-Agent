@@ -1,0 +1,17 @@
+## Communication Profile (max 400 chars)
+User responds well to concrete, direct language grounded in their own stated values and past experiences. Reflective mirroring of their philosophy (e.g., "flowing river" language) resonates. Avoid generic encouragement or abstract frameworks. User processes through narrative and situational detail rather than emotional labeling. Prefer: "What happened next?" over "How did that feel?" Direct questions about decisions and actions land better than open-ended reflection prompts.
+
+## Emotional Patterns (max 500 chars)
+More data needed on baseline tone and session trajectories — only 3 recent sessions available. User demonstrates reflective capacity and comfort with nuance (recognizing goal-achievement as a starting point, not endpoint). Processing style appears narrative-driven: works through situations and consequences to reach insight. No confirmed emotional triggers yet. Emerging growth indicator: willingness to examine self-imposed patterns ("I make my own hypothetical roof") suggests increasing capacity for honest self-observation across contexts.
+
+## Life Context Map (max 600 chars)
+**Career/Ambition**: User recently promoted to CTO after 2 years sustained effort. Active tension: achievement revealed a new ceiling rather than endpoint. User recognizes pattern of self-imposed limitations tied to goal-chasing. Currently in transition headspace — processing what the role means versus what they initially thought it would mean. **Entrepreneurship**: User is actively committed to building service-based company. Motivation explicitly tied to reciprocity — wants to help others as they were helped. This is structural priority, not exploratory. **Values/Philosophy**: Operates from generosity principle ("flowing river, blessings must be shared"). Identity draws from being supported by others; wants to replicate that support systematically.
+
+## Session Patterns (max 300 chars)
+Insufficient data on frequency, timing, or ritual preferences. User appears to bring structural life decisions and identity-level patterns to Sophia rather than daily processing. Underlying need (tentative): space to examine ambitious pursuits without external judgment, and to align actions with stated values around helping others.
+
+## What Works (max 400 chars)
+More data needed — only 3 sessions available. No "What Worked / What Didn't" sections in handoffs provided. Preliminary: user engages substantively with their own philosophical language (reciprocity, flow, circulation). Recommend testing concrete scenario work ("If you started the company tomorrow, what's the first decision?") and pattern-naming aligned with their own observed behavior rather than external frameworks.
+
+## Evolution Notes (max 400 chars)
+First identity file creation — no prior baseline to measure against. Current state: user at inflection point. Recent promotion created dissonance between achievement and fulfillment; simultaneously committed to entrepreneurial transition. Recognizes ambition as a pattern worth examining. Growth edge: translating value philosophy (generosity, circulation) into concrete business and life decisions. Watch for: whether CTO role becomes stepping stone or distraction from company-building commitment. Hold loosely.
