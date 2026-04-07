@@ -182,6 +182,40 @@ async function readStoredSessionHighlights(page: Page): Promise<NormalizedHighli
   return normalizeHighlights(raw);
 }
 
+async function waitForSessionUiReady(page: Page): Promise<void> {
+  await page.waitForURL(/\/session(\/|\?|$)/, { timeout: 15_000 }).catch(() => {});
+
+  const headerEndButton = page.locator('button[title="End session"]').first();
+  await expect(headerEndButton).toBeVisible({ timeout: 10_000 });
+
+  await expect.poll(async () => {
+    return await page.evaluate(() => {
+      try {
+        const payload = localStorage.getItem('sophia-session-store');
+        if (!payload) return false;
+
+        const parsed = JSON.parse(payload) as {
+          state?: {
+            session?: {
+              sessionId?: string;
+              isActive?: boolean;
+              status?: string;
+            };
+          };
+        };
+
+        const session = parsed?.state?.session;
+        return Boolean(session?.sessionId && session?.isActive && session?.status === 'active');
+      } catch {
+        return false;
+      }
+    });
+  }, {
+    timeout: 10_000,
+    intervals: [200, 400, 800],
+  }).toBe(true);
+}
+
 async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
   const deadline = Date.now() + 30_000;
 
@@ -230,7 +264,7 @@ async function startFromHomeAndCapture(page: Page): Promise<NormalizedHighlight[
   }
 
   const highlights = await capturePromise;
-  await page.waitForURL(/\/session(\/|\?|$)/, { timeout: 15_000 }).catch(() => {});
+  await waitForSessionUiReady(page);
   return highlights;
 }
 
@@ -242,13 +276,27 @@ async function endSessionAndWaitRequest(page: Page): Promise<void> {
     );
   }, { timeout: 15_000 });
 
+  await waitForSessionUiReady(page);
+
   const headerEndButton = page.locator('button[title="End session"]').first();
   await expect(headerEndButton).toBeVisible({ timeout: 10_000 });
-  await headerEndButton.click();
+  const confirmEndButton = page.locator('nav').getByRole('button', { name: /^end session$/i });
 
-  const confirmEndButton = page.getByRole('button', { name: /^end session$/i }).first();
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await headerEndButton.click();
+    if (await confirmEndButton.isVisible({ timeout: 1_000 }).catch(() => false)) {
+      break;
+    }
+    await page.waitForTimeout(250);
+  }
+
   await expect(confirmEndButton).toBeVisible({ timeout: 5_000 });
   await confirmEndButton.click();
+
+  const leaveAnywayButton = page.getByRole('button', { name: /^leave anyway$/i }).first();
+  if (await leaveAnywayButton.isVisible({ timeout: 1_500 }).catch(() => false)) {
+    await leaveAnywayButton.click();
+  }
 
   await endReq;
 }
