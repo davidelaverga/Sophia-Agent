@@ -79,12 +79,14 @@ describe('useChatRouteExperience utilities', () => {
     const body = buildChatRouteBody({
       conversationId: 'session-123',
       userId: 'user-abc',
+      threadId: 'thread-xyz',
     })
 
     expect(body).toEqual({
       session_id: 'session-123',
       session_type: 'chat',
       context_mode: 'life',
+      thread_id: 'thread-xyz',
       user_id: 'user-abc',
     })
   })
@@ -226,5 +228,62 @@ describe('useChatRouteExperience', () => {
     )
     expect(setAssistantResponseSuppressedChecker).toHaveBeenCalled()
     expect(setOnUserTranscriptHandler).toHaveBeenCalled()
+  })
+
+  it('reuses the active thread when it belongs to the current conversation', async () => {
+    const sendChatMessage = vi.fn(async () => undefined)
+
+    useCompanionRuntimeMock.mockReturnValue({
+      routeProfile: { id: 'chat' },
+      chatRuntime: {
+        chatMessages: [],
+        sendChatMessage,
+        chatStatus: 'ready',
+        chatError: undefined,
+        setChatMessages: vi.fn(),
+        stopStreaming: vi.fn(),
+      },
+      streamContract: {
+        handleDataPart: vi.fn(),
+        handleFinish: vi.fn(),
+        markStreamTurnStarted: vi.fn(),
+      },
+      artifactsRuntime: {},
+      voiceRuntime: {
+        voiceState: {
+          stage: 'idle',
+          hasRetryableVoiceTurn: () => false,
+          retryLastVoiceTurn: async () => false,
+          resetVoiceState: vi.fn(),
+        },
+        setAssistantResponseSuppressedChecker: vi.fn(),
+        setOnUserTranscriptHandler: vi.fn(),
+      },
+    })
+
+    useChatStore.setState({ conversationId: 'session-ctx', composerValue: 'keep context' })
+    useMessageMetadataStore.setState({
+      metadataByMessage: {},
+      currentThreadId: 'thread-ctx',
+      currentSessionId: 'session-ctx',
+      currentRunId: null,
+      emotionalWeather: null,
+    })
+
+    renderHook(() => useChatRouteExperience())
+
+    await act(async () => {
+      await useChatStore.getState().sendMessage()
+    })
+
+    expect(sendChatMessage).toHaveBeenCalledWith(
+      { text: 'keep context' },
+      {
+        body: expect.objectContaining({
+          session_id: 'session-ctx',
+          thread_id: 'thread-ctx',
+        }),
+      },
+    )
   })
 })

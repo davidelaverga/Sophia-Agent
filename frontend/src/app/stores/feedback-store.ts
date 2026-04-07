@@ -13,6 +13,14 @@ import { logger } from '../lib/error-logger';
 import { queueFeedback } from '../lib/offline-queue';
 import type { FeedbackType, MessageFeedback } from '../types/sophia-ui-message';
 
+export interface SessionFeedbackEntry {
+  session_id: string;
+  rating: 1 | 2 | 3 | 4 | 5;
+  feeling?: string;
+  message?: string;
+  created_at: string;
+}
+
 // =============================================================================
 // STORE INTERFACE
 // =============================================================================
@@ -20,6 +28,9 @@ import type { FeedbackType, MessageFeedback } from '../types/sophia-ui-message';
 interface FeedbackState {
   // Feedback indexed by message_id
   feedbackByMessage: Record<string, FeedbackType>;
+
+  // End-of-session feedback indexed by session_id
+  sessionFeedbackBySession: Record<string, SessionFeedbackEntry>;
   
   // Queue of feedback to sync to backend
   pendingSync: MessageFeedback[];
@@ -28,6 +39,8 @@ interface FeedbackState {
   setFeedback: (messageId: string, feedback: FeedbackType) => void;
   getFeedback: (messageId: string) => FeedbackType | undefined;
   clearFeedback: (messageId: string) => void;
+  setSessionFeedback: (entry: SessionFeedbackEntry) => void;
+  getSessionFeedback: (sessionId: string) => SessionFeedbackEntry | undefined;
   
   // Sync actions
   markSynced: (messageIds: string[]) => void;
@@ -42,6 +55,7 @@ export const useFeedbackStore = create<FeedbackState>()(
   persist(
     (set, get) => ({
       feedbackByMessage: {},
+      sessionFeedbackBySession: {},
       pendingSync: [],
       
       setFeedback: (messageId, feedback) => {
@@ -81,6 +95,19 @@ export const useFeedbackStore = create<FeedbackState>()(
           };
         });
       },
+
+      setSessionFeedback: (entry) => {
+        set((state) => ({
+          sessionFeedbackBySession: {
+            ...state.sessionFeedbackBySession,
+            [entry.session_id]: entry,
+          },
+        }));
+      },
+
+      getSessionFeedback: (sessionId) => {
+        return get().sessionFeedbackBySession[sessionId];
+      },
       
       markSynced: (messageIds) => {
         set((state) => ({
@@ -98,6 +125,7 @@ export const useFeedbackStore = create<FeedbackState>()(
       name: 'sophia.feedback.v1',
       partialize: (state) => ({
         feedbackByMessage: state.feedbackByMessage,
+        sessionFeedbackBySession: state.sessionFeedbackBySession,
         pendingSync: state.pendingSync,
       }),
     }

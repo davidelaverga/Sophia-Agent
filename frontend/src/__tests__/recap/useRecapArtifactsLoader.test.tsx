@@ -1,12 +1,27 @@
 import { act, renderHook } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   clearRecentSessionEndHint,
   getRecentSessionEndHint,
   markRecentSessionEnd,
 } from '../../app/lib/recent-session-end';
-import { useRecapArtifactsLoader } from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
+import {
+  hydrateStoredArtifactsWithRecentMemories,
+  useRecapArtifactsLoader,
+} from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
+
+const markRecapViewedMock = vi.fn();
+const getSessionHistoryEntryMock = vi.fn();
+
+vi.mock('../../app/stores/session-history-store', () => ({
+  useSessionHistoryStore: {
+    getState: () => ({
+      markRecapViewed: markRecapViewedMock,
+      getSession: getSessionHistoryEntryMock,
+    }),
+  },
+}));
 
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
@@ -29,7 +44,13 @@ describe('useRecapArtifactsLoader', () => {
     localStorage.clear();
     clearRecentSessionEndHint();
     vi.clearAllMocks();
+    getSessionHistoryEntryMock.mockReturnValue(undefined);
     vi.useRealTimers();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => new AbortController().signal);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('treats a just-ended 404 as processing and retries until recap artifacts arrive', async () => {
@@ -133,6 +154,114 @@ describe('useRecapArtifactsLoader', () => {
       expect.objectContaining({ takeaway: 'A clean ending still counts.' }),
     );
     expect(result.current.status).toBe('ready');
+  });
+
+  it('hydrates missing memory candidates from the recent memory review queue', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: 'sess-memory-review',
+          started_at: '2026-03-03T19:46:00.000Z',
+          ended_at: '2026-03-03T20:00:00.000Z',
+          takeaway: 'You found the cleaner thread under the noise.',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [
+            {
+              id: '05941898-bd0b-4d01-bcd1-9577ca94c6bc',
+              text: 'User was promoted to CTO after 2 years of sustained effort.',
+              category: 'fact',
+              created_at: '2026-03-03T19:52:00.000Z',
+            },
+          ],
+          count: 1,
+          fallbackApplied: true,
+        }),
+      );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-memory-review',
+        artifacts: null,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/memory/recent?status=pending_review&session_id=sess-memory-review&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'sess-memory-review',
+      expect.objectContaining({
+        takeaway: 'You found the cleaner thread under the noise.',
+        memoryCandidates: [
+          expect.objectContaining({
+            id: '05941898-bd0b-4d01-bcd1-9577ca94c6bc',
+            text: 'User was promoted to CTO after 2 years of sustained effort.',
+          }),
+        ],
+      }),
+    );
+    expect(result.current.status).toBe('ready');
+  });
+
+  it('hydrates stored recap artifacts that were persisted before memories arrived', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        memories: [
+          {
+            id: 'candidate-memory-1',
+            text: 'User wants to protect quiet mornings for deep work.',
+            category: 'preference',
+            created_at: '2026-03-03T20:04:00.000Z',
+          },
+        ],
+        count: 1,
+        fallbackApplied: true,
+      }),
+    );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const hydrated = await hydrateStoredArtifactsWithRecentMemories(
+      {
+        sessionId: 'sess-stored-artifacts',
+        sessionType: 'debrief',
+        contextMode: 'work',
+        startedAt: '2026-03-03T19:46:00.000Z',
+        endedAt: '2026-03-03T20:00:00.000Z',
+        takeaway: 'The quieter plan was the real plan.',
+        status: 'ready',
+        memoryCandidates: [],
+      },
+      'sess-stored-artifacts',
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/memory/recent?status=pending_review&session_id=sess-stored-artifacts&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(hydrated).toEqual(
+      expect.objectContaining({
+        takeaway: 'The quieter plan was the real plan.',
+        memoryCandidates: [
+          expect.objectContaining({
+            id: 'candidate-memory-1',
+            text: 'User wants to protect quiet mornings for deep work.',
+          }),
+        ],
+      }),
+    );
   });
 
   it('keeps stale missing recaps as not found', async () => {

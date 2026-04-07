@@ -129,6 +129,31 @@ async function fetchStreamCredentials(
   }
 }
 
+async function requestVoiceDisconnect(
+  userId: string,
+  credentials: StreamVoiceCredentials,
+  options: { keepalive?: boolean } = {},
+): Promise<void> {
+  if (!credentials.sessionId) return
+
+  const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/disconnect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      call_id: credentials.callId,
+      session_id: credentials.sessionId,
+    }),
+    keepalive: options.keepalive,
+  })
+
+  if (res.ok) {
+    return
+  }
+
+  const body = await res.text().catch(() => "")
+  throw new Error(`Voice disconnect failed (${res.status}): ${body}`)
+}
+
 function resolveVoiceRitual(presetType: PresetType | null): string | null {
   switch (presetType) {
     case "prepare":
@@ -168,17 +193,25 @@ export function useStreamVoiceSession(
   const destroyedRef = useRef(false)
   const errorStageLockRef = useRef(false)
   const isSophiaReadyRef = useRef(false)
+  const credentialsRef = useRef<StreamVoiceCredentials | null>(null)
+  const disconnectRequestKeyRef = useRef<string | null>(null)
   const onArtifactsRef = useRef(onArtifacts)
   const onUserTranscriptRef = useRef(onUserTranscript)
   const onAssistantResponseRef = useRef(onAssistantResponse)
   const sessionIdRef = useRef(sessionId)
 
   // Keep refs current without re-binding effects
+  useEffect(() => { credentialsRef.current = credentials }, [credentials])
   useEffect(() => { onArtifactsRef.current = onArtifacts }, [onArtifacts])
   useEffect(() => { onUserTranscriptRef.current = onUserTranscript }, [onUserTranscript])
   useEffect(() => { onAssistantResponseRef.current = onAssistantResponse }, [onAssistantResponse])
   useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
   useEffect(() => { isSophiaReadyRef.current = isSophiaReady }, [isSophiaReady])
+  useEffect(() => {
+    if (credentials?.callId && credentials?.sessionId) {
+      disconnectRequestKeyRef.current = null
+    }
+  }, [credentials?.callId, credentials?.sessionId])
 
   // --- Platform signal ------------------------------------------------------
   const platform = usePlatformSignal()
@@ -300,6 +333,39 @@ export function useStreamVoiceSession(
       settlePresence,
       setVoiceFailed,
     ],
+  )
+
+  const requestCurrentVoiceDisconnect = useCallback(
+    async (options: { keepalive?: boolean } = {}) => {
+      const activeCredentials = credentialsRef.current
+      if (!userId || !activeCredentials?.sessionId) {
+        return
+      }
+
+      const requestKey = `${activeCredentials.callId}:${activeCredentials.sessionId}`
+      if (disconnectRequestKeyRef.current === requestKey) {
+        return
+      }
+
+      disconnectRequestKeyRef.current = requestKey
+
+      try {
+        await requestVoiceDisconnect(userId, activeCredentials, options)
+      } catch (err) {
+        disconnectRequestKeyRef.current = null
+        logger.warn("Voice disconnect failed", {
+          component: "StreamVoiceSession",
+          action: "requestVoiceDisconnect",
+          metadata: {
+            callId: activeCredentials.callId,
+            voiceAgentSessionId: activeCredentials.sessionId,
+            keepalive: options.keepalive ?? false,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        })
+      }
+    },
+    [userId],
   )
 
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
@@ -653,6 +719,7 @@ export function useStreamVoiceSession(
         sessionId: sessionIdRef.current ?? null,
       },
     })
+    await requestCurrentVoiceDisconnect()
     try {
       await leave()
     } catch {
@@ -686,6 +753,7 @@ export function useStreamVoiceSession(
         sessionId: sessionIdRef.current ?? null,
       },
     })
+    void requestCurrentVoiceDisconnect()
     // Leave the call — Voice Agent detects disconnect as barge-in
     leave().catch(() => {})
     errorStageLockRef.current = false
@@ -716,6 +784,7 @@ export function useStreamVoiceSession(
         sessionId: sessionIdRef.current ?? null,
       },
     })
+    void requestCurrentVoiceDisconnect()
     leave().catch(() => {})
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
@@ -733,12 +802,13 @@ export function useStreamVoiceSession(
   useEffect(() => {
     return () => {
       destroyedRef.current = true
+      void requestCurrentVoiceDisconnect({ keepalive: true })
       if (thinkingTimeoutRef.current) {
         clearTimeout(thinkingTimeoutRef.current)
       }
       clearStartupReadyTimeout()
     }
-  }, [clearStartupReadyTimeout])
+  }, [clearStartupReadyTimeout, requestCurrentVoiceDisconnect])
 
   return {
     stage,

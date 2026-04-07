@@ -95,11 +95,13 @@ export function mapRouteMessagesToChatMessages(
 export function buildChatRouteBody(params: {
   conversationId: string
   userId?: string
+  threadId?: string
 }): Record<string, unknown> {
   return {
     session_id: params.conversationId,
     session_type: "chat",
     context_mode: "life",
+    ...(params.threadId ? { thread_id: params.threadId } : {}),
     ...(params.userId ? { user_id: params.userId } : {}),
   }
 }
@@ -163,6 +165,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
   const setCurrentContext = useMessageMetadataStore((state) => state.setCurrentContext)
   const setMessageMetadata = useMessageMetadataStore((state) => state.setMessageMetadata)
   const activeThreadId = useMessageMetadataStore((state) => state.currentThreadId || undefined)
+  const activeThreadSessionId = useMessageMetadataStore((state) => state.currentSessionId || undefined)
   const showToast = useUiStore((state) => state.showToast)
   const showUsageLimitModal = useUsageLimitStore((state) => state.showModal)
   const recordConnectivityFailure = useConnectivityStore((state) => state.recordFailure)
@@ -264,6 +267,10 @@ export function useChatRouteExperience(): ChatRouteExperience {
       useChatStore.setState({ conversationId: resolvedConversationId })
     }
 
+    const matchingThreadId = activeThreadSessionId === resolvedConversationId
+      ? activeThreadId
+      : undefined
+
     lastUserTextRef.current = text
     runtimeRefs.current.markStreamTurnStarted(Date.now())
 
@@ -273,10 +280,11 @@ export function useChatRouteExperience(): ChatRouteExperience {
         body: buildChatRouteBody({
           conversationId: resolvedConversationId,
           userId: user?.id,
+          threadId: matchingThreadId,
         }),
       }
     )
-  }, [user?.id])
+  }, [activeThreadId, activeThreadSessionId, user?.id])
 
   const routeRetry = useCallback(async () => {
     const currentState = useChatStore.getState()

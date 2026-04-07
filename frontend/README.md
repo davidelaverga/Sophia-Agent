@@ -67,10 +67,20 @@ pnpm start
 Key environment variables (see `.env.example` for full list):
 
 ```bash
-# Backend API URLs (optional, uses nginx proxy by default)
-NEXT_PUBLIC_BACKEND_BASE_URL="http://localhost:8001"
-# LangGraph API URLs (optional, uses nginx proxy by default)
+# Frontend auth
+BETTER_AUTH_URL="http://localhost:3000"
+
+# Backend and gateway URLs for local development
+BACKEND_API_URL="http://localhost:8000"
+NEXT_PUBLIC_API_URL="http://localhost:8000"
+NEXT_PUBLIC_GATEWAY_URL="http://localhost:8001"
+
+# LangGraph URL for chat streaming
 NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:2026/api/langgraph"
+
+# Dev-only auth bypass
+NEXT_PUBLIC_DEV_BYPASS_AUTH=true
+NEXT_PUBLIC_SOPHIA_USER_ID=dev-user
 ```
 
 ## Project Structure

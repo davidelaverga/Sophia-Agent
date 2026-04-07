@@ -482,9 +482,41 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("idle")
   })
 
-  it("bargeIn leaves call synchronously and resets to idle", () => {
-    mockCallingState = CallingState.JOINED
+  it("stopTalking requests voice disconnect for the active session", async () => {
+    mockCall = makeCallMock()
+
     const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    await act(async () => {
+      await result.current.stopTalking()
+    })
+
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/sophia/user-1/voice/disconnect",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+        }),
+      }),
+    )
+  })
+
+  it("bargeIn leaves call synchronously and resets to idle", async () => {
+    mockCallingState = CallingState.JOINED
+    mockCall = makeCallMock()
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
 
     act(() => {
       result.current.bargeIn()
@@ -492,6 +524,37 @@ describe("useStreamVoiceSession", () => {
 
     expect(mockLeave).toHaveBeenCalled()
     expect(result.current.stage).toBe("idle")
+  })
+
+  it("bargeIn requests voice disconnect for the active session", async () => {
+    mockCall = makeCallMock()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    act(() => {
+      result.current.bargeIn()
+    })
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      "/api/sophia/user-1/voice/disconnect",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+        }),
+      }),
+    )
   })
 
   it("resetVoiceState clears all state", async () => {

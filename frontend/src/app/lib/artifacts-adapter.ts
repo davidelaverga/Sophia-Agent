@@ -64,7 +64,7 @@ export function mapBackendArtifactsToRecapV1(
   );
   
   // Determine status
-  const status = normalizeStatus(payload.status, takeaway);
+  const status = normalizeStatus(payload.status, takeaway, reflectionCandidate, memoryCandidates);
   
   const result = {
     sessionId: payload.session_id || sessionId,
@@ -202,7 +202,9 @@ function normalizeMemoryCandidate(
  */
 function normalizeStatus(
   rawStatus?: string,
-  takeaway?: string
+  takeaway?: string,
+  reflectionCandidate?: RecapArtifactsV1['reflectionCandidate'],
+  memoryCandidates: MemoryCandidateV1[] = []
 ): RecapArtifactsV1['status'] {
   if (rawStatus === 'processing' || rawStatus === 'pending') {
     return 'processing';
@@ -212,8 +214,7 @@ function normalizeStatus(
     return 'unavailable';
   }
   
-  // If we have a takeaway, consider it ready
-  if (takeaway) {
+  if (takeaway || reflectionCandidate?.prompt || memoryCandidates.length > 0) {
     return 'ready';
   }
   

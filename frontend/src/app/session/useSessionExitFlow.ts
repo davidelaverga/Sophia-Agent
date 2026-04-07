@@ -11,6 +11,7 @@ import { mapBackendArtifactsToRecapV1 } from '../lib/artifacts-adapter';
 import { errorCopy } from '../lib/error-copy';
 import { logger } from '../lib/error-logger';
 import { markRecentSessionEnd } from '../lib/recent-session-end';
+import type { RecapArtifactsV1 } from '../lib/recap-types';
 import { teardownSessionClientState } from '../lib/session-teardown';
 import { useRecapStore } from '../stores/recap-store';
 import { useSessionHistoryStore } from '../stores/session-history-store';
@@ -129,6 +130,33 @@ function serializeLiveArtifactsForSessionEnd(
   };
 }
 
+function mergeRecapArtifacts(
+  primary: RecapArtifactsV1 | null,
+  fallback: RecapArtifactsV1 | null,
+): RecapArtifactsV1 | null {
+  if (!primary) {
+    return fallback;
+  }
+
+  if (!fallback) {
+    return primary;
+  }
+
+  return {
+    ...primary,
+    startedAt: primary.startedAt ?? fallback.startedAt,
+    endedAt: primary.endedAt ?? fallback.endedAt,
+    takeaway: primary.takeaway ?? fallback.takeaway,
+    reflectionCandidate: primary.reflectionCandidate ?? fallback.reflectionCandidate,
+    memoryCandidates: primary.memoryCandidates?.length
+      ? primary.memoryCandidates
+      : fallback.memoryCandidates,
+    status: primary.status === 'ready' || fallback.status === 'ready'
+      ? 'ready'
+      : primary.status,
+  };
+}
+
 function serializeSessionMessages(messages?: ExitSessionMessage[]): NonNullable<import('../types/session').SessionEndRequest['messages']> {
   if (!Array.isArray(messages)) {
     return [];
@@ -240,7 +268,8 @@ export function useSessionExitFlow({
     const startedAt = sessionStartedAt || new Date().toISOString();
     const presetType = sessionPresetType || 'open';
     const contextMode = sessionContextMode || 'life';
-    const shouldOfferDebrief = presetType !== 'debrief';
+    // Session exit should always continue into the recap feedback flow.
+    const shouldOfferDebrief = false;
     const serializedMessages = serializeSessionMessages(messages);
     const serializedArtifacts = serializeLiveArtifactsForSessionEnd(currentArtifacts);
 
@@ -282,7 +311,10 @@ export function useSessionExitFlow({
           currentArtifacts,
         });
 
-        const resolvedRecapArtifacts = mappedArtifactsFromResponse ?? mappedArtifactsFromLiveSession;
+        const resolvedRecapArtifacts = mergeRecapArtifacts(
+          mappedArtifactsFromResponse,
+          mappedArtifactsFromLiveSession,
+        );
 
         useSessionHistoryStore.getState().addSession({
           sessionId: recapSessionId,

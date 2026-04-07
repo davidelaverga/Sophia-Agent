@@ -23,6 +23,122 @@ interface UseRecapArtifactsLoaderResult {
   reload: () => void;
 }
 
+interface RecentMemoriesResponse {
+  memories?: Array<{
+    id?: string;
+    text?: string;
+    category?: string;
+    created_at?: string;
+    confidence?: number;
+    reason?: string;
+  }>;
+}
+
+function buildArtifactsPayloadFromStore(
+  artifacts: RecapArtifactsV1,
+  sessionId: string,
+): Record<string, unknown> {
+  return {
+    session_id: artifacts.sessionId || sessionId,
+    session_type: artifacts.sessionType,
+    context_mode: artifacts.contextMode,
+    started_at: artifacts.startedAt,
+    ended_at: artifacts.endedAt,
+    takeaway: artifacts.takeaway,
+    reflection_candidate: artifacts.reflectionCandidate,
+    memory_candidates: artifacts.memoryCandidates?.map((candidate) => ({
+      id: candidate.id,
+      text: candidate.text,
+      memory: candidate.memory,
+      category: candidate.category,
+      created_at: candidate.created_at,
+      confidence: candidate.confidence,
+      reason: candidate.reason,
+    })),
+    status: artifacts.status,
+  };
+}
+
+export async function hydrateStoredArtifactsWithRecentMemories(
+  artifacts: RecapArtifactsV1,
+  sessionId: string,
+  historyEntry?: { startedAt?: string; endedAt?: string },
+): Promise<RecapArtifactsV1 | null> {
+  const hydratedStoredPayload = await hydratePayloadWithRecentMemories(
+    {
+      ...buildArtifactsPayloadFromStore(artifacts, sessionId),
+      started_at: artifacts.startedAt || historyEntry?.startedAt,
+      ended_at: artifacts.endedAt || historyEntry?.endedAt,
+    },
+    sessionId,
+  );
+
+  return mapBackendArtifactsToRecapV1(hydratedStoredPayload, sessionId);
+}
+
+async function hydratePayloadWithRecentMemories(
+  payload: Record<string, unknown> | null,
+  sessionId: string,
+): Promise<Record<string, unknown> | null> {
+  if (!payload) {
+    return null;
+  }
+
+  if (Array.isArray(payload.memory_candidates) && payload.memory_candidates.length > 0) {
+    return payload;
+  }
+
+  const params = new URLSearchParams({
+    status: 'pending_review',
+    session_id: sessionId,
+  });
+
+  if (typeof payload.started_at === 'string') {
+    params.set('started_at', payload.started_at);
+  }
+
+  if (typeof payload.ended_at === 'string') {
+    params.set('ended_at', payload.ended_at);
+  }
+
+  try {
+    const response = await fetch(`/api/memory/recent?${params.toString()}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return payload;
+    }
+
+    const recentMemories = await response.json() as RecentMemoriesResponse;
+    if (!Array.isArray(recentMemories.memories) || recentMemories.memories.length === 0) {
+      return payload;
+    }
+
+    return {
+      ...payload,
+      memory_candidates: recentMemories.memories.map((memory) => ({
+        ...(memory.id ? { id: memory.id } : {}),
+        text: memory.text,
+        category: memory.category,
+        ...(memory.created_at ? { created_at: memory.created_at } : {}),
+        ...(typeof memory.confidence === 'number' ? { confidence: memory.confidence } : {}),
+        ...(memory.reason ? { reason: memory.reason } : {}),
+      })),
+    };
+  } catch (error) {
+    logger.logError(error, {
+      component: 'Recap',
+      action: 'fetch_recent_memories',
+    });
+    return payload;
+  }
+}
+
 export function useRecapArtifactsLoader({
   sessionId,
   artifacts,
@@ -59,9 +175,32 @@ export function useRecapArtifactsLoader({
       };
 
       if (artifacts) {
-        if (isRecentEndedSession) {
+        const hasStoredMemories = Array.isArray(artifacts.memoryCandidates) && artifacts.memoryCandidates.length > 0;
+
+        if (!hasStoredMemories) {
+          const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
+          const hydratedStoredArtifacts = await hydrateStoredArtifactsWithRecentMemories(
+            artifacts,
+            sessionId,
+            historyEntry,
+          );
+
+          if ((hydratedStoredArtifacts?.memoryCandidates?.length ?? 0) > 0) {
+            if (isRecentEndedSession) {
+              clearRecentSessionEndHint();
+            }
+            setArtifacts(sessionId, hydratedStoredArtifacts);
+          } else if (isRecentEndedSession && retryCount < RECENT_END_MAX_RETRIES) {
+            retryTimer = setTimeout(() => {
+              setRetryCount((current) => current + 1);
+            }, RECENT_END_RETRY_DELAY_MS);
+          } else if (isRecentEndedSession) {
+            clearRecentSessionEndHint();
+          }
+        } else if (isRecentEndedSession) {
           clearRecentSessionEndHint();
         }
+
         useSessionHistoryStore.getState().markRecapViewed(sessionId);
         setStatus('ready');
         return;
@@ -109,7 +248,8 @@ export function useRecapArtifactsLoader({
               }
             : fallbackTopLevelArtifacts;
 
-          const mapped = mapBackendArtifactsToRecapV1(artifactsPayload, sessionId);
+          const hydratedArtifactsPayload = await hydratePayloadWithRecentMemories(artifactsPayload, sessionId);
+          const mapped = mapBackendArtifactsToRecapV1(hydratedArtifactsPayload, sessionId);
 
           if (mapped) {
             if (isRecentEndedSession) {

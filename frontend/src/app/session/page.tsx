@@ -34,6 +34,7 @@ import {
   ReflectionOverlay,
   EmergenceOverlay,
   AtmosphericFeedback,
+  DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
 import { SessionLayout } from '../components/SessionLayout';
@@ -171,6 +172,7 @@ function SessionPageContent() {
     backendSessionId,
     hasValidBackendSessionId,
     userId,
+    resolvedThreadId,
     safeSessionId,
     sessionPresetType,
     sessionContextMode,
@@ -268,7 +270,7 @@ function SessionPageContent() {
   } = useSessionRouteExperience({
     sessionId,
     activeSessionId: session?.sessionId,
-    activeThreadId: session?.threadId,
+    activeThreadId: resolvedThreadId,
     chatRequestBody,
     hasValidBackendSessionId,
     backendSessionId,
@@ -357,7 +359,7 @@ function SessionPageContent() {
     handleInterruptDismiss,
   } = useSessionInterruptOrchestration({
     sessionId,
-    threadId: session?.threadId,
+    threadId: resolvedThreadId,
     sessionContextMode,
     sessionPresetType,
     artifacts,
@@ -376,7 +378,7 @@ function SessionPageContent() {
     handleNudgeAccept,
     handleNudgeDismiss,
   } = useSessionCompanionIntegration({
-    sessionThreadId: session?.threadId,
+    sessionThreadId: resolvedThreadId,
     sessionContextMode,
     sessionPresetType,
     chatMessageCount: chatMessages.length,
@@ -567,12 +569,16 @@ function SessionPageContent() {
   
   const {
     showExitConfirm,
+    showDebriefOffer,
     showEmergence,
     showFeedback,
+    debriefData,
     isNavigatingToRecap,
     handleEndSession,
     handleVoiceEndSession,
     handleCancelExit,
+    handleStartDebrief,
+    handleSkipToRecap,
     handleEmergenceComplete,
     handleFeedbackComplete,
   } = useSessionExitOrchestration({
@@ -636,7 +642,7 @@ function SessionPageContent() {
     },
     currentArtifacts: artifacts,
     userId,
-    threadId: session?.threadId,
+    threadId: resolvedThreadId,
     persistedSessionId: session?.sessionId,
     responseMode: exitProtectionResponseMode,
     messages,
@@ -1058,8 +1064,15 @@ function SessionPageContent() {
         onGoHome={handleMultiTabGoHome}
         onTakeOver={handleMultiTabTakeOver}
       />
-      
-      {/* DebriefOfferModal removed — R34: debrief offered conversationally */}
+
+      <DebriefOfferModal
+        isOpen={showDebriefOffer && !!debriefData}
+        debriefPrompt={debriefData?.prompt ?? 'Would you like a quick debrief before recap?'}
+        durationMinutes={debriefData?.durationMinutes ?? 0}
+        takeaway={debriefData?.takeaway}
+        onStartDebrief={handleStartDebrief}
+        onSkipToRecap={handleSkipToRecap}
+      />
       
       <UsageLimitModal
         open={limitModalOpen}

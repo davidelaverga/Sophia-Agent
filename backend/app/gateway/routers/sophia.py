@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
+from deerflow.sophia.review_metadata_store import (
+    apply_review_metadata_overlays,
+    remove_review_metadata,
+    upsert_review_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +211,61 @@ def _to_memory_item(mem: dict) -> MemoryItem:
     )
 
 
+def _merge_memory_detail(summary: dict, detail: dict | None) -> dict:
+    if not isinstance(summary, dict):
+        return detail or {}
+    if not isinstance(detail, dict):
+        return summary
+
+    merged = dict(summary)
+    merged.update(detail)
+
+    if merged.get("metadata") is None and detail.get("metadata") is not None:
+        merged["metadata"] = detail.get("metadata")
+
+    if not merged.get("categories") and detail.get("categories"):
+        merged["categories"] = detail.get("categories")
+
+    if merged.get("category") is None and detail.get("category") is not None:
+        merged["category"] = detail.get("category")
+
+    return merged
+
+
+def _should_hydrate_memory_detail(mem: dict) -> bool:
+    return isinstance(mem, dict) and (
+        mem.get("metadata") is None
+        or (not mem.get("categories") and mem.get("category") is None)
+    )
+
+
+def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> list[dict]:
+    hydrated: list[dict] = []
+
+    for memory in memories:
+        merged_memory = memory
+        memory_id = memory.get("id") if isinstance(memory, dict) else None
+
+        if memory_id and (status or _should_hydrate_memory_detail(memory)):
+            try:
+                merged_memory = _merge_memory_detail(memory, client.get(memory_id))
+            except Exception:
+                logger.warning("Failed to hydrate memory detail for %s", memory_id, exc_info=True)
+
+        hydrated.append(merged_memory)
+
+    hydrated = apply_review_metadata_overlays(user_id, hydrated)
+
+    if not status:
+        return hydrated
+
+    return [
+        memory
+        for memory in hydrated
+        if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
+    ]
+
+
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
     return safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
 
@@ -233,6 +293,12 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
         return parsed
     except ValueError:
         return None
+
+
+def _local_content_hash_from_memory_id(memory_id: str) -> str | None:
+    if isinstance(memory_id, str) and memory_id.startswith("local:"):
+        return memory_id.split(":", 1)[1] or None
+    return None
 
 
 def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> int:
@@ -310,6 +376,16 @@ def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None,
 def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, thread_state: dict | None) -> None:
     from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
+    logger.info(
+        "session.finalization queue_pipeline user_id=%s session_id=%s thread_id=%s has_thread_state=%s message_count=%s artifact_count=%s",
+        user_id,
+        session_id,
+        thread_id,
+        thread_state is not None,
+        len(thread_state.get("messages", [])) if isinstance(thread_state, dict) else 0,
+        len(thread_state.get("artifacts", [])) if isinstance(thread_state, dict) and isinstance(thread_state.get("artifacts"), list) else 0,
+    )
+
     task = asyncio.create_task(
         asyncio.to_thread(
             run_offline_pipeline,
@@ -340,12 +416,21 @@ async def list_memories(
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        filters: dict = {"user_id": user_id}
-        if status:
-            filters["metadata"] = {"status": status}
-        result = client.get_all(filters=filters)
+        logger.info(
+            "session.finalization list_memories_request user_id=%s status=%s",
+            user_id,
+            status or "<none>",
+        )
+        result = client.get_all(filters={"user_id": user_id})
         memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
         items = [_to_memory_item(m) for m in memories_raw]
+        logger.info(
+            "session.finalization list_memories_result user_id=%s status=%s count=%s",
+            user_id,
+            status or "<none>",
+            len(items),
+        )
         return MemoryListResponse(memories=items, count=len(items))
     except Exception as e:
         logger.warning("Failed to list memories for %s: %s", user_id, e)
@@ -394,7 +479,26 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
 
         first = created[0] if created else None
         if isinstance(first, dict) and first.get("id"):
+            if memory_metadata:
+                upsert_review_metadata(
+                    user_id,
+                    memory_id=first.get("id"),
+                    content=body.text,
+                    metadata=memory_metadata,
+                    session_id="manual-create",
+                    sync_state="manual",
+                )
             return _to_memory_item(first)
+
+        if memory_metadata:
+            upsert_review_metadata(
+                user_id,
+                memory_id=first.get("id") if isinstance(first, dict) else None,
+                content=body.text,
+                metadata=memory_metadata,
+                session_id="manual-create",
+                sync_state="manual",
+            )
 
         return MemoryItem(
             id=str(first.get("id", "")) if isinstance(first, dict) else "",
@@ -413,6 +517,24 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
 )
 async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest) -> MemoryItem:
     _validate_user(user_id)
+    local_content_hash = _local_content_hash_from_memory_id(memory_id)
+    if local_content_hash:
+        if body.text is None and body.metadata is None:
+            raise HTTPException(status_code=422, detail="At least text or metadata must be provided")
+        upsert_review_metadata(
+            user_id,
+            content=body.text,
+            content_hash=local_content_hash,
+            metadata=body.metadata,
+            sync_state="manual",
+        )
+        return MemoryItem(
+            id=memory_id,
+            content=body.text or "",
+            category=body.metadata.get("category") if isinstance(body.metadata, dict) else None,
+            metadata=body.metadata,
+        )
+
     client = _get_mem0_client()
     try:
         update_data = {}
@@ -426,6 +548,13 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
         from deerflow.sophia.mem0_client import invalidate_user_cache
         invalidate_user_cache(user_id)
         mem = result if isinstance(result, dict) else {}
+        upsert_review_metadata(
+            user_id,
+            memory_id=memory_id,
+            content=body.text or mem.get("memory"),
+            metadata=body.metadata,
+            sync_state="manual",
+        )
         return _to_memory_item(mem) if mem.get("id") else MemoryItem(id=memory_id, content=body.text or "")
     except HTTPException:
         raise
@@ -441,11 +570,17 @@ async def update_memory(user_id: str, memory_id: str, body: MemoryUpdateRequest)
 )
 async def delete_memory(user_id: str, memory_id: str):
     _validate_user(user_id)
+    local_content_hash = _local_content_hash_from_memory_id(memory_id)
+    if local_content_hash:
+        remove_review_metadata(user_id, content_hash=local_content_hash)
+        return
+
     client = _get_mem0_client()
     try:
         client.delete(memory_id=memory_id)
         from deerflow.sophia.mem0_client import invalidate_user_cache
         invalidate_user_cache(user_id)
+        remove_review_metadata(user_id, memory_id=memory_id)
     except Exception as e:
         logger.warning("Failed to delete memory %s: %s", memory_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -462,11 +597,31 @@ async def bulk_review(user_id: str, body: BulkReviewRequest) -> BulkReviewRespon
     results = []
     for item in body.items:
         try:
+            local_content_hash = _local_content_hash_from_memory_id(item.id)
             if item.action == "approve":
-                client.update(memory_id=item.id, metadata={"status": "approved"})
+                if local_content_hash:
+                    upsert_review_metadata(
+                        user_id,
+                        content_hash=local_content_hash,
+                        metadata={"status": "approved"},
+                        sync_state="manual",
+                    )
+                else:
+                    client.update(memory_id=item.id, metadata={"status": "approved"})
+                upsert_review_metadata(
+                    user_id,
+                    memory_id=item.id if not local_content_hash else None,
+                    content_hash=local_content_hash,
+                    metadata={"status": "approved"},
+                    sync_state="manual",
+                )
                 results.append(BulkReviewResult(id=item.id, action="approve", status="ok"))
             elif item.action == "discard":
-                client.delete(memory_id=item.id)
+                if local_content_hash:
+                    remove_review_metadata(user_id, content_hash=local_content_hash)
+                else:
+                    client.delete(memory_id=item.id)
+                    remove_review_metadata(user_id, memory_id=item.id)
                 results.append(BulkReviewResult(id=item.id, action="discard", status="ok"))
         except Exception as e:
             results.append(BulkReviewResult(id=item.id, action=item.action, status="error", error=str(e)))
@@ -527,6 +682,7 @@ async def journal(
             filters["categories"] = category
         result = client.get_all(filters=filters)
         memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = apply_review_metadata_overlays(user_id, memories_raw)
         entries = [
             JournalEntry(
                 id=m.get("id", ""),
@@ -671,6 +827,15 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
 
+    logger.info(
+        "session.finalization end_session_request user_id=%s session_id=%s thread_id=%s message_count=%s has_recap_artifacts=%s",
+        user_id,
+        body.session_id,
+        body.thread_id,
+        len(body.messages or []),
+        body.recap_artifacts is not None,
+    )
+
     ended_at = body.ended_at or datetime.now(UTC).isoformat()
     recap_payload = _build_session_recap_payload(body, ended_at)
     duration_minutes = _compute_duration_minutes(body.started_at, ended_at)
@@ -680,6 +845,12 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
 
     try:
         _write_session_recap(user_id, body.session_id, recap_payload)
+        logger.info(
+            "session.finalization recap_persisted user_id=%s session_id=%s status=%s",
+            user_id,
+            body.session_id,
+            recap_payload.get("status"),
+        )
     except OSError as e:
         logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
 
@@ -696,6 +867,12 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             body.session_id,
             body.thread_id,
             _build_thread_state_from_end_request(body),
+        )
+        logger.info(
+            "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s",
+            user_id,
+            body.session_id,
+            body.thread_id,
         )
         return SessionEndResponse(
             status="pipeline_queued",

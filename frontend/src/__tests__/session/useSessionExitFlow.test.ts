@@ -57,7 +57,7 @@ describe('useSessionExitFlow', () => {
     vi.clearAllMocks();
   });
 
-  it('separates start debrief from skip to recap behavior', async () => {
+  it('keeps the end-session flow on feedback and recap instead of offering debrief', async () => {
     endSessionApiMock.mockResolvedValue({
       success: true,
       data: {
@@ -74,14 +74,6 @@ describe('useSessionExitFlow', () => {
     });
 
     isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
-    submitDebriefDecisionMock.mockResolvedValue({
-      success: true,
-      data: {
-        session_id: 'session-1',
-        decision: 'debrief',
-        recorded_at: '2026-03-03T18:00:05.000Z',
-      },
-    });
 
     const setEndingMock = vi.fn();
     const endSessionStoreMock = vi.fn();
@@ -117,33 +109,25 @@ describe('useSessionExitFlow', () => {
 
     expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
       session_id: 'session-1',
-      offer_debrief: true,
+      offer_debrief: false,
     }));
 
-    expect(result.current.showDebriefOffer).toBe(true);
-
-    await act(async () => {
-      result.current.handleStartDebrief();
-    });
-
-    expect(promoteToDebriefModeMock).toHaveBeenCalledTimes(1);
-    expect(startDebriefWithLLMMock).toHaveBeenCalledTimes(1);
-    expect(submitDebriefDecisionMock).toHaveBeenCalledWith({
-      session_id: 'session-1',
-      decision: 'debrief',
-    });
+    expect(result.current.showDebriefOffer).toBe(false);
+    expect(result.current.showEmergence).toBe(true);
     expect(navigateToMock).not.toHaveBeenCalled();
     expect(endSessionStoreMock).not.toHaveBeenCalled();
     expect(clearSessionStoreMock).not.toHaveBeenCalled();
 
     await act(async () => {
-      result.current.handleSkipToRecap();
+      result.current.handleEmergenceComplete();
     });
 
-    expect(submitDebriefDecisionMock).toHaveBeenCalledWith({
-      session_id: 'session-1',
-      decision: 'skip',
+    expect(result.current.showFeedback).toBe(true);
+
+    await act(async () => {
+      result.current.handleFeedbackComplete();
     });
+
     expect(navigateToMock).toHaveBeenCalledWith('/recap/session-1');
     expect(endSessionStoreMock).toHaveBeenCalledTimes(1);
     expect(clearSessionStoreMock).toHaveBeenCalledTimes(1);
@@ -285,6 +269,76 @@ describe('useSessionExitFlow', () => {
         reflectionCandidate: expect.objectContaining({
           prompt: 'What changed once you stopped forcing the outcome?',
         }),
+      }),
+    );
+  });
+
+  it('merges live memory candidates when the end-session response omits them', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-3b',
+        ended_at: '2026-03-03T20:00:00.000Z',
+        duration_minutes: 14,
+        turn_count: 6,
+        offer_debrief: false,
+        debrief_prompt: undefined,
+        recap_artifacts: {
+          takeaway: 'The headline survived the handoff.',
+          reflection_candidate: {
+            prompt: 'What felt truer once you stopped pushing?',
+          },
+        },
+      },
+    });
+
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const { result } = renderHook(() =>
+      useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        setEnding: vi.fn(),
+        sessionId: 'session-3b',
+        sessionStartedAt: '2026-03-03T19:46:00.000Z',
+        sessionPresetType: 'open',
+        sessionContextMode: 'life',
+        messageCount: 6,
+        endSessionStore: vi.fn(),
+        clearSessionStore: vi.fn(),
+        clearBootstrap: vi.fn(),
+        navigateTo: vi.fn(),
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+        currentArtifacts: {
+          takeaway: '',
+          memory_candidates: [
+            {
+              id: '05941898-bd0b-4d01-bcd1-9577ca94c6bc',
+              memory: 'User was promoted to CTO after 2 years of sustained effort.',
+              category: 'wins_pride',
+              confidence: 0.95,
+            },
+          ],
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(setRecapArtifactsMock).toHaveBeenCalledWith(
+      'session-3b',
+      expect.objectContaining({
+        takeaway: 'The headline survived the handoff.',
+        memoryCandidates: [
+          expect.objectContaining({
+            id: '05941898-bd0b-4d01-bcd1-9577ca94c6bc',
+            text: 'User was promoted to CTO after 2 years of sustained effort.',
+          }),
+        ],
       }),
     );
   });

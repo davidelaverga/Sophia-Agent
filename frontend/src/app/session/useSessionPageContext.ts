@@ -5,6 +5,7 @@ import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
 import { getSessionGreetingMessage } from '../lib/time-greetings';
 import { isUuid } from '../lib/utils';
 import { useChatStore } from '../stores/chat-store';
+import { useMessageMetadataStore } from '../stores/message-metadata-store';
 import { useSessionStore, selectSession, selectArtifacts, selectMessages } from '../stores/session-store';
 import type { MemoryHighlight } from '../types/session';
 
@@ -33,6 +34,8 @@ export function useSessionPageContext({
   const isEnding = useSessionStore((state) => state.isEnding);
 
   const chatConversationId = useChatStore((state) => state.conversationId);
+  const currentThreadId = useMessageMetadataStore((state) => state.currentThreadId);
+  const currentMetadataSessionId = useMessageMetadataStore((state) => state.currentSessionId);
   const platform = usePlatformSignal();
 
   const sessionId = session?.sessionId || chatConversationId || 'default-session';
@@ -43,6 +46,9 @@ export function useSessionPageContext({
   const sessionContextMode = session?.contextMode;
   const isReadOnly = !!session && (session.status === 'ended' || session.isActive === false);
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
+  const resolvedThreadId = safeSessionId && currentMetadataSessionId === safeSessionId
+    ? currentThreadId || session?.threadId
+    : session?.threadId;
   const fallbackGreeting = sessionPresetType && sessionContextMode
     ? getSessionGreetingMessage(sessionPresetType, sessionContextMode)
     : "I'm here with you. What's on your mind?";
@@ -54,12 +60,24 @@ export function useSessionPageContext({
     ? {
         session_id: safeSessionId,
         user_id: userId,
-        thread_id: session?.threadId,
+        thread_id: resolvedThreadId,
         session_type: sessionPresetType,
         context_mode: sessionContextMode,
         platform,
       }
     : undefined;
+
+  useEffect(() => {
+    if (!session?.sessionId || !resolvedThreadId || resolvedThreadId === session.threadId) {
+      return;
+    }
+
+    if (currentMetadataSessionId !== session.sessionId) {
+      return;
+    }
+
+    updateSession({ threadId: resolvedThreadId });
+  }, [currentMetadataSessionId, resolvedThreadId, session?.sessionId, session?.threadId, updateSession]);
 
   useEffect(() => {
     if (!session?.sessionId || !session.isActive || session.status === 'ended') return;
@@ -90,6 +108,7 @@ export function useSessionPageContext({
     backendSessionId,
     hasValidBackendSessionId,
     userId,
+    resolvedThreadId,
     sessionPresetType,
     sessionContextMode,
     isReadOnly,

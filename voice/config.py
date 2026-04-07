@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[1]
 VOICE_DIR = ROOT_DIR / "voice"
 
-for env_file in (ROOT_DIR / ".env", VOICE_DIR / ".env"):
+for env_file in (VOICE_DIR / ".env", ROOT_DIR / ".env"):
     if env_file.exists():
         load_dotenv(env_file, override=False)
 
