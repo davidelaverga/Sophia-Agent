@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Sophia — Journal</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300&family=Inter:wght@300;400;500;600&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --purple:#b8a4e8;--glow:#d4c4ff;--amber:#f2b36b;--teal:#59bead;
+  --rose:#d0829c;--blue:#8ba4d4;--ivory:#fffaf2;
+  --bg:#07060e;--card:rgba(14,12,24,0.82);--border:rgba(184,164,232,0.10);
+  --text:#f0edf8;--text2:#908ba8;--text3:#5c5478;
+}
+body{background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
+  overflow:hidden;height:100vh;width:100vw;-webkit-font-smoothing:antialiased;user-select:none}
+canvas{position:fixed;inset:0}
+#pool{z-index:0}
+#parts{z-index:1;pointer-events:none}
+.drops{position:fixed;inset:0;z-index:2;pointer-events:none}
+
+/* ── Drop markers ── */
+.drop{
+  position:absolute;pointer-events:auto;cursor:pointer;
+  display:flex;flex-direction:column;align-items:center;
+  transform:translate(-50%,-50%);transition:transform .25s ease,filter .25s ease;
+  filter:drop-shadow(0 0 10px var(--dc)) drop-shadow(0 0 3px var(--dc));
+}
+.drop:hover{transform:translate(-50%,-50%) scale(1.3);filter:drop-shadow(0 0 18px var(--dc)) drop-shadow(0 0 6px var(--dc))}
+.drop svg{display:block}
+.drop-glow{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-40%);
+  width:70px;height:70px;border-radius:50%;
+  background:radial-gradient(circle,var(--dc2),transparent 65%);
+  opacity:0.7;pointer-events:none;
+}
+.drop.hero .drop-glow{width:120px;height:120px;opacity:0.9}
+.drop.hero svg{filter:brightness(1.5) drop-shadow(0 0 8px var(--dc))}
+
+/* ── HEADER ── */
+header{
+  position:fixed;top:0;left:0;right:0;z-index:20;
+  display:flex;align-items:flex-start;justify-content:space-between;
+  padding:24px 28px 0;pointer-events:none;
+}
+header>*{pointer-events:auto}
+.title-group h1{font-family:'Inter',sans-serif;font-weight:600;font-size:28px;letter-spacing:-0.02em;color:var(--text)}
+.title-group .sub{font-size:11px;color:var(--text2);margin-top:3px;display:flex;align-items:center;gap:6px}
+.title-group .sub .dot{width:5px;height:5px;border-radius:50%;background:var(--teal);box-shadow:0 0 6px var(--teal)}
+
+.search-bar{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 14px;border-radius:10px;
+  background:rgba(20,18,32,0.7);border:1px solid var(--border);
+  backdrop-filter:blur(16px);min-width:240px;
+}
+.search-bar .si{color:var(--text3);font-size:13px}
+.search-bar input{
+  border:none;outline:none;background:transparent;
+  color:var(--text2);font-size:12px;font-family:'Inter',sans-serif;flex:1;
+}
+.search-bar input::placeholder{color:var(--text3)}
+.search-bar .kb{font-size:10px;color:var(--text3);padding:2px 6px;border-radius:4px;border:1px solid rgba(184,164,232,0.08);background:rgba(20,18,35,0.5)}
+
+.hdr-ctrls{display:flex;align-items:center;gap:8px}
+.hdr-btn{
+  width:34px;height:34px;border-radius:8px;border:1px solid var(--border);
+  background:rgba(20,18,32,0.6);backdrop-filter:blur(12px);
+  color:var(--text2);font-size:14px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.hdr-btn:hover{border-color:rgba(184,164,232,0.2);color:var(--text)}
+.period-sel{
+  padding:7px 14px;border-radius:8px;border:1px solid var(--border);
+  background:rgba(20,18,32,0.6);backdrop-filter:blur(12px);
+  color:var(--text2);font-size:11px;cursor:pointer;display:flex;align-items:center;gap:6px;
+}
+.period-sel::after{content:'▾';font-size:8px;color:var(--text3)}
+.avatar{
+  width:34px;height:34px;border-radius:50%;
+  background:linear-gradient(135deg,var(--purple),var(--teal));
+  border:2px solid rgba(184,164,232,0.25);cursor:pointer;
+}
+
+/* ── LEFT SIDEBAR ── */
+.sidebar{
+  position:fixed;left:0;top:50%;transform:translateY(-50%);z-index:20;
+  display:flex;flex-direction:column;gap:4px;padding:8px;
+}
+.sb-btn{
+  width:32px;height:32px;border-radius:8px;border:1px solid transparent;
+  background:transparent;color:var(--text3);font-size:15px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.sb-btn:hover{border-color:var(--border);color:var(--text2);background:rgba(20,18,32,0.5)}
+.sb-btn.act{border-color:rgba(184,164,232,0.15);color:var(--purple);background:rgba(184,164,232,0.05)}
+
+/* ── MEMORY CARD ── */
+.mem-card{
+  position:fixed;right:40px;top:32%;z-index:20;width:280px;
+  padding:16px 18px;border-radius:14px;
+  background:rgba(245,242,250,0.92);backdrop-filter:blur(20px);
+  border:1px solid rgba(184,164,232,0.15);
+  box-shadow:0 16px 48px rgba(4,3,12,0.6),0 0 0 1px rgba(255,255,255,0.06);
+  color:#1a1625;
+}
+.mc-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.mc-icon{width:20px;height:20px;display:flex;align-items:center;justify-content:center}
+.mc-icon svg{width:16px;height:16px}
+.mc-time{font-size:10px;color:#7a7290;flex:1}
+.mc-check{
+  width:22px;height:22px;border-radius:50%;border:1.5px solid rgba(89,190,173,0.3);
+  background:transparent;cursor:pointer;font-size:11px;color:var(--teal);
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.mc-check:hover{background:rgba(89,190,173,0.08);border-color:var(--teal)}
+.mc-text{font-size:13px;line-height:1.55;font-weight:400;color:#2a2438;margin-bottom:12px}
+.mc-tags{display:flex;gap:6px}
+.mc-tag{
+  font-size:9px;padding:3px 9px;border-radius:12px;
+  background:rgba(184,164,232,0.08);color:#7a7290;
+  display:flex;align-items:center;gap:4px;
+}
+.mc-tag .td{width:4px;height:4px;border-radius:50%;background:var(--purple)}
+
+.card-nav{
+  position:fixed;right:12px;top:42%;z-index:20;
+  width:24px;height:40px;border-radius:12px;
+  background:rgba(20,18,32,0.4);backdrop-filter:blur(8px);
+  border:1px solid var(--border);
+  display:flex;align-items:center;justify-content:center;
+  color:var(--text3);font-size:16px;cursor:pointer;transition:all .15s;
+}
+.card-nav:hover{color:var(--text2);border-color:rgba(184,164,232,0.2)}
+
+/* ── BOTTOM STATS ── */
+.stats{
+  position:fixed;bottom:80px;left:28px;z-index:20;
+  display:flex;gap:14px;align-items:flex-end;
+}
+.stat{
+  display:flex;flex-direction:column;align-items:center;
+  padding:10px 14px 8px;border-radius:14px;
+  background:rgba(14,12,24,0.7);backdrop-filter:blur(12px);
+  border:1px solid var(--border);min-width:64px;
+}
+.stat-n{font-family:'Inter',sans-serif;font-weight:500;font-size:20px;color:var(--text);line-height:1}
+.stat-l{font-size:8px;color:var(--text3);text-align:center;margin-top:4px;letter-spacing:0.03em;line-height:1.3}
+
+/* ── TIMELINE ── */
+.timeline{
+  position:fixed;bottom:34px;left:240px;right:180px;z-index:20;
+  height:32px;display:flex;align-items:center;
+}
+.tl-track{flex:1;position:relative;height:100%}
+.tl-bar{position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(184,164,232,0.06);transform:translateY(-50%)}
+.tl-dot{
+  position:absolute;top:50%;transform:translate(-50%,-50%);
+  width:4px;height:4px;border-radius:50%;
+  background:rgba(89,190,173,0.25);
+}
+.tl-dot.bright{background:rgba(89,190,173,0.5);width:5px;height:5px}
+.tl-labels{
+  position:absolute;bottom:-2px;left:0;right:0;
+  display:flex;justify-content:space-between;
+  font-size:9px;color:var(--text3);letter-spacing:0.03em;
+}
+.tl-cursor{
+  position:absolute;top:50%;transform:translate(-50%,-50%);
+  width:8px;height:8px;border-radius:50%;
+  background:var(--teal);box-shadow:0 0 10px rgba(89,190,173,0.4);
+}
+
+/* ── VIEW TOGGLES ── */
+.view-toggles{
+  position:fixed;bottom:34px;right:28px;z-index:20;
+  display:flex;gap:2px;padding:3px;border-radius:10px;
+  background:rgba(14,12,24,0.7);backdrop-filter:blur(12px);
+  border:1px solid var(--border);
+}
+.vt-btn{
+  width:30px;height:28px;border-radius:7px;border:none;
+  background:transparent;color:var(--text3);font-size:13px;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;transition:all .15s;
+}
+.vt-btn:hover{color:var(--text2)}
+.vt-btn.act{background:rgba(184,164,232,0.12);color:var(--purple)}
+
+/* ── PATTERNS BAR ── */
+.patterns{
+  position:fixed;bottom:0;left:0;right:0;z-index:20;
+  padding:8px 28px 12px;display:flex;align-items:center;gap:10px;
+  background:linear-gradient(to top,rgba(7,6,14,0.95),rgba(7,6,14,0.4),transparent);
+}
+.patterns-label{font-size:10px;color:var(--text2);font-weight:500;letter-spacing:0.03em;margin-right:4px}
+.chip{
+  display:flex;align-items:center;gap:5px;
+  padding:5px 12px;border-radius:20px;
+  background:rgba(20,18,32,0.6);border:1px solid var(--border);
+  font-size:10px;color:var(--text2);cursor:pointer;transition:all .15s;
+}
+.chip:hover{border-color:rgba(184,164,232,0.2);color:var(--text)}
+.chip-dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.chip-more{padding:5px 10px;border-radius:20px;background:rgba(20,18,32,0.4);border:1px solid var(--border);font-size:10px;color:var(--text3)}
+
+@media(prefers-reduced-motion:reduce){
+  .drop,.drop:hover{transition:none}
+}
+</style>
+</head>
+<body>
+
+<canvas id="pool"></canvas>
+<canvas id="parts"></canvas>
+<div class="drops" id="drops"></div>
+
+<!-- Header -->
+<header>
+  <div class="title-group">
+    <h1>Journal</h1>
+    <p class="sub">Your memories with Sophia <span class="dot"></span></p>
+  </div>
+  <div class="search-bar">
+    <span class="si">⌕</span>
+    <input type="text" placeholder="Search memories…" spellcheck="false">
+    <span class="kb">⌘K</span>
+  </div>
+  <div class="hdr-ctrls">
+    <button class="hdr-btn">⊞</button>
+    <div class="period-sel">This month</div>
+    <button class="hdr-btn">⚙</button>
+    <div class="avatar"></div>
+  </div>
+</header>
+
+<!-- Left sidebar -->
+<aside class="sidebar">
+  <button class="sb-btn">☺</button>
+  <button class="sb-btn">∿</button>
+  <button class="sb-btn act">⇌</button>
+  <button class="sb-btn">▐▌</button>
+  <button class="sb-btn">✦</button>
+</aside>
+
+<!-- Memory card -->
+<div class="mem-card">
+  <div class="mc-head">
+    <div class="mc-icon">
+      <svg viewBox="0 0 16 20" fill="none"><path d="M8 1C8 1 1 9 1 13C1 16.5 4 19 8 19C12 19 15 16.5 15 13C15 9 8 1 8 1Z" fill="rgba(89,150,210,0.25)" stroke="rgba(89,150,210,0.7)" stroke-width="1.2"/></svg>
+    </div>
+    <span class="mc-time">Today · 2:14 PM</span>
+    <button class="mc-check">✓</button>
+  </div>
+  <p class="mc-text">Work-mode alertness is leaking into rest — pattern always trying to be alert</p>
+  <div class="mc-tags">
+    <span class="mc-tag">Key</span>
+    <span class="mc-tag">takeaway <span class="td"></span></span>
+  </div>
+</div>
+<div class="card-nav">›</div>
+
+<!-- Stats -->
+<div class="stats">
+  <div class="stat"><span class="stat-n">127</span><span class="stat-l">memories</span></div>
+  <div class="stat"><span class="stat-n">12</span><span class="stat-l">this month</span></div>
+  <div class="stat"><span class="stat-n">3</span><span class="stat-l">emerging<br>patterns</span></div>
+</div>
+
+<!-- Timeline -->
+<div class="timeline"><div class="tl-track" id="tl-track">
+  <div class="tl-bar"></div>
+  <div class="tl-labels"><span>Jul</span><span>Sep</span><span>Sep</span><span>Nov</span></div>
+  <div class="tl-cursor" style="left:42%"></div>
+</div></div>
+
+<!-- View toggles -->
+<div class="view-toggles">
+  <button class="vt-btn">⊞</button>
+  <button class="vt-btn">⤢</button>
+  <button class="vt-btn">☰</button>
+  <button class="vt-btn act">⬡</button>
+</div>
+
+<!-- Patterns -->
+<div class="patterns">
+  <span class="patterns-label">Emerging patterns</span>
+  <span class="chip"><span class="chip-dot" style="background:#59bead"></span>Rest &amp; recovery</span>
+  <span class="chip"><span class="chip-dot" style="background:#8ba4d4"></span>Work boundaries</span>
+  <span class="chip"><span class="chip-dot" style="background:#d0829c"></span>Creative flow</span>
+  <span class="chip"><span class="chip-dot" style="background:#f2b36b"></span>Relationships</span>
+  <span class="chip-more">+2</span>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// VECTOR MATH
+// ═══════════════════════════════════════════════════════════════════════════════
+const V={
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  norm:v=>{const l=Math.hypot(...v);return[v[0]/l,v[1]/l,v[2]/l]},
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+};
+
+// Camera (shared between shader and JS) — must match shader camPos/tgt
+const CAM=[0,3.2,-1.6], TGT=[0,0,0.35], FOV=1.05;
+const fwd=V.norm(V.sub(TGT,CAM));
+const right=V.norm(V.cross(fwd,[0,1,0]));
+const up=V.cross(right,fwd);
+
+function poolToScreen(px,pz){
+  const tp=[px-CAM[0],-CAM[1],pz-CAM[2]];
+  const f=V.dot(tp,fwd);if(f<=0)return null;
+  const r=V.dot(tp,right),u=V.dot(tp,up);
+  const asp=innerWidth/innerHeight;
+  return{
+    x:(r/(f*FOV*asp)+0.5)*innerWidth,
+    y:(-u/(f*FOV)+0.5)*innerHeight,
+    s:1/f
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WebGL — POOL SURFACE WITH RIPPLES
+// ═══════════════════════════════════════════════════════════════════════════════
+const poolC=document.getElementById('pool');
+const gl=poolC.getContext('webgl',{alpha:false,antialias:false});
+
+const VS=`attribute vec2 p;void main(){gl_Position=vec4(p,0,1);}`;
+const FS=`
+precision highp float;
+uniform float t;
+uniform vec2 res;
+uniform vec2 ms;
+
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+float fbm(vec2 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*noise(p);p*=2.03;a*=0.47;}return v;}
+
+vec2 poolCoord(vec2 uv){
+  float asp=res.x/res.y;
+  vec3 camPos=vec3(0.0,3.2,-1.6);
+  vec3 tgt=vec3(0.0,0.0,0.35);
+  vec3 fw=normalize(tgt-camPos);
+  vec3 rt=normalize(cross(fw,vec3(0,1,0)));
+  vec3 u=cross(rt,fw);
+  vec2 sc=(uv-0.5)*vec2(asp,1.0);
+  vec3 rd=normalize(fw+rt*sc.x*1.05+u*sc.y*1.05);
+  if(rd.y>=0.0)return vec2(99.0);
+  float tt=-camPos.y/rd.y;
+  vec3 hit=camPos+rd*tt;
+  return hit.xz;
+}
+
+// Sharp thin ring line — returns bright peak at each ring position
+float ringLine(float d, float freq, float speed, float phase, float time){
+  float wave = d * freq - time * speed + phase;
+  // fract gives sawtooth 0..1; we want thin bright peaks at 0/1
+  float f = fract(wave / 6.2831853);
+  float line = 1.0 - smoothstep(0.0, 0.06, abs(f - 0.5) * 2.0); // thin crisp line
+  // Softer glow halo around each ring
+  float glow = exp(-pow(abs(f - 0.5) * 2.0, 2.0) * 12.0) * 0.4;
+  return line + glow;
+}
+
+// One ripple source: multiple concentric ring sets expanding outward
+float rippleSource(vec2 p, vec2 center, float strength, float phase, float time){
+  float d = length(p - center);
+  float r = 0.0;
+  // Primary ring set — wide spacing
+  r += ringLine(d, 12.0, 1.2, phase, time) * 0.7;
+  // Secondary ring set — tighter spacing
+  r += ringLine(d, 20.0, 1.6, phase + 1.5, time) * 0.35;
+  // Tertiary — fine detail
+  r += ringLine(d, 32.0, 2.1, phase + 3.2, time) * 0.18;
+  // Fade with distance from source
+  r *= exp(-d * d * 0.8) * strength;
+  // Central glow at the source point
+  r += exp(-d * d * 6.0) * strength * 0.15;
+  return r;
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / res;
+  uv.y = 1.0 - uv.y;
+  vec2 pool = poolCoord(uv);
+
+  // Deep space background
+  vec3 col = vec3(0.018, 0.014, 0.035);
+
+  // Subtle background stars/noise
+  float stars = pow(hash(floor(uv * res * 0.5)), 18.0) * 0.15;
+  col += vec3(0.6, 0.5, 0.8) * stars;
+
+  if(length(pool) < 5.0){
+    float cd = length(pool);
+
+    // ── Ripple ring accumulation from 8 sources ──
+    float rip = 0.0;
+    rip += rippleSource(pool, vec2(0.0, 0.0),    1.0,  0.0, t);      // center (strongest)
+    rip += rippleSource(pool, vec2(-0.7, -0.3),   0.65, 1.8, t);
+    rip += rippleSource(pool, vec2(0.8, -0.15),   0.60, 3.5, t);
+    rip += rippleSource(pool, vec2(-0.4, 0.65),   0.50, 0.7, t);
+    rip += rippleSource(pool, vec2(0.55, 0.55),   0.55, 2.6, t);
+    rip += rippleSource(pool, vec2(0.15, -0.75),  0.45, 4.2, t);
+    rip += rippleSource(pool, vec2(-0.25, 0.9),   0.40, 5.5, t);
+    rip += rippleSource(pool, vec2(0.9, 0.3),     0.35, 6.8, t);
+
+    // ── Ring color: purple outer → amber inner ──
+    float warmth = exp(-cd * cd * 1.2);
+    vec3 coolRing  = vec3(0.58, 0.46, 0.82);   // lavender
+    vec3 warmRing  = vec3(0.92, 0.78, 0.52);   // amber
+    vec3 ripCol = mix(coolRing, warmRing, warmth);
+
+    // Mix with some rose/salmon tones at mid distances
+    float midTone = exp(-pow(cd - 1.0, 2.0) * 2.0);
+    ripCol = mix(ripCol, vec3(0.72, 0.52, 0.68), midTone * 0.15);
+
+    col += ripCol * rip * 0.65;
+
+    // ── Central amber/gold glow (wide, warm, prominent) ──
+    col += vec3(0.95, 0.82, 0.55) * exp(-cd * cd * 2.5) * 0.55;
+    col += vec3(0.85, 0.72, 0.50) * exp(-cd * cd * 1.0) * 0.20;
+    // White-hot core
+    col += vec3(1.0, 0.96, 0.88) * exp(-cd * cd * 12.0) * 0.45;
+    // Wider warm wash
+    col += vec3(0.75, 0.60, 0.45) * exp(-cd * cd * 0.5) * 0.10;
+
+    // ── Subtle surface shimmer (FBM-based) ──
+    float shimmer = fbm(pool * 3.0 + t * 0.03) * 0.5 + 0.5;
+    float shimmer2 = fbm(pool * 5.0 - t * 0.02 + 10.0) * 0.5 + 0.5;
+    col += vec3(0.50, 0.40, 0.72) * shimmer * 0.012;
+    // Specular-like highlights (wet surface effect)
+    float spec = pow(shimmer2, 4.0) * exp(-cd * 0.6);
+    col += vec3(0.7, 0.65, 0.9) * spec * 0.04;
+
+    // ── Subtle spiral/swirl structure near center ──
+    float ang = atan(pool.y, pool.x);
+    float spiral = sin(ang * 2.0 + cd * 4.0 - t * 0.25);
+    col += vec3(0.65, 0.50, 0.80) * max(spiral, 0.0) * exp(-cd * cd * 1.5) * 0.04;
+
+    // ── Edge fade ──
+    float edge = smoothstep(4.0, 1.5, cd);
+    col *= edge;
+
+    // ── Mouse-reactive glow ──
+    vec2 mPool = poolCoord(vec2(ms.x, 1.0 - ms.y));
+    if(length(mPool) < 5.0){
+      float md = length(pool - mPool);
+      col += vec3(0.72, 0.64, 0.91) * exp(-md * md * 6.0) * 0.10;
+    }
+  }
+
+  // Atmospheric purple haze around pool edges
+  float haze = exp(-length(uv - vec2(0.5, 0.46)) * 2.0) * 0.035;
+  col += vec3(0.45, 0.32, 0.68) * haze;
+
+  // Vignette
+  vec2 vc = uv - vec2(0.5, 0.5);
+  col *= 1.0 - dot(vc, vc) * 1.8;
+
+  // Tone map (filmic)
+  col = col / (col + 0.42);
+  col = pow(col, vec3(0.90));
+
+  // Film grain
+  col += (hash(uv * res + t * 97.0) - 0.5) * 0.010;
+
+  gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
+}
+`;
+
+function mkS(ty,src){const s=gl.createShader(ty);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){console.error('Shader error:',gl.getShaderInfoLog(s))}return s}
+const prog=gl.createProgram();
+gl.attachShader(prog,mkS(gl.VERTEX_SHADER,VS));
+gl.attachShader(prog,mkS(gl.FRAGMENT_SHADER,FS));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(prog));
+
+const pa=gl.getAttribLocation(prog,'p');
+const qb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const uT=gl.getUniformLocation(prog,'t'),uR=gl.getUniformLocation(prog,'res'),uM=gl.getUniformLocation(prog,'ms');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARTICLE LAYER (Canvas2D)
+// ═══════════════════════════════════════════════════════════════════════════════
+const partC=document.getElementById('parts');
+const ctx=partC.getContext('2d');
+
+const particles=[];
+for(let i=0;i<900;i++){
+  const angle=Math.random()*Math.PI*2;
+  const radius=Math.pow(Math.random(),0.5)*0.48;
+  const px=0.5+Math.cos(angle)*radius*(innerWidth/innerHeight);
+  const py=0.46+Math.sin(angle)*radius*0.65;
+  particles.push({
+    x:px,y:py,
+    sz:Math.random()*1.6+0.3,
+    a:Math.random()*0.55+0.08,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.25+0.06,
+    drift:Math.random()*0.00006+0.00001,
+    h:Math.floor(Math.random()*4),// 0=purple, 1=amber, 2=white, 3=bright
+  });
+}
+const pCols=[[184,164,232],[242,200,130],[220,215,240],[255,250,255]];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DROP MARKERS
+// ═══════════════════════════════════════════════════════════════════════════════
+const categories=[
+  {id:'feeling',color:'#b8a4e8',glow:'rgba(184,164,232,0.25)'},
+  {id:'decision',color:'#f2b36b',glow:'rgba(242,179,107,0.25)'},
+  {id:'lesson',color:'#59bead',glow:'rgba(89,190,173,0.25)'},
+  {id:'relationship',color:'#d0829c',glow:'rgba(208,130,156,0.25)'},
+  {id:'fact',color:'#8ba4d4',glow:'rgba(139,164,212,0.25)'},
+  {id:'pattern',color:'#a88cd2',glow:'rgba(168,140,210,0.25)'},
+  {id:'commitment',color:'#e8c88c',glow:'rgba(232,200,140,0.25)'},
+];
+
+// Generate drop positions in POOL SPACE
+const dropData=[];
+// Hero drop at center
+dropData.push({px:0,pz:0,cat:categories[1],hero:true});
+// Scatter 59 more
+const seed=42;
+function seededRand(i){return(Math.sin(i*127.1+seed*311.7)*43758.5453)%1;if(arguments[0]<0)return arguments[0]+1;return arguments[0]}
+for(let i=0;i<59;i++){
+  const a=((i*2.39996+0.5)%1)*Math.PI*2; // golden angle
+  const r=Math.sqrt((i+1)/60)*1.6;
+  const jx=(Math.sin(i*73.1+37)*43758.5453%1-0.5)*0.3;
+  const jz=(Math.sin(i*129.7+91)*43758.5453%1-0.5)*0.3;
+  const px=Math.cos(a)*r+jx;
+  const pz=Math.sin(a)*r*0.8+jz;
+  const cat=categories[i%categories.length];
+  dropData.push({px,pz,cat,hero:false});
+}
+
+const dropsEl=document.getElementById('drops');
+const dropEls=[];
+
+function createDropSVG(color,isHero){
+  const sz=isHero?44:32;
+  const el=document.createElement('div');
+  el.className='drop'+(isHero?' hero':'');
+  el.style.setProperty('--dc',color);
+  el.style.setProperty('--dc2',color.replace(')',',0.3)').replace('rgb','rgba'));
+
+  const glow=document.createElement('div');
+  glow.className='drop-glow';
+  el.appendChild(glow);
+
+  const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
+  svg.setAttribute('viewBox','0 0 24 34');
+  svg.setAttribute('width',sz);
+  svg.setAttribute('height',Math.round(sz*34/24));
+  svg.innerHTML=`
+    <defs>
+      <radialGradient id="dg${dropEls.length}" cx="42%" cy="35%" r="68%">
+        <stop offset="0%" stop-color="rgba(255,255,255,0.70)"/>
+        <stop offset="30%" stop-color="${color}66"/>
+        <stop offset="70%" stop-color="${color}33"/>
+        <stop offset="100%" stop-color="${color}11"/>
+      </radialGradient>
+      <filter id="df${dropEls.length}">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="0.6"/>
+      </filter>
+    </defs>
+    <path d="M12 1.5 C12 1.5 2 14 2 19.5 C2 26 6 31.5 12 31.5 C18 31.5 22 26 22 19.5 C22 14 12 1.5 12 1.5Z"
+          fill="url(#dg${dropEls.length})" stroke="${color}99" stroke-width="0.7"/>
+    <path d="M12 12 C12 12 7.5 18 7.5 20.5 C7.5 23.5 9.5 25.5 12 25.5 C14.5 25.5 16.5 23.5 16.5 20.5 C16.5 18 12 12 12 12Z"
+          fill="rgba(255,255,255,0.28)" filter="url(#df${dropEls.length})"/>
+    <ellipse cx="9.5" cy="9" rx="3" ry="1.8" fill="rgba(255,255,255,0.30)"/>
+    <circle cx="10" cy="7" r="1.2" fill="rgba(255,255,255,0.18)"/>
+  `;
+  el.appendChild(svg);
+
+  dropsEl.appendChild(el);
+  return el;
+}
+
+dropData.forEach(d=>{
+  const el=createDropSVG(d.cat.color,d.hero);
+  dropEls.push({el,data:d});
+});
+
+// Timeline dots
+const tlTrack=document.getElementById('tl-track');
+for(let i=0;i<35;i++){
+  const dot=document.createElement('div');
+  const pct=5+Math.random()*90;
+  dot.className='tl-dot'+(Math.random()>0.7?' bright':'');
+  dot.style.left=pct+'%';
+  tlTrack.appendChild(dot);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ANIMATION
+// ═══════════════════════════════════════════════════════════════════════════════
+let mx=0.5,my=0.5,smx=0.5,smy=0.5;
+document.addEventListener('mousemove',e=>{mx=e.clientX/innerWidth;my=e.clientY/innerHeight});
+
+const t0=performance.now();
+
+function resize(){
+  const dpr=Math.min(devicePixelRatio,2);
+  poolC.width=innerWidth*dpr;poolC.height=innerHeight*dpr;
+  poolC.style.width=innerWidth+'px';poolC.style.height=innerHeight+'px';
+  gl.viewport(0,0,poolC.width,poolC.height);
+
+  partC.width=innerWidth*dpr;partC.height=innerHeight*dpr;
+  partC.style.width=innerWidth+'px';partC.style.height=innerHeight+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+
+  updateDropPositions();
+}
+
+function updateDropPositions(){
+  dropEls.forEach(({el,data})=>{
+    const proj=poolToScreen(data.px,data.pz);
+    if(!proj||proj.x<-50||proj.x>innerWidth+50||proj.y<-50||proj.y>innerHeight+50){
+      el.style.display='none';return;
+    }
+    el.style.display='';
+    el.style.left=proj.x+'px';
+    el.style.top=proj.y+'px';
+    const s=Math.max(0.4,Math.min(2.2,proj.s*4.0));
+    el.style.transform=`translate(-50%,-50%) scale(${s})`;
+    el.style.zIndex=Math.round(proj.y);
+  });
+}
+
+addEventListener('resize',resize);resize();
+
+function frame(now){
+  const t=(now-t0)/1000;
+  smx+=(mx-smx)*0.04;smy+=(my-smy)*0.04;
+
+  // WebGL pool
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+  gl.enableVertexAttribArray(pa);
+  gl.vertexAttribPointer(pa,2,gl.FLOAT,false,0,0);
+  gl.uniform1f(uT,t);
+  gl.uniform2f(uR,poolC.width,poolC.height);
+  gl.uniform2f(uM,smx,smy);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // Particles — brighter sparkles
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+  for(const p of particles){
+    p.x+=p.drift*Math.cos(t*0.15+p.ph);
+    p.y+=p.drift*Math.sin(t*0.12+p.ph)*0.6;
+    if(p.x<-0.05)p.x=1.05;if(p.x>1.05)p.x=-0.05;
+    if(p.y<-0.05)p.y=1.05;if(p.y>1.05)p.y=-0.05;
+    const pulse=Math.sin(t*p.sp+p.ph)*0.3+0.7;
+    // Occasional bright twinkle
+    const twinkle=Math.pow(Math.max(Math.sin(t*p.sp*3+p.ph*2),0),12)*0.6;
+    const a=(p.a*pulse+twinkle);
+    if(a<0.01)continue;
+    const px=p.x*innerWidth,py=p.y*innerHeight;
+    const[pr,pg,pb]=pCols[p.h];
+
+    // Brighter near center
+    const centerDist=Math.hypot(p.x-0.5,p.y-0.46);
+    const centerBoost=Math.max(0,1-centerDist*2.2)*0.5+1;
+
+    // Soft glow for larger particles
+    if(p.sz>0.6){
+      const g=ctx.createRadialGradient(px,py,0,px,py,p.sz*4);
+      g.addColorStop(0,`rgba(${pr},${pg},${pb},${Math.min(1,a*0.45*centerBoost)})`);
+      g.addColorStop(1,`rgba(${pr},${pg},${pb},0)`);
+      ctx.beginPath();ctx.arc(px,py,p.sz*4,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+    }
+    // Bright core dot
+    ctx.beginPath();ctx.arc(px,py,p.sz*0.45,0,Math.PI*2);
+    ctx.fillStyle=`rgba(${pr},${pg},${pb},${Math.min(1,a*1.2*centerBoost)})`;ctx.fill();
+  }
+
+  // Gentle drop bob animation
+  const bobT=t*0.4;
+  dropEls.forEach(({el,data},i)=>{
+    if(el.style.display==='none')return;
+    const bob=Math.sin(bobT+i*0.7)*1.5;
+    const existingTransform=el.style.transform;
+    // Only update the Y offset via margin
+    el.style.marginTop=bob+'px';
+  });
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

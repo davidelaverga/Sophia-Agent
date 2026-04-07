@@ -25,6 +25,7 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.extraction import extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
+from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
 from deerflow.sophia.smart_opener import generate_smart_opener
 from deerflow.sophia.trace_logger import write_session_trace
 
@@ -63,6 +64,14 @@ def run_offline_pipeline(
     # --- Validate user_id at entry ---
     validate_user_id(user_id)
 
+    logger.info(
+        "session.finalization pipeline_start user_id=%s session_id=%s thread_id=%s has_thread_state=%s",
+        user_id,
+        session_id,
+        thread_id,
+        thread_state is not None,
+    )
+
     # --- Idempotency check (atomic check-and-add to prevent TOCTOU race) ---
     with _processed_lock:
         if session_id in _processed_sessions:
@@ -72,13 +81,29 @@ def run_offline_pipeline(
 
     # --- Thread state guard ---
     if thread_state is None:
-        logger.warning("No thread_state for session %s — aborting pipeline", session_id)
+        logger.warning(
+            "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
+            user_id,
+            session_id,
+            thread_id,
+        )
         return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])
     session_metadata = _build_session_metadata(thread_state)
     artifacts = _extract_artifacts(thread_state)
+
+    logger.info(
+        "session.finalization pipeline_context user_id=%s session_id=%s message_count=%s artifact_count=%s platform=%s context_mode=%s ritual=%s",
+        user_id,
+        session_id,
+        len(messages),
+        len(artifacts),
+        session_metadata.get("platform"),
+        session_metadata.get("context_mode"),
+        session_metadata.get("ritual"),
+    )
 
     steps: dict[str, str] = {}
 
@@ -101,7 +126,14 @@ def run_offline_pipeline(
         extracted_memories = extract_session_memories(
             user_id, session_id, serialized_messages, session_metadata,
         )
+        reconcile_review_metadata_with_mem0(user_id)
         steps["extraction"] = "ok"
+        logger.info(
+            "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
+            user_id,
+            session_id,
+            len(extracted_memories),
+        )
     except Exception:
         logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
         steps["extraction"] = "error"
@@ -177,7 +209,8 @@ def run_offline_pipeline(
     # (session_id already added at the top via _processed_lock)
 
     logger.info(
-        "Offline pipeline completed for session %s: %s",
+        "session.finalization pipeline_complete user_id=%s session_id=%s steps=%s",
+        user_id,
         session_id,
         steps,
     )

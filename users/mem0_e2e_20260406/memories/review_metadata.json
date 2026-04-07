@@ -1,0 +1,228 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "memory_id": "b84d27c5-d119-49a7-b6ad-a24d3c8edf9f",
+      "content": "User is a manager/supervisor overseeing operations and holds accountability to a board for team performance and service quality standards.",
+      "content_hash": "e06595fee943290f32fdbae69a897689ae5d08323dc7df3986e5ce6ebca09be9",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "status": "approved",
+        "source": "recap",
+        "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+        "session_type": "prepare",
+        "preset": "gaming"
+      },
+      "updated_at": "2026-04-06T23:55:07.137899+00:00",
+      "sync_state": "manual"
+    },
+    {
+      "memory_id": "0adb7280-a637-4773-8e68-55191adee270",
+      "content": "User has invested significantly in team development through courses and training programs to improve team capability and performance.",
+      "content_hash": "f1d0ed2c87e8449cafd0bdf6b03f04fdd07aea458568e85afce8b041daac1559",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "status": "approved",
+        "source": "recap",
+        "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+        "session_type": "prepare",
+        "preset": "gaming"
+      },
+      "updated_at": "2026-04-06T23:55:07.144617+00:00",
+      "sync_state": "manual"
+    },
+    {
+      "memory_id": null,
+      "content": "User experiences burnout from over-functioning as the safety net \u2014 handling excessive requests, unable to delegate, and taking on team failures as personal accountability.",
+      "content_hash": "fe7c4f6c0ed28c23da3d9f851a6872d301b373a54a0e07bea79b143395194bcd",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "status": "approved",
+        "source": "recap",
+        "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+        "session_type": "prepare",
+        "preset": "gaming"
+      },
+      "updated_at": "2026-04-06T23:55:07.150756+00:00",
+      "sync_state": "manual"
+    },
+    {
+      "memory_id": null,
+      "content": "User tends to micromanage and control outcomes, driven by fear of board reprimand if service standards slip due to team mistakes.",
+      "content_hash": "b7b082c3037b0c6c9d5d6f987b519131310c105334b57b4d7392e7aea2f5a180",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "status": "approved",
+        "source": "recap",
+        "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+        "session_type": "prepare",
+        "preset": "gaming"
+      },
+      "updated_at": "2026-04-06T23:55:07.157297+00:00",
+      "sync_state": "manual"
+    },
+    {
+      "memory_id": null,
+      "content": "User feels taken advantage of by team members who benefit from their investment in development and oversight without reciprocal effort or improvement.",
+      "content_hash": "34e835530fb9ba1c8e9289eef83d3c15d0da7d35f8c65cb659d7ec536882892c",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "feeling",
+        "importance": "potential",
+        "importance_score": 0.72,
+        "confidence": 0.88,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": 0.2,
+        "tags": [
+          "work",
+          "resentment",
+          "relationships",
+          "fairness"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:16.010002+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": null,
+      "content": "User is caught between two competing fears: being perceived as cold/cutthroat (firing underperformers) versus being expendable if they don't perform.",
+      "content_hash": "815e3c4a0723dfbee17ddad46976bb28cb287d9c95d1ca479ba9df2cf44440ea",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "pattern",
+        "importance": "structural",
+        "importance_score": 0.8,
+        "confidence": 0.93,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": 0.25,
+        "tags": [
+          "fear",
+          "identity",
+          "work",
+          "values-conflict"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:17.996953+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": null,
+      "content": "User has a strong value around second chances and mentoring others, rooted in personal history of receiving help when they were early in their career.",
+      "content_hash": "46c03910e107512c990f5940a34159313d091cef8be0fa7723b3b45a0812bac2",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "lesson",
+        "importance": "potential",
+        "importance_score": 0.78,
+        "confidence": 0.92,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": 0.6,
+        "tags": [
+          "values",
+          "mentoring",
+          "gratitude",
+          "identity"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:20.030125+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": null,
+      "content": "User realized they are repaying a debt of past help that was never meant to be repaid, and that they are no longer obligated to sacrifice themselves for others' development.",
+      "content_hash": "38561505d6478596da5ee9f6b333c0687394e7596ca61c7651b33ef6395ec3ec",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "lesson",
+        "importance": "structural",
+        "importance_score": 0.85,
+        "confidence": 0.92,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": 0.65,
+        "tags": [
+          "insight",
+          "boundaries",
+          "self-worth"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:22.046122+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": null,
+      "content": "User committed to setting boundaries by saying no to requests, stopping micromanagement, and refusing to carry responsibilities that belong to team members.",
+      "content_hash": "2c824426775cd110481cfa30ca18cd1220dc710732dff012eccf6e0b32fa51dd",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "commitment",
+        "importance": "structural",
+        "importance_score": 0.9,
+        "confidence": 0.93,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": 0.7,
+        "tags": [
+          "boundaries",
+          "self-care",
+          "leadership",
+          "next-session"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:24.200992+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": null,
+      "content": "User's core goal is to reach a state where they can rest and actually enjoy their work, rather than being consumed by responsibility.",
+      "content_hash": "49d216a2a9d01366e32632e3fb13be0ad02df5393a2092d85dc85c8f11e7dfac",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "decision",
+        "importance": "structural",
+        "importance_score": 0.85,
+        "confidence": 0.92,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": 0.65,
+        "tags": [
+          "well-being",
+          "values",
+          "work-life"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:26.383904+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": null,
+      "content": "User prefers directness and named clarity in difficult conversations \u2014 responds well when Sophia reflects contradictions back and names the core tension.",
+      "content_hash": "724695c3392183c55de6656078266662ac77e278e20a20b1e5bf1365b7e5f835",
+      "session_id": "9685ddb5-e3e0-4552-8df8-4be7bc8abddb",
+      "metadata": {
+        "category": "preference",
+        "importance": "potential",
+        "importance_score": 0.68,
+        "confidence": 0.8,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tags": [
+          "communication",
+          "sophia-style"
+        ]
+      },
+      "updated_at": "2026-04-06T23:54:28.298770+00:00",
+      "sync_state": "pending"
+    }
+  ]
+}

@@ -19,7 +19,12 @@ from deerflow.config.title_config import load_title_config_from_dict
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 
-load_dotenv()
+BACKEND_DIR = Path(__file__).resolve().parents[4]
+REPO_ROOT = BACKEND_DIR.parent
+
+for env_file in (BACKEND_DIR / ".env", REPO_ROOT / ".env"):
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
 
 logger = logging.getLogger(__name__)
 

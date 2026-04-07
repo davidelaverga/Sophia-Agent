@@ -1,6 +1,15 @@
 import os
+from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+
+BACKEND_DIR = Path(__file__).resolve().parents[2]
+REPO_ROOT = BACKEND_DIR.parent
+
+for env_file in (BACKEND_DIR / ".env", REPO_ROOT / ".env"):
+    if env_file.exists():
+        load_dotenv(env_file, override=False)
 
 
 class GatewayConfig(BaseModel):

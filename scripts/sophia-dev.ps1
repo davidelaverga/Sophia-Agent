@@ -23,7 +23,7 @@ $services = @(
     @{ Name = "LangGraph";  Port = 2024; Dir = "backend";               Cmd = "uv run langgraph dev --no-browser --allow-blocking --no-reload" }
     @{ Name = "Voice";      Port = 8000; Dir = ".";                     Cmd = "voice\.venv\Scripts\python.exe -m voice.server serve --port 8000" }
     @{ Name = "Gateway";    Port = 8001; Dir = "backend";               Cmd = "uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001" }
-    @{ Name = "Frontend";   Port = 3000; Dir = "AI-companion-mvp-front"; Cmd = "npm run dev" }
+    @{ Name = "Frontend";   Port = 3000; Dir = "frontend";               Cmd = "pnpm run dev" }
 )
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

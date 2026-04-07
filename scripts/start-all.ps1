@@ -91,8 +91,8 @@ $voiceJob = Start-Job -Name sophia-voice -ScriptBlock {
 # ---------------------------------------------------------------------------
 Write-Host "[sophia] Starting Frontend on :3000 ..." -ForegroundColor Cyan
 $feJob = Start-Job -Name sophia-frontend -ScriptBlock {
-    Set-Location "$using:ROOT\AI-companion-mvp-front"
-    & npm run dev 2>&1
+    Set-Location "$using:ROOT\frontend"
+    & pnpm run dev 2>&1
 }
 
 # ---------------------------------------------------------------------------

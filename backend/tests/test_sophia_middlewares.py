@@ -278,15 +278,14 @@ class TestPlatformContextMiddleware:
 
 class TestUserIdentityMiddleware:
     def test_loads_identity_file(self, tmp_path):
-        import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-
         # Create a temporary user identity file
         user_dir = tmp_path / "test_user"
         user_dir.mkdir(parents=True)
         (user_dir / "identity.md").write_text("Name: Test User\nRole: Developer")
 
+        import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -303,7 +302,6 @@ class TestUserIdentityMiddleware:
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -329,7 +327,6 @@ class TestSessionStateMiddleware:
         """Greeting message → opener delivered as first_turn_instruction."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
-
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -358,7 +355,6 @@ class TestSessionStateMiddleware:
         """Real content on turn 0 → opener becomes context, not instruction."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
-
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -387,7 +383,6 @@ class TestSessionStateMiddleware:
     def test_no_opener_on_turn_1(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
-
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -407,7 +402,6 @@ class TestSessionStateMiddleware:
     def test_missing_handoff_returns_none(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
-
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -418,6 +412,125 @@ class TestSessionStateMiddleware:
         finally:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir
+
+    def test_greeting_gets_first_turn_instruction(self, tmp_path):
+        """Greeting on turn 0 with handoff file injects <first_turn_instruction>."""
+        import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            '---\nsmart_opener: "How did the pitch go?"\n---\nSome session notes.'
+        )
+
+        try:
+            mw = mod.SessionStateMiddleware("test_user")
+            result = mw.before_agent(
+                {"messages": [_make_message("hey")], "turn_count": 0},
+                _make_runtime(),
+            )
+            assert result is not None
+            blocks = result["system_prompt_blocks"]
+            assert len(blocks) >= 1
+            assert "<first_turn_instruction>" in blocks[0]
+            assert "How did the pitch go?" in blocks[0]
+        finally:
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
+
+    def test_substantive_message_gets_session_context(self, tmp_path):
+        """Substantive user message on turn 0 injects <session_context>, not <first_turn_instruction>."""
+        import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            '---\nsmart_opener: "How did the pitch go?"\n---\nSome session notes.'
+        )
+
+        try:
+            mw = mod.SessionStateMiddleware("test_user")
+            result = mw.before_agent(
+                {"messages": [_make_message("I had a terrible day at work")], "turn_count": 0},
+                _make_runtime(),
+            )
+            assert result is not None
+            blocks = result["system_prompt_blocks"]
+            assert len(blocks) >= 1
+            assert "<session_context>" in blocks[0]
+            assert "<first_turn_instruction>" not in blocks[0]
+            assert "How did the pitch go?" in blocks[0]
+        finally:
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
+
+    def test_no_handoff_file_no_error(self, tmp_path):
+        """No handoff file on disk — middleware returns None gracefully."""
+        import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
+
+        # Create the user dir but NOT the handoff file
+        (tmp_path / "test_user").mkdir(parents=True)
+
+        try:
+            mw = mod.SessionStateMiddleware("test_user")
+            result = mw.before_agent(
+                {"messages": [_make_message("hey")], "turn_count": 0},
+                _make_runtime(),
+            )
+            assert result is None
+        finally:
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
+
+    def test_not_turn_zero_skips(self, tmp_path):
+        """turn_count=1 causes the middleware to skip entirely."""
+        import deerflow.agents.sophia_agent.middlewares.session_state as mod
+        import deerflow.agents.sophia_agent.paths as paths
+        original_users_dir = paths.USERS_DIR
+        paths.USERS_DIR = tmp_path
+        mod.USERS_DIR = tmp_path
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            '---\nsmart_opener: "How did the pitch go?"\n---\n'
+        )
+
+        try:
+            mw = mod.SessionStateMiddleware("test_user")
+            result = mw.before_agent(
+                {"messages": [_make_message("hey")], "turn_count": 1},
+                _make_runtime(),
+            )
+            assert result is None
+        finally:
+            paths.USERS_DIR = original_users_dir
+            mod.USERS_DIR = original_users_dir
+
+    @pytest.mark.parametrize("frontmatter,expected_opener", [
+        ('smart_opener: "How did the pitch go?"', "How did the pitch go?"),
+        ("smart_opener: 'How did the pitch go?'", "How did the pitch go?"),
+        ("smart_opener: How did the pitch go?", "How did the pitch go?"),
+    ])
+    def test_opener_round_trip(self, tmp_path, frontmatter, expected_opener):
+        """_extract_smart_opener handles double quotes, single quotes, and no quotes."""
+        import deerflow.agents.sophia_agent.middlewares.session_state as mod
+
+        handoff_content = f"---\n{frontmatter}\n---\nSession notes."
+        opener = mod.SessionStateMiddleware.__new__(mod.SessionStateMiddleware)._extract_smart_opener(handoff_content)
+        assert opener == expected_opener
 
 
 # --- ToneGuidanceMiddleware ---
@@ -929,7 +1042,6 @@ class TestPromptAssemblyMiddleware:
         from langchain_core.messages import SystemMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-
         mw = PromptAssemblyMiddleware()
         state = {
             "messages": [_make_message("hello")],
@@ -1121,6 +1233,116 @@ class TestMem0CategorySelection:
         assert "commitment" in cats  # from debrief ritual
         assert "decision" in cats  # from debrief ritual
         assert "fact" in cats  # always present
+
+    def test_work_context_sorts_work_memories_first(self):
+        from unittest.mock import patch
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
+
+        _cache.clear()
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
+                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
+                {"id": "m3", "memory": "Sister birthday next week", "metadata": {"category": "family"}},
+                {"id": "m4", "memory": "Works with Alice", "metadata": {"category": "colleague"}},
+                {"id": "m5", "memory": "Prefers morning calls", "metadata": {"category": "preference"}},
+            ],
+        }
+
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            results = search_memories("user1", "test query", context_mode="work")
+
+        # Work categories (deadline, colleague) must appear before non-work (game, family, preference)
+        work_cats = {"project", "colleague", "career", "deadline", "commitment", "decision"}
+        first_non_work_idx = None
+        for i, m in enumerate(results):
+            if m["category"] not in work_cats and first_non_work_idx is None:
+                first_non_work_idx = i
+            if m["category"] in work_cats and first_non_work_idx is not None:
+                pytest.fail(f"Work memory '{m['content']}' at index {i} appeared after non-work memory at index {first_non_work_idx}")
+
+    def test_gaming_context_sorts_gaming_memories_first(self):
+        from unittest.mock import patch
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
+
+        _cache.clear()
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {"id": "m1", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
+                {"id": "m2", "memory": "Beat final boss", "metadata": {"category": "achievement"}},
+                {"id": "m3", "memory": "Plays with TeamX", "metadata": {"category": "gaming_team"}},
+                {"id": "m4", "memory": "Sister birthday", "metadata": {"category": "family"}},
+                {"id": "m5", "memory": "Likes strategy games", "metadata": {"category": "strategy"}},
+            ],
+        }
+
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            results = search_memories("user1", "test query", context_mode="gaming")
+
+        gaming_cats = {"game", "achievement", "gaming_team", "strategy"}
+        first_non_gaming_idx = None
+        for i, m in enumerate(results):
+            if m["category"] not in gaming_cats and first_non_gaming_idx is None:
+                first_non_gaming_idx = i
+            if m["category"] in gaming_cats and first_non_gaming_idx is not None:
+                pytest.fail(f"Gaming memory '{m['content']}' at index {i} appeared after non-gaming memory at index {first_non_gaming_idx}")
+
+    def test_no_context_mode_preserves_original_order(self):
+        from unittest.mock import patch
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
+
+        _cache.clear()
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
+                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
+                {"id": "m3", "memory": "Sister birthday", "metadata": {"category": "family"}},
+            ],
+        }
+
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            results = search_memories("user1", "test query no ctx")
+
+        # Without context_mode, original order should be preserved
+        assert results[0]["id"] == "m1"
+        assert results[1]["id"] == "m2"
+        assert results[2]["id"] == "m3"
+
+    def test_cross_context_memories_still_returned(self):
+        from unittest.mock import patch
+
+        from deerflow.sophia.mem0_client import _cache, search_memories
+
+        _cache.clear()
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = {
+            "results": [
+                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
+                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
+                {"id": "m3", "memory": "Sister birthday", "metadata": {"category": "family"}},
+            ],
+        }
+
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            results = search_memories("user1", "cross ctx query", context_mode="work")
+
+        # All memories should still be present (not excluded)
+        result_ids = [m["id"] for m in results]
+        assert "m1" in result_ids  # gaming memory still present in work context
+        assert "m2" in result_ids  # work memory present
+        assert "m3" in result_ids  # life memory still present in work context
+        # But work memory should be first
+        assert results[0]["category"] == "deadline"
 
 
 # --- SophiaTitleMiddleware ---
