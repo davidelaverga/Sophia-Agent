@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
+
+from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
+from deerflow.config.sandbox_config import SandboxConfig
+
+
+@pytest.fixture(autouse=True)
+def _gateway_test_app_config():
+    set_app_config(
+        AppConfig(
+            models=[],
+            sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
+        )
+    )
+    yield
+    reset_app_config()
 
 
 def test_gateway_app_mounts_sessions_and_bootstrap_routes():
