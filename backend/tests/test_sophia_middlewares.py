@@ -1,5 +1,7 @@
 """Tests for all Sophia middleware components."""
 
+import json
+import os
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -1040,26 +1042,98 @@ class TestArtifactMiddleware:
 # --- PromptAssemblyMiddleware ---
 
 class TestPromptAssemblyMiddleware:
+    def _make_model_request(self, messages, state):
+        """Create a mock ModelRequest for wrap_model_call testing."""
+        request = MagicMock()
+        request.messages = messages
+        request.state = state
+
+        def _override(**kwargs):
+            new_req = MagicMock()
+            new_req.messages = kwargs.get("messages", messages)
+            new_req.state = state
+            return new_req
+
+        request.override = _override
+        return request
+
     def test_assembles_blocks_into_system_message(self):
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        from langchain_core.messages import SystemMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
         mw = PromptAssemblyMiddleware()
+
+        human_msg = HumanMessage(content="hello")
         state = {
-            "messages": [_make_message("hello")],
+            "messages": [human_msg],
             "system_prompt_blocks": ["Block 1", "Block 2", "Block 3"],
         }
-        result = mw.before_model(state, _make_runtime())
-        assert result is not None
-        msgs = result["messages"]
+        request = self._make_model_request([human_msg], state)
+
+        # Track what the handler receives
+        captured = {}
+        def handler(req):
+            captured["messages"] = req.messages
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        assert "messages" in captured
+        msgs = captured["messages"]
+        # First message should be the assembled system message
         assert isinstance(msgs[0], SystemMessage)
         assert "Block 1" in msgs[0].content
         assert "Block 2" in msgs[0].content
+        assert "Block 3" in msgs[0].content
+        # Human message should be preserved
+        assert len(msgs) == 2
+        assert msgs[1].content == "hello"
 
-    def test_empty_blocks_returns_none(self):
+    def test_empty_blocks_passes_through(self):
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+        from langchain_core.messages import HumanMessage
         mw = PromptAssemblyMiddleware()
-        result = mw.before_model({"messages": [], "system_prompt_blocks": []}, _make_runtime())
-        assert result is None
+
+        human_msg = HumanMessage(content="hello")
+        state = {"messages": [human_msg], "system_prompt_blocks": []}
+        request = self._make_model_request([human_msg], state)
+
+        # Handler should receive the original request (unmodified)
+        captured = {}
+        def handler(req):
+            captured["request"] = req
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+        # Original request passed through (no override)
+        assert captured["request"] is request
+
+    def test_removes_old_system_messages(self):
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+        from langchain_core.messages import HumanMessage, SystemMessage
+        mw = PromptAssemblyMiddleware()
+
+        old_sys = SystemMessage(content="old system", id="old-sys")
+        human_msg = HumanMessage(content="hello")
+        state = {
+            "messages": [old_sys, human_msg],
+            "system_prompt_blocks": ["New block"],
+        }
+        request = self._make_model_request([old_sys, human_msg], state)
+
+        captured = {}
+        def handler(req):
+            captured["messages"] = req.messages
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        msgs = captured["messages"]
+        # Only the new system message + human message
+        assert len(msgs) == 2
+        assert isinstance(msgs[0], SystemMessage)
+        assert "New block" in msgs[0].content
+        assert "old system" not in msgs[0].content
+        assert msgs[1].content == "hello"
 
 
 # --- emit_artifact tool ---
@@ -1359,3 +1433,168 @@ class TestSophiaTitleMiddleware:
             _make_runtime(),
         )
         assert result is None
+
+
+# --- emit_builder_artifact tool ---
+
+class TestEmitBuilderArtifactTool:
+    def test_valid_artifact(self):
+        # Invoke emit_builder_artifact with valid input, verify returns JSON string
+        from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
+        result = emit_builder_artifact.invoke({
+            "artifact_path": "outputs/report.md",
+            "artifact_type": "document",
+            "artifact_title": "Business Case Report",
+            "steps_completed": 5,
+            "decisions_made": ["Used simple format", "Included ROI section"],
+            "companion_summary": "A clean business case document.",
+            "companion_tone_hint": "Reassuring — user was stressed.",
+            "confidence": 0.85,
+        })
+        parsed = json.loads(result)
+        assert parsed["artifact_type"] == "document"
+        assert parsed["confidence"] == 0.85
+
+    def test_invalid_confidence_bounds(self):
+        from deerflow.sophia.tools.emit_builder_artifact import BuilderArtifactInput
+        with pytest.raises(Exception):
+            BuilderArtifactInput(
+                artifact_path="x", artifact_type="document", artifact_title="x",
+                steps_completed=1, decisions_made=[], companion_summary="x",
+                companion_tone_hint="x", confidence=1.5,  # out of bounds
+            )
+
+
+# --- BuilderTaskMiddleware ---
+
+class TestBuilderTaskMiddleware:
+    def test_injects_briefing_with_context(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+        mw = BuilderTaskMiddleware()
+        state = {
+            "system_prompt_blocks": ["existing block"],
+            "delegation_context": {
+                "companion_artifact": {"tone_estimate": 1.2, "active_tone_band": "grief_fear", "session_goal": "Investor pitch"},
+                "task_type": "presentation",
+                "relevant_memories": ["Likes clean design"],
+                "active_ritual": "prepare",
+                "ritual_phase": "materials",
+            },
+        }
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        blocks = result["system_prompt_blocks"]
+        assert len(blocks) == 2  # existing + briefing
+        assert "<builder_briefing>" in blocks[1]
+        assert "relief" in blocks[1].lower()  # grief_fear tone guidance
+        assert "armor" in blocks[1].lower()  # prepare ritual
+
+    def test_no_context_returns_none(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+        mw = BuilderTaskMiddleware()
+        result = mw.before_agent({"system_prompt_blocks": []}, _make_runtime())
+        assert result is None
+
+    def test_tone_guidance_engagement(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+        guidance = BuilderTaskMiddleware._tone_guidance(3.0, "engagement")
+        assert "ambitious" in guidance.lower()
+
+    def test_tone_guidance_shutdown(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+        guidance = BuilderTaskMiddleware._tone_guidance(0.3, "shutdown")
+        assert "simple" in guidance.lower()
+
+
+# --- BuilderArtifactMiddleware ---
+
+class TestBuilderArtifactMiddleware:
+    def test_captures_builder_artifact(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        mw = BuilderArtifactMiddleware()
+        # Create a mock AI message with emit_builder_artifact tool call
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "emit_builder_artifact", "args": {
+            "artifact_path": "outputs/doc.md",
+            "artifact_type": "document",
+            "confidence": 0.9,
+        }}]
+        state = {"messages": [msg]}
+        result = mw.after_model(state, _make_runtime())
+        assert result is not None
+        assert result["builder_result"]["artifact_type"] == "document"
+        assert result["builder_result"]["confidence"] == 0.9
+
+    def test_fallback_on_no_tool_call(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = []  # No tool calls — plain text ending
+        state = {"messages": [msg]}
+        result = mw.after_model(state, _make_runtime())
+        assert result is not None
+        assert result["builder_result"]["confidence"] == 0.3  # fallback
+
+    def test_ignores_non_builder_tool_calls(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
+        state = {"messages": [msg]}
+        result = mw.after_model(state, _make_runtime())
+        assert result is None  # Loop continues
+
+
+# --- ArtifactMiddleware synthesis (builder handoff) ---
+
+class TestArtifactMiddlewareSynthesis:
+    def test_synthesis_injection(self):
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        # Create with a mock instructions file
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Artifact Instructions\nTest instructions.")
+            f.flush()
+            mw = ArtifactMiddleware(Path(f.name))
+
+        state = {
+            "system_prompt_blocks": [],
+            "builder_result": {
+                "companion_summary": "A clean report.",
+                "artifact_title": "Business Case",
+                "artifact_type": "document",
+                "decisions_made": ["Kept it simple"],
+                "companion_tone_hint": "Reassuring",
+            },
+            "builder_task": {"status": "completed"},
+            "active_tone_band": "engagement",
+        }
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        # Should have injected synthesis block
+        blocks_text = "\n".join(result["system_prompt_blocks"])
+        assert "<builder_completed>" in blocks_text
+        assert "A clean report." in blocks_text
+        # builder_task status should be updated
+        assert result["builder_task"]["status"] == "synthesized"
+        os.unlink(f.name)
+
+    def test_no_synthesis_when_already_synthesized(self):
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Test")
+            f.flush()
+            mw = ArtifactMiddleware(Path(f.name))
+
+        state = {
+            "system_prompt_blocks": [],
+            "builder_result": {"companion_summary": "Done."},
+            "builder_task": {"status": "synthesized"},  # Already done
+        }
+        result = mw.before_agent(state, _make_runtime())
+        # Should NOT inject synthesis (status is already "synthesized")
+        blocks_text = "\n".join(result["system_prompt_blocks"])
+        assert "<builder_completed>" not in blocks_text
+        os.unlink(f.name)

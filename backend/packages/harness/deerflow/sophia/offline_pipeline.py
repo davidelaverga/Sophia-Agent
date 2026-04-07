@@ -17,10 +17,12 @@ The pipeline is idempotent via a module-level ``_processed_sessions`` set.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import threading
 from typing import Any
+
+import httpx
 
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.extraction import extract_session_memories
@@ -35,6 +37,33 @@ logger = logging.getLogger(__name__)
 # If multi-process is needed later, upgrade to a file-based marker.
 _processed_sessions: set[str] = set()
 _processed_lock = threading.Lock()
+
+_LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:2024")
+
+
+def _fetch_thread_state(thread_id: str) -> dict[str, Any] | None:
+    """Fetch thread state from the LangGraph server.
+
+    Called when ``thread_state`` is not provided by the caller. The
+    pipeline already runs in ``asyncio.to_thread``, so a synchronous
+    HTTP call is fine.
+
+    Returns the state values dict on success, or ``None`` on failure.
+    """
+    url = f"{_LANGGRAPH_URL}/threads/{thread_id}/state"
+    try:
+        resp = httpx.get(url, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        # LangGraph returns {"values": {...state...}, "next": [...], ...}
+        values = data.get("values", data)
+        if not values.get("messages"):
+            logger.warning("Fetched thread state has no messages for thread %s", thread_id)
+            return None
+        return values
+    except Exception:
+        logger.warning("Failed to fetch thread state for thread %s", thread_id, exc_info=True)
+        return None
 
 
 def run_offline_pipeline(
@@ -51,7 +80,8 @@ def run_offline_pipeline(
         thread_id: The LangGraph thread ID.
         thread_state: Full thread state dict including ``messages`` and
             optionally ``configurable``, ``current_artifact``, etc.
-            If ``None``, the pipeline cannot proceed.
+            If ``None``, the pipeline fetches it from the LangGraph
+            server using ``thread_id``.
 
     Returns:
         Summary dict with ``status`` and per-step results, e.g.::
@@ -71,10 +101,19 @@ def run_offline_pipeline(
             return {"status": "already_processed", "session_id": session_id}
         _processed_sessions.add(session_id)
 
-    # --- Thread state guard ---
+    # --- Thread state: fetch from LangGraph if not provided ---
     if thread_state is None:
-        logger.warning("No thread_state for session %s — aborting pipeline", session_id)
-        return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
+        thread_state = _fetch_thread_state(thread_id)
+        if thread_state is None:
+            logger.warning(
+                "No thread_state for session %s and fetch from LangGraph failed — aborting",
+                session_id,
+            )
+            # Remove from processed set so a retry can succeed after a transient failure
+            with _processed_lock:
+                _processed_sessions.discard(session_id)
+            return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
+        logger.info("Fetched thread_state from LangGraph for session %s", session_id)
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])

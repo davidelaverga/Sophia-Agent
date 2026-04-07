@@ -43,6 +43,7 @@ class SophiaState(AgentState):
     # Builder
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
+    delegation_context: NotRequired[dict | None]
 
     # Prompt assembly — accumulated by middlewares in before_agent, assembled in before_model.
     # NOTE: operator.add is kept here for documentation purposes (it signals "append"

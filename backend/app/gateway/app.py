@@ -201,6 +201,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     from app.gateway.routers import sophia
     app.include_router(sophia.router)
 
+    # Sophia Voice API is mounted at /api/sophia/{user_id}/voice
+    from app.gateway.routers import voice
+    app.include_router(voice.router)
+
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:
         """Health check endpoint.

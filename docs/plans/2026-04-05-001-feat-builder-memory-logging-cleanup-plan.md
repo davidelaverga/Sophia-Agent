@@ -1,7 +1,7 @@
 ---
 title: "feat: Builder tool, memory logging, handoff verification, cleanup"
 type: feat
-status: active
+status: completed
 date: 2026-04-05
 ---
 

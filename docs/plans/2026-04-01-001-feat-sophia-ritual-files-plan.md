@@ -1,7 +1,7 @@
 ---
 title: "feat: Create 4 Sophia ritual protocol files"
 type: feat
-status: active
+status: completed
 date: 2026-04-01
 ---
 

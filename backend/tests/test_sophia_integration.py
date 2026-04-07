@@ -214,13 +214,15 @@ class TestMiddlewareChainOrdering:
         assert "2-5 sentences" in text_result["system_prompt_blocks"][0]
 
     def test_prompt_assembly_creates_system_message(self, skills_path):
-        """PromptAssemblyMiddleware joins all blocks into a system message."""
+        """PromptAssemblyMiddleware joins all blocks into a system message via wrap_model_call."""
+        from unittest.mock import MagicMock
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        from langchain_core.messages import SystemMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
 
         mw = PromptAssemblyMiddleware()
+        human_msg = HumanMessage(content="hello")
         state = {
-            "messages": [_make_message("hello")],
+            "messages": [human_msg],
             "system_prompt_blocks": [
                 "# Soul\nYou are Sophia.",
                 "Platform: voice. Respond in 1-3 sentences.",
@@ -228,9 +230,24 @@ class TestMiddlewareChainOrdering:
             ],
         }
 
-        result = mw.before_model(state, _make_runtime())
-        assert result is not None
-        msgs = result["messages"]
+        request = MagicMock()
+        request.messages = [human_msg]
+        request.state = state
+        def _override(**kwargs):
+            new_req = MagicMock()
+            new_req.messages = kwargs.get("messages", [human_msg])
+            new_req.state = state
+            return new_req
+        request.override = _override
+
+        captured = {}
+        def handler(req):
+            captured["messages"] = req.messages
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        msgs = captured["messages"]
         assert isinstance(msgs[0], SystemMessage)
         assert "Sophia" in msgs[0].content
         assert "voice" in msgs[0].content

@@ -1,7 +1,7 @@
 ---
 title: "feat: Voice layer wiring — backend contract + session lifecycle"
 type: feat
-status: active
+status: completed
 date: 2026-04-01
 ---
 
