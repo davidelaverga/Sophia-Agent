@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Sophia — Journal</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#06050c;color:#e8e4f0;font-family:'Inter',sans-serif;
+  overflow:hidden;height:100vh;width:100vw;
+  -webkit-font-smoothing:antialiased;user-select:none;cursor:default;
+}
+canvas{position:fixed;inset:0}
+#pool{z-index:0}
+#overlay{z-index:2;pointer-events:none}
+#hit{z-index:3;cursor:default;background:transparent}
+
+/* ── Minimal whisper-quiet UI ── */
+.top-left{position:fixed;top:28px;left:32px;z-index:10}
+.top-left h1{font-weight:600;font-size:22px;letter-spacing:-0.02em;color:#e8e4f0;opacity:0.82}
+.top-left .sub{font-size:10px;color:#7a7490;margin-top:3px;display:flex;align-items:center;gap:5px}
+.top-left .sub .dot{width:4px;height:4px;border-radius:50%;background:#59bead;box-shadow:0 0 5px #59bead}
+
+.search-bar{
+  position:fixed;top:28px;left:50%;transform:translateX(-50%);z-index:10;
+  display:flex;align-items:center;gap:7px;
+  padding:7px 14px;border-radius:10px;
+  background:rgba(14,12,24,0.50);border:1px solid rgba(184,164,232,0.07);
+  backdrop-filter:blur(14px);min-width:220px;
+}
+.search-bar .si{color:#4a4560;font-size:12px}
+.search-bar input{border:none;outline:none;background:transparent;color:#7a7490;font-size:11px;font-family:'Inter',sans-serif;flex:1}
+.search-bar input::placeholder{color:#4a4560}
+.search-bar .kb{font-size:9px;color:#4a4560;padding:2px 5px;border-radius:3px;border:1px solid rgba(184,164,232,0.06);background:rgba(14,12,24,0.4)}
+
+.top-right{position:fixed;top:28px;right:32px;z-index:10;display:flex;align-items:center;gap:8px}
+.period-sel{
+  padding:6px 12px;border-radius:7px;border:1px solid rgba(184,164,232,0.07);
+  background:rgba(14,12,24,0.45);backdrop-filter:blur(10px);
+  color:#7a7490;font-size:10px;cursor:pointer;display:flex;align-items:center;gap:5px;
+}
+.period-sel::after{content:'▾';font-size:7px;color:#4a4560}
+.avatar{width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#b8a4e8,#59bead);border:1.5px solid rgba(184,164,232,0.12);cursor:pointer;opacity:0.65}
+
+/* Detail panel */
+.detail{
+  position:fixed;right:40px;top:50%;transform:translateY(-50%) translateX(12px);z-index:20;
+  width:255px;padding:18px 20px;border-radius:14px;
+  background:rgba(16,14,28,0.80);backdrop-filter:blur(28px);
+  border:1px solid rgba(184,164,232,0.06);
+  box-shadow:0 24px 64px rgba(3,2,10,0.75);
+  opacity:0;pointer-events:none;transition:opacity .4s ease,transform .4s ease;
+}
+.detail.show{opacity:1;pointer-events:auto;transform:translateY(-50%) translateX(0)}
+.detail .d-date{font-size:9px;color:#4a4560;margin-bottom:8px;letter-spacing:0.03em}
+.detail .d-text{font-size:12px;line-height:1.65;color:#e0dced;font-weight:300;margin-bottom:12px}
+.detail .d-tags{display:flex;gap:5px}
+.detail .d-tag{font-size:8px;padding:3px 8px;border-radius:10px;background:rgba(184,164,232,0.05);color:#7a7490}
+.detail .d-close{position:absolute;top:10px;right:12px;background:none;border:none;color:#4a4560;cursor:pointer;font-size:11px}
+.detail .d-close:hover{color:#7a7490}
+
+/* Stats */
+.stats{position:fixed;bottom:40px;left:32px;z-index:10;display:flex;gap:22px;opacity:0.45}
+.stat .stat-n{font-weight:500;font-size:16px;color:#e0dced}
+.stat .stat-l{font-size:8px;color:#4a4560;margin-top:1px;letter-spacing:0.03em}
+
+/* Timeline */
+.timeline{position:fixed;bottom:30px;left:210px;right:40px;z-index:10;height:24px;display:flex;align-items:center;opacity:0.35}
+.tl-track{flex:1;position:relative;height:100%}
+.tl-bar{position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(184,164,232,0.04);transform:translateY(-50%)}
+.tl-dot{position:absolute;top:50%;transform:translate(-50%,-50%);width:3px;height:3px;border-radius:50%;background:rgba(184,164,232,0.10)}
+.tl-dot.b{background:rgba(89,190,173,0.25);width:4px;height:4px}
+.tl-labels{position:absolute;bottom:-1px;left:0;right:0;display:flex;justify-content:space-between;font-size:8px;color:#3a3550;letter-spacing:0.03em}
+.tl-cursor{position:absolute;top:50%;transform:translate(-50%,-50%);width:6px;height:6px;border-radius:50%;background:#59bead;box-shadow:0 0 8px rgba(89,190,173,0.25)}
+</style>
+</head>
+<body>
+
+<canvas id="pool"></canvas>
+<canvas id="overlay"></canvas>
+<canvas id="hit"></canvas>
+
+<div class="top-left">
+  <h1>Journal</h1>
+  <p class="sub"><span class="dot"></span> Your memories with Sophia</p>
+</div>
+<div class="search-bar">
+  <span class="si">⌕</span>
+  <input type="text" placeholder="Search memories…" spellcheck="false">
+  <span class="kb">⌘K</span>
+</div>
+<div class="top-right">
+  <div class="period-sel">This month</div>
+  <div class="avatar"></div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="stat-n">127</div><div class="stat-l">memories</div></div>
+  <div class="stat"><div class="stat-n">12</div><div class="stat-l">this month</div></div>
+  <div class="stat"><div class="stat-n">3</div><div class="stat-l">emerging patterns</div></div>
+</div>
+<div class="timeline"><div class="tl-track" id="tl">
+  <div class="tl-bar"></div>
+  <div class="tl-labels"><span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span><span>Nov</span></div>
+  <div class="tl-cursor" style="left:62%"></div>
+</div></div>
+
+<div class="detail" id="detail">
+  <button class="d-close" onclick="hideDetail()">✕</button>
+  <div class="d-date" id="dDate"></div>
+  <div class="d-text" id="dText"></div>
+  <div class="d-tags" id="dTags"></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════
+// CAMERA — shared between GLSL and JS
+// Lower, more forward → cinematic 3/4 landscape view
+// ═══════════════════════════════════════════════════
+const CAM = [0, 2.0, -2.8];
+const TGT = [0, -0.15, 0.8];
+const FOV = 0.95;
+
+const V = {
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  norm:v=>{const l=Math.hypot(...v);return[v[0]/l,v[1]/l,v[2]/l]},
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+};
+const fwd=V.norm(V.sub(TGT,CAM));
+const rt=V.norm(V.cross([0,1,0],fwd));
+const up=V.cross(rt,fwd);
+
+function poolToScreen(px,pz){
+  const tp=[px-CAM[0],-CAM[1],pz-CAM[2]];
+  const f=V.dot(tp,fwd);if(f<=0)return null;
+  const r=V.dot(tp,rt),u=V.dot(tp,up);
+  const asp=innerWidth/innerHeight;
+  return{x:(r/(f*FOV*asp)+0.5)*innerWidth,y:(-u/(f*FOV)+0.5)*innerHeight,s:1/f};
+}
+
+// ═══════════════════════════════════════════════════
+// WEBGL — PHYSICALLY-BASED WATER SURFACE
+// ═══════════════════════════════════════════════════
+const poolC=document.getElementById('pool');
+const gl=poolC.getContext('webgl',{alpha:false,antialias:false,preserveDrawingBuffer:false});
+
+const vertSrc=`attribute vec2 p;void main(){gl_Position=vec4(p,0,1);}`;
+
+const fragSrc=`
+precision highp float;
+uniform float uTime;
+uniform vec2 uRes;
+uniform vec2 uMouse;
+
+// ─── Noise ───
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+float fbm(vec2 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*noise(p);p*=2.03;a*=0.47;}return v;}
+float fbm3(vec2 p){float v=0.0,a=0.5;for(int i=0;i<3;i++){v+=a*noise(p);p*=2.1;a*=0.45;}return v;}
+
+// ─── Wave height field: 7 sources × layered harmonics ───
+float waveH(vec2 p, float t){
+  float h=0.0;
+
+  // Source 0 — CENTER (strongest, multiple harmonics)
+  float d=length(p);
+  float decay=exp(-d*0.42);
+  h+=0.022*sin(d*14.0-t*1.5)*decay;
+  h+=0.012*sin(d*24.0-t*2.2+0.5)*decay*0.70;
+  h+=0.006*sin(d*40.0-t*2.9+1.1)*decay*0.45;
+  h+=0.003*sin(d*58.0-t*3.5+1.8)*decay*0.30;
+
+  // Source 1
+  d=length(p-vec2(-0.70,-0.30));
+  decay=exp(-d*0.55);
+  h+=0.016*sin(d*14.0-t*1.5+1.8)*decay;
+  h+=0.008*sin(d*24.0-t*2.2+2.3)*decay*0.70;
+  h+=0.004*sin(d*40.0-t*2.9+2.8)*decay*0.45;
+
+  // Source 2
+  d=length(p-vec2(0.80,-0.15));
+  decay=exp(-d*0.55);
+  h+=0.014*sin(d*14.0-t*1.5+3.5)*decay;
+  h+=0.007*sin(d*24.0-t*2.2+4.0)*decay*0.70;
+
+  // Source 3
+  d=length(p-vec2(-0.35,0.62));
+  decay=exp(-d*0.62);
+  h+=0.012*sin(d*14.0-t*1.5+0.7)*decay;
+  h+=0.006*sin(d*24.0-t*2.2+1.2)*decay*0.70;
+
+  // Source 4
+  d=length(p-vec2(0.55,0.50));
+  decay=exp(-d*0.62);
+  h+=0.011*sin(d*14.0-t*1.5+2.6)*decay;
+  h+=0.005*sin(d*24.0-t*2.2+3.1)*decay*0.70;
+
+  // Source 5
+  d=length(p-vec2(0.14,-0.72));
+  decay=exp(-d*0.72);
+  h+=0.010*sin(d*14.0-t*1.5+4.2)*decay;
+
+  // Source 6 — far back
+  d=length(p-vec2(-0.15,1.2));
+  decay=exp(-d*0.80);
+  h+=0.008*sin(d*14.0-t*1.5+5.5)*decay;
+
+  // Fine surface micro-ripple texture (wind-like)
+  h+=(fbm(p*12.0+t*0.06)-0.5)*0.0018;
+  h+=(fbm3(p*22.0-t*0.03+5.0)-0.5)*0.0006;
+
+  return h;
+}
+
+// ─── Surface normal ───
+vec3 waveN(vec2 p, float t){
+  float e=0.003;
+  float c=waveH(p,t);
+  float dx=waveH(p+vec2(e,0),t)-c;
+  float dz=waveH(p+vec2(0,e),t)-c;
+  return normalize(vec3(-dx/e, 1.0, -dz/e));
+}
+
+// ─── Caustic pattern (dual-layer for richness) ───
+float caustic(vec2 p, float t){
+  float c1=pow(abs(sin(p.x*8.0+t*0.5)*sin(p.y*8.0+t*0.35)+
+                    sin((p.x+p.y)*6.0-t*0.4)*0.5), 3.0);
+  float c2=pow(abs(sin(p.x*14.0-t*0.3+2.0)*sin(p.y*12.0+t*0.45+1.0)), 4.0)*0.35;
+  float c3=pow(abs(sin((p.x-p.y)*10.0+t*0.25)*sin(p.y*7.0-t*0.32)), 3.0)*0.2;
+  return c1+c2+c3;
+}
+
+// ─── Volumetric fog ray march (simple 4-step) ───
+vec3 volumetricGlow(vec3 ro, vec3 rd, float tMax, float time){
+  vec3 acc=vec3(0.0);
+  float dt=tMax/4.0;
+  for(int i=0;i<4;i++){
+    float tt=dt*(float(i)+0.5);
+    vec3 p=ro+rd*tt;
+    // Vertical glow column at center
+    float d2=p.x*p.x+p.z*p.z;
+    float vertGlow=exp(-d2*1.2)*exp(-p.y*p.y*2.5)*0.020;
+    // Color: warm amber near core, lavender outer
+    float w=exp(-d2*0.8);
+    vec3 gc=mix(vec3(0.35,0.25,0.55),vec3(0.80,0.62,0.38),w);
+    acc+=gc*vertGlow*dt;
+  }
+  return acc;
+}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/uRes;
+  uv.y=1.0-uv.y;
+  float asp=uRes.x/uRes.y;
+
+  // ─── Cinematic 3/4 camera ───
+  vec3 cam=vec3(0.0, 2.0, -2.8);
+  vec3 tgt=vec3(
+    (uMouse.x-0.5)*0.12,
+    -0.15,
+    0.8+(uMouse.y-0.5)*0.08
+  );
+  vec3 fw=normalize(tgt-cam);
+  vec3 rt=normalize(cross(vec3(0,1,0),fw));
+  vec3 u=cross(rt,fw);
+
+  vec2 sc=(uv-0.5)*vec2(asp,1.0);
+  vec3 rd=normalize(fw+rt*sc.x*0.95+u*sc.y*0.95);
+
+  // ─── Background: deep dark cosmos with subtle nebula ───
+  vec3 col=vec3(0.010,0.008,0.022);
+  // Faint stars
+  col+=vec3(0.50,0.42,0.68)*pow(hash(floor(uv*uRes*0.5)),24.0)*0.04;
+  // Background nebula haze (very subtle purple wash upper area)
+  float nebula=fbm3(uv*3.0+0.5)*0.5+0.5;
+  col+=vec3(0.03,0.018,0.05)*nebula*smoothstep(0.3,0.7,uv.y)*0.6;
+
+  float tHitVal=100.0;
+
+  // ─── Ray → water plane (y = 0) ───
+  if(rd.y<-0.001){
+    float tHit=-cam.y/rd.y;
+    tHitVal=tHit;
+    vec3 hit=cam+rd*tHit;
+    vec2 pp=hit.xz;
+    float pD=length(pp);
+
+    if(pD<5.5){
+      // Surface normal from wave interference
+      vec3 N=waveN(pp,uTime);
+      vec3 Vi=-rd;
+      float NdV=max(dot(N,Vi),0.001);
+
+      // ── Fresnel (Schlick) ──
+      float F0=0.04;
+      float fres=F0+(1.0-F0)*pow(1.0-NdV,5.0);
+      fres=mix(fres,1.0,0.10);
+
+      // ── REFLECTION ──
+      vec3 R=reflect(rd,N);
+      float skyH=R.y*0.5+0.5;
+      vec3 reflC=mix(vec3(0.018,0.013,0.042),vec3(0.008,0.006,0.018),skyH);
+      // Nebula in reflection
+      reflC+=vec3(0.025,0.015,0.045)*fbm(R.xz*2.0+uTime*0.006);
+      // Center glow reflected from the warm light above
+      reflC+=vec3(0.12,0.08,0.04)*exp(-pD*pD*1.2)*0.25;
+
+      // ── SUBSURFACE ──
+      vec3 subC=vec3(0.012,0.008,0.028);
+
+      // Caustics on pool floor (refracted through normal)
+      vec2 cUV=pp+N.xz*0.55;
+      float cst=caustic(cUV,uTime);
+      // Caustics are warmer near center, cooler at edges
+      float cW=exp(-pD*pD*0.6);
+      vec3 cCol=mix(vec3(0.08,0.05,0.14),vec3(0.14,0.10,0.06),cW);
+      subC+=cCol*cst*0.09*exp(-pD*0.45);
+
+      // ── WARM CENTER GLOW — subsurface scattering ──
+      subC+=vec3(0.42,0.32,0.20)*exp(-pD*pD*0.35)*0.40;  // wide warm wash
+      subC+=vec3(0.82,0.66,0.42)*exp(-pD*pD*1.6)*0.50;    // amber core
+      subC+=vec3(1.0,0.94,0.84)*exp(-pD*pD*5.5)*0.55;      // white-hot
+      subC+=vec3(1.0,0.97,0.90)*exp(-pD*pD*16.0)*0.38;     // tight peak
+
+      // Subtle warm radial bands (barely visible structure)
+      float ang=atan(pp.y,pp.x);
+      subC+=vec3(0.06,0.04,0.02)*sin(ang*3.0+pD*2.0)*exp(-pD*pD*0.8)*0.08;
+
+      // Absorption with distance
+      subC*=exp(-pD*0.18);
+
+      // ── Fresnel blend ──
+      col=mix(subC,reflC,fres);
+
+      // ── SPECULAR — creates the visible ripple ring highlights ──
+      // Primary light: above center
+      vec3 L1=normalize(vec3(0.0,5.0,0.2)-hit);
+      vec3 H1=normalize(Vi+L1);
+      float NdH1=max(dot(N,H1),0.0);
+
+      // 5 specular lobes for rich highlight character
+      float sp_razor =pow(NdH1,600.0)*4.0;    // razor-thin bright arcs
+      float sp_sharp =pow(NdH1,150.0)*0.60;   // crisp ring glow
+      float sp_med   =pow(NdH1,30.0)*0.10;    // medium bloom
+      float sp_wide  =pow(NdH1,8.0)*0.025;    // wide shimmer
+      float sp_ultra =pow(NdH1,3.0)*0.008;    // ultra-wide ambient
+      float specT=sp_razor+sp_sharp+sp_med+sp_wide+sp_ultra;
+
+      // Specular color: warm amber center → cool lavender outer
+      float warmth=exp(-pD*pD*0.55);
+      vec3 spC=mix(vec3(0.52,0.45,0.74),vec3(0.92,0.78,0.50),warmth);
+      // Rose at mid-distance
+      float mid=exp(-pow(pD-1.2,2.0)*1.0);
+      spC=mix(spC,vec3(0.70,0.52,0.62),mid*0.12);
+
+      col+=spC*specT;
+
+      // Secondary light (offset for richer highlights)
+      vec3 L2=normalize(vec3(0.5,4.5,-0.4)-hit);
+      vec3 H2=normalize(Vi+L2);
+      float NdH2=max(dot(N,H2),0.0);
+      col+=spC*pow(NdH2,300.0)*0.45;
+
+      // Tertiary light
+      vec3 L3=normalize(vec3(-0.4,4.5,0.3)-hit);
+      vec3 H3=normalize(Vi+L3);
+      float NdH3=max(dot(N,H3),0.0);
+      col+=spC*pow(NdH3,300.0)*0.30;
+
+      // Rim light (low angle, catches wave edges at distance)
+      vec3 L4=normalize(vec3(0.0,1.2,4.0)-hit);
+      vec3 H4=normalize(Vi+L4);
+      float NdH4=max(dot(N,H4),0.0);
+      col+=vec3(0.35,0.28,0.55)*pow(NdH4,80.0)*0.12*smoothstep(1.0,3.0,pD);
+
+      // ── Edge fade ──
+      col*=smoothstep(5.0,2.2,pD);
+
+      // ── Distance fog (stronger for depth) ──
+      float fog=1.0-exp(-tHit*tHit*0.0020);
+      col=mix(col,vec3(0.012,0.009,0.028),fog);
+    }
+  }
+
+  // ── Volumetric glow (light column rising from center) ──
+  col+=volumetricGlow(cam,rd,tHitVal<100.0?tHitVal:8.0,uTime);
+
+  // ── Atmospheric haze (soft purple, concentrated lower-center) ──
+  float haze=exp(-length(uv-vec2(0.5,0.62))*1.8)*0.030;
+  col+=vec3(0.25,0.18,0.42)*haze;
+  // Warm haze near center-bottom
+  float warmHaze=exp(-length(uv-vec2(0.5,0.55))*2.5)*0.018;
+  col+=vec3(0.45,0.32,0.20)*warmHaze;
+
+  // ── Cinematic bloom (soft screen-space glow around bright areas) ──
+  // Approximated by sampling nearby UVs (cheap 5-tap)
+  // This is a rough approximation — real bloom would be a post-pass
+  float bloomStr=0.0;
+  vec3 bloomCol=vec3(0.0);
+  float bR=0.015;
+  for(int i=0;i<5;i++){
+    float fi=float(i);
+    vec2 bOff=vec2(cos(fi*1.256)*bR,sin(fi*1.256)*bR);
+    vec2 bUV=uv+bOff;
+    float bDist=length(bUV-vec2(0.5,0.55));
+    float bVal=exp(-bDist*bDist*4.0)*0.008;
+    float bW=exp(-bDist*bDist*0.5);
+    bloomCol+=mix(vec3(0.40,0.30,0.60),vec3(0.70,0.55,0.35),bW)*bVal;
+  }
+  col+=bloomCol;
+
+  // ── Vignette (stronger corners for cinema) ──
+  vec2 vc=uv-0.5;
+  col*=1.0-dot(vc,vc)*1.7;
+
+  // ── ACES filmic tone mapping ──
+  col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);
+
+  // ── Color grading: warm lift in shadows ──
+  col=pow(max(col,vec3(0.0)),vec3(0.86,0.88,0.91));
+
+  // ── Film grain ──
+  col+=(hash(uv*uRes+uTime*97.0)-0.5)*0.007;
+
+  gl_FragColor=vec4(max(col,vec3(0.0)),1.0);
+}
+`;
+
+function mkS(ty,src){
+  const s=gl.createShader(ty);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error('GLSL:',gl.getShaderInfoLog(s));
+  return s;
+}
+const prog=gl.createProgram();
+gl.attachShader(prog,mkS(gl.VERTEX_SHADER,vertSrc));
+gl.attachShader(prog,mkS(gl.FRAGMENT_SHADER,fragSrc));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const pa=gl.getAttribLocation(prog,'p');
+const qb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(pa);gl.vertexAttribPointer(pa,2,gl.FLOAT,false,0,0);
+const uTime=gl.getUniformLocation(prog,'uTime');
+const uRes=gl.getUniformLocation(prog,'uRes');
+const uMouse=gl.getUniformLocation(prog,'uMouse');
+
+// ═══════════════════════════════════════════════════
+// MEMORY DATA
+// ═══════════════════════════════════════════════════
+const memTexts=[
+  {text:"Work-mode alertness is leaking into rest — pattern always trying to be alert",date:"Today · 2:14 PM",tags:["pattern","rest"]},
+  {text:"The conversation with mom went better than expected",date:"Today · 11:30 AM",tags:["relationship"]},
+  {text:"Realized I avoid asking for help not from pride but from fear of being seen as weak",date:"Yesterday · 9:45 PM",tags:["lesson"]},
+  {text:"Decided to protect Friday afternoons — no meetings, no exceptions",date:"Yesterday · 3:20 PM",tags:["decision"]},
+  {text:"Three weeks of consistent running — it's becoming mine",date:"Mar 5 · 8:10 AM",tags:["commitment"]},
+  {text:"Said no to the consulting gig. It felt right immediately.",date:"Mar 4 · 6:30 PM",tags:["decision"]},
+  {text:"Something shifted after the conversation with Elena",date:"Mar 3 · 10:15 PM",tags:["feeling"]},
+  {text:"I keep reaching for my phone when I feel uncertain. That's the pattern.",date:"Mar 2 · 7:45 PM",tags:["pattern"]},
+  {text:"The pitch went well. I trusted my preparation instead of over-rehearsing.",date:"Mar 1 · 5:00 PM",tags:["lesson"]},
+  {text:"Jake's comment wasn't about me — it was about his own frustration",date:"Feb 28 · 8:20 PM",tags:["relationship"]},
+  {text:"Woke up without the alarm for the first time in months",date:"Feb 27 · 7:00 AM",tags:["pattern"]},
+  {text:"Naming the fear made it smaller",date:"Feb 26 · 10:30 PM",tags:["lesson"]},
+];
+
+const memories=[];
+const MEM_COUNT=85;
+const MEM_RADIUS=3.2;
+
+for(let i=0;i<MEM_COUNT;i++){
+  const angle=i*2.39996322; // golden angle
+  const r=Math.pow((i+0.5)/MEM_COUNT,0.52)*MEM_RADIUS;
+  // Controlled jitter (seeded)
+  const jx=(Math.sin(i*73.1+37)*43758.5453%1-0.5)*0.28;
+  const jz=(Math.sin(i*129.7+91)*43758.5453%1-0.5)*0.28;
+  const px=Math.cos(angle)*r+jx;
+  const pz=Math.sin(angle)*r*0.78+jz+0.3; // elliptical, shifted forward into camera view
+  const dist=Math.hypot(px,pz);
+  const warmth=Math.exp(-dist*dist*0.35);
+
+  memories.push({
+    px,pz,dist,warmth,
+    phase:Math.abs(Math.sin(i*47.3)*100)%6.28,
+    textIdx:i%memTexts.length,
+    sx:0,sy:0,sc:0,vis:false,
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// PARTICLES — layered cosmic dust + suspended sparkle
+// ═══════════════════════════════════════════════════
+const parts=[];
+// Layer 1: close floating dust (brighter, larger)
+for(let i=0;i<100;i++){
+  const a=Math.random()*Math.PI*2;
+  const r=Math.pow(Math.random(),0.45)*0.50;
+  parts.push({
+    x:0.5+Math.cos(a)*r*(innerWidth/innerHeight),
+    y:0.50+Math.sin(a)*r*0.65,
+    sz:Math.random()*0.85+0.25,
+    al:Math.random()*0.12+0.03,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.12+0.03,
+    dr:Math.random()*0.000030+0.000008,
+    layer:0,
+  });
+}
+// Layer 2: mid-distance haze particles (smaller, dimmer, slower)
+for(let i=0;i<150;i++){
+  const a=Math.random()*Math.PI*2;
+  const r=Math.pow(Math.random(),0.35)*0.65;
+  parts.push({
+    x:0.5+Math.cos(a)*r*(innerWidth/innerHeight),
+    y:0.55+Math.sin(a)*r*0.55,
+    sz:Math.random()*0.45+0.10,
+    al:Math.random()*0.06+0.01,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.08+0.02,
+    dr:Math.random()*0.000016+0.000004,
+    layer:1,
+  });
+}
+// Layer 3: far-background cosmic specks (barely visible, very slow)
+for(let i=0;i<120;i++){
+  parts.push({
+    x:Math.random(),
+    y:Math.random()*0.60+0.15,
+    sz:Math.random()*0.30+0.08,
+    al:Math.random()*0.035+0.005,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.06+0.015,
+    dr:Math.random()*0.000008+0.000002,
+    layer:2,
+  });
+}
+
+// Timeline dots
+const tl=document.getElementById('tl');
+for(let i=0;i<35;i++){
+  const d=document.createElement('div');
+  d.className='tl-dot'+(Math.random()>0.78?' b':'');
+  d.style.left=(4+Math.random()*92)+'%';
+  tl.appendChild(d);
+}
+
+// ═══════════════════════════════════════════════════
+// OVERLAY (Canvas2D for memory dots + particles)
+// ═══════════════════════════════════════════════════
+const olC=document.getElementById('overlay');
+const ctx=olC.getContext('2d');
+const hitC=document.getElementById('hit');
+
+// ═══════════════════════════════════════════════════
+// INTERACTION
+// ═══════════════════════════════════════════════════
+let mx=0.5,my=0.5,smx=0.5,smy=0.5;
+let selIdx=-1,hovIdx=-1;
+const HIT_R=14;
+
+document.addEventListener('mousemove',e=>{
+  mx=e.clientX/innerWidth;my=e.clientY/innerHeight;
+  hovIdx=-1;
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    if(!m.vis)continue;
+    if((e.clientX-m.sx)**2+(e.clientY-m.sy)**2<HIT_R*HIT_R){hovIdx=i;break}
+  }
+  hitC.style.cursor=hovIdx>=0?'pointer':'default';
+});
+hitC.addEventListener('click',()=>{
+  if(hovIdx>=0){selIdx=hovIdx;showDetail(selIdx)}
+  else hideDetail();
+});
+
+const detailEl=document.getElementById('detail');
+function showDetail(i){
+  const info=memTexts[memories[i].textIdx];
+  document.getElementById('dDate').textContent=info.date;
+  document.getElementById('dText').textContent=info.text;
+  document.getElementById('dTags').innerHTML=info.tags.map(t=>`<span class="d-tag">${t}</span>`).join('');
+  detailEl.classList.add('show');
+}
+function hideDetail(){selIdx=-1;detailEl.classList.remove('show')}
+window.hideDetail=hideDetail;
+
+// ═══════════════════════════════════════════════════
+// RESIZE
+// ═══════════════════════════════════════════════════
+function resize(){
+  const dpr=Math.min(devicePixelRatio,2);
+  poolC.width=innerWidth*dpr;poolC.height=innerHeight*dpr;
+  poolC.style.width=innerWidth+'px';poolC.style.height=innerHeight+'px';
+  gl.viewport(0,0,poolC.width,poolC.height);
+  olC.width=innerWidth*dpr;olC.height=innerHeight*dpr;
+  olC.style.width=innerWidth+'px';olC.style.height=innerHeight+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  hitC.width=innerWidth;hitC.height=innerHeight;
+  hitC.style.width=innerWidth+'px';hitC.style.height=innerHeight+'px';
+}
+addEventListener('resize',resize);resize();
+
+// ═══════════════════════════════════════════════════
+// RENDER LOOP
+// ═══════════════════════════════════════════════════
+const t0=performance.now();
+
+// Focal scale (for DOF bokeh on memory dots)
+const focalProj=poolToScreen(0,0);
+const focalS=focalProj?focalProj.s:0.3;
+
+function frame(now){
+  const t=(now-t0)/1000;
+  smx+=(mx-smx)*0.025;smy+=(my-smy)*0.025;
+
+  // ── WebGL: physically-based water ──
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+  gl.enableVertexAttribArray(pa);gl.vertexAttribPointer(pa,2,gl.FLOAT,false,0,0);
+  gl.uniform1f(uTime,t);
+  gl.uniform2f(uRes,poolC.width,poolC.height);
+  gl.uniform2f(uMouse,smx,smy);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // ── Canvas2D overlay ──
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+
+  // Particles (depth-layered)
+  for(const p of parts){
+    const layerScale=[1.0,0.65,0.30][p.layer];
+    p.x+=p.dr*Math.cos(t*0.08+p.ph)*layerScale;
+    p.y+=p.dr*Math.sin(t*0.06+p.ph)*0.4*layerScale;
+    if(p.x<-0.04)p.x=1.04;if(p.x>1.04)p.x=-0.04;
+    if(p.y<-0.04)p.y=1.04;if(p.y>1.04)p.y=-0.04;
+    const pulse=Math.sin(t*p.sp+p.ph)*0.25+0.75;
+    const a=p.al*pulse;if(a<0.003)continue;
+    const px=p.x*innerWidth,py=p.y*innerHeight;
+    const cd=Math.hypot(p.x-0.5,p.y-0.52);
+    const boost=Math.max(0,1-cd*2.5)*0.40+1;
+    // Near center: warmer tint. Far: cooler.
+    const cw=Math.max(0,1-cd*3);
+    const pr=Math.round(200+cw*30);
+    const pg=Math.round(192+cw*22);
+    const pb=Math.round(230-cw*18);
+    if(p.sz>0.30){
+      const g=ctx.createRadialGradient(px,py,0,px,py,p.sz*3.0);
+      g.addColorStop(0,`rgba(${pr},${pg},${pb},${Math.min(1,a*0.35*boost)})`);
+      g.addColorStop(1,`rgba(${pr},${pg},${pb},0)`);
+      ctx.beginPath();ctx.arc(px,py,p.sz*3.0,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+    }
+    ctx.beginPath();ctx.arc(px,py,p.sz*0.3,0,Math.PI*2);
+    ctx.fillStyle=`rgba(${pr},${pg},${pb},${Math.min(1,a*0.8*boost)})`;ctx.fill();
+  }
+
+  // ── Memory dots with DOF bokeh + depth falloff ──
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    const proj=poolToScreen(m.px,m.pz);
+    if(!proj||proj.x<-40||proj.x>innerWidth+40||proj.y<-40||proj.y>innerHeight+40){
+      m.vis=false;continue;
+    }
+    m.vis=true;m.sx=proj.x;m.sy=proj.y;m.sc=proj.s;
+
+    const isSel=(i===selIdx);
+    const isHov=(i===hovIdx);
+
+    // Breathing
+    const breathe=Math.sin(t*0.35+m.phase)*0.12;
+
+    // ── Depth falloff: distant dots fade elegantly ──
+    // proj.s is inversely proportional to distance from camera
+    const depthFade=Math.min(1.0,Math.pow(Math.min(proj.s*3.5,1.0),0.65));
+
+    // ── Depth of field: circle of confusion ──
+    const defocus=Math.abs(proj.s-focalS)*32;
+    const coreR=Math.max(1.6,2.6*Math.min(1.8,proj.s*3.2));
+    const bokehR=coreR+defocus*4.5;
+    const energyScale=coreR*coreR/(Math.max(bokehR,0.5)*Math.max(bokehR,0.5));
+
+    // Color: warm white near center → cool lavender far
+    const rr=Math.round(208+m.warmth*42);
+    const gg=Math.round(198+m.warmth*38);
+    const bb=Math.round(225-m.warmth*12);
+    const cStr=`${rr},${gg},${bb}`;
+
+    // Base alpha — depth-aware
+    let baseA=(0.55+breathe)*energyScale*depthFade;
+    if(isSel)baseA=Math.min(1,baseA*3.0);
+    if(isHov&&!isSel)baseA=Math.min(1,baseA*2.0);
+
+    // ── Selected/hovered: ripple ring animation ──
+    if(isSel||isHov){
+      const rippleCount=isSel?3:1;
+      for(let r=0;r<rippleCount;r++){
+        const ripT=((t*0.8+r*2.1)%4.0)/4.0; // 0→1 cycle
+        const ripR=bokehR+ripT*38;
+        const ripA=(1.0-ripT)*(isSel?0.12:0.06)*depthFade;
+        ctx.beginPath();ctx.arc(proj.x,proj.y,ripR,0,Math.PI*2);
+        ctx.strokeStyle=`rgba(${cStr},${ripA})`;
+        ctx.lineWidth=0.5+0.3*(1.0-ripT);
+        ctx.stroke();
+      }
+    }
+
+    // ── Bokeh glow halo ──
+    const glowR=bokehR+(isSel?22:14);
+    let glowA=(0.08+breathe*0.02)*energyScale*depthFade;
+    if(isSel)glowA*=3.5;
+    if(isHov&&!isSel)glowA*=2.2;
+
+    const grd=ctx.createRadialGradient(proj.x,proj.y,0,proj.x,proj.y,glowR);
+    grd.addColorStop(0,`rgba(${cStr},${Math.min(0.5,glowA)})`);
+    grd.addColorStop(0.25,`rgba(${cStr},${Math.min(0.3,glowA*0.45)})`);
+    grd.addColorStop(0.6,`rgba(${cStr},${Math.min(0.15,glowA*0.15)})`);
+    grd.addColorStop(1,`rgba(${cStr},0)`);
+    ctx.beginPath();ctx.arc(proj.x,proj.y,glowR,0,Math.PI*2);
+    ctx.fillStyle=grd;ctx.fill();
+
+    // ── Selected: soft volumetric column above dot ──
+    if(isSel){
+      const colG=ctx.createRadialGradient(proj.x,proj.y-15,0,proj.x,proj.y-15,30);
+      colG.addColorStop(0,`rgba(${cStr},0.06)`);
+      colG.addColorStop(1,`rgba(${cStr},0)`);
+      ctx.beginPath();ctx.arc(proj.x,proj.y-15,30,0,Math.PI*2);
+      ctx.fillStyle=colG;ctx.fill();
+    }
+
+    // ── Core dot ──
+    ctx.beginPath();ctx.arc(proj.x,proj.y,bokehR,0,Math.PI*2);
+    // For out-of-focus dots: softer edge
+    if(defocus>1){
+      const cg=ctx.createRadialGradient(proj.x,proj.y,0,proj.x,proj.y,bokehR);
+      cg.addColorStop(0,`rgba(${cStr},${Math.min(1,baseA*0.9)})`);
+      cg.addColorStop(0.6,`rgba(${cStr},${Math.min(1,baseA*0.6)})`);
+      cg.addColorStop(1,`rgba(${cStr},0)`);
+      ctx.fillStyle=cg;
+    }else{
+      ctx.fillStyle=`rgba(${cStr},${Math.min(1,baseA)})`;
+    }
+    ctx.fill();
+
+    // Specular spot (tiny bright highlight on top of each dot)
+    if(bokehR>1.5){
+      const spAlpha=Math.min(0.35,baseA*0.25)*depthFade;
+      ctx.beginPath();
+      ctx.arc(proj.x-bokehR*0.15,proj.y-bokehR*0.2,bokehR*0.25,0,Math.PI*2);
+      ctx.fillStyle=`rgba(255,255,255,${spAlpha})`;
+      ctx.fill();
+    }
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

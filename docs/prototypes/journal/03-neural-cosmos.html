@@ -1,0 +1,863 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia Journal — Neural Cosmos</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --sophia-purple: #b8a4e8;
+    --sophia-glow: #d4c4ff;
+    --sophia-amber: #f2b870;
+    --sophia-teal: #59bf9a;
+    --sophia-rose: #d0829c;
+    --bg: #0a0a0f;
+    --text: #f5f3fa;
+    --text-2: #a8a3b8;
+    --card-bg: rgba(20, 18, 30, 0.80);
+    --border-soft: rgba(184, 164, 232, 0.12);
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', sans-serif;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  #nebula-canvas { position: fixed; inset: 0; z-index: 0; }
+  #graph-canvas { position: fixed; inset: 0; z-index: 1; }
+
+  .header {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 10;
+    padding: 28px 40px;
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    background: linear-gradient(to bottom, rgba(10, 10, 15, 0.85) 0%, rgba(10, 10, 15, 0.3) 70%, transparent 100%);
+    pointer-events: none;
+  }
+
+  .header h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-weight: 300;
+    font-size: 26px;
+    letter-spacing: 0.08em;
+    color: var(--sophia-glow);
+    text-shadow: 0 0 40px rgba(184, 164, 232, 0.3);
+  }
+
+  .header .subtitle {
+    font-size: 13px;
+    color: var(--text-2);
+    letter-spacing: 0.04em;
+    font-weight: 300;
+    margin-top: 4px;
+  }
+
+  /* Category filter pills */
+  .filters {
+    position: fixed;
+    top: 28px;
+    right: 40px;
+    z-index: 10;
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    max-width: 420px;
+    justify-content: flex-end;
+    opacity: 0;
+    animation: fadeIn 600ms ease-out 1.5s forwards;
+  }
+
+  .filter-pill {
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 11px;
+    letter-spacing: 0.03em;
+    cursor: pointer;
+    border: 1px solid var(--border-soft);
+    background: rgba(20, 18, 30, 0.5);
+    backdrop-filter: blur(12px);
+    color: var(--text-2);
+    transition: all 200ms ease;
+    user-select: none;
+  }
+
+  .filter-pill:hover, .filter-pill.active {
+    border-color: rgba(184, 164, 232, 0.35);
+    color: var(--text);
+  }
+
+  .filter-pill.active {
+    background: rgba(184, 164, 232, 0.12);
+  }
+
+  .filter-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    margin-right: 6px;
+    vertical-align: middle;
+  }
+
+  /* Memory detail panel */
+  .detail-panel {
+    position: fixed;
+    left: 40px;
+    bottom: 40px;
+    z-index: 15;
+    width: 380px;
+    padding: 28px;
+    background: var(--card-bg);
+    backdrop-filter: blur(28px);
+    -webkit-backdrop-filter: blur(28px);
+    border: 1px solid var(--border-soft);
+    border-radius: 20px;
+    box-shadow: 
+      0 24px 60px rgba(10, 10, 15, 0.7),
+      0 0 80px rgba(184, 164, 232, 0.06),
+      inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    opacity: 0;
+    transform: translateY(12px);
+    transition: opacity 300ms ease-out, transform 300ms ease-out;
+    pointer-events: none;
+  }
+
+  .detail-panel.visible {
+    opacity: 1;
+    transform: translateY(0);
+    pointer-events: auto;
+  }
+
+  .detail-panel .d-category {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    margin-bottom: 14px;
+  }
+
+  .detail-panel .d-text {
+    font-size: 16px;
+    line-height: 1.65;
+    color: var(--text);
+    font-weight: 300;
+    margin-bottom: 14px;
+  }
+
+  .detail-panel .d-meta {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    font-size: 12px;
+    color: var(--text-2);
+  }
+
+  .detail-connections {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border-soft);
+  }
+
+  .detail-connections h4 {
+    font-size: 11px;
+    color: var(--text-2);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+
+  .connection-item {
+    font-size: 13px;
+    color: var(--text);
+    font-weight: 300;
+    line-height: 1.5;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(184, 164, 232, 0.05);
+    opacity: 0.7;
+  }
+
+  .connection-item:last-child { border-bottom: none; }
+
+  /* Center gravity label */
+  .gravity-label {
+    position: fixed;
+    bottom: 40px;
+    right: 40px;
+    z-index: 10;
+    text-align: right;
+    opacity: 0;
+    animation: fadeIn 800ms ease-out 2s forwards;
+  }
+
+  .gravity-label .g-count {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 42px;
+    font-weight: 300;
+    color: var(--sophia-glow);
+    line-height: 1;
+    text-shadow: 0 0 30px rgba(184, 164, 232, 0.2);
+  }
+
+  .gravity-label .g-label {
+    font-size: 12px;
+    color: var(--text-2);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    margin-top: 4px;
+  }
+
+  .gravity-label .g-sub {
+    font-size: 11px;
+    color: rgba(168, 163, 184, 0.5);
+    margin-top: 2px;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<canvas id="nebula-canvas"></canvas>
+<canvas id="graph-canvas"></canvas>
+
+<div class="header">
+  <div>
+    <h1>Neural Cosmos</h1>
+    <div class="subtitle">Memories connected by meaning</div>
+  </div>
+</div>
+
+<div class="filters" id="filters"></div>
+
+<div class="detail-panel" id="detail">
+  <div class="d-category" id="d-cat"></div>
+  <div class="d-text" id="d-text"></div>
+  <div class="d-meta">
+    <span id="d-date"></span>
+    <span id="d-tone"></span>
+  </div>
+  <div class="detail-connections" id="d-connections">
+    <h4>Connected memories</h4>
+  </div>
+</div>
+
+<div class="gravity-label">
+  <div class="g-count" id="node-count">42</div>
+  <div class="g-label">Memory nodes</div>
+  <div class="g-sub" id="edge-count">67 connections</div>
+</div>
+
+<script>
+// ─── Data ─────────────────────────────────────────────────────────────────────
+const CATEGORIES = {
+  feeling:      { color: [184, 164, 232], label: '💜 Feeling',      bg: 'rgba(184,164,232,0.15)', text: '#b8a4e8', dotColor: '#b8a4e8' },
+  decision:     { color: [242, 184, 112], label: '🔥 Decision',     bg: 'rgba(242,184,112,0.15)', text: '#f2b870', dotColor: '#f2b870' },
+  lesson:       { color: [89, 191, 154],  label: '✨ Lesson',       bg: 'rgba(89,191,154,0.15)',  text: '#59bf9a', dotColor: '#59bf9a' },
+  relationship: { color: [208, 130, 156], label: '💗 Relationship', bg: 'rgba(208,130,156,0.15)', text: '#d0829c', dotColor: '#d0829c' },
+  fact:         { color: [139, 164, 212], label: '📌 Fact',         bg: 'rgba(139,164,212,0.15)', text: '#8ba4d4', dotColor: '#8ba4d4' },
+  commitment:   { color: [232, 200, 140], label: '🎯 Commitment',  bg: 'rgba(232,200,140,0.15)', text: '#e8c88c', dotColor: '#e8c88c' },
+  pattern:      { color: [168, 140, 210], label: '🔮 Pattern',     bg: 'rgba(168,140,210,0.15)', text: '#a88cd2', dotColor: '#a88cd2' },
+  preference:   { color: [190, 170, 220], label: '💎 Preference',  bg: 'rgba(190,170,220,0.15)', text: '#beaadc', dotColor: '#beaadc' },
+};
+
+const memories = [
+  { text: "Name: Davide. Based in Barcelona. Building a dev tools startup.", category: 'fact', date: 'Mar 12', tone: 2.5 },
+  { text: "Prefers voice sessions in the morning, text in the evening.", category: 'preference', date: 'Mar 15', tone: 2.8 },
+  { text: "Gaming helps me decompress but only for 1 hour max.", category: 'pattern', date: 'Mar 16', tone: 2.2 },
+  { text: "Realized I haven't taken a real day off in 6 weeks.", category: 'lesson', date: 'Mar 18', tone: 1.4 },
+  { text: "Decided to block Sundays completely. No exceptions.", category: 'decision', date: 'Mar 19', tone: 2.0 },
+  { text: "I default to humor when I'm uncomfortable. It's a shield.", category: 'pattern', date: 'Mar 20', tone: 1.8 },
+  { text: "Felt guilty the entire first Sunday off. But slept 9 hours.", category: 'feeling', date: 'Mar 20', tone: 1.5 },
+  { text: "I prefer walking without podcasts — just ambient sound.", category: 'preference', date: 'Mar 21', tone: 2.6 },
+  { text: "I always minimize good news about myself. 'Not a big deal' reflex.", category: 'pattern', date: 'Mar 22', tone: 1.6 },
+  { text: "Mom asked if I'm eating well. I lied. Need to fix that.", category: 'relationship', date: 'Mar 22', tone: 1.3 },
+  { text: "Felt unexpectedly emotional when Sophia reflected a pattern I hadn't seen.", category: 'feeling', date: 'Mar 23', tone: 1.8 },
+  { text: "I work better in 3-hour deep blocks, not Pomodoro.", category: 'preference', date: 'Mar 24', tone: 2.5 },
+  { text: "The vent ritual works best on Mondays and Thursdays.", category: 'pattern', date: 'Mar 24', tone: 2.4 },
+  { text: "Pitch deck 80% done. Investor meeting April 8th.", category: 'fact', date: 'Mar 25', tone: 3.0 },
+  { text: "No Slack before 10am — the morning is for creation.", category: 'decision', date: 'Mar 26', tone: 2.8 },
+  { text: "Sister called after two months. Meant more than I expected.", category: 'relationship', date: 'Mar 27', tone: 2.5 },
+  { text: "Guilt faded by week two. Body remembered rest.", category: 'feeling', date: 'Mar 27', tone: 2.9 },
+  { text: "Avoiding conflict doesn't protect relationships — it erodes them.", category: 'lesson', date: 'Mar 28', tone: 2.0 },
+  { text: "Quiet pride after shipping the landing page alone.", category: 'feeling', date: 'Mar 28', tone: 3.2 },
+  { text: "Had the difficult equity conversation with Alex.", category: 'decision', date: 'Mar 29', tone: 2.1 },
+  { text: "Genuinely relieved after the hard conversation.", category: 'feeling', date: 'Mar 30', tone: 3.0 },
+  { text: "Alex thanked me for bringing up equity first.", category: 'relationship', date: 'Mar 30', tone: 3.3 },
+  { text: "I prepare better for confrontation the night before.", category: 'pattern', date: 'Mar 31', tone: 2.8 },
+  { text: "Weekly founder sync — no more letting things build.", category: 'commitment', date: 'Apr 1', tone: 3.0 },
+  { text: "Reset ritual: felt grounded for first time this week.", category: 'feeling', date: 'Apr 1', tone: 2.7 },
+  { text: "Debrief ritual genuinely helped process the equity talk.", category: 'lesson', date: 'Apr 1', tone: 3.1 },
+  { text: "Committed to shipping MVP by April 15th.", category: 'commitment', date: 'Apr 1', tone: 3.2 },
+  { text: "Investor meeting went better than expected. Follow-up requested.", category: 'fact', date: 'Apr 2', tone: 3.5 },
+  { text: "Imposter syndrome hit right after positive investor feedback.", category: 'feeling', date: 'Apr 2', tone: 1.5 },
+  { text: "Good things triggering anxiety is a signal, not a verdict.", category: 'lesson', date: 'Apr 3', tone: 2.4 },
+  { text: "Treating follow-up as practice, not performance.", category: 'commitment', date: 'Apr 3', tone: 2.8 },
+  { text: "'I don't know' is a complete answer.", category: 'lesson', date: 'Apr 3', tone: 2.6 },
+  { text: "Wrote the mission statement. First version that felt true.", category: 'fact', date: 'Apr 4', tone: 3.4 },
+  { text: "'Make the tools we wished existed when we started.'", category: 'fact', date: 'Apr 4', tone: 3.5 },
+  { text: "Stop self-assessing after 9pm. Tiredness distorts.", category: 'pattern', date: 'Apr 4', tone: 2.0 },
+  { text: "Alex: 'You carried that meeting.' Learning to receive.", category: 'relationship', date: 'Apr 4', tone: 3.2 },
+  { text: "Clarity I haven't felt since week one.", category: 'feeling', date: 'Apr 5', tone: 3.6 },
+  { text: "Product serves indie founders first.", category: 'decision', date: 'Apr 5', tone: 3.3 },
+  { text: "Alex and I aligned. The mission crystallized it.", category: 'relationship', date: 'Apr 5', tone: 3.5 },
+  { text: "Revisit mission statement every quarter.", category: 'commitment', date: 'Apr 6', tone: 3.2 },
+  { text: "There's a version of me that's already good enough.", category: 'lesson', date: 'Apr 6', tone: 3.0 },
+  { text: "Vent ritual most useful Mondays and Thursdays.", category: 'pattern', date: 'Apr 6', tone: 2.8 },
+];
+
+// ─── Graph connections (semantic/thematic) ────────────────────────────────────
+// Connections represent meaningful relationships between memories
+const edges = [
+  // Rest / boundaries cluster
+  [3, 4], [4, 6], [6, 16], [3, 7], [7, 1],
+  // Self-awareness cluster
+  [5, 8], [8, 10], [10, 28], [28, 29], [5, 34],
+  // Founder relationship cluster
+  [17, 19], [19, 20], [20, 21], [21, 35], [35, 38], [19, 22],
+  // Work/ambition cluster
+  [13, 14], [14, 27], [27, 32], [32, 33], [33, 37],
+  // Ritual cluster
+  [24, 25], [25, 12], [12, 41],
+  // Growth / lessons
+  [17, 29], [29, 31], [31, 40], [40, 25],
+  // Commitments
+  [23, 26], [26, 30], [30, 39],
+  // Cross-cluster bridges
+  [4, 14], // rest → work balance
+  [6, 24], // guilt → reset ritual
+  [21, 38], // Alex gratitude → alignment
+  [18, 36], // shipping pride → clarity
+  [9, 15], // mom → sister (family)
+  [0, 33], // identity → mission
+  [2, 7],  // gaming → walking (decompression)
+  [8, 34], // minimize self → stop assessing tired
+  [11, 1], // deep blocks → voice preference (routines)
+  [27, 37], // investor → product direction
+];
+
+// ─── Force-directed layout ────────────────────────────────────────────────────
+const W = () => window.innerWidth;
+const H = () => window.innerHeight;
+
+// Initialize node positions in a circular spread
+const nodes = memories.map((m, i) => {
+  const angle = (i / memories.length) * Math.PI * 2 + Math.random() * 0.3;
+  const radius = 150 + Math.random() * 200;
+  return {
+    x: W() / 2 + Math.cos(angle) * radius,
+    y: H() / 2 + Math.sin(angle) * radius,
+    vx: 0,
+    vy: 0,
+    targetX: 0,
+    targetY: 0,
+    mass: 1 + (m.tone / 4) * 0.5,
+  };
+});
+
+// Build adjacency list
+const adjacency = memories.map(() => []);
+for (const [a, b] of edges) {
+  adjacency[a].push(b);
+  adjacency[b].push(a);
+}
+
+function simulate() {
+  const centerX = W() / 2;
+  const centerY = H() / 2;
+  const REPULSION = 3000;
+  const ATTRACTION = 0.008;
+  const CENTER_GRAVITY = 0.0005;
+  const DAMPING = 0.88;
+  const MIN_DIST = 40;
+
+  for (let iter = 0; iter < 3; iter++) {
+    // Repulsion between all pairs
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        let dx = nodes[j].x - nodes[i].x;
+        let dy = nodes[j].y - nodes[i].y;
+        let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+        if (dist < MIN_DIST) dist = MIN_DIST;
+        const force = REPULSION / (dist * dist);
+        const fx = (dx / dist) * force;
+        const fy = (dy / dist) * force;
+        nodes[i].vx -= fx;
+        nodes[i].vy -= fy;
+        nodes[j].vx += fx;
+        nodes[j].vy += fy;
+      }
+    }
+
+    // Attraction along edges
+    for (const [a, b] of edges) {
+      const dx = nodes[b].x - nodes[a].x;
+      const dy = nodes[b].y - nodes[a].y;
+      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+      const force = (dist - 100) * ATTRACTION;
+      const fx = (dx / dist) * force;
+      const fy = (dy / dist) * force;
+      nodes[a].vx += fx;
+      nodes[a].vy += fy;
+      nodes[b].vx -= fx;
+      nodes[b].vy -= fy;
+    }
+
+    // Center gravity
+    for (const n of nodes) {
+      n.vx += (centerX - n.x) * CENTER_GRAVITY;
+      n.vy += (centerY - n.y) * CENTER_GRAVITY;
+    }
+
+    // Apply velocity
+    for (const n of nodes) {
+      n.vx *= DAMPING;
+      n.vy *= DAMPING;
+      n.x += n.vx;
+      n.y += n.vy;
+
+      // Keep in bounds
+      const margin = 80;
+      n.x = Math.max(margin, Math.min(W() - margin, n.x));
+      n.y = Math.max(margin, Math.min(H() - margin, n.y));
+    }
+  }
+}
+
+// Run initial simulation steps for layout
+for (let i = 0; i < 300; i++) simulate();
+
+// ─── WebGL Nebula ─────────────────────────────────────────────────────────────
+const nebulaCanvas = document.getElementById('nebula-canvas');
+const gl = nebulaCanvas.getContext('webgl', { alpha: false, antialias: false });
+
+const VERT = `attribute vec2 pos; void main(){ gl_Position=vec4(pos,0,1); }`;
+const FRAG = `
+precision highp float;
+uniform float u_time;
+uniform vec2 u_res;
+uniform vec2 u_mouse;
+uniform vec2 u_focus;
+uniform float u_focusStrength;
+
+vec3 hash3(vec3 p){
+  p=vec3(dot(p,vec3(127.1,311.7,74.7)),dot(p,vec3(269.5,183.3,246.1)),dot(p,vec3(113.5,271.9,124.6)));
+  return -1.0+2.0*fract(sin(p)*43758.5453123);
+}
+float gnoise(vec3 p){
+  vec3 i=floor(p),f=fract(p);vec3 u=f*f*(3.0-2.0*f);
+  return mix(mix(mix(dot(hash3(i),f),dot(hash3(i+vec3(1,0,0)),f-vec3(1,0,0)),u.x),
+    mix(dot(hash3(i+vec3(0,1,0)),f-vec3(0,1,0)),dot(hash3(i+vec3(1,1,0)),f-vec3(1,1,0)),u.x),u.y),
+    mix(mix(dot(hash3(i+vec3(0,0,1)),f-vec3(0,0,1)),dot(hash3(i+vec3(1,0,1)),f-vec3(1,0,1)),u.x),
+    mix(dot(hash3(i+vec3(0,1,1)),f-vec3(0,1,1)),dot(hash3(i+vec3(1,1,1)),f-vec3(1,1,1)),u.x),u.y),u.z);
+}
+float fbm(vec3 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*gnoise(p);p=p*2.0+100.0;a*=0.5;}return v;}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/u_res;
+  vec2 p=(gl_FragCoord.xy-0.5*u_res)/min(u_res.x,u_res.y);
+  float t=u_time;
+  p+=u_mouse*0.015;
+
+  vec3 col=vec3(0.006,0.006,0.016);
+
+  // Base nebula
+  float n1=fbm(vec3(p*1.0,t*0.012));
+  float n2=fbm(vec3(p*0.7+3.0,t*0.008));
+  col+=vec3(0.32,0.24,0.56)*smoothstep(-0.1,0.5,n1)*0.12;
+  col+=vec3(0.16,0.38,0.34)*smoothstep(0.0,0.6,n2)*0.06;
+
+  // Focus glow (brightens around focused node)
+  vec2 fp=(u_focus-0.5)*vec2(u_res.x/u_res.y, 1.0);
+  vec2 pp=p;
+  float fd=length(pp-fp);
+  float focusGlow=exp(-fd*fd*8.0)*u_focusStrength*0.15;
+  col+=vec3(0.45,0.35,0.72)*focusGlow;
+
+  // Subtle filaments
+  float f1=sin(p.y*4.0+n1*3.0+t*0.025)*0.5+0.5;
+  f1=pow(f1,8.0)*0.06;
+  col+=vec3(0.40,0.30,0.65)*f1;
+
+  // Vignette
+  float vig=1.0-dot(uv-0.5,uv-0.5)*1.6;
+  col*=smoothstep(0.0,0.45,vig);
+  col=col/(col+0.55);
+  col=pow(col,vec3(0.92));
+
+  gl_FragColor=vec4(col,1.0);
+}
+`;
+
+function mkShader(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) console.error(gl.getShaderInfoLog(s));
+  return s;
+}
+
+const prog = gl.createProgram();
+gl.attachShader(prog, mkShader(gl.VERTEX_SHADER, VERT));
+gl.attachShader(prog, mkShader(gl.FRAGMENT_SHADER, FRAG));
+gl.linkProgram(prog);
+
+const posAttr = gl.getAttribLocation(prog, 'pos');
+const buf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,1,-1,-1,1,1,1]), gl.STATIC_DRAW);
+
+const uTime = gl.getUniformLocation(prog, 'u_time');
+const uRes = gl.getUniformLocation(prog, 'u_res');
+const uMouse = gl.getUniformLocation(prog, 'u_mouse');
+const uFocus = gl.getUniformLocation(prog, 'u_focus');
+const uFocusStr = gl.getUniformLocation(prog, 'u_focusStrength');
+
+let mouse = { x: 0.5, y: 0.5 };
+let mouseSmooth = { x: 0.5, y: 0.5 };
+let focusPos = { x: 0.5, y: 0.5 };
+let focusStrength = 0;
+let focusStrengthTarget = 0;
+
+document.addEventListener('mousemove', e => {
+  mouse.x = e.clientX / W();
+  mouse.y = 1 - e.clientY / H();
+});
+
+// ─── Graph Canvas ─────────────────────────────────────────────────────────────
+const graphCanvas = document.getElementById('graph-canvas');
+const ctx = graphCanvas.getContext('2d');
+
+let hoveredNode = -1;
+let selectedNode = -1;
+let activeFilter = null;
+let dragNode = -1;
+let isDragging = false;
+
+// Build filter pills
+const filtersEl = document.getElementById('filters');
+const catNames = [...new Set(memories.map(m => m.category))];
+const allPill = document.createElement('div');
+allPill.className = 'filter-pill active';
+allPill.textContent = 'All';
+allPill.addEventListener('click', () => {
+  activeFilter = null;
+  document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+  allPill.classList.add('active');
+});
+filtersEl.appendChild(allPill);
+
+for (const cat of catNames) {
+  const c = CATEGORIES[cat];
+  const pill = document.createElement('div');
+  pill.className = 'filter-pill';
+  pill.innerHTML = `<span class="filter-dot" style="background:${c.dotColor};box-shadow:0 0 6px ${c.dotColor}"></span>${cat}`;
+  pill.addEventListener('click', () => {
+    activeFilter = activeFilter === cat ? null : cat;
+    document.querySelectorAll('.filter-pill').forEach(p => p.classList.remove('active'));
+    if (activeFilter) pill.classList.add('active');
+    else allPill.classList.add('active');
+  });
+  filtersEl.appendChild(pill);
+}
+
+// Interaction
+graphCanvas.addEventListener('mousemove', e => {
+  if (isDragging && dragNode >= 0) {
+    nodes[dragNode].x = e.clientX;
+    nodes[dragNode].y = e.clientY;
+    nodes[dragNode].vx = 0;
+    nodes[dragNode].vy = 0;
+    return;
+  }
+
+  const mx = e.clientX, my = e.clientY;
+  let closest = -1, closestDist = 22;
+  for (let i = 0; i < nodes.length; i++) {
+    if (activeFilter && memories[i].category !== activeFilter) continue;
+    const dx = mx - nodes[i].x, dy = my - nodes[i].y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist < closestDist) { closest = i; closestDist = dist; }
+  }
+
+  if (closest !== hoveredNode) {
+    hoveredNode = closest;
+    graphCanvas.style.cursor = closest >= 0 ? 'pointer' : 'default';
+
+    if (closest >= 0) {
+      focusPos.x = nodes[closest].x / W();
+      focusPos.y = 1 - nodes[closest].y / H();
+      focusStrengthTarget = 1;
+    } else {
+      focusStrengthTarget = 0;
+    }
+  }
+});
+
+graphCanvas.addEventListener('mousedown', e => {
+  if (hoveredNode >= 0) {
+    dragNode = hoveredNode;
+    isDragging = true;
+  }
+});
+
+graphCanvas.addEventListener('mouseup', () => {
+  if (isDragging && dragNode >= 0) {
+    isDragging = false;
+    dragNode = -1;
+    return;
+  }
+});
+
+graphCanvas.addEventListener('click', () => {
+  if (isDragging) return;
+  if (hoveredNode >= 0) {
+    selectedNode = hoveredNode;
+    showDetail(hoveredNode);
+  } else {
+    selectedNode = -1;
+    document.getElementById('detail').classList.remove('visible');
+  }
+});
+
+function showDetail(idx) {
+  const mem = memories[idx];
+  const cat = CATEGORIES[mem.category];
+  const panel = document.getElementById('detail');
+  document.getElementById('d-cat').textContent = cat.label;
+  document.getElementById('d-cat').style.background = cat.bg;
+  document.getElementById('d-cat').style.color = cat.text;
+  document.getElementById('d-text').textContent = mem.text;
+  document.getElementById('d-date').textContent = mem.date + ', 2026';
+  document.getElementById('d-tone').textContent = 'Tone: ' + mem.tone.toFixed(1);
+
+  // Show connected memories
+  const conns = adjacency[idx];
+  const connEl = document.getElementById('d-connections');
+  connEl.innerHTML = '<h4>Connected memories</h4>';
+  for (const ci of conns.slice(0, 4)) {
+    const div = document.createElement('div');
+    div.className = 'connection-item';
+    div.textContent = memories[ci].text;
+    connEl.appendChild(div);
+  }
+
+  panel.classList.add('visible');
+}
+
+// ─── Ambient particles ────────────────────────────────────────────────────────
+const ambientParticles = Array.from({ length: 60 }, () => ({
+  x: Math.random() * 2000,
+  y: Math.random() * 2000,
+  vx: (Math.random() - 0.5) * 0.3,
+  vy: (Math.random() - 0.5) * 0.3,
+  size: Math.random() * 1.5 + 0.3,
+  alpha: Math.random() * 0.2 + 0.05,
+  phase: Math.random() * Math.PI * 2,
+}));
+
+// ─── Resize ───────────────────────────────────────────────────────────────────
+function resize() {
+  const dpr = Math.min(devicePixelRatio, 2);
+
+  nebulaCanvas.width = W() * dpr;
+  nebulaCanvas.height = H() * dpr;
+  nebulaCanvas.style.width = W() + 'px';
+  nebulaCanvas.style.height = H() + 'px';
+  gl.viewport(0, 0, nebulaCanvas.width, nebulaCanvas.height);
+
+  graphCanvas.width = W() * dpr;
+  graphCanvas.height = H() * dpr;
+  graphCanvas.style.width = W() + 'px';
+  graphCanvas.style.height = H() + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+// ─── Animation Loop ───────────────────────────────────────────────────────────
+const startTime = performance.now();
+
+function frame(now) {
+  const t = (now - startTime) / 1000;
+
+  // Light simulation (keeps layout alive)
+  simulate();
+
+  // Smooth focus
+  focusStrength += (focusStrengthTarget - focusStrength) * 0.08;
+  mouseSmooth.x += (mouse.x - mouseSmooth.x) * 0.03;
+  mouseSmooth.y += (mouse.y - mouseSmooth.y) * 0.03;
+
+  // ── WebGL nebula ──
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.enableVertexAttribArray(posAttr);
+  gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform1f(uTime, t);
+  gl.uniform2f(uRes, nebulaCanvas.width, nebulaCanvas.height);
+  gl.uniform2f(uMouse, mouseSmooth.x - 0.5, mouseSmooth.y - 0.5);
+  gl.uniform2f(uFocus, focusPos.x, focusPos.y);
+  gl.uniform1f(uFocusStr, focusStrength);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // ── Graph canvas ──
+  ctx.clearRect(0, 0, W(), H());
+
+  // Ambient particles
+  for (const p of ambientParticles) {
+    p.x += p.vx;
+    p.y += p.vy;
+    if (p.x < 0) p.x = W();
+    if (p.x > W()) p.x = 0;
+    if (p.y < 0) p.y = H();
+    if (p.y > H()) p.y = 0;
+    const twinkle = Math.sin(t * 1.5 + p.phase) * 0.3 + 0.7;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(180, 170, 220, ${p.alpha * twinkle})`;
+    ctx.fill();
+  }
+
+  // Determine visibility
+  const isFiltered = activeFilter !== null;
+  const isNodeVisible = (i) => !isFiltered || memories[i].category === activeFilter;
+  const isNodeConnected = (i) => selectedNode >= 0 && (i === selectedNode || adjacency[selectedNode].includes(i));
+
+  // Draw edges
+  for (const [a, b] of edges) {
+    const va = isNodeVisible(a);
+    const vb = isNodeVisible(b);
+    if (!va && !vb) continue;
+
+    const ax = nodes[a].x, ay = nodes[a].y;
+    const bx = nodes[b].x, by = nodes[b].y;
+
+    // Edge highlight when either node is selected
+    const isHighlighted = selectedNode >= 0 && (a === selectedNode || b === selectedNode);
+    const dimmedByFilter = (!va || !vb);
+    const dimmedBySelection = selectedNode >= 0 && !isHighlighted;
+
+    let alpha = 0.06;
+    if (isHighlighted) alpha = 0.25;
+    else if (dimmedBySelection) alpha = 0.015;
+    else if (dimmedByFilter) alpha = 0.02;
+
+    // Pulsing
+    const pulse = Math.sin(t * 0.8 + a * 0.2) * 0.02;
+    alpha += pulse;
+
+    // Gradient along edge
+    const catA = CATEGORIES[memories[a].category].color;
+    const catB = CATEGORIES[memories[b].category].color;
+    const grad = ctx.createLinearGradient(ax, ay, bx, by);
+    grad.addColorStop(0, `rgba(${catA[0]},${catA[1]},${catA[2]},${alpha})`);
+    grad.addColorStop(1, `rgba(${catB[0]},${catB[1]},${catB[2]},${alpha})`);
+
+    ctx.beginPath();
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = isHighlighted ? 1.5 : 0.8;
+    ctx.stroke();
+
+    // Edge particle (traveling light)
+    if (isHighlighted || (!dimmedBySelection && !dimmedByFilter)) {
+      const ep = (t * 0.15 + a * 0.1) % 1;
+      const epx = ax + (bx - ax) * ep;
+      const epy = ay + (by - ay) * ep;
+      const epAlpha = Math.sin(ep * Math.PI) * (isHighlighted ? 0.5 : 0.15);
+      ctx.beginPath();
+      ctx.arc(epx, epy, isHighlighted ? 2 : 1, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(212, 196, 255, ${epAlpha})`;
+      ctx.fill();
+    }
+  }
+
+  // Draw nodes
+  for (let i = 0; i < nodes.length; i++) {
+    const n = nodes[i];
+    const mem = memories[i];
+    const cat = CATEGORIES[mem.category];
+    const [r, g, b] = cat.color;
+    const visible = isNodeVisible(i);
+    const connected = isNodeConnected(i);
+    const isHovered = i === hoveredNode;
+    const isSelected = i === selectedNode;
+
+    let nodeAlpha = 1;
+    if (!visible) nodeAlpha = 0.08;
+    else if (selectedNode >= 0 && !connected && !isSelected) nodeAlpha = 0.2;
+
+    const breathe = Math.sin(t * 1.2 + i * 0.7) * 0.2 + 0.8;
+    const toneMul = 0.5 + (mem.tone / 4) * 0.5; // bigger nodes for higher tone
+    const baseSize = 3 + toneMul * 3;
+    const size = isHovered ? baseSize * 1.6 : isSelected ? baseSize * 1.4 : baseSize;
+
+    // Outer glow
+    const glowR = (isHovered || isSelected) ? 35 : 16;
+    const glowA = (isHovered ? 0.3 : isSelected ? 0.25 : 0.07 * breathe) * nodeAlpha;
+    const glow = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, glowR);
+    glow.addColorStop(0, `rgba(${r},${g},${b},${glowA})`);
+    glow.addColorStop(0.5, `rgba(${r},${g},${b},${glowA * 0.25})`);
+    glow.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, glowR, 0, Math.PI * 2);
+    ctx.fillStyle = glow;
+    ctx.fill();
+
+    // Core
+    const coreGrad = ctx.createRadialGradient(n.x, n.y, 0, n.x, n.y, size);
+    coreGrad.addColorStop(0, `rgba(255,255,255,${0.9 * nodeAlpha})`);
+    coreGrad.addColorStop(0.4, `rgba(${r},${g},${b},${0.85 * nodeAlpha})`);
+    coreGrad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, size, 0, Math.PI * 2);
+    ctx.fillStyle = coreGrad;
+    ctx.fill();
+
+    // Hover/select ring
+    if (isHovered || isSelected) {
+      const ringPulse = Math.sin(t * 2.5) * 0.2 + 0.8;
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, size + 8 + ringPulse * 3, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.3 * ringPulse * nodeAlpha})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+
+      // Second ring
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, size + 16 + ringPulse * 5, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${r},${g},${b},${0.1 * ringPulse * nodeAlpha})`;
+      ctx.stroke();
+    }
+  }
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

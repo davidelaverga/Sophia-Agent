@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Sophia — Journal</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+:root{
+  --bg:#07060e;
+  --text:#e8e4f0;--text2:#7a7490;--text3:#4a4560;
+  --lavender:rgba(196,184,224,0.3);
+  --amber:#f2b36b;
+  --border:rgba(184,164,232,0.07);
+}
+body{
+  background:var(--bg);color:var(--text);font-family:'Inter',sans-serif;
+  overflow:hidden;height:100vh;width:100vw;
+  -webkit-font-smoothing:antialiased;user-select:none;
+  cursor:default;
+}
+canvas{position:fixed;inset:0;z-index:0}
+
+/* ── Minimal UI — everything whisper-quiet ── */
+.ui{position:fixed;inset:0;z-index:10;pointer-events:none}
+.ui>*{pointer-events:auto}
+
+.top-left{position:fixed;top:28px;left:32px}
+.top-left h1{font-weight:600;font-size:22px;letter-spacing:-0.02em;color:var(--text);opacity:0.85}
+.top-left .sub{font-size:10px;color:var(--text2);margin-top:3px;display:flex;align-items:center;gap:5px}
+.top-left .sub .dot{width:4px;height:4px;border-radius:50%;background:#59bead;box-shadow:0 0 5px #59bead}
+
+.search-bar{
+  position:fixed;top:28px;left:50%;transform:translateX(-50%);
+  display:flex;align-items:center;gap:7px;
+  padding:7px 14px;border-radius:10px;
+  background:rgba(14,12,24,0.55);border:1px solid var(--border);
+  backdrop-filter:blur(14px);min-width:220px;
+}
+.search-bar .si{color:var(--text3);font-size:12px}
+.search-bar input{
+  border:none;outline:none;background:transparent;
+  color:var(--text2);font-size:11px;font-family:'Inter',sans-serif;flex:1;
+}
+.search-bar input::placeholder{color:var(--text3)}
+.search-bar .kb{font-size:9px;color:var(--text3);padding:2px 5px;border-radius:3px;border:1px solid rgba(184,164,232,0.06);background:rgba(14,12,24,0.4)}
+
+.top-right{position:fixed;top:28px;right:32px;display:flex;align-items:center;gap:8px}
+.period-sel{
+  padding:6px 12px;border-radius:7px;border:1px solid var(--border);
+  background:rgba(14,12,24,0.5);backdrop-filter:blur(10px);
+  color:var(--text2);font-size:10px;cursor:pointer;display:flex;align-items:center;gap:5px;
+}
+.period-sel::after{content:'▾';font-size:7px;color:var(--text3)}
+.avatar{
+  width:30px;height:30px;border-radius:50%;
+  background:linear-gradient(135deg,#b8a4e8,#59bead);
+  border:1.5px solid rgba(184,164,232,0.15);cursor:pointer;opacity:0.7;
+}
+
+/* ── Memory detail panel (hidden by default) ── */
+.detail{
+  position:fixed;right:40px;top:50%;transform:translateY(-50%);z-index:20;
+  width:260px;padding:18px 20px;border-radius:14px;
+  background:rgba(16,14,28,0.82);backdrop-filter:blur(24px);
+  border:1px solid rgba(184,164,232,0.08);
+  box-shadow:0 20px 60px rgba(4,3,12,0.7);
+  opacity:0;pointer-events:none;
+  transition:opacity .35s ease,transform .35s ease;
+}
+.detail.show{opacity:1;pointer-events:auto;transform:translateY(-50%) translateX(0)}
+.detail .d-date{font-size:9px;color:var(--text3);margin-bottom:8px;letter-spacing:0.03em}
+.detail .d-text{font-size:12px;line-height:1.6;color:var(--text);font-weight:300;margin-bottom:12px}
+.detail .d-tags{display:flex;gap:5px}
+.detail .d-tag{
+  font-size:8px;padding:3px 8px;border-radius:10px;
+  background:rgba(184,164,232,0.06);color:var(--text2);
+}
+.detail .d-close{
+  position:absolute;top:10px;right:12px;
+  background:none;border:none;color:var(--text3);cursor:pointer;font-size:12px;
+}
+.detail .d-close:hover{color:var(--text2)}
+
+/* ── Bottom stats (very quiet) ── */
+.stats{
+  position:fixed;bottom:42px;left:32px;z-index:10;
+  display:flex;gap:20px;opacity:0.5;
+}
+.stat .stat-n{font-weight:500;font-size:16px;color:var(--text)}
+.stat .stat-l{font-size:8px;color:var(--text3);margin-top:1px;letter-spacing:0.03em}
+
+/* ── Timeline (thin, nearly invisible) ── */
+.timeline{
+  position:fixed;bottom:32px;left:200px;right:40px;z-index:10;
+  height:24px;display:flex;align-items:center;opacity:0.4;
+}
+.tl-track{flex:1;position:relative;height:100%}
+.tl-bar{position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(184,164,232,0.04);transform:translateY(-50%)}
+.tl-dot{
+  position:absolute;top:50%;transform:translate(-50%,-50%);
+  width:3px;height:3px;border-radius:50%;
+  background:rgba(184,164,232,0.12);
+}
+.tl-dot.bright{background:rgba(89,190,173,0.3);width:4px;height:4px}
+.tl-labels{
+  position:absolute;bottom:-1px;left:0;right:0;
+  display:flex;justify-content:space-between;
+  font-size:8px;color:var(--text3);letter-spacing:0.03em;
+}
+.tl-cursor{
+  position:absolute;top:50%;transform:translate(-50%,-50%);
+  width:6px;height:6px;border-radius:50%;
+  background:#59bead;box-shadow:0 0 8px rgba(89,190,173,0.3);
+}
+
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div class="ui">
+  <div class="top-left">
+    <h1>Journal</h1>
+    <p class="sub"><span class="dot"></span> Your memories with Sophia</p>
+  </div>
+
+  <div class="search-bar">
+    <span class="si">⌕</span>
+    <input type="text" placeholder="Search memories…" spellcheck="false">
+    <span class="kb">⌘K</span>
+  </div>
+
+  <div class="top-right">
+    <div class="period-sel">This month</div>
+    <div class="avatar"></div>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="stat-n">127</div><div class="stat-l">memories</div></div>
+    <div class="stat"><div class="stat-n">12</div><div class="stat-l">this month</div></div>
+    <div class="stat"><div class="stat-n">3</div><div class="stat-l">emerging patterns</div></div>
+  </div>
+
+  <div class="timeline"><div class="tl-track" id="tl-track">
+    <div class="tl-bar"></div>
+    <div class="tl-labels"><span>Jul</span><span>Aug</span><span>Sep</span><span>Oct</span><span>Nov</span></div>
+    <div class="tl-cursor" style="left:62%"></div>
+  </div></div>
+</div>
+
+<div class="detail" id="detail">
+  <button class="d-close" onclick="hideDetail()">✕</button>
+  <div class="d-date" id="d-date">Today · 2:14 PM</div>
+  <div class="d-text" id="d-text">Work-mode alertness is leaking into rest — pattern always trying to be alert</div>
+  <div class="d-tags"><span class="d-tag">pattern</span><span class="d-tag">rest</span></div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// CONFIGURATION — all tuneable values in one place
+// ═══════════════════════════════════════════════════════════════════════════════
+const CFG = {
+  // Camera — elevated angle looking down at pool
+  camPos: [0, 3.4, -1.5],
+  camTgt: [0, 0, 0.4],
+  fov: 1.05,
+  // Pool
+  poolRadius: 3.8,
+  // Memory points
+  memoryCount: 72,
+  memPointRadius: 2.8,    // how far from center memories can appear (in pool space)
+  memDotSize: 3.5,        // base pixel radius on screen
+  memGlowRadius: 18,      // glow halo radius
+  memGlowAlpha: 0.12,     // glow halo max alpha
+  memCoreAlpha: 0.65,     // core dot max alpha
+  memPulseAmount: 0.15,   // breathing amplitude
+  // Particles
+  particleCount: 250,
+};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VECTOR HELPERS
+// ═══════════════════════════════════════════════════════════════════════════════
+const V = {
+  sub: (a,b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]],
+  norm: v => { const l=Math.hypot(...v); return [v[0]/l, v[1]/l, v[2]/l]; },
+  cross: (a,b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]],
+  dot: (a,b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+};
+
+const fwd = V.norm(V.sub(CFG.camTgt, CFG.camPos));
+const right = V.norm(V.cross(fwd, [0,1,0]));
+const up = V.cross(right, fwd);
+
+function poolToScreen(px, pz) {
+  const tp = [px - CFG.camPos[0], -CFG.camPos[1], pz - CFG.camPos[2]];
+  const f = V.dot(tp, fwd); if (f <= 0) return null;
+  const r = V.dot(tp, right), u = V.dot(tp, up);
+  const asp = innerWidth / innerHeight;
+  return {
+    x: (r / (f * CFG.fov * asp) + 0.5) * innerWidth,
+    y: (-u / (f * CFG.fov) + 0.5) * innerHeight,
+    s: 1 / f
+  };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CANVAS + WebGL SETUP
+// ═══════════════════════════════════════════════════════════════════════════════
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: false });
+
+const VS = `attribute vec2 p; void main(){ gl_Position = vec4(p, 0, 1); }`;
+
+// The shader — faithful to the recap's visual language
+const FS = `
+precision highp float;
+uniform float t;
+uniform vec2 res;
+uniform vec2 mouse;
+
+float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+float noise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  f = f*f*(3.0-2.0*f);
+  return mix(
+    mix(hash(i), hash(i+vec2(1,0)), f.x),
+    mix(hash(i+vec2(0,1)), hash(i+vec2(1,1)), f.x), f.y
+  );
+}
+
+float fbm(vec2 p){
+  float v = 0.0, a = 0.5;
+  for(int i = 0; i < 5; i++){ v += a*noise(p); p *= 2.03; a *= 0.47; }
+  return v;
+}
+
+// Projects screen UV to pool-space XZ coordinate via ray-plane intersection
+vec2 screenToPool(vec2 uv){
+  float asp = res.x / res.y;
+  vec3 cam = vec3(0.0, 3.4, -1.5);
+  vec3 tgt = vec3(0.0, 0.0, 0.4);
+  vec3 fw = normalize(tgt - cam);
+  vec3 rt = normalize(cross(fw, vec3(0,1,0)));
+  vec3 u  = cross(rt, fw);
+  vec2 sc = (uv - 0.5) * vec2(asp, 1.0);
+  vec3 rd = normalize(fw + rt*sc.x*1.05 + u*sc.y*1.05);
+  if(rd.y >= 0.0) return vec2(99.0);
+  float tt = -cam.y / rd.y;
+  return (cam + rd*tt).xz;
+}
+
+// Single thin luminous ring at radius r from center c
+// Returns brightness. Uses smoothstep for clean anti-aliased line.
+float ring(vec2 pool, vec2 center, float radius, float width){
+  float d = abs(length(pool - center) - radius);
+  return smoothstep(width, width * 0.15, d);
+}
+
+// Expanding ring set from a single source:
+// Multiple concentric rings at logarithmic spacing, fading with distance
+float ringSet(vec2 pool, vec2 center, float phase, float time, float strength){
+  float acc = 0.0;
+  float d = length(pool - center);
+  // 8 rings expanding outward at different speeds
+  for(int i = 0; i < 8; i++){
+    float fi = float(i);
+    // Ring radius expands over time, wraps via fract
+    float baseR = fract(fi * 0.12 + phase + time * 0.04) * 3.5;
+    // Width narrows slightly for outer rings
+    float w = 0.025 + baseR * 0.006;
+    float r = ring(pool, center, baseR, w);
+    // Fade: dimmer near source (too small), dimmer far out (expanding)
+    float fade = smoothstep(0.1, 0.5, baseR) * smoothstep(3.5, 1.8, baseR);
+    acc += r * fade;
+  }
+  return acc * strength;
+}
+
+void main(){
+  vec2 uv = gl_FragCoord.xy / res;
+  uv.y = 1.0 - uv.y;
+  vec2 pool = screenToPool(uv);
+
+  // Deep dark background
+  vec3 col = vec3(0.016, 0.012, 0.032);
+
+  // Very subtle background noise (deep space dust)
+  float bgn = fbm(uv * 4.0 + 0.5) * 0.5 + 0.5;
+  col += vec3(0.02, 0.015, 0.035) * bgn * 0.3;
+
+  if(length(pool) < 5.0){
+    float cd = length(pool);
+
+    // ── CONCENTRIC RING SETS from multiple sources ──
+    float rings = 0.0;
+    rings += ringSet(pool, vec2(0.0, 0.0),    0.0,  t, 1.0);    // center — strongest
+    rings += ringSet(pool, vec2(-0.6, -0.25),  0.3,  t, 0.45);
+    rings += ringSet(pool, vec2(0.7, -0.1),    0.6,  t, 0.40);
+    rings += ringSet(pool, vec2(-0.3, 0.55),   0.15, t, 0.35);
+    rings += ringSet(pool, vec2(0.5, 0.45),    0.45, t, 0.30);
+    rings += ringSet(pool, vec2(0.1, -0.65),   0.7,  t, 0.25);
+
+    // ── Ring COLOR: warm amber near center → cool lavender outer ──
+    float warmth = exp(-cd * cd * 0.9);
+    vec3 ringWarm = vec3(0.85, 0.72, 0.50);
+    vec3 ringCool = vec3(0.55, 0.48, 0.72);
+    vec3 ringCol = mix(ringCool, ringWarm, warmth);
+    // Subtle rose-salmon shift at mid-distance
+    float mid = exp(-pow(cd - 1.2, 2.0) * 1.5);
+    ringCol = mix(ringCol, vec3(0.65, 0.50, 0.62), mid * 0.12);
+
+    col += ringCol * rings * 0.28;
+
+    // ── Soft glow halo around each ring (the "bloom" effect from recap) ──
+    // Use a softer, wider version of the ring pattern
+    float softRings = 0.0;
+    for(int i = 0; i < 6; i++){
+      float fi = float(i);
+      float baseR = fract(fi * 0.12 + t * 0.04) * 3.5;
+      float d = abs(length(pool) - baseR);
+      softRings += exp(-d*d * 8.0) * smoothstep(0.1, 0.4, baseR) * smoothstep(3.5, 1.5, baseR);
+    }
+    col += ringCol * softRings * 0.06;
+
+    // ── CENTRAL WARM GLOW — the heart of the pool ──
+    // Wide warm wash
+    col += vec3(0.70, 0.55, 0.38) * exp(-cd * cd * 0.6) * 0.18;
+    // Brighter amber core
+    col += vec3(0.90, 0.78, 0.50) * exp(-cd * cd * 2.0) * 0.30;
+    // Hot white-amber center
+    col += vec3(1.0, 0.94, 0.82) * exp(-cd * cd * 8.0) * 0.40;
+    // Tight bright core
+    col += vec3(1.0, 0.97, 0.90) * exp(-cd * cd * 25.0) * 0.25;
+
+    // ── Subtle surface shimmer — wet reflective quality ──
+    float shimmer = fbm(pool * 2.8 + t * 0.015) * 0.5 + 0.5;
+    col += vec3(0.45, 0.38, 0.62) * shimmer * 0.008 * exp(-cd * 0.4);
+    // Specular-like micro highlights
+    float spec = pow(fbm(pool * 6.0 - t * 0.01 + 7.0), 5.0);
+    col += vec3(0.6, 0.55, 0.8) * spec * 0.02 * exp(-cd * 0.5);
+
+    // ── Edge fade (pool dissolves into darkness) ──
+    float edge = smoothstep(4.0, 1.8, cd);
+    col *= edge;
+
+    // ── Subtle depth beneath surface (dark under the rings) ──
+    float depth = 1.0 - exp(-cd * cd * 0.3) * 0.08;
+    col *= depth;
+  }
+
+  // ── Atmospheric haze (very subtle purple near pool edges) ──
+  float haze = exp(-length(uv - vec2(0.5, 0.46)) * 2.2);
+  col += vec3(0.25, 0.18, 0.40) * haze * 0.025;
+
+  // ── Vignette ──
+  vec2 vc = uv - 0.5;
+  col *= 1.0 - dot(vc, vc) * 1.6;
+
+  // ── Tone map (soft, cinematic) ──
+  col = col / (col + 0.38);
+  col = pow(col, vec3(0.88));
+
+  // ── Film grain ──
+  col += (hash(uv * res + t * 113.0) - 0.5) * 0.008;
+
+  gl_FragColor = vec4(max(col, vec3(0.0)), 1.0);
+}
+`;
+
+// Compile shaders
+function mkShader(type, src){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if(!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+    console.error('Shader:', gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, mkShader(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, mkShader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog, gl.LINK_STATUS))
+  console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const posAttr = gl.getAttribLocation(prog, 'p');
+const quadBuf = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(posAttr);
+gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
+
+const uTime  = gl.getUniformLocation(prog, 't');
+const uRes   = gl.getUniformLocation(prog, 'res');
+const uMouse = gl.getUniformLocation(prog, 'mouse');
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MEMORY DATA — tiny luminous points within the pool
+// ═══════════════════════════════════════════════════════════════════════════════
+const memTexts = [
+  { text: "Work-mode alertness is leaking into rest — pattern always trying to be alert", date: "Today · 2:14 PM", tags: ["pattern", "rest"] },
+  { text: "The conversation with mom went better than expected", date: "Today · 11:30 AM", tags: ["relationship"] },
+  { text: "Realized I avoid asking for help not from pride but from fear of being seen as weak", date: "Yesterday · 9:45 PM", tags: ["lesson", "vulnerability"] },
+  { text: "Decided to protect Friday afternoons — no meetings, no exceptions", date: "Yesterday · 3:20 PM", tags: ["decision", "boundaries"] },
+  { text: "Three weeks of consistent running — it's becoming mine", date: "Mar 5 · 8:10 AM", tags: ["commitment"] },
+  { text: "Said no to the consulting gig. It felt right immediately.", date: "Mar 4 · 6:30 PM", tags: ["decision"] },
+  { text: "Something shifted after the conversation with Elena", date: "Mar 3 · 10:15 PM", tags: ["feeling", "relationship"] },
+  { text: "I keep reaching for my phone when I feel uncertain. That's the pattern.", date: "Mar 2 · 7:45 PM", tags: ["pattern"] },
+  { text: "The pitch went well. I trusted my preparation instead of over-rehearsing.", date: "Mar 1 · 5:00 PM", tags: ["lesson"] },
+  { text: "Jake's comment wasn't about me — it was about his own frustration", date: "Feb 28 · 8:20 PM", tags: ["relationship", "lesson"] },
+];
+
+const memories = [];
+// Generate positions — clustered denser near center, sparser on edges
+for(let i = 0; i < CFG.memoryCount; i++){
+  // Soft Gaussian-like radial distribution (clustered toward center)
+  const angle = i * 2.39996322; // golden angle in radians
+  const r = Math.pow((i + 0.5) / CFG.memoryCount, 0.55) * CFG.memPointRadius;
+  // Small random jitter
+  const jx = (Math.sin(i * 73.1 + 37) * 43758.5453 % 1 - 0.5) * 0.25;
+  const jz = (Math.sin(i * 129.7 + 91) * 43758.5453 % 1 - 0.5) * 0.25;
+  const px = Math.cos(angle) * r + jx;
+  const pz = Math.sin(angle) * r * 0.75 + jz; // slightly elliptical
+
+  // "Warmth" drives color — memories near center are warmer
+  const dist = Math.hypot(px, pz);
+  const warmth = Math.exp(-dist * dist * 0.4);
+
+  memories.push({
+    px, pz, dist,
+    warmth,
+    phase: Math.random() * Math.PI * 2,
+    textIdx: i % memTexts.length,
+    screenX: 0, screenY: 0, scale: 0, visible: false,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PARTICLES — subtle sparkle dust
+// ═══════════════════════════════════════════════════════════════════════════════
+const particles = [];
+for(let i = 0; i < CFG.particleCount; i++){
+  const a = Math.random() * Math.PI * 2;
+  const r = Math.pow(Math.random(), 0.45) * 0.42;
+  particles.push({
+    x: 0.5 + Math.cos(a) * r * (innerWidth / innerHeight),
+    y: 0.46 + Math.sin(a) * r * 0.6,
+    sz: Math.random() * 0.8 + 0.2,
+    alpha: Math.random() * 0.12 + 0.03,
+    phase: Math.random() * Math.PI * 2,
+    speed: Math.random() * 0.15 + 0.04,
+    drift: Math.random() * 0.00003 + 0.000008,
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TIMELINE DOTS
+// ═══════════════════════════════════════════════════════════════════════════════
+const tlTrack = document.getElementById('tl-track');
+for(let i = 0; i < 40; i++){
+  const dot = document.createElement('div');
+  dot.className = 'tl-dot' + (Math.random() > 0.75 ? ' bright' : '');
+  dot.style.left = (4 + Math.random() * 92) + '%';
+  tlTrack.appendChild(dot);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// OVERLAY CANVAS (for memory dots + particles — drawn in 2D)
+// ═══════════════════════════════════════════════════════════════════════════════
+const oc = document.createElement('canvas');
+oc.style.cssText = 'position:fixed;inset:0;z-index:5;pointer-events:none';
+document.body.appendChild(oc);
+const ctx = oc.getContext('2d');
+
+// Clickable overlay (transparent, captures clicks on memory dots)
+const clickCanvas = document.createElement('canvas');
+clickCanvas.style.cssText = 'position:fixed;inset:0;z-index:6;cursor:default';
+document.body.appendChild(clickCanvas);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INTERACTION
+// ═══════════════════════════════════════════════════════════════════════════════
+let mx = 0.5, my = 0.5, smx = 0.5, smy = 0.5;
+let selectedIdx = -1;
+let hoverIdx = -1;
+
+document.addEventListener('mousemove', e => {
+  mx = e.clientX / innerWidth;
+  my = e.clientY / innerHeight;
+
+  // Hit-test memory dots
+  hoverIdx = -1;
+  const hitR = 14; // px radius for hit detection
+  for(let i = 0; i < memories.length; i++){
+    const m = memories[i];
+    if(!m.visible) continue;
+    const dx = e.clientX - m.screenX, dy = e.clientY - m.screenY;
+    if(dx*dx + dy*dy < hitR*hitR){
+      hoverIdx = i;
+      break;
+    }
+  }
+  clickCanvas.style.cursor = hoverIdx >= 0 ? 'pointer' : 'default';
+});
+
+clickCanvas.addEventListener('click', e => {
+  if(hoverIdx >= 0){
+    selectedIdx = hoverIdx;
+    showDetail(selectedIdx);
+  } else {
+    hideDetail();
+  }
+});
+
+const detailEl = document.getElementById('detail');
+const dDateEl = document.getElementById('d-date');
+const dTextEl = document.getElementById('d-text');
+
+function showDetail(idx){
+  const m = memories[idx];
+  const info = memTexts[m.textIdx];
+  dDateEl.textContent = info.date;
+  dTextEl.textContent = info.text;
+  detailEl.querySelector('.d-tags').innerHTML = info.tags.map(t =>
+    `<span class="d-tag">${t}</span>`
+  ).join('');
+  detailEl.classList.add('show');
+}
+
+function hideDetail(){
+  selectedIdx = -1;
+  detailEl.classList.remove('show');
+}
+// Expose for close button
+window.hideDetail = hideDetail;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESIZE
+// ═══════════════════════════════════════════════════════════════════════════════
+function resize(){
+  const dpr = Math.min(devicePixelRatio, 2);
+  canvas.width = innerWidth * dpr;
+  canvas.height = innerHeight * dpr;
+  canvas.style.width = innerWidth + 'px';
+  canvas.style.height = innerHeight + 'px';
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  oc.width = innerWidth * dpr;
+  oc.height = innerHeight * dpr;
+  oc.style.width = innerWidth + 'px';
+  oc.style.height = innerHeight + 'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+  clickCanvas.width = innerWidth;
+  clickCanvas.height = innerHeight;
+  clickCanvas.style.width = innerWidth + 'px';
+  clickCanvas.style.height = innerHeight + 'px';
+}
+addEventListener('resize', resize);
+resize();
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// ANIMATION LOOP
+// ═══════════════════════════════════════════════════════════════════════════════
+const t0 = performance.now();
+
+function frame(now){
+  const t = (now - t0) / 1000;
+  smx += (mx - smx) * 0.03;
+  smy += (my - smy) * 0.03;
+
+  // ── WebGL pool surface ──
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER, quadBuf);
+  gl.enableVertexAttribArray(posAttr);
+  gl.vertexAttribPointer(posAttr, 2, gl.FLOAT, false, 0, 0);
+  gl.uniform1f(uTime, t);
+  gl.uniform2f(uRes, canvas.width, canvas.height);
+  gl.uniform2f(uMouse, smx, smy);
+  gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+  // ── 2D overlay: particles + memory dots ──
+  ctx.clearRect(0, 0, innerWidth, innerHeight);
+
+  // Particles — extremely subtle warm dust
+  for(const p of particles){
+    p.x += p.drift * Math.cos(t * 0.1 + p.phase);
+    p.y += p.drift * Math.sin(t * 0.08 + p.phase) * 0.5;
+    if(p.x < -0.05) p.x = 1.05;
+    if(p.x > 1.05) p.x = -0.05;
+    if(p.y < -0.05) p.y = 1.05;
+    if(p.y > 1.05) p.y = -0.05;
+
+    const pulse = Math.sin(t * p.speed + p.phase) * 0.3 + 0.7;
+    const a = p.alpha * pulse;
+    if(a < 0.005) continue;
+
+    const px = p.x * innerWidth, py = p.y * innerHeight;
+    // Distance from screen center for brightness boost
+    const cd = Math.hypot(p.x - 0.5, p.y - 0.46);
+    const boost = Math.max(0, 1 - cd * 2.5) * 0.4 + 1;
+
+    if(p.sz > 0.4){
+      const g = ctx.createRadialGradient(px, py, 0, px, py, p.sz * 3);
+      g.addColorStop(0, `rgba(220,210,235,${Math.min(1, a * 0.4 * boost)})`);
+      g.addColorStop(1, `rgba(220,210,235,0)`);
+      ctx.beginPath(); ctx.arc(px, py, p.sz * 3, 0, Math.PI * 2);
+      ctx.fillStyle = g; ctx.fill();
+    }
+    ctx.beginPath(); ctx.arc(px, py, p.sz * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(235,230,245,${Math.min(1, a * boost)})`;
+    ctx.fill();
+  }
+
+  // ── Memory dots ──
+  for(let i = 0; i < memories.length; i++){
+    const m = memories[i];
+    const proj = poolToScreen(m.px, m.pz);
+    if(!proj || proj.x < -30 || proj.x > innerWidth + 30 || proj.y < -30 || proj.y > innerHeight + 30){
+      m.visible = false; continue;
+    }
+    m.visible = true;
+    m.screenX = proj.x;
+    m.screenY = proj.y;
+    m.scale = proj.s;
+
+    const isSelected = (i === selectedIdx);
+    const isHovered = (i === hoverIdx);
+
+    // Breathing
+    const breathe = Math.sin(t * 0.4 + m.phase) * CFG.memPulseAmount;
+    const baseAlpha = CFG.memCoreAlpha + breathe;
+
+    // Size scales with perspective (closer = larger)
+    const sz = CFG.memDotSize * Math.max(0.5, Math.min(1.8, m.scale * 3.2));
+
+    // Color: nearly monochromatic — warm white near center, cool lavender outer
+    const r = Math.round(210 + m.warmth * 40);  // 210–250
+    const g = Math.round(200 + m.warmth * 35);  // 200–235
+    const b = Math.round(225 - m.warmth * 10);  // 225–215
+    const coreStr = `${r},${g},${b}`;
+
+    // Glow halo
+    const glowR = CFG.memGlowRadius * Math.max(0.6, m.scale * 2.5);
+    let glowA = CFG.memGlowAlpha + breathe * 0.03;
+    if(isSelected) glowA *= 2.5;
+    if(isHovered && !isSelected) glowA *= 1.8;
+
+    const grd = ctx.createRadialGradient(proj.x, proj.y, 0, proj.x, proj.y, glowR);
+    grd.addColorStop(0, `rgba(${coreStr},${Math.min(1, glowA)})`);
+    grd.addColorStop(0.4, `rgba(${coreStr},${Math.min(1, glowA * 0.3)})`);
+    grd.addColorStop(1, `rgba(${coreStr},0)`);
+    ctx.beginPath();
+    ctx.arc(proj.x, proj.y, glowR, 0, Math.PI * 2);
+    ctx.fillStyle = grd;
+    ctx.fill();
+
+    // Core dot
+    let coreA = baseAlpha;
+    if(isSelected) coreA = 1.0;
+    if(isHovered && !isSelected) coreA = Math.min(1, coreA * 1.4);
+
+    ctx.beginPath();
+    ctx.arc(proj.x, proj.y, sz, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${coreStr},${Math.min(1, coreA)})`;
+    ctx.fill();
+
+    // Tiny bright specular on top
+    ctx.beginPath();
+    ctx.arc(proj.x - sz * 0.2, proj.y - sz * 0.25, sz * 0.35, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(255,255,255,${Math.min(0.4, coreA * 0.25)})`;
+    ctx.fill();
+
+    // Selected: draw subtle radial pulse ring
+    if(isSelected){
+      const ringR = sz + 8 + Math.sin(t * 2) * 2;
+      ctx.beginPath();
+      ctx.arc(proj.x, proj.y, ringR, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${coreStr},0.2)`;
+      ctx.lineWidth = 0.8;
+      ctx.stroke();
+    }
+  }
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
