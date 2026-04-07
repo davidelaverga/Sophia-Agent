@@ -31,10 +31,16 @@ type TrackerState = {
   endCalls: number;
 };
 
+const END_SESSION_PATHS = ['/api/sophia/end-session', '/api/sessions/end'] as const;
+
 const trackerByPage = new WeakMap<Page, TrackerState>();
 
 function nowIso(offsetMs = 0): string {
   return new Date(Date.now() + offsetMs).toISOString();
+}
+
+function isEndSessionRequest(url: string): boolean {
+  return END_SESSION_PATHS.some((path) => url.includes(path));
 }
 
 function normalizeHighlights(input: unknown): NormalizedHighlight[] {
@@ -107,7 +113,7 @@ function installStartEndTracker(page: Page): void {
     if (method === 'POST' && url.includes('/api/sessions/start')) {
       state.startCalls += 1;
     }
-    if (method === 'POST' && url.includes('/api/sessions/end')) {
+    if (method === 'POST' && isEndSessionRequest(url)) {
       state.endCalls += 1;
     }
   });
@@ -232,7 +238,7 @@ async function endSessionAndWaitRequest(page: Page): Promise<void> {
   const endReq = page.waitForResponse((res) => {
     return (
       res.request().method().toUpperCase() === 'POST' &&
-      res.url().includes('/api/sessions/end')
+      isEndSessionRequest(res.url())
     );
   }, { timeout: 15_000 });
 
@@ -317,6 +323,26 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
       status: 200,
       contentType: 'application/json',
       body: JSON.stringify(payload),
+    });
+  });
+
+  await page.route('**/api/sophia/end-session', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        session_id: 'mock-session-end',
+        ended_at: nowIso(),
+        duration_minutes: 8,
+        turn_count: 6,
+        recap_artifacts: {
+          takeaway: 'mock recap',
+          memory_candidates: [
+            { id: 'cand-1', text: 'mock memory candidate', category: 'episodic', created_at: nowIso() },
+          ],
+        },
+        offer_debrief: false,
+      }),
     });
   });
 
