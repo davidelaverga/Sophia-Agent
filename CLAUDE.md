@@ -374,6 +374,7 @@ GET    /api/sophia/{user_id}/journal
 - `soul.md` is excluded from GEPA. Add it to the exclusion list before running any optimization pass.
 - Run the offline pipeline only once per session. Use the `processed_sessions` set.
 - `smart_opener_assembly.md` must not reference `{cross_platform_memories}` — that placeholder was removed in v7.0.
+- `GET /api/sophia/{user_id}/memories/recent?status=pending_review` must apply the local review metadata overlay before deciding whether Mem0 detail hydration is needed. If the overlay already supplies `metadata.status`, avoid per-memory `client.get(...)` calls or recap loads regress into an N+1 Mem0 path.
 ### Luis
 - `runs/stream` not `runs/wait` — always. The ~0.6s difference matters on voice.
 - Artifact arrives after text. It updates the emotion for the **next** TTS call. Design `SophiaTTS` plugin accordingly.
@@ -381,6 +382,8 @@ GET    /api/sophia/{user_id}/journal
 - Smart opener is injected on the **first turn** of a new session. Sophia delivers it before the user says anything — it's not a system message the user sees.
 - If Live mode audio doesn't work on device, check WKWebView media playback settings in Capacitor config.
 - `ios/` directory is gitignored.
+- The recap fallback route must preserve `pending_review` semantics even when it falls back to the unfiltered memory list. Filter fallback candidates back down to `pending_review` or missing-status records, or approved/discarded memories will reappear in recap.
+- If runtime `users/{user_id}` artifacts are committed for testing or demos, do not default dev auth bypass to a tracked seeded user. Use an explicit `NEXT_PUBLIC_SOPHIA_USER_ID` or a neutral local-only default.
 ---
 ## Spec Documents (source of truth)
 All architectural decisions derive from these. When in doubt, read the spec before implementing.

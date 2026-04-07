@@ -35,6 +35,12 @@ coverage.xml
 coverage/
 .deer-flow/
 .claude/
+!.claude/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/sophia/
+!.claude/skills/sophia/**
 skills/custom/*
 logs/
 log/
