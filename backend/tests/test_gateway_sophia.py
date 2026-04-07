@@ -297,6 +297,7 @@ class TestBulkReview:
         mock_review_store["upsert"].assert_called_once_with(
             "test_user",
             memory_id="m1",
+            content_hash=None,
             metadata={"status": "approved"},
             sync_state="manual",
         )
@@ -309,12 +310,6 @@ class TestBulkReview:
         assert resp.status_code == 204
         mock_invalidate.assert_called_once_with("test_user")
 
-
-# ---------------------------------------------------------------------------
-# Bulk Review
-# ---------------------------------------------------------------------------
-
-class TestBulkReview:
     def test_approve_and_discard(self, client, mock_mem0):
         mock_mem0.update.return_value = {}
         mock_mem0.delete.return_value = None

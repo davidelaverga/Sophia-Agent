@@ -43,7 +43,7 @@ export function isSyntheticMemoryId(memoryId: string | null | undefined): boolea
     return true;
   }
 
-  return /^candidate-/.test(normalized) || /^mem_\d+$/.test(normalized);
+  return normalized.startsWith('candidate-') || /^mem_\d+$/.test(normalized);
 }
 
 export async function fetchSophiaApi(path: string, init: RequestInit): Promise<Response> {
