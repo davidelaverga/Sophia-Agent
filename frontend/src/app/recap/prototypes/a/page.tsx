@@ -840,7 +840,7 @@ function MemoryDrop({
         dropEl.style.transform = `translate(-50%, -50%) scale(${scale})`;
       }
 
-      const trail = el.querySelector('[data-trail]');
+      const trail = el.querySelector<HTMLElement>('[data-trail]');
       if (trail) {
         trail.style.height = `${trailH}px`;
         trail.style.opacity = String(Math.min(p * 2, 0.6));
