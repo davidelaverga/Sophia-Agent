@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
+import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 
 type GatewayMemory = {
   id?: string;
@@ -25,6 +25,12 @@ type NormalizedMemory = {
 
 const FALLBACK_WINDOW_BEFORE_MS = 10 * 60 * 1000;
 const FALLBACK_WINDOW_AFTER_MS = 30 * 60 * 1000;
+
+function getMemoryStatus(memory: NormalizedMemory): string | null {
+  return typeof memory.metadata?.status === 'string'
+    ? memory.metadata.status
+    : null;
+}
 
 function parseIsoTimestamp(value: string | null | undefined): number | null {
   if (!value) {
@@ -185,7 +191,11 @@ export async function GET(request: NextRequest) {
       ? unfilteredPayload.memories.map(normalizeGatewayMemory).filter((memory): memory is NormalizedMemory => memory !== null)
       : [];
 
-    const scopedMemories = selectFallbackMemories(allMemories, sessionId, startedAt, endedAt);
+    const scopedMemories = selectFallbackMemories(allMemories, sessionId, startedAt, endedAt)
+      .filter((memory) => {
+        const memoryStatus = getMemoryStatus(memory);
+        return memoryStatus === null || memoryStatus === 'pending_review';
+      });
 
     return NextResponse.json({
       memories: scopedMemories.map(({ metadata: _metadata, ...memory }) => memory),

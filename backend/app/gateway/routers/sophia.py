@@ -239,14 +239,26 @@ def _should_hydrate_memory_detail(mem: dict) -> bool:
     )
 
 
+def _has_memory_status(mem: dict) -> bool:
+    metadata = mem.get("metadata") if isinstance(mem, dict) else None
+    return isinstance(metadata, dict) and isinstance(metadata.get("status"), str)
+
+
 def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> list[dict]:
+    memories = apply_review_metadata_overlays(user_id, memories)
     hydrated: list[dict] = []
 
     for memory in memories:
         merged_memory = memory
         memory_id = memory.get("id") if isinstance(memory, dict) else None
+        has_status = status is not None and _has_memory_status(memory)
 
-        if memory_id and (status or _should_hydrate_memory_detail(memory)):
+        needs_hydration = memory_id and (
+            (status is not None and not has_status)
+            or (_should_hydrate_memory_detail(memory) and not has_status)
+        )
+
+        if needs_hydration:
             try:
                 merged_memory = _merge_memory_detail(memory, client.get(memory_id))
             except Exception:

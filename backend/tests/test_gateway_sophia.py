@@ -123,6 +123,21 @@ class TestListMemories:
         assert data["count"] == 1
         assert data["memories"][0]["metadata"]["status"] == "pending_review"
 
+    def test_status_filter_skips_detail_hydration_when_overlay_supplies_status(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+        ]
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+        mock_mem0.get.assert_not_called()
+
     def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Likes pizza", "metadata": None, "categories": []},

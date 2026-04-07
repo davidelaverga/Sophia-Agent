@@ -5,4 +5,4 @@ export const authBypassEnabled =
   explicitAuthBypass === 'true' ||
   (process.env.NODE_ENV !== 'production' && explicitAuthBypass !== 'false')
 
-export const authBypassUserId = process.env.NEXT_PUBLIC_SOPHIA_USER_ID || 'dev-user'
+export const authBypassUserId = process.env.NEXT_PUBLIC_SOPHIA_USER_ID || 'local-dev-user'
