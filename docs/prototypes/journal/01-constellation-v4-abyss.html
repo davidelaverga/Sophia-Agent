@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Sophia — The Abyss</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;1,300;1,400&family=Inter:wght@300;400;500&display=swap');
+  *{margin:0;padding:0;box-sizing:border-box}
+  :root{
+    --purple:#b8a4e8;--glow:#d4c4ff;--amber:#f2b36b;--teal:#59bead;
+    --rose:#d0829c;--ivory:#fffaf2;
+    --bg:#040610;--text:#f0edf8;--text2:#908ba8;
+    --card:rgba(8,10,22,0.88);--border:rgba(184,164,232,0.08);
+  }
+  body{
+    background:var(--bg);color:var(--text);
+    font-family:'Inter',sans-serif;overflow:hidden;
+    height:100vh;width:100vw;cursor:default;user-select:none;
+    -webkit-font-smoothing:antialiased;
+  }
+  canvas{position:fixed;inset:0}
+  #bg{z-index:0}
+  #fg{z-index:1}
+
+  /* ─ Dive overlay ─ */
+  #dive-overlay{
+    position:fixed;inset:0;z-index:100;
+    background:linear-gradient(180deg,
+      rgba(212,196,255,0.55) 0%,
+      rgba(184,164,232,0.30) 20%,
+      rgba(89,190,173,0.12) 50%,
+      rgba(4,6,16,0.95) 80%,
+      rgba(4,6,16,1) 100%);
+    pointer-events:none;
+    transition:opacity 1.8s cubic-bezier(0.4,0,0,1);
+  }
+  #dive-overlay.gone{opacity:0}
+  #dive-overlay .dive-text{
+    position:absolute;top:38%;left:50%;transform:translate(-50%,-50%);
+    text-align:center;
+    transition:opacity 0.8s ease, transform 0.8s ease;
+  }
+  #dive-overlay.gone .dive-text{opacity:0;transform:translate(-50%,-40%)}
+  #dive-overlay .dive-text h2{
+    font-family:'Cormorant Garamond',serif;font-weight:300;font-size:32px;
+    color:var(--glow);letter-spacing:0.12em;
+    text-shadow:0 0 40px rgba(184,164,232,0.4);
+    margin-bottom:8px;
+  }
+  #dive-overlay .dive-text p{
+    font-size:12px;color:var(--text2);letter-spacing:0.05em;font-weight:300;
+  }
+
+  /* ─ Surface shimmer ─ */
+  .surface{
+    position:fixed;top:0;left:0;right:0;height:60px;z-index:4;
+    pointer-events:none;opacity:0;transition:opacity 1.5s ease 1.5s;
+  }
+  .surface.on{opacity:1}
+  .surface-inner{
+    width:100%;height:100%;
+    background:linear-gradient(180deg,
+      rgba(212,196,255,0.08) 0%,
+      rgba(89,190,173,0.03) 40%,
+      transparent 100%);
+    animation:surfaceShimmer 8s ease-in-out infinite;
+  }
+  .surface-line{
+    position:absolute;top:0;left:0;right:0;height:2px;
+    background:linear-gradient(90deg,
+      transparent 0%,rgba(184,164,232,0.04) 10%,
+      rgba(212,196,255,0.16) 30%,rgba(242,179,107,0.08) 50%,
+      rgba(212,196,255,0.16) 70%,rgba(184,164,232,0.04) 90%,
+      transparent 100%);
+    box-shadow:0 0 16px rgba(184,164,232,0.06),0 2px 24px rgba(184,164,232,0.03);
+  }
+  @keyframes surfaceShimmer{0%,100%{opacity:0.8;transform:scaleX(1)}50%{opacity:1;transform:scaleX(1.01)}}
+
+  /* ─ Header ─ */
+  .hdr{
+    position:fixed;top:0;left:0;right:0;z-index:10;padding:20px 28px;
+    display:flex;align-items:center;justify-content:space-between;
+    pointer-events:none;opacity:0;transition:opacity 0.8s ease 2.2s;
+  }
+  .hdr.on{opacity:1}.hdr>*{pointer-events:auto}
+  .hdr h1{font-family:'Cormorant Garamond',serif;font-weight:300;font-size:22px;letter-spacing:0.08em;color:var(--glow);text-shadow:0 0 28px rgba(184,164,232,0.2)}
+  .hdr .sub{font-size:10px;color:var(--text2);letter-spacing:0.04em;font-weight:300;margin-top:2px}
+
+  /* ─ Search ─ */
+  .search{
+    position:relative;display:flex;align-items:center;
+  }
+  .search input{
+    width:0;padding:0;border:none;outline:none;
+    background:transparent;color:var(--text);font-size:12px;font-family:'Inter',sans-serif;
+    transition:width 300ms ease,padding 300ms ease;
+  }
+  .search.open input{width:180px;padding:6px 12px;border:1px solid var(--border);border-radius:20px;background:rgba(8,10,22,0.6);backdrop-filter:blur(12px)}
+  .search-btn{
+    width:28px;height:28px;border-radius:50%;border:1px solid var(--border);
+    background:transparent;color:var(--text2);font-size:13px;cursor:pointer;
+    display:flex;align-items:center;justify-content:center;transition:all 150ms;margin-left:6px;
+  }
+  .search-btn:hover{border-color:rgba(184,164,232,0.2);color:var(--text)}
+
+  /* ─ Depth gauge ─ */
+  .depth-gauge{
+    position:fixed;left:14px;top:50%;transform:translateY(-50%);z-index:10;
+    display:flex;flex-direction:column;align-items:center;gap:0;
+    opacity:0;transition:opacity 0.8s ease 2.6s;
+  }
+  .depth-gauge.on{opacity:1}
+  .dg-label{font-size:8px;color:var(--text2);letter-spacing:0.06em;text-transform:uppercase;writing-mode:vertical-rl;transform:rotate(180deg);margin:6px 0}
+  .dg-track{width:2px;height:160px;background:rgba(89,190,173,0.06);border-radius:1px;position:relative}
+  .dg-fill{position:absolute;top:0;width:100%;border-radius:1px;background:linear-gradient(180deg,rgba(212,196,255,0.3),rgba(89,190,173,0.15),rgba(89,190,173,0.04));height:100%}
+  .dg-dot{
+    position:absolute;left:50%;transform:translateX(-50%);width:5px;height:5px;
+    border-radius:50%;border:1px solid rgba(89,190,173,0.3);background:rgba(89,190,173,0.1);
+  }
+
+  /* ─ Legend ─ */
+  .legend{
+    position:fixed;bottom:66px;left:28px;z-index:10;
+    display:flex;flex-direction:column;gap:5px;
+    opacity:0;transition:opacity 0.8s ease 2.4s;
+  }
+  .legend.on{opacity:1}
+  .leg{display:flex;align-items:center;gap:7px;font-size:9px;color:var(--text2);letter-spacing:0.03em;cursor:pointer;padding:3px 9px 3px 5px;border-radius:20px;border:1px solid transparent;transition:all 180ms}
+  .leg:hover{border-color:var(--border);color:var(--text)}
+  .leg.act{border-color:rgba(184,164,232,0.18);background:rgba(184,164,232,0.04);color:var(--text)}
+  .leg.dim{opacity:0.2}
+  .ldot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+
+  /* ─ Stats ─ */
+  .stats{
+    position:fixed;bottom:66px;right:28px;z-index:10;display:flex;gap:22px;
+    opacity:0;transition:opacity 0.8s ease 2.5s;
+  }
+  .stats.on{opacity:1}
+  .st{text-align:center}
+  .sv{font-family:'Cormorant Garamond',serif;font-size:22px;font-weight:300;color:var(--glow)}
+  .sl{font-size:8px;color:var(--text2);letter-spacing:0.06em;text-transform:uppercase;margin-top:1px}
+
+  /* ─ Zoom ─ */
+  .zc{
+    position:fixed;bottom:66px;left:50%;transform:translateX(-50%);z-index:10;display:flex;gap:4px;
+    opacity:0;transition:opacity 0.8s ease 2.6s;
+  }
+  .zc.on{opacity:1}
+  .zb{width:28px;height:28px;border-radius:50%;border:1px solid var(--border);background:rgba(8,10,22,0.4);backdrop-filter:blur(8px);color:var(--text2);font-size:13px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 150ms}
+  .zb:hover{border-color:rgba(184,164,232,0.2);color:var(--text)}
+  .zrst{padding:0 9px;height:28px;border-radius:14px;border:1px solid var(--border);background:rgba(8,10,22,0.4);backdrop-filter:blur(8px);color:var(--text2);font-size:8px;letter-spacing:0.05em;cursor:pointer;transition:all 150ms}
+  .zrst:hover{border-color:rgba(184,164,232,0.2);color:var(--text)}
+
+  /* ─ Timeline ─ */
+  .tl{
+    position:fixed;bottom:0;left:0;right:0;z-index:10;height:48px;padding:0 28px;
+    display:flex;align-items:center;gap:12px;
+    background:linear-gradient(to top,rgba(4,6,16,0.9) 0%,rgba(4,6,16,0.2) 60%,transparent 100%);
+    opacity:0;transition:opacity 0.8s ease 2.7s;
+  }
+  .tl.on{opacity:1}
+  .tll{font-size:9px;color:var(--text2);letter-spacing:0.04em;white-space:nowrap;min-width:44px}
+  .tl-track{flex:1;position:relative;height:28px;display:flex;align-items:center;cursor:pointer}
+  .tl-bar{width:100%;height:2px;background:rgba(89,190,173,0.06);border-radius:1px;position:relative}
+  .tl-fill{height:100%;border-radius:1px;background:linear-gradient(90deg,rgba(89,190,173,0.1),rgba(184,164,232,0.35));width:100%;transition:width 60ms}
+  .tl-thumb{position:absolute;top:50%;left:100%;transform:translate(-50%,-50%);width:11px;height:11px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px rgba(89,190,173,0.4);cursor:grab;transition:transform 120ms}
+  .tl-thumb:hover{transform:translate(-50%,-50%) scale(1.25)}
+  .tl-date-tip{
+    position:absolute;bottom:100%;left:50%;transform:translateX(-50%);
+    padding:3px 8px;border-radius:8px;background:var(--card);border:1px solid var(--border);
+    font-size:9px;color:var(--teal);letter-spacing:0.03em;white-space:nowrap;
+    opacity:0;pointer-events:none;transition:opacity 200ms;margin-bottom:4px;
+  }
+  .tl-date-tip.vis{opacity:1}
+  .tl-density{position:absolute;inset:0;display:flex;align-items:center;pointer-events:none}
+
+  /* ─ Tooltip ─ */
+  .tt{position:fixed;z-index:20;max-width:260px;padding:14px 18px;background:var(--card);backdrop-filter:blur(28px);-webkit-backdrop-filter:blur(28px);border:1px solid var(--border);border-radius:12px;box-shadow:0 14px 40px rgba(4,6,16,0.75),0 0 40px rgba(89,190,173,0.03);pointer-events:none;opacity:0;transform:translateY(5px) scale(0.97);transition:opacity 200ms,transform 200ms}
+  .tt.vis{opacity:1;transform:translateY(0) scale(1)}
+  .tt .badge{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:16px;font-size:8px;letter-spacing:0.04em;text-transform:uppercase;margin-bottom:8px}
+  .tt .txt{font-size:12px;line-height:1.55;font-weight:300}
+  .tt .dt{font-size:8px;color:var(--text2);margin-top:6px;letter-spacing:0.02em}
+  .tt .dp{font-size:8px;color:rgba(89,190,173,0.5);margin-top:2px;font-style:italic}
+
+  /* ─ Detail ─ */
+  .det{
+    position:fixed;right:28px;top:50%;transform:translateY(-50%) translateX(12px);z-index:15;
+    width:300px;padding:22px;background:var(--card);backdrop-filter:blur(32px);-webkit-backdrop-filter:blur(32px);
+    border:1px solid var(--border);border-radius:16px;
+    box-shadow:0 20px 52px rgba(4,6,16,0.75),0 0 60px rgba(89,190,173,0.03);
+    opacity:0;pointer-events:none;transition:opacity 260ms,transform 260ms;
+  }
+  .det.vis{opacity:1;transform:translateY(-50%) translateX(0);pointer-events:auto}
+  .det .x{position:absolute;top:10px;right:10px;width:24px;height:24px;border-radius:50%;border:1px solid var(--border);background:transparent;color:var(--text2);font-size:12px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 150ms}
+  .det .x:hover{background:rgba(89,190,173,0.06);color:var(--text)}
+  .det .dcl{font-family:'Cormorant Garamond',serif;font-size:12px;font-style:italic;color:rgba(89,190,173,0.4);letter-spacing:0.06em;margin-bottom:12px}
+  .det .dcat{display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:16px;font-size:8px;letter-spacing:0.04em;text-transform:uppercase;margin-bottom:10px}
+  .det .dtxt{font-size:13px;line-height:1.6;font-weight:300;margin-bottom:10px}
+  .det .ddt{font-size:9px;color:var(--text2);letter-spacing:0.02em;margin-bottom:3px}
+  .det .ddp{font-size:9px;color:rgba(89,190,173,0.45);font-style:italic;margin-bottom:14px}
+  .det .dct{font-size:8px;color:var(--teal);letter-spacing:0.06em;text-transform:uppercase;margin-bottom:7px;padding-top:10px;border-top:1px solid var(--border);opacity:0.6}
+  .det .dc{font-size:10px;line-height:1.45;font-weight:300;padding:5px 0;border-bottom:1px solid rgba(89,190,173,0.04);opacity:0.55;cursor:pointer;transition:all 150ms;border-radius:4px;padding-left:4px}
+  .det .dc:hover{opacity:1;background:rgba(89,190,173,0.04);padding-left:8px}
+  .det .dc:last-child{border-bottom:none}
+</style>
+</head>
+<body>
+
+<canvas id="bg"></canvas>
+<canvas id="fg"></canvas>
+
+<!-- Dive-in overlay -->
+<div id="dive-overlay">
+  <div class="dive-text">
+    <h2>Beneath the Surface</h2>
+    <p>42 memories rising · dive in</p>
+  </div>
+</div>
+
+<!-- Surface shimmer band -->
+<div class="surface" id="surface"><div class="surface-inner"></div><div class="surface-line"></div></div>
+
+<!-- Header -->
+<div class="hdr" id="hdr">
+  <div><h1>The Abyss</h1><div class="sub">42 drops kept across 18 sessions</div></div>
+  <div class="search" id="search-wrap">
+    <input type="text" id="search-input" placeholder="Search memories…" spellcheck="false">
+    <button class="search-btn" id="search-btn">⌕</button>
+  </div>
+</div>
+
+<!-- Depth gauge -->
+<div class="depth-gauge" id="dg"><div class="dg-label">Surface</div><div class="dg-track" id="dg-track"><div class="dg-fill"></div></div><div class="dg-label">Deep</div></div>
+
+<div class="legend" id="legend"></div>
+<div class="stats" id="stats-el">
+  <div class="st"><div class="sv">42</div><div class="sl">Drops</div></div>
+  <div class="st"><div class="sv">5</div><div class="sl">Colonies</div></div>
+  <div class="st"><div class="sv">18</div><div class="sl">Sessions</div></div>
+</div>
+<div class="zc" id="zc-el">
+  <button class="zb" id="zi">+</button>
+  <button class="zb" id="zo">−</button>
+  <button class="zrst" id="zr">RESURFACE</button>
+</div>
+
+<!-- Timeline -->
+<div class="tl" id="tl-el">
+  <span class="tll">Mar 12</span>
+  <div class="tl-track" id="tlt">
+    <div class="tl-bar"><div class="tl-fill" id="tlf"></div></div>
+    <div class="tl-thumb" id="tlh"><div class="tl-date-tip" id="tl-tip">Apr 6</div></div>
+    <div class="tl-density" id="tl-dens"></div>
+  </div>
+  <span class="tll" style="text-align:right">Apr 6</span>
+</div>
+
+<div class="tt" id="tt"><div class="badge" id="tt-b"></div><div class="txt" id="tt-t"></div><div class="dt" id="tt-d"></div><div class="dp" id="tt-p"></div></div>
+<div class="det" id="det"><button class="x" id="dx">×</button><div class="dcl" id="dcl"></div><div class="dcat" id="dcat"></div><div class="dtxt" id="dtxt"></div><div class="ddt" id="ddt"></div><div class="ddp" id="ddp"></div><div class="dct">Nearby memories</div><div id="dcons"></div></div>
+
+<script>
+// ═══════════════════════════════════════════════════════════════════════════════
+// DATA
+// ═══════════════════════════════════════════════════════════════════════════════
+const C={
+  feeling:{co:[184,164,232],lb:'Feeling',bg:'rgba(184,164,232,0.10)',tx:'#b8a4e8',dt:'#b8a4e8'},
+  decision:{co:[242,179,107],lb:'Decision',bg:'rgba(242,179,107,0.10)',tx:'#f2b36b',dt:'#f2b36b'},
+  lesson:{co:[89,190,173],lb:'Lesson',bg:'rgba(89,190,173,0.10)',tx:'#59bead',dt:'#59bead'},
+  relationship:{co:[208,130,156],lb:'Relationship',bg:'rgba(208,130,156,0.10)',tx:'#d0829c',dt:'#d0829c'},
+  fact:{co:[139,164,212],lb:'Fact',bg:'rgba(139,164,212,0.10)',tx:'#8ba4d4',dt:'#8ba4d4'},
+  commitment:{co:[232,200,140],lb:'Commitment',bg:'rgba(232,200,140,0.10)',tx:'#e8c88c',dt:'#e8c88c'},
+  pattern:{co:[168,140,210],lb:'Pattern',bg:'rgba(168,140,210,0.10)',tx:'#a88cd2',dt:'#a88cd2'},
+  preference:{co:[190,170,220],lb:'Preference',bg:'rgba(190,170,220,0.10)',tx:'#beaadc',dt:'#beaadc'},
+};
+
+const CL=[
+  {nm:'Growth Reef',lp:{cx:-0.27,cy:0.42},tn:[89,190,173],ix:[0,1,2,3,4,5,6]},
+  {nm:'Inner Depths',lp:{cx:0.00,cy:0.15},tn:[184,164,232],ix:[7,8,9,10,11,12,13]},
+  {nm:'Ambition Current',lp:{cx:0.33,cy:0.27},tn:[242,179,107],ix:[14,15,16,17,18,19]},
+  {nm:'Still Waters',lp:{cx:-0.27,cy:-0.38},tn:[208,130,156],ix:[20,21,22,23,24,25]},
+  {nm:'Deep Vision',lp:{cx:0.25,cy:-0.36},tn:[139,164,212],ix:[26,27,28,29,30,31]},
+];
+
+const M=[
+  {t:"Realized that avoiding conflict doesn't protect relationships — it slowly erodes them.",c:'lesson',d:'Mar 28',v:16,cx:-0.32,cy:0.28},
+  {t:"Decided to have the difficult conversation with my co-founder about equity split.",c:'decision',d:'Mar 29',v:17,cx:-0.28,cy:0.22},
+  {t:"Felt genuinely relieved after the conversation, even though it was hard.",c:'feeling',d:'Mar 30',v:18,cx:-0.22,cy:0.30},
+  {t:"My co-founder Alex actually thanked me for bringing it up first.",c:'relationship',d:'Mar 30',v:18,cx:-0.35,cy:0.36},
+  {t:"I handle confrontation better when I prepare what I want to say the night before.",c:'pattern',d:'Mar 31',v:19,cx:-0.25,cy:0.38},
+  {t:"Committed to weekly founder sync — no more letting things build up.",c:'commitment',d:'Apr 1',v:20,cx:-0.18,cy:0.26},
+  {t:"The preparation ritual (debrief) genuinely helped me process after the equity talk.",c:'lesson',d:'Apr 1',v:20,cx:-0.30,cy:0.18},
+  {t:"Noticed I always minimize good news about myself. 'It's not a big deal' reflex.",c:'pattern',d:'Mar 22',v:10,cx:0.02,cy:0.04},
+  {t:"Felt unexpectedly emotional when Sophia reflected back a pattern I hadn't seen.",c:'feeling',d:'Mar 23',v:11,cx:-0.06,cy:-0.05},
+  {t:"The pitch deck is 80% done. Investor meeting scheduled for April 8th.",c:'fact',d:'Mar 25',v:13,cx:0.08,cy:0.08},
+  {t:"I work better in 3-hour deep blocks, not Pomodoro.",c:'preference',d:'Mar 24',v:12,cx:0.12,cy:-0.02},
+  {t:"Decided to stop checking Slack before 10am — the morning is for creation.",c:'decision',d:'Mar 26',v:14,cx:-0.02,cy:0.12},
+  {t:"My sister called to check in — first time in two months. It meant more than I expected.",c:'relationship',d:'Mar 27',v:15,cx:0.05,cy:-0.08},
+  {t:"Felt a kind of quiet pride after shipping the landing page alone.",c:'feeling',d:'Mar 28',v:16,cx:-0.10,cy:0.06},
+  {t:"The investor meeting went better than I prepared for. They want a follow-up.",c:'fact',d:'Apr 2',v:21,cx:0.30,cy:0.10},
+  {t:"Felt the imposter syndrome hit hard right after the positive investor feedback.",c:'feeling',d:'Apr 2',v:21,cx:0.35,cy:0.16},
+  {t:"Lesson: good things triggering anxiety is a signal, not a verdict.",c:'lesson',d:'Apr 3',v:22,cx:0.28,cy:0.20},
+  {t:"Committed to treating the follow-up meeting as practice, not performance.",c:'commitment',d:'Apr 3',v:22,cx:0.38,cy:0.08},
+  {t:"I underestimate myself when I'm tired. Need to stop making self-assessments after 9pm.",c:'pattern',d:'Apr 4',v:23,cx:0.32,cy:0.24},
+  {t:"Alex said 'You carried that meeting' — I'm learning to receive that.",c:'relationship',d:'Apr 4',v:23,cx:0.24,cy:0.14},
+  {t:"Realized I haven't taken a real day off in 6 weeks.",c:'lesson',d:'Mar 18',v:6,cx:-0.28,cy:-0.22},
+  {t:"Decided to block Sundays completely. No exceptions.",c:'decision',d:'Mar 19',v:7,cx:-0.22,cy:-0.28},
+  {t:"Felt guilty the entire first Sunday off. But slept 9 hours.",c:'feeling',d:'Mar 20',v:8,cx:-0.34,cy:-0.26},
+  {t:"The guilt faded by the second Sunday. Body remembered what rest feels like.",c:'feeling',d:'Mar 27',v:15,cx:-0.26,cy:-0.34},
+  {t:"I prefer walking without podcasts — just ambient sound and thoughts.",c:'preference',d:'Mar 21',v:9,cx:-0.30,cy:-0.32},
+  {t:"Mom asked if I'm eating well. I lied. Need to fix that.",c:'relationship',d:'Mar 22',v:10,cx:-0.20,cy:-0.20},
+  {t:"Wrote the company mission statement. First version that felt true.",c:'fact',d:'Apr 4',v:23,cx:0.22,cy:-0.20},
+  {t:"The mission is: 'Make the tools we wished existed when we started.'",c:'fact',d:'Apr 4',v:23,cx:0.28,cy:-0.26},
+  {t:"Felt clarity I haven't felt since the first week of starting the company.",c:'feeling',d:'Apr 5',v:24,cx:0.18,cy:-0.28},
+  {t:"Decided the product serves indie founders first, enterprises later.",c:'decision',d:'Apr 5',v:24,cx:0.32,cy:-0.22},
+  {t:"Alex and I are aligned for the first time in months. The mission crystallized it.",c:'relationship',d:'Apr 5',v:24,cx:0.26,cy:-0.16},
+  {t:"Committed to revisiting the mission statement every quarter.",c:'commitment',d:'Apr 6',v:25,cx:0.20,cy:-0.32},
+  {t:"Started the day with the reset ritual. Felt grounded for the first time this week.",c:'feeling',d:'Apr 1',v:20,cx:-0.05,cy:-0.35},
+  {t:"I default to humor when I'm uncomfortable. It's a shield.",c:'pattern',d:'Mar 20',v:8,cx:0.38,cy:-0.05},
+  {t:"Prefers voice sessions in the morning, text in the evening.",c:'preference',d:'Mar 15',v:3,cx:-0.38,cy:0.05},
+  {t:"The vent ritual is most useful on Mondays and Thursdays.",c:'pattern',d:'Mar 24',v:12,cx:0.00,cy:0.36},
+  {t:"Learned that 'I don't know' is a complete answer.",c:'lesson',d:'Apr 3',v:22,cx:-0.12,cy:-0.18},
+  {t:"There's a version of me that's already good enough. I just keep forgetting.",c:'lesson',d:'Apr 6',v:25,cx:0.10,cy:-0.38},
+  {t:"Name: Davide. Based in Barcelona. Building a dev tools startup.",c:'fact',d:'Mar 12',v:0,cx:-0.38,cy:-0.12},
+  {t:"Gaming helps me decompress but only for 1 hour max. After that it's avoidance.",c:'pattern',d:'Mar 16',v:4,cx:0.15,cy:0.32},
+  {t:"Committed to shipping the MVP by April 15th.",c:'commitment',d:'Apr 1',v:20,cx:-0.15,cy:0.18},
+  {t:"The vent ritual works differently than I expected — more cathartic than analytical.",c:'lesson',d:'Apr 6',v:25,cx:0.05,cy:-0.28},
+];
+
+const DV=25;
+const edges=[[0,1],[1,2],[2,3],[3,4],[4,5],[5,6],[6,0],[1,5],[7,8],[8,9],[9,10],[10,11],[11,12],[12,13],[13,7],[8,11],[14,15],[15,16],[16,17],[17,18],[18,19],[19,14],[15,18],[20,21],[21,22],[22,23],[23,24],[24,25],[25,20],[21,24],[26,27],[27,28],[28,29],[29,30],[30,31],[31,26],[27,30]];
+const adj=M.map(()=>[]);edges.forEach(([a,b])=>{adj[a].push(b);adj[b].push(a)});
+const mCl=new Array(M.length).fill(-1);CL.forEach((c,i)=>c.ix.forEach(j=>mCl[j]=i));
+function mDp(m){return 1-m.v/DV}
+function dpLb(d){return d<0.2?'Just below the surface':d<0.45?'Mid-water':d<0.7?'Deep':'The oldest depth'}
+const dateStrs=['Mar 12','Mar 13','Mar 14','Mar 15','Mar 16','Mar 17','Mar 18','Mar 19','Mar 20','Mar 21','Mar 22','Mar 23','Mar 24','Mar 25','Mar 26','Mar 27','Mar 28','Mar 29','Mar 30','Mar 31','Apr 1','Apr 2','Apr 3','Apr 4','Apr 5','Apr 6'];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// STATE
+// ═══════════════════════════════════════════════════════════════════════════════
+let mx=0.5,my=0.5,msx=0.5,msy=0.5,mcx=0,mcy=0;
+let cX=0,cY=0,cZ=1,tX=0,tY=0,tZ=1;
+let pan=false,psx=0,psy=0,pcx=0,pcy=0;
+let cut=DV,tlDr=false;
+let hi=-1,si=-1,hcl=-1,filt=null,searchQ='';
+let divePhase=0; // 0=overlay, 1=diving, 2=done
+let diveStart=0;
+const DIVE_DUR=2800;
+
+// Chain reaction: bio[i] = glow strength (0-1), decays
+const bio=new Float32Array(M.length);
+const bioTarget=new Float32Array(M.length);
+
+// Bubbles
+const bubbles=[];
+
+// Edge particles
+const eLit=edges.map(()=>({p:Math.random(),s:0.0008+Math.random()*0.0012,sz:Math.random()*0.8+0.4,a:Math.random()*0.2+0.12}));
+
+// Plankton (particles)
+const plk=Array.from({length:280},()=>({
+  x:Math.random(),y:Math.random(),z:Math.random(),
+  sz:Math.random()*1.6+0.2,
+  a:Math.random()*0.18+0.03,
+  dr:Math.random()*0.00025+0.00005,
+  ph:Math.random()*Math.PI*2,
+  h:Math.floor(Math.random()*3),
+}));
+
+// Dust trail
+const dust=[];let lastD=0;
+
+// Fog bands
+const fogBands=[
+  {y:0.3,h:0.12,a:0.06,sp:0.08,ph:0},
+  {y:0.55,h:0.15,a:0.09,sp:0.05,ph:2},
+  {y:0.78,h:0.10,a:0.12,sp:0.06,ph:4},
+];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LEGEND / TIMELINE DENSITY / DEPTH GAUGE
+// ═══════════════════════════════════════════════════════════════════════════════
+const legEl=document.getElementById('legend');
+Object.keys(C).forEach(k=>{
+  const c=C[k],e=document.createElement('div');
+  e.className='leg';e.dataset.cat=k;
+  e.innerHTML=`<div class="ldot" style="background:${c.dt};box-shadow:0 0 4px ${c.dt}"></div><span>${c.lb}</span>`;
+  e.onclick=()=>{
+    if(filt===k){filt=null;document.querySelectorAll('.leg').forEach(l=>l.classList.remove('act','dim'))}
+    else{filt=k;document.querySelectorAll('.leg').forEach(l=>{l.classList.remove('act','dim');l.dataset.cat!==k?l.classList.add('dim'):l.classList.add('act')})}
+  };
+  legEl.appendChild(e);
+});
+
+// Timeline density dots
+const densEl=document.getElementById('tl-dens');
+const densCounts=new Array(26).fill(0);
+M.forEach(m=>densCounts[m.v]++);
+for(let i=0;i<=DV;i++){
+  if(densCounts[i]===0)continue;
+  const dot=document.createElement('div');
+  const pct=i/DV*100;
+  dot.style.cssText=`position:absolute;left:${pct}%;top:50%;transform:translate(-50%,-50%);width:3px;height:3px;border-radius:50%;background:rgba(89,190,173,${Math.min(0.5,densCounts[i]*0.12)});box-shadow:0 0 ${densCounts[i]*2}px rgba(89,190,173,${Math.min(0.3,densCounts[i]*0.06)})`;
+  densEl.appendChild(dot);
+}
+
+// Depth gauge cluster markers
+const dgTrack=document.getElementById('dg-track');
+CL.forEach(cl=>{
+  const avgD=cl.ix.reduce((s,i)=>s+mDp(M[i]),0)/cl.ix.length;
+  const dot=document.createElement('div');
+  dot.className='dg-dot';
+  dot.style.top=(avgD*100)+'%';
+  dot.title=cl.nm;
+  dgTrack.appendChild(dot);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INPUT
+// ═══════════════════════════════════════════════════════════════════════════════
+const fg=document.getElementById('fg');
+document.addEventListener('mousemove',e=>{mx=e.clientX/innerWidth;my=1-e.clientY/innerHeight;mcx=e.clientX;mcy=e.clientY});
+
+document.getElementById('zi').onclick=()=>{tZ=Math.min(tZ*1.35,5)};
+document.getElementById('zo').onclick=()=>{tZ=Math.max(tZ/1.35,0.5)};
+document.getElementById('zr').onclick=()=>{tZ=1;tX=0;tY=0};
+
+fg.addEventListener('wheel',e=>{e.preventDefault();tZ=Math.max(0.5,Math.min(5,tZ*(e.deltaY<0?1.08:0.92)))},{passive:false});
+fg.addEventListener('mousedown',e=>{if(e.button===0&&hi<0){pan=true;psx=e.clientX;psy=e.clientY;pcx=tX;pcy=tY;fg.style.cursor='grabbing'}});
+document.addEventListener('mouseup',()=>{if(pan){pan=false;fg.style.cursor=hi>=0?'pointer':'default'}});
+document.addEventListener('mousemove',e=>{if(pan){tX=pcx+(e.clientX-psx)/cZ;tY=pcy+(e.clientY-psy)/cZ}});
+
+fg.addEventListener('click',e=>{
+  if(pan)return;
+  if(hi>=0){si=hi;showDet(hi);spawnBubbles(hi)}
+  else{si=-1;document.getElementById('det').classList.remove('vis')}
+});
+fg.addEventListener('dblclick',e=>{
+  // Double click on cluster label to zoom
+  if(hcl>=0){
+    const cl=CL[hcl];
+    const p=sPos(cl.lp);
+    tX=innerWidth/2 - p.x + cX;
+    tY=innerHeight/2 - p.y + cY;
+    tZ=Math.min(tZ*2,4);
+  }
+});
+
+document.getElementById('dx').onclick=()=>{si=-1;document.getElementById('det').classList.remove('vis')};
+
+// Timeline
+const tlTrack=document.getElementById('tlt'),tlThumb=document.getElementById('tlh'),tlFill=document.getElementById('tlf');
+const tlTip=document.getElementById('tl-tip');
+function updTl(cx){const r=tlTrack.getBoundingClientRect();const p=Math.max(0,Math.min(1,(cx-r.left)/r.width));cut=p*DV;tlThumb.style.left=(p*100)+'%';tlFill.style.width=(p*100)+'%';const di=Math.round(cut);tlTip.textContent=dateStrs[Math.min(di,25)]}
+tlTrack.addEventListener('mousedown',e=>{tlDr=true;updTl(e.clientX);tlTip.classList.add('vis')});
+document.addEventListener('mousemove',e=>{if(tlDr)updTl(e.clientX)});
+document.addEventListener('mouseup',()=>{if(tlDr){tlDr=false;tlTip.classList.remove('vis')}});
+
+// Search
+const searchWrap=document.getElementById('search-wrap');
+const searchInput=document.getElementById('search-input');
+document.getElementById('search-btn').onclick=()=>{searchWrap.classList.toggle('open');if(searchWrap.classList.contains('open'))searchInput.focus();else{searchInput.value='';searchQ=''}};
+searchInput.addEventListener('input',e=>{searchQ=e.target.value.toLowerCase()});
+
+// Keyboard
+document.addEventListener('keydown',e=>{
+  if(e.target===searchInput)return;
+  if(e.key==='Escape'){si=-1;document.getElementById('det').classList.remove('vis');searchWrap.classList.remove('open');searchInput.value='';searchQ=''}
+  if(e.key==='='||e.key==='+')tZ=Math.min(tZ*1.15,5);
+  if(e.key==='-')tZ=Math.max(tZ/1.15,0.5);
+  if(e.key==='ArrowLeft')tX+=40;if(e.key==='ArrowRight')tX-=40;
+  if(e.key==='ArrowUp')tY+=40;if(e.key==='ArrowDown')tY-=40;
+  if(e.key==='Tab'){
+    e.preventDefault();
+    if(si<0)si=0;else{
+      const nx=adj[si];
+      if(nx.length>0)si=nx[0];else si=(si+1)%M.length;
+    }
+    showDet(si);
+  }
+});
+
+// Touch
+let touches=[];
+fg.addEventListener('touchstart',e=>{touches=Array.from(e.touches);if(touches.length===1){pan=true;psx=touches[0].clientX;psy=touches[0].clientY;pcx=tX;pcy=tY}},{passive:true});
+fg.addEventListener('touchmove',e=>{
+  const ts=Array.from(e.touches);
+  if(ts.length===1&&pan){tX=pcx+(ts[0].clientX-psx)/cZ;tY=pcy+(ts[0].clientY-psy)/cZ}
+  if(ts.length===2&&touches.length===2){
+    const d0=Math.hypot(touches[0].clientX-touches[1].clientX,touches[0].clientY-touches[1].clientY);
+    const d1=Math.hypot(ts[0].clientX-ts[1].clientX,ts[0].clientY-ts[1].clientY);
+    tZ=Math.max(0.5,Math.min(5,tZ*(d1/d0)));
+  }
+  touches=ts;
+},{passive:true});
+fg.addEventListener('touchend',()=>{pan=false;touches=[]},{passive:true});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// DETAIL PANEL
+// ═══════════════════════════════════════════════════════════════════════════════
+function showDet(i){
+  const m=M[i],cat=C[m.c],cl=mCl[i],dp=mDp(m);
+  document.getElementById('dcl').textContent=cl>=0?`${CL[cl].nm}`:'Drifting alone';
+  document.getElementById('dcat').textContent=cat.lb;
+  document.getElementById('dcat').style.background=cat.bg;
+  document.getElementById('dcat').style.color=cat.tx;
+  document.getElementById('dtxt').textContent=m.t;
+  document.getElementById('ddt').textContent=m.d+', 2026';
+  document.getElementById('ddp').textContent=dpLb(dp)+` · ${Math.round(dp*100)}% depth`;
+  const el=document.getElementById('dcons');el.innerHTML='';
+  const cn=adj[i];
+  if(cn.length){cn.slice(0,5).forEach(ci=>{const d=document.createElement('div');d.className='dc';d.textContent=M[ci].t;d.onclick=()=>{si=ci;showDet(ci);spawnBubbles(ci)};el.appendChild(d)})}
+  else{const p=document.createElement('div');p.style.cssText='font-size:10px;color:var(--text2);font-style:italic;opacity:0.4';p.textContent='This memory drifts alone';el.appendChild(p)}
+  document.getElementById('det').classList.add('vis');
+
+  // Chain reaction bioluminescence
+  triggerBioChain(i);
+}
+
+function triggerBioChain(src){
+  bio.fill(0);bioTarget.fill(0);
+  bioTarget[src]=1.0;
+  // 1-hop neighbors at 0.6
+  adj[src].forEach(n=>{bioTarget[n]=0.6;
+    // 2-hop at 0.25
+    adj[n].forEach(nn=>{if(nn!==src&&bioTarget[nn]<0.25)bioTarget[nn]=0.25});
+  });
+}
+
+function spawnBubbles(i){
+  const p=sPos(M[i]);
+  for(let b=0;b<4+Math.floor(Math.random()*3);b++){
+    bubbles.push({
+      x:p.x+(Math.random()-0.5)*12,
+      y:p.y,
+      r:Math.random()*4+2,
+      vy:-(0.6+Math.random()*0.8),
+      vx:(Math.random()-0.5)*0.3,
+      wobble:Math.random()*Math.PI*2,
+      wobbleSpd:2+Math.random()*2,
+      life:1,decay:0.003+Math.random()*0.003,
+    });
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WebGL — VOLUMETRIC UNDERWATER
+// ═══════════════════════════════════════════════════════════════════════════════
+const bgC=document.getElementById('bg');
+const gl=bgC.getContext('webgl',{alpha:false,antialias:false,preserveDrawingBuffer:false});
+
+const VS=`attribute vec2 p;void main(){gl_Position=vec4(p,0,1);}`;
+const FS=`
+precision highp float;
+uniform float t;
+uniform vec2 res;
+uniform vec2 ms;
+uniform vec2 foc;
+uniform float focS;
+uniform vec3 focC;
+uniform float dive; // 0=surface, 1=deep
+
+// ── Noise ──
+vec2 h2(vec2 p){return fract(sin(vec2(dot(p,vec2(127.1,311.7)),dot(p,vec2(269.5,183.3))))*43758.5453)-0.5;}
+float voronoi(vec2 x,float t){
+  vec2 n=floor(x),f=fract(x);
+  float md=8.0;
+  for(int j=-1;j<=1;j++)for(int i=-1;i<=1;i++){
+    vec2 g=vec2(float(i),float(j));
+    vec2 o=h2(n+g);
+    o=0.5+0.5*sin(t*0.4+6.2831*o);
+    float d=length(g+o-f);
+    md=min(md,d);
+  }
+  return md;
+}
+vec3 h3(vec3 p){p=vec3(dot(p,vec3(127.1,311.7,74.7)),dot(p,vec3(269.5,183.3,246.1)),dot(p,vec3(113.5,271.9,124.6)));return -1.0+2.0*fract(sin(p)*43758.5453);}
+float gn(vec3 p){vec3 i=floor(p),f=fract(p);vec3 u=f*f*(3.0-2.0*f);
+  return mix(mix(mix(dot(h3(i),f),dot(h3(i+vec3(1,0,0)),f-vec3(1,0,0)),u.x),mix(dot(h3(i+vec3(0,1,0)),f-vec3(0,1,0)),dot(h3(i+vec3(1,1,0)),f-vec3(1,1,0)),u.x),u.y),
+  mix(mix(dot(h3(i+vec3(0,0,1)),f-vec3(0,0,1)),dot(h3(i+vec3(1,0,1)),f-vec3(1,0,1)),u.x),mix(dot(h3(i+vec3(0,1,1)),f-vec3(0,1,1)),dot(h3(i+vec3(1,1,1)),f-vec3(1,1,1)),u.x),u.y),u.z);}
+float fbm(vec3 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*gn(p);p=p*2.0+100.0;a*=0.5;}return v;}
+
+// ── Caustics (Voronoi-based, 3 layers) ──
+float caustics(vec2 uv, float t){
+  float c=0.0;
+  for(int i=0;i<3;i++){
+    float fi=float(i);
+    float sc=3.5+fi*2.5;
+    float sp=0.6-fi*0.15;
+    float a=fi*0.9+0.2;
+    mat2 rot=mat2(cos(a),-sin(a),sin(a),cos(a));
+    vec2 p=rot*(uv*sc)+vec2(t*sp*0.08,t*sp*0.05);
+    float v=voronoi(p,t*0.3);
+    // Sharpen the caustic lines
+    float line=1.0-smoothstep(0.0,0.12+fi*0.04,v);
+    c+=line*(0.5-fi*0.1);
+  }
+  return clamp(c,0.0,1.0);
+}
+
+// ── God rays ──
+float godRays(vec2 uv, float t){
+  // Source: Snell's window center at (0.5, 0.2)
+  vec2 src=vec2(0.5,0.15);
+  vec2 dir=uv-src;
+  float angle=atan(dir.y,dir.x);
+  float dist=length(dir);
+
+  // Ray pattern: modulated sine bands
+  float rays=0.0;
+  for(int i=0;i<4;i++){
+    float fi=float(i);
+    float freq=3.0+fi*2.0;
+    float phase=t*0.02*(1.0+fi*0.3)+fi*1.5;
+    float ray=pow(max(0.0,sin(angle*freq+phase)),12.0);
+    // Fade with distance from source
+    ray*=exp(-dist*(1.5+fi*0.5));
+    // Only downward
+    ray*=smoothstep(0.0,0.3,dir.y);
+    rays+=ray*(0.3-fi*0.05);
+  }
+
+  // Noise modulation for organic feel
+  float n=fbm(vec3(angle*2.0,dist*3.0,t*0.015));
+  rays*=0.7+n*0.6;
+
+  return rays;
+}
+
+// ── Snell's window ──
+float snell(vec2 uv){
+  float d=length(uv-vec2(0.5,0.18));
+  return smoothstep(0.48,0.22,d);
+}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/res;
+  vec2 p=(gl_FragCoord.xy-0.5*res)/min(res.x,res.y);
+
+  // Subtle mouse parallax
+  p+=(ms-0.5)*0.010;
+
+  // Palette
+  vec3 deepBlue=vec3(0.008,0.012,0.035);
+  vec3 midBlue=vec3(0.015,0.025,0.055);
+  vec3 cp=vec3(0.72,0.64,0.91);
+  vec3 cg=vec3(0.83,0.77,1.0);
+  vec3 ca=vec3(0.95,0.70,0.42);
+  vec3 ct=vec3(0.35,0.75,0.68);
+
+  // Depth gradient (underwater absorption: reds first, blues last)
+  float depthY=uv.y; // 0=top(near surface), 1=bottom(deep)
+  vec3 col=mix(midBlue,deepBlue,smoothstep(0.0,0.8,depthY));
+
+  // Underwater absorption color shift
+  col.r*=mix(1.0,0.6,depthY);
+  col.g*=mix(1.0,0.85,depthY);
+
+  // Snell's window
+  float sw=snell(uv);
+
+  // Voronoi caustics
+  float caus=caustics(uv+ms*0.015,t)*dive;
+
+  // Caustic light (strong in Snell's window, fading with depth)
+  float causStr=mix(0.03,0.30,sw)*(1.0-depthY*0.7);
+  vec3 causCol=mix(cp,cg,caus*0.8)*caus;
+  causCol+=ca*pow(caus,2.5)*0.35;
+  col+=causCol*causStr;
+
+  // God rays
+  float rays=godRays(uv,t)*dive;
+  vec3 rayCol=mix(cg,cp,0.4)*0.9+ca*0.1;
+  col+=rayCol*rays*0.35*(1.0-depthY*0.6);
+
+  // Ambient scattered light (total internal reflection)
+  float rim=smoothstep(0.20,0.50,length(uv-vec2(0.5,0.18)));
+  float rimN=fbm(vec3(uv*3.0,t*0.012))*0.5+0.5;
+  col+=cp*rim*rimN*0.020;
+
+  // Snell's window brightness
+  col+=cg*sw*0.018*dive;
+
+  // ── Swimming lights — luminous creatures crossing above the surface ──
+  // Each light is a bright streak that sweeps diagonally, timed on slow loops
+  for(int i=0;i<3;i++){
+    float fi=float(i);
+    float period=18.0+fi*7.0;  // 18s, 25s, 32s cycles
+    float phase=mod(t/period+fi*0.33,1.0);
+    // Active only for a portion of the cycle (30%)
+    float active=smoothstep(0.0,0.05,phase)*smoothstep(0.35,0.30,phase);
+    if(active<0.01)continue;
+    // Sweep direction (diagonal, each light different angle)
+    float angle=0.4+fi*0.7;
+    float ca2=cos(angle),sa2=sin(angle);
+    vec2 sweepDir=vec2(ca2,sa2);
+    // Position along sweep
+    float sweepPos=phase/0.35;  // 0→1 across the active window
+    vec2 center=vec2(-0.3,0.1)+sweepDir*sweepPos*1.6;
+    vec2 delta=uv-center;
+    // Elongated along sweep direction
+    float along=dot(delta,sweepDir);
+    float perp=length(delta-along*sweepDir);
+    float streak=exp(-along*along*8.0-perp*perp*35.0);
+    // Color: alternate amber, teal, warm gold
+    vec3 sweepCol=fi<0.5?ca*1.2:fi<1.5?ct*1.3:vec3(1.0,0.85,0.5);
+    // Stronger near surface, fading with depth
+    float depthFade=(1.0-depthY*0.8);
+    col+=sweepCol*streak*active*0.25*depthFade*dive;
+    // Also cast some color onto the caustics below
+    col+=sweepCol*streak*active*caus*0.08*depthFade;
+  }
+
+  // ── Slow color breathing — ambient light temperature shift ──
+  float warmth=sin(t*0.06)*0.5+0.5; // 0=cool teal, 1=warm amber, ~100s cycle
+  vec3 ambientShift=mix(ct*0.008,ca*0.006,warmth);
+  col+=ambientShift*(1.0-depthY*0.5)*dive;
+
+  // Volumetric fog bands
+  for(int i=0;i<3;i++){
+    float fi=float(i);
+    float by=0.3+fi*0.22;
+    float bh=0.08+fi*0.02;
+    float ba=(0.05+fi*0.02)*dive;
+    float bsp=0.05-fi*0.01;
+    float n=fbm(vec3(uv.x*2.0+t*bsp,by*5.0,t*0.008+fi));
+    float fog=exp(-pow((uv.y-by-n*0.04)/bh,2.0));
+    col+=mix(cp,ct,fi*0.4)*fog*ba;
+  }
+
+  // Focus cluster bioluminescence
+  if(focS>0.01){
+    vec2 fp=(foc-0.5)*vec2(res.x/res.y,1.0);
+    float fd=length(p-fp);
+    float glow=exp(-fd*fd*3.0)*focS;
+    col+=focC*glow*0.20;
+    col+=ct*glow*0.06;
+    // Caustic modulation around focus
+    col+=focC*glow*caus*0.12;
+  }
+
+  // Vignette (underwater opacity at edges)
+  vec2 vc=uv-vec2(0.5,0.42);
+  float vig=1.0-dot(vc,vc)*2.2;
+  col*=smoothstep(0.0,0.48,vig);
+
+  // Color grading — slight cool teal push
+  col.b=col.b*1.08+0.003;
+  col.g=col.g*1.02;
+
+  // Tone map
+  col=col/(col+0.52);
+  col=pow(col,vec3(0.88));
+
+  // Film grain (subtle)
+  float grain=(fract(sin(dot(gl_FragCoord.xy,vec2(12.9898,78.233))+t)*43758.5453)-0.5)*0.015;
+  col+=grain;
+
+  gl_FragColor=vec4(col,1.0);
+}
+`;
+
+function mkS(ty,src){const s=gl.createShader(ty);gl.shaderSource(s,src);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error(gl.getShaderInfoLog(s));return s}
+const prog=gl.createProgram();gl.attachShader(prog,mkS(gl.VERTEX_SHADER,VS));gl.attachShader(prog,mkS(gl.FRAGMENT_SHADER,FS));gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(prog));
+
+const pa=gl.getAttribLocation(prog,'p');
+const qb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,qb);gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+const uT=gl.getUniformLocation(prog,'t'),uR=gl.getUniformLocation(prog,'res'),uM=gl.getUniformLocation(prog,'ms');
+const uFoc=gl.getUniformLocation(prog,'foc'),uFS=gl.getUniformLocation(prog,'focS'),uFC=gl.getUniformLocation(prog,'focC');
+const uDive=gl.getUniformLocation(prog,'dive');
+let focUV=[.5,.5],focS=0,focST=0,focCol=[.35,.75,.68];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CANVAS 2D
+// ═══════════════════════════════════════════════════════════════════════════════
+const ctx=fg.getContext('2d');
+const W=()=>innerWidth,H=()=>innerHeight,CX=()=>W()/2,CY=()=>H()/2,SC=()=>Math.min(W(),H())*1.02;
+function sPos(m){return{x:CX()+m.cx*SC()*cZ+cX,y:CY()-m.cy*SC()*cZ+cY}}
+function s2uv(x,y){return[x/W(),1-y/H()]}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HOVER
+// ═══════════════════════════════════════════════════════════════════════════════
+const ttEl=document.getElementById('tt'),ttB=document.getElementById('tt-b'),ttT=document.getElementById('tt-t'),ttD=document.getElementById('tt-d'),ttP=document.getElementById('tt-p');
+function updateHover(){
+  if(pan||tlDr||divePhase<2)return;
+  let cl=-1,cd=18/cZ;
+  for(let i=0;i<M.length;i++){
+    if(M[i].v>cut)continue;
+    if(filt&&M[i].c!==filt)continue;
+    if(searchQ&&!M[i].t.toLowerCase().includes(searchQ))continue;
+    const p=sPos(M[i]);const d=Math.hypot(mcx-p.x,mcy-p.y);
+    if(d<cd){cl=i;cd=d}
+  }
+  hi=cl;hcl=cl>=0?mCl[cl]:-1;
+  if(cl>=0){
+    const m=M[cl],cat=C[m.c],p=sPos(m),dp=mDp(m);
+    ttB.textContent=cat.lb;ttB.style.background=cat.bg;ttB.style.color=cat.tx;
+    ttT.textContent=m.t;ttD.textContent=m.d+', 2026';ttP.textContent=dpLb(dp);
+    let tx=p.x+15,ty=p.y-15;
+    if(tx+270>W())tx=p.x-270;if(ty<12)ty=p.y+15;if(ty+120>H())ty=H()-130;
+    ttEl.style.left=tx+'px';ttEl.style.top=ty+'px';ttEl.classList.add('vis');
+    fg.style.cursor='pointer';
+    // Hover chain reaction (lighter)
+    if(si<0)triggerBioChain(cl);
+    if(hcl>=0){const lp=sPos(CL[hcl].lp);focUV=s2uv(lp.x,lp.y);focCol=CL[hcl].tn.map(v=>v/255);focST=1}
+  }else{
+    ttEl.classList.remove('vis');fg.style.cursor=pan?'grabbing':'default';focST=0;
+    if(si<0)bioTarget.fill(0);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RENDER
+// ═══════════════════════════════════════════════════════════════════════════════
+const t0=performance.now();
+let reveal=0;
+const pColors=[[184,164,232],[89,190,173],[242,179,107]];
+
+function resize(){
+  const dpr=Math.min(devicePixelRatio,2);
+  for(const c of[bgC,fg]){c.width=W()*dpr;c.height=H()*dpr;c.style.width=W()+'px';c.style.height=H()+'px'}
+  gl.viewport(0,0,bgC.width,bgC.height);ctx.setTransform(dpr,0,0,dpr,0,0);
+}
+addEventListener('resize',resize);resize();
+
+// Dive sequence
+setTimeout(()=>{
+  divePhase=1;diveStart=performance.now();
+  document.getElementById('dive-overlay').classList.add('gone');
+  setTimeout(()=>{
+    document.getElementById('surface').classList.add('on');
+    document.getElementById('hdr').classList.add('on');
+    document.getElementById('legend').classList.add('on');
+    document.getElementById('stats-el').classList.add('on');
+    document.getElementById('zc-el').classList.add('on');
+    document.getElementById('tl-el').classList.add('on');
+    document.getElementById('dg').classList.add('on');
+  },800);
+},1200);
+
+function frame(now){
+  const t=(now-t0)/1000;
+
+  // Dive animation
+  let diveVal=0;
+  if(divePhase>=1){
+    const dp=(now-diveStart)/DIVE_DUR;
+    diveVal=Math.min(1,dp);
+    diveVal=diveVal<0.5?4*diveVal*diveVal*diveVal:1-Math.pow(-2*diveVal+2,3)/2; // ease-in-out cubic
+    if(dp>=1)divePhase=2;
+  }
+
+  reveal=divePhase>=2?Math.min(reveal+0.008,1):0;
+  const rev=1-Math.pow(1-reveal,3);
+
+  // Camera
+  cX+=(tX-cX)*0.06;cY+=(tY-cY)*0.06;cZ+=(tZ-cZ)*0.06;
+  msx+=(mx-msx)*0.03;msy+=(my-msy)*0.03;
+  focS+=(focST-focS)*0.045;
+
+  // Bio chain decay
+  for(let i=0;i<M.length;i++){
+    bio[i]+=(bioTarget[i]-bio[i])*0.08;
+    bioTarget[i]*=0.995; // slow decay
+  }
+
+  updateHover();
+
+  // Spawn micro-bubbles (rise upward on mouse trail)
+  if(divePhase>=2&&now-lastD>28&&dust.length<55){
+    lastD=now;
+    dust.push({x:mcx+(Math.random()-0.5)*8,y:mcy+(Math.random()-0.5)*5,
+      vx:(Math.random()-0.5)*0.15,vy:-0.20-Math.random()*0.25,
+      life:1,sz:Math.random()*1.2+0.3,h:Math.floor(Math.random()*3)});
+  }
+
+  // ── WebGL ──
+  gl.useProgram(prog);gl.bindBuffer(gl.ARRAY_BUFFER,qb);gl.enableVertexAttribArray(pa);gl.vertexAttribPointer(pa,2,gl.FLOAT,false,0,0);
+  gl.uniform1f(uT,t);gl.uniform2f(uR,bgC.width,bgC.height);gl.uniform2f(uM,msx,msy);
+  gl.uniform2f(uFoc,focUV[0],focUV[1]);gl.uniform1f(uFS,focS);gl.uniform3f(uFC,focCol[0],focCol[1],focCol[2]);
+  gl.uniform1f(uDive,diveVal);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // ── 2D ──
+  ctx.clearRect(0,0,W(),H());
+  if(divePhase<1){requestAnimationFrame(frame);return}
+
+  const plx=(msx-0.5)*12;const ply=(msy-0.5)*12;
+  const acl=si>=0?mCl[si]:hcl;
+
+  // ── Plankton (organic vertical drift — they rise slowly like real plankton) ──
+  for(const p of plk){
+    p.x+=p.dr*Math.cos(t*0.25+p.ph);
+    p.y+=p.dr*Math.sin(t*0.2+p.ph)*0.4 - 0.00008; // gentle upward drift
+    if(p.x>1.04)p.x=-0.04;if(p.x<-0.04)p.x=1.04;
+    if(p.y>1.04)p.y=1.04;if(p.y<-0.04)p.y=1.02+Math.random()*0.02; // respawn at bottom
+    const pulse=Math.sin(t*(0.6+p.ph*0.2)+p.ph)*0.3+0.7;
+    const a=p.a*pulse*diveVal;
+    if(a<0.01)continue;
+    const px=p.x*W()+plx*p.z*0.35,py=p.y*H()-ply*p.z*0.35;
+    const[pr,pg,pb]=pColors[p.h];
+
+    // Caustic projection: brighter particles near top
+    const causticBoost=1+Math.max(0,(1-p.y))*0.5;
+
+    const g=ctx.createRadialGradient(px,py,0,px,py,p.sz*3);
+    g.addColorStop(0,`rgba(${pr},${pg},${pb},${a*0.5*causticBoost})`);
+    g.addColorStop(1,`rgba(${pr},${pg},${pb},0)`);
+    ctx.beginPath();ctx.arc(px,py,p.sz*3,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+    ctx.beginPath();ctx.arc(px,py,p.sz*0.4,0,Math.PI*2);
+    ctx.fillStyle=`rgba(${pr},${pg},${pb},${a*0.7*causticBoost})`;ctx.fill();
+  }
+
+  // ── Organic tendrils (replaces constellation lines) ──
+  for(let li=0;li<edges.length;li++){
+    const[a,b]=edges[li];
+    if(M[a].v>cut||M[b].v>cut)continue;
+    if(filt&&M[a].c!==filt&&M[b].c!==filt)continue;
+    if(searchQ&&!M[a].t.toLowerCase().includes(searchQ)&&!M[b].t.toLowerCase().includes(searchQ))continue;
+
+    const pa2=sPos(M[a]),pb2=sPos(M[b]);
+    // Organic drift — each endpoint drifts independently
+    const dA=t*0.18+a*1.3,dB=t*0.15+b*0.9;
+    pa2.x+=plx+Math.sin(dA)*4;pa2.y-=ply-Math.cos(dA*0.7)*5;
+    pb2.x+=plx+Math.cos(dB)*4;pb2.y-=ply+Math.sin(dB*0.8)*5;
+
+    const dly=li/edges.length;
+    const lp=Math.max(0,Math.min(1,(rev-dly*0.5)/0.5));
+    if(lp<=0)continue;
+
+    const lCl=mCl[a];
+    const isDim=acl>=0&&lCl!==acl&&lCl>=0;
+    const dim=isDim?0.06:1;
+    const avgDp=(mDp(M[a])+mDp(M[b]))/2;
+    const dpA=1-avgDp*0.45;
+    const breath=Math.sin(t*0.22+a*0.4)*0.12+0.88;
+    let alpha=0.045*lp*breath*dim*dpA*diveVal;
+    if(acl>=0&&lCl===acl)alpha*=3.5;
+
+    // Bio chain glow on tendrils
+    const bioGlow=Math.max(bio[a],bio[b]);
+    if(bioGlow>0.05)alpha+=bioGlow*0.15;
+
+    // Two swaying control points for organic S-curve tendril
+    const dx=pb2.x-pa2.x,dy=pb2.y-pa2.y;
+    const dist=Math.hypot(dx,dy);
+    const nx=-dy/dist,ny=dx/dist; // normal
+    const sway1=Math.sin(t*0.3+li*2.1+a)*dist*0.18;
+    const sway2=Math.sin(t*0.25+li*1.7+b+1.5)*dist*0.15;
+    const droop1=Math.abs(Math.sin(t*0.12+li))*dist*0.06; // gravity sag
+    const droop2=Math.abs(Math.cos(t*0.10+li))*dist*0.08;
+    const c1x=pa2.x+dx*0.33+nx*sway1;
+    const c1y=pa2.y+dy*0.33+ny*sway1+droop1;
+    const c2x=pa2.x+dx*0.66+nx*sway2;
+    const c2y=pa2.y+dy*0.66+ny*sway2+droop2;
+
+    // Draw organic tendril — variable width via multiple sub-strokes
+    if(lp>=1){
+      // Main tendril (thin organic curve)
+      ctx.beginPath();ctx.moveTo(pa2.x,pa2.y);
+      ctx.bezierCurveTo(c1x,c1y,c2x,c2y,pb2.x,pb2.y);
+    }else{
+      // Partial reveal — draw as far as progress allows
+      ctx.beginPath();ctx.moveTo(pa2.x,pa2.y);
+      // Simple linear interpolation for partial
+      const ep=lp;
+      const qx=pa2.x*(1-ep)*(1-ep)*(1-ep)+3*c1x*(1-ep)*(1-ep)*ep+3*c2x*(1-ep)*ep*ep+pb2.x*ep*ep*ep;
+      const qy=pa2.y*(1-ep)*(1-ep)*(1-ep)+3*c1y*(1-ep)*(1-ep)*ep+3*c2y*(1-ep)*ep*ep+pb2.y*ep*ep*ep;
+      ctx.bezierCurveTo(
+        pa2.x+(c1x-pa2.x)*ep,pa2.y+(c1y-pa2.y)*ep,
+        pa2.x+(c2x-pa2.x)*ep,pa2.y+(c2y-pa2.y)*ep,
+        qx,qy);
+    }
+    // Organic gradient — fades at both ends like a real tendril
+    const lg=ctx.createLinearGradient(pa2.x,pa2.y,pb2.x,pb2.y);
+    lg.addColorStop(0,`rgba(89,190,173,${alpha*0.3})`);
+    lg.addColorStop(0.2,`rgba(89,190,173,${alpha*1.0})`);
+    lg.addColorStop(0.5,`rgba(184,164,232,${alpha*0.9})`);
+    lg.addColorStop(0.8,`rgba(89,190,173,${alpha*0.8})`);
+    lg.addColorStop(1,`rgba(89,190,173,${alpha*0.2})`);
+    ctx.strokeStyle=lg;
+    ctx.lineWidth=isDim?0.3:(0.5+Math.sin(t*0.4+li)*0.3+bioGlow*1.2);
+    ctx.stroke();
+
+    // Soft glow pass (wider, dimmer — underwater light scatter)
+    if(!isDim&&alpha>0.02){
+      ctx.beginPath();ctx.moveTo(pa2.x,pa2.y);
+      ctx.bezierCurveTo(c1x,c1y,c2x,c2y,pb2.x,pb2.y);
+      ctx.strokeStyle=`rgba(89,190,173,${alpha*0.08})`;
+      ctx.lineWidth=6+bioGlow*8;ctx.stroke();
+    }
+
+    // Drifting spore on tendril (replaces mechanical edge particle)
+    if(lp>=1&&!isDim){
+      const ep=eLit[li];ep.p=(ep.p+ep.s*0.7)%1;
+      const tt2=ep.p;
+      const u=tt2,u2=u*u,u3=u2*u,iu=1-u,iu2=iu*iu,iu3=iu2*iu;
+      const spx=iu3*pa2.x+3*iu2*u*c1x+3*iu*u2*c2x+u3*pb2.x;
+      const spy=iu3*pa2.y+3*iu2*u*c1y+3*iu*u2*c2y+u3*pb2.y;
+      const spA=Math.sin(tt2*Math.PI)*ep.a*dim*dpA*0.8;
+      if(spA>0.01){
+        // Organic spore glow (irregular, not perfectly circular)
+        const spRx=ep.sz*4+Math.sin(t*2+li)*0.8;
+        const spRy=ep.sz*5+Math.cos(t*1.5+li)*1;
+        ctx.save();ctx.translate(spx,spy);
+        ctx.scale(1,spRy/spRx);
+        const sg=ctx.createRadialGradient(0,0,0,0,0,spRx);
+        sg.addColorStop(0,`rgba(89,190,173,${spA*0.5})`);
+        sg.addColorStop(0.5,`rgba(184,164,232,${spA*0.15})`);
+        sg.addColorStop(1,'rgba(89,190,173,0)');
+        ctx.beginPath();ctx.arc(0,0,spRx,0,Math.PI*2);ctx.fillStyle=sg;ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ── Bioluminescent organisms (memory orbs) ──
+  for(let i=0;i<M.length;i++){
+    const m=M[i];
+    if(m.v>cut)continue;
+    const cat=C[m.c],[r,g,b]=cat.co;
+    const pos=sPos(m);
+
+    // Organic floating motion — slow vertical bob + lateral sway (like jellyfish)
+    const bob=Math.sin(t*0.35+i*1.7)*4+Math.sin(t*0.18+i*0.9)*2;
+    const sway=Math.sin(t*0.22+i*2.3)*3+Math.cos(t*0.14+i*1.1)*1.5;
+    const sx=pos.x+plx+sway;
+    const sy=pos.y-ply+bob;
+
+    const sd=i/M.length*0.6;
+    const sp=Math.max(0,Math.min(1,(rev-sd)/0.4));
+    if(sp<=0)continue;
+
+    const depth=mDp(m);
+    const dofBlur=1+depth*0.2;
+    const dofSharp=1-depth*0.08;
+    const depthMul=1-depth*0.25;
+
+    const catVis=!filt||m.c===filt;
+    const searchVis=!searchQ||m.t.toLowerCase().includes(searchQ);
+    const mc=mCl[i];
+    const clDim=acl>=0&&mc!==acl&&mc>=0;
+    let nA=sp*depthMul*diveVal;
+    if(!catVis||!searchVis)nA*=0.06;
+    else if(clDim)nA*=0.15;
+    else nA=Math.min(nA*1.3,1); // general brightness boost
+
+    // Bio chain boost
+    const bioV=bio[i];
+    nA+=bioV*0.35;
+
+    const isH=i===hi,isS=i===si;
+    const pulse=Math.sin(t*(0.5+i*0.04)+i*2.2)*0.12+0.88;
+    const baseR=isH?11:isS?10:(4.5+pulse*0.8+depthMul*1.0);
+    const sz=baseR*sp*(catVis&&searchVis&&!clDim?1:0.55);
+
+    // Caustic light on organism
+    const causticUV_x=sx/W(),causticUV_y=1-sy/H();
+    const causticSample=Math.sin(causticUV_x*22+t*0.5)*Math.sin(causticUV_y*18+t*0.3);
+    const causticOnOrb=Math.max(0,causticSample)*0.25*(1-depth*0.7);
+
+    // ── Trailing filaments (jellyfish tentacles, drawn BEFORE body) ──
+    if(nA>0.06&&catVis&&searchVis&&!clDim){
+      const numTendrils=isH||isS?5:3;
+      const tendrilLen=isH||isS?28:12+pulse*8;
+      const tendrilA=nA*(isH||isS?0.14:0.06)*dofSharp;
+      ctx.save();
+      for(let ti=0;ti<numTendrils;ti++){
+        const spread=(ti-(numTendrils-1)/2)*0.25;
+        const waveOff=ti*0.8+i*1.3;
+        // Tendrils hang down and sway
+        const tx1=sx+spread*sz*2+Math.sin(t*0.4+waveOff)*3;
+        const ty1=sy+sz*1.5+tendrilLen*0.33;
+        const tx2=sx+spread*sz*1.5+Math.sin(t*0.3+waveOff+1)*4;
+        const ty2=sy+sz*1.5+tendrilLen*0.66+Math.sin(t*0.25+waveOff)*2;
+        const tx3=sx+spread*sz+Math.sin(t*0.35+waveOff+2)*5;
+        const ty3=sy+sz*1.5+tendrilLen;
+
+        ctx.beginPath();
+        ctx.moveTo(sx+spread*sz,sy+sz*0.7);
+        ctx.bezierCurveTo(tx1,ty1,tx2,ty2,tx3,ty3);
+
+        // Gradient along tendril: fades out
+        const tg=ctx.createLinearGradient(sx,sy,tx3,ty3);
+        tg.addColorStop(0,`rgba(${r},${g},${b},${tendrilA})`);
+        tg.addColorStop(0.4,`rgba(${r},${g},${b},${tendrilA*0.6})`);
+        tg.addColorStop(1,`rgba(${r},${g},${b},0)`);
+        ctx.strokeStyle=tg;
+        ctx.lineWidth=0.6+Math.sin(t*0.5+ti)*0.2;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // ── Outer bioluminescent aura (soft, organic, slightly oval) ──
+    const haloR=(isH||isS)?38:18+pulse*6;
+    const haloA=((isH||isS)?0.28:0.10*pulse)*nA;
+    ctx.save();ctx.translate(sx,sy);
+    ctx.scale(1,1.15); // slightly taller than wide — organic shape
+    const hg=ctx.createRadialGradient(0,0,0,0,0,haloR*dofBlur);
+    hg.addColorStop(0,`rgba(${r},${g},${b},${haloA*dofSharp})`);
+    hg.addColorStop(0.3,`rgba(${r},${g},${b},${haloA*0.25})`);
+    hg.addColorStop(0.6,`rgba(89,190,173,${haloA*0.06})`);
+    hg.addColorStop(1,`rgba(${r},${g},${b},0)`);
+    ctx.beginPath();ctx.arc(0,0,haloR*dofBlur,0,Math.PI*2);ctx.fillStyle=hg;ctx.fill();
+    ctx.restore();
+
+    // ── Body — oblate, slightly squished vertically (like a jellyfish bell) ──
+    ctx.save();ctx.translate(sx,sy);
+    const squish=0.85+Math.sin(t*0.8+i*1.5)*0.06; // breathing squish
+    ctx.scale(1,squish);
+    const cg2=ctx.createRadialGradient(-sz*0.1,-sz*0.15,0,0,0,sz*dofBlur);
+    cg2.addColorStop(0,`rgba(255,255,255,${(0.85+causticOnOrb)*nA*dofSharp})`);
+    cg2.addColorStop(0.12,`rgba(${Math.min(255,r+60)},${Math.min(255,g+50)},${Math.min(255,b+40)},${0.82*nA*dofSharp})`);
+    cg2.addColorStop(0.35,`rgba(${r},${g},${b},${0.55*nA})`);
+    cg2.addColorStop(0.65,`rgba(${r},${g},${b},${0.18*nA})`);
+    cg2.addColorStop(1,`rgba(${r},${g},${b},0)`);
+    ctx.beginPath();ctx.arc(0,0,sz*dofBlur,0,Math.PI*2);ctx.fillStyle=cg2;ctx.fill();
+    ctx.restore();
+
+    // ── Specular — shifted to top (light from above) ──
+    if(nA>0.08){
+      const spX=sx,spY=sy-sz*0.4;
+      const spR=sz*0.4*dofSharp;
+      const spG=ctx.createRadialGradient(spX,spY,0,spX,spY,spR);
+      spG.addColorStop(0,`rgba(255,255,255,${0.40*nA*dofSharp})`);
+      spG.addColorStop(1,'rgba(255,255,255,0)');
+      ctx.beginPath();ctx.arc(spX,spY,spR,0,Math.PI*2);ctx.fillStyle=spG;ctx.fill();
+    }
+
+    // ── Caustic dancing light on body ──
+    if(causticOnOrb>0.02&&nA>0.1){
+      ctx.beginPath();ctx.arc(sx,sy,sz*0.7,0,Math.PI*2);
+      ctx.fillStyle=`rgba(212,196,255,${causticOnOrb*nA*0.3})`;ctx.fill();
+    }
+
+    // ── Bio chain pulse — expanding ring (like underwater sonar) ──
+    if(bioV>0.1){
+      const bpR=10+bioV*18;
+      ctx.beginPath();ctx.arc(sx,sy,bpR,0,Math.PI*2);
+      ctx.strokeStyle=`rgba(89,190,173,${bioV*0.15*nA})`;
+      ctx.lineWidth=0.8+bioV*1.5;ctx.stroke();
+    }
+
+    // ── Hover/select — soft breathing ring, not mechanical ──
+    if(isH||isS){
+      const rp=Math.sin(t*1.2)*0.15+0.85;
+      ctx.save();ctx.translate(sx,sy);ctx.scale(1,0.9);
+      ctx.beginPath();ctx.arc(0,0,14+rp*5,0,Math.PI*2);
+      ctx.strokeStyle=`rgba(${r},${g},${b},${0.12*rp*nA})`;ctx.lineWidth=0.6;ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // ── Cluster labels ──
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  for(let ci=0;ci<CL.length;ci++){
+    const cl=CL[ci],pos=sPos(cl.lp);
+    const sx=pos.x+plx,sy=pos.y-ply;
+    const isAct=acl===ci,isDim=acl>=0&&acl!==ci;
+    const lb=Math.sin(t*0.25+ci*1.4)*0.10+0.90;
+    let la=isDim?0.04:(isAct?0.38:0.14);la*=lb*rev*diveVal;
+    ctx.font='italic 300 12px "Cormorant Garamond",serif';
+    ctx.fillStyle=`rgba(89,190,173,${la})`;ctx.fillText(cl.nm,sx,sy);
+  }
+
+  // ── Bubbles ──
+  for(let i=bubbles.length-1;i>=0;i--){
+    const bu=bubbles[i];
+    bu.x+=bu.vx+Math.sin(t*bu.wobbleSpd+bu.wobble)*0.6;
+    bu.y+=bu.vy;
+    bu.r*=0.998; // shrink as rising
+    bu.life-=bu.decay;
+    if(bu.life<=0||bu.y<-10){bubbles.splice(i,1);continue}
+
+    const ba=bu.life*0.45;
+    // Bubble body
+    ctx.beginPath();ctx.arc(bu.x,bu.y,bu.r,0,Math.PI*2);
+    ctx.strokeStyle=`rgba(184,164,232,${ba*0.6})`;ctx.lineWidth=0.6;ctx.stroke();
+
+    // Inner refraction
+    const ig=ctx.createRadialGradient(bu.x-bu.r*0.3,bu.y-bu.r*0.3,0,bu.x,bu.y,bu.r);
+    ig.addColorStop(0,`rgba(212,196,255,${ba*0.3})`);
+    ig.addColorStop(0.5,`rgba(89,190,173,${ba*0.05})`);
+    ig.addColorStop(1,'rgba(89,190,173,0)');
+    ctx.beginPath();ctx.arc(bu.x,bu.y,bu.r,0,Math.PI*2);ctx.fillStyle=ig;ctx.fill();
+
+    // Specular highlight
+    const spx=bu.x-bu.r*0.25,spy=bu.y-bu.r*0.3;
+    ctx.beginPath();ctx.arc(spx,spy,bu.r*0.25,0,Math.PI*2);
+    ctx.fillStyle=`rgba(255,255,255,${ba*0.5})`;ctx.fill();
+  }
+
+  // ── Dust ──
+  for(let i=dust.length-1;i>=0;i--){
+    const d=dust[i];
+    d.x+=d.vx+Math.sin(t*1.5+d.x*0.01)*0.08;
+    d.y+=d.vy;d.life-=0.014;
+    if(d.life<=0){dust.splice(i,1);continue}
+    const da=d.life*0.25;const[dr,dg,db]=pColors[d.h];
+    const g=ctx.createRadialGradient(d.x,d.y,0,d.x,d.y,d.sz*3);
+    g.addColorStop(0,`rgba(${dr},${dg},${db},${da})`);g.addColorStop(1,`rgba(${dr},${dg},${db},0)`);
+    ctx.beginPath();ctx.arc(d.x,d.y,d.sz*3,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+  }
+
+  // ── Bottom depth fog ──
+  const dfg=ctx.createLinearGradient(0,H()*0.65,0,H());
+  dfg.addColorStop(0,'rgba(4,6,16,0)');dfg.addColorStop(0.4,'rgba(4,6,16,0.08)');dfg.addColorStop(1,'rgba(4,6,16,0.30)');
+  ctx.fillStyle=dfg;ctx.fillRect(0,H()*0.65,W(),H()*0.35);
+
+  // ── Surface distortion zone (top 60px) — shimmer on particles ──
+  if(diveVal>0.5){
+    const shimG=ctx.createLinearGradient(0,0,0,55);
+    shimG.addColorStop(0,`rgba(212,196,255,${0.04*diveVal})`);
+    shimG.addColorStop(0.5,`rgba(89,190,173,${0.015*diveVal})`);
+    shimG.addColorStop(1,'rgba(4,6,16,0)');
+    ctx.fillStyle=shimG;ctx.fillRect(0,0,W(),55);
+  }
+
+  requestAnimationFrame(frame);
+}
+
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

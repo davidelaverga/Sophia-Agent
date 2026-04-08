@@ -1,0 +1,67 @@
+{
+  "suite": "live-voice-benchmark",
+  "version": 1,
+  "defaults": {
+    "route": "/",
+    "automation": "dashboard-voice",
+    "ritual": "vent",
+    "awaitArtifactMs": 35000,
+    "settleMs": 1500
+  },
+  "cases": [
+    {
+      "id": "flow_02_pause_midthought",
+      "label": "Pause mid-thought",
+      "category": "flow",
+      "audioFile": "flow_02_pause_midthought.wav",
+      "expected": {
+        "responseIntent": "Recover from the pause without repeated false closes and respond once the utterance actually finishes."
+      }
+    },
+    {
+      "id": "flow_04_correction",
+      "label": "Correction-heavy utterance",
+      "category": "flow",
+      "audioFile": "flow_04_correction.wav",
+      "expected": {
+        "responseIntent": "Accept the corrected phrasing, collapse the false starts into one interpretation, and answer without limbo."
+      }
+    },
+    {
+      "id": "map_01_grief",
+      "label": "Grief mapping",
+      "category": "mapping",
+      "audioFile": "map_01_grief.wav",
+      "expected": {
+        "emotionFamilies": ["supportive"],
+        "responseIntent": "Hold space for grief without mirroring despair back at the user.",
+        "spokenDelivery": "The spoken delivery should feel calm, steady, and companion-safe.",
+        "toneBand": "grief_fear"
+      }
+    },
+    {
+      "id": "map_02_excitement",
+      "label": "Excitement mapping",
+      "category": "mapping",
+      "audioFile": "map_02_excitement.wav",
+      "expected": {
+        "emotionFamilies": ["celebratory"],
+        "responseIntent": "Celebrate the moment with energy that still feels grounded rather than manic.",
+        "spokenDelivery": "The spoken delivery should sound warm and energized without overshooting into intensity.",
+        "toneBand": "enthusiasm"
+      }
+    },
+    {
+      "id": "map_03_mixed",
+      "label": "Mixed-emotion mapping",
+      "category": "mapping",
+      "audioFile": "map_03_mixed.wav",
+      "expected": {
+        "emotionFamilies": ["challenging"],
+        "responseIntent": "Name the stuck pattern and pivot into a reflective question that moves the user toward the real want.",
+        "spokenDelivery": "The spoken delivery should feel clear, steady, and gently challenging rather than accusatory.",
+        "toneBand": "engagement"
+      }
+    }
+  ]
+}

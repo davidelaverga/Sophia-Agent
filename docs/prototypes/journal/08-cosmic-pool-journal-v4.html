@@ -1,0 +1,1391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Sophia — Journal</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&family=Cormorant+Garamond:wght@400;500&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+  background:#06050c;color:#e8e4f0;font-family:'Inter',sans-serif;
+  overflow:hidden;height:100vh;width:100vw;
+  -webkit-font-smoothing:antialiased;user-select:none;cursor:default;
+}
+canvas{position:fixed;inset:0}
+#pool{z-index:0}
+#overlay{z-index:2;pointer-events:none}
+#hit{z-index:3;cursor:default;background:transparent}
+
+/* ── Refined product UI ── */
+.top-left{position:fixed;top:28px;left:32px;z-index:10}
+.top-left h1{font-family:'Cormorant Garamond',serif;font-weight:500;font-size:26px;letter-spacing:-0.02em;color:#e8e4f0;opacity:0.85}
+.top-left .sub{font-size:9.5px;color:#6a6480;margin-top:4px;display:flex;align-items:center;gap:5px;letter-spacing:0.02em}
+.top-left .sub .dot{width:4px;height:4px;border-radius:50%;background:#8b7ec8;box-shadow:0 0 6px #8b7ec880}
+
+.search-bar{
+  position:fixed;top:28px;left:50%;transform:translateX(-50%);z-index:10;
+  display:flex;align-items:center;gap:7px;
+  padding:7px 14px;border-radius:10px;
+  background:rgba(14,12,24,0.55);border:1px solid rgba(184,164,232,0.08);
+  backdrop-filter:blur(16px);min-width:240px;
+}
+.search-bar .si{color:#5a5470;font-size:12px}
+.search-bar input{border:none;outline:none;background:transparent;color:#8a84a0;font-size:11px;font-family:'Inter',sans-serif;flex:1}
+.search-bar input::placeholder{color:#4a4560}
+.search-bar .kb{font-size:9px;color:#4a4560;padding:2px 5px;border-radius:3px;border:1px solid rgba(184,164,232,0.07);background:rgba(14,12,24,0.45)}
+
+.filters{
+  position:fixed;top:62px;left:50%;transform:translateX(-50%);z-index:10;
+  display:flex;gap:3px;
+}
+.fil{
+  padding:4px 10px;border-radius:12px;font-size:9px;letter-spacing:0.02em;
+  color:#4a4560;cursor:pointer;transition:all .3s ease;
+  background:transparent;border:1px solid transparent;
+}
+.fil:hover{color:#7a7490}
+.fil.active{color:#a898d8;background:rgba(184,164,232,0.06);border-color:rgba(184,164,232,0.10)}
+
+.top-right{position:fixed;top:28px;right:32px;z-index:10;display:flex;align-items:center;gap:8px}
+.period-sel{
+  padding:6px 12px;border-radius:7px;border:1px solid rgba(184,164,232,0.07);
+  background:rgba(14,12,24,0.50);backdrop-filter:blur(12px);
+  color:#6a6480;font-size:10px;cursor:pointer;display:flex;align-items:center;gap:5px;
+}
+.period-sel::after{content:'▾';font-size:7px;color:#4a4560}
+.view-toggle{
+  display:flex;gap:1px;padding:2px;border-radius:6px;
+  background:rgba(14,12,24,0.45);border:1px solid rgba(184,164,232,0.06);
+}
+.vt{padding:4px 7px;border-radius:4px;font-size:9px;color:#4a4560;cursor:pointer}
+.vt.active{background:rgba(184,164,232,0.08);color:#7a7490}
+.avatar{width:28px;height:28px;border-radius:50%;background:linear-gradient(135deg,#8b7ec8,#59bead);border:1.5px solid rgba(184,164,232,0.10);cursor:pointer;opacity:0.58}
+
+/* Detail panel — floats above selected gem */
+.detail{
+  position:fixed;z-index:20;
+  width:260px;padding:18px 20px 16px;
+  border-radius:14px;
+  background:rgba(16,12,28,0.88);backdrop-filter:blur(40px) saturate(1.3);
+  border:1px solid rgba(184,164,232,0.10);
+  box-shadow:0 20px 60px rgba(3,2,10,0.75),0 0 1px rgba(184,164,232,0.15),inset 0 1px 0 rgba(255,255,255,0.04);
+  opacity:0;pointer-events:none;
+  transition:opacity .35s ease,transform .35s ease;
+  transform:translateY(6px);
+}
+.detail.show{opacity:1;pointer-events:auto;transform:translateY(0)}
+/* Arrow pointing down toward gem */
+.detail::after{
+  content:'';position:absolute;bottom:-7px;left:50%;transform:translateX(-50%);
+  width:14px;height:14px;background:rgba(16,12,28,0.88);
+  border-right:1px solid rgba(184,164,232,0.10);border-bottom:1px solid rgba(184,164,232,0.10);
+  transform:translateX(-50%) rotate(45deg);border-radius:0 0 3px 0;
+}
+.detail .d-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+.detail .d-cat{display:inline-block;font-size:7.5px;padding:3px 8px;border-radius:8px;letter-spacing:0.06em;text-transform:uppercase;font-weight:500}
+.detail .d-cat.cat-pattern{background:rgba(139,126,200,0.12);color:#a090d0}
+.detail .d-cat.cat-decision{background:rgba(89,190,173,0.10);color:#6fcdb8}
+.detail .d-cat.cat-lesson{background:rgba(200,165,120,0.10);color:#d4b088}
+.detail .d-cat.cat-feeling{background:rgba(200,120,160,0.10);color:#d490b0}
+.detail .d-cat.cat-relationship{background:rgba(120,155,200,0.10);color:#88aad0}
+.detail .d-cat.cat-commitment{background:rgba(120,200,165,0.10);color:#88d0b0}
+.detail .d-close{background:none;border:none;color:#5a5470;cursor:pointer;font-size:13px;padding:2px 4px;border-radius:4px;transition:color .2s,background .2s}
+.detail .d-close:hover{color:#a090d0;background:rgba(160,144,208,0.08)}
+.detail .d-date{font-size:9px;color:#6a6480;margin-bottom:10px;letter-spacing:0.03em;display:flex;align-items:center;gap:6px}
+.detail .d-date::before{content:'';display:inline-block;width:3px;height:3px;border-radius:50%;background:#8b7ec8;box-shadow:0 0 4px rgba(139,126,200,0.5)}
+.detail .d-text{font-size:13px;line-height:1.65;color:#e8e4f0;font-weight:300;margin-bottom:14px;letter-spacing:0.01em}
+.detail .d-divider{width:100%;height:1px;background:linear-gradient(90deg,transparent,rgba(184,164,232,0.08),transparent);margin-bottom:10px}
+.detail .d-tags{display:flex;gap:5px;flex-wrap:wrap}
+.detail .d-tag{font-size:8px;padding:3px 9px;border-radius:10px;background:rgba(184,164,232,0.06);color:#6a6480;font-weight:400;letter-spacing:0.02em}
+.detail .d-session{font-size:8px;color:#3a3550;margin-top:8px;letter-spacing:0.03em}
+
+/* Stats */
+.stats{position:fixed;bottom:76px;left:32px;z-index:10;display:flex;gap:22px;opacity:0.50}
+.stat .stat-n{font-weight:500;font-size:15px;color:#d0cce0}
+.stat .stat-l{font-size:8px;color:#5a5470;margin-top:1px;letter-spacing:0.03em}
+
+/* Timeline — interactive scrubber */
+.timeline{
+  position:fixed;bottom:0;left:0;right:0;z-index:10;
+  display:flex;flex-direction:column;align-items:stretch;
+  padding:28px 40px 14px;
+  background:linear-gradient(to top,rgba(8,5,18,0.75) 0%,rgba(8,5,18,0.45) 55%,transparent 100%);
+  user-select:none;
+}
+.tl-date{
+  font-family:'Cormorant Garamond',serif;font-size:14px;font-weight:400;
+  color:rgba(220,212,240,0.85);letter-spacing:0.04em;
+  text-align:center;pointer-events:none;margin-bottom:10px;
+  transition:color .3s;
+}
+.tl-date .tl-count{
+  font-size:10px;color:rgba(160,150,200,0.55);margin-left:8px;font-family:Inter,sans-serif;
+  font-weight:300;letter-spacing:0.02em;
+}
+.tl-track{
+  position:relative;height:6px;cursor:pointer;
+  padding:10px 0;/* hit area */
+  box-sizing:content-box;
+}
+.tl-bar{
+  position:absolute;top:10px;left:0;right:0;height:1px;
+  background:rgba(184,164,232,0.18);
+}
+.tl-fill{
+  position:absolute;top:10px;left:0;height:1px;
+  background:linear-gradient(90deg,rgba(139,126,200,0.08),rgba(160,144,208,0.40));
+  transition:width .12s ease-out;
+}
+.tl-dot{
+  position:absolute;top:10px;transform:translate(-50%,-50%);
+  width:3px;height:3px;border-radius:50%;
+  background:rgba(180,168,220,0.35);
+  transition:opacity .5s,transform .5s,background .3s;
+}
+.tl-dot.b{background:rgba(180,168,220,0.55);width:4px;height:4px}
+.tl-dot.recent{background:rgba(200,184,240,0.70);width:4px;height:4px;box-shadow:0 0 6px rgba(160,144,208,0.30)}
+.tl-dot.hidden{opacity:0;transform:translate(-50%,-50%) scale(0)}
+.tl-handle{
+  position:absolute;top:10px;transform:translate(-50%,-50%);
+  width:12px;height:12px;border-radius:50%;z-index:2;
+  background:radial-gradient(circle,rgba(220,210,255,0.95) 0%,rgba(180,164,228,0.7) 50%,rgba(139,126,200,0.3) 100%);
+  box-shadow:0 0 16px rgba(160,144,208,0.45),0 0 4px rgba(255,255,255,0.15);
+  cursor:grab;transition:transform .2s,box-shadow .2s;
+}
+.tl-handle:hover{
+  transform:translate(-50%,-50%) scale(1.3);
+  box-shadow:0 0 18px rgba(160,144,208,0.45),0 0 4px rgba(255,255,255,0.12);
+}
+.tl-handle.dragging{
+  cursor:grabbing;
+  transform:translate(-50%,-50%) scale(1.5);
+  box-shadow:0 0 24px rgba(160,144,208,0.55),0 0 6px rgba(255,255,255,0.15);
+}
+.tl-months{
+  display:flex;justify-content:space-between;
+  pointer-events:none;padding:0 1%;margin-top:2px;
+}
+.tl-month{
+  font-size:8px;color:rgba(140,130,180,0.40);letter-spacing:0.06em;
+  font-weight:400;transition:color .3s;
+}
+.tl-month.active{color:rgba(190,175,230,0.70)}
+/* Onboarding hint — inline right of date */
+.tl-hint{
+  display:inline-flex;align-items:center;gap:5px;
+  font-size:9px;color:rgba(180,168,220,0.50);letter-spacing:0.04em;
+  margin-left:10px;font-family:Inter,sans-serif;font-weight:300;
+  animation:tlHintPulse 2.5s ease-in-out infinite;
+  transition:opacity .8s;pointer-events:none;white-space:nowrap;
+}
+.tl-hint.hide{opacity:0}
+.tl-hint svg{width:12px;height:12px;fill:none;stroke:rgba(180,168,220,0.50);stroke-width:1.5}
+@keyframes tlHintPulse{0%,100%{opacity:0.5}50%{opacity:1}}
+
+/* Emerging patterns */
+.patterns-bar{position:fixed;bottom:72px;right:32px;z-index:10;display:flex;align-items:center;gap:6px;opacity:0.40}
+.patterns-bar .pb-label{font-size:8.5px;color:#5a5470;letter-spacing:0.03em;margin-right:4px;font-weight:500}
+.patterns-bar .pb-pill{font-size:8px;padding:3px 10px;border-radius:10px;display:flex;align-items:center;gap:4px;letter-spacing:0.02em;cursor:default}
+.patterns-bar .pb-pill .pb-dot{width:4px;height:4px;border-radius:50%}
+.patterns-bar .pb-pill.p-rest{background:rgba(139,126,200,0.08);color:#8b7ec8}
+.patterns-bar .pb-pill.p-rest .pb-dot{background:#8b7ec8}
+.patterns-bar .pb-pill.p-work{background:rgba(89,180,170,0.06);color:#59b4aa}
+.patterns-bar .pb-pill.p-work .pb-dot{background:#59b4aa}
+.patterns-bar .pb-pill.p-creative{background:rgba(200,140,160,0.06);color:#c88ca0}
+.patterns-bar .pb-pill.p-creative .pb-dot{background:#c88ca0}
+.patterns-bar .pb-pill.p-relations{background:rgba(200,165,120,0.06);color:#c8a578}
+.patterns-bar .pb-pill.p-relations .pb-dot{background:#c8a578}
+.patterns-bar .pb-more{font-size:8px;color:#4a4560;margin-left:2px}
+</style>
+</head>
+<body>
+
+<canvas id="pool"></canvas>
+<canvas id="overlay"></canvas>
+<canvas id="hit"></canvas>
+
+<!-- Product UI Layer -->
+<div class="top-left">
+  <h1>Journal</h1>
+  <p class="sub"><span class="dot"></span> Your memories with Sophia</p>
+</div>
+<div class="search-bar">
+  <span class="si">⌕</span>
+  <input type="text" placeholder="Search memories…" spellcheck="false">
+  <span class="kb">⌘K</span>
+</div>
+<div class="filters">
+  <div class="fil active" onclick="setFilter(this)">All</div>
+  <div class="fil" onclick="setFilter(this)">Decisions</div>
+  <div class="fil" onclick="setFilter(this)">Patterns</div>
+  <div class="fil" onclick="setFilter(this)">Lessons</div>
+  <div class="fil" onclick="setFilter(this)">Feelings</div>
+  <div class="fil" onclick="setFilter(this)">Relationships</div>
+</div>
+<div class="top-right">
+  <div class="period-sel">This month</div>
+  <div class="view-toggle"><div class="vt active">Pool</div><div class="vt">List</div></div>
+  <div class="avatar"></div>
+</div>
+<div class="stats">
+  <div class="stat"><div class="stat-n">127</div><div class="stat-l">memories</div></div>
+  <div class="stat"><div class="stat-n">14</div><div class="stat-l">this month</div></div>
+  <div class="stat"><div class="stat-n">3</div><div class="stat-l">emerging patterns</div></div>
+</div>
+<div class="timeline">
+  <div class="tl-date" id="tlDate"><span id="tlDateText">Today</span><span class="tl-count" id="tlCount">12 memories</span><span class="tl-hint" id="tlHint"><svg viewBox="0 0 16 16"><path d="M3 8h10M3 8l3-3M3 8l3 3M13 8l-3-3M13 8l-3 3"/></svg>drag to explore</span></div>
+  <div class="tl-track" id="tl">
+    <div class="tl-bar"></div>
+    <div class="tl-fill" id="tlFill"></div>
+    <div class="tl-handle" id="tlHandle"></div>
+  </div>
+  <div class="tl-months"><span class="tl-month" data-start="0">Jul</span><span class="tl-month" data-start="31">Aug</span><span class="tl-month" data-start="62">Sep</span><span class="tl-month" data-start="93">Oct</span><span class="tl-month" data-start="124">Nov</span></div>
+</div>
+<div class="patterns-bar">
+  <span class="pb-label">Emerging patterns</span>
+  <span class="pb-pill p-rest"><span class="pb-dot"></span>Rest & recovery</span>
+  <span class="pb-pill p-work"><span class="pb-dot"></span>Work boundaries</span>
+  <span class="pb-pill p-creative"><span class="pb-dot"></span>Creative flow</span>
+  <span class="pb-pill p-relations"><span class="pb-dot"></span>Relationships</span>
+  <span class="pb-more">+2</span>
+</div>
+
+<div class="detail" id="detail">
+  <div class="d-header">
+    <div class="d-cat cat-pattern" id="dCat">pattern</div>
+    <button class="d-close" onclick="hideDetail()">✕</button>
+  </div>
+  <div class="d-date" id="dDate"></div>
+  <div class="d-text" id="dText"></div>
+  <div class="d-divider"></div>
+  <div class="d-tags" id="dTags"></div>
+  <div class="d-session" id="dSession"></div>
+</div>
+
+<script>
+// Filter pill interaction
+function setFilter(el){document.querySelectorAll('.fil').forEach(f=>f.classList.remove('active'));el.classList.add('active')}
+window.setFilter=setFilter;
+
+// ═══════════════════════════════════════════════════
+// CAMERA
+// ═══════════════════════════════════════════════════
+const CAM = [0, 1.05, -1.40];
+const TGT = [0, -0.05, 0.15];
+const curFOV = 1.70;
+
+const V = {
+  sub:(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]],
+  norm:v=>{const l=Math.hypot(...v);return[v[0]/l,v[1]/l,v[2]/l]},
+  cross:(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],
+  dot:(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2],
+};
+const fwd=V.norm(V.sub(TGT,CAM));
+const rt=V.norm(V.cross([0,1,0],fwd));
+const up=V.cross(rt,fwd);
+
+function poolToScreen(px,pz){
+  const tp=[px-CAM[0],-CAM[1],pz-CAM[2]];
+  const f=V.dot(tp,fwd);if(f<=0)return null;
+  const r=V.dot(tp,rt),u=V.dot(tp,up);
+  const asp=innerWidth/innerHeight;
+  return{x:(r/(f*curFOV*asp)+0.5)*innerWidth,y:(-u/(f*curFOV)+0.5)*innerHeight,s:1/f};
+}
+
+// ═══════════════════════════════════════════════════
+// WEBGL — WATER + PER-MEMORY RIPPLE PHYSICS
+// ═══════════════════════════════════════════════════
+const poolC=document.getElementById('pool');
+const gl=poolC.getContext('webgl',{alpha:false,antialias:false,preserveDrawingBuffer:false});
+
+const vertSrc=`attribute vec2 p;void main(){gl_Position=vec4(p,0,1);}`;
+
+const fragSrc=`
+precision highp float;
+uniform float uTime;
+uniform vec2 uRes;
+uniform vec2 uMouse;
+uniform vec3 uCam;
+uniform vec3 uTgt;
+uniform float uFov;
+uniform vec4 uMem[16]; // xy=worldPos, z=strength(0-1), w=phase
+
+// ─── Noise ───
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+float fbm(vec2 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*noise(p);p*=2.03;a*=0.47;}return v;}
+float fbm3(vec2 p){float v=0.0,a=0.5;for(int i=0;i<3;i++){v+=a*noise(p);p*=2.1;a*=0.45;}return v;}
+
+// ─── Wave height field: ambient sources + per-memory ripples ───
+float waveH(vec2 p, float t){
+  float h=0.0;
+
+  // Ambient background waves (7 wide sources)
+  float d=length(p);
+  float decay=exp(-d*0.42);
+  h+=0.018*sin(d*14.0-t*1.5)*decay;
+  h+=0.010*sin(d*24.0-t*2.2+0.5)*decay*0.70;
+  h+=0.005*sin(d*40.0-t*2.9+1.1)*decay*0.45;
+  h+=0.002*sin(d*58.0-t*3.5+1.8)*decay*0.30;
+
+  d=length(p-vec2(-0.70,-0.30));decay=exp(-d*0.55);
+  h+=0.014*sin(d*14.0-t*1.5+1.8)*decay;
+  h+=0.007*sin(d*24.0-t*2.2+2.3)*decay*0.70;
+
+  d=length(p-vec2(0.80,-0.15));decay=exp(-d*0.55);
+  h+=0.012*sin(d*14.0-t*1.5+3.5)*decay;
+
+  d=length(p-vec2(-0.35,0.62));decay=exp(-d*0.62);
+  h+=0.010*sin(d*14.0-t*1.5+0.7)*decay;
+
+  d=length(p-vec2(0.55,0.50));decay=exp(-d*0.62);
+  h+=0.009*sin(d*14.0-t*1.5+2.6)*decay;
+
+  d=length(p-vec2(0.14,-0.72));decay=exp(-d*0.72);
+  h+=0.008*sin(d*14.0-t*1.5+4.2)*decay;
+
+  d=length(p-vec2(-0.15,1.2));decay=exp(-d*0.80);
+  h+=0.006*sin(d*14.0-t*1.5+5.5)*decay;
+
+  // ── PER-MEMORY LOCAL RIPPLES (16 positions from JS) ──
+  for(int i=0;i<16;i++){
+    vec2 mp=uMem[i].xy;
+    float str=uMem[i].z;
+    float ph=uMem[i].w;
+    float md=length(p-mp);
+    float mDecay=exp(-md*3.5)*str;
+    h+=0.007*sin(md*20.0-t*2.0+ph)*mDecay;
+    h+=0.004*sin(md*34.0-t*2.8+ph+1.2)*mDecay*0.55;
+  }
+
+  // Fine micro-texture
+  h+=(fbm(p*12.0+t*0.06)-0.5)*0.0014;
+  h+=(fbm3(p*22.0-t*0.03+5.0)-0.5)*0.0005;
+
+  return h;
+}
+
+vec3 waveN(vec2 p, float t){
+  float e=0.003;
+  float c=waveH(p,t);
+  float dx=waveH(p+vec2(e,0),t)-c;
+  float dz=waveH(p+vec2(0,e),t)-c;
+  vec3 N=normalize(vec3(-dx/e, 1.0, -dz/e));
+
+  // ── Micro-texture: high-freq normal perturbation ──
+  // Layer 1: medium ripples (capillary waves)
+  vec2 mt1=p*45.0+t*vec2(0.12,-0.08);
+  float mn1=(noise(mt1)-0.5)*2.0;
+  // Layer 2: fine grain (wind micro-chop)
+  vec2 mt2=p*90.0+t*vec2(-0.06,0.14);
+  float mn2=(noise(mt2)-0.5)*2.0;
+  // Layer 3: ultra-fine shimmer
+  vec2 mt3=p*160.0+t*vec2(0.09,0.05);
+  float mn3=(noise(mt3)-0.5)*2.0;
+
+  // Blend: stronger near camera, fades with distance for natural LOD
+  float pD=length(p);
+  float microFade=exp(-pD*0.25);
+  float microStr=0.065*microFade;
+  N.x+=mn1*microStr*0.6+mn2*microStr*0.3+mn3*microStr*0.15;
+  N.z+=mn1*microStr*0.5+mn2*microStr*0.35+mn3*microStr*0.12;
+  return normalize(N);
+}
+
+float caustic(vec2 p, float t){
+  float c1=pow(abs(sin(p.x*8.0+t*0.5)*sin(p.y*8.0+t*0.35)+
+                    sin((p.x+p.y)*6.0-t*0.4)*0.5), 3.0);
+  float c2=pow(abs(sin(p.x*14.0-t*0.3+2.0)*sin(p.y*12.0+t*0.45+1.0)), 4.0)*0.35;
+  float c3=pow(abs(sin((p.x-p.y)*10.0+t*0.25)*sin(p.y*7.0-t*0.32)), 3.0)*0.18;
+  return c1+c2+c3;
+}
+
+vec3 volumetricGlow(vec3 ro, vec3 rd, float tMax, float time){
+  vec3 acc=vec3(0.0);
+  float dt=tMax/8.0;
+  for(int i=0;i<8;i++){
+    float tt=dt*(float(i)+0.5);
+    vec3 p=ro+rd*tt;
+    float d2=p.x*p.x+p.z*p.z;
+    // Height-dependent density: thicker near the surface, thins upward
+    float hDensity=exp(-max(p.y,0.0)*1.2)*0.8+0.2;
+    float vertGlow=exp(-d2*0.80)*exp(-p.y*p.y*1.5)*0.028*hDensity;
+    float w=exp(-d2*0.45);
+    // Purple/violet mid-tones with warm amber core
+    vec3 gc=mix(vec3(0.12,0.08,0.22),vec3(0.45,0.30,0.18),w*w);
+    // Rose/lavender tint at mid-distance
+    gc+=vec3(0.06,0.03,0.06)*exp(-pow(length(p.xz)-0.8,2.0)*2.0);
+    acc+=gc*vertGlow*dt;
+  }
+  return acc;
+}
+
+// ─── Sky color: reusable for background & water reflections ───
+vec3 skyColor(vec3 dir, vec2 seed){
+  // Base cosmos — dark with purple undertone
+  vec3 c=vec3(0.008,0.006,0.018);
+  // Remap direction to UV-like coords for noise sampling
+  vec2 skyUV=dir.xz/(abs(dir.y)+0.15)*0.4+0.5+seed;
+  // Stars — varied colors (white, lavender, warm)
+  c+=vec3(0.55,0.50,0.62)*pow(hash(floor(skyUV*200.0)),22.0)*0.055;
+  c+=vec3(0.45,0.38,0.55)*pow(hash(floor(skyUV*120.0+vec2(7.3,2.1))),18.0)*0.035;
+  c+=vec3(0.50,0.42,0.38)*pow(hash(floor(skyUV*60.0+vec2(3.1,5.7))),15.0)*0.022;
+  // Elevation mask
+  float hMask=smoothstep(-0.3,0.4,dir.y);
+  // Primary nebula — purple/violet wash
+  float neb=fbm3(skyUV*3.0+0.3)*0.5+0.5;
+  c+=vec3(0.05,0.025,0.10)*neb*hMask;
+  // Secondary nebula — blue-violet
+  float neb2=fbm3(skyUV*2.0+vec2(1.7,0.5))*0.5+0.5;
+  c+=vec3(0.03,0.02,0.07)*neb2*hMask*0.6;
+  // Rose/magenta accent
+  c+=vec3(0.04,0.015,0.05)*fbm3(skyUV*4.5+2.0)*hMask*0.5;
+  // Gold nebula band
+  float neb3=fbm3(skyUV*1.8+vec2(4.2,1.3))*0.5+0.5;
+  c+=vec3(0.04,0.028,0.010)*neb3*hMask*0.45;
+  // Horizon glow — purple + warm
+  float horizonGlow=exp(-dir.y*dir.y*8.0);
+  c+=vec3(0.03,0.018,0.06)*horizonGlow*0.7;
+  c+=vec3(0.025,0.015,0.005)*horizonGlow*0.4;
+  // Central radiance
+  float centerGlow=exp(-dot(dir.xz,dir.xz)*1.5);
+  c+=vec3(0.02,0.012,0.04)*centerGlow*0.5;
+  return c;
+}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/uRes;
+  uv.y=1.0-uv.y;
+  float asp=uRes.x/uRes.y;
+
+  // ─── Camera (from uniforms) ───
+  vec3 cam=uCam;
+  vec3 tgt=uTgt+vec3(
+    (uMouse.x-0.5)*0.12,
+    0.0,
+    (uMouse.y-0.5)*0.08
+  );
+  vec3 fw=normalize(tgt-cam);
+  vec3 rt=normalize(cross(vec3(0,1,0),fw));
+  vec3 u=cross(rt,fw);
+
+  vec2 sc=(uv-0.5)*vec2(asp,1.0);
+  vec3 rd=normalize(fw+rt*sc.x*uFov+u*sc.y*uFov);
+
+  // ─── Background: dark cosmos with purple undertone ───
+  vec3 col=vec3(0.005,0.004,0.014);
+  // Stars — lavender/white
+  col+=vec3(0.45,0.40,0.58)*pow(hash(floor(uv*uRes*0.5)),28.0)*0.025;
+  // Purple nebula wash in upper sky
+  float bgNeb=fbm3(uv*3.5+0.3)*0.5+0.5;
+  col+=vec3(0.016,0.008,0.035)*bgNeb*smoothstep(0.15,0.70,uv.y)*0.7;
+  float bgNeb2=fbm3(uv*2.2+vec2(1.7,0.5))*0.5+0.5;
+  col+=vec3(0.010,0.006,0.022)*bgNeb2*smoothstep(0.25,0.60,uv.y)*0.4;
+  // Rose-violet accent
+  col+=vec3(0.012,0.006,0.016)*fbm3(uv*5.0+2.0)*smoothstep(0.35,0.75,uv.y)*0.30;
+
+  float tHitVal=100.0;
+
+  // ─── Ray → water plane ───
+  if(rd.y<-0.001){
+    float tHit=-cam.y/rd.y;
+    tHitVal=tHit;
+    vec3 hit=cam+rd*tHit;
+    vec2 pp=hit.xz;
+    float pD=length(pp);
+
+    if(pD<5.5){
+      vec3 N=waveN(pp,uTime);
+      vec3 Vi=-rd;
+      float NdV=max(dot(N,Vi),0.001);
+
+      // ── Glitter normal: extra perturbation for specular breakup ──
+      vec3 Nglitter=N;
+      vec2 gn1=pp*55.0+uTime*vec2(0.15,-0.10);
+      vec2 gn2=pp*120.0+uTime*vec2(-0.08,0.12);
+      float g1=(noise(gn1)-0.5)*2.0;
+      float g2=(noise(gn2)-0.5)*2.0;
+      float glitterFade=exp(-pD*0.20);
+      Nglitter.x+=(g1*0.08+g2*0.05)*glitterFade;
+      Nglitter.z+=(g1*0.06+g2*0.04)*glitterFade;
+      Nglitter=normalize(Nglitter);
+
+      // Physically-based Fresnel (water IOR=1.33)
+      float F0=0.02;
+      float fres=F0+(1.0-F0)*pow(1.0-NdV,5.0);
+      // At this camera angle (~30° from horizontal), real water is 40-80% reflective
+      // Boost minimum so shallow-angle areas stay reflective
+      fres=max(fres, 0.15);
+      // Distance boost: far water is more reflective (grazing angles)
+      fres+=0.20*smoothstep(1.0,4.0,pD)*(1.0-fres);
+
+      // REFLECTION — anisotropic stretch along view direction
+      vec3 R=reflect(rd,N);
+
+      // ── Anisotropy: stretch reflection along camera→hit direction ──
+      // Project view direction onto water plane to get stretch axis
+      vec2 viewDir2D=normalize(hit.xz-cam.xz);
+      // Decompose reflection xz into parallel (along view) and perpendicular components
+      float rPar=dot(R.xz,viewDir2D);
+      vec2 rPerp=R.xz-rPar*viewDir2D;
+      // Stretch parallel component (reflections elongate toward viewer)
+      float anisoStrength=1.45; // >1 = stretched along view, 1 = no aniso
+      float grazeStretch=1.0+0.3*(1.0-NdV); // more stretch at grazing angles
+      vec2 anisoR=rPar*viewDir2D*anisoStrength*grazeStretch+rPerp;
+      // Use anisotropic reflection for lookup, keep R.y for sky height
+      vec3 Raniso=normalize(vec3(anisoR.x,R.y,anisoR.y));
+
+      // Sample actual sky for reflection (same cosmos the background uses)
+      vec3 reflC=skyColor(Raniso, vec2(uTime*0.003));
+      // Water concentrates and brightens reflected light
+      reflC*=1.4;
+      // Add subtle wave-based color spread (water disperses light)
+      vec3 reflC2=skyColor(Raniso+N*0.12, vec2(uTime*0.003+0.5));
+      reflC=mix(reflC, reflC2, 0.25);
+      // Warm subsurface bleed into reflection at center
+      reflC+=vec3(0.08,0.04,0.02)*exp(-pD*pD*0.8)*0.12;
+
+      // SUBSURFACE — deep dark pool with selective glow
+      vec3 subC=vec3(0.003,0.002,0.008);
+
+      // ── Variable depth: noise-modulated subsurface intensity ──
+      float depthNoise=fbm3(pp*2.5+vec2(0.3,0.7))*0.5+0.5;
+      float depthVar=0.75+depthNoise*0.50; // 0.75–1.25 range
+      // Shallower areas are slightly warmer, deeper areas more indigo
+      vec3 depthTint=mix(vec3(0.02,0.01,0.01),vec3(-0.01,0.0,0.02),depthNoise);
+
+      // Caustics — purple outer, gold inner
+      vec2 cUV=pp+N.xz*0.55;
+      float cst=caustic(cUV,uTime);
+      float cW=exp(-pD*pD*0.35);
+      vec3 cCol=mix(vec3(0.04,0.015,0.08),vec3(0.16,0.10,0.04),cW);
+      cCol+=vec3(0.06,0.03,0.01)*exp(-pow(pD-0.8,2.0)*0.8);
+      cCol+=vec3(0.03,0.015,0.05)*exp(-pow(pD-1.5,2.0)*0.5);
+      subC+=cCol*cst*0.18*exp(-pD*0.22)*(0.8+depthNoise*0.4);
+
+      // ── Per-memory light projection: each gem illuminates the water beneath it ──
+      for(int i=0;i<16;i++){
+        vec2 mp=uMem[i].xy;
+        float str=uMem[i].z;
+        if(str<0.01) continue;
+        float md=length(pp-mp);
+        // Warm light pool beneath each gem
+        float lightPool=exp(-md*md*8.0)*str;
+        vec3 gemLight=mix(vec3(0.18,0.10,0.30),vec3(0.38,0.26,0.12),exp(-md*3.0));
+        subC+=gemLight*lightPool*0.22;
+      }
+
+      // ── Ripple rings per memory — each memory is the origin of its own ripples ──
+      for(int i=0;i<16;i++){
+        vec2 mp=uMem[i].xy;
+        float str=uMem[i].z;
+        if(str<0.01) continue;
+        float ph=uMem[i].w;
+        float md=length(pp-mp);
+        // Faster decay — ripples stay close to their memory
+        float mDecay=exp(-md*0.85)*str;
+        if(mDecay<0.003) continue;
+        // Primary ring: clean, visible
+        float r1=pow(abs(sin(md*7.0 -uTime*0.9+ph      )),14.0);
+        // Secondary: subtle accent
+        float r2=pow(abs(sin(md*12.0-uTime*1.4+ph+1.0   )),16.0)*0.3;
+        float ringBright=r1*0.50+r2*0.12;
+        // Fade with distance from the memory
+        ringBright*=mix(1.0, 0.20, smoothstep(0.2, 2.5, md));
+        vec3 ringCol=mix(vec3(0.40,0.25,0.65),vec3(0.55,0.40,0.22),exp(-md*0.8));
+        subC+=ringCol*ringBright*mDecay;
+      }
+
+      // (Global rings removed — all ripples originate from memories only)
+
+      // ── COLOR GRADIENT: deep indigo → violet → rose → amber (more color, less white) ──
+      // (modulated by depthVar for irregular bottom)
+      // Outer: purple/violet (the pool's signature color)
+      subC+=vec3(0.03,0.015,0.07)*exp(-pD*pD*0.10)*0.22*depthVar;
+      subC+=vec3(0.05,0.03,0.10)*exp(-pD*pD*0.22)*0.18*depthVar;
+      // Mid: violet → rose transition
+      subC+=vec3(0.10,0.06,0.14)*exp(-pD*pD*0.38)*0.18*depthVar;
+      subC+=vec3(0.16,0.09,0.12)*exp(-pD*pD*0.55)*0.15*depthVar;
+      // Inner: warm gold glow (subtle, not blowout)
+      subC+=vec3(0.20,0.13,0.06)*exp(-pD*pD*0.90)*0.14*depthVar;
+      subC+=vec3(0.24,0.16,0.08)*exp(-pD*pD*1.8)*0.10;
+      subC+=vec3(0.28,0.20,0.10)*exp(-pD*pD*4.0)*0.06;
+      subC+=vec3(0.30,0.22,0.12)*exp(-pD*pD*10.0)*0.03;
+      // Depth tint variation
+      subC+=depthTint*exp(-pD*0.3)*0.5;
+
+      // Angular color variation — warm/cool swirls
+      float ang=atan(pp.y,pp.x);
+      // Purple swirls at mid-distance
+      subC+=vec3(0.06,0.02,0.08)*sin(ang*2.0+pD*1.5+uTime*0.10)*exp(-pD*pD*0.35)*0.16;
+      subC+=vec3(0.04,0.02,0.06)*cos(ang*3.0-pD*0.8)*exp(-pD*pD*0.30)*0.10;
+      // Gold accent that rotates slowly
+      subC+=vec3(0.08,0.05,0.02)*sin(ang*1.5-uTime*0.06+1.0)*exp(-pD*pD*0.50)*0.14;
+      // Warm pocket at specific angle
+      float pocket=exp(-pow(ang-1.2,2.0)*2.0)*exp(-pow(pD-1.0,2.0)*1.0);
+      subC+=vec3(0.12,0.08,0.03)*pocket*0.20;
+
+      subC*=exp(-pD*0.15);
+
+      // ── Dark pools: noise-driven patches of shadow between ripples ──
+      // Large-scale dark variation (slow-moving voids)
+      float darkNoise=fbm3(pp*1.2+vec2(uTime*0.02, uTime*0.015));
+      float darkPatch=smoothstep(0.35,0.55,darkNoise); // 0 in dark zones, 1 in lit zones
+      // Smaller turbulent shadows
+      float turbShadow=fbm3(pp*3.5+vec2(-uTime*0.03, uTime*0.025));
+      float turbMask=smoothstep(0.30,0.58,turbShadow);
+      // Combine: multiply subsurface by shadow pattern
+      float shadowFactor=mix(0.35, 1.0, darkPatch*0.6+turbMask*0.4);
+      subC*=shadowFactor;
+
+      // Water transparency: crystal clear at distance
+      float transparency=smoothstep(0.5,3.0,pD)*0.60;
+      subC=mix(subC,vec3(0.004,0.003,0.012),transparency);
+
+      col=mix(subC,reflC,fres);
+
+      // SPECULAR — uses glitter normal for breakup
+      vec3 L1=normalize(vec3(0.0,5.0,0.2)-hit);
+      vec3 H1=normalize(Vi+L1);
+      float NdH1=max(dot(Nglitter,H1),0.0);
+
+      float sp_razor =pow(NdH1,600.0)*1.2;
+      float sp_sharp =pow(NdH1,150.0)*0.22;
+      float sp_med   =pow(NdH1,30.0)*0.05;
+      float sp_wide  =pow(NdH1,8.0)*0.012;
+      float sp_ultra =pow(NdH1,3.0)*0.003;
+      float specT=sp_razor+sp_sharp+sp_med+sp_wide+sp_ultra;
+
+      // Specular color gradient — lavender to warm gold
+      float warmth=exp(-pD*pD*0.35);
+      vec3 spC=mix(vec3(0.38,0.28,0.52),vec3(0.62,0.46,0.28),warmth);
+      float mid=exp(-pow(pD-1.0,2.0)*0.6);
+      spC=mix(spC,vec3(0.55,0.38,0.45),mid*0.30);
+
+      col+=spC*specT;
+
+      // Secondary lights (also use glitter normal)
+      vec3 L2=normalize(vec3(0.5,4.5,-0.4)-hit);
+      col+=spC*pow(max(dot(Nglitter,normalize(Vi+L2)),0.0),300.0)*0.14;
+
+      vec3 L3=normalize(vec3(-0.4,4.5,0.3)-hit);
+      col+=spC*pow(max(dot(Nglitter,normalize(Vi+L3)),0.0),300.0)*0.10;
+
+      // Rim light — warm amber at distance (not just violet)
+      vec3 L4=normalize(vec3(0.0,1.2,4.0)-hit);
+      vec3 H4=normalize(Vi+L4);
+      float rimSpec=pow(max(dot(N,H4),0.0),80.0)*0.13*smoothstep(1.0,3.0,pD);
+      vec3 rimCol=mix(vec3(0.25,0.18,0.38),vec3(0.45,0.32,0.18),smoothstep(1.5,3.0,pD));
+      col+=rimCol*rimSpec;
+
+      // Edge fade — aggressive to hide pool boundary at low camera angle
+      float edgeFade=smoothstep(4.0,1.8,pD);
+      edgeFade*=edgeFade; // quadratic falloff: faster kill at edges
+      col*=edgeFade;
+
+      // Distance fog — dark navy with warm edge tint
+      float fog=1.0-exp(-tHit*tHit*0.0038);
+      vec3 fogCol=vec3(0.008,0.007,0.016);
+      fogCol+=vec3(0.010,0.007,0.012)*exp(-pD*pD*0.4);
+      fogCol+=vec3(0.008,0.005,0.003)*smoothstep(2.0,4.5,pD);
+      col=mix(col,fogCol,fog);
+
+      // Midground mist
+      float mist=exp(-pow(pD-1.8,2.0)*0.6)*0.045;
+      col=mix(col,vec3(0.010,0.008,0.018),mist);
+    }
+  }
+
+  // Volumetric glow
+  col+=volumetricGlow(cam,rd,tHitVal<100.0?tHitVal:8.0,uTime);
+
+  // Atmospheric haze — warm/dark navy tones
+  // Layer 1: wide warm haze centered on pool
+  float haze1=exp(-length(uv-vec2(0.5,0.56))*1.3)*0.025;
+  col+=vec3(0.08,0.05,0.12)*haze1;
+  // Layer 2: narrower warm glow above pool center
+  float haze2=exp(-length(uv-vec2(0.5,0.52))*2.0)*0.014;
+  col+=vec3(0.10,0.07,0.10)*haze2;
+  // Layer 3: foreground haze
+  float fgHaze=exp(-pow(uv.y-0.72,2.0)*8.0)*0.010;
+  col+=vec3(0.06,0.04,0.08)*fgHaze;
+  // Warm horizon band
+  float roseH=exp(-pow(uv.y-0.50,2.0)*30.0)*0.008;
+  col+=vec3(0.22,0.12,0.10)*roseH;
+  // Warm center (tight)
+  float warmH=exp(-length(uv-vec2(0.5,0.50))*3.2)*0.008;
+  col+=vec3(0.30,0.20,0.12)*warmH;
+
+  // Bloom — two radii for inner crispness + outer softness
+  vec3 bloomCol=vec3(0.0);
+  // Inner bloom ring (tight, bright)
+  for(int i=0;i<6;i++){
+    float fi=float(i);
+    vec2 bOff=vec2(cos(fi*1.047)*0.015,sin(fi*1.047)*0.015);
+    vec2 bUV=uv+bOff;
+    float bDist=length(bUV-vec2(0.5,0.50));
+    float bVal=exp(-bDist*bDist*4.0)*0.010;
+    float bW=exp(-bDist*bDist*0.4);
+    bloomCol+=mix(vec3(0.10,0.07,0.16),vec3(0.35,0.25,0.16),bW*bW)*bVal;
+  }
+  // Outer bloom ring (wide, soft glow)
+  for(int i=0;i<5;i++){
+    float fi=float(i);
+    vec2 bOff=vec2(cos(fi*1.256+0.3)*0.040,sin(fi*1.256+0.3)*0.040);
+    vec2 bUV=uv+bOff;
+    float bDist=length(bUV-vec2(0.5,0.52));
+    float bVal=exp(-bDist*bDist*1.8)*0.005;
+    float bW=exp(-bDist*bDist*0.25);
+    bloomCol+=mix(vec3(0.08,0.05,0.12),vec3(0.28,0.20,0.14),bW*bW)*bVal;
+  }
+  col+=bloomCol;
+
+  // Vignette — deeper for cinematic framing
+  vec2 vc=uv-0.5;
+  col*=1.0-dot(vc,vc)*1.8;
+
+  // ACES tone mapping
+  col=(col*(2.51*col+0.03))/(col*(2.43*col+0.59)+0.14);
+
+  // Color grading
+  col=pow(max(col,vec3(0.0)),vec3(0.88,0.90,0.92));
+
+  // Film grain
+  col+=(hash(uv*uRes+uTime*97.0)-0.5)*0.006;
+
+  gl_FragColor=vec4(max(col,vec3(0.0)),1.0);
+}
+`;
+
+function mkS(ty,src){
+  const s=gl.createShader(ty);gl.shaderSource(s,src);gl.compileShader(s);
+  if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))console.error('GLSL:',gl.getShaderInfoLog(s));
+  return s;
+}
+const prog=gl.createProgram();
+gl.attachShader(prog,mkS(gl.VERTEX_SHADER,vertSrc));
+gl.attachShader(prog,mkS(gl.FRAGMENT_SHADER,fragSrc));
+gl.linkProgram(prog);
+if(!gl.getProgramParameter(prog,gl.LINK_STATUS))console.error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+
+const pa=gl.getAttribLocation(prog,'p');
+const qb=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+gl.bufferData(gl.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),gl.STATIC_DRAW);
+gl.enableVertexAttribArray(pa);gl.vertexAttribPointer(pa,2,gl.FLOAT,false,0,0);
+const uTime=gl.getUniformLocation(prog,'uTime');
+const uRes=gl.getUniformLocation(prog,'uRes');
+const uMouse=gl.getUniformLocation(prog,'uMouse');
+const uCamLoc=gl.getUniformLocation(prog,'uCam');
+const uTgtLoc=gl.getUniformLocation(prog,'uTgt');
+const uFovLoc=gl.getUniformLocation(prog,'uFov');
+const uMemLoc=gl.getUniformLocation(prog,'uMem[0]');
+
+// ═══════════════════════════════════════════════════
+// MEMORY DROPLETS — 12 sparse, elegant points on the surface
+// ═══════════════════════════════════════════════════
+const memTexts=[
+  {text:"Work-mode alertness is leaking into rest",date:"Today · 2:14 PM",tags:["pattern"],day:150},
+  {text:"The conversation with mom went better than expected",date:"Today · 11:30 AM",tags:["relationship"],day:150},
+  {text:"Realized I avoid asking for help not from pride but from fear",date:"Yesterday · 9:45 PM",tags:["lesson"],day:149},
+  {text:"Decided to protect Friday afternoons — no meetings",date:"Yesterday · 3:20 PM",tags:["decision"],day:149},
+  {text:"Three weeks of consistent running",date:"Mar 5 · 8:10 AM",tags:["commitment"],day:145},
+  {text:"Said no to the consulting gig. It felt right.",date:"Mar 4 · 6:30 PM",tags:["decision"],day:144},
+  {text:"Something shifted after the conversation with Elena",date:"Mar 3 · 10:15 PM",tags:["feeling"],day:143},
+  {text:"I keep reaching for my phone when I feel uncertain",date:"Mar 2 · 7:45 PM",tags:["pattern"],day:142},
+  {text:"The pitch went well. I trusted my preparation.",date:"Mar 1 · 5:00 PM",tags:["lesson"],day:141},
+  {text:"Jake's comment wasn't about me",date:"Feb 28 · 8:20 PM",tags:["relationship"],day:138},
+  {text:"Naming the fear made it smaller",date:"Feb 26 · 10:30 PM",tags:["lesson"],day:132},
+  {text:"Feeling lighter after setting the boundary",date:"Feb 23 · 7:15 PM",tags:["feeling"],day:120},
+];
+
+// Hand-placed positions — mostly midground, asymmetrically scattered
+// Each: [worldX, worldZ, brightness(0-1), size(0-1)]
+const memSeeds=[
+  [-0.95, 0.55, 0.70, 0.65],  // left mid
+  [ 0.60, 0.80, 0.55, 0.50],  // right mid-far
+  [-0.30, 0.25, 0.90, 0.80],  // left-center near
+  [ 1.10, 0.40, 0.40, 0.40],  // far right
+  [-0.55, 1.10, 0.35, 0.35],  // left far
+  [ 0.20, 0.65, 0.80, 0.70],  // center mid
+  [-1.30, 0.30, 0.30, 0.30],  // far left edge
+  [ 0.85, 0.15, 0.50, 0.45],  // right near
+  [-0.10, 1.40, 0.25, 0.30],  // center far
+  [ 0.45, 1.15, 0.35, 0.38],  // right far
+  [-0.70, 0.00, 0.60, 0.55],  // left near
+  [ 0.05, 0.05, 0.45, 0.42],  // center near (close to core glow)
+];
+
+const memories=[];
+for(let i=0;i<memSeeds.length;i++){
+  const [px,pz,brightness,size]=memSeeds[i];
+  const dist=Math.hypot(px,pz);
+  memories.push({
+    px,pz,dist,
+    brightness,size,
+    phase:i*2.09+0.7,  // spread phases
+    textIdx:i,
+    day:memTexts[i].day,
+    tlAlpha:1.0,
+    cr:195,cg:180,cb:235,
+    sx:0,sy:0,sc:0,vis:false,
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// PARTICLES — cosmic dust in 3 depth layers
+// ═══════════════════════════════════════════════════
+const parts=[];
+// Layer 0: close floating sparkles — bright on water surface
+for(let i=0;i<110;i++){
+  const a=Math.random()*Math.PI*2;
+  const r=Math.pow(Math.random(),0.42)*0.55;
+  parts.push({
+    x:0.5+Math.cos(a)*r*(innerWidth/innerHeight),
+    y:0.50+Math.sin(a)*r*0.65,
+    sz:Math.random()*1.0+0.35,
+    al:Math.random()*0.35+0.10,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.10+0.03,
+    dr:Math.random()*0.000025+0.000008,
+    layer:0,
+    cr:210+Math.random()*40, cg:195+Math.random()*40, cb:230+Math.random()*20,
+  });
+}
+// Layer 1: mid-distance — rose/violet shimmer
+for(let i=0;i<160;i++){
+  const a=Math.random()*Math.PI*2;
+  const r=Math.pow(Math.random(),0.35)*0.70;
+  parts.push({
+    x:0.5+Math.cos(a)*r*(innerWidth/innerHeight),
+    y:0.54+Math.sin(a)*r*0.55,
+    sz:Math.random()*0.55+0.15,
+    al:Math.random()*0.20+0.05,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.07+0.02,
+    dr:Math.random()*0.000014+0.000003,
+    layer:1,
+    cr:200+Math.random()*35, cg:175+Math.random()*30, cb:220+Math.random()*25,
+  });
+}
+// Layer 2: far cosmic specks — barely visible, cool
+for(let i=0;i<130;i++){
+  parts.push({
+    x:Math.random(),
+    y:Math.random()*0.60+0.15,
+    sz:Math.random()*0.28+0.06,
+    al:Math.random()*0.06+0.01,
+    ph:Math.random()*Math.PI*2,
+    sp:Math.random()*0.05+0.01,
+    dr:Math.random()*0.000007+0.000002,
+    layer:2,
+    cr:160+Math.random()*30, cg:145+Math.random()*20, cb:200+Math.random()*30,
+  });
+}
+
+// ═══════════════════════════════════════════════════
+// INTERACTIVE TIMELINE
+// ═══════════════════════════════════════════════════
+const TL_DAY_MIN=0;   // day 0 = Jul 1
+const TL_DAY_MAX=150;  // day 150 ≈ today
+let tlDay=TL_DAY_MAX;  // current scrub position
+let tlInteracted=false;
+const tlTrack=document.getElementById('tl');
+const tlHandle=document.getElementById('tlHandle');
+const tlFill=document.getElementById('tlFill');
+const tlDateText=document.getElementById('tlDateText');
+const tlCount=document.getElementById('tlCount');
+const tlHint=document.getElementById('tlHint');
+const tlMonthEls=document.querySelectorAll('.tl-month');
+
+// Day → readable label
+const tlLabels=[
+  {day:0,  text:'Jul 1'},  {day:15, text:'Jul 15'}, {day:31, text:'Aug 1'},
+  {day:46, text:'Aug 15'}, {day:62, text:'Sep 1'},  {day:77, text:'Sep 15'},
+  {day:93, text:'Oct 1'},  {day:108,text:'Oct 15'}, {day:120,text:'Oct 28'},
+  {day:124,text:'Nov 1'},  {day:132,text:'Nov 9'},  {day:138,text:'Nov 15'},
+  {day:141,text:'Nov 18'}, {day:142,text:'Nov 19'}, {day:143,text:'Nov 20'},
+  {day:144,text:'Nov 21'}, {day:145,text:'Nov 22'}, {day:149,text:'Yesterday'},
+  {day:150,text:'Today'},
+];
+function dayToLabel(d){
+  for(let i=tlLabels.length-1;i>=0;i--)
+    if(d>=tlLabels[i].day) return tlLabels[i].text;
+  return 'Jul 1';
+}
+function dayToPct(d){ return ((d-TL_DAY_MIN)/(TL_DAY_MAX-TL_DAY_MIN))*100; }
+function pctToDay(p){ return Math.round(TL_DAY_MIN+p/100*(TL_DAY_MAX-TL_DAY_MIN)); }
+
+// Place memory dots on timeline
+const tlDots=[];
+for(const m of memories){
+  const d=document.createElement('div');
+  const pct=dayToPct(m.day);
+  d.className='tl-dot'+(m.day>140?' recent':m.brightness>0.5?' b':'');
+  d.style.left=pct+'%';
+  d._day=m.day;
+  tlTrack.insertBefore(d,tlHandle);
+  tlDots.push(d);
+}
+
+function setTlDay(day){
+  tlDay=Math.max(TL_DAY_MIN,Math.min(TL_DAY_MAX,day));
+  const pct=dayToPct(tlDay);
+  tlHandle.style.left=pct+'%';
+  tlFill.style.width=pct+'%';
+  // Date label
+  tlDateText.textContent=dayToLabel(tlDay);
+  // Memory visibility
+  let visCount=0;
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    if(m.day<=tlDay){
+      const age=tlDay-m.day;
+      m.tlAlpha=age>=5?1.0:0.3+age*0.14;
+      visCount++;
+    } else {
+      m.tlAlpha=0.0;
+    }
+  }
+  tlCount.textContent=visCount+(visCount===1?' memory':' memories');
+  // Dot visibility
+  for(const d of tlDots){
+    d.classList.toggle('hidden',d._day>tlDay);
+  }
+  // Highlight active month label
+  tlMonthEls.forEach(el=>{
+    const s=parseInt(el.dataset.start);
+    el.classList.toggle('active',tlDay>=s&&tlDay<s+31);
+  });
+  // Stats counter
+  const statN=document.querySelector('.stat:nth-child(2) .stat-n');
+  if(statN) statN.textContent=visCount;
+}
+
+// Dragging
+let tlDragging=false;
+function tlPointerToDay(e){
+  const rect=tlTrack.getBoundingClientRect();
+  const pct=Math.max(0,Math.min(100,((e.clientX-rect.left)/rect.width)*100));
+  return pctToDay(pct);
+}
+function dismissHint(){
+  if(!tlInteracted){tlInteracted=true;tlHint.classList.add('hide');}
+}
+tlTrack.addEventListener('pointerdown',e=>{
+  tlDragging=true;
+  dismissHint();
+  tlHandle.classList.add('dragging');
+  setTlDay(tlPointerToDay(e));
+  tlTrack.setPointerCapture(e.pointerId);
+});
+tlTrack.addEventListener('pointermove',e=>{
+  if(!tlDragging) return;
+  setTlDay(tlPointerToDay(e));
+});
+tlTrack.addEventListener('pointerup',()=>{
+  tlDragging=false;
+  tlHandle.classList.remove('dragging');
+});
+
+// Initialize at max (show all)
+setTlDay(TL_DAY_MAX);
+
+// ═══════════════════════════════════════════════════
+// OVERLAY
+// ═══════════════════════════════════════════════════
+const olC=document.getElementById('overlay');
+const ctx=olC.getContext('2d');
+const hitC=document.getElementById('hit');
+
+// ═══════════════════════════════════════════════════
+// INTERACTION
+// ═══════════════════════════════════════════════════
+let mx=0.5,my=0.5,smx=0.5,smy=0.5;
+let selIdx=-1;
+let hovIdx=-1;
+const HIT_R=16;
+
+document.addEventListener('mousemove',e=>{
+  mx=e.clientX/innerWidth;my=e.clientY/innerHeight;
+  hovIdx=-1;
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    if(!m.vis)continue;
+    if((e.clientX-m.sx)**2+(e.clientY-m.sy)**2<HIT_R*HIT_R){hovIdx=i;break}
+  }
+  hitC.style.cursor=hovIdx>=0?'pointer':'default';
+});
+hitC.addEventListener('click',()=>{
+  if(hovIdx>=0){selIdx=hovIdx;showDetail(selIdx)}
+  else hideDetail();
+});
+
+const detailEl=document.getElementById('detail');
+function showDetail(i){
+  const m=memories[i];
+  const info=memTexts[m.textIdx];
+  const catEl=document.getElementById('dCat');
+  catEl.textContent=info.tags[0]||'memory';
+  catEl.className='d-cat cat-'+(info.tags[0]||'pattern');
+  document.getElementById('dDate').textContent=info.date;
+  document.getElementById('dText').textContent=info.text;
+  document.getElementById('dTags').innerHTML=info.tags.map(t=>`<span class="d-tag">${t}</span>`).join('');
+  document.getElementById('dSession').textContent='From session · '+info.date.split(' · ')[0];
+  detailEl.classList.add('show');
+  // Position above the gem
+  positionDetail(m);
+}
+function positionDetail(m){
+  if(!m.vis) return;
+  const pw=260; // panel width
+  const ph=detailEl.offsetHeight||140;
+  let px=m.sx-pw/2;
+  let py=m.sy-ph-28; // 28px gap above gem
+  // Clamp to viewport
+  const margin=12;
+  if(px<margin) px=margin;
+  if(px+pw>innerWidth-margin) px=innerWidth-margin-pw;
+  if(py<margin) py=m.sy+32; // flip below if no room above
+  detailEl.style.left=px+'px';
+  detailEl.style.top=py+'px';
+}
+function hideDetail(){selIdx=-1;detailEl.classList.remove('show')}
+window.hideDetail=hideDetail;
+
+// ═══════════════════════════════════════════════════
+// RESIZE
+// ═══════════════════════════════════════════════════
+function resize(){
+  const dpr=Math.min(devicePixelRatio,2);
+  poolC.width=innerWidth*dpr;poolC.height=innerHeight*dpr;
+  poolC.style.width=innerWidth+'px';poolC.style.height=innerHeight+'px';
+  gl.viewport(0,0,poolC.width,poolC.height);
+  olC.width=innerWidth*dpr;olC.height=innerHeight*dpr;
+  olC.style.width=innerWidth+'px';olC.style.height=innerHeight+'px';
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  hitC.width=innerWidth;hitC.height=innerHeight;
+  hitC.style.width=innerWidth+'px';hitC.style.height=innerHeight+'px';
+}
+addEventListener('resize',resize);resize();
+
+// ═══════════════════════════════════════════════════
+// MEMORY UNIFORM UPDATE — send 16 closest to shader
+// ═══════════════════════════════════════════════════
+const memUniformData=new Float32Array(64); // 16 × vec4
+
+function updateMemoryUniforms(){
+  memUniformData.fill(0);
+  const count=Math.min(16,memories.length);
+  for(let i=0;i<count;i++){
+    const m=memories[i];
+    if(!m.vis||m.tlAlpha<0.01)continue;
+    // Ripple strength modulated by timeline visibility
+    const strength=(i===selIdx?0.70:i===hovIdx?0.50:m.brightness*0.30+0.10)*m.tlAlpha;
+    memUniformData[i*4+0]=m.px;
+    memUniformData[i*4+1]=m.pz;
+    memUniformData[i*4+2]=strength;
+    memUniformData[i*4+3]=m.phase;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// RENDER LOOP
+// ═══════════════════════════════════════════════════
+const t0=performance.now();
+
+function frame(now){
+  const t=(now-t0)/1000;
+  smx+=(mx-smx)*0.025;smy+=(my-smy)*0.025;
+
+  // ── Update memory uniforms ──
+  updateMemoryUniforms();
+
+  // ── WebGL ──
+  gl.useProgram(prog);
+  gl.bindBuffer(gl.ARRAY_BUFFER,qb);
+  gl.enableVertexAttribArray(pa);gl.vertexAttribPointer(pa,2,gl.FLOAT,false,0,0);
+  gl.uniform1f(uTime,t);
+  gl.uniform2f(uRes,poolC.width,poolC.height);
+  gl.uniform2f(uMouse,smx,smy);
+  gl.uniform3f(uCamLoc,CAM[0],CAM[1],CAM[2]);
+  gl.uniform3f(uTgtLoc,TGT[0],TGT[1],TGT[2]);
+  gl.uniform1f(uFovLoc,curFOV);
+  gl.uniform4fv(uMemLoc,memUniformData);
+  gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
+
+  // ── Canvas2D overlay ──
+  ctx.clearRect(0,0,innerWidth,innerHeight);
+
+  // ── Particles — visible sparkles on water ──
+  for(const p of parts){
+    const ls=[1.0,0.60,0.28][p.layer];
+    p.x+=p.dr*Math.cos(t*0.08+p.ph)*ls;
+    p.y+=p.dr*Math.sin(t*0.06+p.ph)*0.4*ls;
+    if(p.x<-0.04)p.x=1.04;if(p.x>1.04)p.x=-0.04;
+    if(p.y<-0.04)p.y=1.04;if(p.y>1.04)p.y=-0.04;
+    const pulse=Math.sin(t*p.sp+p.ph)*0.35+0.65;
+    const twinkle=Math.max(0,Math.sin(t*p.sp*3.7+p.ph*2.1))**4; // sharp twinkle
+    const a=p.al*pulse;if(a<0.003)continue;
+    const pxs=p.x*innerWidth,pys=p.y*innerHeight;
+    const cd=Math.hypot(p.x-0.5,p.y-0.52);
+    const boost=Math.max(0,1-cd*1.8)*0.55+1;
+    const pr=Math.round(p.cr), pg=Math.round(p.cg), pb=Math.round(p.cb);
+    // Outer glow — large soft halo
+    const glowR=p.sz*12.0;
+    if(glowR>2){
+      const g=ctx.createRadialGradient(pxs,pys,0,pxs,pys,glowR);
+      g.addColorStop(0,`rgba(${pr},${pg},${pb},${Math.min(1,a*0.45*boost)})`);
+      g.addColorStop(0.4,`rgba(${pr},${pg},${pb},${Math.min(1,a*0.15*boost)})`);
+      g.addColorStop(1,`rgba(${pr},${pg},${pb},0)`);
+      ctx.beginPath();ctx.arc(pxs,pys,glowR,0,Math.PI*2);ctx.fillStyle=g;ctx.fill();
+    }
+    // Bright core dot
+    const coreR=Math.max(0.8, p.sz*1.2);
+    const coreA=Math.min(1, a*1.2*boost + twinkle*0.4);
+    ctx.beginPath();ctx.arc(pxs,pys,coreR,0,Math.PI*2);
+    ctx.fillStyle=`rgba(${Math.min(255,pr+40)},${Math.min(255,pg+40)},${Math.min(255,pb+20)},${coreA})`;ctx.fill();
+  }
+
+  // ── Constellation lines — subtle connections between nearby memories ──
+  // Pre-compute visible gems for line drawing
+  const visGems=[];
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    if(m.vis&&m.sc>0.05&&m.tlAlpha>0.05) visGems.push({i,x:m.sx,y:m.sy,sc:m.sc,px:m.px,pz:m.pz,tlA:m.tlAlpha});
+  }
+  // Connect gems within a world-space threshold (not screen-space, so perspective-correct)
+  const maxLinkDist=1.6; // world units
+  const drawnLinks=new Set();
+  for(let a=0;a<visGems.length;a++){
+    for(let b=a+1;b<visGems.length;b++){
+      const ga=visGems[a], gb=visGems[b];
+      const wDist=Math.hypot(ga.px-gb.px, ga.pz-gb.pz);
+      if(wDist>maxLinkDist) continue;
+      const key=ga.i*100+gb.i;
+      if(drawnLinks.has(key)) continue;
+      drawnLinks.add(key);
+      // Line alpha: fades with world distance, modulated by depth
+      const distFade=1.0-wDist/maxLinkDist;
+      const depthA=Math.min(1.0, ga.sc*3.0);
+      const depthB=Math.min(1.0, gb.sc*3.0);
+      const lineAlpha=distFade*distFade*Math.min(depthA,depthB)*Math.min(ga.tlA,gb.tlA)*0.12;
+      if(lineAlpha<0.005) continue;
+      // Gradient along the line — fades at both ends
+      const lg=ctx.createLinearGradient(ga.x,ga.y,gb.x,gb.y);
+      lg.addColorStop(0,`rgba(190,175,220,0)`);
+      lg.addColorStop(0.15,`rgba(190,175,220,${lineAlpha})`);
+      lg.addColorStop(0.5,`rgba(200,185,225,${lineAlpha*1.2})`);
+      lg.addColorStop(0.85,`rgba(190,175,220,${lineAlpha})`);
+      lg.addColorStop(1,`rgba(190,175,220,0)`);
+      ctx.beginPath();
+      ctx.moveTo(ga.x,ga.y);
+      ctx.lineTo(gb.x,gb.y);
+      ctx.strokeStyle=lg;
+      ctx.lineWidth=0.6;
+      ctx.stroke();
+    }
+  }
+
+  // ── Memory gems — 3D teardrop crystals with warm interior glow ──
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    const proj=poolToScreen(m.px,m.pz);
+    if(!proj||proj.x<-50||proj.x>innerWidth+50||proj.y<-50||proj.y>innerHeight+50){
+      m.vis=false;continue;
+    }
+    m.vis=true;m.sx=proj.x;m.sy=proj.y;m.sc=proj.s;
+
+    const isSel=(i===selIdx);
+    const isHov=(i===hovIdx);
+
+    // Slow breathing
+    const breathe=Math.sin(t*0.25+m.phase)*0.08+Math.sin(t*0.13+m.phase*1.7)*0.04;
+
+    // Depth falloff
+    const depthFade=Math.min(1.0,Math.pow(Math.min(proj.s*3.0,1.0),0.55));
+
+    // Gem scale — perspective-adjusted, larger to stand out
+    const baseScale=6.5+m.size*3.0;
+    const sc=Math.max(4.5,baseScale*Math.min(2.5,proj.s*3.5));
+    const gemW=sc*0.50;
+    const gemH=sc*1.25;
+
+    // Alpha — modulated by timeline scrubber
+    if(m.tlAlpha<0.01){m.vis=false;continue;}
+    let alpha=(0.50+m.brightness*0.35+breathe)*depthFade*m.tlAlpha;
+    if(isSel)alpha=Math.min(1.0,alpha*2.2);
+    if(isHov&&!isSel)alpha=Math.min(0.92,alpha*1.8);
+
+    const cx=proj.x;
+    const cy=proj.y;
+
+    // ── Multiple concentric ripple rings (warm → cool as they expand) ──
+    if(depthFade>0.10){
+      const nRings=isSel?5:isHov?4:3;
+      const speed=0.28;
+      for(let r=0;r<nRings;r++){
+        const ripPhase=((t*speed+m.phase+r*1.2)%5.0)/5.0;
+        const ripR=sc*0.8+ripPhase*(isSel?45:isHov?32:22);
+        const ripA=(1.0-ripPhase)*(isSel?0.22:isHov?0.14:0.07)*depthFade;
+        if(ripA<0.004)continue;
+        const warmth=Math.max(0,1-ripPhase);
+        const rr=Math.round(180+warmth*55);
+        const rg=Math.round(155+warmth*50);
+        const rb=Math.round(215-warmth*65);
+        ctx.beginPath();ctx.arc(cx,cy,ripR,0,Math.PI*2);
+        ctx.strokeStyle=`rgba(${rr},${rg},${rb},${ripA})`;
+        ctx.lineWidth=isSel?1.2:isHov?0.9:0.5;
+        ctx.stroke();
+      }
+    }
+
+    // ── Outer warm glow halo ──
+    const glowR=gemH*2.5+(isSel?28:isHov?20:12+m.brightness*8);
+    let glowA=(0.14+breathe*0.03)*depthFade*(0.5+m.brightness*0.5);
+    if(isSel)glowA*=3.5;
+    if(isHov&&!isSel)glowA*=2.2;
+
+    const haloG=ctx.createRadialGradient(cx,cy,0,cx,cy,glowR);
+    haloG.addColorStop(0,`rgba(235,215,240,${Math.min(0.40,glowA*1.2)})`);
+    haloG.addColorStop(0.25,`rgba(210,190,220,${Math.min(0.22,glowA*0.6)})`);
+    haloG.addColorStop(0.6,`rgba(180,160,200,${Math.min(0.08,glowA*0.2)})`);
+    haloG.addColorStop(1,'rgba(160,145,185,0)');
+    ctx.beginPath();ctx.arc(cx,cy,glowR,0,Math.PI*2);
+    ctx.fillStyle=haloG;ctx.fill();
+
+    // ── Teardrop gem body (rounded top, pointed bottom) ──
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(cx, cy+gemH);
+    ctx.bezierCurveTo(
+      cx-gemW*1.3, cy+gemH*0.15,
+      cx-gemW*1.0, cy-gemH*0.65,
+      cx, cy-gemH*0.55
+    );
+    ctx.bezierCurveTo(
+      cx+gemW*1.0, cy-gemH*0.65,
+      cx+gemW*1.3, cy+gemH*0.15,
+      cx, cy+gemH
+    );
+    ctx.closePath();
+    // Clip to gem shape for all interior layers
+    ctx.clip();
+
+    // Layer 1: Base fill — rich translucent violet
+    ctx.fillStyle=`rgba(155,135,205,${Math.min(0.72,alpha*0.75)})`;
+    ctx.fill();
+
+    // Layer 2: Interior glow — warm white core shifted upward (light from above)
+    const gemG=ctx.createRadialGradient(cx,cy-gemH*0.22,0,cx,cy-gemH*0.05,gemH*0.85);
+    gemG.addColorStop(0,`rgba(255,248,242,${Math.min(0.88,alpha*0.95)})`);
+    gemG.addColorStop(0.25,`rgba(240,218,228,${Math.min(0.70,alpha*0.75)})`);
+    gemG.addColorStop(0.50,`rgba(210,185,225,${Math.min(0.42,alpha*0.45)})`);
+    gemG.addColorStop(0.80,`rgba(175,155,210,${Math.min(0.18,alpha*0.20)})`);
+    gemG.addColorStop(1,'rgba(150,130,195,0)');
+    ctx.fillStyle=gemG;
+    ctx.fillRect(cx-gemW*2,cy-gemH,gemW*4,gemH*2.5);
+
+    // Layer 3: Bottom shadow — darker at the point (3D depth cue)
+    const shadG=ctx.createLinearGradient(cx,cy,cx,cy+gemH);
+    shadG.addColorStop(0,'rgba(40,30,60,0)');
+    shadG.addColorStop(0.5,`rgba(40,30,60,${Math.min(0.25,alpha*0.28)})`);
+    shadG.addColorStop(1,`rgba(25,18,45,${Math.min(0.40,alpha*0.45)})`);
+    ctx.fillStyle=shadG;
+    ctx.fillRect(cx-gemW*2,cy-gemH,gemW*4,gemH*2.5);
+
+    // Layer 4: Refraction edge — bright rim on left side (light catches edge)
+    const edgeG=ctx.createLinearGradient(cx-gemW*1.2,cy,cx+gemW*0.5,cy);
+    edgeG.addColorStop(0,`rgba(235,225,250,${Math.min(0.35,alpha*0.38)})`);
+    edgeG.addColorStop(0.15,`rgba(215,205,240,${Math.min(0.18,alpha*0.20)})`);
+    edgeG.addColorStop(0.4,'rgba(190,175,225,0)');
+    edgeG.addColorStop(1,'rgba(180,165,215,0)');
+    ctx.fillStyle=edgeG;
+    ctx.fillRect(cx-gemW*2,cy-gemH,gemW*4,gemH*2.5);
+
+    ctx.restore();
+
+    // ── Gem outline — faint crystal edge ──
+    ctx.beginPath();
+    ctx.moveTo(cx, cy+gemH);
+    ctx.bezierCurveTo(cx-gemW*1.3,cy+gemH*0.15,cx-gemW*1.0,cy-gemH*0.65,cx,cy-gemH*0.55);
+    ctx.bezierCurveTo(cx+gemW*1.0,cy-gemH*0.65,cx+gemW*1.3,cy+gemH*0.15,cx,cy+gemH);
+    ctx.closePath();
+    ctx.strokeStyle=`rgba(220,212,245,${Math.min(0.35,alpha*0.38)})`;
+    ctx.lineWidth=0.9;
+    ctx.stroke();
+
+    // ── Specular highlight — top of gem ──
+    const hlY=cy-gemH*0.32;
+    const hlR=gemW*0.75;
+    const hlG=ctx.createRadialGradient(cx-gemW*0.15,hlY,0,cx-gemW*0.05,hlY,hlR);
+    hlG.addColorStop(0,`rgba(255,252,250,${Math.min(0.75,alpha*0.80)})`);
+    hlG.addColorStop(0.4,`rgba(240,232,245,${Math.min(0.30,alpha*0.32)})`);
+    hlG.addColorStop(1,'rgba(215,205,230,0)');
+    ctx.beginPath();ctx.arc(cx-gemW*0.1,hlY,hlR,0,Math.PI*2);
+    ctx.fillStyle=hlG;ctx.fill();
+
+    ctx.restore();
+  }
+
+  // ── Atmospheric overlays — layered depth separation ──
+
+  // Layer A: wide central glow above pool (warm dark)
+  const hazeA=ctx.createRadialGradient(innerWidth*0.5,innerHeight*0.48,0,innerWidth*0.5,innerHeight*0.48,innerWidth*0.5);
+  hazeA.addColorStop(0,'rgba(45,35,48,0.018)');
+  hazeA.addColorStop(0.35,'rgba(35,28,38,0.010)');
+  hazeA.addColorStop(0.7,'rgba(22,18,28,0.004)');
+  hazeA.addColorStop(1,'rgba(12,10,16,0)');
+  ctx.beginPath();ctx.rect(0,0,innerWidth,innerHeight);
+  ctx.fillStyle=hazeA;ctx.fill();
+
+  // Layer B: midground mist band — subtle horizontal strip
+  const midY=innerHeight*0.52;
+  const hazeB=ctx.createLinearGradient(0,midY-innerHeight*0.12,0,midY+innerHeight*0.12);
+  hazeB.addColorStop(0,'rgba(18,16,24,0)');
+  hazeB.addColorStop(0.3,'rgba(28,22,30,0.008)');
+  hazeB.addColorStop(0.5,'rgba(32,26,34,0.012)');
+  hazeB.addColorStop(0.7,'rgba(28,22,30,0.008)');
+  hazeB.addColorStop(1,'rgba(18,16,24,0)');
+  ctx.beginPath();ctx.rect(0,midY-innerHeight*0.12,innerWidth,innerHeight*0.24);
+  ctx.fillStyle=hazeB;ctx.fill();
+
+  // Layer C: foreground depth fade (bottom corners darken slightly)
+  const hazeC=ctx.createLinearGradient(0,innerHeight*0.65,0,innerHeight);
+  hazeC.addColorStop(0,'rgba(6,5,10,0)');
+  hazeC.addColorStop(0.6,'rgba(6,5,10,0.008)');
+  hazeC.addColorStop(1,'rgba(6,5,10,0.016)');
+  ctx.beginPath();ctx.rect(0,innerHeight*0.65,innerWidth,innerHeight*0.35);
+  ctx.fillStyle=hazeC;ctx.fill();
+
+  // Layer D: top darkness fade (background recedes)
+  const hazeD=ctx.createLinearGradient(0,0,0,innerHeight*0.30);
+  hazeD.addColorStop(0,'rgba(5,4,8,0.012)');
+  hazeD.addColorStop(0.5,'rgba(5,4,8,0.005)');
+  hazeD.addColorStop(1,'rgba(5,4,8,0)');
+  ctx.beginPath();ctx.rect(0,0,innerWidth,innerHeight*0.30);
+  ctx.fillStyle=hazeD;ctx.fill();
+
+  // Layer E: tight central luminance lift (the pool "breathes light into the air")
+  const cPulse=Math.sin(t*0.15)*0.003+0.018;
+  const hazeG=ctx.createRadialGradient(innerWidth*0.5,innerHeight*0.52,0,innerWidth*0.5,innerHeight*0.52,innerWidth*0.22);
+  hazeG.addColorStop(0,`rgba(55,40,50,${cPulse})`);
+  hazeG.addColorStop(0.5,`rgba(50,32,85,${cPulse*0.4})`);
+  hazeG.addColorStop(1,'rgba(30,20,55,0)');
+  ctx.beginPath();ctx.rect(0,0,innerWidth,innerHeight);
+  ctx.fillStyle=hazeG;ctx.fill();
+
+  // Keep detail panel tracking the selected gem
+  if(selIdx>=0&&memories[selIdx].vis) positionDetail(memories[selIdx]);
+
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

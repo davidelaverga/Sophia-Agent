@@ -1,25 +1,18 @@
-import { Footer } from "@/components/landing/footer";
-import { Header } from "@/components/landing/header";
-import { Hero } from "@/components/landing/hero";
-import { CaseStudySection } from "@/components/landing/sections/case-study-section";
-import { CommunitySection } from "@/components/landing/sections/community-section";
-import { SandboxSection } from "@/components/landing/sections/sandbox-section";
-import { SkillsSection } from "@/components/landing/sections/skills-section";
-import { WhatsNewSection } from "@/components/landing/sections/whats-new-section";
+/**
+ * Home Page - Sophia V2 Dashboard
+ * Sprint 1 - Voice-First Redesign
+ * 
+ * Voice is the hero action, rituals are optional modes
+ * Auth flow: Discord Login → Consent Gate → Dashboard
+ */
 
-export default function LandingPage() {
+import { EnhancedFieldDashboard } from './components/EnhancedFieldDashboard';
+import { ProtectedRoute } from './components/ProtectedRoute';
+
+export default function HomePage() {
   return (
-    <div className="min-h-screen w-full bg-[#0a0a0a]">
-      <Header />
-      <main className="flex w-full flex-col">
-        <Hero />
-        <CaseStudySection />
-        <SkillsSection />
-        <SandboxSection />
-        <WhatsNewSection />
-        <CommunitySection />
-      </main>
-      <Footer />
-    </div>
+    <ProtectedRoute>
+      <EnhancedFieldDashboard />
+    </ProtectedRoute>
   );
 }

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -16,7 +17,6 @@ from fastapi.testclient import TestClient
 def client():
     """Create a test client with the Sophia router."""
     from app.gateway.routers.sophia import router
-    from fastapi import FastAPI
 
     app = FastAPI()
     app.include_router(router)
@@ -30,6 +30,20 @@ def mock_mem0():
         mock_client = MagicMock()
         mock.return_value = mock_client
         yield mock_client
+
+
+@pytest.fixture(autouse=True)
+def mock_review_store():
+    with (
+        patch("app.gateway.routers.sophia.apply_review_metadata_overlays", side_effect=lambda _user_id, memories: memories) as mock_apply,
+        patch("app.gateway.routers.sophia.upsert_review_metadata") as mock_upsert,
+        patch("app.gateway.routers.sophia.remove_review_metadata") as mock_remove,
+    ):
+        yield {
+            "apply": mock_apply,
+            "upsert": mock_upsert,
+            "remove": mock_remove,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -71,13 +85,78 @@ class TestListMemories:
         assert resp.json()["memories"] == []
 
     def test_with_status_filter(self, client, mock_mem0):
-        mock_mem0.get_all.return_value = []
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+            {"id": "m2", "memory": "Already approved", "metadata": None},
+        ]
+        mock_mem0.get.side_effect = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+            {"id": "m2", "memory": "Already approved", "metadata": {"status": "approved"}},
+        ]
         resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
         assert resp.status_code == 200
-        mock_mem0.get_all.assert_called_once()
-        call_kwargs = mock_mem0.get_all.call_args
-        filters = call_kwargs[1].get("filters", call_kwargs[0][0] if call_kwargs[0] else {})
-        assert "user_id" in str(filters)
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "m1"
+        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user"})
+        assert mock_mem0.get.call_count == 2
+
+    def test_status_filter_uses_local_review_metadata_overlay(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+        ]
+        mock_mem0.get.return_value = {"id": "m1", "memory": "Needs review", "metadata": None}
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {
+                "id": "m1",
+                "memory": "Needs review",
+                "metadata": {"status": "pending_review", "category": "fact"},
+                "category": "fact",
+            }
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["metadata"]["status"] == "pending_review"
+
+    def test_status_filter_skips_detail_hydration_when_overlay_supplies_status(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": None},
+        ]
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "m1", "memory": "Needs review", "metadata": {"status": "pending_review"}},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 1
+        mock_mem0.get.assert_not_called()
+
+    def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Likes pizza", "metadata": None, "categories": []},
+        ]
+        mock_mem0.get.return_value = {
+            "id": "m1",
+            "memory": "Likes pizza",
+            "metadata": {"status": "approved"},
+            "categories": ["food"],
+        }
+
+        resp = client.get("/api/sophia/test_user/memories/recent")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["metadata"] == {"status": "approved"}
+        assert data["memories"][0]["category"] == "food"
+        mock_mem0.get.assert_called_once_with("m1")
 
     def test_mem0_failure_returns_503(self, client, mock_mem0):
         mock_mem0.get_all.side_effect = Exception("API error")
@@ -97,11 +176,56 @@ class TestListMemories:
 
 
 # ---------------------------------------------------------------------------
+# Memory Create
+# ---------------------------------------------------------------------------
+
+class TestCreateMemory:
+    def test_create_memory_returns_item(self, client, mock_mem0, mock_review_store):
+        mock_mem0.add.return_value = [{"id": "m1", "memory": "Likes pizza", "categories": ["food"]}]
+        with patch("deerflow.sophia.mem0_client.invalidate_user_cache") as mock_invalidate:
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Likes pizza", "category": "food", "metadata": {"status": "approved"}},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == "m1"
+        assert data["content"] == "Likes pizza"
+        mock_mem0.add.assert_called_once()
+        mock_invalidate.assert_called_once_with("test_user")
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            memory_id="m1",
+            content="Likes pizza",
+            metadata={"status": "approved", "category": "food"},
+            session_id="manual-create",
+            sync_state="manual",
+        )
+
+    def test_create_memory_falls_back_without_metadata(self, client, mock_mem0):
+        mock_mem0.add.side_effect = [TypeError("metadata unsupported"), [{"id": "m2", "memory": "Keeps going"}]]
+        with patch("deerflow.sophia.mem0_client.invalidate_user_cache"):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Keeps going", "metadata": {"status": "approved"}},
+            )
+        assert resp.status_code == 200
+        assert mock_mem0.add.call_count == 2
+
+    def test_create_memory_invalid_user_returns_400(self, client):
+        resp = client.post(
+            "/api/sophia/user;hack/memories",
+            json={"text": "test"},
+        )
+        assert resp.status_code == 400
+
+
+# ---------------------------------------------------------------------------
 # Memory Update
 # ---------------------------------------------------------------------------
 
 class TestUpdateMemory:
-    def test_update_text(self, client, mock_mem0):
+    def test_update_text(self, client, mock_mem0, mock_review_store):
         mock_mem0.update.return_value = {"id": "m1", "memory": "Updated text"}
         with patch("app.gateway.routers.sophia.invalidate_user_cache", create=True):
             resp = client.put(
@@ -109,6 +233,13 @@ class TestUpdateMemory:
                 json={"text": "Updated text"},
             )
         assert resp.status_code == 200
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            memory_id="m1",
+            content="Updated text",
+            metadata=None,
+            sync_state="manual",
+        )
 
     def test_invalid_user_returns_400(self, client):
         resp = client.put(
@@ -117,7 +248,7 @@ class TestUpdateMemory:
         )
         assert resp.status_code == 400
 
-    def test_update_with_metadata(self, client, mock_mem0):
+    def test_update_with_metadata(self, client, mock_mem0, mock_review_store):
         mock_mem0.update.return_value = {"id": "m1", "memory": "Updated text"}
         with patch("app.gateway.routers.sophia.invalidate_user_cache", create=True):
             resp = client.put(
@@ -127,6 +258,13 @@ class TestUpdateMemory:
         assert resp.status_code == 200
         mock_mem0.update.assert_called_once_with(
             memory_id="m1", text="Updated text", metadata={"status": "approved"},
+        )
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            memory_id="m1",
+            content="Updated text",
+            metadata={"status": "approved"},
+            sync_state="manual",
         )
 
     def test_update_no_fields_returns_422(self, client, mock_mem0):
@@ -143,16 +281,42 @@ class TestUpdateMemory:
 # ---------------------------------------------------------------------------
 
 class TestDeleteMemory:
-    def test_delete_returns_204(self, client, mock_mem0):
+    def test_delete_returns_204(self, client, mock_mem0, mock_review_store):
         mock_mem0.delete.return_value = None
         with patch("app.gateway.routers.sophia.invalidate_user_cache", create=True):
             resp = client.delete("/api/sophia/test_user/memories/m1")
         assert resp.status_code == 204
+        mock_review_store["remove"].assert_called_once_with("test_user", memory_id="m1")
 
     def test_delete_failure_returns_503(self, client, mock_mem0):
         mock_mem0.delete.side_effect = Exception("Not found")
         resp = client.delete("/api/sophia/test_user/memories/m1")
         assert resp.status_code == 503
+
+
+class TestBulkReview:
+    def test_bulk_review_updates_local_store(self, client, mock_mem0, mock_review_store):
+        resp = client.post(
+            "/api/sophia/test_user/memories/bulk-review",
+            json={
+                "items": [
+                    {"id": "m1", "action": "approve"},
+                    {"id": "m2", "action": "discard"},
+                ]
+            },
+        )
+
+        assert resp.status_code == 200
+        mock_mem0.update.assert_called_once_with(memory_id="m1", metadata={"status": "approved"})
+        mock_mem0.delete.assert_called_once_with(memory_id="m2")
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            memory_id="m1",
+            content_hash=None,
+            metadata={"status": "approved"},
+            sync_state="manual",
+        )
+        mock_review_store["remove"].assert_called_once_with("test_user", memory_id="m2")
 
     def test_delete_invalidates_cache(self, client, mock_mem0):
         mock_mem0.delete.return_value = None
@@ -161,12 +325,6 @@ class TestDeleteMemory:
         assert resp.status_code == 204
         mock_invalidate.assert_called_once_with("test_user")
 
-
-# ---------------------------------------------------------------------------
-# Bulk Review
-# ---------------------------------------------------------------------------
-
-class TestBulkReview:
     def test_approve_and_discard(self, client, mock_mem0):
         mock_mem0.update.return_value = {}
         mock_mem0.delete.return_value = None
@@ -215,7 +373,7 @@ class TestBulkReview:
 class TestReflect:
     def test_reflect_success(self, client):
         mock_result = {"voice_context": "You've been focused on work.", "visual_parts": []}
-        with patch("app.gateway.routers.sophia.generate_reflection", return_value=mock_result, create=True):
+        with patch("deerflow.sophia.reflection.generate_reflection", return_value=mock_result):
             resp = client.post(
                 "/api/sophia/test_user/reflect",
                 json={"query": "How have I been?", "period": "this_week"},
@@ -261,6 +419,34 @@ class TestJournal:
 
 
 # ---------------------------------------------------------------------------
+# Session Recap
+# ---------------------------------------------------------------------------
+
+class TestSessionRecap:
+    def test_returns_persisted_recap(self, client, tmp_path):
+        recap_dir = tmp_path / "test_user" / "recaps"
+        recap_dir.mkdir(parents=True, exist_ok=True)
+        (recap_dir / "sess-001.json").write_text(
+            '{"session_id": "sess-001", "thread_id": "thread-001", "status": "ready", "ended_at": "2026-04-05T10:00:00+00:00", "turn_count": 4, "recap_artifacts": {"takeaway": "You stayed with the hard part."}}',
+            encoding="utf-8",
+        )
+
+        with patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
+            resp = client.get("/api/sophia/test_user/sessions/sess-001/recap")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["session_id"] == "sess-001"
+        assert data["recap_artifacts"]["takeaway"] == "You stayed with the hard part."
+
+    def test_missing_recap_returns_404(self, client, tmp_path):
+        with patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
+            resp = client.get("/api/sophia/test_user/sessions/missing/recap")
+
+        assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
 # Visual Weekly
 # ---------------------------------------------------------------------------
 
@@ -302,16 +488,45 @@ class TestVisualCategories:
 # ---------------------------------------------------------------------------
 
 class TestSessionEnd:
-    def test_returns_202(self, client):
-        with patch("app.gateway.routers.sophia.run_offline_pipeline", create=True):
+    def test_returns_202(self, client, tmp_path):
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
             resp = client.post(
                 "/api/sophia/test_user/end-session",
-                json={"session_id": "sess-001", "thread_id": "thread-001"},
+                json={
+                    "session_id": "sess-001",
+                    "thread_id": "thread-001",
+                    "started_at": "2026-04-05T09:52:00+00:00",
+                    "ended_at": "2026-04-05T10:00:00+00:00",
+                    "offer_debrief": True,
+                    "session_type": "open",
+                    "context_mode": "life",
+                    "turn_count": 4,
+                    "messages": [
+                        {"role": "user", "content": "I needed to talk this through."},
+                        {"role": "assistant", "content": "You stayed with it."},
+                    ],
+                    "recap_artifacts": {
+                        "takeaway": "You stayed with it.",
+                        "reflection_candidate": {"prompt": "What shifted once you slowed down?"},
+                    },
+                },
             )
         assert resp.status_code == 202
         data = resp.json()
         assert data["status"] == "pipeline_queued"
         assert data["session_id"] == "sess-001"
+        assert data["turn_count"] == 4
+        assert data["offer_debrief"] is True
+        assert data["recap_artifacts"]["takeaway"] == "You stayed with it."
+
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-001.json").read_text(encoding="utf-8"))
+        assert saved["status"] == "ready"
+        assert saved["recap_artifacts"]["takeaway"] == "You stayed with it."
+        mock_queue.assert_called_once()
+        queued_state = mock_queue.call_args.args[3]
+        assert queued_state is not None
+        assert queued_state["messages"][0]["content"] == "I needed to talk this through."
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

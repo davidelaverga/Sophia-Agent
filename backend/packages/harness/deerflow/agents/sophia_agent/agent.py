@@ -5,7 +5,6 @@ Creates the Sophia companion agent with its middleware chain.
 
 import logging
 import os
-from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
@@ -25,8 +24,8 @@ from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMid
 from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
+from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
@@ -52,7 +51,10 @@ def make_sophia_agent(config: RunnableConfig):
 
     logger.info(
         "Creating Sophia companion agent: user_id=%s, platform=%s, ritual=%s, context_mode=%s",
-        user_id, platform, ritual, context_mode,
+        user_id,
+        platform,
+        ritual,
+        context_mode,
     )
 
     model = ChatAnthropic(

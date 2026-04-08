@@ -6,7 +6,7 @@ realistic state, verifying ordering constraints and crisis fast-path.
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -84,14 +84,14 @@ class TestMiddlewareChainOrdering:
 
     def test_normal_turn_all_middlewares_fire(self, skills_path):
         """All middlewares contribute to state on a normal turn."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
-        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
-        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
-        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 
         middlewares = [
             CrisisCheckMiddleware(),
@@ -133,14 +133,14 @@ class TestMiddlewareChainOrdering:
 
     def test_crisis_fast_path(self, skills_path):
         """Crisis message activates fast-path — only soul.md + crisis_redirect injected."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
         from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
-        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
-        from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
-        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 
         middlewares = [
             CrisisCheckMiddleware(),
@@ -215,12 +215,14 @@ class TestMiddlewareChainOrdering:
 
     def test_prompt_assembly_creates_system_message(self, skills_path):
         """PromptAssemblyMiddleware joins all blocks into a system message."""
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         from langchain_core.messages import SystemMessage
 
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
+        human_msg = HumanMessage(content="hello")
         state = {
-            "messages": [_make_message("hello")],
+            "messages": [human_msg],
             "system_prompt_blocks": [
                 "# Soul\nYou are Sophia.",
                 "Platform: voice. Respond in 1-3 sentences.",
@@ -228,9 +230,24 @@ class TestMiddlewareChainOrdering:
             ],
         }
 
-        result = mw.before_model(state, _make_runtime())
-        assert result is not None
-        msgs = result["messages"]
+        request = MagicMock()
+        request.messages = [human_msg]
+        request.state = state
+        def _override(**kwargs):
+            new_req = MagicMock()
+            new_req.messages = kwargs.get("messages", [human_msg])
+            new_req.state = state
+            return new_req
+        request.override = _override
+
+        captured = {}
+        def handler(req):
+            captured["messages"] = req.messages
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        msgs = captured["messages"]
         assert isinstance(msgs[0], SystemMessage)
         assert "Sophia" in msgs[0].content
         assert "voice" in msgs[0].content

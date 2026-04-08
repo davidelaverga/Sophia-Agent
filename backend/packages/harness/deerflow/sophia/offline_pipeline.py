@@ -17,15 +17,18 @@ The pipeline is idempotent via a module-level ``_processed_sessions`` set.
 
 from __future__ import annotations
 
-import json
 import logging
+import os
 import threading
 from typing import Any
+
+import httpx
 
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.extraction import extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
+from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
 from deerflow.sophia.smart_opener import generate_smart_opener
 from deerflow.sophia.trace_logger import write_session_trace
 
@@ -35,6 +38,33 @@ logger = logging.getLogger(__name__)
 # If multi-process is needed later, upgrade to a file-based marker.
 _processed_sessions: set[str] = set()
 _processed_lock = threading.Lock()
+
+_LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:2024")
+
+
+def _fetch_thread_state(thread_id: str) -> dict[str, Any] | None:
+    """Fetch thread state from the LangGraph server.
+
+    Called when ``thread_state`` is not provided by the caller. The
+    pipeline already runs in ``asyncio.to_thread``, so a synchronous
+    HTTP call is fine.
+
+    Returns the state values dict on success, or ``None`` on failure.
+    """
+    url = f"{_LANGGRAPH_URL}/threads/{thread_id}/state"
+    try:
+        resp = httpx.get(url, timeout=10.0)
+        resp.raise_for_status()
+        data = resp.json()
+        # LangGraph returns {"values": {...state...}, "next": [...], ...}
+        values = data.get("values", data)
+        if not values.get("messages"):
+            logger.warning("Fetched thread state has no messages for thread %s", thread_id)
+            return None
+        return values
+    except Exception:
+        logger.warning("Failed to fetch thread state for thread %s", thread_id, exc_info=True)
+        return None
 
 
 def run_offline_pipeline(
@@ -51,7 +81,8 @@ def run_offline_pipeline(
         thread_id: The LangGraph thread ID.
         thread_state: Full thread state dict including ``messages`` and
             optionally ``configurable``, ``current_artifact``, etc.
-            If ``None``, the pipeline cannot proceed.
+            If ``None``, the pipeline fetches it from the LangGraph
+            server using ``thread_id``.
 
     Returns:
         Summary dict with ``status`` and per-step results, e.g.::
@@ -64,6 +95,14 @@ def run_offline_pipeline(
     # --- Validate user_id at entry ---
     validate_user_id(user_id)
 
+    logger.info(
+        "session.finalization pipeline_start user_id=%s session_id=%s thread_id=%s has_thread_state=%s",
+        user_id,
+        session_id,
+        thread_id,
+        thread_state is not None,
+    )
+
     # --- Idempotency check (atomic check-and-add to prevent TOCTOU race) ---
     with _processed_lock:
         if session_id in _processed_sessions:
@@ -71,15 +110,37 @@ def run_offline_pipeline(
             return {"status": "already_processed", "session_id": session_id}
         _processed_sessions.add(session_id)
 
-    # --- Thread state guard ---
+    # --- Thread state: fetch from LangGraph if not provided ---
     if thread_state is None:
-        logger.warning("No thread_state for session %s — aborting pipeline", session_id)
-        return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
+        thread_state = _fetch_thread_state(thread_id)
+        if thread_state is None:
+            logger.warning(
+                "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
+                user_id,
+                session_id,
+                thread_id,
+            )
+            # Remove from processed set so a retry can succeed after a transient failure
+            with _processed_lock:
+                _processed_sessions.discard(session_id)
+            return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
+        logger.info("Fetched thread_state from LangGraph for session %s", session_id)
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])
     session_metadata = _build_session_metadata(thread_state)
     artifacts = _extract_artifacts(thread_state)
+
+    logger.info(
+        "session.finalization pipeline_context user_id=%s session_id=%s message_count=%s artifact_count=%s platform=%s context_mode=%s ritual=%s",
+        user_id,
+        session_id,
+        len(messages),
+        len(artifacts),
+        session_metadata.get("platform"),
+        session_metadata.get("context_mode"),
+        session_metadata.get("ritual"),
+    )
 
     steps: dict[str, str] = {}
 
@@ -102,7 +163,14 @@ def run_offline_pipeline(
         extracted_memories = extract_session_memories(
             user_id, session_id, serialized_messages, session_metadata,
         )
+        reconcile_review_metadata_with_mem0(user_id)
         steps["extraction"] = "ok"
+        logger.info(
+            "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
+            user_id,
+            session_id,
+            len(extracted_memories),
+        )
     except Exception:
         logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
         steps["extraction"] = "error"
@@ -178,7 +246,8 @@ def run_offline_pipeline(
     # (session_id already added at the top via _processed_lock)
 
     logger.info(
-        "Offline pipeline completed for session %s: %s",
+        "session.finalization pipeline_complete user_id=%s session_id=%s steps=%s",
+        user_id,
         session_id,
         steps,
     )

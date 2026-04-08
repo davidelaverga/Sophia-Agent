@@ -161,3 +161,11 @@ up:
 # Stop and remove production containers
 down:
 	@./scripts/deploy.sh down
+
+# ==========================================
+# Sophia Voice Development
+# ==========================================
+
+# Start all Sophia voice services (Windows PowerShell)
+sophia-dev:
+	@powershell -ExecutionPolicy Bypass -File scripts/sophia-dev.ps1

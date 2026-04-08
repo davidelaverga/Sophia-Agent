@@ -3,9 +3,6 @@
 import json
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-
 # Sample extraction response from Claude Haiku
 _SAMPLE_EXTRACTION = [
     {

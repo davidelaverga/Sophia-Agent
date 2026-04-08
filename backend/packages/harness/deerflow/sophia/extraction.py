@@ -7,7 +7,7 @@ via add_memories() with full metadata and status="pending_review".
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import anthropic
@@ -81,12 +81,19 @@ def extract_session_memories(
         List of memory dicts that were written to Mem0. Empty list on
         error or if no memories were extracted.
     """
+    logger.info(
+        "session.finalization extraction_start user_id=%s session_id=%s message_count=%s",
+        user_id,
+        session_id,
+        len(messages),
+    )
+
     if not messages:
         logger.info("Empty transcript for session %s — skipping extraction", session_id)
         return []
 
     metadata = session_metadata or {}
-    session_date = metadata.get("session_date", datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+    session_date = metadata.get("session_date", datetime.now(UTC).strftime("%Y-%m-%d"))
 
     # Format the transcript
     transcript = _format_transcript(messages)
@@ -147,6 +154,13 @@ def extract_session_memories(
         logger.error("Extraction response is not a list for session %s", session_id)
         return []
 
+    logger.info(
+        "session.finalization extraction_candidates user_id=%s session_id=%s candidate_count=%s",
+        user_id,
+        session_id,
+        len(extracted),
+    )
+
     # Write each extracted memory to Mem0
     written_memories: list[dict] = []
     platform = metadata.get("platform", "text")
@@ -206,10 +220,19 @@ def extract_session_memories(
             "mem0_result": result,
         })
 
+        logger.info(
+            "session.finalization extraction_memory_written user_id=%s session_id=%s category=%s importance=%s",
+            user_id,
+            session_id,
+            entry.get("category", "fact"),
+            importance_label,
+        )
+
     logger.info(
-        "Extracted %d memories from session %s (from %d candidates)",
-        len(written_memories),
+        "session.finalization extraction_complete user_id=%s session_id=%s written_count=%s candidate_count=%s",
+        user_id,
         session_id,
+        len(written_memories),
         len(extracted),
     )
 
