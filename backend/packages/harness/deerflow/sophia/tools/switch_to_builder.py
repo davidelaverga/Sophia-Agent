@@ -1,6 +1,5 @@
 """switch_to_builder tool.
 
-<<<<<<< HEAD
 Delegates a task to the sophia_builder agent after the companion has
 gathered all clarifying information.  Uses SubagentExecutor with a
 pre-built builder agent and passes delegation_context through configurable
@@ -12,16 +11,6 @@ import logging
 import time
 import uuid
 from dataclasses import replace
-=======
-Delegates a task to the sophia_builder agent (DeerFlow's lead_agent)
-after the companion has gathered all clarifying information. Uses the
-DeerFlow SubagentExecutor for background execution with progress streaming.
-"""
-
-import logging
-import time
-import uuid
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
 from typing import Annotated, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
@@ -59,7 +48,6 @@ def switch_to_builder(
     Before calling this, ensure you have complete specs — ask any clarifying
     questions first, then delegate with the complete brief."""
 
-<<<<<<< HEAD
     # ------------------------------------------------------------------
     # 1. Extract companion state
     # ------------------------------------------------------------------
@@ -68,25 +56,6 @@ def switch_to_builder(
     active_ritual = None
     ritual_phase = None
     injected_memories: list[str] = []
-=======
-    # Extract companion context for the builder
-    companion_context = _extract_companion_context(runtime)
-    logger.info(
-        "[Builder] switch_to_builder called: task_type=%s, context_keys=%s",
-        task_type, list(companion_context.keys()),
-    )
-
-    # Build the builder prompt with companion context
-    builder_prompt = _build_prompt(task, task_type, companion_context)
-
-    # Get the general-purpose subagent config (builder uses lead_agent capabilities)
-    config = get_subagent_config("general-purpose")
-    if config is None:
-        logger.warning("[Builder] general-purpose subagent config not found — returning stub")
-        return f"Builder task queued: [{task_type}] {task}"
-
-    # Extract parent context for sandbox/thread access
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
     sandbox_state = None
     thread_data = None
     thread_id = None
@@ -94,7 +63,6 @@ def switch_to_builder(
     trace_id = str(uuid.uuid4())[:8]
 
     if runtime is not None:
-<<<<<<< HEAD
         state = runtime.state or {}
 
         # Companion artifact — full emotional snapshot
@@ -119,16 +87,10 @@ def switch_to_builder(
         if not thread_id and runtime.config:
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
-=======
-        sandbox_state = runtime.state.get("sandbox")
-        thread_data = runtime.state.get("thread_data")
-        thread_id = runtime.context.get("thread_id") if runtime.context else None
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
         metadata = runtime.config.get("metadata", {}) if runtime.config else {}
         parent_model = metadata.get("model_name")
         trace_id = metadata.get("trace_id") or trace_id
 
-<<<<<<< HEAD
     # Fallback: LangChain ContextVar
     if not thread_id:
         try:
@@ -180,26 +142,11 @@ def switch_to_builder(
     executor = SubagentExecutor(
         config=config,
         tools=[],  # tools are already in the pre-built agent
-=======
-    # Get available tools (excluding task tool to prevent nesting)
-    try:
-        from deerflow.tools import get_available_tools
-        tools = get_available_tools(model_name=parent_model, subagent_enabled=False)
-    except Exception:
-        logger.warning("[Builder] Failed to load tools, using empty list")
-        tools = []
-
-    # Create executor
-    executor = SubagentExecutor(
-        config=config,
-        tools=tools,
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
         parent_model=parent_model,
         sandbox_state=sandbox_state,
         thread_data=thread_data,
         thread_id=thread_id,
         trace_id=trace_id,
-<<<<<<< HEAD
         pre_built_agent=builder_agent,
         extra_configurable={"delegation_context": delegation_context},  # merged into initial state
     )
@@ -209,13 +156,6 @@ def switch_to_builder(
     # ------------------------------------------------------------------
     task_id = tool_call_id or str(uuid.uuid4())[:8]
     executor.execute_async(task, task_id=task_id)
-=======
-    )
-
-    # Start background execution
-    task_id = tool_call_id or str(uuid.uuid4())[:8]
-    executor.execute_async(builder_prompt, task_id=task_id)
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
     logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
 
     # Stream progress via get_stream_writer if available
@@ -226,10 +166,6 @@ def switch_to_builder(
     except Exception:
         writer = None
 
-<<<<<<< HEAD
-=======
-    # Poll for completion (same pattern as DeerFlow's task_tool)
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
     poll_count = 0
     max_poll_count = (config.timeout_seconds + 60) // 5
 
@@ -239,32 +175,23 @@ def switch_to_builder(
         if result is None:
             logger.error("[Builder] Task %s not found", task_id)
             cleanup_background_task(task_id)
-<<<<<<< HEAD
             return _format_error("Task disappeared")
-=======
-            return f"Builder error: task {task_id} disappeared"
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
 
         if result.status == SubagentStatus.COMPLETED:
             logger.info("[Builder] Task %s completed after %d polls", task_id, poll_count)
             if writer:
                 writer({"type": "task_completed", "task_id": task_id, "result": result.result})
             cleanup_background_task(task_id)
-<<<<<<< HEAD
 
             # Extract builder_result from final state
             builder_result = _extract_builder_result(result)
             return _format_success(builder_result)
-=======
-            return f"Builder completed: {result.result}"
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
 
         elif result.status == SubagentStatus.FAILED:
             logger.error("[Builder] Task %s failed: %s", task_id, result.error)
             if writer:
                 writer({"type": "task_failed", "task_id": task_id, "error": result.error})
             cleanup_background_task(task_id)
-<<<<<<< HEAD
             return _format_error(result.error or "Unknown error")
 
         elif result.status == SubagentStatus.TIMED_OUT:
@@ -273,21 +200,12 @@ def switch_to_builder(
                 writer({"type": "task_timed_out", "task_id": task_id})
             cleanup_background_task(task_id)
             return _format_error(f"Timed out after {config.timeout_seconds}s")
-=======
-            return f"Builder failed: {result.error}"
-
-        elif result.status == SubagentStatus.TIMED_OUT:
-            logger.warning("[Builder] Task %s timed out", task_id)
-            cleanup_background_task(task_id)
-            return f"Builder timed out after {config.timeout_seconds}s"
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
 
         time.sleep(5)
         poll_count += 1
 
         if poll_count > max_poll_count:
             logger.error("[Builder] Task %s polling timed out", task_id)
-<<<<<<< HEAD
             cleanup_background_task(task_id)
             return _format_error(f"Polling timed out after {poll_count} polls")
 
@@ -339,64 +257,3 @@ def _format_success(builder_result: dict) -> str:
 def _format_error(error: str) -> str:
     """Format a builder error for the companion."""
     return f"Builder failed: {error}"
-=======
-            return f"Builder polling timed out after {poll_count} polls"
-
-
-def _extract_companion_context(runtime) -> dict:
-    """Extract relevant companion state for the builder."""
-    if runtime is None or not hasattr(runtime, "state"):
-        return {}
-
-    state = runtime.state
-    context = {}
-
-    # User identity
-    identity_blocks = [
-        b for b in state.get("system_prompt_blocks", [])
-        if "<user_identity>" in b
-    ]
-    if identity_blocks:
-        context["user_identity"] = identity_blocks[0]
-
-    # Current session context
-    artifact = state.get("current_artifact") or state.get("previous_artifact") or {}
-    if artifact:
-        context["session_goal"] = artifact.get("session_goal", "")
-        context["tone_estimate"] = artifact.get("tone_estimate", 2.5)
-
-    # Injected memories
-    memory_blocks = [
-        b for b in state.get("system_prompt_blocks", [])
-        if "<memories>" in b
-    ]
-    if memory_blocks:
-        context["memories"] = memory_blocks[0]
-
-    # Platform and context mode
-    context["platform"] = state.get("platform", "text")
-    context["context_mode"] = state.get("context_mode", "life")
-
-    return context
-
-
-def _build_prompt(task: str, task_type: str, context: dict) -> str:
-    """Build the builder prompt with companion context."""
-    parts = [
-        f"## Builder Task\n**Type:** {task_type}\n**Task:** {task}",
-    ]
-
-    if context.get("user_identity"):
-        parts.append(f"\n## User Context\n{context['user_identity']}")
-
-    if context.get("session_goal"):
-        parts.append(f"\n## Session Context\nGoal: {context['session_goal']}")
-        parts.append(f"Tone: {context.get('tone_estimate', '?')}")
-        parts.append(f"Platform: {context.get('platform', 'text')}")
-        parts.append(f"Context: {context.get('context_mode', 'life')}")
-
-    if context.get("memories"):
-        parts.append(f"\n## Relevant Memories\n{context['memories']}")
-
-    return "\n".join(parts)
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11

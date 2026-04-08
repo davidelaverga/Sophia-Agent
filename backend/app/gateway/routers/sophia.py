@@ -13,6 +13,9 @@ from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from deerflow.agents.sophia_agent.paths import USERS_DIR
+from deerflow.agents.sophia_agent.utils import safe_user_path
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/sophia", tags=["sophia"])
@@ -676,10 +679,31 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
 async def journal(
     user_id: str,
     category: str | None = Query(default=None, description="Filter by category"),
+    search: str | None = Query(default=None, description="Search memories by keyword"),
 ) -> JournalResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
+        if search:
+            # Semantic search via Mem0 search API
+            from deerflow.sophia.mem0_client import search_memories
+            results = await asyncio.to_thread(
+                search_memories, user_id, search,
+                categories=[category] if category else None,
+            )
+            entries = [
+                JournalEntry(
+                    id=m.get("id", ""),
+                    content=m.get("content", ""),
+                    category=m.get("category"),
+                    metadata=None,
+                    created_at=None,
+                )
+                for m in results
+            ]
+            return JournalResponse(entries=entries, count=len(entries))
+
+        # Browse all memories (optionally filtered by category)
         filters: dict = {"user_id": user_id}
         if category:
             filters["categories"] = category

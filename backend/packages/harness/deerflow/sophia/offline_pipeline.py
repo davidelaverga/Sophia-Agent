@@ -112,27 +112,19 @@ def run_offline_pipeline(
 
     # --- Thread state: fetch from LangGraph if not provided ---
     if thread_state is None:
-<<<<<<< HEAD
         thread_state = _fetch_thread_state(thread_id)
         if thread_state is None:
             logger.warning(
-                "No thread_state for session %s and fetch from LangGraph failed — aborting",
+                "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
+                user_id,
                 session_id,
+                thread_id,
             )
             # Remove from processed set so a retry can succeed after a transient failure
             with _processed_lock:
                 _processed_sessions.discard(session_id)
             return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
         logger.info("Fetched thread_state from LangGraph for session %s", session_id)
-=======
-        logger.warning(
-            "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
-            user_id,
-            session_id,
-            thread_id,
-        )
-        return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
->>>>>>> b7efaa7ddc748f1d814b78cb234226064ee38c11
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])

@@ -1,5 +1,8 @@
 """Tests for all Sophia middleware components."""
 
+import json
+import os
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -1054,7 +1057,7 @@ class TestPromptAssemblyMiddleware:
         return request
 
     def test_assembles_blocks_into_system_message(self):
-        from langchain_core.messages import SystemMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         mw = PromptAssemblyMiddleware()
