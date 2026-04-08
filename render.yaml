@@ -9,24 +9,18 @@ services:
   - type: web
     name: sophia-langgraph
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile
+    dockerfilePath: ./backend/Dockerfile.langgraph
     dockerContext: .
     plan: standard
     region: oregon
     healthCheckPath: /ok
     envVars:
-      - key: PYTHONPATH
-        value: .
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: MEM0_API_KEY
         sync: false
       - key: LANGCHAIN_TRACING_V2
         value: "false"
-    startCommand: >-
-      sh -c "cd backend && PYTHONPATH=. uv run langgraph dev
-      --host 0.0.0.0 --port $PORT
-      --no-browser --allow-blocking --no-reload"
 
   # ─────────────────────────────────────────────────────────────────
   # 2. Gateway API (REST + SSE proxy)
@@ -34,14 +28,12 @@ services:
   - type: web
     name: sophia-gateway
     runtime: docker
-    dockerfilePath: ./backend/Dockerfile
+    dockerfilePath: ./backend/Dockerfile.gateway
     dockerContext: .
     plan: starter
     region: oregon
     healthCheckPath: /health
     envVars:
-      - key: PYTHONPATH
-        value: .
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: MEM0_API_KEY
@@ -51,12 +43,9 @@ services:
       - key: STREAM_API_SECRET
         sync: false
       - key: LANGGRAPH_URL
-        sync: false  # Set to internal URL of sophia-langgraph
+        sync: false
       - key: SOPHIA_VOICE_SERVER_URL
-        sync: false  # Set to internal URL of sophia-voice
-    startCommand: >-
-      sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app
-      --host 0.0.0.0 --port $PORT"
+        sync: false
 
   # ─────────────────────────────────────────────────────────────────
   # 3. Voice Server (Vision Agents — STT + TTS + WebRTC)
@@ -82,7 +71,7 @@ services:
       - key: SOPHIA_BACKEND_MODE
         value: deerflow
       - key: SOPHIA_LANGGRAPH_BASE_URL
-        sync: false  # Set to internal URL of sophia-langgraph
+        sync: false
       - key: SOPHIA_ASSISTANT_ID
         value: sophia_companion
       - key: SOPHIA_DEEPGRAM_MODEL
