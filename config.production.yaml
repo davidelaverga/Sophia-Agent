@@ -1,0 +1,30 @@
+# Sophia MVP — Production Configuration for Render
+# Used by Dockerfile.langgraph and Dockerfile.gateway
+# API keys resolve from Render environment variables at runtime
+
+config_version: 2
+
+models:
+  - name: claude-haiku-4-5-20251001
+    display_name: Claude Haiku 4.5
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-haiku-4-5-20251001
+    api_key: $ANTHROPIC_API_KEY
+    max_tokens: 4096
+    temperature: 1.0
+
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+
+skills:
+  path: ../skills
+  container_path: /mnt/skills
+
+subagents:
+  enabled: true
+
+memory:
+  enabled: false
+
+summarization:
+  enabled: false
