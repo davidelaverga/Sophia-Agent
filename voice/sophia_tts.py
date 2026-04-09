@@ -127,7 +127,10 @@ class SophiaTTS(CartesiaTTS):
 
         @self.events.subscribe
         async def _on_tts_error(event: TTSErrorEvent) -> None:
-            logger.error("voice.error stage=tts user_id=%s message=%s", self._active_response_user_id, event.error_message)
+            logger.error(
+                "[VOICE:TTS] ERROR | user_id=%s | message=%s",
+                self._active_response_user_id, event.error_message,
+            )
             if self._error_callback is not None:
                 self._error_callback(
                     "tts",
@@ -243,6 +246,11 @@ class SophiaTTS(CartesiaTTS):
         # --- Client-visible log tag ---
         source = "artifact" if self._has_real_artifact else ("hint" if self._hint_emotion else "warm-default")
         logger.info(
+            "[VOICE:TTS] SYNTHESIS_START | emotion=%s | speed=%s | "
+            "source=%s | text='%s'",
+            emotion, delivery.speed_label, source, text[:80],
+        )
+        logger.info(
             "[SOPHIA-VOICE] emitted_family=%s resolved_family=%s emotion=%s speed=%s source=%s",
             classify_emotion_family(self._next_artifact.get("voice_emotion_primary")),
             delivery.family,
@@ -271,6 +279,10 @@ class SophiaTTS(CartesiaTTS):
             sample_rate=self.sample_rate,
             channels=1,
             format=AudioFormat.S16,
+        )
+        logger.info(
+            "[VOICE:TTS] AUDIO_SENT | emotion=%s | speed=%s",
+            emotion, delivery.speed_label,
         )
 
         # Estimate playback duration from text length.
