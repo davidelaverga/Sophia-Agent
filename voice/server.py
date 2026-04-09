@@ -398,7 +398,7 @@ async def create_agent(**kwargs) -> Agent:
         stt=stt,
         tts=tts,
         turn_detection=turn_detection,
-        streaming_tts=True,
+        streaming_tts=False,
     )
     llm.attach_call_emitter(agent.send_custom_event)
 
