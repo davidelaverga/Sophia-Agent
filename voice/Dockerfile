@@ -16,4 +16,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY voice/ ./voice/
 
 # Voice server uses $PORT from Render
-CMD ["sh", "-c", "python -m voice.server serve --port ${PORT:-8000}"]
+CMD ["sh", "-c", "python -m voice.server serve --host 0.0.0.0 --port ${PORT:-8000}"]
