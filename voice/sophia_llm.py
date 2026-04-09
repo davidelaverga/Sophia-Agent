@@ -330,6 +330,12 @@ class SophiaLLM(LLM):
         participant: Participant | None = None,
     ) -> LLMResponseEvent[Any]:
         user_id = self._resolve_user_id(participant)
+        logger.info(
+            "[VOICE:LLM] GENERATE_START | user_id=%s | platform=%s | "
+            "ritual=%s | context_mode=%s | message='%s'",
+            user_id, self._runtime_platform, self._runtime_ritual,
+            self._runtime_context_mode, text[:80],
+        )
         if not text.strip():
             self.note_stage_error(
                 "silence-empty-transcript",
@@ -443,6 +449,10 @@ class SophiaLLM(LLM):
 
                 if first_token_ms is None:
                     first_token_ms = (time.perf_counter() - request_started) * 1000
+                    logger.info(
+                        "[VOICE:LLM] DEERFLOW_STREAMING | user_id=%s | first_token_ms=%.0f",
+                        request.user_id, first_token_ms,
+                    )
                     self.note_first_text_emitted(request.user_id)
                     await self.emit_pending_user_ended(request.user_id)
                     await self.emit_turn_event("agent_started", request.user_id)
@@ -507,6 +517,14 @@ class SophiaLLM(LLM):
                 "Backend stream ended without an artifact payload.",
                 recoverable=False,
             )
+
+        total_ms = (time.perf_counter() - request_started) * 1000
+        logger.info(
+            "[VOICE:LLM] GENERATE_COMPLETE | user_id=%s | "
+            "response_length=%d | artifact_seen=%s | chunks=%d | total_ms=%.0f",
+            request.user_id, len("".join(text_parts)),
+            artifact_seen, sequence, total_ms,
+        )
 
         return (
             "".join(text_parts),
