@@ -27,6 +27,9 @@ class ArtifactState(AgentState):
     current_artifact: NotRequired[dict | None]
     previous_artifact: NotRequired[dict | None]
     system_prompt_blocks: NotRequired[list[str]]
+    builder_result: NotRequired[dict | None]
+    builder_task: NotRequired[dict | None]
+    active_tone_band: NotRequired[str]
 
 
 class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
@@ -48,6 +51,19 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
             return None
 
         blocks = [self._instructions]
+
+        # --- Builder synthesis injection ---
+        builder_result = state.get("builder_result")
+        builder_task = state.get("builder_task") or {}
+        if builder_result and builder_task.get("status") == "completed":
+            synthesis_block = self._build_synthesis_prompt(builder_result, state)
+            blocks.append(synthesis_block)
+            # Mark as synthesized to prevent re-injection on subsequent turns
+            log_middleware("Artifact", "builder synthesis injected", _t0)
+            existing = list(state.get("system_prompt_blocks", []))
+            existing.extend(blocks)
+            builder_task_updated = {**builder_task, "status": "synthesized"}
+            return {"system_prompt_blocks": existing, "builder_task": builder_task_updated}
 
         # Conditionally inject previous artifact
         prev = state.get("previous_artifact")
@@ -96,3 +112,66 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
         log_middleware("Artifact", "no artifact in response", _t0)
         return None
+
+    # ------------------------------------------------------------------
+    # Builder synthesis
+    # ------------------------------------------------------------------
+
+    _SYNTHESIS_INSTRUCTIONS = {
+        "shutdown": (
+            "The user is in a very low state. Keep presentation ultra-brief. "
+            "Just tell them it's ready. No details unless they ask."
+        ),
+        "grief_fear": (
+            "The user is carrying weight. Present as something taken care of. "
+            "Warm and brief. One or two sentences, then offer the file."
+        ),
+        "anger_antagonism": (
+            "The user was frustrated. Present as forward motion. Be direct. "
+            "'Here's what I built. It does X.' State next action clearly."
+        ),
+        "engagement": (
+            "The user has energy. Give more detail about what was built. "
+            "Mention 1-2 key decisions. Frame next action as collaboration."
+        ),
+        "enthusiasm": (
+            "The user is high energy. Match that energy. Present with confidence. "
+            "Highlight any surprise element. Let them ride the momentum."
+        ),
+    }
+
+    def _build_synthesis_prompt(self, builder: dict, state: dict) -> str:
+        """Build the synthesis prompt for presenting builder results."""
+        tone_band = state.get("active_tone_band", "engagement")
+        instruction = self._SYNTHESIS_INSTRUCTIONS.get(
+            tone_band, self._SYNTHESIS_INSTRUCTIONS["engagement"]
+        )
+
+        parts = ["<builder_completed>"]
+        parts.append(f"WHAT WAS BUILT: {builder.get('companion_summary', 'Task completed.')}")
+        parts.append(
+            f"DELIVERABLE: {builder.get('artifact_title', 'Untitled')} "
+            f"({builder.get('artifact_type', 'file')})"
+        )
+
+        decisions = builder.get("decisions_made", [])
+        if decisions:
+            parts.append(f"KEY DECISIONS: {'; '.join(decisions)}")
+
+        tone_hint = builder.get("companion_tone_hint", "")
+        if tone_hint:
+            parts.append(f"BUILDER'S SUGGESTION: {tone_hint}")
+
+        next_action = builder.get("user_next_action")
+        if next_action:
+            parts.append(f"USER'S NEXT STEP: {next_action}")
+
+        parts.append(f"\nHOW TO PRESENT THIS:\n{instruction}")
+        parts.append(
+            "\nExpress this result naturally in your voice. Do not list "
+            "decisions mechanically. The user should feel this was done "
+            "WITH care, not BY a machine."
+        )
+        parts.append("</builder_completed>")
+
+        return "\n".join(parts)

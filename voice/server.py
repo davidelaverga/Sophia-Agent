@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
@@ -114,6 +115,7 @@ async def start_sophia_session(
 ) -> StartSessionResponse:
     """Start an agent session and bind runtime context before the client joins."""
 
+    session_create_time = time.time()
     try:
         session = await launcher.start_session(
             call_id=call_id,
@@ -135,6 +137,10 @@ async def start_sophia_session(
             detail="Reached maximum number of sessions for this call",
         ) from exc
     except Exception as exc:
+        logger.error(
+            "[VOICE:SESSION] CREATE_FAILED | call_id=%s | error=%s",
+            call_id, str(exc),
+        )
         logger.exception("Failed to start Sophia agent")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -157,6 +163,13 @@ async def start_sophia_session(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to bind agent session context",
         ) from exc
+
+    logger.info(
+        "[VOICE:SESSION] CREATED | session_id=%s | call_id=%s | "
+        "platform=%s | context_mode=%s | ritual=%s | timestamp=%.3f",
+        session.id, call_id, request.platform,
+        request.context_mode, request.ritual, session_create_time,
+    )
 
     return StartSessionResponse(
         session_id=session.id,
@@ -217,6 +230,7 @@ def attach_runtime_observers(
     coordinator: ConversationFlowCoordinator,
 ) -> None:
     turn_det = agent.turn_detection
+    _first_participant_audio = {"seen": False}
 
     def _resolve_turn_transcript(participant: object) -> str:
         get_turn_transcript = getattr(turn_det, "get_turn_transcript", None)
@@ -231,6 +245,10 @@ def attach_runtime_observers(
     @turn_det.events.subscribe
     async def _on_turn_ended(event: TurnEndedEvent) -> None:
         transcript = _resolve_turn_transcript(event.participant)
+        logger.info(
+            "[VOICE:TURN] DETECTED | transcript='%s' | substantive=%s",
+            transcript[:100], _has_substantive_transcript(transcript),
+        )
         if not _has_substantive_transcript(transcript):
             logger.debug("[FLOW] Ignoring non-substantive turn transcript")
             return
@@ -283,6 +301,18 @@ def attach_runtime_observers(
 
     @agent.stt.events.subscribe
     async def _on_final_transcript(event: STTTranscriptEvent) -> None:
+        if not _first_participant_audio["seen"]:
+            _first_participant_audio["seen"] = True
+            participant = getattr(event, "participant", None)
+            participant_id = getattr(participant, "user_id", "unknown") if participant else "unknown"
+            logger.info(
+                "[VOICE:PARTICIPANT] FIRST_AUDIO | participant_id=%s",
+                participant_id,
+            )
+        logger.info(
+            "[VOICE:STT] TRANSCRIPT | text='%s' | is_final=True",
+            event.text[:100],
+        )
         # Also feed final transcripts — some STT flows skip partials on fast speech.
         await _handle_runtime_transcript(
             event.text,
@@ -292,6 +322,10 @@ def attach_runtime_observers(
 
     @agent.stt.events.subscribe
     async def _on_stt_error(event: STTErrorEvent) -> None:
+        logger.error(
+            "[VOICE:STT] ERROR | error=%s | recoverable=%s",
+            event.error_message, event.is_recoverable,
+        )
         llm.note_stage_error(
             "stt",
             event.error_message,
@@ -323,6 +357,10 @@ async def create_agent(**kwargs) -> Agent:
     )
     # We want Smart Turn to decide turn boundaries in Week 1.
     stt.turn_detection = False
+    logger.info(
+        "[VOICE:AUDIO] STT_WIRED | stt_provider=deepgram | model=%s | language=%s",
+        settings.deepgram_model, settings.deepgram_language,
+    )
 
     tts = SophiaTTS(settings)
     llm = SophiaLLM(settings)
@@ -483,6 +521,11 @@ async def create_agent(**kwargs) -> Agent:
         settings.backend_mode,
         settings.platform,
     )
+    logger.info(
+        "[VOICE:SESSION] AGENT_READY | backend=%s | platform=%s | "
+        "stt=deepgram | tts=cartesia | turn_detection=smart_turn",
+        settings.backend_mode, settings.platform,
+    )
     return agent
 
 
@@ -494,6 +537,10 @@ async def join_call(agent: Agent, call_type: str, call_id: str, **kwargs) -> Non
         async with agent.join(call):
             await agent.finish()
     finally:
+        logger.info(
+            "[VOICE:SESSION] AGENT_STOPPED | call_id=%s | call_type=%s",
+            call_id, call_type,
+        )
         rhythm_tracker = getattr(agent, "_rhythm_tracker", None)
         if rhythm_tracker is not None:
             rhythm_tracker.end_session()

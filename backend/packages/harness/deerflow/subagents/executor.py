@@ -56,6 +56,7 @@ class SubagentResult:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
+    final_state: dict[str, Any] | None = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -132,6 +133,8 @@ class SubagentExecutor:
         thread_data: ThreadDataState | None = None,
         thread_id: str | None = None,
         trace_id: str | None = None,
+        pre_built_agent=None,
+        extra_configurable: dict[str, Any] | None = None,
     ):
         """Initialize the executor.
 
@@ -143,6 +146,8 @@ class SubagentExecutor:
             thread_data: Thread data from parent agent.
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
+            pre_built_agent: Pre-built agent instance — bypasses _create_agent().
+            extra_configurable: Additional configurable dict merged into run_config.
         """
         self.config = config
         self.parent_model = parent_model
@@ -151,6 +156,8 @@ class SubagentExecutor:
         self.thread_id = thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
+        self.pre_built_agent = pre_built_agent
+        self.extra_configurable = extra_configurable
 
         # Filter tools based on config
         self.tools = _filter_tools(
@@ -162,7 +169,10 @@ class SubagentExecutor:
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
 
     def _create_agent(self):
-        """Create the agent instance."""
+        """Create the agent instance. Uses pre_built_agent if provided."""
+        if self.pre_built_agent is not None:
+            return self.pre_built_agent
+
         model_name = _get_model_name(self.config, self.parent_model)
         model = create_chat_model(name=model_name, thinking_enabled=False)
 
@@ -198,6 +208,10 @@ class SubagentExecutor:
         if self.thread_data is not None:
             state["thread_data"] = self.thread_data
 
+        # Merge extra_configurable into initial state so middlewares can read it
+        if self.extra_configurable:
+            state.update(self.extra_configurable)
+
         return state
 
     async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
@@ -231,10 +245,15 @@ class SubagentExecutor:
             run_config: RunnableConfig = {
                 "recursion_limit": self.config.max_turns,
             }
-            context = {}
+            configurable: dict[str, Any] = {}
+            context: dict[str, Any] = {}
             if self.thread_id:
-                run_config["configurable"] = {"thread_id": self.thread_id}
+                configurable["thread_id"] = self.thread_id
                 context["thread_id"] = self.thread_id
+            if self.extra_configurable:
+                configurable.update(self.extra_configurable)
+            if configurable:
+                run_config["configurable"] = configurable
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -266,6 +285,9 @@ class SubagentExecutor:
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+
+            # Store final state for callers that need structured data (e.g., builder_result)
+            result.final_state = final_state
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
@@ -404,6 +426,7 @@ class SubagentExecutor:
                         _background_tasks[task_id].error = exec_result.error
                         _background_tasks[task_id].completed_at = datetime.now()
                         _background_tasks[task_id].ai_messages = exec_result.ai_messages
+                        _background_tasks[task_id].final_state = exec_result.final_state
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:

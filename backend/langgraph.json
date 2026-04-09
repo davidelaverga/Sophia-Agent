@@ -8,7 +8,7 @@
   "graphs": {
     "lead_agent": "deerflow.agents:make_lead_agent",
     "sophia_companion": "deerflow.agents.sophia_agent:make_sophia_agent",
-    "sophia_builder": "deerflow.agents:make_lead_agent"
+    "sophia_builder": "deerflow.agents.sophia_agent.builder_agent:make_sophia_builder"
   },
   "checkpointer": {
     "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"

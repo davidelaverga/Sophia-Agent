@@ -69,3 +69,9 @@ backend/.coverage
 !README.md
 !frontend/README.md
 !backend/README.md
+
+# Whitelist files needed by Sophia Dockerfiles
+!config.yaml
+!config.example.yaml
+!skills/
+!voice/

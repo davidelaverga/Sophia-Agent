@@ -504,3 +504,60 @@ class TestFormatMemoriesForOpener:
         from deerflow.sophia.offline_pipeline import _format_memories_for_opener
 
         assert _format_memories_for_opener([]) == "None available."
+
+
+# ==================================================================
+# State fetch fallback
+# ==================================================================
+
+
+class TestStateFetchFallback:
+    """Tests for _fetch_thread_state and the self-fetching pipeline guard."""
+
+    def test_fetches_thread_state_when_none(self, mock_steps):
+        """Pipeline fetches state from LangGraph when thread_state=None."""
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        fake_state = _make_thread_state()
+        # Patch httpx.get to return a successful response
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"values": fake_state}
+
+        with patch("deerflow.sophia.offline_pipeline.httpx") as mock_httpx:
+            mock_httpx.get.return_value = mock_response
+            result = run_offline_pipeline("user_abc", "sess_fetch", "thread_fetch", thread_state=None)
+
+        assert result["status"] == "completed"
+        mock_httpx.get.assert_called_once()
+        # Verify the URL contains the thread_id
+        call_url = mock_httpx.get.call_args[0][0]
+        assert "thread_fetch" in call_url
+
+    def test_aborts_when_fetch_fails(self, mock_steps):
+        """Pipeline aborts when both thread_state=None and fetch fails."""
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        with patch("deerflow.sophia.offline_pipeline.httpx") as mock_httpx:
+            mock_httpx.get.side_effect = Exception("Connection refused")
+            result = run_offline_pipeline("user_abc", "sess_fail", "thread_fail", thread_state=None)
+
+        assert result["status"] == "error"
+        assert result["reason"] == "no_thread_state"
+
+    def test_aborts_when_fetch_returns_no_messages(self, mock_steps):
+        """Pipeline aborts when fetched state has no messages."""
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"values": {"messages": []}}
+
+        with patch("deerflow.sophia.offline_pipeline.httpx") as mock_httpx:
+            mock_httpx.get.return_value = mock_response
+            result = run_offline_pipeline("user_abc", "sess_empty", "thread_empty", thread_state=None)
+
+        assert result["status"] == "error"
+        assert result["reason"] == "no_thread_state"

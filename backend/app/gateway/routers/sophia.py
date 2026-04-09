@@ -15,11 +15,6 @@ from pydantic import BaseModel, Field
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
-from deerflow.sophia.review_metadata_store import (
-    apply_review_metadata_overlays,
-    remove_review_metadata,
-    upsert_review_metadata,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +32,6 @@ def _validate_user(user_id: str) -> str:
     """Validate user_id and return it, or raise 400."""
     try:
         from deerflow.agents.sophia_agent.utils import validate_user_id
-
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
@@ -46,8 +40,8 @@ def _validate_user(user_id: str) -> str:
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
+        import os
         from mem0 import MemoryClient
-
         api_key = os.environ.get("MEM0_API_KEY")
         if not api_key:
             raise HTTPException(status_code=503, detail="MEM0_API_KEY not configured")
@@ -753,32 +747,49 @@ async def journal(
     client = _get_mem0_client()
     try:
         selected_category = category or memory_type
-        filters: dict = {"user_id": user_id}
-        if selected_category:
-            filters["categories"] = selected_category
-        result = client.get_all(filters=filters)
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-        memories_raw = apply_review_metadata_overlays(user_id, memories_raw)
+        normalized_search = search.strip().lower() if isinstance(search, str) and search.strip() else None
+        memories_raw: list[dict]
+
+        if normalized_search:
+            from deerflow.sophia.mem0_client import search_memories
+
+            memories_raw = await asyncio.to_thread(
+                search_memories,
+                user_id,
+                normalized_search,
+                categories=[selected_category] if selected_category else None,
+            )
+            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+
+            # Preserve the previous plain-text search behavior if Mem0 search returns no results.
+            if not memories_raw:
+                filters: dict = {"user_id": user_id}
+                if selected_category:
+                    filters["categories"] = selected_category
+                result = client.get_all(filters=filters)
+                memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+                memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+                memories_raw = [
+                    memory
+                    for memory in memories_raw
+                    if any(
+                        isinstance(target, str) and normalized_search in target.lower()
+                        for target in [
+                            memory.get("memory", memory.get("content", "")),
+                            *(memory.get("categories") if isinstance(memory.get("categories"), list) else []),
+                        ]
+                    )
+                ]
+        else:
+            filters = {"user_id": user_id}
+            if selected_category:
+                filters["categories"] = selected_category
+            result = client.get_all(filters=filters)
+            memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+
         memories_raw = _sort_memories_desc(memories_raw)
         memories_raw = _dedupe_memories_by_id(memories_raw)
-
-        normalized_search = search.strip().lower() if isinstance(search, str) and search.strip() else None
-        if normalized_search:
-            filtered_memories: list[dict] = []
-            for memory in memories_raw:
-                content = memory.get("memory", memory.get("content", ""))
-                categories = memory.get("categories") if isinstance(memory.get("categories"), list) else []
-                search_targets = [content, *categories]
-                if any(isinstance(target, str) and normalized_search in target.lower() for target in search_targets):
-                    filtered_memories.append(memory)
-            memories_raw = filtered_memories
-
-        if status:
-            memories_raw = [
-                memory
-                for memory in memories_raw
-                if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
-            ]
 
         entries = [
             JournalEntry(

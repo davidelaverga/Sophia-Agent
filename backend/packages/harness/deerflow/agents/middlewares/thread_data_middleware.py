@@ -1,3 +1,5 @@
+import logging
+import uuid
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -6,6 +8,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config.paths import Paths, get_paths
+
+logger = logging.getLogger(__name__)
 
 
 class ThreadDataMiddlewareState(AgentState):
@@ -71,9 +75,20 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
-        thread_id = runtime.context.get("thread_id")
+        # Extract thread_id from runtime context (may be None in subagent execution)
+        thread_id = None
+        if runtime and runtime.context:
+            thread_id = runtime.context.get("thread_id")
+
         if thread_id is None:
-            raise ValueError("Thread ID is required in the context")
+            # Subagents may already have thread_data passed from the parent agent.
+            # Also check configurable for thread_id (used by SubagentExecutor).
+            if state.get("thread_data"):
+                return None
+            raise ValueError(
+                "Thread ID is required — set it in runtime.context['thread_id'] "
+                "or pass thread_data in state"
+            )
 
         if self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories

@@ -1,0 +1,82 @@
+# Sophia MVP — Render Blueprint
+# Push this file to trigger automatic service creation on Render.
+# Set env vars in Render Dashboard → Environment tab (or use env groups).
+
+services:
+  # ─────────────────────────────────────────────────────────────────
+  # 1. LangGraph Backend (sophia_companion agent)
+  # ─────────────────────────────────────────────────────────────────
+  - type: web
+    name: sophia-langgraph
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.langgraph
+    dockerContext: .
+    plan: standard
+    region: oregon
+    healthCheckPath: /ok
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MEM0_API_KEY
+        sync: false
+      - key: LANGCHAIN_TRACING_V2
+        value: "false"
+
+  # ─────────────────────────────────────────────────────────────────
+  # 2. Gateway API (REST + SSE proxy)
+  # ─────────────────────────────────────────────────────────────────
+  - type: web
+    name: sophia-gateway
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile.gateway
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /health
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: MEM0_API_KEY
+        sync: false
+      - key: STREAM_API_KEY
+        sync: false
+      - key: STREAM_API_SECRET
+        sync: false
+      - key: LANGGRAPH_URL
+        sync: false
+      - key: SOPHIA_VOICE_SERVER_URL
+        sync: false
+
+  # ─────────────────────────────────────────────────────────────────
+  # 3. Voice Server (Vision Agents — STT + TTS + WebRTC)
+  # ─────────────────────────────────────────────────────────────────
+  - type: web
+    name: sophia-voice
+    runtime: docker
+    dockerfilePath: ./voice/Dockerfile
+    dockerContext: .
+    plan: standard
+    region: oregon
+    envVars:
+      - key: STREAM_API_KEY
+        sync: false
+      - key: STREAM_API_SECRET
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: CARTESIA_API_KEY
+        sync: false
+      - key: SOPHIA_VOICE_ID
+        sync: false
+      - key: SOPHIA_BACKEND_MODE
+        value: deerflow
+      - key: SOPHIA_LANGGRAPH_BASE_URL
+        sync: false
+      - key: SOPHIA_ASSISTANT_ID
+        value: sophia_companion
+      - key: SOPHIA_DEEPGRAM_MODEL
+        value: flux-general-en
+      - key: SOPHIA_PLATFORM
+        value: voice
+      - key: SOPHIA_CONTEXT_MODE
+        value: life

@@ -68,11 +68,36 @@ def _get_client():
                 _client = None
             else:
                 _client = MemoryClient(api_key=api_key)
+                logger.info("[Mem0] Client initialized successfully")
         except ImportError:
             logger.warning("mem0 package not installed — memory retrieval disabled")
             _client = None
         _client_initialized = True
         return _client
+
+
+def warm_up() -> None:
+    """Eagerly initialize the Mem0 client and verify connectivity.
+
+    Call at startup (e.g., in make_sophia_agent) so the first user
+    request doesn't pay the cold-start latency (~1-2s for client init + ping).
+    Safe to call multiple times — the client is a singleton.
+    """
+    import time
+    _t0 = time.perf_counter()
+    client = _get_client()
+    if client is None:
+        logger.warning("[Mem0] warm_up: client unavailable")
+        return
+    try:
+        # The Mem0 SDK pings the server on first API call.
+        # Do a lightweight search to trigger that ping now.
+        client.search(query="warm_up", filters={"user_id": "__warmup__"}, limit=1)
+        elapsed = (time.perf_counter() - _t0) * 1000
+        logger.info("[Mem0] warm_up completed (%.0fms)", elapsed)
+    except Exception:
+        elapsed = (time.perf_counter() - _t0) * 1000
+        logger.warning("[Mem0] warm_up ping failed (%.0fms)", elapsed, exc_info=True)
 
 
 def search_memories(
@@ -458,3 +483,16 @@ def invalidate_user_cache(user_id: str) -> None:
         keys_to_remove = [k for k in _cache if k.startswith(prefix)]
         for k in keys_to_remove:
             del _cache[k]
+
+
+# ---------------------------------------------------------------------------
+# Eager startup: init client + ping in a background thread so the first
+# request doesn't pay the ~2s cold-start.  Runs once at module import time
+# (when LangGraph loads the sophia_companion graph).
+# ---------------------------------------------------------------------------
+def _startup_warm_up() -> None:
+    """Background thread target — initializes client and pings Mem0."""
+    warm_up()
+
+_warmup_thread = threading.Thread(target=_startup_warm_up, daemon=True, name="mem0-warmup")
+_warmup_thread.start()
