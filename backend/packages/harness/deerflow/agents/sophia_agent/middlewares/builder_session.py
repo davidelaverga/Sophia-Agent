@@ -16,7 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
-from deerflow.subagents.executor import SubagentStatus, get_background_task_result
+from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 
 _NON_TERMINAL_STATUSES = {"queued", "running", "started"}
 _TERMINAL_STATUSES = {"completed", "synthesized", "failed", "timed_out"}
@@ -215,6 +215,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     updates["builder_task"] = completed_task
                     updates["builder_result"] = self._extract_builder_result(result)
                     updates["active_mode"] = "companion"
+                    cleanup_background_task(task_id)
                 else:
                     failed_task = {
                         **current_task,
@@ -225,6 +226,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     updates["builder_task"] = failed_task
                     updates["active_mode"] = "companion"
                     blocks.append(self._failure_block(failed_task))
+                    cleanup_background_task(task_id)
         elif current_task and current_status in _TERMINAL_STATUSES:
             updates["active_mode"] = "companion"
 
