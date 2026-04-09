@@ -1,0 +1,17 @@
+{
+  "session_id": "c23e8d69-25da-4f8e-acd4-a8b81f278050",
+  "thread_id": "24e2d00a-6d89-487c-979f-ab5ac96e4f6c",
+  "session_type": "debrief",
+  "context_mode": "gaming",
+  "started_at": "2026-04-09T02:56:07.106Z",
+  "ended_at": "2026-04-09T02:56:40.237686+00:00",
+  "turn_count": 3,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Small, concrete rituals are anchors. Remembering them proves continuity matters.",
+    "reflection_candidate": {
+      "prompt": "What other rituals or small practices ground you that might be worth protecting?"
+    },
+    "status": "ready"
+  }
+}
