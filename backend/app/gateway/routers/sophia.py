@@ -15,6 +15,11 @@ from pydantic import BaseModel, Field
 
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
+from deerflow.sophia.review_metadata_store import (
+    apply_review_metadata_overlays,
+    remove_review_metadata,
+    upsert_review_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +45,6 @@ def _validate_user(user_id: str) -> str:
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
-        import os
         from mem0 import MemoryClient
         api_key = os.environ.get("MEM0_API_KEY")
         if not api_key:

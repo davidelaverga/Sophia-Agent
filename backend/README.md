@@ -58,6 +58,8 @@ The Sophia graphs (`sophia_companion`, `sophia_builder`) now use a stateful buil
 
 - `switch_to_builder` queues builder work asynchronously and returns a structured `builder_handoff` payload immediately (no blocking polling loop)
 - `BuilderSessionMiddleware` consumes the handoff payload, tracks task status from background execution, and writes `builder_task` / `builder_result` into companion state
+- Builder execution now tracks non-artifact tool turns and escalates endgame instructions so the builder explicitly finalizes with `emit_builder_artifact`
+- Background subagent timeout handling preserves terminal safety while capturing late-turn diagnostics (`last` and `late` tool-call summaries) for debugging
 - Companion synthesis remains in `ArtifactMiddleware` and runs when `builder_task.status == "completed"`
 - Companion chain now includes config-driven `SummarizationMiddleware` wiring
 - Builder chain now includes `SandboxMiddleware` and `TodoMiddleware` for execution parity
