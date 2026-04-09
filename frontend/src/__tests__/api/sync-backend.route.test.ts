@@ -4,24 +4,36 @@ const getSessionMock = vi.fn();
 const listUserAccountsMock = vi.fn();
 const providerLoginMock = vi.fn();
 const cookieSetMock = vi.fn();
+const headersMock = vi.fn();
+
+let authBypassEnabledMock = false;
 
 vi.mock('next/headers', () => ({
-  headers: () => new Headers(),
+  headers: (...args: unknown[]) => headersMock(...args),
   cookies: async () => ({
     set: cookieSetMock,
   }),
+}));
+
+vi.mock('../../app/lib/auth/dev-bypass', () => ({
+  get authBypassEnabled() {
+    return authBypassEnabledMock;
+  },
 }));
 
 vi.mock('../../app/lib/auth/backend-auth', () => ({
   providerLogin: (...args: unknown[]) => providerLoginMock(...args),
 }));
 
-vi.mock('../../server/better-auth', () => ({
+vi.mock('../../server/better-auth/config', () => ({
   auth: {
     api: {
       listUserAccounts: (...args: unknown[]) => listUserAccountsMock(...args),
     },
   },
+}));
+
+vi.mock('../../server/better-auth', () => ({
   getSession: (...args: unknown[]) => getSessionMock(...args),
 }));
 
@@ -30,6 +42,8 @@ import { POST } from '../../app/api/auth/sync-backend/route';
 describe('/api/auth/sync-backend POST', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    authBypassEnabledMock = false;
+    headersMock.mockReturnValue(new Headers({ cookie: 'better-auth.session=abc123' }));
     getSessionMock.mockResolvedValue({
       user: {
         id: 'session-user-1',
@@ -55,8 +69,10 @@ describe('/api/auth/sync-backend POST', () => {
     expect(response.status).toBe(200);
     expect(providerLoginMock).toHaveBeenCalledWith({
       provider: 'google',
+      canonicalUserId: 'session-user-1',
       providerUserId: 'google-account-123',
       email: 'user@example.com',
+      forwardedCookieHeader: 'better-auth.session=abc123',
       username: 'Test User',
     });
     expect(cookieSetMock).toHaveBeenCalledWith(

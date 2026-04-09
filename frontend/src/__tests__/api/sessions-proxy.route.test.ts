@@ -2,7 +2,7 @@ import type { NextRequest } from 'next/server';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
-  getServerAuthHeader: vi.fn(() => 'Bearer test-token'),
+  getUserScopedAuthHeader: vi.fn(() => 'Bearer test-token'),
 }));
 
 import { GET, POST } from '../../app/api/sessions/[...path]/route';

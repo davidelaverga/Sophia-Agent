@@ -3,6 +3,14 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { logger } from '../../../lib/error-logger';
 import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 
+function isLocalReviewMemoryId(memoryId: string): boolean {
+  return memoryId.startsWith('local:');
+}
+
+function isBlockedSyntheticMemoryId(memoryId: string): boolean {
+  return isSyntheticMemoryId(memoryId) && !isLocalReviewMemoryId(memoryId);
+}
+
 async function resolveMemoryRequest(
   req: NextRequest,
   params: Promise<{ memoryId: string }>,
@@ -13,7 +21,7 @@ async function resolveMemoryRequest(
     return NextResponse.json({ error: 'memoryId is required' }, { status: 400 });
   }
 
-  const userId = await resolveSophiaUserId(req.nextUrl.searchParams.get('user_id'));
+  const userId = await resolveSophiaUserId();
   if (!userId) {
     return NextResponse.json({ error: 'Unable to resolve user_id' }, { status: 401 });
   }
@@ -48,7 +56,7 @@ export async function PUT(
 
     const { memoryId, userId } = resolved;
 
-    if (isSyntheticMemoryId(memoryId)) {
+    if (isBlockedSyntheticMemoryId(memoryId)) {
       return NextResponse.json({ error: 'Synthetic memories cannot be updated' }, { status: 400 });
     }
 
@@ -84,7 +92,7 @@ export async function DELETE(
 
     const { memoryId, userId } = resolved;
 
-    if (isSyntheticMemoryId(memoryId)) {
+    if (isBlockedSyntheticMemoryId(memoryId)) {
       return new NextResponse(null, { status: 204 });
     }
 

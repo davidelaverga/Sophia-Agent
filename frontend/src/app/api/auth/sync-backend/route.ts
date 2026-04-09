@@ -38,8 +38,9 @@ export async function POST() {
 
   try {
     // Get linked accounts for the current user
+    const requestHeaders = await headers()
     const { auth } = await import('@/server/better-auth/config')
-    const accounts = await auth.api.listUserAccounts({ headers: await headers() })
+    const accounts = await auth.api.listUserAccounts({ headers: requestHeaders })
     const googleAccount = (accounts as { accountId: string; providerId: string }[])?.find(
       (a) => a.providerId === 'google',
     )
@@ -50,8 +51,10 @@ export async function POST() {
 
     const backendUser = await providerLogin({
       provider: 'google',
+      canonicalUserId: session.user.id,
       providerUserId: googleAccount.accountId,
       email: session.user.email || '',
+      forwardedCookieHeader: requestHeaders.get('cookie') || undefined,
       username: session.user.name || undefined,
     })
 

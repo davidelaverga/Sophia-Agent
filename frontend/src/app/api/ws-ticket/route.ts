@@ -18,7 +18,7 @@
 
 import { NextResponse } from 'next/server';
 
-import { getServerAuthToken } from '../../lib/auth/server-auth';
+import { getUserScopedAuthToken } from '../../lib/auth/server-auth';
 import { logger } from '../../lib/error-logger';
 import { apiLimiters } from '../../lib/rate-limiter';
 
@@ -42,7 +42,7 @@ export async function POST() {
     );
   }
 
-  const token = await getServerAuthToken();
+  const token = await getUserScopedAuthToken();
 
   if (!token) {
     logger.warn('WS ticket auth missing', {

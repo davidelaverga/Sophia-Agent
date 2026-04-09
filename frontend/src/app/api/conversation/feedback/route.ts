@@ -1,13 +1,17 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getServerAuthToken } from "../../../lib/auth/server-auth";
+import { getUserScopedAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = await getServerAuthToken();
 
   if (!backendUrl) {
     return NextResponse.json({ error: "Server configuration incomplete" }, { status: 500 });
+  }
+
+  const apiKey = await getUserScopedAuthToken();
+  if (!apiKey) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
   let body: { turn_id: string; helpful: boolean; tag?: string };

@@ -4,7 +4,7 @@ const getServerAuthTokenMock = vi.fn();
 const secureLogMock = vi.fn();
 
 vi.mock('../../../app/lib/auth/server-auth', () => ({
-  getServerAuthToken: (...args: unknown[]) => getServerAuthTokenMock(...args),
+  getUserScopedAuthToken: (...args: unknown[]) => getServerAuthTokenMock(...args),
 }));
 
 vi.mock('../../../app/api/chat/_lib/config', () => ({

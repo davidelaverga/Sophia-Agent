@@ -63,9 +63,9 @@ test('debrief ritual saves recap memories into journal', async ({ page }, testIn
 
   const journalBefore = await fetchJournal(page);
   const uniqueToken = `RITUAL-JOURNAL-E2E-${Date.now()}`;
-  const uniqueRitualDetail = `marigold-citrus blend ${uniqueToken}`;
+  const uniqueRitualDetail = `cedar-cardamom reset with brass compass ${uniqueToken}`;
   const memoryPrompt = [
-    `Please remember this exact detail for continuity: my comfort ritual after a hard day is drinking ${uniqueRitualDetail} and taking ten quiet minutes.`,
+    `Please remember this exact detail for continuity: after a hard debrief I reset by tracing the rim of a brass compass, breathing in ${uniqueRitualDetail}, and staying silent for ninety seconds.`,
     'Keep that as one concrete personal detail for future sessions.',
   ].join(' ');
 
@@ -128,6 +128,6 @@ test('debrief ritual saves recap memories into journal', async ({ page }, testIn
     }),
   ).toBeTruthy();
   expect(
-    highlightedEntries.some((entry) => /marigold-citrus/i.test(entry.content)),
+    highlightedEntries.some((entry) => /cedar-cardamom|brass compass/i.test(entry.content)),
   ).toBeTruthy();
 });

@@ -32,6 +32,14 @@ function getMemoryStatus(memory: NormalizedMemory): string | null {
     : null;
 }
 
+function getMemorySessionId(memory: NormalizedMemory): string | null {
+  return typeof memory.metadata?.session_id === 'string'
+    ? memory.metadata.session_id
+    : typeof memory.metadata?.source_session_id === 'string'
+      ? memory.metadata.source_session_id
+      : null;
+}
+
 function parseIsoTimestamp(value: string | null | undefined): number | null {
   if (!value) {
     return null;
@@ -103,17 +111,16 @@ function selectFallbackMemories(
   endedAt: string | null,
 ): NormalizedMemory[] {
   if (sessionId) {
-    const bySession = memories.filter((memory) => {
-      const scopedSessionId = typeof memory.metadata?.session_id === 'string'
-        ? memory.metadata.session_id
-        : typeof memory.metadata?.source_session_id === 'string'
-          ? memory.metadata.source_session_id
-          : null;
-      return scopedSessionId === sessionId;
-    });
+    const bySession = memories.filter((memory) => getMemorySessionId(memory) === sessionId);
 
     if (bySession.length > 0) {
       return bySession;
+    }
+
+    memories = memories.filter((memory) => getMemorySessionId(memory) === null);
+
+    if (memories.length === 0) {
+      return [];
     }
   }
 
@@ -135,7 +142,7 @@ function selectFallbackMemories(
 
 export async function GET(request: NextRequest) {
   try {
-    const userId = await resolveSophiaUserId(request.nextUrl.searchParams.get('user_id'));
+    const userId = await resolveSophiaUserId();
     if (!userId) {
       return NextResponse.json(
         { error: 'Unable to resolve user_id' },
@@ -168,10 +175,19 @@ export async function GET(request: NextRequest) {
       ? filteredPayload.memories.map(normalizeGatewayMemory).filter((memory): memory is NormalizedMemory => memory !== null)
       : [];
 
-    if (filteredMemories.length > 0 || status !== 'pending_review') {
+    const scopedFilteredMemories = status === 'pending_review'
+      ? selectFallbackMemories(filteredMemories, sessionId, startedAt, endedAt)
+        .filter((memory) => {
+          const memoryStatus = getMemoryStatus(memory);
+          return memoryStatus === null || memoryStatus === 'pending_review';
+        })
+      : filteredMemories;
+
+    if (status !== 'pending_review' || scopedFilteredMemories.length > 0) {
       return NextResponse.json({
-        memories: filteredMemories.map(({ metadata: _metadata, ...memory }) => memory),
-        count: filteredMemories.length,
+        memories: (status === 'pending_review' ? scopedFilteredMemories : filteredMemories)
+          .map(({ metadata: _metadata, ...memory }) => memory),
+        count: status === 'pending_review' ? scopedFilteredMemories.length : filteredMemories.length,
         fallbackApplied: false,
       });
     }

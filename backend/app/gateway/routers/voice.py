@@ -8,11 +8,17 @@ import uuid
 from dataclasses import dataclass
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authorized_user_scope
+
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/sophia", tags=["voice"])
+router = APIRouter(
+    prefix="/api/sophia",
+    tags=["voice"],
+    dependencies=[Depends(require_authorized_user_scope)],
+)
 
 SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
 SUPPORTED_CONTEXT_MODES = {"work", "gaming", "life"}

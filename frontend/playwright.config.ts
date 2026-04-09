@@ -6,6 +6,12 @@ const baseURL =
   process.env.PLAYWRIGHT_TEST_BASE_URL ??
   process.env.E2E_BASE_URL ??
   `http://${host}:${port}`;
+const reuseExistingServer =
+  process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === 'true'
+    ? true
+    : process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === 'false'
+      ? false
+      : !process.env.CI;
 
 const webServerEnv = {
   ...process.env,
@@ -44,7 +50,7 @@ export default defineConfig({
     command: `pnpm exec next dev --hostname ${host} --port ${port}`,
     url: baseURL,
     env: webServerEnv,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer,
     timeout: 120_000,
   },
 });

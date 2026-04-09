@@ -72,6 +72,34 @@ describe('memory item route', () => {
     expect(fetchSophiaApiMock).not.toHaveBeenCalled();
   });
 
+  it('forwards PUT requests for local review memory ids', async () => {
+    isSyntheticMemoryIdMock.mockReturnValue(true);
+    fetchSophiaApiMock.mockResolvedValue(
+      new Response(JSON.stringify({ id: 'local:abc123', content: 'Updated local memory' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memories/local:abc123'),
+      json: vi.fn().mockResolvedValue({ text: 'Updated local memory' }),
+    } as unknown as NextRequest;
+
+    const response = await updateMemory(request, { params: Promise.resolve({ memoryId: 'local:abc123' }) });
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.content).toBe('Updated local memory');
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-123/memories/local%3Aabc123',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ text: 'Updated local memory' }),
+      }),
+    );
+  });
+
   it('passes DELETE responses through from the Sophia gateway', async () => {
     fetchSophiaApiMock.mockResolvedValue(new Response(null, { status: 204 }));
 
@@ -84,6 +112,23 @@ describe('memory item route', () => {
     expect(response.status).toBe(204);
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
       '/api/sophia/user-123/memories/mem-123',
+      expect.objectContaining({ method: 'DELETE' }),
+    );
+  });
+
+  it('forwards DELETE requests for local review memory ids', async () => {
+    isSyntheticMemoryIdMock.mockReturnValue(true);
+    fetchSophiaApiMock.mockResolvedValue(new Response(null, { status: 204 }));
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memories/local:abc123'),
+    } as unknown as NextRequest;
+
+    const response = await deleteMemory(request, { params: Promise.resolve({ memoryId: 'local:abc123' }) });
+
+    expect(response.status).toBe(204);
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-123/memories/local%3Aabc123',
       expect.objectContaining({ method: 'DELETE' }),
     );
   });

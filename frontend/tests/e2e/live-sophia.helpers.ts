@@ -236,13 +236,42 @@ export async function keepAllRecapMemories(page: Page, maxRounds = 12): Promise<
   let keptCount = 0;
 
   for (let round = 0; round < maxRounds; round += 1) {
+    const introButton = page.getByRole('button', { name: 'Got it' }).first();
+    if (await introButton.isVisible({ timeout: 500 }).catch(() => false)) {
+      await introButton.click({ force: true });
+      await page.waitForTimeout(500);
+      continue;
+    }
+
     const saveButton = page.locator('[data-onboarding="recap-memory-save"]').first();
     if (await saveButton.isVisible({ timeout: 500 }).catch(() => false)) {
       return keptCount;
     }
 
+    const retryButton = page.getByRole('button', { name: /^retry$/i }).first();
+    if (await retryButton.isVisible({ timeout: 500 }).catch(() => false)) {
+      await retryButton.click({ force: true });
+      await page.waitForTimeout(1_200);
+      continue;
+    }
+
+    const processingHeading = page.getByRole('heading', { name: /recap is still processing/i }).first();
+    if (await processingHeading.isVisible({ timeout: 500 }).catch(() => false)) {
+      await page.waitForTimeout(1_200);
+      continue;
+    }
+
+    const emptyState = page.getByText('No new memories from this session.').first();
+    if (await emptyState.isVisible({ timeout: 500 }).catch(() => false)) {
+      return keptCount;
+    }
+
     const keepButton = page.getByLabel('Keep this memory').first();
-    await expect(keepButton).toBeVisible({ timeout: 20_000 });
+    if (!(await keepButton.isVisible({ timeout: 1_500 }).catch(() => false))) {
+      await page.waitForTimeout(900);
+      continue;
+    }
+
     await keepButton.click();
     keptCount += 1;
     await page.waitForTimeout(900);

@@ -67,22 +67,25 @@ export function useCompanionVoiceRuntime({
     onArtifacts: handleVoiceArtifacts,
   });
 
+  const voiceError = voiceState.error;
+  const canRetryVoiceTurn = voiceState.hasRetryableVoiceTurn();
+
   useEffect(() => {
-    if (!voiceState.error) return;
-    if (!lastVoiceTranscript && !voiceState.hasRetryableVoiceTurn()) return;
+    if (!voiceError) return;
+    if (!lastVoiceTranscript && !canRetryVoiceTurn) return;
 
     setVoiceRetryState((prev) => {
       const transcript = lastVoiceTranscript || '';
-      if (prev?.transcript === transcript && prev.message === voiceState.error) {
+      if (prev?.transcript === transcript && prev.message === voiceError) {
         return prev;
       }
 
       return {
         transcript,
-        message: voiceState.error,
+        message: voiceError,
       };
     });
-  }, [voiceState, lastVoiceTranscript]);
+  }, [canRetryVoiceTurn, lastVoiceTranscript, voiceError]);
 
   useEffect(() => {
     if (!pendingVoiceRetryPlayback) return;

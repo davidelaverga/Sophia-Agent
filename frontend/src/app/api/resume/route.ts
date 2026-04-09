@@ -16,7 +16,7 @@
 
 import { type NextRequest } from 'next/server';
 
-import { getServerAuthToken } from '../../lib/auth/server-auth';
+import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../lib/auth/server-auth';
 import { debugLog } from '../../lib/debug-logger';
 import { logger } from '../../lib/error-logger';
 import type { InterruptKind } from '../../lib/session-types';
@@ -151,7 +151,6 @@ export async function POST(req: NextRequest) {
     // Support both new flat format and legacy nested format
     let thread_id: string;
     let session_id: string;
-    let user_id: string;
     let interrupt_kind: InterruptKind;
     let selected_option_id: string;
     let context: Record<string, unknown> | undefined;
@@ -160,7 +159,6 @@ export async function POST(req: NextRequest) {
       // Legacy nested format from frontend types
       thread_id = payload.thread_id;
       session_id = payload.session_id;
-      user_id = payload.user_id || 'user-default';
       interrupt_kind = payload.resume.kind;
       selected_option_id = payload.resume.option_id;
       context = payload.resume.extra;
@@ -168,7 +166,6 @@ export async function POST(req: NextRequest) {
       // Flat format matching backend schema
       thread_id = payload.thread_id;
       session_id = payload.session_id;
-      user_id = payload.user_id || 'user-default';
       interrupt_kind = payload.interrupt_kind;
       selected_option_id = payload.selected_option_id;
       context = payload.context;
@@ -179,6 +176,28 @@ export async function POST(req: NextRequest) {
         JSON.stringify({ error: 'Missing required fields: thread_id, session_id, interrupt_kind, selected_option_id' }),
         { 
           status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: 'Not authenticated' }),
+        {
+          status: 401,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const userScopedToken = await getUserScopedAuthToken();
+    if (!userScopedToken) {
+      return new Response(
+        JSON.stringify({ error: 'Not authenticated' }),
+        {
+          status: 401,
           headers: { 'Content-Type': 'application/json' },
         }
       );
@@ -217,7 +236,7 @@ export async function POST(req: NextRequest) {
     const backendPayload = {
       thread_id,
       session_id,
-      user_id,
+      user_id: userId,
       interrupt_kind,
       selected_option_id,
       context: {
@@ -237,7 +256,7 @@ export async function POST(req: NextRequest) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${await getServerAuthToken()}`,
+        'Authorization': `Bearer ${userScopedToken}`,
         // Hint to backend: UI language is English.
         // Backend may ignore this, but it helps prevent accidental Spanish replies.
         'Accept-Language': 'en',

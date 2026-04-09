@@ -1,5 +1,6 @@
 import { type NextRequest } from 'next/server';
 
+import { getAuthenticatedUserId } from '../../../lib/auth/server-auth';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
 
@@ -115,12 +116,19 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
     const {
       userMessage,
       sessionId,
-      userId,
       threadId,
       sessionType,
       contextMode,
       platform,
     } = parsed.data;
+
+    const userId = await getAuthenticatedUserId();
+    if (!userId) {
+      return new Response(
+        JSON.stringify({ error: 'Not authenticated' }),
+        { status: 401, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
 
     if (USE_MOCK) {
       secureLog('[/api/chat] Using mock streaming response');

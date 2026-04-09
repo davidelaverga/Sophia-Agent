@@ -74,4 +74,51 @@ describe('memory recent route', () => {
     expect(payload.memories).toHaveLength(2);
     expect(payload.memories.map((memory: { id: string }) => memory.id)).toEqual(['pending-1', 'legacy-1']);
   });
+
+  it('does not leak pending-review memories from a different session into recap fallback', async () => {
+    fetchSophiaApiMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          memories: [
+            {
+              id: 'other-session-1',
+              memory: 'Pending from a different session',
+              metadata: { session_id: 'sess-other', status: 'pending_review' },
+              created_at: '2026-03-03T19:55:00.000Z',
+            },
+          ],
+          count: 1,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          memories: [
+            {
+              id: 'other-session-1',
+              memory: 'Pending from a different session',
+              metadata: { session_id: 'sess-other', status: 'pending_review' },
+              created_at: '2026-03-03T19:55:00.000Z',
+            },
+          ],
+          count: 1,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memory/recent?status=pending_review&session_id=sess-target&started_at=2026-03-03T19:46:00.000Z&ended_at=2026-03-03T20:00:00.000Z'),
+    } as unknown as NextRequest;
+
+    const response = await recentMemoriesGET(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.fallbackApplied).toBe(true);
+    expect(payload.memories).toEqual([]);
+  });
 });

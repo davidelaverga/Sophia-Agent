@@ -1,4 +1,4 @@
-import { getServerAuthToken } from '../../../lib/auth/server-auth';
+import { getUserScopedAuthToken } from '../../../lib/auth/server-auth';
 
 import { IS_PRODUCTION, SOPHIA_ASSISTANT_ID, secureLog } from './config';
 
@@ -120,7 +120,7 @@ export async function fetchBackendStreamWithBootstrap(
   backendUrl: string,
   backendPayload: BackendStreamPayload,
 ): Promise<BackendFetchResult> {
-  const authToken = await getServerAuthToken();
+  const authToken = await getUserScopedAuthToken();
   const ritual = resolveRitual(backendPayload.session_type);
   let activeBackendUrl = normalizeBackendUrl(backendUrl);
   const directLangGraphFallbackUrl = getLocalLangGraphFallbackUrl(activeBackendUrl);

@@ -26,7 +26,7 @@ function normalizeEntry(entry: Partial<JournalEntry>): JournalEntry | null {
 
 export async function GET(request: NextRequest) {
   try {
-    const userId = await resolveSophiaUserId(request.nextUrl.searchParams.get('user_id'))
+    const userId = await resolveSophiaUserId()
     if (!userId) {
       return NextResponse.json(
         { error: 'Unable to resolve user_id' },

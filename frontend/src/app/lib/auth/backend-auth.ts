@@ -22,6 +22,7 @@ export interface BackendRegisterRequest {
   username?: string
   provider_user_id?: string
   discord_id?: string
+  canonical_user_id?: string
 }
 
 export interface ProviderLoginRequest {
@@ -31,6 +32,8 @@ export interface ProviderLoginRequest {
   username?: string
   discriminator?: string
   avatar?: string
+  canonicalUserId?: string
+  forwardedCookieHeader?: string
 }
 
 export interface DiscordLoginRequest {
@@ -73,12 +76,10 @@ type BackendRequestError = Error & { status?: number }
 // CONFIGURATION
 // ============================================================================
 
-function getBackendUrl(): string {
-  // Server-side: use internal URL if available
-  const serverUrl = process.env.BACKEND_API_URL
-  // Client-side: use public URL
-  const publicUrl = process.env.NEXT_PUBLIC_API_URL
-  
+function getAuthBackendUrl(): string {
+  const serverUrl = process.env.SOPHIA_AUTH_BACKEND_URL || process.env.BACKEND_API_URL
+  const publicUrl = process.env.NEXT_PUBLIC_SOPHIA_AUTH_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL
+
   const url = serverUrl || publicUrl || 'http://localhost:8000'
   return url.replace(/\/$/, '') // Remove trailing slash
 }
@@ -106,19 +107,26 @@ function createBackendRequestError(message: string, status?: number): BackendReq
 export async function providerLogin(
   data: ProviderLoginRequest
 ): Promise<BackendUserResponse> {
-  const url = `${getBackendUrl()}/api/v1/auth/discord/login`
+  const url = `${getAuthBackendUrl()}/api/v1/auth/discord/login`
   
   try {
     // Add timeout to prevent hanging forever
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
+    const requestHeaders: HeadersInit = {
+      'Content-Type': 'application/json',
+    }
+
+    if (data.forwardedCookieHeader) {
+      requestHeaders.Cookie = data.forwardedCookieHeader
+    }
     
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: requestHeaders,
       body: JSON.stringify({
+        canonical_user_id: data.canonicalUserId,
         discord_id: data.providerUserId,
         email: data.email,
         username: data.username,
@@ -186,6 +194,7 @@ export async function registerWithBackend(
       return await providerLogin({
         provider: 'google',
         providerUserId,
+        canonicalUserId: data.canonical_user_id,
         email: data.email,
         username: data.username,
       })
@@ -194,7 +203,7 @@ export async function registerWithBackend(
     }
   }
   
-  const url = `${getBackendUrl()}/api/v1/auth/register`
+  const url = `${getAuthBackendUrl()}/api/v1/auth/register`
   
   try {
     const response = await fetch(url, {
@@ -285,7 +294,7 @@ export async function loginOrRegister(
 export async function validateToken(
   token: string
 ): Promise<BackendValidateResponse> {
-  const url = `${getBackendUrl()}/api/v1/auth/validate`
+  const url = `${getAuthBackendUrl()}/api/v1/auth/validate`
   
   try {
     const response = await fetch(url, {
@@ -314,7 +323,7 @@ export async function validateToken(
 export async function getCurrentUser(
   token: string
 ): Promise<BackendUserResponse> {
-  const url = `${getBackendUrl()}/api/v1/auth/me`
+  const url = `${getAuthBackendUrl()}/api/v1/auth/me`
   
   const response = await fetch(url, {
     method: 'GET',
@@ -339,7 +348,7 @@ export async function getCurrentUser(
 export async function refreshToken(
   token: string
 ): Promise<BackendUserResponse> {
-  const url = `${getBackendUrl()}/api/v1/auth/token/refresh`
+  const url = `${getAuthBackendUrl()}/api/v1/auth/token/refresh`
   
   const response = await fetch(url, {
     method: 'POST',

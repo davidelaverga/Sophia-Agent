@@ -1,19 +1,21 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getServerAuthToken } from "../../../lib/auth/server-auth";
+import { getAuthenticatedUserId, getUserScopedAuthToken } from "../../../lib/auth/server-auth";
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
 export async function GET(request: NextRequest) {
-  const apiKey = await getServerAuthToken();
-
-  // Get user_id from query params
   const { searchParams } = new URL(request.url);
-  const userId = searchParams.get("user_id");
   const limit = searchParams.get("limit") || "20";
+  const userId = await getAuthenticatedUserId();
 
   if (!userId) {
-    return NextResponse.json({ error: "user_id is required" }, { status: 400 });
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  const apiKey = await getUserScopedAuthToken();
+  if (!apiKey) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
   try {

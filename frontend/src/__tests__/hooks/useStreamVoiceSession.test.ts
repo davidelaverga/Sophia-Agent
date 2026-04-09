@@ -1,5 +1,6 @@
 import { CallingState } from "@stream-io/video-react-sdk"
 import { renderHook, act } from "@testing-library/react"
+import { StrictMode, createElement, type ReactNode } from "react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
 import { useStreamVoiceSession } from "../../app/hooks/useStreamVoiceSession"
@@ -289,6 +290,28 @@ describe("useStreamVoiceSession", () => {
     expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 
+  it("does not treat Strict Mode effect cleanup as a permanent destroy flag", async () => {
+    mockCall = makeCallMock()
+
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(StrictMode, null, children)
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"), { wrapper })
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/sophia/user-1/voice/connect",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    )
+  })
+
   it("startTalking with no userId sets error", async () => {
     const { result } = renderHook(() => useStreamVoiceSession(undefined))
 
@@ -337,6 +360,25 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("connecting")
 
     mockRemoteParticipantSessionIds = ["voice-session-123"]
+    rerender()
+
+    expect(result.current.stage).toBe("listening")
+  })
+
+  it("transitions to listening when any remote participant joins the one-on-one call", async () => {
+    mockCall = makeCallMock()
+
+    const { result, rerender } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    mockCallingState = CallingState.JOINED
+    rerender()
+    expect(result.current.stage).toBe("connecting")
+
+    mockRemoteParticipantSessionIds = ["unexpected-remote-session"]
     rerender()
 
     expect(result.current.stage).toBe("listening")

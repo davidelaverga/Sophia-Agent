@@ -9,6 +9,7 @@ import { useSessionHistoryStore } from '../../stores/session-history-store';
 
 const RECENT_END_RETRY_DELAY_MS = 1500;
 const RECENT_END_MAX_RETRIES = 6;
+const RECENT_END_CONTEXT_WINDOW_MS = 2 * 60 * 1000;
 
 export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'unavailable' | 'not_found';
 
@@ -32,6 +33,19 @@ interface RecentMemoriesResponse {
     confidence?: number;
     reason?: string;
   }>;
+}
+
+function wasEndedRecently(value: string | null | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const endedAtMs = Date.parse(value);
+  if (Number.isNaN(endedAtMs)) {
+    return false;
+  }
+
+  return Date.now() - endedAtMs <= RECENT_END_CONTEXT_WINDOW_MS;
 }
 
 function buildArtifactsPayloadFromStore(
@@ -154,10 +168,26 @@ export function useRecapArtifactsLoader({
       setStatus('loading');
 
       const recentEndHint = getRecentSessionEndHint();
-      const isRecentEndedSession = recentEndHint?.sessionId === sessionId;
+      const hasRecentEndHint = recentEndHint?.sessionId === sessionId;
+
+      const shouldRetryMemories = (endedAt: string | null | undefined) => {
+        return hasRecentEndHint || wasEndedRecently(endedAt);
+      };
+
+      const scheduleMemoryRetry = (enabled: boolean) => {
+        if (!enabled || retryCount >= RECENT_END_MAX_RETRIES) {
+          return false;
+        }
+
+        setStatus('processing');
+        retryTimer = setTimeout(() => {
+          setRetryCount((current) => current + 1);
+        }, RECENT_END_RETRY_DELAY_MS);
+        return true;
+      };
 
       const scheduleRecentRetry = () => {
-        if (!isRecentEndedSession) {
+        if (!hasRecentEndHint) {
           return false;
         }
 
@@ -175,10 +205,11 @@ export function useRecapArtifactsLoader({
       };
 
       if (artifacts) {
+        const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
+        const shouldRetryStoredMemories = shouldRetryMemories(artifacts.endedAt || historyEntry?.endedAt);
         const hasStoredMemories = Array.isArray(artifacts.memoryCandidates) && artifacts.memoryCandidates.length > 0;
 
         if (!hasStoredMemories) {
-          const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
           const hydratedStoredArtifacts = await hydrateStoredArtifactsWithRecentMemories(
             artifacts,
             sessionId,
@@ -186,18 +217,16 @@ export function useRecapArtifactsLoader({
           );
 
           if ((hydratedStoredArtifacts?.memoryCandidates?.length ?? 0) > 0) {
-            if (isRecentEndedSession) {
+            if (hasRecentEndHint) {
               clearRecentSessionEndHint();
             }
             setArtifacts(sessionId, hydratedStoredArtifacts);
-          } else if (isRecentEndedSession && retryCount < RECENT_END_MAX_RETRIES) {
-            retryTimer = setTimeout(() => {
-              setRetryCount((current) => current + 1);
-            }, RECENT_END_RETRY_DELAY_MS);
-          } else if (isRecentEndedSession) {
+          } else if (scheduleMemoryRetry(shouldRetryStoredMemories)) {
+            return;
+          } else if (hasRecentEndHint) {
             clearRecentSessionEndHint();
           }
-        } else if (isRecentEndedSession) {
+        } else if (hasRecentEndHint) {
           clearRecentSessionEndHint();
         }
 
@@ -252,7 +281,18 @@ export function useRecapArtifactsLoader({
           const mapped = mapBackendArtifactsToRecapV1(hydratedArtifactsPayload, sessionId);
 
           if (mapped) {
-            if (isRecentEndedSession) {
+            const hasMappedMemories = (mapped.memoryCandidates?.length ?? 0) > 0;
+            const shouldRetryFetchedMemories = shouldRetryMemories(mapped.endedAt || (typeof data?.ended_at === 'string' ? data.ended_at : null));
+
+            if (!hasMappedMemories && shouldRetryFetchedMemories) {
+              setArtifacts(sessionId, mapped);
+
+              if (scheduleMemoryRetry(shouldRetryFetchedMemories)) {
+                return;
+              }
+            }
+
+            if (hasRecentEndHint) {
               clearRecentSessionEndHint();
             }
             setArtifacts(sessionId, mapped);

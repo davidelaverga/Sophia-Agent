@@ -70,18 +70,22 @@ async function dismissRecapIntroIfPresent(page: Page): Promise<void> {
 async function completeRecapReview(page: Page): Promise<number> {
   await dismissRecapIntroIfPresent(page);
 
+  const saveButton = page.locator('[data-onboarding="recap-memory-save"]').first();
+  if (await saveButton.isVisible({ timeout: 2_000 }).catch(() => false)) {
+    await saveButton.click();
+    return 0;
+  }
+
   const keepButton = page.getByLabel('Keep this memory').first();
   const keepVisible = await keepButton.waitFor({ state: 'visible', timeout: 10_000 }).then(() => true).catch(() => false);
   if (keepVisible) {
     const keptCount = await keepAllRecapMemories(page);
 
-    const saveButton = page.locator('[data-onboarding="recap-memory-save"]').first();
     await expect(saveButton).toBeVisible({ timeout: 10_000 });
     await saveButton.click();
     return keptCount;
   }
 
-  const saveButton = page.locator('[data-onboarding="recap-memory-save"]').first();
   await expect(saveButton).toBeVisible({ timeout: 10_000 });
   await saveButton.click();
   return 0;
@@ -95,10 +99,10 @@ test('journal allows editing and deleting a saved memory', async ({ page }, test
 
   const journalBefore = await fetchJournal(page);
   const uniqueToken = `JOURNAL-MEMORY-ACTIONS-${Date.now()}`;
-  const originalDetail = `marigold-citrus blend ${uniqueToken}`;
-  const updatedDetail = `amber-ginger blend ${uniqueToken}`;
+  const originalDetail = `obsidian notebook with bergamot steam ${uniqueToken}`;
+  const updatedDetail = `ember-mint notebook ritual ${uniqueToken}`;
   const memoryPrompt = [
-    `Please remember this exact detail for continuity: my comfort ritual after a hard day is drinking ${originalDetail} and taking ten quiet minutes.`,
+    `Please remember this exact detail for continuity: after difficult work sessions I reset by opening an ${originalDetail}, sketching three tight spirals, and listening to one minute of rain audio.`,
     'Keep that as one concrete personal detail for future sessions.',
   ].join(' ');
 

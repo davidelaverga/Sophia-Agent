@@ -41,14 +41,14 @@ const GENERIC_REFLECTION_PROMPTS = [
 ];
 
 export async function POST(request: NextRequest) {
-  let body: { conversation_id: string; user_id: string };
+  let body: { conversation_id: string; user_id?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "Invalid JSON payload" }, { status: 400 });
   }
 
-  if (!body.conversation_id || !body.user_id) {
+  if (!body.conversation_id) {
     return NextResponse.json(
       { error: "Missing required fields" },
       { status: 400 }

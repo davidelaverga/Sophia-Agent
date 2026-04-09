@@ -463,10 +463,15 @@ export function useStreamVoiceSession(
     if (callingState !== CallingState.JOINED) return
 
     const voiceAgentSessionId = credentials?.sessionId
-    if (!voiceAgentSessionId) return
-    if (!remoteParticipantSessionIds.includes(voiceAgentSessionId)) return
+    const hasRemoteParticipant = remoteParticipantSessionIds.length > 0
+    if (!hasRemoteParticipant) return
 
-    markSophiaReady("remote-participant")
+    markSophiaReady("remote-participant", {
+      matchedExpectedSession: voiceAgentSessionId
+        ? remoteParticipantSessionIds.includes(voiceAgentSessionId)
+        : false,
+      remoteParticipantCount: remoteParticipantSessionIds.length,
+    })
   }, [
     callingState,
     credentials?.sessionId,
@@ -700,6 +705,19 @@ export function useStreamVoiceSession(
       )
 
       if (destroyedRef.current || startRequestVersionRef.current !== requestVersion) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "stale-connect-response",
+          payload: {
+            destroyed: destroyedRef.current,
+            requestVersion,
+            currentRequestVersion: startRequestVersionRef.current,
+            callId: creds.callId,
+            callType: creds.callType,
+            voiceAgentSessionId: creds.sessionId ?? null,
+            sessionId: sessionIdRef.current ?? null,
+          },
+        })
         if (creds.sessionId) {
           try {
             await requestVoiceDisconnect(userId, creds)
@@ -879,7 +897,17 @@ export function useStreamVoiceSession(
 
   // --- Cleanup on unmount --------------------------------------------------
   useEffect(() => {
+    destroyedRef.current = false
+
     return () => {
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "hook-cleanup",
+        payload: {
+          sessionId: sessionIdRef.current ?? null,
+          requestVersion: startRequestVersionRef.current,
+        },
+      })
       destroyedRef.current = true
       cancelPendingStartRequest()
       void requestCurrentVoiceDisconnect({ keepalive: true })

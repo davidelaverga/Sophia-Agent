@@ -7,11 +7,20 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.gateway.auth import require_authorized_user_scope
 from app.gateway.routers.voice import _dispatch_voice_agent, router
 
 app = FastAPI()
 app.include_router(router)
+app.dependency_overrides[require_authorized_user_scope] = lambda: "test-user"
 client = TestClient(app)
+
+
+@pytest.fixture
+def secure_client():
+    secure_app = FastAPI()
+    secure_app.include_router(router)
+    return TestClient(secure_app)
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +65,13 @@ def _stream_env(monkeypatch):
 
 class TestVoiceConnect:
     """POST /api/sophia/{user_id}/voice/connect"""
+
+    def test_requires_authorization_when_auth_dependency_is_active(self, secure_client):
+        resp = secure_client.post(
+            "/api/sophia/user_123/voice/connect",
+            json={"platform": "voice"},
+        )
+        assert resp.status_code == 401
 
     def test_happy_path_returns_credentials(self):
         with _mock_dispatch_success():

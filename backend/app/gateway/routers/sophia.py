@@ -10,15 +10,25 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authorized_user_scope
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
+from deerflow.sophia.review_metadata_store import (
+    apply_review_metadata_overlays,
+    remove_review_metadata,
+    upsert_review_metadata,
+)
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/sophia", tags=["sophia"])
+router = APIRouter(
+    prefix="/api/sophia",
+    tags=["sophia"],
+    dependencies=[Depends(require_authorized_user_scope)],
+)
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
@@ -40,7 +50,6 @@ def _validate_user(user_id: str) -> str:
 def _get_mem0_client():
     """Get Mem0 MemoryClient or raise 503."""
     try:
-        import os
         from mem0 import MemoryClient
         api_key = os.environ.get("MEM0_API_KEY")
         if not api_key:

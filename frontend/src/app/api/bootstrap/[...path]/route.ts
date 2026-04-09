@@ -10,7 +10,7 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthHeader } from '../../../lib/auth/server-auth';
+import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
@@ -20,6 +20,11 @@ const BACKEND_URL = getPrimaryGatewayUrl();
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');
   const url = new URL(`${BACKEND_URL}/api/v1/bootstrap/${path}`);
+  const authHeader = await getUserScopedAuthHeader();
+
+  if (!authHeader) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  }
   
   debugLog('bootstrap proxy', 'Request', { method: req.method, path, url: url.toString() });
 
@@ -31,7 +36,7 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   // 🔒 SECURITY: Read token from httpOnly cookie server-side
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
-    'Authorization': await getServerAuthHeader(),
+    'Authorization': authHeader,
   };
 
   try {

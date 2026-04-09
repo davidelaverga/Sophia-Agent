@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,6 +17,18 @@ from fastapi.testclient import TestClient
 @pytest.fixture
 def client():
     """Create a test client with the Sophia router."""
+    from app.gateway.auth import require_authorized_user_scope
+    from app.gateway.routers.sophia import router
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"
+    return TestClient(app)
+
+
+@pytest.fixture
+def secure_client():
+    """Create a test client with the real auth dependency enabled."""
     from app.gateway.routers.sophia import router
 
     app = FastAPI()
@@ -58,6 +71,68 @@ class TestUserIdValidation:
     def test_user_id_with_spaces_returns_400(self, client):
         resp = client.get("/api/sophia/user%20with%20spaces/memories/recent")
         assert resp.status_code == 400
+
+
+class TestUserScopedAuthorization:
+    def test_prefers_sophia_auth_backend_url_for_auth_validation(self, monkeypatch):
+        from app.gateway.auth import _get_legacy_auth_base_url
+
+        monkeypatch.setenv("BACKEND_API_URL", "http://backend-service:8000")
+        monkeypatch.setenv("SOPHIA_AUTH_BACKEND_URL", "http://frontend-auth-bridge:3000")
+
+        assert _get_legacy_auth_base_url() == "http://frontend-auth-bridge:3000"
+
+    def test_missing_bearer_token_returns_401(self, secure_client):
+        resp = secure_client.get("/api/sophia/test_user/memories/recent")
+        assert resp.status_code == 401
+
+    def test_mismatched_authenticated_user_returns_403(self, secure_client):
+        request = httpx.Request("GET", "http://localhost:8000/api/v1/auth/me")
+        auth_response = httpx.Response(200, request=request, json={"id": "other_user"})
+
+        with patch("app.gateway.auth.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=auth_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            resp = secure_client.get(
+                "/api/sophia/test_user/memories/recent",
+                headers={"Authorization": "Bearer test-token"},
+            )
+
+        assert resp.status_code == 403
+
+    def test_matching_authenticated_user_allows_request(self, secure_client, mock_mem0):
+        mock_mem0.get_all.return_value = []
+        request = httpx.Request("GET", "http://localhost:8000/api/v1/auth/me")
+        auth_response = httpx.Response(200, request=request, json={"id": "test_user"})
+
+        with patch("app.gateway.auth.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=auth_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            resp = secure_client.get(
+                "/api/sophia/test_user/memories/recent",
+                headers={"Authorization": "Bearer test-token"},
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 0
+
+    def test_explicit_dev_bypass_keeps_local_user_scope(self, secure_client, mock_mem0, monkeypatch):
+        monkeypatch.setenv("NEXT_PUBLIC_DEV_BYPASS_AUTH", "true")
+        monkeypatch.setenv("NEXT_PUBLIC_SOPHIA_USER_ID", "dev-user")
+        mock_mem0.get_all.return_value = []
+
+        resp = secure_client.get("/api/sophia/dev-user/memories/recent")
+
+        assert resp.status_code == 200
+        assert resp.json()["count"] == 0
 
 
 # ---------------------------------------------------------------------------
