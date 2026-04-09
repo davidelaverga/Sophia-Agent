@@ -433,7 +433,7 @@ def get_deferred_tools_prompt_section() -> str:
 
         if not get_app_config().tool_search.enabled:
             return ""
-    except FileNotFoundError:
+    except Exception:
         return ""
 
     registry = get_deferred_registry()

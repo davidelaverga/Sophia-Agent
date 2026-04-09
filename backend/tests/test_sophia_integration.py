@@ -215,7 +215,7 @@ class TestMiddlewareChainOrdering:
 
     def test_prompt_assembly_creates_system_message(self, skills_path):
         """PromptAssemblyMiddleware joins all blocks into a system message."""
-        from langchain_core.messages import SystemMessage
+        from langchain_core.messages import HumanMessage, SystemMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 
