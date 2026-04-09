@@ -16,14 +16,22 @@ import { logger } from "../lib/error-logger"
  * Returns a cleanup function.
  */
 function bindRemoteAudio(call: Call): () => void {
-  const boundElements = new Map<string, { el: HTMLAudioElement; cleanup: (() => void) | undefined }>()
+  const boundElements = new Map<string, { el: HTMLAudioElement; cleanup: (() => void) | undefined; diagTimer: ReturnType<typeof setInterval> | null }>()
 
   const sub = call.state.remoteParticipants$.subscribe((participants) => {
     const currentSessionIds = new Set(participants.map((p) => p.sessionId))
 
+    console.log(
+      "[VOICE:FRONTEND] remoteParticipants update | count=%d | sessionIds=%s",
+      participants.length,
+      participants.map((p) => p.sessionId).join(", "),
+    )
+
     // Remove elements for participants who left
     for (const [sessionId, entry] of boundElements) {
       if (!currentSessionIds.has(sessionId)) {
+        console.log("[VOICE:FRONTEND] UNBINDING audio | sessionId=%s", sessionId)
+        if (entry.diagTimer) clearInterval(entry.diagTimer)
         entry.cleanup?.()
         entry.el.remove()
         boundElements.delete(sessionId)
@@ -38,7 +46,38 @@ function bindRemoteAudio(call: Call): () => void {
         audioEl.style.display = "none"
         document.body.appendChild(audioEl)
         const cleanup = call.bindAudioElement(audioEl, p.sessionId, "audioTrack")
-        boundElements.set(p.sessionId, { el: audioEl, cleanup })
+
+        // Diagnostic: monitor audio element state every 2s, auto-stop after 20s
+        const diagTimer = setInterval(() => {
+          const stream = audioEl.srcObject as MediaStream | null
+          const tracks = stream?.getAudioTracks() ?? []
+          console.log(
+            "[VOICE:FRONTEND] AUDIO_CHECK | sessionId=%s | paused=%s | srcObject=%s | tracks=%d | trackStates=%s | readyState=%d | muted=%s",
+            p.sessionId,
+            String(audioEl.paused),
+            String(Boolean(stream)),
+            tracks.length,
+            tracks.map((t) => `${t.kind}:${t.readyState}:enabled=${t.enabled}:muted=${t.muted}`).join(";"),
+            audioEl.readyState,
+            String(audioEl.muted),
+          )
+        }, 2000)
+        setTimeout(() => {
+          clearInterval(diagTimer)
+          const entry = boundElements.get(p.sessionId)
+          if (entry) entry.diagTimer = null
+        }, 20000)
+
+        boundElements.set(p.sessionId, { el: audioEl, cleanup, diagTimer })
+
+        console.log(
+          "[VOICE:FRONTEND] BOUND audio | sessionId=%s | userId=%s | hasAudioStream=%s | audioEl.srcObject=%s | audioEl.paused=%s",
+          p.sessionId,
+          p.userId,
+          String(Boolean(p.audioStream)),
+          String(Boolean(audioEl.srcObject)),
+          String(audioEl.paused),
+        )
       }
     }
   })
@@ -46,6 +85,7 @@ function bindRemoteAudio(call: Call): () => void {
   return () => {
     sub.unsubscribe()
     for (const [, entry] of boundElements) {
+      if (entry.diagTimer) clearInterval(entry.diagTimer)
       entry.cleanup?.()
       entry.el.remove()
     }
