@@ -7,8 +7,9 @@ import { type NextRequest, NextResponse } from 'next/server';
 
 import { getServerAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
+import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
-const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8001';
+const BACKEND_URL = getPrimaryGatewayUrl();
 
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');

@@ -10,7 +10,6 @@
 
 import { 
   Clock, 
-  ChevronRight, 
   MessageCircle,
   Target,
   RefreshCw,
@@ -174,11 +173,6 @@ export function SessionHistory({ className, maxItems = 5 }: SessionHistoryProps)
     }
   };
   
-  const handleViewAll = () => {
-    haptic('light');
-    router.push('/history');
-  };
-  
   if (recentSessions.length === 0) {
     return (
       <div className={className}>
@@ -192,15 +186,6 @@ export function SessionHistory({ className, maxItems = 5 }: SessionHistoryProps)
       {/* Header */}
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-medium text-sophia-text2">Recent Sessions</h2>
-        {sessions.length > maxItems && (
-          <button
-            onClick={handleViewAll}
-            className="flex items-center gap-1 text-xs text-sophia-purple hover:text-sophia-purple/80 transition-colors"
-          >
-            View all
-            <ChevronRight className="w-3 h-3" />
-          </button>
-        )}
       </div>
       
       {/* Horizontal scroll container */}

@@ -27,11 +27,13 @@
 
 // Client-side exports
 export {
+  providerLogin,
   discordLogin,
   registerWithBackend,
   validateToken,
   getCurrentUser,
   refreshToken,
+  type ProviderLoginRequest,
   type DiscordLoginRequest,
   type BackendRegisterRequest,
   type BackendUserResponse,

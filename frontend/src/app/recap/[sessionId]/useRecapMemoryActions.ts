@@ -22,7 +22,7 @@ interface UseRecapMemoryActionsParams {
   setDecision: (sessionId: string, candidateId: string, decision: MemoryDecision, editedText?: string) => void;
   commitMemories: (sessionId: string, threadId?: string) => Promise<{ committed: string[]; discarded: string[]; errors: Array<{ candidate_id: string; message: string }> }>;
   showToast: ShowToast;
-  navigateHome: () => void;
+  navigateAfterSave: (result: { committed: string[]; discarded: string[]; errors: Array<{ candidate_id: string; message: string }> }) => void;
 }
 
 interface UseRecapMemoryActionsResult {
@@ -51,7 +51,7 @@ export function useRecapMemoryActions({
   setDecision,
   commitMemories,
   showToast,
-  navigateHome,
+  navigateAfterSave,
 }: UseRecapMemoryActionsParams): UseRecapMemoryActionsResult {
   const [isSaving, setIsSaving] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -172,8 +172,10 @@ export function useRecapMemoryActions({
         (decision) => decision.decision === 'approved' || decision.decision === 'edited'
       ).length;
 
+      let commitResult = { committed: [], discarded: [], errors: [] as Array<{ candidate_id: string; message: string }> };
+
       if (approvedCount > 0) {
-        const commitResult = await commitMemories(sessionId);
+        commitResult = await commitMemories(sessionId);
         if (commitResult.errors.length > 0 || commitResult.committed.length < approvedCount) {
           throw new Error(errorCopy.couldntSaveMemories);
         }
@@ -190,7 +192,7 @@ export function useRecapMemoryActions({
       });
 
       setTimeout(() => {
-        navigateHome();
+        navigateAfterSave(commitResult);
       }, 1500);
     } catch (error) {
       logger.logError(error, {
@@ -205,7 +207,7 @@ export function useRecapMemoryActions({
     } finally {
       setIsSaving(false);
     }
-  }, [commitMemories, decisions, navigateHome, sessionId, showToast]);
+  }, [commitMemories, decisions, navigateAfterSave, sessionId, showToast]);
 
   const dismissActionError = useCallback(() => {
     setActionError(null);

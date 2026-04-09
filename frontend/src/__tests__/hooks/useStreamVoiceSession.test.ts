@@ -156,6 +156,32 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("connecting")
   })
 
+  it("includes session_id and thread_id when the voice session is bound to an active session", async () => {
+    const { result } = renderHook(() =>
+      useStreamVoiceSession("user-1", {
+        sessionId: "session-123",
+        threadId: "thread-456",
+      }),
+    )
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/connect",
+      expect.objectContaining({
+        body: JSON.stringify({
+          platform: "voice",
+          context_mode: "gaming",
+          ritual: "vent",
+          session_id: "session-123",
+          thread_id: "thread-456",
+        }),
+      }),
+    )
+  })
+
   it("sends a null ritual for open or chat sessions", async () => {
     mockSessionContextMode = "life"
     mockSessionPresetType = "open"
@@ -221,6 +247,46 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.error).toBe("Sophia voice is unavailable right now. Try again.")
     expect(mockSetVoiceFailed).toHaveBeenCalledWith("Sophia voice is unavailable right now. Try again.")
     expect(mockJoin).not.toHaveBeenCalled()
+  })
+
+  it("ignores concurrent startTalking calls while a connect request is already in flight", async () => {
+    let resolveFetch: ((value: {
+      ok: boolean
+      json: () => Promise<Record<string, unknown>>
+      text: () => Promise<string>
+    }) => void) | null = null
+
+    mockFetch.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFetch = resolve
+      }),
+    )
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      const firstStart = result.current.startTalking()
+      const secondStart = result.current.startTalking()
+
+      await Promise.resolve()
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+
+      resolveFetch?.({
+        ok: true,
+        json: () => Promise.resolve({
+          api_key: "test-key",
+          token: "test-token",
+          call_type: "audio_room",
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+        }),
+        text: () => Promise.resolve(""),
+      })
+
+      await Promise.all([firstStart, secondStart])
+    })
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
   })
 
   it("startTalking with no userId sets error", async () => {

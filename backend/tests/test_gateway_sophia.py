@@ -174,6 +174,22 @@ class TestListMemories:
         assert data["memories"][0]["category"] == "feeling"
         assert data["memories"][1]["category"] == "fact"
 
+    def test_deduplicates_duplicate_memory_ids_before_returning_recent_memories(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = []
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "local:dup", "memory": "Older duplicate", "metadata": {"status": "pending_review"}, "updated_at": "2026-04-01T00:00:00+00:00"},
+            {"id": "local:dup", "memory": "Newer duplicate", "metadata": {"status": "pending_review"}, "updated_at": "2026-04-02T00:00:00+00:00"},
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "local:dup"
+        assert data["memories"][0]["content"] == "Newer duplicate"
+
 
 # ---------------------------------------------------------------------------
 # Memory Create
@@ -405,17 +421,71 @@ class TestJournal:
         assert data["count"] == 1
         assert data["entries"][0]["content"] == "Likes pizza"
 
+    def test_handles_empty_categories_list(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Approved memory", "categories": [], "metadata": {"status": "approved"}},
+        ]
+        resp = client.get("/api/sophia/test_user/journal")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["entries"][0]["category"] is None
+
     def test_with_category_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = []
         resp = client.get("/api/sophia/test_user/journal?category=relationship")
         assert resp.status_code == 200
         mock_mem0.get_all.assert_called_once()
 
+    def test_with_type_alias_filter(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = []
+        resp = client.get("/api/sophia/test_user/journal?type=relationship")
+        assert resp.status_code == 200
+        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user", "categories": "relationship"})
+
+    def test_with_search_filter(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Presentation went well", "categories": ["lesson"]},
+            {"id": "m2", "memory": "Likes pizza", "categories": ["fact"]},
+        ]
+        resp = client.get("/api/sophia/test_user/journal?search=present")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["entries"][0]["id"] == "m1"
+
+    def test_with_status_filter(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Approved memory", "metadata": {"status": "approved"}},
+            {"id": "m2", "memory": "Pending memory", "metadata": {"status": "pending_review"}},
+        ]
+        resp = client.get("/api/sophia/test_user/journal?status=approved")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["entries"][0]["id"] == "m1"
+
     def test_empty_journal(self, client, mock_mem0):
         mock_mem0.get_all.return_value = []
         resp = client.get("/api/sophia/test_user/journal")
         assert resp.status_code == 200
         assert resp.json()["entries"] == []
+
+    def test_deduplicates_duplicate_memory_ids_before_returning_journal(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get_all.return_value = []
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {"id": "local:dup", "memory": "Older duplicate", "metadata": {"status": "approved"}, "created_at": "2026-04-01T00:00:00+00:00"},
+            {"id": "local:dup", "memory": "Newer duplicate", "metadata": {"status": "approved"}, "created_at": "2026-04-02T00:00:00+00:00"},
+        ]
+
+        resp = client.get("/api/sophia/test_user/journal")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["entries"][0]["id"] == "local:dup"
+        assert data["entries"][0]["content"] == "Newer duplicate"
 
 
 # ---------------------------------------------------------------------------

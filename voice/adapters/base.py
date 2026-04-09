@@ -29,6 +29,8 @@ class BackendRequest:
     platform: str
     ritual: str | None
     context_mode: str
+    session_id: str | None = None
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True)

@@ -25,13 +25,13 @@ export const copy: CopyStructure = {
   auth: {
     title: "Sophia",
     subtitle: "Una compañera tranquila, emocionalmente consciente.",
-    button: "Continuar con Discord",
+    button: "Continuar con Google",
     loading: "Preparando un espacio tranquilo para ti...",
     connecting: "Un momento...",
     footerNote: "Al continuar aceptas nuestros términos y nuestra política de privacidad",
     errors: {
-      discord: "El inicio de sesión con Discord falló. Inténtalo de nuevo.",
-      unexpected: "No pudimos contactar con Discord. Inténtalo de nuevo en unos momentos.",
+      signIn: "El inicio de sesión con Google falló. Inténtalo de nuevo.",
+      unexpected: "No pudimos contactar con Google. Inténtalo de nuevo en unos momentos.",
     },
   },
   header: {

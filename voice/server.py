@@ -63,6 +63,14 @@ class SophiaStartSessionRequest(BaseModel):
         default=None,
         description="Active ritual: prepare | debrief | vent | reset | None",
     )
+    session_id: str | None = Field(
+        default=None,
+        description="Frontend companion session ID for continuity",
+    )
+    thread_id: str | None = Field(
+        default=None,
+        description="LangGraph thread ID to reuse for this voice session",
+    )
 
 
 session_router = APIRouter()
@@ -74,6 +82,8 @@ def _bind_agent_session_context(
     platform: str,
     context_mode: str,
     ritual: str | None,
+    session_id: str | None,
+    thread_id: str | None,
 ) -> None:
     llm = getattr(agent, "llm", None)
     bind_session_context = getattr(llm, "bind_session_context", None)
@@ -84,6 +94,8 @@ def _bind_agent_session_context(
         platform=platform,
         context_mode=context_mode,
         ritual=ritual,
+        session_id=session_id,
+        thread_id=thread_id,
     )
 
 
@@ -135,6 +147,8 @@ async def start_sophia_session(
             platform=request.platform,
             context_mode=request.context_mode,
             ritual=request.ritual,
+            session_id=request.session_id,
+            thread_id=request.thread_id,
         )
     except Exception as exc:
         logger.exception("Failed to bind Sophia session context")

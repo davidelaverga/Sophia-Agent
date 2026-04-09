@@ -40,12 +40,12 @@ canvas{position:fixed;inset:0}
   display:flex;gap:3px;
 }
 .fil{
-  padding:4px 10px;border-radius:12px;font-size:9px;letter-spacing:0.02em;
-  color:#4a4560;cursor:pointer;transition:all .3s ease;
+  padding:5px 13px;border-radius:12px;font-size:10.5px;letter-spacing:0.02em;
+  color:#5a5478;cursor:pointer;transition:all .3s ease;
   background:transparent;border:1px solid transparent;
 }
-.fil:hover{color:#7a7490}
-.fil.active{color:#a898d8;background:rgba(184,164,232,0.06);border-color:rgba(184,164,232,0.10)}
+.fil:hover{color:#9a94b0;background:rgba(184,164,232,0.04)}
+.fil.active{color:#b8a8e8;background:rgba(184,164,232,0.09);border-color:rgba(184,164,232,0.14)}
 
 .top-right{position:fixed;top:28px;right:32px;z-index:10;display:flex;align-items:center;gap:8px}
 .period-sel{
@@ -54,6 +54,23 @@ canvas{position:fixed;inset:0}
   color:#6a6480;font-size:10px;cursor:pointer;display:flex;align-items:center;gap:5px;
 }
 .period-sel::after{content:'▾';font-size:7px;color:#4a4560}
+/* AGENT: Period dropdown — NEW CSS. Create as a Radix/shadcn dropdown or custom positioned div */
+.period-dropdown{
+  position:fixed;z-index:30;
+  display:none;flex-direction:column;
+  min-width:120px;padding:4px;
+  border-radius:10px;
+  background:rgba(16,12,28,0.92);backdrop-filter:blur(30px);
+  border:1px solid rgba(184,164,232,0.10);
+  box-shadow:0 12px 40px rgba(3,2,10,0.7);
+}
+.period-dropdown.open{display:flex}
+.period-opt{
+  padding:7px 12px;border-radius:7px;font-size:10px;color:#8a84a0;
+  cursor:pointer;transition:background .2s,color .2s;
+}
+.period-opt:hover{background:rgba(184,164,232,0.08);color:#b8a8e8}
+.period-opt.active{color:#b8a8e8}
 .view-toggle{
   display:flex;gap:1px;padding:2px;border-radius:6px;
   background:rgba(14,12,24,0.45);border:1px solid rgba(184,164,232,0.06);
@@ -90,6 +107,9 @@ canvas{position:fixed;inset:0}
 .detail .d-cat.cat-feeling{background:rgba(200,120,160,0.10);color:#d490b0}
 .detail .d-cat.cat-relationship{background:rgba(120,155,200,0.10);color:#88aad0}
 .detail .d-cat.cat-commitment{background:rgba(120,200,165,0.10);color:#88d0b0}
+.detail .d-cat.cat-preference{background:rgba(180,160,200,0.10);color:#b0a0c8}
+.detail .d-cat.cat-fact{background:rgba(170,185,200,0.10);color:#a0b4c8}
+.detail .d-cat.cat-ritual_context{background:rgba(175,155,190,0.10);color:#af9bbe}
 .detail .d-close{background:none;border:none;color:#5a5470;cursor:pointer;font-size:13px;padding:2px 4px;border-radius:4px;transition:color .2s,background .2s}
 .detail .d-close:hover{color:#a090d0;background:rgba(160,144,208,0.08)}
 .detail .d-date{font-size:9px;color:#6a6480;margin-bottom:10px;letter-spacing:0.03em;display:flex;align-items:center;gap:6px}
@@ -101,9 +121,9 @@ canvas{position:fixed;inset:0}
 .detail .d-session{font-size:8px;color:#3a3550;margin-top:8px;letter-spacing:0.03em}
 
 /* Stats */
-.stats{position:fixed;bottom:76px;left:32px;z-index:10;display:flex;gap:22px;opacity:0.50}
-.stat .stat-n{font-weight:500;font-size:15px;color:#d0cce0}
-.stat .stat-l{font-size:8px;color:#5a5470;margin-top:1px;letter-spacing:0.03em}
+.stats{position:fixed;bottom:76px;left:32px;z-index:10;display:flex;gap:24px;opacity:0.72}
+.stat .stat-n{font-weight:500;font-size:17px;color:#d8d4e8}
+.stat .stat-l{font-size:9.5px;color:#6a6488;margin-top:2px;letter-spacing:0.03em}
 
 /* Timeline — interactive scrubber */
 .timeline{
@@ -148,29 +168,30 @@ canvas{position:fixed;inset:0}
 .tl-dot.hidden{opacity:0;transform:translate(-50%,-50%) scale(0)}
 .tl-handle{
   position:absolute;top:10px;transform:translate(-50%,-50%);
-  width:12px;height:12px;border-radius:50%;z-index:2;
+  width:16px;height:16px;border-radius:50%;z-index:2;
   background:radial-gradient(circle,rgba(220,210,255,0.95) 0%,rgba(180,164,228,0.7) 50%,rgba(139,126,200,0.3) 100%);
-  box-shadow:0 0 16px rgba(160,144,208,0.45),0 0 4px rgba(255,255,255,0.15);
+  box-shadow:0 0 18px rgba(160,144,208,0.50),0 0 5px rgba(255,255,255,0.18);
   cursor:grab;transition:transform .2s,box-shadow .2s;
 }
 .tl-handle:hover{
   transform:translate(-50%,-50%) scale(1.3);
-  box-shadow:0 0 18px rgba(160,144,208,0.45),0 0 4px rgba(255,255,255,0.12);
+  box-shadow:0 0 20px rgba(160,144,208,0.50),0 0 5px rgba(255,255,255,0.15);
 }
 .tl-handle.dragging{
   cursor:grabbing;
   transform:translate(-50%,-50%) scale(1.5);
-  box-shadow:0 0 24px rgba(160,144,208,0.55),0 0 6px rgba(255,255,255,0.15);
+  box-shadow:0 0 26px rgba(160,144,208,0.60),0 0 7px rgba(255,255,255,0.18);
 }
 .tl-months{
   display:flex;justify-content:space-between;
-  pointer-events:none;padding:0 1%;margin-top:2px;
+  padding:0 1%;margin-top:2px;
 }
 .tl-month{
-  font-size:8px;color:rgba(140,130,180,0.40);letter-spacing:0.06em;
-  font-weight:400;transition:color .3s;
+  font-size:9.5px;color:rgba(140,130,180,0.45);letter-spacing:0.06em;
+  font-weight:400;transition:color .3s;cursor:pointer;
 }
-.tl-month.active{color:rgba(190,175,230,0.70)}
+.tl-month:hover{color:rgba(190,175,230,0.65)}
+.tl-month.active{color:rgba(190,175,230,0.80)}
 /* Onboarding hint — inline right of date */
 .tl-hint{
   display:inline-flex;align-items:center;gap:5px;
@@ -184,9 +205,9 @@ canvas{position:fixed;inset:0}
 @keyframes tlHintPulse{0%,100%{opacity:0.5}50%{opacity:1}}
 
 /* Emerging patterns */
-.patterns-bar{position:fixed;bottom:72px;right:32px;z-index:10;display:flex;align-items:center;gap:6px;opacity:0.40}
-.patterns-bar .pb-label{font-size:8.5px;color:#5a5470;letter-spacing:0.03em;margin-right:4px;font-weight:500}
-.patterns-bar .pb-pill{font-size:8px;padding:3px 10px;border-radius:10px;display:flex;align-items:center;gap:4px;letter-spacing:0.02em;cursor:default}
+.patterns-bar{position:fixed;bottom:72px;right:32px;z-index:10;display:flex;align-items:center;gap:7px;opacity:0.62}
+.patterns-bar .pb-label{font-size:9.5px;color:#6a6488;letter-spacing:0.03em;margin-right:5px;font-weight:500}
+.patterns-bar .pb-pill{font-size:9px;padding:4px 11px;border-radius:10px;display:flex;align-items:center;gap:5px;letter-spacing:0.02em;cursor:default}
 .patterns-bar .pb-pill .pb-dot{width:4px;height:4px;border-radius:50%}
 .patterns-bar .pb-pill.p-rest{background:rgba(139,126,200,0.08);color:#8b7ec8}
 .patterns-bar .pb-pill.p-rest .pb-dot{background:#8b7ec8}
@@ -197,6 +218,38 @@ canvas{position:fixed;inset:0}
 .patterns-bar .pb-pill.p-relations{background:rgba(200,165,120,0.06);color:#c8a578}
 .patterns-bar .pb-pill.p-relations .pb-dot{background:#c8a578}
 .patterns-bar .pb-more{font-size:8px;color:#4a4560;margin-left:2px}
+
+/* Onboarding prompt — click a memory */
+.onboard-hint-orb{
+  position:fixed;z-index:10;
+  left:50%;top:46%;transform:translate(-50%,-50%);
+  font-size:11.5px;color:rgba(200,190,230,0.55);letter-spacing:0.04em;
+  font-weight:300;pointer-events:none;
+  animation:orbHintPulse 3s ease-in-out infinite;
+  transition:opacity 1s ease;white-space:nowrap;
+}
+.onboard-hint-orb.hide{opacity:0;pointer-events:none}
+@keyframes orbHintPulse{0%,100%{opacity:0.35}50%{opacity:0.70}}
+
+/* Hover label preview for orbs */
+.hover-label{
+  position:fixed;z-index:25;
+  padding:6px 12px;border-radius:8px;
+  background:rgba(16,12,28,0.85);backdrop-filter:blur(20px);
+  border:1px solid rgba(184,164,232,0.12);
+  font-size:11px;color:#d0cce0;font-weight:300;
+  letter-spacing:0.01em;line-height:1.4;
+  pointer-events:none;opacity:0;
+  transition:opacity .25s ease;
+  transform:translateX(-50%);max-width:220px;text-align:center;
+  box-shadow:0 8px 24px rgba(3,2,10,0.6);
+}
+.hover-label.show{opacity:1}
+.hover-label .hl-cat{
+  display:inline-block;font-size:7.5px;padding:2px 6px;border-radius:6px;
+  letter-spacing:0.05em;text-transform:uppercase;font-weight:500;
+  margin-bottom:4px;
+}
 </style>
 </head>
 <body>
@@ -205,33 +258,103 @@ canvas{position:fixed;inset:0}
 <canvas id="overlay"></canvas>
 <canvas id="hit"></canvas>
 
+<!-- ═══════════════════════════════════════════════════════════════════
+  AGENT NOTES — RECREATING THIS AS journal/page.tsx
+  ═══════════════════════════════════════════════════════════════════
+  ARCHITECTURE:
+  - 3 stacked <canvas> elements: pool (WebGL shader), overlay (2D gems/particles), hit (invisible click target)
+  - Product UI is standard HTML/CSS positioned fixed over the canvases
+  - Memory data comes from Mem0 API in production (GET /api/sophia/{user_id}/memories/recent)
+  - Categories map to Mem0's 9 categories (see CLAUDE.md): fact, feeling, decision, lesson, commitment, preference, relationship, pattern, ritual_context
+  - Timeline scrubber filters memories by date (maps to memory timestamps)
+
+  COLORS / THEME:
+  - Background: #06050c (--background in existing theme)
+  - Text primary: #e8e4f0 (map to --foreground or create --journal-text)
+  - Text muted: #6a6480 (map to --muted-foreground)
+  - Accent purple: #8b7ec8 / rgba(184,164,232,*) (map to --primary or --accent)
+  - Glass panels: rgba(14,12,24,0.55) + backdrop-filter:blur — use existing glass pattern from theme
+  - Border subtle: rgba(184,164,232,0.08) — reuse --border with low opacity
+  - Category colors are CUSTOM — define in a catColors map (see JS section below)
+
+  FONTS:
+  - Headings: 'Cormorant Garamond' serif — MUST be loaded (Google Fonts or local)
+  - Body: 'Inter' sans-serif — likely already in theme
+  - If Inter is already the app font, just use font-sans from Tailwind
+
+  COMPONENTS TO CREATE:
+  1. JournalCanvas — WebGL shader (pool) + 2D overlay (gems/particles)
+     - The GLSL shader is ~600 lines. Ship it as a string literal or .glsl file
+     - The 2D overlay draws gems, constellations, particles each frame
+  2. JournalUI — all the fixed-position product UI (search, filters, stats, timeline, detail panel)
+  3. MemoryGem — the gem rendering logic (drop shadow, sphere layers, outline, specular)
+  4. Timeline — scrubber with pointer drag, memory dots
+  5. DetailPanel — floating panel that positions above selected gem
+  6. SearchBar — filters memories by text match
+  7. CategoryFilter — filters by Mem0 category
+  8. PeriodSelector — dropdown: "All time", "This month", "This week", "Today"
+
+  STATE (React):
+  - memories: Memory[] — from API
+  - activeFilter: string — 'all' | category name
+  - searchQuery: string
+  - period: 'all' | 'month' | 'week' | 'today'
+  - tlDay: number — timeline scrub position
+  - selectedIdx: number | null
+  - hoveredIdx: number | null
+
+  PERFORMANCE:
+  - WebGL shader runs at 60fps via requestAnimationFrame
+  - 2D canvas redraws every frame (gems bob with waves)
+  - Memory uniforms (uMem[16]) pass world positions to shader for light/ripple effects
+  - DPR is uncapped (devicePixelRatio) — high-res displays get full resolution
+  - Use useRef for canvas elements, useEffect for animation loop
+  - Do NOT put animation state in React state — use plain variables in the animation closure
+═══════════════════════════════════════════════════════════════════ -->
+
 <!-- Product UI Layer -->
+<!-- AGENT: These are all position:fixed overlays. In React, wrap in a single <div className="journal-ui"> -->
+<!-- AGENT: z-index layers: pool=0, overlay=2, hit=3, UI=10, detail=20, hover-label=25 -->
 <div class="top-left">
   <h1>Journal</h1>
   <p class="sub"><span class="dot"></span> Your memories with Sophia</p>
 </div>
+<!-- AGENT: Search bar — center-top. In React: controlled input with onChange -> setSearchQuery -->
 <div class="search-bar">
   <span class="si">⌕</span>
-  <input type="text" placeholder="Search memories…" spellcheck="false">
+  <input id="searchInput" type="text" placeholder="Search memories…" spellcheck="false">
   <span class="kb">⌘K</span>
 </div>
-<div class="filters">
-  <div class="fil active" onclick="setFilter(this)">All</div>
-  <div class="fil" onclick="setFilter(this)">Decisions</div>
-  <div class="fil" onclick="setFilter(this)">Patterns</div>
-  <div class="fil" onclick="setFilter(this)">Lessons</div>
-  <div class="fil" onclick="setFilter(this)">Feelings</div>
-  <div class="fil" onclick="setFilter(this)">Relationships</div>
+<!-- AGENT: Filter pills — center below search. 'All' + one per category. onclick toggles activeFilter state -->
+<!-- AGENT: Category names must match the tags in memory data. Use lowercase internally, display capitalized -->
+<div class="filters" id="filtersBar">
+  <div class="fil active" data-cat="all" onclick="setFilter(this)">All</div>
+  <div class="fil" data-cat="decision" onclick="setFilter(this)">Decisions</div>
+  <div class="fil" data-cat="pattern" onclick="setFilter(this)">Patterns</div>
+  <div class="fil" data-cat="lesson" onclick="setFilter(this)">Lessons</div>
+  <div class="fil" data-cat="feeling" onclick="setFilter(this)">Feelings</div>
+  <div class="fil" data-cat="relationship" onclick="setFilter(this)">Relationships</div>
+  <div class="fil" data-cat="commitment" onclick="setFilter(this)">Commitments</div>
+  <div class="fil" data-cat="preference" onclick="setFilter(this)">Preferences</div>
 </div>
+<!-- AGENT: Top-right controls. Period selector is a dropdown. View toggle switches pool/list (list view not implemented here) -->
 <div class="top-right">
-  <div class="period-sel">This month</div>
+  <div class="period-sel" id="periodSel">All time</div>
+  <!-- AGENT: Period dropdown — appears on click, positioned below the button -->
+  <div class="period-dropdown" id="periodDropdown">
+    <div class="period-opt" data-period="all">All time</div>
+    <div class="period-opt" data-period="month">This month</div>
+    <div class="period-opt" data-period="week">This week</div>
+    <div class="period-opt" data-period="today">Today</div>
+  </div>
   <div class="view-toggle"><div class="vt active">Pool</div><div class="vt">List</div></div>
   <div class="avatar"></div>
 </div>
+<!-- AGENT: Stats bar — bottom-left. Numbers update dynamically based on filtered/visible memories -->
 <div class="stats">
-  <div class="stat"><div class="stat-n">127</div><div class="stat-l">memories</div></div>
-  <div class="stat"><div class="stat-n">14</div><div class="stat-l">this month</div></div>
-  <div class="stat"><div class="stat-n">3</div><div class="stat-l">emerging patterns</div></div>
+  <div class="stat"><div class="stat-n" id="statTotal">127</div><div class="stat-l">memories</div></div>
+  <div class="stat"><div class="stat-n" id="statVisible">14</div><div class="stat-l">visible</div></div>
+  <div class="stat"><div class="stat-n" id="statPatterns">3</div><div class="stat-l">emerging patterns</div></div>
 </div>
 <div class="timeline">
   <div class="tl-date" id="tlDate"><span id="tlDateText">Today</span><span class="tl-count" id="tlCount">12 memories</span><span class="tl-hint" id="tlHint"><svg viewBox="0 0 16 16"><path d="M3 8h10M3 8l3-3M3 8l3 3M13 8l-3-3M13 8l-3 3"/></svg>drag to explore</span></div>
@@ -251,6 +374,9 @@ canvas{position:fixed;inset:0}
   <span class="pb-more">+2</span>
 </div>
 
+<div class="onboard-hint-orb" id="orbHint">Click a memory to explore</div>
+<div class="hover-label" id="hoverLabel"></div>
+
 <div class="detail" id="detail">
   <div class="d-header">
     <div class="d-cat cat-pattern" id="dCat">pattern</div>
@@ -264,9 +390,127 @@ canvas{position:fixed;inset:0}
 </div>
 
 <script>
-// Filter pill interaction
-function setFilter(el){document.querySelectorAll('.fil').forEach(f=>f.classList.remove('active'));el.classList.add('active')}
+// ═══════════════════════════════════════════════════════════════════
+// AGENT: ARCHITECTURE OVERVIEW — READ THIS FIRST
+// ═══════════════════════════════════════════════════════════════════
+// This prototype has TWO rendering layers that must stay in sync:
+//
+// 1) WEBGL SHADER (pool canvas) — renders water, ripples, light pools, caustics, sky.
+//    Receives per-gem data via two uniforms:
+//      uMem[16]    (vec4): xy = shader-space position, z = strength, w = phase
+//      uMemCol[16] (vec3): RGB category color (0-1 range)
+//    CRITICAL: positions must go through worldToShaderPP() to match shader coords.
+//
+// 2) CANVAS 2D OVERLAY (overlay canvas) — renders gems, halos, particles, lines.
+//    Uses screen-space (m.sx, m.sy) from poolToScreen().
+//
+// GEM-WATER INTEGRATION (what makes gems feel "in" the water, not "on" it):
+//   a) GLSL light pools — shader illuminates water with gem's category color
+//   b) GLSL ripple rings — concentric waves emanate in gem's category color
+//   c) Canvas water anchor — 2D radial gradient below gem (category colored)
+//   d) Canvas contact ring — bright ellipse at gem-water intersection
+//   e) Canvas particle tinting — nearby particles blend toward gem color
+//   f) Canvas constellation bobbing — connection lines undulate with waves
+//   g) Canvas gem bobbing — gems themselves move with the wave
+//
+// In React: split into WebGLPool component (shader) + CanvasOverlay component.
+// Share memory state via context or zustand store. Run both in the same rAF loop.
+// ═══════════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════════
+// FILTER / SEARCH / PERIOD STATE
+// ═══════════════════════════════════════════════════════════════════
+// AGENT: In React, these become useState hooks. The applyFilters() function
+// recalculates which memories are visible whenever any filter changes.
+let activeFilter='all';  // 'all' | category name (lowercase)
+let searchQuery='';      // text typed in search bar
+let activePeriod='all';  // 'all' | 'month' | 'week' | 'today'
+let selIdx=-1;           // selected memory index (-1 = none)
+let hovIdx=-1;           // hovered memory index (-1 = none)
+
+// Filter pill interaction — sets category filter and re-applies
+function setFilter(el){
+  document.querySelectorAll('.fil').forEach(f=>f.classList.remove('active'));
+  el.classList.add('active');
+  activeFilter=el.dataset.cat||'all';
+  applyFilters();
+}
 window.setFilter=setFilter;
+
+// Search input — debounced text filter
+const searchInput=document.getElementById('searchInput');
+searchInput.addEventListener('input',()=>{
+  searchQuery=searchInput.value.trim().toLowerCase();
+  applyFilters();
+});
+// AGENT: Wire up Cmd+K shortcut to focus search
+document.addEventListener('keydown',e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key==='k'){e.preventDefault();searchInput.focus();}
+  if(e.key==='Escape'){searchInput.blur();searchInput.value='';searchQuery='';applyFilters();hideDetail();}
+});
+
+// Period selector dropdown
+const periodSel=document.getElementById('periodSel');
+const periodDropdown=document.getElementById('periodDropdown');
+periodSel.addEventListener('click',e=>{
+  e.stopPropagation();
+  const rect=periodSel.getBoundingClientRect();
+  periodDropdown.style.top=(rect.bottom+4)+'px';
+  periodDropdown.style.right=(innerWidth-rect.right)+'px';
+  periodDropdown.classList.toggle('open');
+});
+document.addEventListener('click',()=>periodDropdown.classList.remove('open'));
+document.querySelectorAll('.period-opt').forEach(opt=>{
+  opt.addEventListener('click',e=>{
+    e.stopPropagation();
+    activePeriod=opt.dataset.period;
+    periodSel.textContent=opt.textContent;
+    document.querySelectorAll('.period-opt').forEach(o=>o.classList.remove('active'));
+    opt.classList.add('active');
+    periodDropdown.classList.remove('open');
+    applyFilters();
+  });
+});
+
+// AGENT: Core filter logic. Computes a "filterAlpha" per memory (0 = hidden, 1 = visible).
+// In React, derive this in a useMemo based on [memories, activeFilter, searchQuery, activePeriod, tlDay]
+function applyFilters(){
+  let visCount=0;
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    const info=memTexts[m.textIdx];
+    const cat=info.tags[0]||'pattern';
+    let visible=true;
+    // Category filter
+    if(activeFilter!=='all' && cat!==activeFilter) visible=false;
+    // Search filter — match against text and tags
+    if(searchQuery && !info.text.toLowerCase().includes(searchQuery) && !info.tags.some(t=>t.includes(searchQuery))) visible=false;
+    // Period filter — based on day field
+    if(activePeriod==='today' && m.day<TL_DAY_MAX) visible=false;
+    if(activePeriod==='week' && m.day<TL_DAY_MAX-7) visible=false;
+    if(activePeriod==='month' && m.day<TL_DAY_MAX-30) visible=false;
+    // Timeline scrub filter
+    if(m.day>tlDay) visible=false;
+    m.filterVisible=visible;
+    if(visible){
+      const age=tlDay-m.day;
+      m.tlAlpha=age>=5?1.0:0.3+age*0.14;
+      visCount++;
+    } else {
+      m.tlAlpha=0.0;
+    }
+  }
+  // Update stats
+  document.getElementById('statTotal').textContent=memories.length;
+  document.getElementById('statVisible').textContent=visCount;
+  tlCount.textContent=visCount+(visCount===1?' memory':' memories');
+  // Update timeline dots
+  for(let i=0;i<tlDots.length;i++){
+    tlDots[i].classList.toggle('hidden',memories[i].tlAlpha<0.01);
+  }
+  // If selected memory is now hidden, close detail
+  if(selIdx>=0 && memories[selIdx].tlAlpha<0.01) hideDetail();
+}
 
 // ═══════════════════════════════════════════════════
 // CAMERA
@@ -293,6 +537,28 @@ function poolToScreen(px,pz){
   return{x:(r/(f*curFOV*asp)+0.5)*innerWidth,y:(-u/(f*curFOV)+0.5)*innerHeight,s:1/f};
 }
 
+// AGENT: CRITICAL — worldToShaderPP bridges JS world coords and GLSL shader coords.
+// The shader does uv.y=1.0-uv.y which means its ray-water intersections (hit.xz)
+// don't match raw world (px,pz). This function replicates the shader's ray math
+// so that uMem[i].xy aligns with the shader's pp, placing light pools and ripple
+// rings exactly under each gem. Without this, ripples appear at the wrong position.
+// In React: extract into a utility, call once per visible gem per frame.
+function worldToShaderPP(px,pz){
+  const proj=poolToScreen(px,pz);
+  if(!proj)return[px,pz]; // fallback
+  // CSS pixel → shader UV: gl_y = H-cssY, uv.y = gl_y/H, after flip = 1-gl_y/H = cssY/H
+  const asp=innerWidth/innerHeight;
+  const scx=((proj.x/innerWidth)-0.5)*asp;
+  const scy=(proj.y/innerHeight)-0.5;
+  // Reconstruct ray direction (same math as shader)
+  const rdx=fwd[0]+rt[0]*scx*curFOV+up[0]*scy*curFOV;
+  const rdy=fwd[1]+rt[1]*scx*curFOV+up[1]*scy*curFOV;
+  const rdz=fwd[2]+rt[2]*scx*curFOV+up[2]*scy*curFOV;
+  if(rdy>=0)return[px,pz]; // ray misses water
+  const tHit=-CAM[1]/rdy;
+  return[CAM[0]+rdx*tHit, CAM[2]+rdz*tHit];
+}
+
 // ═══════════════════════════════════════════════════
 // WEBGL — WATER + PER-MEMORY RIPPLE PHYSICS
 // ═══════════════════════════════════════════════════
@@ -310,16 +576,32 @@ uniform vec3 uCam;
 uniform vec3 uTgt;
 uniform float uFov;
 uniform vec4 uMem[16]; // xy=worldPos, z=strength(0-1), w=phase
+// AGENT: uMemCol passes each gem's category color to the shader so light pools
+// and ripple rings match the gem's color. Populated from catColors in updateMemoryUniforms().
+// In React: same pattern — Float32Array(48), gl.uniform3fv, filled per-frame.
+uniform vec3 uMemCol[16]; // per-memory RGB category color (0-1 range)
+uniform vec4 uComet[4]; // xy=position on XZ plane, z=brightness, w=trail angle
 
 // ─── Noise ───
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float hash2(vec2 p){return fract(sin(dot(p,vec2(269.5,183.3)))*43758.5453);}
+vec2 hash2v(vec2 p){return vec2(hash(p),hash2(p));}
 float noise(vec2 p){
   vec2 i=floor(p),f=fract(p);
-  f=f*f*(3.0-2.0*f);
+  f=f*f*f*(f*(f*6.0-15.0)+10.0);
   return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
 }
+float noise2(vec2 p){
+  vec2 i=floor(p),f=fract(p);
+  f=f*f*f*(f*(f*6.0-15.0)+10.0);
+  return mix(mix(hash2(i),hash2(i+vec2(1,0)),f.x),mix(hash2(i+vec2(0,1)),hash2(i+vec2(1,1)),f.x),f.y);
+}
 float fbm(vec2 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*noise(p);p*=2.03;a*=0.47;}return v;}
-float fbm3(vec2 p){float v=0.0,a=0.5;for(int i=0;i<3;i++){v+=a*noise(p);p*=2.1;a*=0.45;}return v;}
+float fbm_b(vec2 p){float v=0.0,a=0.5;for(int i=0;i<5;i++){v+=a*noise2(p);p*=1.97;a*=0.48;}return v;}
+float fbm3(vec2 p){float v=0.0,a=0.5;for(int i=0;i<4;i++){v+=a*noise(p);p*=2.1;a*=0.45;}return v;}
+float fbm6(vec2 p){float v=0.0,a=0.5;
+  p+=vec2(noise2(p*0.8+vec2(3.1,7.4)),noise2(p*0.8+vec2(6.2,1.9)))*0.3;
+  for(int i=0;i<7;i++){v+=a*noise(p);p*=2.04;a*=0.46;}return v;}
 
 // ─── Wave height field: ambient sources + per-memory ripples ───
 float waveH(vec2 p, float t){
@@ -371,7 +653,7 @@ float waveH(vec2 p, float t){
 }
 
 vec3 waveN(vec2 p, float t){
-  float e=0.003;
+  float e=0.002;
   float c=waveH(p,t);
   float dx=waveH(p+vec2(e,0),t)-c;
   float dz=waveH(p+vec2(0,e),t)-c;
@@ -398,28 +680,43 @@ vec3 waveN(vec2 p, float t){
 }
 
 float caustic(vec2 p, float t){
-  float c1=pow(abs(sin(p.x*8.0+t*0.5)*sin(p.y*8.0+t*0.35)+
-                    sin((p.x+p.y)*6.0-t*0.4)*0.5), 3.0);
-  float c2=pow(abs(sin(p.x*14.0-t*0.3+2.0)*sin(p.y*12.0+t*0.45+1.0)), 4.0)*0.35;
-  float c3=pow(abs(sin((p.x-p.y)*10.0+t*0.25)*sin(p.y*7.0-t*0.32)), 3.0)*0.18;
-  return c1+c2+c3;
+  // Dynamic speed variation — caustics accelerate and slow rhythmically
+  float tVar=t+sin(t*0.15)*1.5;
+  float c1=pow(abs(sin(p.x*8.0+tVar*0.5)*sin(p.y*8.0+tVar*0.35)+
+                    sin((p.x+p.y)*6.0-tVar*0.4)*0.5), 3.0);
+  float c2=pow(abs(sin(p.x*14.0-tVar*0.3+2.0)*sin(p.y*12.0+tVar*0.45+1.0)), 4.0)*0.35;
+  float c3=pow(abs(sin((p.x-p.y)*10.0+tVar*0.25)*sin(p.y*7.0-tVar*0.32)), 3.0)*0.18;
+  // Extra fine caustic layer for more complexity
+  float c4=pow(abs(sin(p.x*20.0+tVar*0.6+3.0)*sin(p.y*18.0-tVar*0.42+2.0)), 4.0)*0.22;
+  return c1+c2+c3+c4;
 }
 
 vec3 volumetricGlow(vec3 ro, vec3 rd, float tMax, float time){
   vec3 acc=vec3(0.0);
-  float dt=tMax/8.0;
-  for(int i=0;i<8;i++){
+  float dt=tMax/12.0;
+  // Breathing pulse — slow global intensity modulation
+  float breath=0.65+0.35*sin(time*0.20)+0.18*sin(time*0.13+1.5);
+  for(int i=0;i<12;i++){
     float tt=dt*(float(i)+0.5);
     vec3 p=ro+rd*tt;
     float d2=p.x*p.x+p.z*p.z;
-    // Height-dependent density: thicker near the surface, thins upward
     float hDensity=exp(-max(p.y,0.0)*1.2)*0.8+0.2;
-    float vertGlow=exp(-d2*0.80)*exp(-p.y*p.y*1.5)*0.028*hDensity;
+    // Drifting density pockets — volumetric clouds that move slowly
+    float drift=noise(vec2(p.x*1.5+time*0.03, p.z*1.5-time*0.02))*0.6+0.4;
+    float vertGlow=exp(-d2*0.80)*exp(-p.y*p.y*1.5)*0.038*hDensity*drift*breath;
     float w=exp(-d2*0.45);
-    // Purple/violet mid-tones with warm amber core
-    vec3 gc=mix(vec3(0.12,0.08,0.22),vec3(0.45,0.30,0.18),w*w);
-    // Rose/lavender tint at mid-distance
+    // Spatial color zone: angle-based blue/purple/amber distribution
+    float vAng=atan(p.z,p.x);
+    float zoneA=sin(vAng*1.0+time*0.04)*0.5+0.5; // 0=blue zone, 1=amber zone
+    float zoneP=cos(vAng*1.5-time*0.03)*0.5+0.5; // purple accent
+    vec3 gcBlue=vec3(0.06,0.10,0.28);  // deep blue
+    vec3 gcPurple=vec3(0.14,0.08,0.24); // violet
+    vec3 gcAmber=vec3(0.40,0.26,0.10);  // warm amber
+    vec3 gc=mix(mix(gcBlue,gcPurple,zoneP),gcAmber,zoneA*w*w);
     gc+=vec3(0.06,0.03,0.06)*exp(-pow(length(p.xz)-0.8,2.0)*2.0);
+    // Subtle color oscillation in the glow
+    gc.r+=sin(time*0.12+p.x*2.0)*0.02;
+    gc.b+=cos(time*0.09+p.z*2.0)*0.02;
     acc+=gc*vertGlow*dt;
   }
   return acc;
@@ -427,34 +724,56 @@ vec3 volumetricGlow(vec3 ro, vec3 rd, float tMax, float time){
 
 // ─── Sky color: reusable for background & water reflections ───
 vec3 skyColor(vec3 dir, vec2 seed){
-  // Base cosmos — dark with purple undertone
-  vec3 c=vec3(0.008,0.006,0.018);
+  // Base cosmos — dark with blue-purple undertone gradient
+  float skyAng=atan(dir.z,dir.x);
+  float skyZone=sin(skyAng*0.8)*0.5+0.5;
+  vec3 c=mix(vec3(0.010,0.008,0.025),vec3(0.006,0.012,0.022),skyZone);
   // Remap direction to UV-like coords for noise sampling
   vec2 skyUV=dir.xz/(abs(dir.y)+0.15)*0.4+0.5+seed;
-  // Stars — varied colors (white, lavender, warm)
-  c+=vec3(0.55,0.50,0.62)*pow(hash(floor(skyUV*200.0)),22.0)*0.055;
-  c+=vec3(0.45,0.38,0.55)*pow(hash(floor(skyUV*120.0+vec2(7.3,2.1))),18.0)*0.035;
-  c+=vec3(0.50,0.42,0.38)*pow(hash(floor(skyUV*60.0+vec2(3.1,5.7))),15.0)*0.022;
+
+  // ── Milky Way band reflected in water ──
+  vec2 mwD=dir.xz;
+  float mwLine=mwD.x*0.52+mwD.y*0.85; // diagonal band axis
+  float mwPerp=mwD.x*0.85-mwD.y*0.52;
+  float mwB=exp(-mwPerp*mwPerp*3.0);
+  float mwStr=fbm3(vec2(mwLine*3.0+seed.x,mwPerp*6.0+seed.y))*0.5+0.5;
+  float mwStr2=fbm(vec2(mwLine*1.5+4.0,mwPerp*2.5+3.0))*0.5+0.5;
+  float mwDark=smoothstep(0.42,0.55,fbm3(vec2(mwLine*5.0+2.0,mwPerp*8.0)))*0.5;
+  float mwFinal=mwB*(mwStr*0.6+mwStr2*0.4)*(1.0-mwDark);
+  c+=vec3(0.12,0.09,0.07)*mwFinal*1.2;
+  c+=vec3(0.05,0.03,0.10)*mwB*mwStr2*0.7;
+  // Rose pockets in the band
+  float mwRose=fbm3(vec2(mwLine*4.0+6.0,mwPerp*5.0+1.0))*0.5+0.5;
+  c+=vec3(0.07,0.03,0.06)*mwRose*mwB*0.5;
+
+  // Stars — multi-layer, varied colors (denser than before)
+  c+=vec3(0.60,0.55,0.75)*pow(hash(floor(skyUV*200.0)),16.0)*0.07;
+  c+=vec3(0.50,0.42,0.60)*pow(hash(floor(skyUV*120.0+vec2(7.3,2.1))),14.0)*0.05;
+  c+=vec3(0.55,0.45,0.35)*pow(hash(floor(skyUV*60.0+vec2(3.1,5.7))),12.0)*0.035;
+  c+=vec3(0.40,0.38,0.50)*pow(hash(floor(skyUV*300.0+vec2(11.0,8.0))),18.0)*0.04;
+  // Band-concentrated stars in reflection
+  c+=vec3(0.65,0.60,0.70)*pow(hash(floor(skyUV*160.0+vec2(5.5,3.3))),11.0)*0.05*(mwB*0.6+0.2);
+
   // Elevation mask
   float hMask=smoothstep(-0.3,0.4,dir.y);
   // Primary nebula — purple/violet wash
   float neb=fbm3(skyUV*3.0+0.3)*0.5+0.5;
-  c+=vec3(0.05,0.025,0.10)*neb*hMask;
+  c+=vec3(0.06,0.03,0.12)*neb*hMask;
   // Secondary nebula — blue-violet
   float neb2=fbm3(skyUV*2.0+vec2(1.7,0.5))*0.5+0.5;
-  c+=vec3(0.03,0.02,0.07)*neb2*hMask*0.6;
+  c+=vec3(0.04,0.03,0.08)*neb2*hMask*0.7;
   // Rose/magenta accent
-  c+=vec3(0.04,0.015,0.05)*fbm3(skyUV*4.5+2.0)*hMask*0.5;
+  c+=vec3(0.05,0.02,0.06)*fbm3(skyUV*4.5+2.0)*hMask*0.6;
   // Gold nebula band
   float neb3=fbm3(skyUV*1.8+vec2(4.2,1.3))*0.5+0.5;
-  c+=vec3(0.04,0.028,0.010)*neb3*hMask*0.45;
+  c+=vec3(0.05,0.035,0.012)*neb3*hMask*0.55;
   // Horizon glow — purple + warm
   float horizonGlow=exp(-dir.y*dir.y*8.0);
-  c+=vec3(0.03,0.018,0.06)*horizonGlow*0.7;
-  c+=vec3(0.025,0.015,0.005)*horizonGlow*0.4;
+  c+=vec3(0.035,0.020,0.065)*horizonGlow*0.8;
+  c+=vec3(0.030,0.018,0.006)*horizonGlow*0.5;
   // Central radiance
   float centerGlow=exp(-dot(dir.xz,dir.xz)*1.5);
-  c+=vec3(0.02,0.012,0.04)*centerGlow*0.5;
+  c+=vec3(0.025,0.015,0.045)*centerGlow*0.6;
   return c;
 }
 
@@ -466,9 +785,9 @@ void main(){
   // ─── Camera (from uniforms) ───
   vec3 cam=uCam;
   vec3 tgt=uTgt+vec3(
-    (uMouse.x-0.5)*0.12,
+    (uMouse.x-0.5)*0.03,
     0.0,
-    (uMouse.y-0.5)*0.08
+    (uMouse.y-0.5)*0.02
   );
   vec3 fw=normalize(tgt-cam);
   vec3 rt=normalize(cross(vec3(0,1,0),fw));
@@ -477,43 +796,218 @@ void main(){
   vec2 sc=(uv-0.5)*vec2(asp,1.0);
   vec3 rd=normalize(fw+rt*sc.x*uFov+u*sc.y*uFov);
 
-  // ─── Background: dark cosmos with purple undertone ───
-  vec3 col=vec3(0.005,0.004,0.014);
-  // Stars — lavender/white
-  col+=vec3(0.45,0.40,0.58)*pow(hash(floor(uv*uRes*0.5)),28.0)*0.025;
-  // Purple nebula wash in upper sky
-  float bgNeb=fbm3(uv*3.5+0.3)*0.5+0.5;
-  col+=vec3(0.016,0.008,0.035)*bgNeb*smoothstep(0.15,0.70,uv.y)*0.7;
-  float bgNeb2=fbm3(uv*2.2+vec2(1.7,0.5))*0.5+0.5;
-  col+=vec3(0.010,0.006,0.022)*bgNeb2*smoothstep(0.25,0.60,uv.y)*0.4;
-  // Rose-violet accent
-  col+=vec3(0.012,0.006,0.016)*fbm3(uv*5.0+2.0)*smoothstep(0.35,0.75,uv.y)*0.30;
+  // ─── Background: high-detail milky way cosmos ───
+  vec3 col=vec3(0.003,0.003,0.010);
+
+  // ── Coordinate systems ──
+  vec2 mwUV=uv-0.5;
+  float mwAng=0.55;
+  float ca=cos(mwAng),sa=sin(mwAng);
+  vec2 mwR=vec2(mwUV.x*ca-mwUV.y*sa, mwUV.x*sa+mwUV.y*ca);
+  // Along-band and perpendicular coordinates
+  float mwAlong=mwR.x, mwPerp=mwR.y;
+
+  // ── MILKY WAY — multi-scale structure ──
+  // Band profile — layered widths (core tight, haze wide)
+  float bandCore=exp(-mwPerp*mwPerp*28.0);    // tight bright core
+  float bandMid=exp(-mwPerp*mwPerp*10.0);     // mid structure
+  float bandWide=exp(-mwPerp*mwPerp*4.0);     // wide faint haze
+  float bandUltra=exp(-mwPerp*mwPerp*1.8);    // ultra-wide glow
+
+  // Fine structure — decorrelated layers break self-similarity
+  float grain1=fbm6(vec2(mwAlong*14.0+1.3,mwPerp*22.0+3.7)+uTime*0.004)*0.5+0.5;
+  float grain2=fbm_b(vec2(mwAlong*24.0+5.1,mwPerp*40.0+8.2)-uTime*0.003)*0.5+0.5;
+  float grain3=fbm(vec2(mwAlong*45.0+2.8,mwPerp*65.0+11.0)+uTime*0.002)*0.5+0.5;
+  float grain4=noise2(vec2(mwAlong*80.0+6.5,mwPerp*120.0+15.0))*0.5+0.5;
+  float grain5=noise(vec2(mwAlong*140.0+9.1,mwPerp*200.0+4.4))*0.5+0.5;
+  float fineStruct=grain1*0.30+grain2*0.25+grain3*0.20+grain4*0.15+grain5*0.10;
+
+  // Medium-scale cloud structure (decorrelated pair)
+  float cloud1=fbm6(vec2(mwAlong*5.0+0.5,mwPerp*9.0+1.7)+uTime*0.006)*0.5+0.5;
+  float cloud2=fbm_b(vec2(mwAlong*3.0+4.2,mwPerp*5.0+6.1)-uTime*0.004)*0.5+0.5;
+  float cloudStr=cloud1*0.6+cloud2*0.4;
+
+  // DARK ABSORPTION LANES — decorrelated noise breaks pattern repetition
+  float rift1=fbm6(vec2(mwAlong*7.0+3.0,mwPerp*16.0+0.5)+uTime*0.003)*0.5+0.5;
+  float riftMask1=smoothstep(0.36,0.56,rift1);
+  float rift2=fbm_b(vec2(mwAlong*10.0+7.2,mwPerp*22.0+4.8)-uTime*0.002)*0.5+0.5;
+  float riftMask2=smoothstep(0.40,0.55,rift2)*0.7;
+  float rift3=fbm6(vec2(mwAlong*18.0+1.8,mwPerp*30.0+9.3))*0.5+0.5;
+  float riftMask3=smoothstep(0.38,0.54,rift3)*0.45;
+  float rift4=fbm_b(vec2(mwAlong*30.0+4.4,mwPerp*45.0+7.1))*0.5+0.5;
+  float riftMask4=smoothstep(0.42,0.56,rift4)*0.25*bandCore;
+  float absorption=1.0-(riftMask1+riftMask2+riftMask3+riftMask4)*bandMid*0.65;
+  absorption=max(absorption, 0.08);
+
+  // Galactic center — warm bright bulge
+  float gcDist=length(mwR-vec2(-0.08,0.0));
+  float gcBulge=exp(-gcDist*gcDist*12.0);
+  float gcBright=gcBulge*(0.8+cloud1*0.2)*absorption;
+
+  // ── ASSEMBLE MILKY WAY LIGHT ──
+  // Unresolved star cloud — the main milky glow
+  float starCloud=bandMid*cloudStr*fineStruct*absorption;
+  vec3 mwLight=vec3(0.0);
+  // Core: warm white (like the reference — slightly warm, not pure white)
+  mwLight+=vec3(0.22,0.18,0.15)*starCloud*bandCore*2.8;
+  // Mid: blue-white star light
+  mwLight+=vec3(0.14,0.12,0.16)*starCloud*bandMid*1.6;
+  // Wide: faint blue haze of unresolved distant stars
+  mwLight+=vec3(0.06,0.05,0.09)*cloudStr*bandWide*absorption*0.8;
+  // Ultra-wide: barely visible outer halo
+  mwLight+=vec3(0.025,0.020,0.040)*bandUltra*cloud2*0.5;
+  // Galactic center golden glow
+  mwLight+=vec3(0.35,0.24,0.10)*gcBright*1.2;
+  mwLight+=vec3(0.20,0.14,0.06)*gcBulge*bandCore*absorption*0.8;
+  // Slow color drift — the MW band subtly shifts hue over time
+  float hueShift=sin(uTime*0.035)*0.045;
+  float hueShift2=cos(uTime*0.028)*0.035;
+  mwLight.r+=hueShift*bandMid;
+  mwLight.b+=hueShift2*bandMid;
+  mwLight.g-=(hueShift+hueShift2)*0.25*bandMid;
+  // Rose/magenta emission regions within the band
+  float emiss1=fbm_b(vec2(mwAlong*5.5+7.3,mwPerp*6.0+4.1)+uTime*0.005)*0.5+0.5;
+  float emissMask=bandMid*emiss1*smoothstep(0.3,0.6,emiss1);
+  mwLight+=vec3(0.12,0.04,0.08)*emissMask*absorption*0.7;
+  // Blue reflection nebula patches
+  float blueNeb=fbm_b(vec2(mwAlong*4.5+11.0,mwPerp*7.0+2.5))*0.5+0.5;
+  mwLight+=vec3(0.04,0.06,0.14)*blueNeb*bandMid*absorption*smoothstep(0.5,0.7,blueNeb)*0.6;
+
+  col+=mwLight;
+
+  // ── STARS — jittered cell positions, decorrelated hashes ──
+  vec2 pxUV=uv*uRes;
+  float starDensMod=bandWide*0.7+0.3;
+
+  // Each cell has a star at a random position (not grid-aligned)
+  // Dust layer 1
+  { vec2 c=floor(pxUV); vec2 f=fract(pxUV); vec2 sp=hash2v(c);
+    float d=length(f-sp); float b=pow(hash(c+vec2(42.0,17.0)),8.0);
+    col+=vec3(0.28,0.26,0.36)*b*smoothstep(0.50,0.0,d)*0.055*starDensMod; }
+  // Dust layer 2 (offset + decorrelated hash)
+  { vec2 sc=pxUV+vec2(0.37,0.73); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(13.0,7.0));
+    float d=length(f-sp); float b=pow(hash2(c+vec2(55.0,23.0)),8.0);
+    col+=vec3(0.24,0.22,0.30)*b*smoothstep(0.50,0.0,d)*0.042*starDensMod; }
+  // Dust layer 3: warm
+  { vec2 sc=pxUV*0.8+vec2(3.1,7.2); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(29.0,11.0));
+    float d=length(f-sp); float b=pow(hash(c+vec2(37.0,5.0)),9.0);
+    col+=vec3(0.32,0.28,0.22)*b*smoothstep(0.50,0.0,d)*0.045*starDensMod; }
+  // Layer 4: small blue-white + twinkle
+  { vec2 sc=pxUV*0.7; vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(19.0,31.0));
+    float d=length(f-sp); float b=pow(hash2(c+vec2(7.0,53.0)),14.0);
+    float tw=0.7+0.3*sin(uTime*1.3+hash(c)*62.83);
+    col+=vec3(0.55,0.52,0.75)*b*smoothstep(0.45,0.0,d)*0.14*tw; }
+  // Layer 5: medium white-yellow
+  { vec2 sc=pxUV*0.5+vec2(5.5,2.3); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(41.0,67.0));
+    float d=length(f-sp); float b=pow(hash(c+vec2(22.0,58.0)),16.0);
+    float tw=0.75+0.25*sin(uTime*0.9+hash2(c)*62.83);
+    col+=vec3(0.65,0.58,0.45)*b*smoothstep(0.45,0.0,d)*0.12*tw; }
+  // Layer 6: medium blue
+  { vec2 sc=pxUV*0.55+vec2(11.0,4.7); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(83.0,37.0));
+    float d=length(f-sp); float b=pow(hash2(c+vec2(61.0,44.0)),15.0);
+    col+=vec3(0.40,0.48,0.80)*b*smoothstep(0.45,0.0,d)*0.11*(0.7+0.3*sin(uTime*1.8+b*40.0)); }
+  // Layer 7: bright prominent + soft glow halo
+  { vec2 sc=pxUV*0.4+vec2(8.3,13.1); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(97.0,53.0));
+    float d=length(f-sp); float b=pow(hash(c+vec2(33.0,71.0)),22.0);
+    float tw=0.6+0.4*sin(uTime*0.7+hash2(c)*62.83);
+    col+=vec3(0.80,0.78,0.95)*b*(smoothstep(0.40,0.0,d)+smoothstep(0.7,0.1,d)*0.15)*0.22*tw; }
+  // Layer 8: rare brilliant + color variety + glow
+  { vec2 sc=pxUV*0.3+vec2(17.3,4.8); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(113.0,29.0));
+    float d=length(f-sp); float b=pow(hash2(c+vec2(77.0,91.0)),30.0);
+    float hueId=hash(c+vec2(17.3,4.9));
+    vec3 sCol=hueId<0.3?vec3(0.70,0.75,1.0):hueId<0.6?vec3(1.0,0.92,0.70):vec3(1.0,0.80,0.75);
+    float tw=0.5+0.5*sin(uTime*0.5+b*80.0);
+    col+=sCol*b*(smoothstep(0.40,0.0,d)+smoothstep(0.8,0.1,d)*0.12)*0.38*tw; }
+  // In-band layers 9-11 (jittered, decorrelated)
+  { vec2 sc=pxUV+vec2(2.2,9.8); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(131.0,47.0));
+    float d=length(f-sp); float b=pow(hash(c+vec2(19.0,83.0)),7.0);
+    col+=vec3(0.22,0.20,0.28)*b*smoothstep(0.50,0.0,d)*0.045*bandMid*absorption; }
+  { vec2 sc=pxUV+vec2(6.6,3.3); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(149.0,61.0));
+    float d=length(f-sp); float b=pow(hash2(c+vec2(43.0,109.0)),6.0);
+    col+=vec3(0.20,0.18,0.25)*b*smoothstep(0.50,0.0,d)*0.035*bandMid*absorption; }
+  { vec2 sc=pxUV*1.3+vec2(14.1,2.7); vec2 c=floor(sc); vec2 f=fract(sc); vec2 sp=hash2v(c+vec2(167.0,73.0));
+    float d=length(f-sp); float b=pow(hash(c+vec2(57.0,121.0)),7.0);
+    col+=vec3(0.18,0.15,0.12)*b*smoothstep(0.50,0.0,d)*0.030*bandCore*absorption; }
+
+  // ── NEBULA REGIONS — localized color pockets ──
+  // Dark sky nebulae (outside the band — subtle)
+  float neb1=fbm_b(uv*3.5+0.3+uTime*vec2(0.003,-0.002))*0.5+0.5;
+  col+=vec3(0.025,0.012,0.055)*neb1*smoothstep(0.08,0.45,uv.y)*(1.0-bandMid*0.7);
+  // Gold nebula patch (upper left)
+  float neb4=fbm_b(uv*2.8+vec2(4.2,1.3)+uTime*vec2(0.002,-0.003))*0.5+0.5;
+  float goldP=exp(-pow(length(uv-vec2(0.32,0.18)),2.0)*6.0);
+  col+=vec3(0.04,0.028,0.008)*neb4*goldP*1.5;
+  // Blue nebula wing (upper right)
+  float neb5=fbm_b(uv*3.2+vec2(8.1,3.5)-uTime*vec2(0.004,0.002))*0.5+0.5;
+  float blueP=exp(-pow(length(uv-vec2(0.74,0.14)),2.0)*5.0);
+  col+=vec3(0.015,0.030,0.065)*neb5*blueP*1.3;
+
+  // ── AURORA CURTAINS — ethereal flowing light bands ──
+  // Only visible in the upper sky, fading toward horizon
+  float auroraY=smoothstep(0.55,0.05,uv.y); // strongest high up
+  if(auroraY>0.01){
+    // Curtain wave: vertical ribbons that drift horizontally
+    float curtain1=sin(uv.x*12.0+uTime*0.08+sin(uv.x*5.0+uTime*0.12)*1.5)*0.5+0.5;
+    float curtain2=sin(uv.x*8.0-uTime*0.06+sin(uv.x*3.5-uTime*0.09)*2.0)*0.5+0.5;
+    // Vertical fold structure from noise
+    float fold=fbm_b(vec2(uv.x*6.0+uTime*0.04,uv.y*2.0+uTime*0.02))*0.5+0.5;
+    // Height-dependent intensity (brighter at top of curtain, fading down)
+    float curtainH=pow(auroraY,1.2);
+    // Color: green-teal primary, magenta secondary (like real aurora)
+    float aStr1=curtain1*fold*curtainH*0.14;
+    float aStr2=curtain2*(1.0-fold)*curtainH*0.08;
+    // Breathing: slow global pulse
+    float aBreath=0.6+0.4*sin(uTime*0.15+uv.x*2.0);
+    col+=vec3(0.04,0.14,0.10)*aStr1*aBreath;  // teal-green
+    col+=vec3(0.12,0.03,0.10)*aStr2*aBreath;  // magenta
+    // Faint white shimmer at the brightest fold peaks
+    float peak=pow(fold*curtain1,3.0)*curtainH*0.05*aBreath;
+    col+=vec3(0.06,0.08,0.06)*peak;
+  }
+
+  // ── HORIZON ATMOSPHERE — warm glow where sky meets water ──
+  float hGlow=exp(-pow(uv.y-0.38,2.0)*6.0);
+  col+=vec3(0.025,0.015,0.04)*hGlow*0.6;
+  col+=vec3(0.015,0.010,0.003)*hGlow*bandWide*0.4;
+
+  // Save background for seamless water-edge blending
+  vec3 bgCol=col;
 
   float tHitVal=100.0;
 
   // ─── Ray → water plane ───
-  if(rd.y<-0.001){
+  if(rd.y<-0.0005){
     float tHit=-cam.y/rd.y;
     tHitVal=tHit;
     vec3 hit=cam+rd*tHit;
     vec2 pp=hit.xz;
     float pD=length(pp);
 
-    if(pD<5.5){
+    if(pD<12.0){
       vec3 N=waveN(pp,uTime);
       vec3 Vi=-rd;
       float NdV=max(dot(N,Vi),0.001);
 
-      // ── Glitter normal: extra perturbation for specular breakup ──
+      // ── Glitter normal: smooth low-freq wave breakup + subtle sparkle ──
       vec3 Nglitter=N;
-      vec2 gn1=pp*55.0+uTime*vec2(0.15,-0.10);
-      vec2 gn2=pp*120.0+uTime*vec2(-0.08,0.12);
+      // Low-freq undulation for broad specular breakup (not grain)
+      vec2 gn1=pp*8.0+uTime*vec2(0.12,-0.08);
+      vec2 gn2=pp*18.0+uTime*vec2(-0.06,0.09);
       float g1=(noise(gn1)-0.5)*2.0;
-      float g2=(noise(gn2)-0.5)*2.0;
+      float g2=(noise2(gn2)-0.5)*2.0;
       float glitterFade=exp(-pD*0.20);
-      Nglitter.x+=(g1*0.08+g2*0.05)*glitterFade;
-      Nglitter.z+=(g1*0.06+g2*0.04)*glitterFade;
+      Nglitter.x+=(g1*0.04+g2*0.025)*glitterFade;
+      Nglitter.z+=(g1*0.03+g2*0.020)*glitterFade;
       Nglitter=normalize(Nglitter);
+      // Separate sparkle normal: mid-freq for occasional bright points
+      vec3 Nsparkle=N;
+      vec2 sn1=pp*32.0+uTime*vec2(0.10,-0.07);
+      vec2 sn2=pp*60.0+uTime*vec2(-0.05,0.08);
+      float s1=(noise(sn1)-0.5)*2.0;
+      float s2=(noise2(sn2)-0.5)*2.0;
+      Nsparkle.x+=(s1*0.06+s2*0.03)*glitterFade;
+      Nsparkle.z+=(s1*0.04+s2*0.025)*glitterFade;
+      Nsparkle=normalize(Nsparkle);
 
       // Physically-based Fresnel (water IOR=1.33)
       float F0=0.02;
@@ -550,6 +1044,34 @@ void main(){
       // Warm subsurface bleed into reflection at center
       reflC+=vec3(0.08,0.04,0.02)*exp(-pD*pD*0.8)*0.12;
 
+      // ── Comet / shooting star reflections on water ──
+      for(int i=0;i<4;i++){
+        vec2 cp=uComet[i].xy;
+        float cb=uComet[i].z;
+        float cAng=uComet[i].w;
+        if(cb<0.005) continue;
+        vec2 cDir=vec2(cos(cAng),sin(cAng));
+        vec2 cPerp=vec2(-cDir.y,cDir.x);
+        vec2 toC=cp-pp;
+        float along=dot(toC,cDir);
+        float perp=dot(toC,cPerp);
+        // Head — compact bright spot
+        float headD=length(toC);
+        float head=exp(-headD*headD*18.0)*cb;
+        // Trail — elongated streak behind the head
+        float trailMask=smoothstep(0.05,-3.0,along);
+        float trailWidth=exp(-perp*perp*35.0);
+        float trailFade=exp(along*0.6); // exponential decay along trail
+        float trail=trailMask*trailWidth*trailFade*cb*0.35;
+        // Combine and distort by water normals for authentic ripple breakup
+        float cBright=(head+trail)*(0.85+N.x*0.25+N.z*0.15);
+        if(cBright<0.002) continue;
+        // Color: white-blue head, warm amber trail
+        vec3 headCol=vec3(0.65,0.60,0.90)*head;
+        vec3 trailCol=mix(vec3(0.50,0.40,0.70),vec3(0.45,0.30,0.15),trailMask*0.7)*trail;
+        reflC+=(headCol+trailCol)*2.5;
+      }
+
       // SUBSURFACE — deep dark pool with selective glow
       vec3 subC=vec3(0.003,0.002,0.008);
 
@@ -564,6 +1086,12 @@ void main(){
       float cst=caustic(cUV,uTime);
       float cW=exp(-pD*pD*0.35);
       vec3 cCol=mix(vec3(0.04,0.015,0.08),vec3(0.16,0.10,0.04),cW);
+      // Angle-based caustic color zones
+      float cAng=atan(pp.y,pp.x);
+      float cZone=sin(cAng*1.2+uTime*0.05)*0.5+0.5;
+      vec3 cColBlue=vec3(0.03,0.06,0.14); // blue caustics
+      vec3 cColAmber=vec3(0.18,0.12,0.03); // amber caustics
+      cCol=mix(cCol,mix(cColBlue,cColAmber,cZone),0.5);
       cCol+=vec3(0.06,0.03,0.01)*exp(-pow(pD-0.8,2.0)*0.8);
       cCol+=vec3(0.03,0.015,0.05)*exp(-pow(pD-1.5,2.0)*0.5);
       subC+=cCol*cst*0.18*exp(-pD*0.22)*(0.8+depthNoise*0.4);
@@ -574,61 +1102,85 @@ void main(){
         float str=uMem[i].z;
         if(str<0.01) continue;
         float md=length(pp-mp);
-        // Warm light pool beneath each gem
-        float lightPool=exp(-md*md*8.0)*str;
-        vec3 gemLight=mix(vec3(0.18,0.10,0.30),vec3(0.38,0.26,0.12),exp(-md*3.0));
-        subC+=gemLight*lightPool*0.22;
+        // Category-colored light pool beneath each gem
+        float lightPool=exp(-md*md*6.0)*str;
+        vec3 gemCol=uMemCol[i];
+        // Warm core blending into category color outward
+        vec3 gemLight=mix(gemCol*1.2, gemCol*0.5+vec3(0.08,0.05,0.12), smoothstep(0.0,0.6,md));
+        subC+=gemLight*lightPool*0.35;
       }
 
-      // ── Ripple rings per memory — each memory is the origin of its own ripples ──
+      // ── Ripple rings per memory — category-colored concentric waves ──
       for(int i=0;i<16;i++){
         vec2 mp=uMem[i].xy;
         float str=uMem[i].z;
         if(str<0.01) continue;
         float ph=uMem[i].w;
         float md=length(pp-mp);
-        // Faster decay — ripples stay close to their memory
         float mDecay=exp(-md*0.85)*str;
         if(mDecay<0.003) continue;
-        // Primary ring: clean, visible
         float r1=pow(abs(sin(md*7.0 -uTime*0.9+ph      )),14.0);
-        // Secondary: subtle accent
         float r2=pow(abs(sin(md*12.0-uTime*1.4+ph+1.0   )),16.0)*0.3;
         float ringBright=r1*0.50+r2*0.12;
-        // Fade with distance from the memory
         ringBright*=mix(1.0, 0.20, smoothstep(0.2, 2.5, md));
-        vec3 ringCol=mix(vec3(0.40,0.25,0.65),vec3(0.55,0.40,0.22),exp(-md*0.8));
+        // Blend category color into ring — bright near gem, fades to generic further out
+        vec3 gemCol=uMemCol[i];
+        vec3 ringCol=mix(gemCol*1.0+vec3(0.1,0.08,0.15), vec3(0.35,0.25,0.50), smoothstep(0.3,1.8,md));
         subC+=ringCol*ringBright*mDecay;
       }
 
       // (Global rings removed — all ripples originate from memories only)
 
-      // ── COLOR GRADIENT: deep indigo → violet → rose → amber (more color, less white) ──
+      // ── COLOR GRADIENT: tri-zone blue / violet / amber ──
       // (modulated by depthVar for irregular bottom)
-      // Outer: purple/violet (the pool's signature color)
-      subC+=vec3(0.03,0.015,0.07)*exp(-pD*pD*0.10)*0.22*depthVar;
-      subC+=vec3(0.05,0.03,0.10)*exp(-pD*pD*0.22)*0.18*depthVar;
-      // Mid: violet → rose transition
-      subC+=vec3(0.10,0.06,0.14)*exp(-pD*pD*0.38)*0.18*depthVar;
-      subC+=vec3(0.16,0.09,0.12)*exp(-pD*pD*0.55)*0.15*depthVar;
-      // Inner: warm gold glow (subtle, not blowout)
-      subC+=vec3(0.20,0.13,0.06)*exp(-pD*pD*0.90)*0.14*depthVar;
+      // Spatial zone map: rotating zones of color around the pool
+      float zAng=atan(pp.y,pp.x);
+      float zoneBlue=pow(sin(zAng*1.0-0.5+uTime*0.03)*0.5+0.5, 1.5);
+      float zoneAmber=pow(sin(zAng*1.0+2.1+uTime*0.025)*0.5+0.5, 1.5);
+      float zonePurple=1.0-max(zoneBlue,zoneAmber)*0.6;
+      // Outer: zone-tinted deep color
+      vec3 outerCol=vec3(0.03,0.015,0.07)*zonePurple
+                   +vec3(0.015,0.03,0.08)*zoneBlue
+                   +vec3(0.06,0.035,0.015)*zoneAmber;
+      subC+=outerCol*exp(-pD*pD*0.10)*0.28*depthVar;
+      // Mid-outer
+      vec3 midOutCol=vec3(0.05,0.03,0.10)*zonePurple
+                    +vec3(0.025,0.05,0.12)*zoneBlue
+                    +vec3(0.10,0.06,0.02)*zoneAmber;
+      subC+=midOutCol*exp(-pD*pD*0.22)*0.22*depthVar;
+      // Mid: transition ring
+      vec3 midCol=vec3(0.10,0.06,0.14)*zonePurple
+                 +vec3(0.04,0.08,0.16)*zoneBlue
+                 +vec3(0.16,0.10,0.04)*zoneAmber;
+      subC+=midCol*exp(-pD*pD*0.38)*0.20*depthVar;
+      vec3 midInCol=vec3(0.16,0.09,0.12)*zonePurple
+                   +vec3(0.06,0.10,0.14)*zoneBlue
+                   +vec3(0.20,0.14,0.06)*zoneAmber;
+      subC+=midInCol*exp(-pD*pD*0.55)*0.16*depthVar;
+      // Inner: warm gold glow (shared, slightly tinted by zone)
+      vec3 innerCol=mix(vec3(0.20,0.13,0.06),vec3(0.22,0.15,0.08),zoneAmber);
+      subC+=innerCol*exp(-pD*pD*0.90)*0.14*depthVar;
       subC+=vec3(0.24,0.16,0.08)*exp(-pD*pD*1.8)*0.10;
       subC+=vec3(0.28,0.20,0.10)*exp(-pD*pD*4.0)*0.06;
       subC+=vec3(0.30,0.22,0.12)*exp(-pD*pD*10.0)*0.03;
       // Depth tint variation
       subC+=depthTint*exp(-pD*0.3)*0.5;
 
-      // Angular color variation — warm/cool swirls
+      // Angular color variation — tri-zone swirls
       float ang=atan(pp.y,pp.x);
-      // Purple swirls at mid-distance
-      subC+=vec3(0.06,0.02,0.08)*sin(ang*2.0+pD*1.5+uTime*0.10)*exp(-pD*pD*0.35)*0.16;
+      // Blue swirls
+      subC+=vec3(0.02,0.04,0.10)*sin(ang*2.0+pD*1.5+uTime*0.10)*exp(-pD*pD*0.35)*0.18*zoneBlue;
+      // Purple swirls
+      subC+=vec3(0.06,0.02,0.08)*sin(ang*2.0+pD*1.5+uTime*0.10)*exp(-pD*pD*0.35)*0.14*zonePurple;
       subC+=vec3(0.04,0.02,0.06)*cos(ang*3.0-pD*0.8)*exp(-pD*pD*0.30)*0.10;
-      // Gold accent that rotates slowly
-      subC+=vec3(0.08,0.05,0.02)*sin(ang*1.5-uTime*0.06+1.0)*exp(-pD*pD*0.50)*0.14;
+      // Amber swirls that rotate slowly
+      subC+=vec3(0.12,0.08,0.02)*sin(ang*1.5-uTime*0.06+1.0)*exp(-pD*pD*0.50)*0.18*zoneAmber;
+      // Blue accent pocket
+      float bPocket=exp(-pow(ang+1.0,2.0)*1.5)*exp(-pow(pD-1.2,2.0)*0.8);
+      subC+=vec3(0.03,0.06,0.14)*bPocket*0.25;
       // Warm pocket at specific angle
       float pocket=exp(-pow(ang-1.2,2.0)*2.0)*exp(-pow(pD-1.0,2.0)*1.0);
-      subC+=vec3(0.12,0.08,0.03)*pocket*0.20;
+      subC+=vec3(0.14,0.09,0.03)*pocket*0.22;
 
       subC*=exp(-pD*0.15);
 
@@ -649,17 +1201,22 @@ void main(){
 
       col=mix(subC,reflC,fres);
 
-      // SPECULAR — uses glitter normal for breakup
+      // SPECULAR — smooth N for main highlight, glitter/sparkle for accent
       vec3 L1=normalize(vec3(0.0,5.0,0.2)-hit);
       vec3 H1=normalize(Vi+L1);
-      float NdH1=max(dot(Nglitter,H1),0.0);
-
-      float sp_razor =pow(NdH1,600.0)*1.2;
-      float sp_sharp =pow(NdH1,150.0)*0.22;
-      float sp_med   =pow(NdH1,30.0)*0.05;
-      float sp_wide  =pow(NdH1,8.0)*0.012;
-      float sp_ultra =pow(NdH1,3.0)*0.003;
-      float specT=sp_razor+sp_sharp+sp_med+sp_wide+sp_ultra;
+      // Primary specular: smooth wave normal → clean, broad highlight
+      float NdH_smooth=max(dot(N,H1),0.0);
+      float sp_core  =pow(NdH_smooth,200.0)*0.55;
+      float sp_bloom =pow(NdH_smooth,50.0)*0.12;
+      float sp_wide  =pow(NdH_smooth,12.0)*0.025;
+      float sp_atmo  =pow(NdH_smooth,4.0)*0.006;
+      // Glitter accent: broad undulation breakup
+      float NdH_glit=max(dot(Nglitter,H1),0.0);
+      float sp_glit  =pow(NdH_glit,120.0)*0.18;
+      // Sparkle accent: rare bright points (mid-freq, not grain)
+      float NdH_spark=max(dot(Nsparkle,H1),0.0);
+      float sp_spark =pow(NdH_spark,350.0)*0.40;
+      float specT=sp_core+sp_bloom+sp_wide+sp_atmo+sp_glit+sp_spark;
 
       // Specular color gradient — lavender to warm gold
       float warmth=exp(-pD*pD*0.35);
@@ -669,12 +1226,14 @@ void main(){
 
       col+=spC*specT;
 
-      // Secondary lights (also use glitter normal)
+      // Secondary lights — smooth N + glitter accent
       vec3 L2=normalize(vec3(0.5,4.5,-0.4)-hit);
-      col+=spC*pow(max(dot(Nglitter,normalize(Vi+L2)),0.0),300.0)*0.14;
+      vec3 H2=normalize(Vi+L2);
+      col+=spC*(pow(max(dot(N,H2),0.0),160.0)*0.10+pow(max(dot(Nglitter,H2),0.0),100.0)*0.06);
 
       vec3 L3=normalize(vec3(-0.4,4.5,0.3)-hit);
-      col+=spC*pow(max(dot(Nglitter,normalize(Vi+L3)),0.0),300.0)*0.10;
+      vec3 H3=normalize(Vi+L3);
+      col+=spC*(pow(max(dot(N,H3),0.0),160.0)*0.07+pow(max(dot(Nglitter,H3),0.0),100.0)*0.04);
 
       // Rim light — warm amber at distance (not just violet)
       vec3 L4=normalize(vec3(0.0,1.2,4.0)-hit);
@@ -683,16 +1242,48 @@ void main(){
       vec3 rimCol=mix(vec3(0.25,0.18,0.38),vec3(0.45,0.32,0.18),smoothstep(1.5,3.0,pD));
       col+=rimCol*rimSpec;
 
-      // Edge fade — aggressive to hide pool boundary at low camera angle
-      float edgeFade=smoothstep(4.0,1.8,pD);
-      edgeFade*=edgeFade; // quadratic falloff: faster kill at edges
-      col*=edgeFade;
+      // ── Surface mist / gas — hugs the water at the far edges ──
+      float mistStart=smoothstep(1.6,3.2,pD);
+      float mistFalloff=exp(-pow(pD-4.5,2.0)*0.05);
+      if(mistStart>0.01){
+        // Multi-scale drifting fog layers
+        float mist1=fbm_b(pp*0.5+vec2(uTime*0.03,-uTime*0.022))*0.5+0.5;
+        float mist2=fbm(pp*1.2+vec2(-uTime*0.018,uTime*0.028))*0.5+0.5;
+        float mist3=noise2(pp*2.5+vec2(uTime*0.04,uTime*0.015))*0.5+0.5;
+        float mistDensity=mist1*0.5+mist2*0.3+mist3*0.2;
+        // Wispy threshold — patchy tendrils, not solid fog
+        float wisps=smoothstep(0.30,0.60,mistDensity);
+        // Height factor
+        float mistH=smoothstep(0.005,-0.025,rd.y);
+        // Final opacity — moderate
+        float mistAlpha=wisps*mistStart*mistFalloff*mistH*0.70;
+        mistAlpha=min(mistAlpha,0.40);
+        // Color: tri-zone tinted
+        float mAng=atan(pp.y,pp.x);
+        float mzBlue=pow(sin(mAng*1.0-0.5+uTime*0.03)*0.5+0.5,1.5);
+        float mzAmber=pow(sin(mAng*1.0+2.1+uTime*0.025)*0.5+0.5,1.5);
+        float mzPurple=1.0-max(mzBlue,mzAmber)*0.5;
+        vec3 mistCol=vec3(0.06,0.09,0.20)*mzBlue
+                    +vec3(0.10,0.07,0.16)*mzPurple
+                    +vec3(0.16,0.11,0.05)*mzAmber;
+        float skyBounce=max(0.0,dot(N,vec3(0,1,0)))*0.4;
+        mistCol+=vec3(0.04,0.04,0.05)*skyBounce;
+        float edgeGlow=smoothstep(3.5,5.5,pD)*0.25;
+        mistCol*=(1.0+edgeGlow);
+        col=mix(col,mistCol,mistAlpha*0.60);
+        col+=mistCol*mistAlpha*0.20;
+      }
 
-      // Distance fog — dark navy with warm edge tint
-      float fog=1.0-exp(-tHit*tHit*0.0038);
-      vec3 fogCol=vec3(0.008,0.007,0.016);
-      fogCol+=vec3(0.010,0.007,0.012)*exp(-pD*pD*0.4);
-      fogCol+=vec3(0.008,0.005,0.003)*smoothstep(2.0,4.5,pD);
+      // Edge fade — seamless blend to actual background
+      float edgeFade=smoothstep(6.5,1.8,pD);
+      // Extra horizon softening: rays near horizontal get extra blend
+      float horizBlend=smoothstep(-0.003,-0.025,rd.y);
+      edgeFade*=horizBlend;
+      col=mix(bgCol,col,edgeFade);
+
+      // Distance fog — blend toward background at edges
+      float fog=1.0-exp(-tHit*tHit*0.003);
+      vec3 fogCol=mix(vec3(0.008,0.007,0.016),bgCol,smoothstep(1.5,5.0,pD));
       col=mix(col,fogCol,fog);
 
       // Midground mist
@@ -704,19 +1295,28 @@ void main(){
   // Volumetric glow
   col+=volumetricGlow(cam,rd,tHitVal<100.0?tHitVal:8.0,uTime);
 
-  // Atmospheric haze — warm/dark navy tones
-  // Layer 1: wide warm haze centered on pool
-  float haze1=exp(-length(uv-vec2(0.5,0.56))*1.3)*0.025;
-  col+=vec3(0.08,0.05,0.12)*haze1;
-  // Layer 2: narrower warm glow above pool center
-  float haze2=exp(-length(uv-vec2(0.5,0.52))*2.0)*0.014;
-  col+=vec3(0.10,0.07,0.10)*haze2;
-  // Layer 3: foreground haze
+  // Atmospheric haze — tri-zone color distribution
+  // Zone map for screen-space haze
+  float hazeAng=atan(uv.y-0.52,uv.x-0.5);
+  float hzBlue=pow(sin(hazeAng*1.0-0.3)*0.5+0.5,1.5);
+  float hzAmber=pow(sin(hazeAng*1.0+2.3)*0.5+0.5,1.5);
+  float hzPurple=1.0-max(hzBlue,hzAmber)*0.5;
+  // Layer 1: wide haze centered on pool
+  float haze1=exp(-length(uv-vec2(0.5,0.56))*1.3)*0.028;
+  col+=vec3(0.04,0.06,0.16)*haze1*hzBlue;
+  col+=vec3(0.08,0.05,0.14)*haze1*hzPurple;
+  col+=vec3(0.14,0.08,0.04)*haze1*hzAmber;
+  // Layer 2: narrower glow above pool center
+  float haze2=exp(-length(uv-vec2(0.5,0.52))*2.0)*0.016;
+  col+=vec3(0.05,0.08,0.15)*haze2*hzBlue;
+  col+=vec3(0.10,0.07,0.10)*haze2*hzPurple;
+  col+=vec3(0.16,0.10,0.05)*haze2*hzAmber;
+  // Foreground haze
   float fgHaze=exp(-pow(uv.y-0.72,2.0)*8.0)*0.010;
-  col+=vec3(0.06,0.04,0.08)*fgHaze;
+  col+=vec3(0.04,0.04,0.10)*fgHaze*hzBlue+vec3(0.06,0.04,0.08)*fgHaze*hzPurple+vec3(0.10,0.06,0.03)*fgHaze*hzAmber;
   // Warm horizon band
-  float roseH=exp(-pow(uv.y-0.50,2.0)*30.0)*0.008;
-  col+=vec3(0.22,0.12,0.10)*roseH;
+  float roseH=exp(-pow(uv.y-0.50,2.0)*30.0)*0.010;
+  col+=vec3(0.10,0.08,0.22)*roseH*hzBlue+vec3(0.22,0.12,0.10)*roseH*hzPurple+vec3(0.28,0.18,0.06)*roseH*hzAmber;
   // Warm center (tight)
   float warmH=exp(-length(uv-vec2(0.5,0.50))*3.2)*0.008;
   col+=vec3(0.30,0.20,0.12)*warmH;
@@ -785,40 +1385,143 @@ const uCamLoc=gl.getUniformLocation(prog,'uCam');
 const uTgtLoc=gl.getUniformLocation(prog,'uTgt');
 const uFovLoc=gl.getUniformLocation(prog,'uFov');
 const uMemLoc=gl.getUniformLocation(prog,'uMem[0]');
+const uMemColLoc=gl.getUniformLocation(prog,'uMemCol[0]');
+const uCometLoc=gl.getUniformLocation(prog,'uComet[0]');
 
 // ═══════════════════════════════════════════════════
-// MEMORY DROPLETS — 12 sparse, elegant points on the surface
+// COMET / SHOOTING STAR SYSTEM
 // ═══════════════════════════════════════════════════
+const MAX_COMETS=4;
+const cometUniformData=new Float32Array(MAX_COMETS*4);
+const comets=[];
+let nextCometSpawn=1.5+Math.random()*2;
+
+function spawnComet(){
+  const enterAngle=Math.random()*Math.PI*2;
+  const enterR=3.0+Math.random()*1.5;
+  const sx=Math.cos(enterAngle)*enterR;
+  const sz=Math.sin(enterAngle)*enterR;
+  const crossAngle=enterAngle+Math.PI+(Math.random()-0.5)*0.7;
+  const speed=1.8+Math.random()*3.0;
+  const brightness=0.45+Math.random()*0.55;
+  comets.push({
+    x:sx, z:sz,
+    dx:Math.cos(crossAngle)*speed,
+    dz:Math.sin(crossAngle)*speed,
+    angle:crossAngle,
+    life:0,
+    maxLife:1.4+Math.random()*1.8,
+    peak:brightness,
+  });
+  while(comets.length>MAX_COMETS) comets.shift();
+}
+
+function updateComets(dt){
+  for(let i=comets.length-1;i>=0;i--){
+    const c=comets[i];
+    c.life+=dt;
+    c.x+=c.dx*dt;
+    c.z+=c.dz*dt;
+    if(c.life>c.maxLife){ comets.splice(i,1); continue; }
+  }
+  // Pack into uniform
+  cometUniformData.fill(0);
+  for(let i=0;i<Math.min(comets.length,MAX_COMETS);i++){
+    const c=comets[i];
+    // Brightness envelope: fast attack, slow decay
+    const phase=c.life/c.maxLife;
+    const env=phase<0.08?phase/0.08:Math.pow(1.0-phase,2.2);
+    cometUniformData[i*4+0]=c.x;
+    cometUniformData[i*4+1]=c.z;
+    cometUniformData[i*4+2]=env*c.peak;
+    cometUniformData[i*4+3]=c.angle;
+  }
+}
+
+// ═══════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════
+// MEMORY DATA — 24 memories across all categories
+// ═══════════════════════════════════════════════════════════════════
+// AGENT: In production, this comes from GET /api/sophia/{user_id}/memories/recent
+// Each memory has: text (the memory content), date (display string), tags (array of Mem0 categories), day (0-150 timeline position)
+// The "day" field maps to the timeline: day 0 = Jul 1, day 150 = Today (Nov 28)
+// In React, map memory.timestamp to a relative day offset from today
+//
+// CATEGORY → TAG MAPPING (must match Mem0 9-category system):
+//   decision, pattern, lesson, feeling, commitment, relationship, preference, fact, ritual_context
+// The UI filters use these exact lowercase names.
 const memTexts=[
+  // --- Today (day 150) ---
   {text:"Work-mode alertness is leaking into rest",date:"Today · 2:14 PM",tags:["pattern"],day:150},
   {text:"The conversation with mom went better than expected",date:"Today · 11:30 AM",tags:["relationship"],day:150},
+  {text:"Feeling genuinely calm for the first time this week",date:"Today · 9:00 AM",tags:["feeling"],day:150},
+  // --- Yesterday (day 149) ---
   {text:"Realized I avoid asking for help not from pride but from fear",date:"Yesterday · 9:45 PM",tags:["lesson"],day:149},
   {text:"Decided to protect Friday afternoons — no meetings",date:"Yesterday · 3:20 PM",tags:["decision"],day:149},
-  {text:"Three weeks of consistent running",date:"Mar 5 · 8:10 AM",tags:["commitment"],day:145},
-  {text:"Said no to the consulting gig. It felt right.",date:"Mar 4 · 6:30 PM",tags:["decision"],day:144},
-  {text:"Something shifted after the conversation with Elena",date:"Mar 3 · 10:15 PM",tags:["feeling"],day:143},
-  {text:"I keep reaching for my phone when I feel uncertain",date:"Mar 2 · 7:45 PM",tags:["pattern"],day:142},
-  {text:"The pitch went well. I trusted my preparation.",date:"Mar 1 · 5:00 PM",tags:["lesson"],day:141},
-  {text:"Jake's comment wasn't about me",date:"Feb 28 · 8:20 PM",tags:["relationship"],day:138},
-  {text:"Naming the fear made it smaller",date:"Feb 26 · 10:30 PM",tags:["lesson"],day:132},
-  {text:"Feeling lighter after setting the boundary",date:"Feb 23 · 7:15 PM",tags:["feeling"],day:120},
+  {text:"I prefer when Sophia asks one question at a time, not three",date:"Yesterday · 1:10 PM",tags:["preference"],day:149},
+  // --- This week (days 145-148) ---
+  {text:"Three weeks of consistent running",date:"Nov 25 · 8:10 AM",tags:["commitment"],day:148},
+  {text:"My default response to stress is withdrawal, not anger",date:"Nov 24 · 10:20 PM",tags:["pattern"],day:147},
+  {text:"Said no to the consulting gig. It felt right.",date:"Nov 23 · 6:30 PM",tags:["decision"],day:146},
+  {text:"Something shifted after the conversation with Elena",date:"Nov 22 · 10:15 PM",tags:["feeling"],day:145},
+  // --- Earlier this month (days 130-144) ---
+  {text:"I keep reaching for my phone when I feel uncertain",date:"Nov 19 · 7:45 PM",tags:["pattern"],day:142},
+  {text:"The pitch went well. I trusted my preparation.",date:"Nov 18 · 5:00 PM",tags:["lesson"],day:141},
+  {text:"Jake's comment wasn't about me",date:"Nov 15 · 8:20 PM",tags:["relationship"],day:138},
+  {text:"Started journaling before sleep — want to keep this up",date:"Nov 14 · 11:00 PM",tags:["commitment"],day:137},
+  {text:"Naming the fear made it smaller",date:"Nov 9 · 10:30 PM",tags:["lesson"],day:132},
+  {text:"I work better with ambient noise than silence",date:"Nov 7 · 3:15 PM",tags:["preference"],day:130},
+  // --- October (days 93-124) ---
+  {text:"Feeling lighter after setting the boundary",date:"Oct 28 · 7:15 PM",tags:["feeling"],day:120},
+  {text:"Mom's birthday is March 15",date:"Oct 22 · 2:00 PM",tags:["fact"],day:114},
+  {text:"Decided to take the sabbatical in January",date:"Oct 15 · 9:30 AM",tags:["decision"],day:108},
+  {text:"The morning ritual helped me start the day grounded",date:"Oct 10 · 8:45 AM",tags:["ritual_context"],day:103},
+  // --- September (days 62-92) ---
+  {text:"I'm a senior product designer at Figma",date:"Sep 18 · 4:00 PM",tags:["fact"],day:80},
+  {text:"Elena is my sister — we talk every Sunday",date:"Sep 10 · 6:30 PM",tags:["relationship"],day:72},
+  // --- August (days 31-61) ---
+  {text:"The vent ritual works best when I don't try to solve anything",date:"Aug 20 · 9:15 PM",tags:["ritual_context"],day:51},
+  {text:"Committed to running 3x a week",date:"Aug 5 · 7:00 AM",tags:["commitment"],day:36},
 ];
 
-// Hand-placed positions — mostly midground, asymmetrically scattered
-// Each: [worldX, worldZ, brightness(0-1), size(0-1)]
+// AGENT: Hand-placed world positions for each memory gem on the water surface.
+// Format: [worldX, worldZ, brightness(0-1), size(0-1)]
+// worldX: left(-) to right(+), roughly -1.5 to 1.5
+// worldZ: near(0) to far(2.0), camera looks from -Z toward +Z
+// In production, auto-place using a force-directed layout or spiral algorithm
+// to avoid overlaps. These manual positions are tuned for 24 memories.
 const memSeeds=[
-  [-0.95, 0.55, 0.70, 0.65],  // left mid
-  [ 0.60, 0.80, 0.55, 0.50],  // right mid-far
-  [-0.30, 0.25, 0.90, 0.80],  // left-center near
-  [ 1.10, 0.40, 0.40, 0.40],  // far right
-  [-0.55, 1.10, 0.35, 0.35],  // left far
-  [ 0.20, 0.65, 0.80, 0.70],  // center mid
-  [-1.30, 0.30, 0.30, 0.30],  // far left edge
-  [ 0.85, 0.15, 0.50, 0.45],  // right near
-  [-0.10, 1.40, 0.25, 0.30],  // center far
-  [ 0.45, 1.15, 0.35, 0.38],  // right far
-  [-0.70, 0.00, 0.60, 0.55],  // left near
-  [ 0.05, 0.05, 0.45, 0.42],  // center near (close to core glow)
+  // Today (3) — near center, prominent
+  [-0.55, 0.35, 0.75, 0.65],
+  [ 0.70, 0.50, 0.70, 0.55],
+  [ 0.05, 0.20, 0.80, 0.60],
+  // Yesterday (3) — spread left-center-right
+  [-1.20, 0.55, 0.90, 0.80],
+  [ 1.45, 0.30, 0.55, 0.50],
+  [ 0.30, 0.75, 0.45, 0.42],
+  // This week (4) — wide spread
+  [-0.20, 0.95, 0.80, 0.70],
+  [-1.65, 0.25, 0.40, 0.38],
+  [ 1.70, 0.65, 0.55, 0.48],
+  [ 0.50, 1.25, 0.35, 0.35],
+  // Earlier this month (6) — fill out the mid-range
+  [-0.85, 1.10, 0.38, 0.40],
+  [ 1.15, 0.10, 0.60, 0.55],
+  [-1.50, 0.90, 0.30, 0.32],
+  [ 0.10, 0.55, 0.50, 0.45],
+  [ 1.50, 1.05, 0.28, 0.30],
+  [-0.40, 0.15, 0.42, 0.40],
+  // October (4) — further out
+  [ 0.80, 1.50, 0.25, 0.30],
+  [-1.40, 1.35, 0.35, 0.35],
+  [-0.15, 1.55, 0.22, 0.28],
+  [ 1.55, 1.40, 0.30, 0.32],
+  // September (2) — far edges
+  [-1.75, 0.60, 0.40, 0.38],
+  [ 0.45, 1.75, 0.20, 0.25],
+  // August (2) — deep far
+  [-0.70, 1.80, 0.18, 0.25],
+  [ 1.20, 1.70, 0.15, 0.22],
 ];
 
 const memories=[];
@@ -828,10 +1531,11 @@ for(let i=0;i<memSeeds.length;i++){
   memories.push({
     px,pz,dist,
     brightness,size,
-    phase:i*2.09+0.7,  // spread phases
+    phase:i*2.09+0.7,
     textIdx:i,
     day:memTexts[i].day,
     tlAlpha:1.0,
+    filterVisible:true, // AGENT: new field — tracks combined filter/search/period visibility
     cr:195,cg:180,cb:235,
     sx:0,sy:0,sc:0,vis:false,
   });
@@ -938,33 +1642,14 @@ function setTlDay(day){
   const pct=dayToPct(tlDay);
   tlHandle.style.left=pct+'%';
   tlFill.style.width=pct+'%';
-  // Date label
   tlDateText.textContent=dayToLabel(tlDay);
-  // Memory visibility
-  let visCount=0;
-  for(let i=0;i<memories.length;i++){
-    const m=memories[i];
-    if(m.day<=tlDay){
-      const age=tlDay-m.day;
-      m.tlAlpha=age>=5?1.0:0.3+age*0.14;
-      visCount++;
-    } else {
-      m.tlAlpha=0.0;
-    }
-  }
-  tlCount.textContent=visCount+(visCount===1?' memory':' memories');
-  // Dot visibility
-  for(const d of tlDots){
-    d.classList.toggle('hidden',d._day>tlDay);
-  }
+  // Re-apply all filters (includes timeline day check)
+  applyFilters();
   // Highlight active month label
   tlMonthEls.forEach(el=>{
     const s=parseInt(el.dataset.start);
     el.classList.toggle('active',tlDay>=s&&tlDay<s+31);
   });
-  // Stats counter
-  const statN=document.querySelector('.stat:nth-child(2) .stat-n');
-  if(statN) statN.textContent=visCount;
 }
 
 // Dragging
@@ -996,6 +1681,14 @@ tlTrack.addEventListener('pointerup',()=>{
 // Initialize at max (show all)
 setTlDay(TL_DAY_MAX);
 
+// Make month labels clickable — jump to that period
+tlMonthEls.forEach(el=>{
+  el.addEventListener('click',()=>{
+    dismissHint();
+    setTlDay(Math.min(TL_DAY_MAX, parseInt(el.dataset.start)+15));
+  });
+});
+
 // ═══════════════════════════════════════════════════
 // OVERLAY
 // ═══════════════════════════════════════════════════
@@ -1007,9 +1700,25 @@ const hitC=document.getElementById('hit');
 // INTERACTION
 // ═══════════════════════════════════════════════════
 let mx=0.5,my=0.5,smx=0.5,smy=0.5;
-let selIdx=-1;
-let hovIdx=-1;
-const HIT_R=16;
+const HIT_R=28;
+
+// AGENT: Category colors — CUSTOM values, not from theme. Define as a constant map.
+// These tint the gem orb, halo, ripple rings, constellation lines, and hover labels.
+// Keys must match Mem0 category names exactly.
+const catColors={
+  pattern:       {r:180,g:130,b:255},  // vivid purple
+  decision:      {r:80,g:220,b:200},   // bright teal
+  lesson:        {r:240,g:185,b:100},   // warm amber
+  feeling:       {r:240,g:120,b:175},   // hot rose
+  relationship:  {r:110,g:170,b:245},   // bright blue
+  commitment:    {r:100,g:230,b:170},   // mint green
+  preference:    {r:200,g:160,b:230},   // lavender
+  fact:          {r:150,g:200,b:235},   // sky blue
+  ritual_context:{r:195,g:140,b:220},   // violet
+};
+const hoverLabelEl=document.getElementById('hoverLabel');
+const orbHintEl=document.getElementById('orbHint');
+let orbHintDismissed=false;
 
 document.addEventListener('mousemove',e=>{
   mx=e.clientX/innerWidth;my=e.clientY/innerHeight;
@@ -1020,10 +1729,46 @@ document.addEventListener('mousemove',e=>{
     if((e.clientX-m.sx)**2+(e.clientY-m.sy)**2<HIT_R*HIT_R){hovIdx=i;break}
   }
   hitC.style.cursor=hovIdx>=0?'pointer':'default';
+  // Hover label preview — always shows, even when detail is open for another memory
+  if(hovIdx>=0 && hovIdx!==selIdx){
+    const m=memories[hovIdx];
+    const info=memTexts[m.textIdx];
+    const cat=info.tags[0]||'pattern';
+    const cc=catColors[cat]||catColors.pattern;
+    hoverLabelEl.innerHTML='<div class="hl-cat" style="background:rgba('+cc.r+','+cc.g+','+cc.b+',0.15);color:rgba('+cc.r+','+cc.g+','+cc.b+',0.9)">'+cat+'</div><br>'+info.text;
+    hoverLabelEl.style.left=m.sx+'px';
+    hoverLabelEl.style.top=(m.sy-65)+'px';
+    hoverLabelEl.classList.add('show');
+  } else {
+    hoverLabelEl.classList.remove('show');
+  }
 });
-hitC.addEventListener('click',()=>{
-  if(hovIdx>=0){selIdx=hovIdx;showDetail(selIdx)}
-  else hideDetail();
+// Click handler on document so it works even above the detail panel
+function handleMemoryClick(e){
+  // Ignore clicks on the detail panel close button or inside the detail itself
+  if(detailEl.contains(e.target)) return;
+  // Re-check hover at click position
+  let clickIdx=-1;
+  for(let i=0;i<memories.length;i++){
+    const m=memories[i];
+    if(!m.vis)continue;
+    if((e.clientX-m.sx)**2+(e.clientY-m.sy)**2<HIT_R*HIT_R){clickIdx=i;break}
+  }
+  if(clickIdx>=0){
+    selIdx=clickIdx;showDetail(selIdx);
+    if(!orbHintDismissed){orbHintDismissed=true;orbHintEl.classList.add('hide');}
+    hoverLabelEl.classList.remove('show');
+  } else {
+    hideDetail();
+  }
+}
+hitC.addEventListener('click',handleMemoryClick);
+document.addEventListener('click',e=>{
+  // Only handle clicks on UI overlay elements that sit above hitC
+  if(e.target===hitC||hitC.contains(e.target)) return;
+  if(detailEl.contains(e.target)) return;
+  // Check if click is on a memory position
+  handleMemoryClick(e);
 });
 
 const detailEl=document.getElementById('detail');
@@ -1031,6 +1776,8 @@ function showDetail(i){
   const m=memories[i];
   const info=memTexts[m.textIdx];
   const catEl=document.getElementById('dCat');
+  // AGENT: Category badge colors in the detail panel use CSS classes: cat-{category}
+  // Map them from catColors or define as CSS custom properties
   catEl.textContent=info.tags[0]||'memory';
   catEl.className='d-cat cat-'+(info.tags[0]||'pattern');
   document.getElementById('dDate').textContent=info.date;
@@ -1062,7 +1809,7 @@ window.hideDetail=hideDetail;
 // RESIZE
 // ═══════════════════════════════════════════════════
 function resize(){
-  const dpr=Math.min(devicePixelRatio,2);
+  const dpr=devicePixelRatio;
   poolC.width=innerWidth*dpr;poolC.height=innerHeight*dpr;
   poolC.style.width=innerWidth+'px';poolC.style.height=innerHeight+'px';
   gl.viewport(0,0,poolC.width,poolC.height);
@@ -1078,19 +1825,46 @@ addEventListener('resize',resize);resize();
 // MEMORY UNIFORM UPDATE — send 16 closest to shader
 // ═══════════════════════════════════════════════════
 const memUniformData=new Float32Array(64); // 16 × vec4
+// AGENT: memColUniformData carries per-gem RGB (0-1) to the shader.
+// Always keep in sync with memUniformData slots — same index = same gem.
+const memColUniformData=new Float32Array(48); // 16 × vec3 (RGB 0-1)
 
+// AGENT: Sends the 16 most relevant memory positions to the shader each frame.
+// Prioritizes: selected > hovered > visible (sorted by strength desc).
+// This ensures the ripple always appears under the correct gem.
 function updateMemoryUniforms(){
   memUniformData.fill(0);
-  const count=Math.min(16,memories.length);
-  for(let i=0;i<count;i++){
+  memColUniformData.fill(0);
+  // Build a priority list of all visible memories
+  const candidates=[];
+  for(let i=0;i<memories.length;i++){
     const m=memories[i];
-    if(!m.vis||m.tlAlpha<0.01)continue;
-    // Ripple strength modulated by timeline visibility
-    const strength=(i===selIdx?0.70:i===hovIdx?0.50:m.brightness*0.30+0.10)*m.tlAlpha;
-    memUniformData[i*4+0]=m.px;
-    memUniformData[i*4+1]=m.pz;
-    memUniformData[i*4+2]=strength;
-    memUniformData[i*4+3]=m.phase;
+    if(!m.vis||m.tlAlpha<0.01) continue;
+    let priority=0;
+    let strength=m.brightness*0.30+0.10;
+    if(i===selIdx){priority=2;strength=0.70;}
+    else if(i===hovIdx){priority=1;strength=0.50;}
+    const cat=memTexts[m.textIdx].tags[0]||'pattern';
+    const cc=catColors[cat]||catColors.pattern;
+    candidates.push({idx:i,priority,strength:strength*m.tlAlpha,cc});
+  }
+  // Sort: selected first, then hovered, then by strength descending
+  candidates.sort((a,b)=>b.priority-a.priority||b.strength-a.strength);
+  // Fill up to 16 shader slots
+  const count=Math.min(16,candidates.length);
+  for(let slot=0;slot<count;slot++){
+    const c=candidates[slot];
+    const m=memories[c.idx];
+    // Convert world position to shader's coordinate system (accounts for uv.y flip)
+    const sp=worldToShaderPP(m.px,m.pz);
+    memUniformData[slot*4+0]=sp[0];
+    memUniformData[slot*4+1]=sp[1];
+    memUniformData[slot*4+2]=c.strength;
+    memUniformData[slot*4+3]=m.phase;
+    // Pass category color as normalized RGB (0-1)
+    memColUniformData[slot*3+0]=c.cc.r/255;
+    memColUniformData[slot*3+1]=c.cc.g/255;
+    memColUniformData[slot*3+2]=c.cc.b/255;
   }
 }
 
@@ -1098,10 +1872,18 @@ function updateMemoryUniforms(){
 // RENDER LOOP
 // ═══════════════════════════════════════════════════
 const t0=performance.now();
+let lastFrameTime=0;
 
 function frame(now){
   const t=(now-t0)/1000;
   smx+=(mx-smx)*0.025;smy+=(my-smy)*0.025;
+
+  // ── Update comets ──
+  const frameDt=Math.min(0.05, lastFrameTime>0?(now-lastFrameTime)*0.001:0.016);
+  lastFrameTime=now;
+  nextCometSpawn-=frameDt;
+  if(nextCometSpawn<=0){ spawnComet(); nextCometSpawn=2.5+Math.random()*5; }
+  updateComets(frameDt);
 
   // ── Update memory uniforms ──
   updateMemoryUniforms();
@@ -1117,12 +1899,18 @@ function frame(now){
   gl.uniform3f(uTgtLoc,TGT[0],TGT[1],TGT[2]);
   gl.uniform1f(uFovLoc,curFOV);
   gl.uniform4fv(uMemLoc,memUniformData);
+  gl.uniform3fv(uMemColLoc,memColUniformData);
+  gl.uniform4fv(uCometLoc,cometUniformData);
   gl.drawArrays(gl.TRIANGLE_STRIP,0,4);
 
   // ── Canvas2D overlay ──
   ctx.clearRect(0,0,innerWidth,innerHeight);
 
-  // ── Particles — visible sparkles on water ──
+  // ── Particles — visible sparkles on water, tinted by nearby gems ──
+  // AGENT: Particles within 120px of a gem blend toward that gem's category color
+  // (60% max blend) and drift slightly toward it. This makes the water surface
+  // feel alive around each memory. In React: optimize with a spatial index or
+  // skip the gem-proximity loop for low-end devices (it's O(particles × gems)).
   for(const p of parts){
     const ls=[1.0,0.60,0.28][p.layer];
     p.x+=p.dr*Math.cos(t*0.08+p.ph)*ls;
@@ -1130,12 +1918,33 @@ function frame(now){
     if(p.x<-0.04)p.x=1.04;if(p.x>1.04)p.x=-0.04;
     if(p.y<-0.04)p.y=1.04;if(p.y>1.04)p.y=-0.04;
     const pulse=Math.sin(t*p.sp+p.ph)*0.35+0.65;
-    const twinkle=Math.max(0,Math.sin(t*p.sp*3.7+p.ph*2.1))**4; // sharp twinkle
+    const twinkle=Math.max(0,Math.sin(t*p.sp*3.7+p.ph*2.1))**4;
     const a=p.al*pulse;if(a<0.003)continue;
     const pxs=p.x*innerWidth,pys=p.y*innerHeight;
     const cd=Math.hypot(p.x-0.5,p.y-0.52);
     const boost=Math.max(0,1-cd*1.8)*0.55+1;
-    const pr=Math.round(p.cr), pg=Math.round(p.cg), pb=Math.round(p.cb);
+    // Tint particle by nearest visible gem
+    let pr=Math.round(p.cr), pg=Math.round(p.cg), pb=Math.round(p.cb);
+    let closestDist=999,closestGem=null;
+    for(let gi=0;gi<memories.length;gi++){
+      const gm=memories[gi];
+      if(!gm.vis||gm.tlAlpha<0.1)continue;
+      const gd=Math.hypot(pxs-gm.sx,pys-gm.sy);
+      if(gd<closestDist){closestDist=gd;closestGem=gi;}
+    }
+    if(closestGem!==null&&closestDist<120){
+      const gm=memories[closestGem];
+      const cat=memTexts[gm.textIdx].tags[0]||'pattern';
+      const gcc=catColors[cat]||catColors.pattern;
+      const blend=Math.max(0,(1-closestDist/120))*0.6;
+      pr=Math.round(pr*(1-blend)+gcc.r*blend);
+      pg=Math.round(pg*(1-blend)+gcc.g*blend);
+      pb=Math.round(pb*(1-blend)+gcc.b*blend);
+      // Drift slightly toward gem
+      const dx=(gm.sx/innerWidth-p.x), dy=(gm.sy/innerHeight-p.y);
+      p.x+=dx*0.0003*blend;
+      p.y+=dy*0.0003*blend;
+    }
     // Outer glow — large soft halo
     const glowR=p.sz*12.0;
     if(glowR>2){
@@ -1153,41 +1962,64 @@ function frame(now){
   }
 
   // ── Constellation lines — subtle connections between nearby memories ──
-  // Pre-compute visible gems for line drawing
+  // AGENT: Lines connect nearby gems (world distance < 0.95, max 2 per gem).
+  // Endpoints bob with the wave for immersion. Dual-pass rendering:
+  // 1) soft glow (lineWidth 4.5, low alpha) 2) crisp core (lineWidth 1.4, gradient).
+  // In React: same Canvas2D approach or consider SVG/WebGL lines for perf.
   const visGems=[];
   for(let i=0;i<memories.length;i++){
     const m=memories[i];
-    if(m.vis&&m.sc>0.05&&m.tlAlpha>0.05) visGems.push({i,x:m.sx,y:m.sy,sc:m.sc,px:m.px,pz:m.pz,tlA:m.tlAlpha});
+    if(m.vis&&m.sc>0.05&&m.tlAlpha>0.05){
+      // Bob endpoints with the wave — same formula as gem bobbing
+      const wD=m.dist,wDecay=Math.exp(-wD*0.42);
+      const wBob=0.018*Math.sin(wD*14-t*1.5)*wDecay+0.010*Math.sin(wD*24-t*2.2+0.5)*wDecay*0.70;
+      const bobY=m.sy+wBob*m.sc*innerHeight*0.12;
+      visGems.push({i,x:m.sx,y:bobY,sc:m.sc,px:m.px,pz:m.pz,tlA:m.tlAlpha});
+    }
   }
-  // Connect gems within a world-space threshold (not screen-space, so perspective-correct)
-  const maxLinkDist=1.6; // world units
-  const drawnLinks=new Set();
+  // Connect gems within a world-space threshold — limit to 2 links per gem to keep it sparse
+  const maxLinkDist=0.95; // world units — tight so only true neighbors connect
+  const linkCount=new Map(); // gem index → number of links drawn
+  const MAX_LINKS_PER_GEM=2;
   for(let a=0;a<visGems.length;a++){
     for(let b=a+1;b<visGems.length;b++){
       const ga=visGems[a], gb=visGems[b];
+      if((linkCount.get(ga.i)||0)>=MAX_LINKS_PER_GEM||(linkCount.get(gb.i)||0)>=MAX_LINKS_PER_GEM) continue;
       const wDist=Math.hypot(ga.px-gb.px, ga.pz-gb.pz);
       if(wDist>maxLinkDist) continue;
-      const key=ga.i*100+gb.i;
-      if(drawnLinks.has(key)) continue;
-      drawnLinks.add(key);
+      linkCount.set(ga.i,(linkCount.get(ga.i)||0)+1);
+      linkCount.set(gb.i,(linkCount.get(gb.i)||0)+1);
       // Line alpha: fades with world distance, modulated by depth
       const distFade=1.0-wDist/maxLinkDist;
       const depthA=Math.min(1.0, ga.sc*3.0);
       const depthB=Math.min(1.0, gb.sc*3.0);
-      const lineAlpha=distFade*distFade*Math.min(depthA,depthB)*Math.min(ga.tlA,gb.tlA)*0.12;
-      if(lineAlpha<0.005) continue;
-      // Gradient along the line — fades at both ends
+      const lineAlpha=distFade*distFade*Math.min(depthA,depthB)*Math.min(ga.tlA,gb.tlA)*0.65;
+      if(lineAlpha<0.003) continue;
+      // Gradient along the line — fades at edges, bright center
       const lg=ctx.createLinearGradient(ga.x,ga.y,gb.x,gb.y);
-      lg.addColorStop(0,`rgba(190,175,220,0)`);
-      lg.addColorStop(0.15,`rgba(190,175,220,${lineAlpha})`);
-      lg.addColorStop(0.5,`rgba(200,185,225,${lineAlpha*1.2})`);
-      lg.addColorStop(0.85,`rgba(190,175,220,${lineAlpha})`);
-      lg.addColorStop(1,`rgba(190,175,220,0)`);
+      lg.addColorStop(0,`rgba(200,185,235,0)`);
+      lg.addColorStop(0.08,`rgba(200,185,235,${lineAlpha*0.6})`);
+      lg.addColorStop(0.5,`rgba(220,205,245,${lineAlpha})`);
+      lg.addColorStop(0.92,`rgba(200,185,235,${lineAlpha*0.6})`);
+      lg.addColorStop(1,`rgba(200,185,235,0)`);
+      // Soft glow pass (wider, lower alpha)
       ctx.beginPath();
       ctx.moveTo(ga.x,ga.y);
-      ctx.lineTo(gb.x,gb.y);
+      const ldx=gb.x-ga.x,ldy=gb.y-ga.y;
+      const llen=Math.hypot(ldx,ldy)||1;
+      const lnx=-ldy/llen,lny=ldx/llen;
+      const curv=Math.sin(ga.i*1.7+gb.i*0.9+t*0.08)*12+Math.cos(ga.i*0.5-gb.i*1.3)*6;
+      const cpx=(ga.x+gb.x)*0.5+lnx*curv, cpy=(ga.y+gb.y)*0.5+lny*curv;
+      ctx.quadraticCurveTo(cpx,cpy,gb.x,gb.y);
+      ctx.strokeStyle=`rgba(190,175,230,${lineAlpha*0.25})`;
+      ctx.lineWidth=4.5;
+      ctx.stroke();
+      // Crisp core line
+      ctx.beginPath();
+      ctx.moveTo(ga.x,ga.y);
+      ctx.quadraticCurveTo(cpx,cpy,gb.x,gb.y);
       ctx.strokeStyle=lg;
-      ctx.lineWidth=0.6;
+      ctx.lineWidth=1.4;
       ctx.stroke();
     }
   }
@@ -1201,8 +2033,15 @@ function frame(now){
     }
     m.vis=true;m.sx=proj.x;m.sy=proj.y;m.sc=proj.s;
 
+    // Wave-surface integration: gems bob with the water
+    const wD=m.dist,wDecay=Math.exp(-wD*0.42);
+    const wH=0.018*Math.sin(wD*14-t*1.5)*wDecay+0.010*Math.sin(wD*24-t*2.2+0.5)*wDecay*0.70;
+    m.sy+=wH*proj.s*innerHeight*0.45;
+
     const isSel=(i===selIdx);
     const isHov=(i===hovIdx);
+    const cat=memTexts[m.textIdx].tags[0]||'pattern';
+    const cc=catColors[cat]||catColors.pattern;
 
     // Slow breathing
     const breathe=Math.sin(t*0.25+m.phase)*0.08+Math.sin(t*0.13+m.phase*1.7)*0.04;
@@ -1210,20 +2049,19 @@ function frame(now){
     // Depth falloff
     const depthFade=Math.min(1.0,Math.pow(Math.min(proj.s*3.0,1.0),0.55));
 
-    // Gem scale — perspective-adjusted, larger to stand out
-    const baseScale=6.5+m.size*3.0;
-    const sc=Math.max(4.5,baseScale*Math.min(2.5,proj.s*3.5));
-    const gemW=sc*0.50;
-    const gemH=sc*1.25;
+    // Gem scale — perspective-adjusted
+    const baseScale=10.0+m.size*5.0;
+    const sc=Math.max(6.5,baseScale*Math.min(2.5,proj.s*3.5));
+    const orbR=sc*0.70; // sphere radius
 
     // Alpha — modulated by timeline scrubber
     if(m.tlAlpha<0.01){m.vis=false;continue;}
-    let alpha=(0.50+m.brightness*0.35+breathe)*depthFade*m.tlAlpha;
-    if(isSel)alpha=Math.min(1.0,alpha*2.2);
-    if(isHov&&!isSel)alpha=Math.min(0.92,alpha*1.8);
+    let alpha=(0.65+m.brightness*0.30+breathe)*depthFade*m.tlAlpha;
+    if(isSel)alpha=Math.min(1.0,alpha*2.0);
+    if(isHov&&!isSel)alpha=Math.min(0.95,alpha*1.7);
 
-    const cx=proj.x;
-    const cy=proj.y;
+    const cx=m.sx;
+    const cy=m.sy;
 
     // ── Multiple concentric ripple rings (warm → cool as they expand) ──
     if(depthFade>0.10){
@@ -1235,9 +2073,9 @@ function frame(now){
         const ripA=(1.0-ripPhase)*(isSel?0.22:isHov?0.14:0.07)*depthFade;
         if(ripA<0.004)continue;
         const warmth=Math.max(0,1-ripPhase);
-        const rr=Math.round(180+warmth*55);
-        const rg=Math.round(155+warmth*50);
-        const rb=Math.round(215-warmth*65);
+        const rr=Math.round(cc.r*0.4+120*0.6+warmth*40);
+        const rg=Math.round(cc.g*0.4+100*0.6+warmth*35);
+        const rb=Math.round(cc.b*0.4+155*0.6-warmth*30);
         ctx.beginPath();ctx.arc(cx,cy,ripR,0,Math.PI*2);
         ctx.strokeStyle=`rgba(${rr},${rg},${rb},${ripA})`;
         ctx.lineWidth=isSel?1.2:isHov?0.9:0.5;
@@ -1246,89 +2084,176 @@ function frame(now){
     }
 
     // ── Outer warm glow halo ──
-    const glowR=gemH*2.5+(isSel?28:isHov?20:12+m.brightness*8);
-    let glowA=(0.14+breathe*0.03)*depthFade*(0.5+m.brightness*0.5);
+    const glowR=orbR*4.0+(isSel?35:isHov?25:16+m.brightness*10);
+    let glowA=(0.22+breathe*0.04)*depthFade*(0.6+m.brightness*0.4);
     if(isSel)glowA*=3.5;
     if(isHov&&!isSel)glowA*=2.2;
 
+    // Category-tinted halo — stronger color presence
+    const hr0=Math.round(cc.r*0.5+185*0.5),hg0=Math.round(cc.g*0.5+165*0.5),hb0=Math.round(cc.b*0.5+190*0.5);
+    const hr1=Math.round(cc.r*0.4+170*0.6),hg1=Math.round(cc.g*0.4+150*0.6),hb1=Math.round(cc.b*0.4+180*0.6);
     const haloG=ctx.createRadialGradient(cx,cy,0,cx,cy,glowR);
-    haloG.addColorStop(0,`rgba(235,215,240,${Math.min(0.40,glowA*1.2)})`);
-    haloG.addColorStop(0.25,`rgba(210,190,220,${Math.min(0.22,glowA*0.6)})`);
-    haloG.addColorStop(0.6,`rgba(180,160,200,${Math.min(0.08,glowA*0.2)})`);
+    haloG.addColorStop(0,`rgba(${hr0},${hg0},${hb0},${Math.min(0.55,glowA*1.5)})`);
+    haloG.addColorStop(0.25,`rgba(${hr1},${hg1},${hb1},${Math.min(0.30,glowA*0.8)})`);
+    haloG.addColorStop(0.6,`rgba(${Math.round(cc.r*0.35+150*0.65)},${Math.round(cc.g*0.35+130*0.65)},${Math.round(cc.b*0.35+170*0.65)},${Math.min(0.12,glowA*0.3)})`);
     haloG.addColorStop(1,'rgba(160,145,185,0)');
     ctx.beginPath();ctx.arc(cx,cy,glowR,0,Math.PI*2);
     ctx.fillStyle=haloG;ctx.fill();
 
-    // ── Teardrop gem body (rounded top, pointed bottom) ──
+    // ── Water anchor: colored light pool on surface beneath orb ──
+    // AGENT: This is a 2D Canvas ellipse (squashed circle) drawn below each gem.
+    // It uses the gem's catColor with radial gradient — creates the illusion
+    // the gem illuminates the water surface. Separate from the GLSL light pool
+    // (which is in the shader). Both work together for a layered glow effect.
+    const anchorY=cy+orbR*1.1;
+    const anchorRx=orbR*4.5;
+    const anchorRy=anchorRx*0.32;
+    const anchorA=0.22*depthFade*Math.min(1.0,alpha*1.2);
+    if(anchorA>0.004){
+      ctx.save();
+      ctx.translate(cx,anchorY);
+      ctx.scale(1,anchorRy/anchorRx);
+      const ag=ctx.createRadialGradient(0,0,0,0,0,anchorRx);
+      ag.addColorStop(0,`rgba(${cc.r},${cc.g},${cc.b},${Math.min(0.38,anchorA*1.2)})`);
+      ag.addColorStop(0.35,`rgba(${cc.r},${cc.g},${cc.b},${Math.min(0.18,anchorA*0.55)})`);
+      ag.addColorStop(0.7,`rgba(${(cc.r*0.4)|0},${(cc.g*0.4)|0},${(cc.b*0.5)|0},${anchorA*0.15})`);
+      ag.addColorStop(1.0,'rgba(6,5,12,0)');
+      ctx.beginPath();ctx.arc(0,0,anchorRx,0,Math.PI*2);
+      ctx.fillStyle=ag;ctx.fill();
+      ctx.restore();
+    }
+
+    // ── Surface contact ring — bright ellipse where gem meets water ──
+    // AGENT: Thin bright ellipse at the gem-water contact point. Creates a
+    // "surface tension" effect — the gem appears to sit IN the water, not on top.
+    // Two strokes: inner crisp ring (1.2px) + outer soft glow (3.0px).
+    // Color is the gem's catColor brightened by +60/+50/+40 RGB.
+    if(depthFade>0.08){
+      const crY=cy+orbR*0.55;
+      const crRx=orbR*1.3;
+      const crRy=crRx*0.35;
+      const crA=Math.min(0.45,alpha*0.50)*depthFade;
+      ctx.save();
+      ctx.translate(cx,crY);
+      ctx.scale(1,crRy/crRx);
+      ctx.beginPath();ctx.arc(0,0,crRx,0,Math.PI*2);
+      ctx.strokeStyle=`rgba(${Math.min(255,cc.r+60)},${Math.min(255,cc.g+50)},${Math.min(255,cc.b+40)},${crA})`;
+      ctx.lineWidth=1.2;
+      ctx.stroke();
+      // Softer outer contact glow
+      ctx.beginPath();ctx.arc(0,0,crRx+2,0,Math.PI*2);
+      ctx.strokeStyle=`rgba(${cc.r},${cc.g},${cc.b},${crA*0.3})`;
+      ctx.lineWidth=3.0;
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // ── Luminous sphere orb ──
+    // Drop shadow — grounds the orb on the water surface
+    const shR=orbR*1.15;
+    const shY=cy+orbR*0.35;
+    const shG=ctx.createRadialGradient(cx,shY,orbR*0.3,cx,shY,shR);
+    shG.addColorStop(0,`rgba(4,3,10,${Math.min(0.40,alpha*0.45)})`);
+    shG.addColorStop(0.5,`rgba(6,4,14,${Math.min(0.18,alpha*0.20)})`);
+    shG.addColorStop(1,'rgba(8,6,16,0)');
+    ctx.beginPath();ctx.ellipse(cx,shY,shR,shR*0.45,0,0,Math.PI*2);
+    ctx.fillStyle=shG;ctx.fill();
+
     ctx.save();
     ctx.beginPath();
-    ctx.moveTo(cx, cy+gemH);
-    ctx.bezierCurveTo(
-      cx-gemW*1.3, cy+gemH*0.15,
-      cx-gemW*1.0, cy-gemH*0.65,
-      cx, cy-gemH*0.55
-    );
-    ctx.bezierCurveTo(
-      cx+gemW*1.0, cy-gemH*0.65,
-      cx+gemW*1.3, cy+gemH*0.15,
-      cx, cy+gemH
-    );
+    ctx.arc(cx, cy, orbR, 0, Math.PI*2);
     ctx.closePath();
-    // Clip to gem shape for all interior layers
     ctx.clip();
 
-    // Layer 1: Base fill — rich translucent violet
-    ctx.fillStyle=`rgba(155,135,205,${Math.min(0.72,alpha*0.75)})`;
+    // Layer 1: Base fill — category-tinted sphere with stronger color
+    const bf=ctx.createRadialGradient(cx,cy,0,cx,cy,orbR);
+    bf.addColorStop(0,`rgba(${Math.min(255,(cc.r*0.45+180*0.55)|0)},${Math.min(255,(cc.g*0.45+170*0.55)|0)},${Math.min(255,(cc.b*0.45+210*0.55)|0)},${Math.min(0.70,alpha*0.72)})`);
+    bf.addColorStop(0.7,`rgba(${(cc.r*0.6+80*0.4)|0},${(cc.g*0.6+70*0.4)|0},${(cc.b*0.6+120*0.4)|0},${Math.min(0.55,alpha*0.58)})`);
+    bf.addColorStop(1,`rgba(${(cc.r*0.45+30*0.55)|0},${(cc.g*0.45+20*0.55)|0},${(cc.b*0.45+50*0.55)|0},${Math.min(0.38,alpha*0.40)})`);
+    ctx.fillStyle=bf;
     ctx.fill();
 
-    // Layer 2: Interior glow — warm white core shifted upward (light from above)
-    const gemG=ctx.createRadialGradient(cx,cy-gemH*0.22,0,cx,cy-gemH*0.05,gemH*0.85);
-    gemG.addColorStop(0,`rgba(255,248,242,${Math.min(0.88,alpha*0.95)})`);
-    gemG.addColorStop(0.25,`rgba(240,218,228,${Math.min(0.70,alpha*0.75)})`);
-    gemG.addColorStop(0.50,`rgba(210,185,225,${Math.min(0.42,alpha*0.45)})`);
-    gemG.addColorStop(0.80,`rgba(175,155,210,${Math.min(0.18,alpha*0.20)})`);
-    gemG.addColorStop(1,'rgba(150,130,195,0)');
-    ctx.fillStyle=gemG;
-    ctx.fillRect(cx-gemW*2,cy-gemH,gemW*4,gemH*2.5);
+    // Layer 2: Interior glow — bright core shifted upper-left (light from above)
+    const igx=cx-orbR*0.20, igy=cy-orbR*0.25;
+    const ig=ctx.createRadialGradient(igx,igy,0,cx,cy,orbR*0.95);
+    ig.addColorStop(0,`rgba(255,250,245,${Math.min(0.85,alpha*0.90)})`);
+    ig.addColorStop(0.20,`rgba(245,230,240,${Math.min(0.55,alpha*0.60)})`);
+    ig.addColorStop(0.50,`rgba(${(cc.r*0.4+200*0.6)|0},${(cc.g*0.4+185*0.6)|0},${(cc.b*0.4+220*0.6)|0},${Math.min(0.28,alpha*0.30)})`);
+    ig.addColorStop(1,'rgba(120,105,165,0)');
+    ctx.fillStyle=ig;
+    ctx.fillRect(cx-orbR,cy-orbR,orbR*2,orbR*2);
 
-    // Layer 3: Bottom shadow — darker at the point (3D depth cue)
-    const shadG=ctx.createLinearGradient(cx,cy,cx,cy+gemH);
-    shadG.addColorStop(0,'rgba(40,30,60,0)');
-    shadG.addColorStop(0.5,`rgba(40,30,60,${Math.min(0.25,alpha*0.28)})`);
-    shadG.addColorStop(1,`rgba(25,18,45,${Math.min(0.40,alpha*0.45)})`);
-    ctx.fillStyle=shadG;
-    ctx.fillRect(cx-gemW*2,cy-gemH,gemW*4,gemH*2.5);
+    // Layer 3: Bottom shadow — deeper 3D sphere shading
+    const bs=ctx.createRadialGradient(cx+orbR*0.10,cy+orbR*0.35,0,cx,cy,orbR);
+    bs.addColorStop(0,`rgba(12,8,28,${Math.min(0.50,alpha*0.52)})`);
+    bs.addColorStop(0.4,`rgba(18,12,38,${Math.min(0.25,alpha*0.28)})`);
+    bs.addColorStop(0.75,`rgba(25,18,50,${Math.min(0.10,alpha*0.12)})`);
+    bs.addColorStop(1,'rgba(30,22,55,0)');
+    ctx.fillStyle=bs;
+    ctx.fillRect(cx-orbR,cy-orbR,orbR*2,orbR*2);
 
-    // Layer 4: Refraction edge — bright rim on left side (light catches edge)
-    const edgeG=ctx.createLinearGradient(cx-gemW*1.2,cy,cx+gemW*0.5,cy);
-    edgeG.addColorStop(0,`rgba(235,225,250,${Math.min(0.35,alpha*0.38)})`);
-    edgeG.addColorStop(0.15,`rgba(215,205,240,${Math.min(0.18,alpha*0.20)})`);
-    edgeG.addColorStop(0.4,'rgba(190,175,225,0)');
-    edgeG.addColorStop(1,'rgba(180,165,215,0)');
-    ctx.fillStyle=edgeG;
-    ctx.fillRect(cx-gemW*2,cy-gemH,gemW*4,gemH*2.5);
+    // Layer 3b: Bottom-right secondary shadow — enhances roundness
+    const bs2=ctx.createRadialGradient(cx+orbR*0.25,cy+orbR*0.40,0,cx+orbR*0.15,cy+orbR*0.25,orbR*0.9);
+    bs2.addColorStop(0,`rgba(8,5,20,${Math.min(0.30,alpha*0.32)})`);
+    bs2.addColorStop(0.6,`rgba(15,10,30,${Math.min(0.10,alpha*0.12)})`);
+    bs2.addColorStop(1,'rgba(20,15,35,0)');
+    ctx.fillStyle=bs2;
+    ctx.fillRect(cx-orbR,cy-orbR,orbR*2,orbR*2);
+
+    // Layer 4: Rim light — bright crescent on upper-left edge
+    const rx=cx-orbR*0.55, ry=cy-orbR*0.45;
+    const rl=ctx.createRadialGradient(rx,ry,orbR*0.15,rx,ry,orbR*0.85);
+    rl.addColorStop(0,`rgba(240,235,255,${Math.min(0.35,alpha*0.38)})`);
+    rl.addColorStop(0.4,`rgba(210,200,240,${Math.min(0.14,alpha*0.16)})`);
+    rl.addColorStop(1,'rgba(180,170,220,0)');
+    ctx.fillStyle=rl;
+    ctx.fillRect(cx-orbR,cy-orbR,orbR*2,orbR*2);
+
+    // Layer 4b: Bottom rim light — subtle warm edge catch (separates from water)
+    const brx=cx+orbR*0.30, bry=cy+orbR*0.50;
+    const brl=ctx.createRadialGradient(brx,bry,orbR*0.05,brx,bry,orbR*0.65);
+    brl.addColorStop(0,`rgba(${Math.min(255,cc.r+80)},${Math.min(255,cc.g+60)},${Math.min(255,cc.b+40)},${Math.min(0.18,alpha*0.20)})`);
+    brl.addColorStop(0.5,`rgba(${Math.min(255,cc.r+40)},${Math.min(255,cc.g+30)},${Math.min(255,cc.b+20)},${Math.min(0.06,alpha*0.07)})`);
+    brl.addColorStop(1,'rgba(120,100,80,0)');
+    ctx.fillStyle=brl;
+    ctx.fillRect(cx-orbR,cy-orbR,orbR*2,orbR*2);
 
     ctx.restore();
 
-    // ── Gem outline — faint crystal edge ──
+    // ── Sphere outline — luminous edge ring ──
+    // Outer glow ring (soft, category-colored)
     ctx.beginPath();
-    ctx.moveTo(cx, cy+gemH);
-    ctx.bezierCurveTo(cx-gemW*1.3,cy+gemH*0.15,cx-gemW*1.0,cy-gemH*0.65,cx,cy-gemH*0.55);
-    ctx.bezierCurveTo(cx+gemW*1.0,cy-gemH*0.65,cx+gemW*1.3,cy+gemH*0.15,cx,cy+gemH);
-    ctx.closePath();
-    ctx.strokeStyle=`rgba(220,212,245,${Math.min(0.35,alpha*0.38)})`;
-    ctx.lineWidth=0.9;
+    ctx.arc(cx, cy, orbR+2.0, 0, Math.PI*2);
+    ctx.strokeStyle=`rgba(${Math.min(255,(cc.r*0.5+180*0.5)|0)},${Math.min(255,(cc.g*0.5+170*0.5)|0)},${Math.min(255,(cc.b*0.5+210*0.5)|0)},${Math.min(0.22,alpha*0.25)})`;
+    ctx.lineWidth=2.5;
+    ctx.stroke();
+    // Inner crisp edge
+    ctx.beginPath();
+    ctx.arc(cx, cy, orbR, 0, Math.PI*2);
+    ctx.strokeStyle=`rgba(235,228,255,${Math.min(0.35,alpha*0.38)})`;
+    ctx.lineWidth=0.8;
     ctx.stroke();
 
-    // ── Specular highlight — top of gem ──
-    const hlY=cy-gemH*0.32;
-    const hlR=gemW*0.75;
-    const hlG=ctx.createRadialGradient(cx-gemW*0.15,hlY,0,cx-gemW*0.05,hlY,hlR);
-    hlG.addColorStop(0,`rgba(255,252,250,${Math.min(0.75,alpha*0.80)})`);
-    hlG.addColorStop(0.4,`rgba(240,232,245,${Math.min(0.30,alpha*0.32)})`);
-    hlG.addColorStop(1,'rgba(215,205,230,0)');
-    ctx.beginPath();ctx.arc(cx-gemW*0.1,hlY,hlR,0,Math.PI*2);
+    // ── Specular highlight — bright spot upper-left ──
+    const hlX=cx-orbR*0.28, hlY=cy-orbR*0.32;
+    const hlR=orbR*0.38;
+    const hlG=ctx.createRadialGradient(hlX,hlY,0,hlX,hlY,hlR);
+    hlG.addColorStop(0,`rgba(255,253,250,${Math.min(0.65,alpha*0.70)})`);
+    hlG.addColorStop(0.30,`rgba(248,242,252,${Math.min(0.30,alpha*0.33)})`);
+    hlG.addColorStop(0.65,`rgba(235,228,248,${Math.min(0.08,alpha*0.10)})`);
+    hlG.addColorStop(1,'rgba(220,215,240,0)');
+    ctx.beginPath();ctx.arc(hlX,hlY,hlR,0,Math.PI*2);
     ctx.fillStyle=hlG;ctx.fill();
+
+    // ── Secondary specular — tiny sharp point (glass-like catch) ──
+    const hl2X=cx-orbR*0.18, hl2Y=cy-orbR*0.22;
+    const hl2R=orbR*0.12;
+    const hl2G=ctx.createRadialGradient(hl2X,hl2Y,0,hl2X,hl2Y,hl2R);
+    hl2G.addColorStop(0,`rgba(255,255,255,${Math.min(0.80,alpha*0.85)})`);
+    hl2G.addColorStop(0.5,`rgba(255,252,255,${Math.min(0.25,alpha*0.28)})`);
+    hl2G.addColorStop(1,'rgba(240,235,250,0)');
+    ctx.beginPath();ctx.arc(hl2X,hl2Y,hl2R,0,Math.PI*2);
+    ctx.fillStyle=hl2G;ctx.fill();
 
     ctx.restore();
   }
@@ -1372,7 +2297,7 @@ function frame(now){
   ctx.fillStyle=hazeD;ctx.fill();
 
   // Layer E: tight central luminance lift (the pool "breathes light into the air")
-  const cPulse=Math.sin(t*0.15)*0.003+0.018;
+  const cPulse=Math.sin(t*0.15)*0.002+0.012;
   const hazeG=ctx.createRadialGradient(innerWidth*0.5,innerHeight*0.52,0,innerWidth*0.5,innerHeight*0.52,innerWidth*0.22);
   hazeG.addColorStop(0,`rgba(55,40,50,${cPulse})`);
   hazeG.addColorStop(0.5,`rgba(50,32,85,${cPulse*0.4})`);
@@ -1386,6 +2311,14 @@ function frame(now){
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
+
+// Auto-reveal first memory after a brief delay to teach the interaction model
+setTimeout(()=>{
+  if(selIdx<0 && memories.length>0){
+    selIdx=0;
+    showDetail(0);
+  }
+},2000);
 </script>
 </body>
 </html>

@@ -13,10 +13,9 @@
  * - POST /api/v4/chat
  */
 
-import { headers } from "next/headers"
 import { type NextRequest, NextResponse } from "next/server"
 
-import { auth } from "@/server/better-auth"
+import { getSession } from "@/server/better-auth"
 
 import { getServerAuthToken } from "../../../lib/auth/server-auth"
 
@@ -214,7 +213,7 @@ function sanitizeResponse(responseText: string): { text: string; artifacts: Reco
 
 async function getAuthenticatedUser(): Promise<string | undefined> {
   try {
-    const session = await auth.api.getSession({ headers: await headers() })
+    const session = await getSession()
     return session?.user?.id
   } catch {
     return undefined

@@ -3,12 +3,12 @@
  * ==============================
  * 
  * Handles authentication with the Sophia backend.
- * After Discord OAuth via Better Auth, we register the user with
+ * After social OAuth via Better Auth, we register the user with
  * the backend to get a per-user api_token.
  * 
  * Flow:
- * 1. User completes Discord OAuth via Better Auth
- * 2. Frontend calls loginOrRegister() with Discord data
+ * 1. User completes OAuth via Better Auth
+ * 2. Frontend calls loginOrRegister() with provider data
  * 3. Backend returns api_token (creates user if new, returns existing if not)
  * 4. Token is stored and used for all subsequent API calls
  */
@@ -20,7 +20,17 @@
 export interface BackendRegisterRequest {
   email: string
   username?: string
+  provider_user_id?: string
   discord_id?: string
+}
+
+export interface ProviderLoginRequest {
+  provider: 'google' | 'discord'
+  providerUserId: string
+  email: string
+  username?: string
+  discriminator?: string
+  avatar?: string
 }
 
 export interface DiscordLoginRequest {
@@ -57,6 +67,8 @@ export interface BackendAuthError {
   code?: string
 }
 
+type BackendRequestError = Error & { status?: number }
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -71,21 +83,28 @@ function getBackendUrl(): string {
   return url.replace(/\/$/, '') // Remove trailing slash
 }
 
+function createBackendRequestError(message: string, status?: number): BackendRequestError {
+  const error = new Error(message) as BackendRequestError
+  error.status = status
+  return error
+}
+
 // ============================================================================
 // API FUNCTIONS
 // ============================================================================
 
 /**
- * Login or register a user with Discord credentials.
- * Uses the /api/v1/auth/discord/login endpoint which handles both:
+ * Login or register a user with a social provider account.
+ * Uses the legacy /api/v1/auth/discord/login endpoint, which still expects
+ * the external provider id under the `discord_id` field.
  * - Existing users: Returns existing user with token
  * - New users: Creates user and returns with token
  * 
- * @param data User data from Discord OAuth
+ * @param data User data from Google or Discord OAuth
  * @returns BackendUserResponse with api_token
  */
-export async function discordLogin(
-  data: DiscordLoginRequest
+export async function providerLogin(
+  data: ProviderLoginRequest
 ): Promise<BackendUserResponse> {
   const url = `${getBackendUrl()}/api/v1/auth/discord/login`
   
@@ -99,7 +118,13 @@ export async function discordLogin(
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(data),
+      body: JSON.stringify({
+        discord_id: data.providerUserId,
+        email: data.email,
+        username: data.username,
+        discriminator: data.discriminator,
+        avatar: data.avatar,
+      }),
       signal: controller.signal,
     })
     
@@ -109,7 +134,10 @@ export async function discordLogin(
       const error: BackendAuthError = await response.json().catch(() => ({
         detail: `HTTP ${response.status}: ${response.statusText}`,
       }))
-      throw new Error(error.detail || 'Failed to login with backend')
+      throw createBackendRequestError(
+        error.detail || 'Failed to login with backend',
+        response.status,
+      )
     }
     
     const user: BackendUserResponse = await response.json()
@@ -122,26 +150,42 @@ export async function discordLogin(
       }
       throw error
     }
-    throw new Error('Network error during Discord login')
+    throw new Error('Network error during provider login')
   }
+}
+
+export async function discordLogin(
+  data: DiscordLoginRequest
+): Promise<BackendUserResponse> {
+  return providerLogin({
+    provider: 'discord',
+    providerUserId: data.discord_id,
+    email: data.email,
+    username: data.username,
+    discriminator: data.discriminator,
+    avatar: data.avatar,
+  })
 }
 
 /**
  * Register a user with the backend (legacy, use discordLogin instead).
  * Kept for backwards compatibility.
  * 
- * @param data User data from Discord OAuth
+ * @param data User data from OAuth
  * @returns BackendUserResponse with api_token, or null if user exists
- * @deprecated Use discordLogin instead
+ * @deprecated Use providerLogin instead
  */
 export async function registerWithBackend(
   data: BackendRegisterRequest
 ): Promise<BackendUserResponse | null> {
-  // If we have discord_id, use the discord/login endpoint instead
-  if (data.discord_id) {
+  const providerUserId = data.provider_user_id ?? data.discord_id
+
+  // If we have an external provider id, use the legacy social login endpoint first
+  if (providerUserId) {
     try {
-      return await discordLogin({
-        discord_id: data.discord_id,
+      return await providerLogin({
+        provider: 'google',
+        providerUserId,
         email: data.email,
         username: data.username,
       })
@@ -192,7 +236,7 @@ export async function registerWithBackend(
  * 2. If 409 (exists), check for existing token in cookie
  * 3. If no token, we can't authenticate (user needs to contact support)
  * 
- * @param data User data from Discord OAuth
+ * @param data User data from OAuth
  * @param existingToken Optional existing token to validate
  * @returns User response with token, or throws
  */

@@ -72,7 +72,6 @@ export function useDashboardEntryState() {
   const [pendingStart, setPendingStart] = useState<PendingStart | null>(null);
   const [isLaunchingSession, setIsLaunchingSession] = useState(false);
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
-  const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [showResumeBanner, setShowResumeBanner] = useState(false);
   const [backendActiveSession, setBackendActiveSession] = useState<{
     session_id: string;
@@ -431,11 +430,6 @@ export function useDashboardEntryState() {
     setShowResumeBanner(false);
   }, [backendActiveSession, activeSession, endSession, clearSession]);
 
-  const handleConversationLoaded = useCallback(() => {
-    setShowHistoryDrawer(false);
-    router.push('/session');
-  }, [router]);
-
   return {
     user,
     currentContext,
@@ -458,8 +452,6 @@ export function useDashboardEntryState() {
     isStartingSession,
     showSettingsDrawer,
     setShowSettingsDrawer,
-    showHistoryDrawer,
-    setShowHistoryDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     handleConfirmReplaceSession,
@@ -469,6 +461,5 @@ export function useDashboardEntryState() {
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,
-    handleConversationLoaded,
   };
 }

@@ -1,13 +1,14 @@
 import { betterAuth } from "better-auth";
-import Database from "better-sqlite3";
+
+import { getBetterAuthDatabase } from "./database";
 
 export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
-  database: new Database("./sqlite.db"),
+  database: getBetterAuthDatabase(),
   socialProviders: {
-    discord: {
-      clientId: process.env.DISCORD_CLIENT_ID,
-      clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     },
   },
 });

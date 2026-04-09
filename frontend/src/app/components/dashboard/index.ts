@@ -15,7 +15,6 @@ export type { MicState, RitualConfig, ContextConfig } from './types';
 export {
   RecentSessionsSidebar,
   ConversationHistorySidebar,
-  MobileFloatingButtons,
   MobileBottomSheet,
   MobileSessionsContent,
 } from './DashboardSidebar';

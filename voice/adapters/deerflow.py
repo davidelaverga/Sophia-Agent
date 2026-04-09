@@ -92,7 +92,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
         self,
         request: BackendRequest,
     ) -> AsyncIterator[BackendEvent]:
-        thread_id = await self._get_or_create_thread(request.user_id)
+        thread_id = request.thread_id or await self._get_or_create_thread(request.user_id)
         payload = {
             "assistant_id": self.settings.assistant_id,
             "input": {"messages": [{"role": "user", "content": request.text}]},

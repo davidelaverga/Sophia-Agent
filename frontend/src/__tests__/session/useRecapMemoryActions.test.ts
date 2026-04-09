@@ -9,7 +9,7 @@ describe('useRecapMemoryActions', () => {
 
     const commitMemories = vi.fn(async () => ({ committed: ['c1'], discarded: [], errors: [] }));
     const showToast = vi.fn();
-    const navigateHome = vi.fn();
+    const navigateAfterSave = vi.fn();
 
     const { result } = renderHook(() =>
       useRecapMemoryActions({
@@ -26,7 +26,7 @@ describe('useRecapMemoryActions', () => {
         setDecision: vi.fn(),
         commitMemories,
         showToast,
-        navigateHome,
+        navigateAfterSave,
       })
     );
 
@@ -41,7 +41,8 @@ describe('useRecapMemoryActions', () => {
       vi.advanceTimersByTime(1500);
     });
 
-    expect(navigateHome).toHaveBeenCalledTimes(1);
+    expect(navigateAfterSave).toHaveBeenCalledTimes(1);
+    expect(navigateAfterSave).toHaveBeenCalledWith({ committed: ['c1'], discarded: [], errors: [] });
     vi.useRealTimers();
   });
 
@@ -67,7 +68,7 @@ describe('useRecapMemoryActions', () => {
         setDecision: vi.fn(),
         commitMemories,
         showToast: vi.fn(),
-        navigateHome: vi.fn(),
+        navigateAfterSave: vi.fn(),
       })
     );
 

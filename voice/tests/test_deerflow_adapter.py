@@ -37,13 +37,19 @@ def _sse_response(*lines: str) -> httpx.Response:
     )
 
 
-def _make_request() -> BackendRequest:
+def _make_request(
+    *,
+    session_id: str | None = None,
+    thread_id: str | None = None,
+) -> BackendRequest:
     return BackendRequest(
         text="hello",
         user_id="user-1",
         platform="voice",
         ritual="prepare",
         context_mode="work",
+        session_id=session_id,
+        thread_id=thread_id,
     )
 
 
@@ -203,6 +209,69 @@ async def test_stream_events_report_invalid_json_as_backend_contract_error() -> 
     assert events[0].stage == "backend-contract"
     assert events[0].recoverable is False
     assert "invalid JSON" in (events[0].message or "")
+
+
+@pytest.mark.anyio
+async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() -> None:
+    run_payloads: list[dict[str, object]] = []
+    request_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        if request.url.path == "/threads/thread-explicit/runs/stream":
+            run_payloads.append(json.loads(request.content))
+            return _sse_response(
+                "event: messages",
+                "data: "
+                + json.dumps(
+                    [
+                        {"type": "AIMessageChunk", "content": [{"text": "Hello", "type": "text", "index": 0}]},
+                        {"id": "meta-1"},
+                    ]
+                ),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [
+            event
+            async for event in adapter.stream_events(
+                _make_request(
+                    session_id="session-123",
+                    thread_id="thread-explicit",
+                )
+            )
+        ]
+
+    assert request_paths == ["/threads/thread-explicit/runs/stream"]
+    assert [event.kind for event in events] == ["text"]
+    assert events[0].text == "Hello"
+    assert run_payloads == [
+        {
+            "assistant_id": "sophia_companion",
+            "input": {"messages": [{"role": "user", "content": "hello"}]},
+            "config": {
+                "configurable": {
+                    "user_id": "user-1",
+                    "platform": "voice",
+                    "ritual": "prepare",
+                    "context_mode": "work",
+                    "thread_id": "thread-explicit",
+                }
+            },
+            "stream_mode": ["messages-tuple", "values"],
+        }
+    ]
 
 
 @pytest.mark.anyio

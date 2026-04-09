@@ -96,6 +96,18 @@ def _entry_category(entry: dict) -> str | None:
     return None
 
 
+def _overlay_timestamp(value: dict) -> str:
+    updated_at = value.get("updated_at")
+    if isinstance(updated_at, str) and updated_at:
+        return updated_at
+
+    created_at = value.get("created_at")
+    if isinstance(created_at, str) and created_at:
+        return created_at
+
+    return ""
+
+
 def _match_score(left: str, right: str) -> float:
     left_normalized = _normalize_match_text(left)
     right_normalized = _normalize_match_text(right)
@@ -347,6 +359,8 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
     changed = False
     matched_keys: set[str] = set()
     overlaid_memories: list[dict] = []
+    local_only_by_id: dict[str, dict] = {}
+    local_only_order: list[str] = []
 
     for memory in memories:
         if not isinstance(memory, dict):
@@ -355,18 +369,24 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
 
         memory_id = memory.get("id")
         content = memory.get("memory") or memory.get("content")
-        entry = _select_entry(entries, memory_id=memory_id, content_hash=_content_hash(content))
+        content_hash = _content_hash(content)
+        entry = _select_entry(entries, memory_id=memory_id, content_hash=content_hash)
 
         merged_memory = dict(memory)
         if entry:
-            entry_key = entry.get("memory_id") or entry.get("content_hash")
-            if isinstance(entry_key, str):
-                matched_keys.add(entry_key)
+            for matched_key in (entry.get("memory_id"), entry.get("content_hash"), content_hash):
+                if isinstance(matched_key, str) and matched_key:
+                    matched_keys.add(matched_key)
 
             if memory_id and not entry.get("memory_id"):
                 entry["memory_id"] = memory_id
                 entry["updated_at"] = _now_iso()
                 changed = True
+
+            local_content = entry.get("content")
+            if isinstance(local_content, str) and local_content.strip():
+                merged_memory["memory"] = local_content
+                merged_memory["content"] = local_content
 
             local_metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else None
             if local_metadata:
@@ -391,7 +411,7 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
         category = local_metadata.get("category") if isinstance(local_metadata, dict) else None
         local_memory_id = entry.get("memory_id") or f"local:{entry.get('content_hash')}"
 
-        overlaid_memories.append({
+        local_memory = {
             "id": local_memory_id,
             "memory": entry.get("content", ""),
             "category": category,
@@ -399,7 +419,19 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
             "metadata": dict(local_metadata),
             "created_at": entry.get("updated_at"),
             "updated_at": entry.get("updated_at"),
-        })
+        }
+
+        existing_local = local_only_by_id.get(local_memory_id)
+        if existing_local is None:
+            local_only_by_id[local_memory_id] = local_memory
+            local_only_order.append(local_memory_id)
+            continue
+
+        if _overlay_timestamp(local_memory) >= _overlay_timestamp(existing_local):
+            local_only_by_id[local_memory_id] = local_memory
+
+    for local_memory_id in local_only_order:
+        overlaid_memories.append(local_only_by_id[local_memory_id])
 
     if changed:
         _save_store(user_id, store)

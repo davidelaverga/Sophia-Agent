@@ -1,6 +1,6 @@
 "use client"
 
-import { MessageSquare, Plus, Clock, ChevronRight, History } from "lucide-react"
+import { MessageSquare, Plus, Clock, ChevronRight } from "lucide-react"
 import { useState, useEffect, useCallback, useMemo } from "react"
 
 import { useCopy, useTranslation } from "../copy"
@@ -8,14 +8,12 @@ import { haptic } from "../hooks/useHaptics"
 import { useSessionPersistence } from "../hooks/useSessionPersistence"
 import { 
   getCurrentSessionPreview, 
-  getConversationSummaries,
   formatRelativeTime,
   type ConversationSummary 
 } from "../lib/conversation-history"
 import { getTimeBasedGreeting } from "../lib/time-greetings"
 import type { PresetType } from "../types/session"
 
-import { HistoryDrawer } from "./HistoryDrawer"
 
 type WelcomeBackProps = {
   onContinue: () => void
@@ -47,9 +45,7 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
   const copy = useCopy()
   const { t } = useTranslation()
 
-  const [showHistoryDrawer, setShowHistoryDrawer] = useState(false)
   const [currentSession, setCurrentSession] = useState<ConversationSummary | null>(null)
-  const [hasHistory, setHasHistory] = useState(false)
   const [mounted, setMounted] = useState(false)
   
   // Session persistence hook (Phase 4 - Week 4)
@@ -81,7 +77,6 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
     } else {
       setCurrentSession(getCurrentSessionPreview())
     }
-    setHasHistory(getConversationSummaries().length > 0)
   }, [canResume, snapshotSummary])
   
   const handleContinue = useCallback(() => {
@@ -99,15 +94,10 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
     await clearAndStartFresh()
     
     // Refresh UI state
-    setHasHistory(getConversationSummaries().length > 0)
     setCurrentSession(null)
     
     onStartNew()
   }, [clearAndStartFresh, onStartNew])
-  
-  const handleHistoryConversationLoaded = useCallback(() => {
-    onContinue()
-  }, [onContinue])
   
   if (!mounted) return null
   
@@ -115,11 +105,6 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
   if (currentSession) {
     return (
       <>
-        <HistoryDrawer
-          isOpen={showHistoryDrawer}
-          onClose={() => setShowHistoryDrawer(false)}
-          onConversationLoaded={handleHistoryConversationLoaded}
-        />
         <div className="flex h-full flex-col justify-between gap-6 rounded-2xl bg-sophia-bubble p-8 text-sophia-text animate-in fade-in duration-300">
           {/* Header */}
           <div className="space-y-4">
@@ -191,15 +176,6 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
               {t("welcomeBack.startNew")}
             </button>
             
-            {hasHistory && (
-              <button
-                onClick={() => setShowHistoryDrawer(true)}
-                className="flex-1 py-3 rounded-xl border border-sophia-surface-border bg-sophia-surface text-sophia-purple font-medium transition-all hover:border-sophia-purple/30 hover:bg-sophia-purple/5 active:scale-[0.98]"
-              >
-                <History className="w-4 h-4 inline-block mr-2" />
-                {t("welcomeBack.viewHistory")}
-              </button>
-            )}
           </div>
         </div>
         </div>
@@ -210,11 +186,6 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
   // No current session - show regular empty state with history access
   return (
     <>
-      <HistoryDrawer
-        isOpen={showHistoryDrawer}
-        onClose={() => setShowHistoryDrawer(false)}
-        onConversationLoaded={handleHistoryConversationLoaded}
-      />
       <div className="flex h-full flex-col justify-between gap-8 rounded-2xl bg-sophia-bubble p-8 text-sophia-text">
         <div className="space-y-4">
           {/* Presence indicator with breathing animation */}
@@ -238,15 +209,6 @@ export function WelcomeBack({ onContinue, onStartNew, onPromptSelect }: WelcomeB
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <p className="text-sm font-medium text-sophia-text2">{t("welcomeBack.tryAsking")}</p>
-            {hasHistory && (
-              <button
-                onClick={() => setShowHistoryDrawer(true)}
-                className="flex items-center gap-1.5 text-sm text-sophia-purple hover:text-sophia-purple/80 transition-colors"
-              >
-                <History className="w-4 h-4" />
-                {t("welcomeBack.viewHistory")}
-              </button>
-            )}
           </div>
           <div className="flex flex-wrap gap-2.5">
             {copy.chat.quickPrompts.map((prompt, index) => (

@@ -1,10 +1,10 @@
-import { headers as nextHeaders } from 'next/headers';
-
 import { authBypassEnabled, authBypassUserId } from '@/app/lib/auth/dev-bypass';
 import { getServerAuthHeader } from '@/app/lib/auth/server-auth';
-import { auth } from '@/server/better-auth';
+import { getSession } from '@/server/better-auth';
 
-export const SOPHIA_GATEWAY_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8001';
+import { getPrimaryGatewayUrl } from './gateway-url';
+
+export const SOPHIA_GATEWAY_URL = getPrimaryGatewayUrl();
 
 function normalizeUserId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -30,7 +30,7 @@ export async function resolveSophiaUserId(explicitUserId?: string | null): Promi
   }
 
   try {
-    const session = await auth.api.getSession({ headers: await nextHeaders() });
+    const session = await getSession();
     return normalizeUserId(session?.user?.id ?? null);
   } catch {
     return null;

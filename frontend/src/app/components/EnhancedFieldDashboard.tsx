@@ -1,6 +1,7 @@
 'use client';
 
-import { History, Settings } from 'lucide-react';
+import { BookOpen, Settings } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { haptic } from '../hooks/useHaptics';
@@ -14,7 +15,6 @@ import { RitualThread } from './dashboard/RitualThread';
 import { SettingsDrawer } from './dashboard/SettingsDrawer';
 import { CONTEXTS } from './dashboard/types';
 import { useDashboardEntryState } from './dashboard/useDashboardEntryState';
-import { HistoryDrawer } from './HistoryDrawer';
 import { ResumeBanner } from './session/ResumeBanner';
 import { ThemeToggle } from './ThemeToggle';
 
@@ -48,6 +48,7 @@ function FieldChromeButton({
 }
 
 export function EnhancedFieldDashboard() {
+  const router = useRouter();
   const {
     currentContext,
     contextMode,
@@ -67,8 +68,6 @@ export function EnhancedFieldDashboard() {
     isStartingSession,
     showSettingsDrawer,
     setShowSettingsDrawer,
-    showHistoryDrawer,
-    setShowHistoryDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     handleConfirmReplaceSession,
@@ -78,7 +77,6 @@ export function EnhancedFieldDashboard() {
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,
-    handleConversationLoaded,
   } = useDashboardEntryState();
 
   const contextConfig = CONTEXTS.find((context) => context.value === currentContext) ?? CONTEXTS[0];
@@ -145,13 +143,13 @@ export function EnhancedFieldDashboard() {
         <div className="pointer-events-auto flex items-center gap-2">
           <ThemeToggle />
           <FieldChromeButton
-            ariaLabel="Open history"
+            ariaLabel="Open journal"
             onClick={() => {
               haptic('light');
-              setShowHistoryDrawer(true);
+              router.push('/journal');
             }}
           >
-            <History className="h-4 w-4" />
+            <BookOpen className="h-4 w-4" />
           </FieldChromeButton>
           <FieldChromeButton
             ariaLabel="Open settings"
@@ -304,19 +302,9 @@ export function EnhancedFieldDashboard() {
         </div>
       </div>
 
-      <HistoryDrawer
-        isOpen={showHistoryDrawer}
-        onClose={() => setShowHistoryDrawer(false)}
-        onConversationLoaded={handleConversationLoaded}
-      />
-
       <SettingsDrawer
         isOpen={showSettingsDrawer}
         onClose={() => setShowSettingsDrawer(false)}
-        onShowHistory={() => {
-          setShowSettingsDrawer(false);
-          setShowHistoryDrawer(true);
-        }}
       />
     </div>
   );

@@ -1,6 +1,6 @@
 import { getServerAuthToken } from '../../../lib/auth/server-auth';
 
-import { BACKEND_URL, IS_PRODUCTION, SOPHIA_ASSISTANT_ID, secureLog } from './config';
+import { IS_PRODUCTION, SOPHIA_ASSISTANT_ID, secureLog } from './config';
 
 export interface BackendStreamPayload {
   message: string;
@@ -19,6 +19,8 @@ type CreateThreadResponse = {
   thread_id?: string;
 };
 
+const DEV_DIRECT_LANGGRAPH_URL = 'http://127.0.0.1:2024';
+
 function shouldRetryWithFreshThread(response: Response, errorText: string, hadThreadId: boolean): boolean {
   if (!hadThreadId) {
     return false;
@@ -31,6 +33,52 @@ function shouldRetryWithFreshThread(response: Response, errorText: string, hadTh
   return errorText.toLowerCase().includes('thread or assistant not found');
 }
 
+function normalizeBackendUrl(url: string): string {
+  return url.replace(/\/$/, '');
+}
+
+function getLocalLangGraphFallbackUrl(backendUrl: string): string | null {
+  if (IS_PRODUCTION) {
+    return null;
+  }
+
+  const normalizedBackendUrl = normalizeBackendUrl(backendUrl);
+  if (
+    normalizedBackendUrl === DEV_DIRECT_LANGGRAPH_URL ||
+    normalizedBackendUrl === `${DEV_DIRECT_LANGGRAPH_URL}/threads`
+  ) {
+    return null;
+  }
+
+  if (normalizedBackendUrl.includes('localhost:2026/api/langgraph')) {
+    return normalizedBackendUrl.endsWith('/threads')
+      ? `${DEV_DIRECT_LANGGRAPH_URL}/threads`
+      : DEV_DIRECT_LANGGRAPH_URL;
+  }
+
+  return null;
+}
+
+function isRetryableLocalLangGraphError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('fetch failed') ||
+    message.includes('econnrefused') ||
+    message.includes('connection refused') ||
+    message.includes('failed to create deerflow thread: 502') ||
+    message.includes('failed to create deerflow thread: 503') ||
+    message.includes('failed to create deerflow thread: 504')
+  );
+}
+
+function shouldRetryWithDirectLangGraphResponse(response: Response, backendUrl: string): boolean {
+  return !!getLocalLangGraphFallbackUrl(backendUrl) && [502, 503, 504].includes(response.status);
+}
+
 function resolveRitual(sessionType?: string): string | null {
   if (!sessionType) return null;
 
@@ -41,7 +89,7 @@ function resolveRitual(sessionType?: string): string | null {
   return null;
 }
 
-async function createThread(authToken: string | null): Promise<string> {
+async function createThread(authToken: string | null, backendUrl: string): Promise<string> {
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
   };
@@ -50,7 +98,7 @@ async function createThread(authToken: string | null): Promise<string> {
     headers.Authorization = `Bearer ${authToken}`;
   }
 
-  const response = await fetch(`${BACKEND_URL}/threads`, {
+  const response = await fetch(backendUrl, {
     method: 'POST',
     headers,
     body: JSON.stringify({}),
@@ -74,6 +122,8 @@ export async function fetchBackendStreamWithBootstrap(
 ): Promise<BackendFetchResult> {
   const authToken = await getServerAuthToken();
   const ritual = resolveRitual(backendPayload.session_type);
+  let activeBackendUrl = normalizeBackendUrl(backendUrl);
+  const directLangGraphFallbackUrl = getLocalLangGraphFallbackUrl(activeBackendUrl);
 
   const headers: HeadersInit = {
     'Content-Type': 'application/json',
@@ -84,8 +134,27 @@ export async function fetchBackendStreamWithBootstrap(
     headers.Authorization = `Bearer ${authToken}`;
   }
 
+  const switchToDirectLangGraph = (reason: string): boolean => {
+    if (!directLangGraphFallbackUrl || activeBackendUrl === directLangGraphFallbackUrl) {
+      return false;
+    }
+
+    const previousBackendUrl = activeBackendUrl;
+    activeBackendUrl = directLangGraphFallbackUrl;
+
+    if (!IS_PRODUCTION) {
+      secureLog('[/api/chat] local langgraph proxy unavailable, retrying direct backend', {
+        reason,
+        previousBackendUrl,
+        fallbackBackendUrl: activeBackendUrl,
+      });
+    }
+
+    return true;
+  };
+
   const runStream = async (threadId: string): Promise<Response> => {
-    return fetch(`${backendUrl}/${threadId}/runs/stream`, {
+    return fetch(`${activeBackendUrl}/${threadId}/runs/stream`, {
       method: 'POST',
       headers,
       body: JSON.stringify({
@@ -107,13 +176,43 @@ export async function fetchBackendStreamWithBootstrap(
     });
   };
 
-  let threadId = backendPayload.thread_id || await createThread(authToken || null);
-  let upstream = await runStream(threadId);
+  const createThreadWithFallback = async (): Promise<string> => {
+    try {
+      return await createThread(authToken || null, activeBackendUrl);
+    } catch (error) {
+      if (!isRetryableLocalLangGraphError(error) || !switchToDirectLangGraph(error instanceof Error ? error.message : 'thread bootstrap failed')) {
+        throw error;
+      }
+
+      return createThread(authToken || null, activeBackendUrl);
+    }
+  };
+
+  const runStreamWithFallback = async (threadId: string): Promise<Response> => {
+    try {
+      let response = await runStream(threadId);
+
+      if (!response.ok && shouldRetryWithDirectLangGraphResponse(response, activeBackendUrl) && switchToDirectLangGraph(`stream returned ${response.status}`)) {
+        response = await runStream(threadId);
+      }
+
+      return response;
+    } catch (error) {
+      if (!isRetryableLocalLangGraphError(error) || !switchToDirectLangGraph(error instanceof Error ? error.message : 'stream bootstrap failed')) {
+        throw error;
+      }
+
+      return runStream(threadId);
+    }
+  };
+
+  let threadId = backendPayload.thread_id || await createThreadWithFallback();
+  let upstream = await runStreamWithFallback(threadId);
 
   if (shouldRetryWithFreshThread(upstream, await upstream.clone().text(), !!backendPayload.thread_id)) {
     const staleThreadId = threadId;
-    threadId = await createThread(authToken || null);
-    upstream = await runStream(threadId);
+    threadId = await createThreadWithFallback();
+    upstream = await runStreamWithFallback(threadId);
 
     if (!IS_PRODUCTION) {
       secureLog('[/api/chat] stale DeerFlow thread detected, retried with fresh thread', {
@@ -125,6 +224,7 @@ export async function fetchBackendStreamWithBootstrap(
 
   if (!IS_PRODUCTION) {
     secureLog('[/api/chat] forwarding to DeerFlow thread', {
+      backendUrl: activeBackendUrl,
       threadId,
       assistantId: SOPHIA_ASSISTANT_ID,
       platform: backendPayload.platform || 'text',

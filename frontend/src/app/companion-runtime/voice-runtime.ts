@@ -9,6 +9,7 @@ const DEFAULT_VOICE_CANCEL_RETRY_MESSAGE = 'Voice response cancelled. Retry?';
 export function useCompanionVoiceRuntime({
   userId,
   sessionId,
+  threadId,
   onUserTranscriptFallback,
   appendAssistantMessage,
   ingestArtifacts,
@@ -60,6 +61,7 @@ export function useCompanionVoiceRuntime({
 
   const voiceState = useStreamVoiceSession(userId, {
     sessionId,
+    threadId,
     onUserTranscript: handleUserTranscript,
     onAssistantResponse: handleAssistantResponse,
     onArtifacts: handleVoiceArtifacts,

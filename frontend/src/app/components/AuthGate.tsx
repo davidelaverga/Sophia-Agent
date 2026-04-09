@@ -78,14 +78,14 @@ export function AuthGate({
     }
   }, [user, loading, onAuthenticated])
 
-  const handleDiscordLogin = async () => {
+  const handleGoogleLogin = async () => {
     setIsLoggingIn(true)
     try {
       await authClient.signIn.social({
-        provider: "discord",
+        provider: "google",
         callbackURL: "/",
       })
-      // User will be redirected to Discord
+      // User will be redirected to Google
     } catch {
       setIsLoggingIn(false)
     }
@@ -129,23 +129,26 @@ export function AuthGate({
           </p>
         </div>
 
-        {/* Discord Login Button */}
+        {/* Google Login Button */}
         <div className="animate-fadeIn">
           <button
-            onClick={handleDiscordLogin}
+            onClick={handleGoogleLogin}
             disabled={isLoggingIn}
-            className="inline-flex w-full items-center justify-center gap-3 rounded-2xl bg-[#5865F2] px-6 py-4 text-base font-semibold text-white shadow-lg shadow-[#5865F2]/30 transition-all duration-300 hover:bg-[#4752C4] hover:shadow-xl hover:shadow-[#5865F2]/40 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
+            className="inline-flex w-full items-center justify-center gap-3 rounded-2xl border border-black/10 bg-white px-6 py-4 text-base font-semibold text-[#111827] shadow-lg shadow-black/10 transition-all duration-300 hover:bg-[#F8FAFC] hover:shadow-xl hover:shadow-black/15 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:scale-100"
           >
             {isLoggingIn ? (
               <>
-                <span className="h-5 w-5 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                <span className="h-5 w-5 animate-spin rounded-full border-2 border-black/15 border-t-[#111827]" />
                 <span>{t("auth.connecting")}</span>
               </>
             ) : (
               <>
-                {/* Discord Icon */}
-                <svg className="h-6 w-6" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/>
+                {/* Google Icon */}
+                <svg className="h-5 w-5" viewBox="0 0 48 48" aria-hidden="true">
+                  <path fill="#FFC107" d="M43.611 20.083H42V20H24v8h11.303C33.654 32.657 29.212 36 24 36c-6.627 0-12-5.373-12-12s5.373-12 12-12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4 12.955 4 4 12.955 4 24s8.955 20 20 20 20-8.955 20-20c0-1.341-.138-2.65-.389-3.917Z"/>
+                  <path fill="#FF3D00" d="M6.306 14.691l6.571 4.819C14.655 15.108 18.961 12 24 12c3.059 0 5.842 1.154 7.961 3.039l5.657-5.657C34.046 6.053 29.268 4 24 4c-7.682 0-14.338 4.337-17.694 10.691Z"/>
+                  <path fill="#4CAF50" d="M24 44c5.166 0 9.86-1.977 13.409-5.193l-6.19-5.238C29.143 35.091 26.715 36 24 36c-5.191 0-9.625-3.329-11.287-7.946l-6.522 5.025C9.505 39.556 16.227 44 24 44Z"/>
+                  <path fill="#1976D2" d="M43.611 20.083H42V20H24v8h11.303c-.792 2.237-2.231 4.166-4.085 5.569l.003-.001 6.19 5.238C36.971 39.205 44 34 44 24c0-1.341-.138-2.65-.389-3.917Z"/>
                 </svg>
                 <span>{t("auth.button")}</span>
               </>

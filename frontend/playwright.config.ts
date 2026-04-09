@@ -11,6 +11,8 @@ const webServerEnv = {
   ...process.env,
   NEXT_PUBLIC_DEV_BYPASS_AUTH: process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH ?? 'true',
   NEXT_PUBLIC_SOPHIA_USER_ID: process.env.NEXT_PUBLIC_SOPHIA_USER_ID ?? 'e2e-user',
+  NEXT_PUBLIC_GATEWAY_URL: process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'http://localhost:8001',
+  SOPHIA_LANGGRAPH_BASE_URL: process.env.SOPHIA_LANGGRAPH_BASE_URL ?? 'http://127.0.0.1:2024',
 };
 
 export default defineConfig({
