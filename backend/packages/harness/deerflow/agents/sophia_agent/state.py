@@ -45,6 +45,9 @@ class SophiaState(AgentState):
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
+    builder_non_artifact_turns: NotRequired[int]
+    builder_last_tool_names: NotRequired[list[str]]
+    builder_tool_turn_summaries: NotRequired[list[dict]]
 
     # Planning
     todos: NotRequired[list | None]

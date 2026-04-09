@@ -1089,8 +1089,9 @@ class TestPromptAssemblyMiddleware:
         assert msgs[1].content == "hello"
 
     def test_empty_blocks_passes_through(self):
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         from langchain_core.messages import HumanMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         mw = PromptAssemblyMiddleware()
 
         human_msg = HumanMessage(content="hello")
@@ -1108,8 +1109,9 @@ class TestPromptAssemblyMiddleware:
         assert captured["request"] is request
 
     def test_removes_old_system_messages(self):
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         from langchain_core.messages import HumanMessage, SystemMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         mw = PromptAssemblyMiddleware()
 
         old_sys = SystemMessage(content="old system", id="old-sys")
@@ -1513,6 +1515,30 @@ class TestBuilderTaskMiddleware:
         guidance = BuilderTaskMiddleware._tone_guidance(0.3, "shutdown")
         assert "simple" in guidance.lower()
 
+    def test_adds_endgame_escalation_after_non_artifact_turns(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        mw = BuilderTaskMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "builder_non_artifact_turns": 2,
+            "builder_last_tool_names": ["bash", "write_file"],
+            "delegation_context": {
+                "companion_artifact": {"tone_estimate": 2.7, "active_tone_band": "engagement"},
+                "task_type": "presentation",
+                "relevant_memories": [],
+                "active_ritual": None,
+                "ritual_phase": None,
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        briefing = result["system_prompt_blocks"][-1]
+        assert "<builder_endgame>" in briefing
+        assert "emit_builder_artifact" in briefing
+        assert "bash, write_file" in briefing
+
 
 # --- BuilderArtifactMiddleware ---
 
@@ -1553,7 +1579,25 @@ class TestBuilderArtifactMiddleware:
         msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
         state = {"messages": [msg]}
         result = mw.after_model(state, _make_runtime())
-        assert result is None  # Loop continues
+        assert result is not None
+        assert result["builder_non_artifact_turns"] == 1
+        assert result["builder_last_tool_names"] == ["bash"]
+        assert result["builder_tool_turn_summaries"][-1]["has_emit_builder_artifact"] is False
+
+    def test_emit_resets_non_artifact_turn_counter(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "emit_builder_artifact", "args": {"artifact_type": "document", "confidence": 0.8}}]
+
+        state = {"messages": [msg], "builder_non_artifact_turns": 3, "builder_tool_turn_summaries": []}
+        result = mw.after_model(state, _make_runtime())
+
+        assert result is not None
+        assert result["builder_non_artifact_turns"] == 0
+        assert result["builder_result"]["artifact_type"] == "document"
 
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---

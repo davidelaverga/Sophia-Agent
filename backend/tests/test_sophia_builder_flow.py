@@ -239,6 +239,83 @@ def test_builder_session_to_artifact_synthesis_lifecycle(monkeypatch):
     Path(f.name).unlink(missing_ok=True)
 
 
+def test_builder_session_timeout_surfaces_debug_summary(monkeypatch):
+    class _FakeSubagentStatus:
+        PENDING = "pending"
+        RUNNING = "running"
+        COMPLETED = "completed"
+        FAILED = "failed"
+        TIMED_OUT = "timed_out"
+
+    task_id = "task-timeout-1"
+    handoff_payload = {
+        "type": "builder_handoff",
+        "status": "queued",
+        "task_id": task_id,
+        "task_type": "presentation",
+        "trace_id": "trace-timeout",
+        "builder_task": {
+            "task_id": task_id,
+            "description": "Build deck",
+            "task_type": "presentation",
+            "status": "queued",
+            "delegated_at": "2026-04-09T00:00:00Z",
+        },
+    }
+    ai_msg = AIMessage(
+        content="Delegating to builder",
+        tool_calls=[{"id": "tool-timeout", "name": "switch_to_builder", "args": {"task_type": "presentation"}}],
+    )
+    tool_msg = ToolMessage(content=json.dumps(handoff_payload), tool_call_id="tool-timeout", name="switch_to_builder")
+    state = {"messages": [ai_msg, tool_msg], "system_prompt_blocks": []}
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-timeout"}
+
+    timed_out_result = SimpleNamespace(
+        task_id=task_id,
+        trace_id="trace-timeout",
+        status=_FakeSubagentStatus.TIMED_OUT,
+        completed_at=datetime.now(),
+        error="Execution timed out after 120 seconds",
+        ai_messages=[],
+        final_state=None,
+        timed_out_at=datetime.now(),
+        last_ai_message_summary={
+            "tool_names": ["bash", "write_file"],
+            "has_emit_builder_artifact": False,
+        },
+        late_ai_message_summary={
+            "tool_names": ["emit_builder_artifact"],
+            "has_emit_builder_artifact": True,
+        },
+    )
+
+    cleanup_calls = []
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.SubagentStatus",
+        _FakeSubagentStatus,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.cleanup_background_task",
+        lambda cleaned_task_id: cleanup_calls.append(cleaned_task_id),
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: timed_out_result,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    assert state["builder_task"]["status"] == "timed_out"
+    debug = state["builder_task"]["debug"]
+    assert debug["last_tool_names"] == ["bash", "write_file"]
+    assert debug["late_tool_names"] == ["emit_builder_artifact"]
+    assert debug["late_has_emit_builder_artifact"] is True
+    assert cleanup_calls == [task_id]
+    assert any("late_tool_calls_after_timeout=emit_builder_artifact" in block for block in state["system_prompt_blocks"])
+
+
 def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
