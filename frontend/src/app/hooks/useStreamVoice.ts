@@ -21,16 +21,9 @@ function bindRemoteAudio(call: Call): () => void {
   const sub = call.state.remoteParticipants$.subscribe((participants) => {
     const currentSessionIds = new Set(participants.map((p) => p.sessionId))
 
-    console.log(
-      "[VOICE:FRONTEND] remoteParticipants update | count=%d | sessionIds=%s",
-      participants.length,
-      participants.map((p) => p.sessionId).join(", "),
-    )
-
     // Remove elements for participants who left
     for (const [sessionId, entry] of boundElements) {
       if (!currentSessionIds.has(sessionId)) {
-        console.log("[VOICE:FRONTEND] UNBINDING audio | sessionId=%s", sessionId)
         entry.cleanup?.()
         entry.el.remove()
         boundElements.delete(sessionId)
@@ -46,32 +39,6 @@ function bindRemoteAudio(call: Call): () => void {
         document.body.appendChild(audioEl)
         const cleanup = call.bindAudioElement(audioEl, p.sessionId, "audioTrack")
         boundElements.set(p.sessionId, { el: audioEl, cleanup })
-
-        console.log(
-          "[VOICE:FRONTEND] BOUND audio | sessionId=%s | userId=%s | hasAudioStream=%s | audioEl.srcObject=%s | audioEl.paused=%s",
-          p.sessionId,
-          p.userId,
-          String(Boolean(p.audioStream)),
-          String(Boolean(audioEl.srcObject)),
-          String(audioEl.paused),
-        )
-
-        // Monitor the audio element state for 10 seconds
-        const _checkInterval = setInterval(() => {
-          const stream = audioEl.srcObject as MediaStream | null
-          const tracks = stream?.getAudioTracks() ?? []
-          console.log(
-            "[VOICE:FRONTEND] AUDIO_CHECK | sessionId=%s | paused=%s | srcObject=%s | tracks=%d | trackStates=%s | readyState=%d | muted=%s",
-            p.sessionId,
-            String(audioEl.paused),
-            String(Boolean(stream)),
-            tracks.length,
-            tracks.map((t) => `${t.kind}:${t.readyState}:enabled=${t.enabled}:muted=${t.muted}`).join(";"),
-            audioEl.readyState,
-            String(audioEl.muted),
-          )
-        }, 2000)
-        setTimeout(() => clearInterval(_checkInterval), 20000)
       }
     }
   })
