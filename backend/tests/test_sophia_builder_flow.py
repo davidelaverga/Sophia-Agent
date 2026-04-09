@@ -200,10 +200,15 @@ def test_builder_session_to_artifact_synthesis_lifecycle(monkeypatch):
             }
         },
     )
+    cleanup_calls = []
     results = iter([running_result, completed_result])
     monkeypatch.setattr(
         "deerflow.agents.sophia_agent.middlewares.builder_session.SubagentStatus",
         _FakeSubagentStatus,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.cleanup_background_task",
+        lambda cleaned_task_id: cleanup_calls.append(cleaned_task_id),
     )
     monkeypatch.setattr(
         "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
@@ -220,6 +225,7 @@ def test_builder_session_to_artifact_synthesis_lifecycle(monkeypatch):
     assert state["builder_task"]["status"] == "completed"
     assert state["active_mode"] == "companion"
     assert state["builder_result"]["artifact_type"] == "presentation"
+    assert cleanup_calls == [task_id]
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
         f.write("# Artifact Instructions\nUse this block.")
