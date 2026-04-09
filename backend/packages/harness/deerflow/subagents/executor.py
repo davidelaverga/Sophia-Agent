@@ -237,6 +237,9 @@ class SubagentExecutor:
                 started_at=datetime.now(),
             )
 
+        def _timed_out_externally() -> bool:
+            return result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT
+
         try:
             agent = self._create_agent()
             state = self._build_initial_state(task)
@@ -261,6 +264,9 @@ class SubagentExecutor:
             # This allows us to collect AI messages as they are generated
             final_state = None
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+                if _timed_out_externally():
+                    logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; aborting local updates")
+                    return result
                 final_state = chunk
 
                 # Extract AI messages from the current state
@@ -280,11 +286,14 @@ class SubagentExecutor:
                         else:
                             is_duplicate = message_dict in result.ai_messages
 
-                        if not is_duplicate:
+                        if not is_duplicate and not _timed_out_externally():
                             result.ai_messages.append(message_dict)
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+            if _timed_out_externally():
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} completed after timeout; ignoring completion write")
+                return result
 
             # Store final state for callers that need structured data (e.g., builder_result)
             result.final_state = final_state
@@ -329,10 +338,17 @@ class SubagentExecutor:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
                     result.result = "No response generated"
 
+            if _timed_out_externally():
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} hit timeout before final status write; preserving TIMED_OUT")
+                return result
+
             result.status = SubagentStatus.COMPLETED
             result.completed_at = datetime.now()
 
         except Exception as e:
+            if _timed_out_externally():
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} raised after timeout; preserving TIMED_OUT state")
+                return result
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.status = SubagentStatus.FAILED
             result.error = str(e)
@@ -365,6 +381,9 @@ class SubagentExecutor:
         try:
             return asyncio.run(self._aexecute(task, result_holder))
         except Exception as e:
+            if result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT:
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} execute() raised after timeout; preserving terminal TIMED_OUT")
+                return result_holder
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
             # Create a result with error if we don't have one
             if result_holder is not None:
@@ -421,26 +440,40 @@ class SubagentExecutor:
                     # Wait for execution with timeout
                     exec_result = execution_future.result(timeout=self.config.timeout_seconds)
                     with _background_tasks_lock:
-                        _background_tasks[task_id].status = exec_result.status
-                        _background_tasks[task_id].result = exec_result.result
-                        _background_tasks[task_id].error = exec_result.error
-                        _background_tasks[task_id].completed_at = datetime.now()
-                        _background_tasks[task_id].ai_messages = exec_result.ai_messages
-                        _background_tasks[task_id].final_state = exec_result.final_state
+                        task_state = _background_tasks.get(task_id)
+                        if task_state is None:
+                            logger.warning(f"[trace={self.trace_id}] Task {task_id} missing at completion write; skipping late update")
+                            return
+                        if task_state.status == SubagentStatus.TIMED_OUT:
+                            logger.warning(
+                                f"[trace={self.trace_id}] Task {task_id} already timed out; "
+                                "ignoring late completion write"
+                            )
+                            return
+                        task_state.status = exec_result.status
+                        task_state.result = exec_result.result
+                        task_state.error = exec_result.error
+                        task_state.completed_at = exec_result.completed_at or datetime.now()
+                        task_state.ai_messages = exec_result.ai_messages
+                        task_state.final_state = exec_result.final_state
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:
-                        _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
-                        _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
-                        _background_tasks[task_id].completed_at = datetime.now()
+                        task_state = _background_tasks.get(task_id)
+                        if task_state is not None:
+                            task_state.status = SubagentStatus.TIMED_OUT
+                            task_state.error = f"Execution timed out after {self.config.timeout_seconds} seconds"
+                            task_state.completed_at = datetime.now()
                     # Cancel the future (best effort - may not stop the actual execution)
                     execution_future.cancel()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
-                    _background_tasks[task_id].status = SubagentStatus.FAILED
-                    _background_tasks[task_id].error = str(e)
-                    _background_tasks[task_id].completed_at = datetime.now()
+                    task_state = _background_tasks.get(task_id)
+                    if task_state is not None and task_state.status != SubagentStatus.TIMED_OUT:
+                        task_state.status = SubagentStatus.FAILED
+                        task_state.error = str(e)
+                        task_state.completed_at = datetime.now()
 
         _scheduler_pool.submit(run_task)
         return task_id

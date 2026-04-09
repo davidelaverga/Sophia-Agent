@@ -52,6 +52,21 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 - **Tool system** with sandbox, MCP, community, and built-in tools
 - **Subagent delegation** for parallel task execution
 - **System prompt** with skills injection, memory context, and working directory guidance
+### Sophia Companion + Builder
+
+The Sophia graphs (`sophia_companion`, `sophia_builder`) now use a stateful builder handoff flow:
+
+- `switch_to_builder` queues builder work asynchronously and returns a structured `builder_handoff` payload immediately (no blocking polling loop)
+- `BuilderSessionMiddleware` consumes the handoff payload, tracks task status from background execution, and writes `builder_task` / `builder_result` into companion state
+- Companion synthesis remains in `ArtifactMiddleware` and runs when `builder_task.status == "completed"`
+- Companion chain now includes config-driven `SummarizationMiddleware` wiring
+- Builder chain now includes `SandboxMiddleware` and `TodoMiddleware` for execution parity
+
+Regression command for this flow:
+
+```bash
+PYTHONPATH=. uv run pytest tests/test_sophia_builder_flow.py -v
+```
 
 ### Middleware Chain
 

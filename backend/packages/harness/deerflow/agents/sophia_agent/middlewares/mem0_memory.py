@@ -24,6 +24,7 @@ class Mem0MemoryState(AgentState):
     active_skill: NotRequired[str]
     context_mode: NotRequired[str]
     injected_memories: NotRequired[list[str]]
+    injected_memory_contents: NotRequired[list[str]]
     system_prompt_blocks: NotRequired[list[str]]
 
 
@@ -136,8 +137,13 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Format memories for prompt injection
         memory_lines = []
         memory_ids = []
+        memory_contents = []
         for mem in results[:10]:  # cap at 10 results
-            memory_lines.append(f"- {mem.get('content', '')}")
+            content = str(mem.get("content", "")).strip()
+            if not content:
+                continue
+            memory_lines.append(f"- {content}")
+            memory_contents.append(content)
             if mem.get("id"):
                 memory_ids.append(mem["id"])
 
@@ -146,6 +152,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
+            "injected_memory_contents": memory_contents,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }
 
