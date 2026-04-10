@@ -16,14 +16,17 @@ from deerflow.config.summarization_config import ContextSize, SummarizationConfi
 from deerflow.subagents.config import SubagentConfig
 
 
-def _make_runtime(state: dict, thread_id: str = "thread-1", user_id: str | None = None) -> SimpleNamespace:
+def _make_runtime(state: dict, thread_id: str = "thread-1", user_id: str | None = None, context_user_id: str | None = None) -> SimpleNamespace:
     configurable = {"thread_id": thread_id}
     if user_id is not None:
         configurable["user_id"] = user_id
+    context = {"thread_id": thread_id}
+    if context_user_id is not None:
+        context["user_id"] = context_user_id
 
     return SimpleNamespace(
         state=state,
-        context={"thread_id": thread_id},
+        context=context,
         config={
             "configurable": configurable,
             "metadata": {"model_name": "claude-haiku-4-5-20251001", "trace_id": "trace-1"},
@@ -173,14 +176,19 @@ def test_switch_to_builder_prefers_runtime_config_user_id(monkeypatch):
         },
         user_id="jorge_test",
     )
-    switch_module.switch_to_builder.func(
+    response = switch_module.switch_to_builder.func(
         runtime=runtime,
         task="Build a test doc.",
         task_type="document",
         tool_call_id="tc-builder-runtime-user-id",
     )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
 
     assert captured["builder_agent"]["user_id"] == "jorge_test"
+    assert handoff_resolution["user_id_source"] == "runtime.config.configurable.user_id"
+    assert handoff_resolution["config_user_id_present"] is True
+    assert handoff_resolution["state_user_id_present"] is False
 
 
 def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
@@ -244,6 +252,60 @@ def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
     delegation_context = payload["delegation_context"]
     assert delegation_context["companion_artifact"]["tone_estimate"] == 3.5
     assert delegation_context["companion_artifact"]["active_tone_band"] == "enthusiasm"
+    handoff_resolution = payload["handoff_resolution"]
+    assert handoff_resolution["artifact_source"] == "latest_emit_artifact_tool_call"
+    assert handoff_resolution["latest_emit_artifact_present"] is True
+    assert handoff_resolution["current_artifact_present"] is True
+
+
+def test_switch_to_builder_reports_default_resolution_sources(monkeypatch):
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, task: str, task_id: str | None = None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime({}, user_id=None)
+
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build docs from defaults.",
+        task_type="document",
+        tool_call_id="tc-builder-default-resolution",
+    )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert handoff_resolution["user_id_source"] == "default_user"
+    assert handoff_resolution["artifact_source"] == "default_empty"
+    assert handoff_resolution["config_user_id_present"] is False
+    assert handoff_resolution["context_user_id_present"] is False
+    assert handoff_resolution["state_user_id_present"] is False
+    assert handoff_resolution["latest_emit_artifact_present"] is False
+    assert handoff_resolution["current_artifact_present"] is False
+    assert handoff_resolution["previous_artifact_present"] is False
 
 
 def test_builder_session_to_artifact_synthesis_lifecycle(monkeypatch):
