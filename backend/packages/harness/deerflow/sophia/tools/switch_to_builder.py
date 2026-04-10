@@ -141,12 +141,11 @@ def _resolve_companion_artifact(state: SophiaState) -> tuple[dict[str, Any], str
     previous_artifact = state.get("previous_artifact")
 
     diagnostics = {
-        "latest_emit_artifact_present": latest_emit_artifact is not None,
+        "latest_emit_artifact_present": isinstance(latest_emit_artifact, dict) and bool(latest_emit_artifact),
         "current_artifact_present": isinstance(current_artifact, dict) and bool(current_artifact),
         "previous_artifact_present": isinstance(previous_artifact, dict) and bool(previous_artifact),
     }
-
-    if latest_emit_artifact is not None:
+    if latest_emit_artifact:
         return latest_emit_artifact, "latest_emit_artifact_tool_call", diagnostics
 
     if isinstance(current_artifact, dict) and current_artifact:

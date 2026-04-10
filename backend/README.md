@@ -57,7 +57,7 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 The Sophia graphs (`sophia_companion`, `sophia_builder`) now use a stateful builder handoff flow:
 
 - `switch_to_builder` queues builder work asynchronously and returns a structured `builder_handoff` payload immediately (no blocking polling loop)
-- `switch_to_builder` now resolves builder `user_id` from runtime configurable/context first and prefers the latest in-turn `emit_artifact` tool payload over stale persisted artifacts when building delegation context
+- `switch_to_builder` now resolves builder `user_id` from runtime configurable/context first and prefers the latest non-empty in-turn `emit_artifact` tool payload over stale persisted artifacts when building delegation context (empty payloads fall back to state artifacts)
 - `switch_to_builder` also emits handoff resolution diagnostics (`user_id_source`, `artifact_source`, and source-presence flags) in both logs and handoff payloads for faster production triage
 - `BuilderSessionMiddleware` consumes the handoff payload, tracks task status from background execution, writes `builder_task` / `builder_result` into companion state, and logs adopted handoffs plus timeout debug fields (`task_id`, `last_tool_calls`, `late_tool_calls_after_timeout`)
 - Builder execution now tracks non-artifact tool turns and escalates endgame instructions so the builder explicitly finalizes with `emit_builder_artifact`

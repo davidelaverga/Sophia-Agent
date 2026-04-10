@@ -257,6 +257,64 @@ def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
     assert handoff_resolution["latest_emit_artifact_present"] is True
     assert handoff_resolution["current_artifact_present"] is True
 
+def test_switch_to_builder_ignores_empty_emit_artifact_payload(monkeypatch):
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, task: str, task_id: str | None = None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            "user_id": "user_123",
+            "current_artifact": {"tone_estimate": 2.4, "active_tone_band": "anger_antagonism"},
+            "messages": [
+                AIMessage(
+                    content="handoff with malformed emit payload",
+                    tool_calls=[{"id": "tool-emit-artifact-empty", "name": "emit_artifact", "args": {}}],
+                )
+            ],
+        }
+    )
+
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build from fallback artifact context.",
+        task_type="document",
+        tool_call_id="tc-builder-empty-emit-artifact",
+    )
+    payload = json.loads(response)
+
+    delegation_context = payload["delegation_context"]
+    assert delegation_context["companion_artifact"]["tone_estimate"] == 2.4
+    assert delegation_context["companion_artifact"]["active_tone_band"] == "anger_antagonism"
+    handoff_resolution = payload["handoff_resolution"]
+    assert handoff_resolution["artifact_source"] == "current_artifact_state"
+    assert handoff_resolution["latest_emit_artifact_present"] is False
+    assert handoff_resolution["current_artifact_present"] is True
+
 
 def test_switch_to_builder_reports_default_resolution_sources(monkeypatch):
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")

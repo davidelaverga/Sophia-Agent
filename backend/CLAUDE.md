@@ -140,7 +140,7 @@ from deerflow.config import get_app_config
 
 **Sophia Companion + Builder** (`packages/harness/deerflow/agents/sophia_agent/`):
 - `switch_to_builder` is queue-only: it starts background execution and returns a structured `builder_handoff` payload immediately
-- `switch_to_builder` resolves builder `user_id` from runtime configurable/context first and prefers the latest in-turn `emit_artifact` tool payload when assembling delegation context
+- `switch_to_builder` resolves builder `user_id` from runtime configurable/context first and prefers the latest non-empty in-turn `emit_artifact` tool payload when assembling delegation context (empty payloads fall back to `current_artifact`/`previous_artifact`)
 - `switch_to_builder` now records handoff resolution diagnostics (`user_id_source`, `artifact_source`, and source-presence flags) in logs and in the handoff payload to accelerate incident triage
 - `BuilderSessionMiddleware` consumes that payload, prevents duplicate handoffs while a task is active, maps background task terminal states into `builder_task` / `builder_result`, and logs adopted handoffs plus timeout debug fields (`task_id`, `last_tool_calls`, `late_tool_calls_after_timeout`)
 - Builder middleware tracks non-artifact tool-call turns and injects stronger `<builder_endgame>` completion guidance when finalization drifts
