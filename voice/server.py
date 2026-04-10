@@ -33,6 +33,7 @@ from vision_agents.core.stt.events import (
     STTTranscriptEvent,
 )
 from vision_agents.core.tts.events import (
+    TTSAudioEvent,
     TTSSynthesisCompleteEvent,
     TTSSynthesisStartEvent,
 )
@@ -332,6 +333,17 @@ def attach_runtime_observers(
     async def _on_tts_synthesis_complete(_: TTSSynthesisCompleteEvent) -> None:
         coordinator.on_agent_ended()
         await llm.emit_turn_event("agent_ended")
+
+    @agent.tts.events.subscribe
+    async def _on_tts_audio_debug(event: TTSAudioEvent) -> None:
+        has_data = event.data is not None
+        data_len = len(event.data.data) if has_data and hasattr(event.data, "data") else 0
+        logger.info(
+            "[VOICE:TTS] FRAMEWORK_EVENT | has_data=%s | data_bytes=%d | is_final=%s",
+            has_data,
+            data_len,
+            getattr(event, "is_final_chunk", "unknown"),
+        )
 
 
 async def create_agent(**kwargs) -> Agent:
