@@ -293,7 +293,7 @@ export function SessionConversationPane({
                 ) : (
                   /* Text mode: whisper-style reflecting indicator */
                   <div className="flex items-center gap-3">
-                    <span className="text-[10px] tracking-[0.18em] lowercase transition-colors duration-1000" style={{ color: 'var(--cosmic-text-faint)' }}>
+                    <span className="text-[10px] tracking-[0.18em] lowercase transition-colors duration-1000" style={{ color: 'var(--cosmic-text-muted)' }}>
                       sophia is reflecting...
                     </span>
                     <button

@@ -1,4 +1,4 @@
-import { getAuthenticatedUserId, getUserScopedAuthHeader } from '@/app/lib/auth/server-auth';
+import { getAuthenticatedUserId, getUserScopedAuthHeader, refreshUserScopedAuthHeader } from '@/app/lib/auth/server-auth';
 
 import { getPrimaryGatewayUrl } from './gateway-url';
 
@@ -45,10 +45,24 @@ export async function fetchSophiaApi(path: string, init: RequestInit): Promise<R
     });
   }
 
-  requestHeaders.set('Authorization', authHeader);
+  const execute = (authorization: string) => {
+    const headers = new Headers(requestHeaders)
+    headers.set('Authorization', authorization)
 
-  return fetch(`${SOPHIA_GATEWAY_URL}${path}`, {
-    ...init,
-    headers: requestHeaders,
-  });
+    return fetch(`${SOPHIA_GATEWAY_URL}${path}`, {
+      ...init,
+      headers,
+    })
+  }
+
+  let response = await execute(authHeader)
+
+  if (response.status === 401 || response.status === 403) {
+    const refreshedAuthHeader = await refreshUserScopedAuthHeader()
+    if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
+      response = await execute(refreshedAuthHeader)
+    }
+  }
+
+  return response
 }

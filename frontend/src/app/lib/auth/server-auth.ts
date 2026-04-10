@@ -6,10 +6,11 @@
  * These run on the server side and read from cookies.
  */
 
-import { cookies } from 'next/headers'
+import { cookies, headers } from 'next/headers'
 
 import { getSession } from '@/server/better-auth'
 
+import { providerLogin } from './backend-auth'
 import { debugWarn } from '../debug-logger'
 import { logger } from '../error-logger'
 
@@ -59,6 +60,74 @@ function getFallbackServerToken(): string {
   return fallback
 }
 
+async function resolveProviderUserId(canonicalUserId: string, requestHeaders: Headers): Promise<string> {
+  try {
+    const { auth } = await import('../../../server/better-auth/config')
+    const accounts = await auth.api.listUserAccounts({ headers: requestHeaders }) as Array<{
+      accountId: string
+      providerId: string
+    }>
+
+    return accounts.find((account) => account.providerId === 'google')?.accountId ?? canonicalUserId
+  } catch (error) {
+    debugWarn('Server Auth', 'Falling back to canonical user id for backend token hydration', error)
+    return canonicalUserId
+  }
+}
+
+async function tryHydrateUserScopedAuthToken(): Promise<string> {
+  try {
+    const session = await getSession()
+    const canonicalUserId = normalizeUserId(session?.user?.id ?? null)
+
+    if (!canonicalUserId) {
+      return ''
+    }
+
+    const requestHeaders = await headers()
+    const providerUserId = await resolveProviderUserId(canonicalUserId, requestHeaders)
+
+    const backendUser = await providerLogin({
+      provider: 'google',
+      canonicalUserId,
+      providerUserId,
+      email: session.user.email || '',
+      forwardedCookieHeader: requestHeaders.get('cookie') || undefined,
+      username: session.user.name || undefined,
+    })
+
+    if (!backendUser?.api_token) {
+      logger.logError(new Error('No backend token returned during user-scoped auth hydration'), {
+        component: 'Server Auth',
+        action: 'hydrate_user_scoped_auth_token',
+      })
+      return ''
+    }
+
+    const cookieStore = await cookies()
+    cookieStore.set(COOKIE_NAME, backendUser.api_token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      maxAge: 60 * 60 * 24 * 30,
+      path: '/',
+    })
+
+    return backendUser.api_token
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'status' in error && error.status === 404) {
+      debugWarn('Server Auth', 'Legacy backend auth bridge unavailable while hydrating user-scoped token')
+      return ''
+    }
+
+    logger.logError(error instanceof Error ? error : new Error('Backend token hydration failed'), {
+      component: 'Server Auth',
+      action: 'hydrate_user_scoped_auth_token',
+    })
+    return ''
+  }
+}
+
 export async function getAuthenticatedUserId(): Promise<string | null> {
   if (authBypassEnabled) {
     return normalizeUserId(authBypassUserId)
@@ -82,6 +151,11 @@ export async function getUserScopedAuthToken(): Promise<string> {
     return getFallbackServerToken() || DEV_BYPASS_BACKEND_TOKEN
   }
 
+  const hydratedToken = await tryHydrateUserScopedAuthToken()
+  if (hydratedToken) {
+    return hydratedToken
+  }
+
   logger.logError(new Error('No user-scoped backend token available'), {
     component: 'Server Auth',
     action: 'get_user_scoped_auth_token',
@@ -89,8 +163,21 @@ export async function getUserScopedAuthToken(): Promise<string> {
   return ''
 }
 
+export async function refreshUserScopedAuthToken(): Promise<string> {
+  if (authBypassEnabled) {
+    return getFallbackServerToken() || DEV_BYPASS_BACKEND_TOKEN
+  }
+
+  return tryHydrateUserScopedAuthToken()
+}
+
 export async function getUserScopedAuthHeader(): Promise<string> {
   const token = await getUserScopedAuthToken()
+  return token ? `Bearer ${token}` : ''
+}
+
+export async function refreshUserScopedAuthHeader(): Promise<string> {
+  const token = await refreshUserScopedAuthToken()
   return token ? `Bearer ${token}` : ''
 }
 

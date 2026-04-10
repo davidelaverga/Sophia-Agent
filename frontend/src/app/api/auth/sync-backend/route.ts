@@ -37,22 +37,23 @@ export async function POST() {
   }
 
   try {
-    // Get linked accounts for the current user
     const requestHeaders = await headers()
-    const { auth } = await import('@/server/better-auth/config')
-    const accounts = await auth.api.listUserAccounts({ headers: requestHeaders })
-    const googleAccount = (accounts as { accountId: string; providerId: string }[])?.find(
-      (a) => a.providerId === 'google',
-    )
+    let providerUserId = session.user.id
 
-    if (!googleAccount) {
-      return NextResponse.json({ error: 'No Google account linked' }, { status: 400 })
+    try {
+      const { auth } = await import('@/server/better-auth/config')
+      const accounts = await auth.api.listUserAccounts({ headers: requestHeaders })
+      providerUserId = (accounts as { accountId: string; providerId: string }[])
+        ?.find((account) => account.providerId === 'google')
+        ?.accountId || session.user.id
+    } catch {
+      providerUserId = session.user.id
     }
 
     const backendUser = await providerLogin({
       provider: 'google',
       canonicalUserId: session.user.id,
-      providerUserId: googleAccount.accountId,
+      providerUserId,
       email: session.user.email || '',
       forwardedCookieHeader: requestHeaders.get('cookie') || undefined,
       username: session.user.name || undefined,

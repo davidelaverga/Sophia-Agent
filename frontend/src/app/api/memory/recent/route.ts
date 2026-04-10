@@ -26,6 +26,10 @@ type NormalizedMemory = {
 const FALLBACK_WINDOW_BEFORE_MS = 10 * 60 * 1000;
 const FALLBACK_WINDOW_AFTER_MS = 30 * 60 * 1000;
 
+function createUnavailableRecentMemoriesResponse() {
+  return NextResponse.json({ memories: [], count: 0, fallbackApplied: true, unavailable: true });
+}
+
 function getMemoryStatus(memory: NormalizedMemory): string | null {
   return typeof memory.metadata?.status === 'string'
     ? memory.metadata.status
@@ -142,15 +146,19 @@ function selectFallbackMemories(
 
 export async function GET(request: NextRequest) {
   try {
+    const status = request.nextUrl.searchParams.get('status');
     const userId = await resolveSophiaUserId();
     if (!userId) {
+      if (status === 'pending_review') {
+        return createUnavailableRecentMemoriesResponse();
+      }
+
       return NextResponse.json(
         { error: 'Unable to resolve user_id' },
         { status: 401 },
       );
     }
 
-    const status = request.nextUrl.searchParams.get('status');
     const sessionId = request.nextUrl.searchParams.get('session_id');
     const startedAt = request.nextUrl.searchParams.get('started_at');
     const endedAt = request.nextUrl.searchParams.get('ended_at');
@@ -159,6 +167,10 @@ export async function GET(request: NextRequest) {
     const filteredText = await filteredResponse.text();
 
     if (!filteredResponse.ok) {
+      if (status === 'pending_review' && [401, 403, 503].includes(filteredResponse.status)) {
+        return createUnavailableRecentMemoriesResponse();
+      }
+
       return new NextResponse(filteredText, {
         status: filteredResponse.status,
         headers: {

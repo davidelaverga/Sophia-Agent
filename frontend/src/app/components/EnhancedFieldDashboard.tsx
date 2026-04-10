@@ -8,11 +8,13 @@ import { haptic } from '../hooks/useHaptics';
 import { cn } from '../lib/utils';
 import type { ContextMode } from '../types/session';
 
+import { CelestialComet } from './dashboard/CelestialComet';
 import { ContextTabs } from './dashboard/ContextTabs';
 import { EnhancedFieldBackground } from './dashboard/EnhancedFieldBackground';
 import { RitualOrbit } from './dashboard/RitualOrbit';
 import { RitualThread } from './dashboard/RitualThread';
 import { SettingsDrawer } from './dashboard/SettingsDrawer';
+import { useSweepGlow } from './dashboard/sweepLight';
 import { CONTEXTS } from './dashboard/types';
 import { useDashboardEntryState } from './dashboard/useDashboardEntryState';
 import { ResumeBanner } from './session/ResumeBanner';
@@ -81,6 +83,7 @@ export function EnhancedFieldDashboard() {
 
   const contextConfig = CONTEXTS.find((context) => context.value === currentContext) ?? CONTEXTS[0];
   const greeting = getGreeting(contextConfig);
+  const greetingGlowRef = useSweepGlow();
   const subtitle = selectedRitual
     ? contextConfig.ritualPrompts[selectedRitual]
     : contextConfig.subtitle;
@@ -137,6 +140,7 @@ export function EnhancedFieldDashboard() {
       )}
     >
       <EnhancedFieldBackground contextMode={contextMode} />
+      <CelestialComet contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
       <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex items-start justify-end px-4 py-4 sm:px-6">
@@ -216,7 +220,18 @@ export function EnhancedFieldDashboard() {
 
       <div className="relative z-10 flex min-h-screen flex-col px-6 sm:px-8">
         {/* Greeting — near top, matching prototype clamp(28px,6vh,48px) */}
-        <div className="pointer-events-none mx-auto max-w-[480px] pt-[clamp(28px,6vh,48px)] text-center">
+        <div
+          ref={greetingGlowRef as React.RefObject<HTMLDivElement>}
+          className="pointer-events-none mx-auto max-w-[480px] pt-[clamp(28px,6vh,48px)] text-center"
+          style={{
+            filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.12))',
+            textShadow: [
+              '0 0',
+              'calc(8px * var(--sweep-glow, 0))',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.15))',
+            ].join(' '),
+          }}
+        >
           <h1
             className={cn(
               'font-cormorant text-[clamp(24px,3.5vw,32px)] font-light leading-[1.4] tracking-[0.01em]',

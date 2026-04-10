@@ -13,6 +13,8 @@
  * 4. Token is stored and used for all subsequent API calls
  */
 
+import { headers } from 'next/headers'
+
 // ============================================================================
 // TYPES
 // ============================================================================
@@ -76,12 +78,47 @@ type BackendRequestError = Error & { status?: number }
 // CONFIGURATION
 // ============================================================================
 
-function getAuthBackendUrl(): string {
-  const serverUrl = process.env.SOPHIA_AUTH_BACKEND_URL || process.env.BACKEND_API_URL
-  const publicUrl = process.env.NEXT_PUBLIC_SOPHIA_AUTH_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL
+function normalizeUrl(value: string | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null
+  }
 
-  const url = serverUrl || publicUrl || 'http://localhost:8000'
-  return url.replace(/\/$/, '') // Remove trailing slash
+  const trimmed = value.trim()
+  return trimmed ? trimmed.replace(/\/$/, '') : null
+}
+
+async function resolveCurrentAppOrigin(): Promise<string | null> {
+  try {
+    const requestHeaders = await headers()
+    const host = requestHeaders.get('x-forwarded-host') ?? requestHeaders.get('host')
+    if (!host) {
+      return null
+    }
+
+    const forwardedProto = requestHeaders.get('x-forwarded-proto')?.split(',')[0]?.trim()
+    const protocol = forwardedProto || (host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https')
+
+    return `${protocol}://${host}`
+  } catch {
+    return null
+  }
+}
+
+async function getAuthBackendUrl(): Promise<string> {
+  const configuredUrl = normalizeUrl(process.env.SOPHIA_AUTH_BACKEND_URL)
+    ?? normalizeUrl(process.env.NEXT_PUBLIC_SOPHIA_AUTH_BACKEND_URL)
+    ?? normalizeUrl(process.env.NEXT_PUBLIC_APP_URL)
+
+  if (configuredUrl) {
+    return configuredUrl
+  }
+
+  const requestOrigin = await resolveCurrentAppOrigin()
+  if (requestOrigin) {
+    return requestOrigin
+  }
+
+  return 'http://localhost:3000'
 }
 
 function createBackendRequestError(message: string, status?: number): BackendRequestError {
@@ -107,7 +144,7 @@ function createBackendRequestError(message: string, status?: number): BackendReq
 export async function providerLogin(
   data: ProviderLoginRequest
 ): Promise<BackendUserResponse> {
-  const url = `${getAuthBackendUrl()}/api/v1/auth/discord/login`
+  const url = `${await getAuthBackendUrl()}/api/v1/auth/discord/login`
   
   try {
     // Add timeout to prevent hanging forever
@@ -203,7 +240,7 @@ export async function registerWithBackend(
     }
   }
   
-  const url = `${getAuthBackendUrl()}/api/v1/auth/register`
+  const url = `${await getAuthBackendUrl()}/api/v1/auth/register`
   
   try {
     const response = await fetch(url, {
@@ -294,7 +331,7 @@ export async function loginOrRegister(
 export async function validateToken(
   token: string
 ): Promise<BackendValidateResponse> {
-  const url = `${getAuthBackendUrl()}/api/v1/auth/validate`
+  const url = `${await getAuthBackendUrl()}/api/v1/auth/validate`
   
   try {
     const response = await fetch(url, {
@@ -323,7 +360,7 @@ export async function validateToken(
 export async function getCurrentUser(
   token: string
 ): Promise<BackendUserResponse> {
-  const url = `${getAuthBackendUrl()}/api/v1/auth/me`
+  const url = `${await getAuthBackendUrl()}/api/v1/auth/me`
   
   const response = await fetch(url, {
     method: 'GET',
@@ -348,7 +385,7 @@ export async function getCurrentUser(
 export async function refreshToken(
   token: string
 ): Promise<BackendUserResponse> {
-  const url = `${getAuthBackendUrl()}/api/v1/auth/token/refresh`
+  const url = `${await getAuthBackendUrl()}/api/v1/auth/token/refresh`
   
   const response = await fetch(url, {
     method: 'POST',

@@ -5,11 +5,47 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
+import type { MicroBriefingIntent } from '../../../types/session';
+import { getUserScopedAuthHeader, refreshUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 const BACKEND_URL = getPrimaryGatewayUrl();
+
+const MICRO_BRIEFING_COPY: Record<MicroBriefingIntent, string> = {
+  interrupt_checkin: 'Pause for one breath. What matters most in the next few minutes?',
+  quick_reset: 'Reset the frame. Name one thing you can release and one thing you want to keep.',
+  reflection_prompt: 'What are you noticing underneath the surface right now?',
+  nudge: 'A small check-in: do you want to stay with this thread, or shift your attention?',
+};
+
+function createAnonymousActiveSessionResponse() {
+  return NextResponse.json({ has_active_session: false }, { status: 200 });
+}
+
+function createFallbackMicroBriefingResponse(rawBody: string | undefined) {
+  let intent: MicroBriefingIntent = 'nudge';
+
+  if (rawBody) {
+    try {
+      const parsed = JSON.parse(rawBody) as { intent?: MicroBriefingIntent };
+      if (parsed.intent && parsed.intent in MICRO_BRIEFING_COPY) {
+        intent = parsed.intent;
+      }
+    } catch {
+      // Ignore malformed fallback payloads and use the default nudge copy.
+    }
+  }
+
+  return NextResponse.json({
+    message_id: `micro-${Date.now()}`,
+    assistant_text: MICRO_BRIEFING_COPY[intent],
+    highlights: [],
+    ui_cards: [],
+    briefing_source: 'fallback',
+    has_memory: false,
+  }, { status: 200 });
+}
 
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');
@@ -17,6 +53,10 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const authHeader = await getUserScopedAuthHeader();
 
   if (!authHeader) {
+    if (req.method === 'GET' && path === 'active') {
+      return createAnonymousActiveSessionResponse();
+    }
+
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
   
@@ -28,19 +68,34 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   });
 
   // 🔒 SECURITY: Read token from httpOnly cookie server-side
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-    'Authorization': authHeader,
-  };
-
   const method = req.method.toUpperCase();
   const body = method === 'GET' || method === 'HEAD' ? undefined : await req.text();
 
-  const backendResponse = await fetch(url.toString(), {
+  const execute = (authorization: string) => fetch(url.toString(), {
     method,
-    headers,
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': authorization,
+    },
     body,
   });
+
+  let backendResponse = await execute(authHeader);
+
+  if (backendResponse.status === 401) {
+    const refreshedAuthHeader = await refreshUserScopedAuthHeader();
+    if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
+      backendResponse = await execute(refreshedAuthHeader);
+    }
+  }
+
+  if (backendResponse.status === 401 && method === 'GET' && path === 'active') {
+    return createAnonymousActiveSessionResponse();
+  }
+
+  if (backendResponse.status === 404 && method === 'POST' && path === 'micro-briefing') {
+    return createFallbackMicroBriefingResponse(body);
+  }
 
   const responseText = await backendResponse.text();
   

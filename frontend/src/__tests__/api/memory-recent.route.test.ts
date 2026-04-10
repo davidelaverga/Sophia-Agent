@@ -121,4 +121,28 @@ describe('memory recent route', () => {
     expect(payload.fallbackApplied).toBe(true);
     expect(payload.memories).toEqual([]);
   });
+
+  it('returns an empty pending-review payload when the user-scoped gateway call is unavailable', async () => {
+    fetchSophiaApiMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: 'Forbidden' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memory/recent?status=pending_review&session_id=sess-1'),
+    } as unknown as NextRequest;
+
+    const response = await recentMemoriesGET(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({
+      memories: [],
+      count: 0,
+      fallbackApplied: true,
+      unavailable: true,
+    });
+  });
 });

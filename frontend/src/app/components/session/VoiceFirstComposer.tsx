@@ -190,7 +190,7 @@ export function VoiceFirstComposer({
         {textOnly && (
         <div className="flex justify-center mb-3">
           <div role="status" aria-live="polite" className="flex items-center gap-2">
-            <span className="text-[10px] tracking-[0.14em] lowercase transition-all duration-500" style={{ color: 'var(--cosmic-text-faint)' }}>
+            <span className="text-[10px] tracking-[0.14em] lowercase transition-all duration-500" style={{ color: 'var(--cosmic-text-muted)' }}>
               {isTyping ? 'sophia is typing…' : ''}
             </span>
           </div>
@@ -351,15 +351,15 @@ export function VoiceFirstComposer({
                     disabled={disabled}
                     className={cn(
                       'flex-1 px-4 py-2.5 rounded-2xl border transition-all duration-200 resize-none',
-                      'text-sm placeholder:text-[color:var(--cosmic-text-faint)]',
+                      'text-sm placeholder:text-[color:var(--cosmic-text-whisper)]',
                       'cosmic-focus-ring focus-visible:outline-none',
                       'min-h-[40px] max-h-[100px]',
                       disabled && 'opacity-50 cursor-not-allowed'
                     )}
                     style={{
-                      backgroundColor: 'var(--input-bg)',
-                      color: 'var(--cosmic-text)',
-                      borderColor: 'var(--cosmic-border-soft)',
+                      backgroundColor: 'color-mix(in srgb, var(--input-bg) 90%, var(--sophia-purple) 10%)',
+                      color: 'var(--cosmic-text-strong)',
+                      borderColor: 'var(--cosmic-border)',
                     }}
                   />
                   

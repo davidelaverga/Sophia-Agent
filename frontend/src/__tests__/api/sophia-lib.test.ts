@@ -2,10 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const getAuthenticatedUserIdMock = vi.fn()
 const getUserScopedAuthHeaderMock = vi.fn()
+const refreshUserScopedAuthHeaderMock = vi.fn()
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
   getAuthenticatedUserId: (...args: unknown[]) => getAuthenticatedUserIdMock(...args),
   getUserScopedAuthHeader: (...args: unknown[]) => getUserScopedAuthHeaderMock(...args),
+  refreshUserScopedAuthHeader: (...args: unknown[]) => refreshUserScopedAuthHeaderMock(...args),
 }))
 
 vi.mock('../../app/api/_lib/gateway-url', () => ({
@@ -19,6 +21,7 @@ describe('Sophia API helper', () => {
     vi.clearAllMocks()
     getAuthenticatedUserIdMock.mockResolvedValue('user-123')
     getUserScopedAuthHeaderMock.mockResolvedValue('Bearer token-123')
+    refreshUserScopedAuthHeaderMock.mockResolvedValue('')
     global.fetch = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -58,6 +61,26 @@ describe('Sophia API helper', () => {
     const headers = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers
     expect(headers.get('Authorization')).toBe('Bearer token-123')
     expect(headers.get('Content-Type')).toBe('application/json')
+  })
+
+  it('retries once with a refreshed auth header when the gateway returns 403', async () => {
+    refreshUserScopedAuthHeaderMock.mockResolvedValue('Bearer refreshed-token')
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ detail: 'Forbidden' }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })) as unknown as typeof fetch
+
+    const response = await fetchSophiaApi('/api/sophia/user-123/journal', { method: 'GET' })
+
+    expect(global.fetch).toHaveBeenCalledTimes(2)
+    const secondHeaders = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[1][1].headers as Headers
+    expect(secondHeaders.get('Authorization')).toBe('Bearer refreshed-token')
+    expect(response.status).toBe(200)
   })
 
   it('treats local review-overlay ids as synthetic memories', () => {

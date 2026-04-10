@@ -10,12 +10,28 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
+import { getUserScopedAuthHeader, refreshUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 const BACKEND_URL = getPrimaryGatewayUrl();
+
+function createAnonymousBootstrapResponse(path: string) {
+  if (path === 'status') {
+    return NextResponse.json({ has_opener: false, user_id: 'anonymous' }, { status: 200 });
+  }
+
+  return NextResponse.json(
+    {
+      opener_text: '',
+      suggested_ritual: null,
+      emotional_context: null,
+      has_opener: false,
+    },
+    { status: 200 },
+  );
+}
 
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');
@@ -23,6 +39,10 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const authHeader = await getUserScopedAuthHeader();
 
   if (!authHeader) {
+    if (req.method === 'GET') {
+      return createAnonymousBootstrapResponse(path);
+    }
+
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
   
@@ -34,16 +54,27 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   });
 
   // 🔒 SECURITY: Read token from httpOnly cookie server-side
-  const headers: HeadersInit = {
-    'Content-Type': 'application/json',
-    'Authorization': authHeader,
-  };
-
   try {
-    const backendResponse = await fetch(url.toString(), {
+    const execute = (authorization: string) => fetch(url.toString(), {
       method: req.method,
-      headers,
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': authorization,
+      },
     });
+
+    let backendResponse = await execute(authHeader);
+
+    if (backendResponse.status === 401) {
+      const refreshedAuthHeader = await refreshUserScopedAuthHeader();
+      if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
+        backendResponse = await execute(refreshedAuthHeader);
+      }
+    }
+
+    if (backendResponse.status === 401 && req.method === 'GET') {
+      return createAnonymousBootstrapResponse(path);
+    }
 
     const responseText = await backendResponse.text();
     

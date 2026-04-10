@@ -46,8 +46,8 @@ export function ModeToggle({ opacity = 1 }: { opacity?: number }) {
               "text-[11px] tracking-[0.14em] lowercase transition-all duration-300 px-3 py-0.5 rounded-full",
               "focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
               isActive
-                ? "text-white/50 bg-white/[0.06]"
-                : "text-white/25 hover:text-white/40 cursor-pointer",
+                ? "text-white/70 bg-white/[0.08]"
+                : "text-white/35 hover:text-white/55 cursor-pointer",
               isDisabled && "opacity-40 cursor-not-allowed",
             ]
               .filter(Boolean)

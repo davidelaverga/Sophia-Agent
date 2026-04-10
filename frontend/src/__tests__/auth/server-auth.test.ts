@@ -1,15 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const cookiesMock = vi.fn()
+const headersMock = vi.fn()
 const getSessionMock = vi.fn()
+const listUserAccountsMock = vi.fn()
+const providerLoginMock = vi.fn()
 const logErrorMock = vi.fn()
 const debugWarnMock = vi.fn()
+const cookieGetMock = vi.fn()
+const cookieSetMock = vi.fn()
 
 let authBypassEnabledMock = false
 let authBypassUserIdMock = 'dev-user'
 
 vi.mock('next/headers', () => ({
   cookies: (...args: unknown[]) => cookiesMock(...args),
+  headers: (...args: unknown[]) => headersMock(...args),
 }))
 
 vi.mock('../../app/lib/auth/dev-bypass', () => ({
@@ -25,6 +31,18 @@ vi.mock('../../server/better-auth', () => ({
   getSession: (...args: unknown[]) => getSessionMock(...args),
 }))
 
+vi.mock('../../server/better-auth/config', () => ({
+  auth: {
+    api: {
+      listUserAccounts: (...args: unknown[]) => listUserAccountsMock(...args),
+    },
+  },
+}))
+
+vi.mock('../../app/lib/auth/backend-auth', () => ({
+  providerLogin: (...args: unknown[]) => providerLoginMock(...args),
+}))
+
 vi.mock('../../app/lib/error-logger', () => ({
   logger: {
     logError: (...args: unknown[]) => logErrorMock(...args),
@@ -37,6 +55,7 @@ vi.mock('../../app/lib/debug-logger', () => ({
 
 import {
   getAuthenticatedUserId,
+  refreshUserScopedAuthToken,
   getServerAuthToken,
   getUserScopedAuthToken,
   hasUserToken,
@@ -47,13 +66,25 @@ describe('server-auth helpers', () => {
     vi.clearAllMocks()
     authBypassEnabledMock = false
     authBypassUserIdMock = 'dev-user'
+    cookieGetMock.mockReturnValue(undefined)
     cookiesMock.mockResolvedValue({
-      get: vi.fn(() => undefined),
+      get: cookieGetMock,
+      set: cookieSetMock,
     })
+    headersMock.mockResolvedValue(new Headers({ cookie: 'better-auth.session=abc123' }))
     getSessionMock.mockResolvedValue({
       user: {
         id: 'session-user-123',
+        email: 'user@example.com',
+        name: 'Test User',
       },
+    })
+    listUserAccountsMock.mockResolvedValue([])
+    providerLoginMock.mockResolvedValue({
+      id: 'backend-user-123',
+      email: 'user@example.com',
+      username: 'Test User',
+      api_token: 'synced-token-123',
     })
     process.env.BACKEND_API_KEY = 'server-fallback-token'
   })
@@ -71,8 +102,45 @@ describe('server-auth helpers', () => {
   })
 
   it('does not fall back to BACKEND_API_KEY for user-scoped auth when bypass is disabled', async () => {
+    getSessionMock.mockResolvedValue(null)
+
     await expect(getUserScopedAuthToken()).resolves.toBe('')
     expect(logErrorMock).toHaveBeenCalled()
+  })
+
+  it('hydrates a missing user-scoped token from the active Better Auth session', async () => {
+    await expect(getUserScopedAuthToken()).resolves.toBe('synced-token-123')
+    expect(providerLoginMock).toHaveBeenCalledWith({
+      provider: 'google',
+      canonicalUserId: 'session-user-123',
+      providerUserId: 'session-user-123',
+      email: 'user@example.com',
+      forwardedCookieHeader: 'better-auth.session=abc123',
+      username: 'Test User',
+    })
+    expect(cookieSetMock).toHaveBeenCalledWith(
+      'sophia-backend-token',
+      'synced-token-123',
+      expect.objectContaining({
+        httpOnly: true,
+        sameSite: 'lax',
+        path: '/',
+      }),
+    )
+  })
+
+  it('prefers the linked Google account id when one exists during hydration', async () => {
+    listUserAccountsMock.mockResolvedValue([{ providerId: 'google', accountId: 'google-account-123' }])
+
+    await expect(refreshUserScopedAuthToken()).resolves.toBe('synced-token-123')
+    expect(providerLoginMock).toHaveBeenCalledWith({
+      provider: 'google',
+      canonicalUserId: 'session-user-123',
+      providerUserId: 'google-account-123',
+      email: 'user@example.com',
+      forwardedCookieHeader: 'better-auth.session=abc123',
+      username: 'Test User',
+    })
   })
 
   it('allows the backend fallback token for user-scoped auth only in bypass mode', async () => {

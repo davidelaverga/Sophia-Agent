@@ -90,15 +90,25 @@ describe('/api/auth/sync-backend POST', () => {
     });
   });
 
-  it('returns 400 when the session has no linked Google account', async () => {
+  it('falls back to the canonical session user id when no linked Google account exists', async () => {
     listUserAccountsMock.mockResolvedValue([{ providerId: 'discord', accountId: 'discord-legacy' }]);
 
     const response = await POST();
     const payload = await response.json();
 
-    expect(response.status).toBe(400);
-    expect(payload).toEqual({ error: 'No Google account linked' });
-    expect(providerLoginMock).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(providerLoginMock).toHaveBeenCalledWith({
+      provider: 'google',
+      canonicalUserId: 'session-user-1',
+      providerUserId: 'session-user-1',
+      email: 'user@example.com',
+      forwardedCookieHeader: 'better-auth.session=abc123',
+      username: 'Test User',
+    });
+    expect(payload).toEqual({
+      ok: true,
+      user: { id: 'backend-user-1', email: 'user@example.com', username: 'Test User' },
+    });
   });
 
   it('returns a skipped success when the legacy backend bridge is missing locally', async () => {

@@ -74,7 +74,6 @@ export function useSessionExitOrchestration({
     showExitConfirm,
     showDebriefOffer,
     showEmergence,
-    showFeedback,
     debriefData,
     isNavigatingToRecap,
     openExitConfirm,
@@ -84,7 +83,6 @@ export function useSessionExitOrchestration({
     handleStartDebrief,
     handleSkipToRecap,
     handleEmergenceComplete,
-    handleFeedbackComplete,
     handleAbruptExit,
   } = useSessionExitFlow({
     isReadOnly,
@@ -115,14 +113,13 @@ export function useSessionExitOrchestration({
     messages,
     updateMessages,
     openExitConfirm,
-    isExitInProgress: isEnding || isNavigatingToRecap || showDebriefOffer || showEmergence || showFeedback,
+    isExitInProgress: isEnding || isNavigatingToRecap || showDebriefOffer || showEmergence,
   });
 
   return {
     showExitConfirm,
     showDebriefOffer,
     showEmergence,
-    showFeedback,
     debriefData,
     isNavigatingToRecap,
     handleEndSession,
@@ -131,7 +128,6 @@ export function useSessionExitOrchestration({
     handleStartDebrief,
     handleSkipToRecap,
     handleEmergenceComplete,
-    handleFeedbackComplete,
     handleAbruptExit,
   };
 }

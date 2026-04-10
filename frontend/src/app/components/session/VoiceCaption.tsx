@@ -47,6 +47,21 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
   const lastAssistantIdRef = useRef<string>("")
   const lastUserContentRef = useRef<string>("")
   const lastUserIdRef = useRef<string>("")
+  // Snapshot message count at the moment voice mode activates
+  // so we don't replay text-mode messages as voice captions
+  const voiceEntryCountRef = useRef<{ assistant: number; user: number }>({ assistant: 0, user: 0 })
+  const prevVoiceModeRef = useRef(isVoiceMode)
+
+  // When switching TO voice, record how many messages already exist
+  useEffect(() => {
+    if (isVoiceMode && !prevVoiceModeRef.current) {
+      voiceEntryCountRef.current = {
+        assistant: messages.filter((m) => m.role === "assistant").length,
+        user: messages.filter((m) => m.role === "user").length,
+      }
+    }
+    prevVoiceModeRef.current = isVoiceMode
+  }, [isVoiceMode, messages])
 
   // Track assistant messages
   useEffect(() => {
@@ -57,6 +72,8 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
 
     const assistantMessages = messages.filter((m) => m.role === "assistant")
     if (assistantMessages.length <= 1) return // skip initial greeting
+    // Only show captions for messages that arrived AFTER entering voice mode
+    if (assistantMessages.length <= voiceEntryCountRef.current.assistant) return
     const last = assistantMessages[assistantMessages.length - 1]
 
     const content = last.content?.trim()
@@ -78,6 +95,8 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
 
     const userMessages = messages.filter((m) => m.role === "user")
     if (userMessages.length === 0) return
+    // Only show captions for messages that arrived AFTER entering voice mode
+    if (userMessages.length <= voiceEntryCountRef.current.user) return
     const last = userMessages[userMessages.length - 1]
 
     const content = last.content?.trim()
@@ -95,7 +114,8 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
 
   return (
     <div
-      className="fixed bottom-[140px] left-1/2 -translate-x-1/2 z-30 text-center pointer-events-none max-w-[600px] w-[90vw] flex flex-col items-center gap-3"
+      className="fixed left-1/2 -translate-x-1/2 z-20 text-center pointer-events-none max-w-[600px] w-[90vw] flex flex-col items-center gap-3 transition-[bottom] duration-700 ease-out"
+      style={{ bottom: 'var(--voice-caption-bottom, 140px)' }}
       role="status"
       aria-live="polite"
       aria-label="Voice captions"

@@ -3,6 +3,7 @@
  * Cola persistente para operaciones offline con retry exponencial
  */
 
+import { resolveApiUrl } from './capacitor-api';
 import { logger } from './error-logger';
 
 // ============================================================================
@@ -524,10 +525,10 @@ export const sophiaOfflineQueue = new OfflineSyncQueue<SophiaQueuePayload>({
 // Register default API processor
 sophiaOfflineQueue.registerProcessor('api', async (item) => {
   const { endpoint, method, body, headers } = item.payload;
-  const baseUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const requestUrl = resolveApiUrl(endpoint);
 
   try {
-    const response = await fetch(`${baseUrl}${endpoint}`, {
+    const response = await fetch(requestUrl, {
       method,
       headers: {
         'Content-Type': 'application/json',

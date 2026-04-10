@@ -4,7 +4,7 @@
  *
  * Full-screen atmospheric veil with staggered reveals of session takeaways.
  * Nebula dims behind it (coreIntensity 0.2, flowEnergy 0.1).
- * Tap anywhere or wait 8s to advance to feedback.
+ * Tap anywhere or wait 8s to advance to recap.
  */
 
 'use client';
@@ -118,7 +118,11 @@ export function EmergenceOverlay({
         'transition-opacity duration-[2500ms] ease-out',
         isActive ? 'opacity-100' : 'opacity-0',
       )}
-      style={{ backgroundColor: 'var(--cosmic-modal-backdrop)' }}
+      style={{
+        backgroundColor: 'color-mix(in srgb, var(--bg) 88%, transparent)',
+        backdropFilter: 'blur(24px) saturate(0.6)',
+        WebkitBackdropFilter: 'blur(24px) saturate(0.6)',
+      }}
       onClick={handleTap}
       role="dialog"
       aria-label="Session summary"

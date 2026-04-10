@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getUserScopedAuthToken } from "../../../lib/auth/server-auth";
+import { getUserScopedAuthHeader, refreshUserScopedAuthHeader } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
@@ -9,8 +9,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Server configuration incomplete" }, { status: 500 });
   }
 
-  const apiKey = await getUserScopedAuthToken();
-  if (!apiKey) {
+  const authHeader = await getUserScopedAuthHeader();
+  if (!authHeader) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
@@ -26,14 +26,28 @@ export async function POST(request: NextRequest) {
   }
 
   try {
-    const response = await fetch(`${backendUrl}/api/v1/conversation/feedback`, {
+    const execute = (authorization: string) => fetch(`${backendUrl}/api/v1/conversation/feedback`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: authorization,
       },
       body: JSON.stringify(body),
     });
+
+    let response = await execute(authHeader);
+
+    if (response.status === 401 || response.status === 403) {
+      const refreshedAuthHeader = await refreshUserScopedAuthHeader();
+      if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
+        response = await execute(refreshedAuthHeader);
+      }
+    }
+
+    // Feedback is optional analytics. If the backend surface is absent, do not fail the UI.
+    if (response.status === 404) {
+      return new NextResponse(null, { status: 204 });
+    }
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({ error: "Unknown error" }));

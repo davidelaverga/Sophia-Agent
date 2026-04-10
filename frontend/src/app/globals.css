@@ -547,15 +547,15 @@ button, a, [role="button"] {
   --cosmic-border-soft: color-mix(in srgb, var(--sophia-purple) 10%, transparent);
   --cosmic-border: color-mix(in srgb, var(--sophia-purple) 18%, transparent);
   --cosmic-border-strong: color-mix(in srgb, var(--sophia-glow) 26%, transparent);
-  --cosmic-text-strong: color-mix(in srgb, var(--text) 86%, transparent);
-  --cosmic-text: color-mix(in srgb, var(--text) 64%, transparent);
-  --cosmic-text-muted: color-mix(in srgb, var(--text) 46%, transparent);
-  --cosmic-text-whisper: color-mix(in srgb, var(--text) 26%, transparent);
-  --cosmic-text-faint: color-mix(in srgb, var(--text) 14%, transparent);
+  --cosmic-text-strong: color-mix(in srgb, var(--text) 94%, transparent);
+  --cosmic-text: color-mix(in srgb, var(--text) 78%, transparent);
+  --cosmic-text-muted: color-mix(in srgb, var(--text) 56%, transparent);
+  --cosmic-text-whisper: color-mix(in srgb, var(--text) 34%, transparent);
+  --cosmic-text-faint: color-mix(in srgb, var(--text) 20%, transparent);
   --cosmic-shadow-sm: 0 12px 30px color-mix(in srgb, var(--bg) 22%, transparent);
   --cosmic-shadow-md: 0 18px 48px color-mix(in srgb, var(--bg) 38%, transparent);
   --cosmic-shadow-lg: 0 30px 100px color-mix(in srgb, var(--bg) 48%, transparent), inset 0 0 30px color-mix(in srgb, var(--sophia-purple) 2%, transparent);
-  --cosmic-reading-corridor: radial-gradient(ellipse 60% 75% at 50% 50%, color-mix(in srgb, var(--bg) 82%, transparent) 0%, color-mix(in srgb, var(--bg) 55%, transparent) 55%, transparent 100%);
+  --cosmic-reading-corridor: radial-gradient(ellipse 65% 80% at 50% 50%, color-mix(in srgb, var(--bg) 94%, transparent) 0%, color-mix(in srgb, var(--bg) 78%, transparent) 55%, color-mix(in srgb, var(--bg) 30%, transparent) 100%);
   --cosmic-modal-backdrop: color-mix(in srgb, var(--bg) 55%, transparent);
   --cosmic-bottom-bar-bg: color-mix(in srgb, var(--bg) 72%, transparent);
 }
@@ -787,6 +787,18 @@ a {
   background: var(--cosmic-reading-corridor);
 }
 
+/* Text mode elevated contrast — applied to conversation area for readability */
+.text-mode-elevated {
+  --cosmic-text-strong: color-mix(in srgb, var(--text) 98%, transparent);
+  --cosmic-text: color-mix(in srgb, var(--text) 90%, transparent);
+  --cosmic-text-muted: color-mix(in srgb, var(--text) 68%, transparent);
+}
+
+/* Push voice captions above the artifact panel when it's open */
+.voice-caption-raised {
+  --voice-caption-bottom: 340px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -923,6 +935,15 @@ a {
   }
   100% {
     background-position: 200% 0;
+  }
+}
+
+@keyframes insightPulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--sophia-purple) 30%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 16px 4px color-mix(in srgb, var(--sophia-purple) 20%, transparent);
   }
 }
 
