@@ -39,10 +39,6 @@ function bindRemoteAudio(call: Call): () => void {
         document.body.appendChild(audioEl)
         const cleanup = call.bindAudioElement(audioEl, p.sessionId, "audioTrack")
         boundElements.set(p.sessionId, { el: audioEl, cleanup })
-
-        // Explicit play() for Safari which sometimes needs it even after
-        // AudioContext unlock + autoplay attribute on WebRTC audio elements.
-        audioEl.play().catch(() => {})
       }
     }
   })
