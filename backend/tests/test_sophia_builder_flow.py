@@ -16,12 +16,16 @@ from deerflow.config.summarization_config import ContextSize, SummarizationConfi
 from deerflow.subagents.config import SubagentConfig
 
 
-def _make_runtime(state: dict, thread_id: str = "thread-1") -> SimpleNamespace:
+def _make_runtime(state: dict, thread_id: str = "thread-1", user_id: str | None = None) -> SimpleNamespace:
+    configurable = {"thread_id": thread_id}
+    if user_id is not None:
+        configurable["user_id"] = user_id
+
     return SimpleNamespace(
         state=state,
         context={"thread_id": thread_id},
         config={
-            "configurable": {"thread_id": thread_id},
+            "configurable": configurable,
             "metadata": {"model_name": "claude-haiku-4-5-20251001", "trace_id": "trace-1"},
         },
     )
@@ -130,6 +134,116 @@ def test_switch_to_builder_suppresses_duplicate_launch(monkeypatch):
 
     assert payload["status"] == "already_running"
     assert payload["task_id"] == "task-existing"
+
+
+def test_switch_to_builder_prefers_runtime_config_user_id(monkeypatch):
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(self, task: str, task_id: str | None = None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: captured.setdefault("builder_agent", {"user_id": user_id, "model_name": model_name}),
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            # state user_id intentionally omitted to validate runtime-config precedence
+            "current_artifact": {"tone_estimate": 2.1, "active_tone_band": "anger_antagonism"},
+        },
+        user_id="jorge_test",
+    )
+    switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a test doc.",
+        task_type="document",
+        tool_call_id="tc-builder-runtime-user-id",
+    )
+
+    assert captured["builder_agent"]["user_id"] == "jorge_test"
+
+
+def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(self, task: str, task_id: str | None = None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            "user_id": "user_123",
+            "current_artifact": {"tone_estimate": 2.5, "active_tone_band": "engagement"},
+            "messages": [
+                AIMessage(
+                    content="Here is your update plus handoff.",
+                    tool_calls=[
+                        {
+                            "id": "tool-emit-artifact-1",
+                            "name": "emit_artifact",
+                            "args": {"tone_estimate": 3.5, "active_tone_band": "enthusiasm"},
+                        },
+                        {"id": "tool-switch-builder-1", "name": "switch_to_builder", "args": {"task_type": "document"}},
+                    ],
+                )
+            ],
+        }
+    )
+
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build docs from latest context.",
+        task_type="document",
+        tool_call_id="tc-builder-artifact-freshness",
+    )
+    payload = json.loads(response)
+
+    delegation_context = payload["delegation_context"]
+    assert delegation_context["companion_artifact"]["tone_estimate"] == 3.5
+    assert delegation_context["companion_artifact"]["active_tone_band"] == "enthusiasm"
 
 
 def test_builder_session_to_artifact_synthesis_lifecycle(monkeypatch):
