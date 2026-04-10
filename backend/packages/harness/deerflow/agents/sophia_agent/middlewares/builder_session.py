@@ -195,6 +195,73 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
 
         return debug or None
 
+    @staticmethod
+    def _joined_tool_names(tool_names: list[str] | None) -> str | None:
+        if not tool_names:
+            return None
+        joined = ", ".join(str(name).strip() for name in tool_names if str(name).strip())
+        return joined or None
+
+    @classmethod
+    def _task_log_fields(cls, task: dict[str, Any] | None) -> list[str]:
+        if not isinstance(task, dict):
+            return []
+
+        fields: list[str] = []
+        task_id = task.get("task_id")
+        trace_id = task.get("trace_id")
+        error = task.get("error")
+        debug = task.get("debug") if isinstance(task.get("debug"), dict) else {}
+
+        if task_id:
+            fields.append(f"task_id={task_id}")
+        if trace_id:
+            fields.append(f"trace_id={trace_id}")
+        if error:
+            fields.append(f"error={error}")
+
+        last_tools = cls._joined_tool_names(debug.get("last_tool_names"))
+        late_tools = cls._joined_tool_names(debug.get("late_tool_names"))
+        if last_tools:
+            fields.append(f"last_tool_calls={last_tools}")
+        if "last_has_emit_builder_artifact" in debug:
+            fields.append(f"last_emit_builder_artifact={'true' if debug.get('last_has_emit_builder_artifact') else 'false'}")
+        if late_tools:
+            fields.append(f"late_tool_calls_after_timeout={late_tools}")
+        if "late_has_emit_builder_artifact" in debug:
+            fields.append(f"late_emit_builder_artifact={'true' if debug.get('late_has_emit_builder_artifact') else 'false'}")
+        if debug.get("timed_out_at"):
+            fields.append(f"timed_out_at={debug['timed_out_at']}")
+
+        return fields
+
+    @classmethod
+    def _status_log_context(
+        cls,
+        status: str | None,
+        task: dict[str, Any] | None,
+        *,
+        new_handoff_adopted: bool = False,
+        background_task_missing: bool = False,
+    ) -> str:
+        fields = [f"builder status={status or 'unknown'}"]
+        if new_handoff_adopted:
+            fields.append("new_handoff_adopted=true")
+        if background_task_missing:
+            fields.append("background_task_missing=true")
+        fields.extend(cls._task_log_fields(task))
+        return " ".join(fields)
+
+    @classmethod
+    def _no_state_change_context(cls, task: dict[str, Any] | None) -> str:
+        if not isinstance(task, dict) or not task:
+            return "no builder state change: no tracked builder task"
+
+        status = task.get("status") or "unknown"
+        fields = [f"no builder state change: tracked_task_status={status}"]
+        fields.extend(cls._task_log_fields(task))
+        return " ".join(fields)
+
     @override
     def before_agent(self, state: BuilderSessionState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
@@ -204,6 +271,8 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
 
         payload = self._extract_latest_handoff_payload(messages)
         existing_task = state.get("builder_task") or {}
+        new_handoff_adopted = False
+        background_task_missing = False
 
         if payload:
             payload_task = payload.get("builder_task") or {}
@@ -221,6 +290,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     updates["builder_result"] = None
                     updates["delegation_context"] = payload.get("delegation_context")
                     existing_task = payload_task
+                    new_handoff_adopted = True
                 elif not state.get("delegation_context") and payload.get("delegation_context"):
                     updates["delegation_context"] = payload.get("delegation_context")
 
@@ -234,6 +304,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     "error": payload.get("error") or "Builder handoff failed to start.",
                 }
                 existing_task = updates["builder_task"]
+                new_handoff_adopted = True
 
         current_task = updates.get("builder_task") or existing_task
         current_status = (current_task or {}).get("status")
@@ -243,6 +314,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
             result = get_background_task_result(task_id) if task_id else None
 
             if result is None:
+                background_task_missing = True
                 failed_task = {
                     **current_task,
                     "status": "failed",
@@ -292,9 +364,10 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
             updates["system_prompt_blocks"] = blocks
 
         if not updates:
-            log_middleware("BuilderSession", "no builder state change", _t0)
+            log_middleware("BuilderSession", self._no_state_change_context(current_task), _t0)
             return None
 
-        next_status = (updates.get("builder_task") or current_task or {}).get("status")
-        log_middleware("BuilderSession", f"builder status={next_status}", _t0)
+        next_task = updates.get("builder_task") or current_task or {}
+        next_status = next_task.get("status")
+        log_middleware("BuilderSession", self._status_log_context(next_status, next_task, new_handoff_adopted=new_handoff_adopted, background_task_missing=background_task_missing), _t0)
         return updates
