@@ -291,6 +291,7 @@ def test_builder_session_timeout_surfaces_debug_summary(monkeypatch):
     )
 
     cleanup_calls = []
+    log_contexts = []
     monkeypatch.setattr(
         "deerflow.agents.sophia_agent.middlewares.builder_session.SubagentStatus",
         _FakeSubagentStatus,
@@ -303,6 +304,10 @@ def test_builder_session_timeout_surfaces_debug_summary(monkeypatch):
         "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
         lambda _task_id: timed_out_result,
     )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda name, context, _start_time: log_contexts.append((name, context)),
+    )
 
     builder_session = BuilderSessionMiddleware()
     state = _apply_update(state, builder_session.before_agent(state, runtime))
@@ -314,6 +319,67 @@ def test_builder_session_timeout_surfaces_debug_summary(monkeypatch):
     assert debug["late_has_emit_builder_artifact"] is True
     assert cleanup_calls == [task_id]
     assert any("late_tool_calls_after_timeout=emit_builder_artifact" in block for block in state["system_prompt_blocks"])
+    assert any(
+        name == "BuilderSession"
+        and "builder status=timed_out" in context
+        and "new_handoff_adopted=true" in context
+        and f"task_id={task_id}" in context
+        and "last_tool_calls=bash, write_file" in context
+        and "late_tool_calls_after_timeout=emit_builder_artifact" in context
+        and "late_emit_builder_artifact=true" in context
+        for name, context in log_contexts
+    )
+
+def test_builder_session_logs_missing_background_task(monkeypatch):
+    task_id = "task-missing-1"
+    handoff_payload = {
+        "type": "builder_handoff",
+        "status": "queued",
+        "task_id": task_id,
+        "task_type": "presentation",
+        "trace_id": "trace-missing",
+        "builder_task": {
+            "task_id": task_id,
+            "description": "Build deck",
+            "task_type": "presentation",
+            "status": "queued",
+            "delegated_at": "2026-04-09T00:00:00Z",
+            "trace_id": "trace-missing",
+        },
+    }
+    ai_msg = AIMessage(
+        content="Delegating to builder",
+        tool_calls=[{"id": "tool-missing", "name": "switch_to_builder", "args": {"task_type": "presentation"}}],
+    )
+    tool_msg = ToolMessage(content=json.dumps(handoff_payload), tool_call_id="tool-missing", name="switch_to_builder")
+    state = {"messages": [ai_msg, tool_msg], "system_prompt_blocks": []}
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-missing"}
+
+    log_contexts = []
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda name, context, _start_time: log_contexts.append((name, context)),
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    assert state["builder_task"]["status"] == "failed"
+    assert state["builder_task"]["error"] == "Builder task state disappeared before completion."
+    assert any(
+        name == "BuilderSession"
+        and "builder status=failed" in context
+        and "new_handoff_adopted=true" in context
+        and "background_task_missing=true" in context
+        and f"task_id={task_id}" in context
+        and "trace_id=trace-missing" in context
+        for name, context in log_contexts
+    )
 
 
 def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
