@@ -341,6 +341,7 @@ make format     # Format code (ruff)
 - **Python**: 3.12+ with type hints
 - **Quotes**: Double quotes
 - **Indentation**: 4 spaces
+- **Import hygiene**: keep imports used and remove unused imports (`ruff` F401)
 
 ### Testing
 

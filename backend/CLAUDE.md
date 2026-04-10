@@ -508,6 +508,7 @@ For models with `supports_vision: true`:
 - Line length: 240 characters
 - Python 3.12+ with type hints
 - Double quotes, space indentation
+- Keep imports used and remove unused imports (`ruff` F401)
 
 ## Documentation
 
