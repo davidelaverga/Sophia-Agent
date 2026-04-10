@@ -14,6 +14,7 @@
 import { CallingState } from "@stream-io/video-react-sdk"
 import { useCallback, useEffect, useRef, useState } from "react"
 
+import { unlockAudioPlayback } from "../lib/audio-unlock"
 import { logger } from "../lib/error-logger"
 import { recordSophiaCaptureEvent } from "../lib/session-capture"
 import type { ContextMode, PresetType } from "../lib/session-types"
@@ -605,6 +606,11 @@ export function useStreamVoiceSession(
   // --- Actions -------------------------------------------------------------
 
   const startTalking = useCallback(async () => {
+    // Unlock browser audio policy SYNCHRONOUSLY, before any async work.
+    // This runs inside the user's click gesture — the browser will allow
+    // all subsequent audio playback (WebRTC tracks, <audio> elements).
+    unlockAudioPlayback()
+
     if (!userId) {
       setError("No user ID")
       setStage("error")
