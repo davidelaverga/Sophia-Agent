@@ -3,7 +3,7 @@ import { useCallback, useState } from 'react';
 import { haptic } from '../../hooks/useHaptics';
 import { errorCopy } from '../../lib/error-copy';
 import { logger } from '../../lib/error-logger';
-import type { MemoryCandidateV1, MemoryDecision, RecapArtifactsV1 } from '../../lib/recap-types';
+import type { MemoryDecision, RecapArtifactsV1 } from '../../lib/recap-types';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 
 type DecisionMap = Array<{ candidateId: string; decision: MemoryDecision; editedText?: string }>;
@@ -33,10 +33,6 @@ interface UseRecapMemoryActionsResult {
   handleDecisionChange: (candidateId: string, decision: MemoryDecision, editedText?: string) => void;
   handleSaveApproved: () => Promise<void>;
   dismissActionError: () => void;
-}
-
-function getDisplayText(candidate: MemoryCandidateV1): string {
-  return (candidate.text ?? candidate.memory ?? '').trim();
 }
 
 function isLegacyCandidateId(candidateId: string): boolean {
@@ -142,24 +138,21 @@ export function useRecapMemoryActions({
     setDecision(sessionId, candidateId, decision, nextEditedText);
 
     if (decision === 'approved') {
-      const candidate = artifacts?.memoryCandidates?.find((item) => item.id === candidateId);
-      if (candidate) {
-        showToast({
-          message: `Saved: “${getDisplayText(candidate)}”`,
-          variant: 'success',
-          durationMs: 1500,
-        });
-      }
-    }
-
-    if (decision === 'edited') {
       showToast({
-        message: 'Refined memory ready to save.',
+        message: 'Memory saved.',
         variant: 'success',
         durationMs: 1500,
       });
     }
-  }, [artifacts?.memoryCandidates, handleDiscardCandidate, sessionId, setDecision, showToast]);
+
+    if (decision === 'edited') {
+      showToast({
+        message: 'Refined memory saved.',
+        variant: 'success',
+        durationMs: 1500,
+      });
+    }
+  }, [handleDiscardCandidate, sessionId, setDecision, showToast]);
 
   const handleSaveApproved = useCallback(async () => {
     setIsSaving(true);
