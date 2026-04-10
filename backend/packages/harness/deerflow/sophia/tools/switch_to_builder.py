@@ -83,25 +83,41 @@ def _resolve_memory_snippets(state: SophiaState) -> list[str]:
     return fallbacks
 
 
-def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: SophiaState) -> str:
-    """Resolve user_id from runtime config/context first, then state fallback."""
+def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: SophiaState) -> tuple[str, str, dict[str, bool]]:
+    """Resolve user_id and return source diagnostics."""
+    configurable_user_id: str | None = None
+    context_user_id: str | None = None
+    state_user_id: str | None = None
+
     if runtime is not None:
         if runtime.config:
             configurable = runtime.config.get("configurable", {}) or {}
-            runtime_user_id = configurable.get("user_id")
-            if isinstance(runtime_user_id, str) and runtime_user_id.strip():
-                return validate_user_id(runtime_user_id)
+            candidate = configurable.get("user_id")
+            if isinstance(candidate, str) and candidate.strip():
+                configurable_user_id = candidate
 
         if runtime.context:
-            context_user_id = runtime.context.get("user_id")
-            if isinstance(context_user_id, str) and context_user_id.strip():
-                return validate_user_id(context_user_id)
+            candidate = runtime.context.get("user_id")
+            if isinstance(candidate, str) and candidate.strip():
+                context_user_id = candidate
 
-    state_user_id = state.get("user_id")
-    if isinstance(state_user_id, str) and state_user_id.strip():
-        return validate_user_id(state_user_id)
+    candidate = state.get("user_id")
+    if isinstance(candidate, str) and candidate.strip():
+        state_user_id = candidate
 
-    return validate_user_id("default_user")
+    diagnostics = {
+        "config_user_id_present": bool(configurable_user_id),
+        "context_user_id_present": bool(context_user_id),
+        "state_user_id_present": bool(state_user_id),
+    }
+
+    if configurable_user_id:
+        return validate_user_id(configurable_user_id), "runtime.config.configurable.user_id", diagnostics
+    if context_user_id:
+        return validate_user_id(context_user_id), "runtime.context.user_id", diagnostics
+    if state_user_id:
+        return validate_user_id(state_user_id), "state.user_id", diagnostics
+    return validate_user_id("default_user"), "default_user", diagnostics
 
 
 def _latest_emit_artifact_payload(messages: list[Any]) -> dict[str, Any] | None:
@@ -118,21 +134,27 @@ def _latest_emit_artifact_payload(messages: list[Any]) -> dict[str, Any] | None:
     return None
 
 
-def _resolve_companion_artifact(state: SophiaState) -> tuple[dict[str, Any], str]:
-    """Resolve freshest companion artifact and provenance label for diagnostics."""
+def _resolve_companion_artifact(state: SophiaState) -> tuple[dict[str, Any], str, dict[str, bool]]:
+    """Resolve freshest companion artifact and provenance diagnostics."""
     latest_emit_artifact = _latest_emit_artifact_payload(state.get("messages", []) or [])
-    if latest_emit_artifact:
-        return latest_emit_artifact, "latest_emit_artifact_tool_call"
-
     current_artifact = state.get("current_artifact")
-    if isinstance(current_artifact, dict) and current_artifact:
-        return current_artifact, "current_artifact_state"
-
     previous_artifact = state.get("previous_artifact")
-    if isinstance(previous_artifact, dict) and previous_artifact:
-        return previous_artifact, "previous_artifact_state"
 
-    return {}, "default_empty"
+    diagnostics = {
+        "latest_emit_artifact_present": isinstance(latest_emit_artifact, dict) and bool(latest_emit_artifact),
+        "current_artifact_present": isinstance(current_artifact, dict) and bool(current_artifact),
+        "previous_artifact_present": isinstance(previous_artifact, dict) and bool(previous_artifact),
+    }
+    if latest_emit_artifact:
+        return latest_emit_artifact, "latest_emit_artifact_tool_call", diagnostics
+
+    if isinstance(current_artifact, dict) and current_artifact:
+        return current_artifact, "current_artifact_state", diagnostics
+
+    if isinstance(previous_artifact, dict) and previous_artifact:
+        return previous_artifact, "previous_artifact_state", diagnostics
+
+    return {}, "default_empty", diagnostics
 
 
 def _build_duplicate_payload(existing_task: dict, task_type: str, trace_id: str) -> dict:
@@ -178,8 +200,14 @@ def switch_to_builder(
         )
         return json.dumps(_build_duplicate_payload(existing_task, task_type, trace_id))
 
-    companion_artifact, artifact_source = _resolve_companion_artifact(state)
-    user_id = _resolve_user_id(runtime, state)
+    companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
+    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(runtime, state)
+    handoff_resolution = {
+        "user_id_source": user_id_source,
+        "artifact_source": artifact_source,
+        **user_id_diagnostics,
+        **artifact_diagnostics,
+    }
     active_ritual = state.get("active_ritual")
     ritual_phase = state.get("ritual_phase")
     memory_snippets = _resolve_memory_snippets(state)
@@ -191,14 +219,24 @@ def switch_to_builder(
         parent_model = (runtime.config.get("metadata", {}) or {}).get("model_name")
 
     logger.info(
-        "[Builder] switch_to_builder queued: task_type=%s tone=%.1f ritual=%s thread_id=%s model=%s user_id=%s artifact_source=%s",
+        "[Builder] switch_to_builder queued: task_type=%s tone=%.1f ritual=%s thread_id=%s model=%s user_id=%s user_id_source=%s artifact_source=%s",
         task_type,
         companion_artifact.get("tone_estimate", 2.5),
         active_ritual,
         thread_id,
         parent_model,
         user_id,
+        user_id_source,
         artifact_source,
+    )
+    logger.info(
+        "[Builder] handoff resolution: config_user_id_present=%s context_user_id_present=%s state_user_id_present=%s latest_emit_artifact_present=%s current_artifact_present=%s previous_artifact_present=%s",
+        handoff_resolution["config_user_id_present"],
+        handoff_resolution["context_user_id_present"],
+        handoff_resolution["state_user_id_present"],
+        handoff_resolution["latest_emit_artifact_present"],
+        handoff_resolution["current_artifact_present"],
+        handoff_resolution["previous_artifact_present"],
     )
 
     delegation_context = {
@@ -209,6 +247,7 @@ def switch_to_builder(
         "relevant_memories": memory_snippets[:5],
         "active_ritual": active_ritual,
         "ritual_phase": ritual_phase,
+        "handoff_resolution": handoff_resolution,
     }
 
     from deerflow.agents.sophia_agent.builder_agent import _create_builder_agent
@@ -263,6 +302,7 @@ def switch_to_builder(
         "delegated_at": _utcnow_iso(),
         "status": "queued",
         "trace_id": trace_id,
+        "handoff_resolution": handoff_resolution,
     }
 
     payload = {
@@ -275,5 +315,6 @@ def switch_to_builder(
         "acknowledgement": "Builder task queued and running in the background.",
         "builder_task": builder_task,
         "delegation_context": delegation_context,
+        "handoff_resolution": handoff_resolution,
     }
     return json.dumps(payload)
