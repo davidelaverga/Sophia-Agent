@@ -16,20 +16,12 @@ AUTH_ME_TIMEOUT_SECONDS = 5.0
 
 
 def _is_explicit_bypass_enabled() -> bool:
-    raw_value = (
-        os.getenv("SOPHIA_AUTH_BYPASS")
-        or os.getenv("NEXT_PUBLIC_SOPHIA_AUTH_BYPASS")
-        or os.getenv("NEXT_PUBLIC_DEV_BYPASS_AUTH")
-    )
+    raw_value = os.getenv("SOPHIA_AUTH_BYPASS")
     return isinstance(raw_value, str) and raw_value.strip().lower() == "true"
 
 
 def _get_bypass_user_id() -> str:
-    return (
-        os.getenv("SOPHIA_USER_ID")
-        or os.getenv("NEXT_PUBLIC_SOPHIA_USER_ID")
-        or "local-dev-user"
-    ).strip()
+    return (os.getenv("SOPHIA_USER_ID") or "local-dev-user").strip()
 
 
 def _get_legacy_auth_base_url() -> str:

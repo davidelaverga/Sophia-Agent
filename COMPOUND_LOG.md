@@ -147,3 +147,28 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ### GEPA Log Entry
 - N/A
 
+## 2026-04-10 · [auth-runtime-cleanup-and-voice-connect-fix] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** backend + frontend + voice · **Spec:** docs/specs/04_backend_integration.md, docs/specs/05_frontend_ux.md, docs/specs/06_implementation_spec.md
+
+### What Changed
+- Verified the remaining local auth regressions were caused by process-scoped E2E bypass variables leaking into the live frontend and gateway runtime, then restarted both services in a clean environment with the bypass flags removed.
+- Confirmed the backend auth path now stays scoped to backend-only bypass variables while the frontend keeps its public dev-bypass handling isolated to local UI behavior.
+- Diagnosed the mic blink-and-stop failure to the gateway generating voice `call_id` values directly from mixed-case Better Auth user IDs, which violated the voice server contract that only allows lowercase `a-z`, digits, `_`, and `-`.
+- Patched `backend/app/gateway/routers/voice.py` to sanitize the user-derived `call_id` fragment before dispatching the voice session, and added regression coverage in `backend/tests/test_voice_gateway.py` for mixed-case user IDs.
+- Revalidated the targeted voice gateway suite locally (`24 passed`) and reran the deploy-oriented frontend checks: `pnpm lint` with warnings only, `pnpm typecheck`, and `BETTER_AUTH_SECRET=local-dev-secret pnpm build`.
+
+### What We Learned
+- Public E2E bypass flags do not need to be persisted at the OS level to break local auth; a contaminated shell is enough to split frontend identity from gateway identity.
+- A successful `/voice/connect` response is not proof that live voice bootstrapped correctly; the downstream voice session creation can still fail and leave the frontend with a brief start-stop blink.
+- Better Auth user IDs are not safe to reuse as downstream transport identifiers without normalization because external systems may impose stricter character contracts.
+- The strongest local release signal for this branch remains targeted backend tests plus frontend lint, typecheck, and production build, while backend repo-wide lint is still blocked by unrelated pre-existing issues.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+

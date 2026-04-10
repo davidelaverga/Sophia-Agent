@@ -124,15 +124,23 @@ class TestUserScopedAuthorization:
         assert resp.status_code == 200
         assert resp.json()["count"] == 0
 
-    def test_explicit_dev_bypass_keeps_local_user_scope(self, secure_client, mock_mem0, monkeypatch):
-        monkeypatch.setenv("NEXT_PUBLIC_DEV_BYPASS_AUTH", "true")
-        monkeypatch.setenv("NEXT_PUBLIC_SOPHIA_USER_ID", "dev-user")
+    def test_explicit_backend_bypass_keeps_local_user_scope(self, secure_client, mock_mem0, monkeypatch):
+        monkeypatch.setenv("SOPHIA_AUTH_BYPASS", "true")
+        monkeypatch.setenv("SOPHIA_USER_ID", "dev-user")
         mock_mem0.get_all.return_value = []
 
         resp = secure_client.get("/api/sophia/dev-user/memories/recent")
 
         assert resp.status_code == 200
         assert resp.json()["count"] == 0
+
+    def test_public_frontend_bypass_flags_do_not_enable_backend_bypass(self, secure_client, monkeypatch):
+        monkeypatch.setenv("NEXT_PUBLIC_DEV_BYPASS_AUTH", "true")
+        monkeypatch.setenv("NEXT_PUBLIC_SOPHIA_USER_ID", "e2e-user")
+
+        resp = secure_client.get("/api/sophia/e2e-user/memories/recent")
+
+        assert resp.status_code == 401
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -95,6 +96,13 @@ def _get_stream_api_secret() -> str:
     return secret
 
 
+def _sanitize_call_id_fragment(value: str) -> str:
+    """Normalize user-derived fragments to the voice server's call_id charset."""
+
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", value.lower()).strip("-_")
+    return normalized or "user"
+
+
 def _generate_stream_token(api_secret: str, user_id: str) -> str:
     """Generate a Stream user token using the getstream SDK.
 
@@ -149,7 +157,7 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
     api_key = _get_stream_api_key()
     api_secret = _get_stream_api_secret()
 
-    call_id = f"sophia-{user_id}-{uuid.uuid4().hex[:8]}"
+    call_id = f"sophia-{_sanitize_call_id_fragment(user_id)}-{uuid.uuid4().hex[:8]}"
     call_type = "default"
     token = _generate_stream_token(api_secret, user_id)
 

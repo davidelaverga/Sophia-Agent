@@ -1,5 +1,6 @@
 """Tests for the voice gateway endpoint."""
 
+import re
 from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
@@ -8,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.gateway.auth import require_authorized_user_scope
-from app.gateway.routers.voice import _dispatch_voice_agent, router
+from app.gateway.routers.voice import _dispatch_voice_agent, _get_voice_server_url, router
 
 app = FastAPI()
 app.include_router(router)
@@ -191,6 +192,18 @@ class TestVoiceConnect:
                 json={"platform": "voice"},
             )
         assert resp1.json()["call_id"] != resp2.json()["call_id"]
+
+    def test_mixed_case_user_id_is_normalized_for_call_id(self):
+        with _mock_dispatch_success():
+            resp = client.post(
+                "/api/sophia/krEDzdbKU9ingOR78XxYFLSI7iyQeF0h/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 200
+        call_id = resp.json()["call_id"]
+        assert call_id.startswith("sophia-kredzdbku9ingor78xxyflsi7iyqef0h-")
+        assert re.fullmatch(r"[a-z0-9_-]+", call_id)
 
     def test_reconnect_closes_previous_session_for_same_user(self):
         with patch(
@@ -420,7 +433,7 @@ async def test_dispatch_voice_agent_posts_runtime_context():
 
     assert session_id == "test-session-id"
     mock_client.post.assert_awaited_once_with(
-        "http://localhost:8000/calls/sophia-user_123-abc12345/sessions",
+        f"{_get_voice_server_url()}/calls/sophia-user_123-abc12345/sessions",
         json={
             "call_type": "default",
             "platform": "voice",
