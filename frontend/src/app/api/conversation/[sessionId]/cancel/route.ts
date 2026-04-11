@@ -1,6 +1,6 @@
 import { type NextRequest, NextResponse } from "next/server"
 
-import { getServerAuthToken } from "../../../../lib/auth/server-auth"
+import { getUserScopedAuthToken } from "../../../../lib/auth/server-auth"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
@@ -15,12 +15,19 @@ export async function POST(
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
   const { sessionId } = await params
-  const apiKey = await getServerAuthToken()
 
   if (!sessionId) {
     return NextResponse.json(
       { error: "Session ID is required" },
       { status: 400 }
+    )
+  }
+
+  const apiKey = await getUserScopedAuthToken()
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: 'Not authenticated' },
+      { status: 401 }
     )
   }
 

@@ -51,25 +51,13 @@ interface PoolRipple {
 interface SettledGlow {
   x: number;
   y: number;
+  color: [number, number, number];
 }
 
 interface ActiveDrop {
   id: string;
   startX: number;
   startY: number;
-}
-
-interface Mote {
-  x: number;
-  y: number;
-  vx: number;
-  vy: number;
-  size: number;
-  alpha: number;
-  phase: number;
-  speed: number;
-  depth: number;
-  hue: number;
 }
 
 interface FogWisp {
@@ -90,6 +78,7 @@ interface ApprovedMemoryRow {
   id: string;
   text: string;
   isEdited: boolean;
+  category?: string;
 }
 
 interface MemoryOrbProps {
@@ -103,6 +92,7 @@ interface MemoryOrbProps {
   onClick?: () => void;
   disabled?: boolean;
   orbRef?: RefObject<HTMLDivElement | null>;
+  pendingEditText?: string;
 }
 
 const KEEP_ANIMATION_MS = 700;
@@ -117,6 +107,7 @@ precision highp float;
 uniform float u_time;
 uniform vec2  u_res;
 uniform vec2  u_mouse;
+uniform vec4  u_comet[3];
 
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
 float noise(vec2 p){
@@ -160,6 +151,65 @@ void main(){
   col+=c_purple*neb*0.025;
   col+=c_teal*neb2*0.012;
 
+  float starY=smoothstep(0.05,0.30,uv.y);
+  vec3 starCol=vec3(0.0);
+  vec2 suv=uv*vec2(asp,1.0);
+  for(int layer=0;layer<4;layer++){
+    float fl=float(layer);
+    float scale=fl<0.5?400.0:fl<1.5?200.0:fl<2.5?90.0:45.0;
+    float thresh=fl<0.5?0.985:fl<1.5?0.988:fl<2.5?0.992:0.996;
+    float bright=fl<0.5?0.08:fl<1.5?0.15:fl<2.5?0.3:0.55;
+    float sharpness=fl<0.5?800.0:fl<1.5?400.0:fl<2.5?180.0:90.0;
+    vec2 cell=floor(suv*scale);
+    float rnd=hash(cell+fl*73.13);
+    if(rnd>thresh){
+      vec2 starPos=(cell+0.3+0.4*vec2(hash(cell+fl*11.0),hash(cell+fl*37.0)))/scale;
+      float d=length(suv-starPos)*scale;
+      float core=exp(-d*d*sharpness);
+      float halo=fl>2.5?exp(-d*d*18.0)*0.06:0.0;
+      float twinkle=0.7+0.3*sin(t*(0.3+fl*0.15)+rnd*80.0);
+      float temp=hash(cell+fl*200.0);
+      vec3 sc=temp<0.3?vec3(0.7,0.78,1.0):temp<0.6?vec3(1.0,0.93,0.82):vec3(0.88,0.85,1.0);
+      starCol+=sc*(core+halo)*bright*twinkle;
+    }
+  }
+  col+=starCol*starY;
+
+  for(int i=0;i<3;i++){
+    vec2 cp=u_comet[i].xy;
+    float cb=u_comet[i].z;
+    float cAng=u_comet[i].w;
+    if(cb<0.005) continue;
+    vec2 cDir=vec2(cos(cAng),sin(cAng));
+    vec2 cPerp=vec2(-cDir.y,cDir.x);
+    vec2 toP=uv-cp;
+    float along=dot(toP,cDir);
+    float perp=dot(toP,cPerp);
+    float headD=length(toP);
+    float headPinpoint=exp(-headD*headD*12000.0)*cb*3.5;
+    float headCore=exp(-headD*headD*3000.0)*cb*2.0;
+    float headGlow=exp(-headD*headD*500.0)*cb*0.7;
+    float headHalo=exp(-headD*headD*60.0)*cb*0.15;
+    float trailMask=smoothstep(0.0,0.5,-along);
+    float trailHot=exp(-perp*perp*18000.0)*1.0;
+    float trailCore=exp(-perp*perp*6000.0)*0.7;
+    float trailMid=exp(-perp*perp*1500.0)*0.35;
+    float trailWide=exp(-perp*perp*200.0)*0.06;
+    float trailFade=exp(along*6.0)*trailMask;
+    float trail=(trailHot+trailCore+trailMid+trailWide)*trailFade*cb;
+    float scatter=0.0;
+    for(int j=0;j<6;j++){
+      float fj=float(j);
+      float sOff=-0.015-fj*0.03;
+      vec2 sp=cp+cDir*sOff;
+      float sd=length(uv-sp+cPerp*(hash(sp+fj)*0.008-0.004));
+      scatter+=exp(-sd*sd*6000.0)*cb*0.12*(1.0-fj*0.14);
+    }
+    vec3 headCol=vec3(1.0,0.98,1.0)*headPinpoint+vec3(0.95,0.93,1.0)*headCore+vec3(0.75,0.70,0.95)*headGlow+vec3(0.50,0.45,0.70)*headHalo;
+    vec3 trailCol=mix(vec3(0.70,0.60,0.95),vec3(0.55,0.40,0.30),trailMask*0.7)*(trail+scatter);
+    col+=(headCol+trailCol)*starY;
+  }
+
   float a1=aurora(uv+mp*0.6,t,0.12,3.5,0.0);
   float a2=aurora(uv+mp*0.4,t,0.09,2.8,2.5);
   float a3=aurora(uv+mp*0.2,t,0.07,4.2,5.0);
@@ -181,7 +231,9 @@ uniform float u_time;
 uniform vec2  u_res;
 uniform vec4  u_r0,u_r1,u_r2,u_r3,u_r4,u_r5,u_r6,u_r7;
 uniform vec2  u_g0,u_g1,u_g2,u_g3;
+uniform vec3  u_gcolor0,u_gcolor1,u_gcolor2,u_gcolor3;
 uniform float u_gc;
+uniform vec4  u_comet[3];
 
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
 float noise(vec2 p){
@@ -217,12 +269,24 @@ float ripple(vec2 uv,vec4 r){
   return (ring+inner)*wave*fade*smoothstep(0.0,0.08,el);
 }
 
-float glow(vec2 uv,vec2 gp,float idx){
+vec3 glowCol(vec2 uv,vec2 gp,float idx,vec3 mc){
   float d=length(uv-gp);
   float g=exp(-d*d*55.0);
   float pulse=sin(u_time*0.4+idx*1.5)*0.12+0.88;
   float core=exp(-d*d*180.0)*0.08;
-  return (g*0.14+core)*pulse;
+  float surface=(g*0.14+core)*pulse;
+  float rings=0.0;
+  for(int i=0;i<3;i++){
+    float fi=float(i);
+    float phase=u_time*(0.12+fi*0.04)+idx*2.1+fi*1.4;
+    float r=sin(d*(22.0+fi*7.0)-phase)*0.5+0.5;
+    r*=exp(-d*d*(25.0+fi*8.0));
+    rings+=r*(0.055-fi*0.012);
+  }
+  float caust=fbm(uv*7.0+vec2(u_time*0.05,-u_time*0.035));
+  caust*=exp(-d*d*18.0)*0.05;
+  float pool=exp(-d*d*10.0)*0.07*pulse;
+  return mc*(surface+rings+caust+pool);
 }
 
 void main(){
@@ -276,12 +340,38 @@ void main(){
   col+=mix(c_amber,c_glow,0.5)*tr*0.55;
   col+=vec3(1.0,0.98,0.95)*pow(tr,2.5)*0.30;
 
-  float tg=0.0;
-  if(u_gc>0.5)tg+=glow(uv,u_g0,0.0);
-  if(u_gc>1.5)tg+=glow(uv,u_g1,1.0);
-  if(u_gc>2.5)tg+=glow(uv,u_g2,2.0);
-  if(u_gc>3.5)tg+=glow(uv,u_g3,3.0);
-  col+=mix(c_purple,c_amber,0.3)*tg;
+  vec3 tg=vec3(0.0);
+  if(u_gc>0.5)tg+=glowCol(uv,u_g0,0.0,u_gcolor0);
+  if(u_gc>1.5)tg+=glowCol(uv,u_g1,1.0,u_gcolor1);
+  if(u_gc>2.5)tg+=glowCol(uv,u_g2,2.0,u_gcolor2);
+  if(u_gc>3.5)tg+=glowCol(uv,u_g3,3.0,u_gcolor3);
+  col+=tg;
+
+  for(int i=0;i<3;i++){
+    vec2 cp=u_comet[i].xy;
+    float cb=u_comet[i].z;
+    float cAng=u_comet[i].w;
+    if(cb<0.005) continue;
+    vec2 cDir=vec2(cos(cAng),-sin(cAng));
+    vec2 cPerp=vec2(-cDir.y,cDir.x);
+    vec2 rcp=vec2(cp.x,1.0-cp.y)+distort*0.5;
+    vec2 toP=refUV-rcp;
+    float along=dot(toP,cDir);
+    float perp=dot(toP,cPerp);
+    float headD=length(toP);
+    float headBright=exp(-headD*headD*200.0)*cb*1.8;
+    float headSoft=exp(-headD*headD*30.0)*cb*0.5;
+    float headPool=exp(-headD*headD*8.0)*cb*0.15;
+    float trailMask=smoothstep(0.0,0.4,-along);
+    float trailW=exp(-perp*perp*600.0);
+    float trailSoft=exp(-perp*perp*80.0)*0.25;
+    float trailFade=exp(along*4.0)*trailMask;
+    float trail=(trailW+trailSoft)*trailFade*cb*0.5;
+    float horizFade=smoothstep(0.0,0.35,uv.y)*smoothstep(1.0,0.45,uv.y);
+    float rBright=(headBright+headSoft+headPool+trail)*horizFade*1.0;
+    vec3 rCol=mix(vec3(0.70,0.65,0.95),vec3(0.50,0.40,0.30),trailMask*0.5);
+    col+=rCol*rBright*depth;
+  }
 
   col+=c_glow*smoothstep(0.1,0.0,1.0-uv.y)*0.035;
   float sh=smoothstep(0.015,0.0,1.0-uv.y)*smoothstep(0.0,0.004,1.0-uv.y);
@@ -300,11 +390,95 @@ void main(){
 }
 `;
 
-const MOTE_COLORS: [number, number, number][] = [
-  [184, 164, 232],
-  [242, 179, 107],
-  [89, 190, 173],
-];
+/* ── Glass-sphere shader: Fresnel rim, internal caustics, specular highlights ── */
+const ORB_FRAG = `
+precision highp float;
+uniform float u_time;
+uniform vec2 u_res;
+uniform float u_active;
+
+float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+float noise(vec2 p){
+  vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
+  return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),
+             mix(hash(i+vec2(0,1)),hash(i+vec2(1,1)),f.x),f.y);
+}
+float fbm4(vec2 p){
+  float v=0.0,a=0.5;
+  for(int i=0;i<4;i++){v+=a*noise(p);p*=2.1;p+=100.0;a*=0.5;}
+  return v;
+}
+
+void main(){
+  vec2 uv=gl_FragCoord.xy/u_res;
+  vec2 p=(uv-0.5)*2.0;
+  float t=u_time;
+  float d=length(p);
+
+  if(d>1.0){gl_FragColor=vec4(0.0);return;}
+
+  float z=sqrt(1.0-d*d);
+  vec3 N=normalize(vec3(p,z));
+  vec3 V=vec3(0.0,0.0,1.0);
+  float fresnel=pow(1.0-dot(N,V),3.0);
+
+  vec3 cp=vec3(0.72,0.64,0.91);
+  vec3 ct=vec3(0.35,0.75,0.68);
+  vec3 cg=vec3(0.83,0.77,1.0);
+  vec3 ca=vec3(0.95,0.70,0.42);
+
+  vec3 col=vec3(0.012,0.012,0.025);
+
+  vec2 sUV=N.xy*0.5+0.5;
+  float c1=fbm4(sUV*3.0+t*0.06);
+  float c2=fbm4(sUV*4.2-t*0.05+vec2(5.0,3.0));
+  float c3=fbm4((sUV+vec2(sin(t*0.03),cos(t*0.04)))*2.5);
+  float energy=pow(c1*c2,1.5)*2.5;
+
+  float df=z*z;
+  float act=mix(0.25,1.0,u_active);
+
+  col+=cp*energy*0.22*df*act;
+  col+=ct*c3*0.10*df*act;
+  col+=ca*pow(c2,3.0)*0.06*df*act;
+
+  float ang=atan(p.y,p.x)+t*0.05;
+  float neb=fbm4(vec2(ang*0.8,d*3.0)+t*0.03);
+  col+=mix(cp,ct,neb)*neb*0.045*df*act;
+
+  float core=exp(-d*d*4.0);
+  float pulse=sin(t*0.35)*0.15+0.85;
+  col+=cg*core*0.04*pulse*act;
+
+  float rAng=atan(p.y,p.x);
+  vec3 rimC=mix(cp,ct,sin(rAng*2.0+t*0.25)*0.5+0.5);
+  col+=rimC*fresnel*0.55*act;
+
+  col.r+=fresnel*fresnel*0.06*sin(t*0.18+0.5);
+  col.b+=fresnel*fresnel*0.05*sin(t*0.22+2.0);
+
+  vec3 L1=normalize(vec3(-0.35,0.55,0.85));
+  float sp1=pow(max(dot(reflect(-L1,N),V),0.0),38.0);
+  col+=vec3(1.0,0.98,0.95)*sp1*0.38*act;
+
+  vec3 L2=normalize(vec3(0.4,-0.3,0.7));
+  float sp2=pow(max(dot(reflect(-L2,N),V),0.0),18.0);
+  col+=ct*sp2*0.10*act;
+
+  vec3 L3=normalize(vec3(0.0,0.6,0.5));
+  float sp3=pow(max(dot(reflect(-L3,N),V),0.0),60.0);
+  col+=cg*sp3*0.15*act;
+
+  float edge=smoothstep(1.0,0.95,d);
+  col=col/(col+0.50);
+  col=pow(col,vec3(0.90));
+
+  float alpha=mix(0.25,0.75,fresnel)*edge;
+  alpha=mix(alpha*0.35,alpha,u_active);
+
+  gl_FragColor=vec4(col,alpha);
+}
+`;
 
 const FOG_COLORS: [number, number, number][] = [
   [184, 164, 232],
@@ -317,28 +491,41 @@ function getCandidateText(candidate: MemoryCandidateV1) {
   return (candidate.text ?? candidate.memory ?? '').trim();
 }
 
-function getSettledGlowSlot(index: number): SettledGlow {
+/* ── Category → glow color map (bridges Recap pool ↔ Journal pool palette) ── */
+const CATEGORY_GLOW_COLORS: Record<string, [number, number, number]> = {
+  identity_profile:       [0.35, 0.75, 0.82],
+  relationship_context:   [0.83, 0.56, 0.69],
+  goals_projects:         [0.83, 0.69, 0.53],
+  emotional_patterns:     [0.72, 0.56, 0.79],
+  regulation_tools:       [0.35, 0.75, 0.68],
+  preferences_boundaries: [0.69, 0.63, 0.78],
+  wins_pride:             [0.95, 0.73, 0.45],
+  temporary_context:      [0.53, 0.67, 0.82],
+  decision:     [0.35, 0.75, 0.68],
+  pattern:      [0.55, 0.49, 0.78],
+  lesson:       [0.83, 0.69, 0.53],
+  feeling:      [0.83, 0.56, 0.69],
+  relationship: [0.53, 0.67, 0.82],
+  commitment:   [0.53, 0.82, 0.69],
+  preference:   [0.69, 0.63, 0.78],
+  fact:         [0.63, 0.71, 0.78],
+  ritual_context: [0.69, 0.61, 0.75],
+};
+const DEFAULT_GLOW_COLOR: [number, number, number] = [0.72, 0.64, 0.91];
+
+function getCategoryGlowColor(category?: string): [number, number, number] {
+  if (!category) return DEFAULT_GLOW_COLOR;
+  return CATEGORY_GLOW_COLORS[category] ?? DEFAULT_GLOW_COLOR;
+}
+
+function getSettledGlowSlot(index: number, color: [number, number, number] = DEFAULT_GLOW_COLOR): SettledGlow {
   const offsets = [-0.22, -0.08, 0.08, 0.22];
   const lanes = [0.64, 0.72, 0.68, 0.76];
   return {
     x: 0.5 + offsets[index % offsets.length] + Math.floor(index / offsets.length) * 0.02,
     y: lanes[index % lanes.length],
+    color,
   };
-}
-
-function createMotes(w: number, h: number): Mote[] {
-  return Array.from({ length: 100 }, () => ({
-    x: Math.random() * w,
-    y: Math.random() * h,
-    vx: (Math.random() - 0.5) * 0.03,
-    vy: -Math.random() * 0.025 - 0.008,
-    size: Math.random() * 1.3 + 0.3,
-    alpha: Math.random() * 0.35 + 0.06,
-    phase: Math.random() * Math.PI * 2,
-    speed: 0.2 + Math.random() * 0.5,
-    depth: Math.random(),
-    hue: Math.floor(Math.random() * 3),
-  }));
 }
 
 function createFogWisps(w: number, h: number): FogWisp[] {
@@ -411,17 +598,63 @@ function setupQuad(gl: WebGLRenderingContext, program: WebGLProgram) {
   gl.vertexAttribPointer(location, 2, gl.FLOAT, false, 0, 0);
 }
 
+const MAX_COMETS = 3;
+type CometState = { x: number; y: number; dx: number; dy: number; angle: number; life: number; maxLife: number; peak: number };
+
+const sharedCometData = { comets: [] as CometState[], uniform: new Float32Array(MAX_COMETS * 4) };
+
+function spawnComet() {
+  const side = Math.random();
+  let x: number, y: number, angle: number;
+  if (side < 0.5) {
+    x = -0.08;
+    y = 0.6 + Math.random() * 0.32;
+    angle = -0.15 + Math.random() * 0.3;
+  } else {
+    x = 1.08;
+    y = 0.6 + Math.random() * 0.32;
+    angle = Math.PI - 0.15 + Math.random() * 0.3;
+  }
+  const speed = 0.08 + Math.random() * 0.12;
+  sharedCometData.comets.push({
+    x, y, dx: Math.cos(angle) * speed, dy: Math.sin(angle) * speed,
+    angle, life: 0, maxLife: 3.0 + Math.random() * 3.0, peak: 0.6 + Math.random() * 0.4,
+  });
+  while (sharedCometData.comets.length > MAX_COMETS) sharedCometData.comets.shift();
+}
+
+function updateComets(dt: number) {
+  const { comets, uniform } = sharedCometData;
+  for (let i = comets.length - 1; i >= 0; i--) {
+    const c = comets[i];
+    c.life += dt;
+    c.x += c.dx * dt;
+    c.y += c.dy * dt;
+    if (c.life > c.maxLife) comets.splice(i, 1);
+  }
+  uniform.fill(0);
+  for (let i = 0; i < Math.min(comets.length, MAX_COMETS); i++) {
+    const c = comets[i];
+    const phase = c.life / c.maxLife;
+    const envelope = phase < 0.08 ? phase / 0.08 : Math.pow(1 - phase, 2.2);
+    uniform[i * 4] = c.x;
+    uniform[i * 4 + 1] = c.y;
+    uniform[i * 4 + 2] = envelope * c.peak;
+    uniform[i * 4 + 3] = c.angle;
+  }
+}
+
 function AuroraBackground() {
   const glRef = useRef<HTMLCanvasElement>(null);
-  const moteRef = useRef<HTMLCanvasElement>(null);
   const stateRef = useRef<{
     gl: WebGLRenderingContext;
     uniforms: Record<string, WebGLUniformLocation | null>;
   } | null>(null);
-  const motesRef = useRef<Mote[]>([]);
   const mouseRef = useRef({ x: 0.5, y: 0.5 });
   const rafRef = useRef(0);
   const t0 = useRef(performance.now());
+  const lastFrameRef = useRef(0);
+  const nextCometRef = useRef(8 + Math.random() * 10);
 
   useEffect(() => {
     if (IS_TEST_ENV) {
@@ -429,8 +662,7 @@ function AuroraBackground() {
     }
 
     const glCanvas = glRef.current;
-    const moteCanvas = moteRef.current;
-    if (!glCanvas || !moteCanvas) {
+    if (!glCanvas) {
       return;
     }
 
@@ -442,11 +674,6 @@ function AuroraBackground() {
       glCanvas.height = Math.round(h * dpr);
       glCanvas.style.width = `${w}px`;
       glCanvas.style.height = `${h}px`;
-      moteCanvas.width = w;
-      moteCanvas.height = h;
-      if (!motesRef.current.length) {
-        motesRef.current = createMotes(w, h);
-      }
     };
     resize();
     window.addEventListener('resize', resize);
@@ -469,6 +696,7 @@ function AuroraBackground() {
         t: gl.getUniformLocation(program, 'u_time'),
         r: gl.getUniformLocation(program, 'u_res'),
         m: gl.getUniformLocation(program, 'u_mouse'),
+        comet: gl.getUniformLocation(program, 'u_comet[0]'),
       },
     };
 
@@ -480,8 +708,18 @@ function AuroraBackground() {
 
     const loop = () => {
       rafRef.current = requestAnimationFrame(loop);
-      const t = (performance.now() - t0.current) / 1000;
+      const now = performance.now();
+      const t = (now - t0.current) / 1000;
+      const dt = Math.min(0.05, lastFrameRef.current > 0 ? (now - lastFrameRef.current) * 0.001 : 0.016);
+      lastFrameRef.current = now;
       const { x, y } = mouseRef.current;
+
+      nextCometRef.current -= dt;
+      if (nextCometRef.current <= 0) {
+        spawnComet();
+        nextCometRef.current = 12 + Math.random() * 18;
+      }
+      updateComets(dt);
 
       if (stateRef.current) {
         const { gl: g, uniforms } = stateRef.current;
@@ -489,47 +727,9 @@ function AuroraBackground() {
         g.uniform1f(uniforms.t, t);
         g.uniform2f(uniforms.r, g.canvas.width, g.canvas.height);
         g.uniform2f(uniforms.m, x, 1 - y);
+        if (uniforms.comet) g.uniform4fv(uniforms.comet, sharedCometData.uniform);
         g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
       }
-
-      const ctx = moteCanvas.getContext('2d');
-      if (!ctx) {
-        return;
-      }
-
-      const w = moteCanvas.width;
-      const h = moteCanvas.height;
-      ctx.clearRect(0, 0, w, h);
-      ctx.globalCompositeOperation = 'screen';
-      for (const mote of motesRef.current) {
-        mote.x += mote.vx + (x - 0.5) * 0.12 * (0.3 + mote.depth * 0.7);
-        mote.y += mote.vy;
-        if (mote.x < -10) mote.x = w + 10;
-        if (mote.x > w + 10) mote.x = -10;
-        if (mote.y < -10) {
-          mote.y = h + 10;
-          mote.x = Math.random() * w;
-        }
-        if (mote.y > h + 10) mote.y = -10;
-
-        const twinkle = (Math.sin(t * mote.speed + mote.phase) * 0.5 + 0.5) ** 2;
-        const alpha = mote.alpha * twinkle * 0.4;
-        if (alpha < 0.006) {
-          continue;
-        }
-        const color = MOTE_COLORS[mote.hue];
-        const size = mote.size * (0.85 + twinkle * 0.3);
-        const gradient = ctx.createRadialGradient(mote.x, mote.y, 0, mote.x, mote.y, size * 5);
-        gradient.addColorStop(0, `rgba(${color[0]},${color[1]},${color[2]},${alpha * 0.5})`);
-        gradient.addColorStop(1, `rgba(${color[0]},${color[1]},${color[2]},0)`);
-        ctx.fillStyle = gradient;
-        ctx.fillRect(mote.x - size * 5, mote.y - size * 5, size * 10, size * 10);
-        ctx.beginPath();
-        ctx.arc(mote.x, mote.y, size * 0.4, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,250,245,${alpha * 0.8})`;
-        ctx.fill();
-      }
-      ctx.globalCompositeOperation = 'source-over';
     };
 
     rafRef.current = requestAnimationFrame(loop);
@@ -544,7 +744,6 @@ function AuroraBackground() {
   return (
     <div className="fixed inset-0 z-0" aria-hidden="true">
       <canvas ref={glRef} className="absolute inset-0 h-full w-full" />
-      <canvas ref={moteRef} className="absolute inset-0 h-full w-full mix-blend-screen" style={{ opacity: 0.6 }} />
     </div>
   );
 }
@@ -616,6 +815,10 @@ function CosmicPool({
     for (let index = 0; index < 4; index += 1) {
       uniforms[`g${index}`] = gl.getUniformLocation(program, `u_g${index}`);
     }
+    for (let index = 0; index < 4; index += 1) {
+      uniforms[`gc${index}`] = gl.getUniformLocation(program, `u_gcolor${index}`);
+    }
+    uniforms.comet = gl.getUniformLocation(program, 'u_comet[0]');
     glState.current = { gl, uniforms };
 
     const loop = () => {
@@ -642,8 +845,11 @@ function CosmicPool({
       const settled = settledRef.current;
       for (let index = 0; index < 4; index += 1) {
         g.uniform2f(loc[`g${index}`], settled[index]?.x ?? -2, settled[index]?.y ?? -2);
+        const sc = settled[index]?.color ?? [0.72, 0.64, 0.91];
+        g.uniform3f(loc[`gc${index}`], sc[0], sc[1], sc[2]);
       }
       g.uniform1f(loc.gc, Math.min(settled.length, 4));
+      if (loc.comet) g.uniform4fv(loc.comet, sharedCometData.uniform);
       g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
     };
 
@@ -968,16 +1174,16 @@ function OrbMistCanvas({ active }: { active: boolean }) {
     const radius = size / 2 - 4;
 
     if (!particles.current.length) {
-      particles.current = Array.from({ length: active ? 16 : 5 }, () => {
+      particles.current = Array.from({ length: active ? 24 : 6 }, () => {
         const angle = Math.random() * Math.PI * 2;
-        const distance = Math.random() * radius * 0.65;
+        const distance = Math.random() * radius * 0.7;
         return {
           x: cx + Math.cos(angle) * distance,
           y: cy + Math.sin(angle) * distance,
-          vx: (Math.random() - 0.5) * 0.12,
-          vy: (Math.random() - 0.5) * 0.10,
-          r: 8 + Math.random() * 22,
-          a: 0.02 + Math.random() * 0.035,
+          vx: (Math.random() - 0.5) * 0.14,
+          vy: (Math.random() - 0.5) * 0.12,
+          r: 6 + Math.random() * 25,
+          a: 0.025 + Math.random() * 0.04,
           phase: Math.random() * Math.PI * 2,
         };
       });
@@ -998,45 +1204,106 @@ function OrbMistCanvas({ active }: { active: boolean }) {
       ctx.clip();
       ctx.globalCompositeOperation = 'screen';
 
-      for (const particle of particles.current) {
-        particle.x += particle.vx + Math.sin(t * 0.3 + particle.phase) * 0.06;
-        particle.y += particle.vy + Math.cos(t * 0.25 + particle.phase) * 0.05;
+      const pts = particles.current;
+
+      // Draw particles
+      for (const particle of pts) {
+        particle.x += particle.vx + Math.sin(t * 0.3 + particle.phase) * 0.07;
+        particle.y += particle.vy + Math.cos(t * 0.25 + particle.phase) * 0.06;
         const dx = particle.x - cx;
         const dy = particle.y - cy;
         if (Math.sqrt(dx * dx + dy * dy) > radius * 0.72) {
-          particle.vx -= dx * 0.0008;
-          particle.vy -= dy * 0.0008;
+          particle.vx -= dx * 0.001;
+          particle.vy -= dy * 0.001;
         }
         const pulse = (Math.sin(t * 0.5 + particle.phase) * 0.5 + 0.5) * 0.5 + 0.5;
         const alpha = particle.a * pulse;
         const gradient = ctx.createRadialGradient(particle.x, particle.y, 0, particle.x, particle.y, particle.r);
         gradient.addColorStop(0, `rgba(200,180,240,${alpha})`);
-        gradient.addColorStop(0.5, `rgba(230,170,195,${alpha * 0.5})`);
+        gradient.addColorStop(0.4, `rgba(230,170,195,${alpha * 0.45})`);
         gradient.addColorStop(1, 'rgba(89,190,173,0)');
         ctx.fillStyle = gradient;
         ctx.fillRect(particle.x - particle.r, particle.y - particle.r, particle.r * 2, particle.r * 2);
       }
 
+      // Energy tendrils between nearby particles
       if (active) {
-        for (let index = 0; index < 6; index += 1) {
-          const angle = t * 0.18 * (index % 2 === 0 ? 1 : -1) + (index / 6) * Math.PI * 2;
-          const orbit = 35 + index * 18 + Math.sin(t * 0.35 + index) * 12;
-          const sx = cx + Math.cos(angle) * orbit;
-          const sy = cy + Math.sin(angle) * orbit;
+        ctx.lineWidth = 0.6;
+        for (let i = 0; i < pts.length; i += 1) {
+          for (let j = i + 1; j < pts.length; j += 1) {
+            const dx = pts[i].x - pts[j].x;
+            const dy = pts[i].y - pts[j].y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            if (dist < 90) {
+              const strength = (1 - dist / 90) * 0.08;
+              const midX = (pts[i].x + pts[j].x) / 2 + Math.sin(t * 0.4 + i) * 8;
+              const midY = (pts[i].y + pts[j].y) / 2 + Math.cos(t * 0.35 + j) * 8;
+              ctx.beginPath();
+              ctx.moveTo(pts[i].x, pts[i].y);
+              ctx.quadraticCurveTo(midX, midY, pts[j].x, pts[j].y);
+              ctx.strokeStyle = `rgba(184,164,232,${strength})`;
+              ctx.stroke();
+            }
+          }
+        }
+      }
+
+      // Orbiting sparks with trails
+      if (active) {
+        for (let index = 0; index < 8; index += 1) {
+          const dir = index % 2 === 0 ? 1 : -1;
+          const speed = 0.15 + (index % 3) * 0.04;
+          const angle = t * speed * dir + (index / 8) * Math.PI * 2;
+          const orbitR = 30 + index * 16 + Math.sin(t * 0.35 + index) * 14;
+          const sx = cx + Math.cos(angle) * orbitR;
+          const sy = cy + Math.sin(angle) * orbitR;
           const spark = (Math.sin(t * 0.7 + index * 1.7) * 0.5 + 0.5) ** 2;
-          if (spark < 0.08) {
+          if (spark < 0.06) {
             continue;
           }
+
+          // Spark trail (3 fading positions)
+          for (let trail = 0; trail < 3; trail += 1) {
+            const ta = angle - dir * trail * 0.12;
+            const tx = cx + Math.cos(ta) * orbitR;
+            const ty = cy + Math.sin(ta) * orbitR;
+            const trailAlpha = spark * 0.06 * (1 - trail * 0.35);
+            const tg = ctx.createRadialGradient(tx, ty, 0, tx, ty, 2.5);
+            tg.addColorStop(0, `rgba(200,180,240,${trailAlpha})`);
+            tg.addColorStop(1, 'rgba(200,180,240,0)');
+            ctx.fillStyle = tg;
+            ctx.fillRect(tx - 2.5, ty - 2.5, 5, 5);
+          }
+
+          // Bright spark core
           ctx.beginPath();
-          ctx.arc(sx, sy, 1, 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(255,248,240,${spark * 0.22})`;
+          ctx.arc(sx, sy, 1.2, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,248,240,${spark * 0.28})`;
           ctx.fill();
-          const sparkGradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, 3.5);
-          sparkGradient.addColorStop(0, `rgba(200,180,240,${spark * 0.12})`);
+          const sparkGradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, 4);
+          sparkGradient.addColorStop(0, `rgba(200,180,240,${spark * 0.15})`);
           sparkGradient.addColorStop(1, 'rgba(200,180,240,0)');
           ctx.fillStyle = sparkGradient;
-          ctx.fillRect(sx - 3.5, sy - 3.5, 7, 7);
+          ctx.fillRect(sx - 4, sy - 4, 8, 8);
         }
+
+        // Rotating energy ring at 65% radius
+        const ringR = radius * 0.65;
+        const ringPulse = Math.sin(t * 0.25) * 0.3 + 0.7;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(184,164,232,${0.025 * ringPulse})`;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+
+        // Second ring, counter-phase
+        const ringR2 = radius * 0.45;
+        const ringPulse2 = Math.sin(t * 0.3 + 1.5) * 0.3 + 0.7;
+        ctx.beginPath();
+        ctx.arc(cx, cy, ringR2, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(89,190,173,${0.02 * ringPulse2})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
       }
 
       ctx.restore();
@@ -1046,30 +1313,220 @@ function OrbMistCanvas({ active }: { active: boolean }) {
     return () => cancelAnimationFrame(rafRef.current);
   }, [active]);
 
-  return <canvas ref={ref} className="pointer-events-none absolute inset-0 h-full w-full rounded-full" style={{ opacity: active ? 0.65 : 0.25 }} />;
+  return <canvas ref={ref} className="pointer-events-none absolute inset-0 h-full w-full rounded-full" style={{ opacity: active ? 0.75 : 0.25 }} />;
+}
+
+/* ── WebGL glass-sphere renderer: Fresnel rim, caustics, specular highlights ── */
+function OrbGlassCanvas({ active }: { active: boolean }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const stateRef = useRef<{
+    gl: WebGLRenderingContext;
+    uniforms: Record<string, WebGLUniformLocation | null>;
+  } | null>(null);
+  const rafRef = useRef(0);
+  const t0 = useRef(performance.now());
+  const activeRef = useRef(active);
+  activeRef.current = active;
+
+  useEffect(() => {
+    if (IS_TEST_ENV) return;
+    const canvas = ref.current;
+    if (!canvas) return;
+
+    const size = 512;
+    canvas.width = size;
+    canvas.height = size;
+
+    const gl = canvas.getContext('webgl', { alpha: true, premultipliedAlpha: false, antialias: false });
+    if (!gl) return;
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+
+    const program = buildProgram(gl, VERT, ORB_FRAG);
+    if (!program) return;
+
+    gl.useProgram(program);
+    setupQuad(gl, program);
+    stateRef.current = {
+      gl,
+      uniforms: {
+        t: gl.getUniformLocation(program, 'u_time'),
+        r: gl.getUniformLocation(program, 'u_res'),
+        a: gl.getUniformLocation(program, 'u_active'),
+      },
+    };
+
+    const loop = () => {
+      rafRef.current = requestAnimationFrame(loop);
+      const t = (performance.now() - t0.current) / 1000;
+      const s = stateRef.current;
+      if (!s) return;
+      const { gl: g, uniforms } = s;
+      g.viewport(0, 0, g.canvas.width, g.canvas.height);
+      g.clearColor(0, 0, 0, 0);
+      g.clear(g.COLOR_BUFFER_BIT);
+      g.uniform1f(uniforms.t, t);
+      g.uniform2f(uniforms.r, g.canvas.width, g.canvas.height);
+      g.uniform1f(uniforms.a, activeRef.current ? 1.0 : 0.0);
+      g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
+    };
+
+    rafRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, []);
+
+  return (
+    <canvas
+      ref={ref}
+      className="pointer-events-none absolute inset-0 h-full w-full rounded-full"
+    />
+  );
+}
+
+/* ── Canvas particle burst for keep / discard exit FX ── */
+function OrbExitFXCanvas({ type, active }: { type: 'keep' | 'discard'; active: boolean }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  const rafRef = useRef(0);
+  const particlesRef = useRef<Array<{
+    x: number; y: number; vx: number; vy: number;
+    r: number; a: number; life: number; maxLife: number;
+    color: number;
+  }>>([]);
+  const startedRef = useRef(false);
+
+  useEffect(() => {
+    if (!active || IS_TEST_ENV) return;
+    const canvas = ref.current;
+    if (!canvas) return;
+
+    const size = 512;
+    canvas.width = size;
+    canvas.height = size;
+    const cx = size / 2;
+    const cy = size / 2;
+
+    if (!startedRef.current) {
+      startedRef.current = true;
+      const count = type === 'keep' ? 35 : 45;
+      particlesRef.current = Array.from({ length: count }, () => {
+        const angle = Math.random() * Math.PI * 2;
+        const speed = type === 'keep'
+          ? 0.3 + Math.random() * 0.6  // Keep: gentle inward then up
+          : 1.8 + Math.random() * 3.5; // Discard: explosive outward
+        const startDist = type === 'keep' ? 60 + Math.random() * 80 : Math.random() * 20;
+        return {
+          x: cx + Math.cos(angle) * startDist,
+          y: cy + Math.sin(angle) * startDist,
+          vx: type === 'keep'
+            ? -Math.cos(angle) * speed
+            : Math.cos(angle) * speed,
+          vy: type === 'keep'
+            ? -Math.sin(angle) * speed - 1.5
+            : Math.sin(angle) * speed,
+          r: 1.5 + Math.random() * 3,
+          a: 0.4 + Math.random() * 0.5,
+          life: 0,
+          maxLife: type === 'keep' ? 40 + Math.random() * 25 : 25 + Math.random() * 20,
+          color: Math.floor(Math.random() * 3),
+        };
+      });
+    }
+
+    const colors: [number, number, number][] = [
+      [184, 164, 232], // purple
+      [89, 190, 173],  // teal
+      [212, 196, 255], // light purple
+    ];
+
+    const loop = () => {
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.clearRect(0, 0, size, size);
+      ctx.globalCompositeOperation = 'screen';
+
+      let alive = 0;
+      for (const p of particlesRef.current) {
+        p.life += 1;
+        if (p.life > p.maxLife) continue;
+        alive += 1;
+
+        p.x += p.vx;
+        p.y += p.vy;
+
+        if (type === 'keep') {
+          // Spiral inward then upward
+          const dx = cx - p.x;
+          const dy = cy - p.y;
+          p.vx += dx * 0.002;
+          p.vy += dy * 0.002 - 0.08;
+        } else {
+          // Decelerate and fade
+          p.vx *= 0.96;
+          p.vy *= 0.96;
+        }
+
+        const progress = p.life / p.maxLife;
+        const alpha = p.a * (1 - progress * progress);
+        const c = colors[p.color];
+        const gradient = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r * 3);
+        gradient.addColorStop(0, `rgba(${c[0]},${c[1]},${c[2]},${alpha})`);
+        gradient.addColorStop(0.4, `rgba(${c[0]},${c[1]},${c[2]},${alpha * 0.4})`);
+        gradient.addColorStop(1, `rgba(${c[0]},${c[1]},${c[2]},0)`);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(p.x - p.r * 3, p.y - p.r * 3, p.r * 6, p.r * 6);
+
+        // Bright core
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r * 0.3, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(255,250,245,${alpha * 0.6})`;
+        ctx.fill();
+      }
+
+      if (alive > 0) {
+        rafRef.current = requestAnimationFrame(loop);
+      }
+    };
+
+    rafRef.current = requestAnimationFrame(loop);
+    return () => {
+      cancelAnimationFrame(rafRef.current);
+      startedRef.current = false;
+      particlesRef.current = [];
+    };
+  }, [active, type]);
+
+  if (!active) return null;
+
+  return (
+    <canvas
+      ref={ref}
+      className="pointer-events-none absolute inset-[-20%] z-[25] h-[140%] w-[140%] rounded-full"
+    />
+  );
 }
 
 function ProgressIndicator({ total, reviewed }: { total: number; reviewed: number }) {
   return (
-    <div className="mb-1 mt-6 flex items-center gap-3">
-      <div className="flex items-center gap-2">
+    <div className="mb-2 mt-5 flex items-center gap-3">
+      <div className="flex items-center gap-1.5">
         {Array.from({ length: total }, (_, index) => (
           <div
             key={index}
-            className="transition-all duration-500"
+            className="transition-all duration-700 ease-out"
             style={{
-              width: index < reviewed ? 20 : 6,
+              width: index < reviewed ? 22 : 6,
               height: 3,
               borderRadius: 2,
               background: index < reviewed
-                ? 'linear-gradient(to right, color-mix(in srgb, var(--sophia-purple) 50%, transparent), color-mix(in srgb, var(--sophia-glow) 40%, transparent))'
-                : 'var(--cosmic-text-faint)',
-              boxShadow: index < reviewed ? '0 0 8px color-mix(in srgb, var(--sophia-purple) 15%, transparent)' : 'none',
+                ? 'linear-gradient(to right, color-mix(in srgb, var(--sophia-purple) 55%, transparent), color-mix(in srgb, var(--sophia-glow) 45%, transparent))'
+                : 'color-mix(in srgb, var(--cosmic-text-faint) 60%, transparent)',
+              boxShadow: index < reviewed ? '0 0 10px color-mix(in srgb, var(--sophia-purple) 18%, transparent)' : 'none',
             }}
           />
         ))}
       </div>
-      <span className="text-[9px] tracking-[0.1em]" style={{ color: 'var(--cosmic-text-faint)' }}>{reviewed}/{total}</span>
+      <span className="text-[9px] tabular-nums tracking-[0.1em]" style={{ color: 'var(--cosmic-text-muted)' }}>{reviewed}/{total}</span>
     </div>
   );
 }
@@ -1085,26 +1542,28 @@ function MemoryOrb({
   onClick,
   disabled,
   orbRef,
+  pendingEditText,
 }: MemoryOrbProps) {
   const isCenter = position === 'center';
   const [showReason, setShowReason] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
-  const [editValue, setEditValue] = useState(getCandidateText(candidate));
+  const [editValue, setEditValue] = useState(pendingEditText || getCandidateText(candidate));
   const category = getRecapCategoryPresentation(candidate.category);
-  const displayText = getCandidateText(candidate);
+  const displayText = pendingEditText || getCandidateText(candidate);
+  const isLongText = displayText.length > 150;
   const confidence = candidate.confidence;
 
   useEffect(() => {
     if (!isEditing) {
-      setEditValue(displayText);
+      setEditValue(pendingEditText || getCandidateText(candidate));
     }
-  }, [displayText, isEditing]);
+  }, [candidate, isEditing, pendingEditText]);
 
   const canSaveEdit = editValue.trim().length > 0 && !disabled;
 
   const positionClasses = useMemo(() => {
     if (isExiting && exitType === 'keep') return 'translate-y-[-80px] scale-75 opacity-0';
-    if (isExiting && exitType === 'discard') return 'scale-[0.85] opacity-0 blur-md';
+    if (isExiting && exitType === 'discard') return 'scale-[0.3] opacity-0 blur-xl rotate-12 -translate-y-6';
     switch (position) {
       case 'left':
         return '-translate-x-[95%] translate-y-[8px] scale-[0.38]';
@@ -1121,8 +1580,8 @@ function MemoryOrb({
         'absolute transition-all ease-out',
         isCenter ? 'z-20 duration-600' : 'z-10 duration-700',
         positionClasses,
-        !isCenter && 'opacity-[0.08] blur-[8px]',
-        !isCenter && !disabled && 'cursor-pointer hover:opacity-[0.15] hover:blur-[4px]'
+        !isCenter && 'opacity-[0.18] blur-[4px]',
+        !isCenter && !disabled && 'cursor-pointer hover:opacity-[0.30] hover:blur-[2px]'
       )}
       onClick={!isCenter ? onClick : undefined}
       role={isCenter ? 'article' : 'button'}
@@ -1166,20 +1625,36 @@ function MemoryOrb({
         />
       )}
 
+      {isExiting && exitType === 'discard' && (
+        <div
+          className="absolute inset-0 z-30 rounded-full pointer-events-none animate-[discardFlash_600ms_ease-out_forwards]"
+          style={{
+            background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 15%, transparent) 0%, color-mix(in srgb, var(--cosmic-teal) 5%, transparent) 40%, transparent 70%)',
+            filter: 'blur(20px)',
+            transform: 'scale(2)',
+          }}
+        />
+      )}
+
+      {/* Canvas particle burst for keep / discard */}
+      {isExiting && exitType && (
+        <OrbExitFXCanvas type={exitType} active />
+      )}
+
       {isCenter && !isExiting && confidence != null && (
         <svg
           className="pointer-events-none absolute inset-[-6px] -z-[5] h-[calc(100%+12px)] w-[calc(100%+12px)]"
           viewBox="0 0 100 100"
           style={{ transform: 'rotate(-90deg)' }}
         >
-          <circle cx="50" cy="50" r="49" fill="none" stroke="rgba(255,255,255,0.02)" strokeWidth="0.3" />
+          <circle cx="50" cy="50" r="49" fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth="0.8" />
           <circle
             cx="50"
             cy="50"
             r="49"
             fill="none"
             stroke="url(#confGrad)"
-            strokeWidth="0.5"
+            strokeWidth="1.5"
             strokeDasharray={`${confidence * 308} 308`}
             strokeLinecap="round"
             className="transition-all duration-1000 ease-out"
@@ -1198,67 +1673,25 @@ function MemoryOrb({
         className={cn(
           'relative overflow-hidden rounded-full',
           isCenter
-            ? 'h-[260px] w-[260px] sm:h-[310px] sm:w-[310px] md:h-[350px] md:w-[350px]'
+            ? 'h-[310px] w-[310px] sm:h-[370px] sm:w-[370px] md:h-[420px] md:w-[420px]'
             : 'h-[260px] w-[260px] sm:h-[310px] sm:w-[310px]'
         )}
         style={{
           background: isCenter
-            ? 'radial-gradient(ellipse 120% 100% at 50% 100%, color-mix(in srgb, var(--sophia-purple) 7%, transparent) 0%, transparent 40%), radial-gradient(ellipse 100% 120% at 50% 0%, color-mix(in srgb, var(--cosmic-teal) 3%, transparent) 0%, transparent 35%), radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 92%, black 8%), color-mix(in srgb, var(--bg) 95%, black 5%))'
+            ? 'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 85%, black 15%), color-mix(in srgb, var(--bg) 90%, black 10%))'
             : 'radial-gradient(circle at 50% 55%, color-mix(in srgb, var(--card-bg) 76%, black 24%), color-mix(in srgb, var(--bg) 85%, black 15%) 85%)',
           boxShadow: isCenter
-            ? 'inset 0 -28px 65px -28px color-mix(in srgb, var(--sophia-purple) 10%, transparent), inset 0 28px 45px -28px color-mix(in srgb, var(--cosmic-teal) 4%, transparent), inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent), 0 14px 45px -25px color-mix(in srgb, var(--bg) 55%, transparent)'
+            ? 'inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent), 0 14px 45px -25px color-mix(in srgb, var(--bg) 55%, transparent)'
             : 'inset 0 -15px 30px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent), inset 0 0 0 1px var(--cosmic-border-soft)',
-          backdropFilter: isCenter ? 'blur(2px)' : undefined,
         }}
       >
+        {/* WebGL glass sphere with Fresnel rim, caustics, specular */}
+        <OrbGlassCanvas active={isCenter} />
+
+        {/* Canvas 2D particle mist + orbiting sparks */}
         <OrbMistCanvas active={isCenter} />
 
-        <div
-          className="pointer-events-none absolute rounded-full"
-          style={{
-            top: '4%',
-            left: '12%',
-            width: '42%',
-            height: '18%',
-            background: 'radial-gradient(ellipse at 40% 40%, color-mix(in srgb, var(--cosmic-ivory) 10%, transparent), color-mix(in srgb, var(--cosmic-ivory) 2%, transparent) 40%, transparent 70%)',
-            filter: 'blur(5px)',
-          }}
-        />
-
-        {isCenter && (
-          <div
-            className="pointer-events-none absolute rounded-full"
-            style={{
-              top: '14%',
-              right: '5%',
-              width: '16%',
-              height: '46%',
-              background: 'radial-gradient(ellipse at 80% 50%, color-mix(in srgb, var(--cosmic-teal) 5%, transparent), transparent 70%)',
-              filter: 'blur(10px)',
-            }}
-          />
-        )}
-
-        {isCenter && (
-          <div
-            className="pointer-events-none absolute inset-[1px] rounded-full"
-            style={{
-              background: 'linear-gradient(175deg, color-mix(in srgb, var(--cosmic-ivory) 5%, transparent) 0%, transparent 20%, transparent 80%, color-mix(in srgb, var(--sophia-purple) 3%, transparent) 100%)',
-            }}
-          />
-        )}
-
-        {isCenter && (
-          <div
-            className="pointer-events-none absolute bottom-0 left-[10%] right-[10%]"
-            style={{
-              height: '32%',
-              background: 'radial-gradient(ellipse 100% 70% at 50% 100%, color-mix(in srgb, var(--sophia-purple) 5%, transparent), transparent 70%)',
-              filter: 'blur(12px)',
-            }}
-          />
-        )}
-
+        {/* Inset shadow for depth */}
         <div
           className="pointer-events-none absolute inset-[1px] rounded-full"
           style={{
@@ -1270,7 +1703,7 @@ function MemoryOrb({
 
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center px-8 sm:px-11">
           {isCenter && (
-            <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 40%, transparent)' }}>
+            <span className="mb-2 shrink-0 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 55%, transparent)' }}>
               <span aria-hidden="true">{category.icon}</span>{' '}
               <span>{category.label}</span>
             </span>
@@ -1322,12 +1755,30 @@ function MemoryOrb({
               </div>
             </div>
           ) : (
-            <p
-              className={cn('font-cormorant text-center leading-relaxed', isCenter ? 'text-[16px] sm:text-[19px]' : 'text-[14px]')}
-              style={{ color: isCenter ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text-whisper)' }}
+            <div
+              className={cn(
+                'flex-1 min-h-0 flex items-center',
+                isCenter && 'max-h-[140px] sm:max-h-[180px] md:max-h-[220px] overflow-y-auto scrollbar-thin'
+              )}
+              style={isCenter ? {
+                maskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+                WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+              } : undefined}
             >
-              {displayText}
-            </p>
+              <p
+                className={cn(
+                  'font-cormorant text-center leading-relaxed w-full',
+                  isCenter
+                    ? isLongText
+                      ? 'text-[14px] sm:text-[16px]'
+                      : 'text-[16px] sm:text-[19px]'
+                    : 'text-[14px]'
+                )}
+                style={{ color: isCenter ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text-whisper)' }}
+              >
+                {displayText}
+              </p>
+            </div>
           )}
 
           {isCenter && !isExiting && !isEditing && candidate.reason && (
@@ -1336,9 +1787,10 @@ function MemoryOrb({
                 event.stopPropagation();
                 setShowReason((previous) => !previous);
               }}
-              className="mt-3 text-[9px] uppercase tracking-[0.1em] transition-colors"
-              style={{ color: showReason ? 'color-mix(in srgb, var(--sophia-purple) 40%, transparent)' : 'var(--cosmic-text-faint)' }}
+              className="mt-3 flex items-center gap-1 text-[9px] uppercase tracking-[0.1em] transition-colors hover:underline"
+              style={{ color: showReason ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-muted)' }}
             >
+              <span className="text-[8px]">?</span>
               {showReason ? 'Hide' : 'Why this?'}
             </button>
           )}
@@ -1359,10 +1811,17 @@ function MemoryOrb({
                 disabled={disabled}
                 data-onboarding="recap-memory-keep"
                 aria-label="Keep this memory"
-                className="cosmic-accent-pill cosmic-focus-ring group flex items-center gap-2 rounded-full px-5 py-2 transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-30"
+                className="cosmic-accent-pill cosmic-focus-ring group relative flex items-center gap-2 rounded-full px-5 py-2 transition-all duration-300 disabled:cursor-not-allowed disabled:opacity-30"
               >
-                <Check className="h-3.5 w-3.5 transition-transform group-hover:scale-110" />
-                <span className="text-[10px] uppercase tracking-[0.08em]">Keep this</span>
+                {/* Hover glow aura */}
+                <span
+                  className="pointer-events-none absolute inset-0 rounded-full opacity-0 transition-opacity duration-500 group-hover:opacity-100"
+                  style={{
+                    boxShadow: '0 0 18px 4px color-mix(in srgb, var(--sophia-purple) 25%, transparent), 0 0 40px 8px color-mix(in srgb, var(--sophia-glow) 12%, transparent)',
+                  }}
+                />
+                <Check className="h-3.5 w-3.5 transition-transform duration-300 group-hover:scale-125" />
+                <span className="text-[10px] uppercase tracking-[0.08em]">{pendingEditText ? 'Keep refined' : 'Keep this'}</span>
               </button>
               <button
                 onClick={(event) => {
@@ -1374,9 +1833,9 @@ function MemoryOrb({
                 }}
                 disabled={disabled}
                 aria-label="Refine this memory"
-                className="cosmic-ghost-pill cosmic-focus-ring rounded-full p-2 transition-all disabled:opacity-30"
+                className="cosmic-ghost-pill cosmic-focus-ring rounded-full p-2 transition-all duration-300 hover:shadow-[0_0_12px_color-mix(in_srgb,var(--sophia-purple)_20%,transparent)] disabled:opacity-30"
               >
-                <Pencil className="h-3.5 w-3.5" />
+                <Pencil className="h-3.5 w-3.5 transition-transform duration-300 hover:rotate-[-8deg]" />
               </button>
               <button
                 onClick={(event) => {
@@ -1386,10 +1845,18 @@ function MemoryOrb({
                 disabled={disabled}
                 data-onboarding="recap-memory-discard"
                 aria-label="Let this memory go"
-                className="cosmic-focus-ring group flex items-center gap-2 rounded-full border px-5 py-2 text-[var(--cosmic-text-whisper)] transition-all duration-300 hover:bg-[color-mix(in_srgb,var(--sophia-error)_10%,transparent)] hover:text-[color-mix(in_srgb,var(--sophia-error)_72%,white_10%)] disabled:cursor-not-allowed disabled:opacity-30"
+                className="cosmic-focus-ring group relative flex items-center gap-2 rounded-full border px-5 py-2 text-[var(--cosmic-text-whisper)] transition-all duration-300 hover:border-[color-mix(in_srgb,var(--sophia-error)_30%,transparent)] hover:bg-[color-mix(in_srgb,var(--sophia-error)_8%,transparent)] hover:text-[color-mix(in_srgb,var(--sophia-error)_72%,white_10%)] disabled:cursor-not-allowed disabled:opacity-30"
                 style={{ borderColor: 'var(--cosmic-border-soft)', background: 'var(--cosmic-panel-soft)' }}
               >
-                <X className="h-3.5 w-3.5 transition-transform group-hover:scale-110" />
+                {/* Hover void pull */}
+                <span
+                  className="pointer-events-none absolute inset-0 rounded-full opacity-0 transition-opacity duration-500 group-hover:opacity-100"
+                  style={{
+                    background: 'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--sophia-error) 6%, transparent) 0%, transparent 70%)',
+                    boxShadow: 'inset 0 0 18px color-mix(in srgb, var(--sophia-error) 8%, transparent)',
+                  }}
+                />
+                <X className="h-3.5 w-3.5 transition-transform duration-300 group-hover:scale-125 group-hover:rotate-90" />
                 <span className="text-[10px] uppercase tracking-[0.08em]">Let it go</span>
               </button>
             </div>
@@ -1418,7 +1885,7 @@ function ReflectionCard({
   return (
     <div
       className={cn(
-        'mt-8 flex max-w-xl flex-col items-center text-center transition-all duration-[1200ms] ease-out',
+        'mt-10 flex max-w-xl flex-col items-center text-center transition-all duration-[1200ms] ease-out',
         visible ? 'translate-y-0 opacity-100' : 'translate-y-6 opacity-0'
       )}
       style={{ transitionDelay: '700ms' }}
@@ -1433,7 +1900,7 @@ function ReflectionCard({
       >
         <div className="mb-3 flex items-center gap-2">
           <span className="text-base">💭</span>
-          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 35%, transparent)' }}>
+          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
             {tag ? TAG_LABELS[tag] ?? 'Something to reflect on' : 'Something to reflect on'}
           </p>
         </div>
@@ -1441,7 +1908,7 @@ function ReflectionCard({
         {onReflect && (
           <button
             onClick={onReflect}
-            className="cosmic-ghost-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
+            className="cosmic-accent-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
           >
             Sit with this for a moment →
           </button>
@@ -1457,12 +1924,14 @@ function LoadingState() {
       <AuroraBackground />
       <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-4 text-center">
         <div
-          className="relative h-[240px] w-[240px] rounded-full sm:h-[280px] sm:w-[280px]"
+          className="relative h-[240px] w-[240px] overflow-hidden rounded-full sm:h-[280px] sm:w-[280px]"
           style={{
-            background: 'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 92%, black 8%), color-mix(in srgb, var(--bg) 95%, black 5%))',
-            boxShadow: 'inset 0 -28px 65px -28px color-mix(in srgb, var(--sophia-purple) 10%, transparent), inset 0 28px 45px -28px color-mix(in srgb, var(--cosmic-teal) 4%, transparent), inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent)',
+            background: 'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 85%, black 15%), color-mix(in srgb, var(--bg) 90%, black 10%))',
+            boxShadow: 'inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent)',
           }}
         >
+          <OrbGlassCanvas active={false} />
+          <OrbMistCanvas active={false} />
           <div className="absolute inset-[22%] animate-pulse rounded-full border" style={{ borderColor: 'var(--cosmic-border-soft)', background: 'var(--cosmic-panel-soft)' }} />
         </div>
         <p className="mt-8 font-cormorant text-[20px]" style={{ color: 'var(--cosmic-text)' }}>Composing recap…</p>
@@ -1495,7 +1964,6 @@ function EmptyState() {
 
 function CompletedState({
   approvedCount,
-  approvedMemories,
   reflectionPrompt,
   reflectionTag,
   onReflect,
@@ -1510,61 +1978,53 @@ function CompletedState({
 }) {
   return (
     <>
-      <div className="mt-6 flex flex-col items-center motion-safe:animate-fadeIn">
-        <div
-          className="relative flex h-[280px] w-[280px] flex-col items-center justify-center overflow-hidden rounded-full"
-          style={{
-            background: 'radial-gradient(ellipse 120% 100% at 50% 100%, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent 40%), radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 92%, black 8%), color-mix(in srgb, var(--bg) 95%, black 5%))',
-            boxShadow: 'inset 0 -28px 65px -28px color-mix(in srgb, var(--sophia-purple) 12%, transparent), inset 0 28px 45px -28px color-mix(in srgb, var(--cosmic-teal) 3%, transparent), inset 0 0 0 1px var(--cosmic-border-soft), 0 0 55px -15px color-mix(in srgb, var(--sophia-purple) 5%, transparent)',
-          }}
-        >
-          <OrbMistCanvas active />
-          <div className="relative z-10 flex flex-col items-center">
-            <div
-              className="mb-3 flex h-12 w-12 items-center justify-center rounded-full"
-              style={{ background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)', border: '1px solid var(--cosmic-border)' }}
-            >
-              <Check className="h-6 w-6" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 45%, transparent)' }} />
+      <div
+        className={cn(
+          'mt-10 flex flex-col items-center transition-all duration-[1800ms] ease-out',
+          showEntrance ? 'translate-y-0 opacity-100 scale-100' : 'translate-y-8 opacity-0 scale-95'
+        )}
+        style={{ transitionDelay: '200ms' }}
+      >
+        {/* Ambient outer glow behind the sphere */}
+        <div className="relative">
+          <div
+            className="pointer-events-none absolute -z-10 rounded-full motion-safe:animate-[breathe_6s_ease-in-out_infinite]"
+            style={{
+              inset: '-50%',
+              background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 8%, transparent) 0%, color-mix(in srgb, var(--cosmic-teal) 3%, transparent) 35%, transparent 60%)',
+              filter: 'blur(60px)',
+            }}
+          />
+          <div
+            className="relative flex h-[240px] w-[240px] flex-col items-center justify-center overflow-hidden rounded-full sm:h-[280px] sm:w-[280px]"
+            style={{
+              background: 'radial-gradient(circle at 50% 50%, color-mix(in srgb, var(--card-bg) 80%, black 20%), color-mix(in srgb, var(--bg) 85%, black 15%))',
+              boxShadow: 'inset 0 0 0 1px color-mix(in srgb, var(--sophia-purple) 12%, transparent), 0 0 60px -10px color-mix(in srgb, var(--sophia-purple) 10%, transparent), 0 0 120px -20px color-mix(in srgb, var(--cosmic-teal) 5%, transparent)',
+            }}
+          >
+            <OrbGlassCanvas active />
+            <OrbMistCanvas active />
+            <div className="relative z-10 flex flex-col items-center">
+              <div
+                className="mb-3 flex h-14 w-14 items-center justify-center rounded-full animate-breathe-subtle"
+                style={{
+                  background: 'radial-gradient(circle, color-mix(in srgb, var(--sophia-purple) 12%, transparent), color-mix(in srgb, var(--sophia-purple) 4%, transparent))',
+                  border: '1px solid color-mix(in srgb, var(--sophia-purple) 18%, transparent)',
+                  boxShadow: '0 0 24px color-mix(in srgb, var(--sophia-purple) 10%, transparent), inset 0 0 12px color-mix(in srgb, var(--sophia-glow) 6%, transparent)',
+                }}
+              >
+                <Check className="h-6 w-6" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 60%, white 20%)' }} />
+              </div>
+              <p className="font-cormorant text-[20px] sm:text-[22px]" style={{ color: 'var(--cosmic-text-strong)' }}>All memories reviewed</p>
+              <p className="mt-1.5 text-[11px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                {approvedCount === 0
+                  ? 'Nothing carried forward this time'
+                  : `${approvedCount} ${approvedCount === 1 ? 'memory' : 'memories'} in the pool`}
+              </p>
             </div>
-            <p className="font-cormorant text-[22px]" style={{ color: 'var(--cosmic-text-strong)' }}>All memories reviewed</p>
-            <p className="mt-1 text-[11px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-              {approvedCount === 0
-                ? 'Nothing was carried into memory this time'
-                : `${approvedCount} ${approvedCount === 1 ? 'memory' : 'memories'} in the pool`}
-            </p>
           </div>
         </div>
       </div>
-
-      {approvedMemories.length > 0 && (
-        <div className="mt-8 w-full max-w-2xl space-y-3">
-          {approvedMemories.map((memory) => (
-            <div
-              key={memory.id}
-              className="flex items-start justify-between gap-3 rounded-2xl px-4 py-3 backdrop-blur-xl"
-              style={{
-                background: 'var(--cosmic-panel)',
-                border: '1px solid var(--cosmic-border-soft)',
-                boxShadow: 'inset 0 0 20px color-mix(in srgb, var(--sophia-purple) 1.2%, transparent)',
-              }}
-            >
-              <p className="font-cormorant text-[17px] leading-relaxed" style={{ color: 'var(--cosmic-text)' }}>{memory.text}</p>
-              {memory.isEdited && (
-                <span
-                  className="shrink-0 rounded-full px-3 py-1 text-[10px] uppercase tracking-[0.12em]"
-                  style={{
-                    background: 'color-mix(in srgb, var(--sophia-purple) 10%, transparent)',
-                    border: '1px solid var(--cosmic-border)',
-                    color: 'color-mix(in srgb, var(--sophia-glow) 75%, transparent)',
-                  }}
-                >
-                  Refined
-                </span>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
 
       <ReflectionCard
         prompt={reflectionPrompt}
@@ -1602,6 +2062,7 @@ export function RecapCosmicPoolOrbit({
         id: candidate.id,
         text: record.decision === 'edited' && refinedText ? refinedText : originalText,
         isEdited: record.decision === 'edited',
+        category: candidate.category,
       }];
     });
   }, [decisions, normalizedCandidates]);
@@ -1620,6 +2081,7 @@ export function RecapCosmicPoolOrbit({
   const [settledMemories, setSettledMemories] = useState<SettledGlow[]>([]);
   const [activeDrop, setActiveDrop] = useState<ActiveDrop | null>(null);
   const [impactFlash, setImpactFlash] = useState<{ x: number; y: number } | null>(null);
+  const [pendingEdits, setPendingEdits] = useState<Record<string, string>>({});
 
   const mountTime = useRef(performance.now());
   const orbRef = useRef<HTMLDivElement>(null);
@@ -1647,11 +2109,11 @@ export function RecapCosmicPoolOrbit({
       }
       const next = [...previous];
       for (let index = previous.length; index < approvedMemories.length; index += 1) {
-        next.push(getSettledGlowSlot(index));
+        next.push(getSettledGlowSlot(index, getCategoryGlowColor(approvedMemories[index]?.category)));
       }
       return next;
     });
-  }, [approvedMemories.length]);
+  }, [approvedMemories]);
 
   const clearExitTimeout = useCallback(() => {
     if (exitTimeoutRef.current !== null) {
@@ -1717,30 +2179,27 @@ export function RecapCosmicPoolOrbit({
     clearExitTimeout();
     setExitingId(candidateId);
     setExitType('keep');
+    const pendingText = pendingEdits[candidateId];
     exitTimeoutRef.current = window.setTimeout(() => {
-      onDecisionChange(candidateId, 'approved');
+      if (pendingText) {
+        onDecisionChange(candidateId, 'edited', pendingText);
+        setPendingEdits((prev) => { const next = { ...prev }; delete next[candidateId]; return next; });
+      } else {
+        onDecisionChange(candidateId, 'approved');
+      }
       setExitingId(null);
       setExitType(null);
       exitTimeoutRef.current = null;
     }, KEEP_ANIMATION_MS);
-  }, [clearExitTimeout, disabled, exitingId, onDecisionChange, triggerDropFromOrb]);
+  }, [clearExitTimeout, disabled, exitingId, onDecisionChange, pendingEdits, triggerDropFromOrb]);
 
   const handleEdit = useCallback((candidateId: string, editedText: string) => {
     if (disabled || exitingId) {
       return;
     }
-    haptic('medium');
-    triggerDropFromOrb(candidateId);
-    clearExitTimeout();
-    setExitingId(candidateId);
-    setExitType('keep');
-    exitTimeoutRef.current = window.setTimeout(() => {
-      onDecisionChange(candidateId, 'edited', editedText);
-      setExitingId(null);
-      setExitType(null);
-      exitTimeoutRef.current = null;
-    }, KEEP_ANIMATION_MS);
-  }, [clearExitTimeout, disabled, exitingId, onDecisionChange, triggerDropFromOrb]);
+    haptic('light');
+    setPendingEdits((prev) => ({ ...prev, [candidateId]: editedText }));
+  }, [disabled, exitingId]);
 
   const handleDiscard = useCallback((candidateId: string) => {
     if (disabled || exitingId) {
@@ -1759,14 +2218,16 @@ export function RecapCosmicPoolOrbit({
   }, [clearExitTimeout, disabled, exitingId, onDecisionChange]);
 
   const handleDropImpact = useCallback(() => {
+    const droppedCandidate = activeDrop ? normalizedCandidates.find(c => c.id === activeDrop.id) : undefined;
+    const dropColor = getCategoryGlowColor(droppedCandidate?.category);
     const now = (performance.now() - mountTime.current) / 1000;
     const poolX = 0.5 + (Math.random() - 0.5) * 0.06;
     const poolY = 0.82 + Math.random() * 0.06;
     setRipples((previous) => [...previous.slice(-6), { x: poolX, y: poolY, time: now, intensity: 1.0 }]);
-    setSettledMemories((previous) => [...previous, getSettledGlowSlot(previous.length)]);
+    setSettledMemories((previous) => [...previous, getSettledGlowSlot(previous.length, dropColor)]);
     setImpactFlash({ x: activeDrop?.startX ?? window.innerWidth / 2, y: window.innerHeight * 0.56 });
     setActiveDrop(null);
-  }, [activeDrop]);
+  }, [activeDrop, normalizedCandidates]);
 
   const safeFocusedIndex = getSafeFocusedIndex(focusedIndex, activeCandidates.length);
   const visibleCandidates = useMemo(
@@ -1823,7 +2284,7 @@ export function RecapCosmicPoolOrbit({
           )}
           data-onboarding="recap-summary"
         >
-          <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 30%, transparent)' }}>
+          <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
             key takeaway
           </span>
           <div className="relative max-w-2xl">
@@ -1861,7 +2322,7 @@ export function RecapCosmicPoolOrbit({
               'relative flex w-full items-center justify-center transition-all duration-[1200ms] ease-out',
               showEntrance ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0'
             )}
-            style={{ minHeight: 400, transitionDelay: '300ms' }}
+            style={{ minHeight: 420, transitionDelay: '300ms' }}
           >
             {safeFocusedIndex > 0 && (
               <button
@@ -1883,7 +2344,7 @@ export function RecapCosmicPoolOrbit({
               </button>
             )}
 
-            <div className="relative flex h-[360px] w-full items-center justify-center sm:h-[420px]">
+            <div className="relative flex h-[420px] w-full items-center justify-center sm:h-[480px]">
               {visibleCandidates.map(({ candidate, position }) => (
                 <MemoryOrb
                   key={`${candidate.id}-${position}`}
@@ -1902,6 +2363,7 @@ export function RecapCosmicPoolOrbit({
                   }}
                   disabled={disabled || Boolean(exitingId) || position !== 'center'}
                   orbRef={position === 'center' ? orbRef : undefined}
+                  pendingEditText={pendingEdits[candidate.id]}
                 />
               ))}
             </div>

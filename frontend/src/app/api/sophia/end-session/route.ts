@@ -6,7 +6,7 @@ import { logger } from '../../../lib/error-logger';
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json() as Record<string, unknown>;
-    const userId = await resolveSophiaUserId(typeof body.user_id === 'string' ? body.user_id : null);
+    const userId = await resolveSophiaUserId();
 
     if (!userId) {
       return NextResponse.json({ error: 'Unable to resolve user_id' }, { status: 401 });

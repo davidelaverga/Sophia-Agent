@@ -26,6 +26,11 @@ $services = @(
     @{ Name = "Frontend";   Port = 3000; Dir = "frontend";               Cmd = "pnpm run dev" }
 )
 
+$gatewayEnvBlock = @{
+    PYTHONPATH = (Join-Path $RepoRoot "backend")
+    SOPHIA_AUTH_BACKEND_URL = "http://127.0.0.1:3000"
+}
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 function Test-PortOpen([int]$Port, [int]$TimeoutMs = 500) {
@@ -89,8 +94,11 @@ foreach ($svc in $services) {
 
     Write-Host "  Starting $name..." -ForegroundColor White
 
-    # Set PYTHONPATH for gateway
-    $envBlock = @{ PYTHONPATH = $dir }
+    $envBlock = if ($name -eq "Gateway") {
+        $gatewayEnvBlock
+    } else {
+        @{}
+    }
 
     $job = Start-Job -Name $name -ScriptBlock {
         param($Dir, $Cmd, $Log, $EnvBlock)
@@ -133,6 +141,7 @@ Write-Host "  Frontend:  http://localhost:3000" -ForegroundColor White
 Write-Host "  Gateway:   http://localhost:8001" -ForegroundColor White
 Write-Host "  Voice:     http://localhost:8000" -ForegroundColor White
 Write-Host "  LangGraph: http://localhost:2024" -ForegroundColor White
+Write-Host "  Auth bridge: http://127.0.0.1:3000" -ForegroundColor White
 Write-Host ""
 Write-Host "  Logs:" -ForegroundColor DarkGray
 Write-Host "    logs/langgraph.log   logs/voice.log" -ForegroundColor DarkGray

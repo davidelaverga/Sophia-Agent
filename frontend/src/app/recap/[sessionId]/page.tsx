@@ -88,7 +88,16 @@ export default function RecapPage() {
     setDecision,
     commitMemories,
     showToast,
-    navigateHome: () => router.push('/'),
+    navigateAfterSave: (result) => {
+      const params = new URLSearchParams();
+      if (result.committed.length > 0) {
+        params.set('highlight', result.committed.join(','));
+      }
+      params.set('source', 'recap');
+      params.set('session', sessionId);
+      const suffix = params.toString();
+      router.push(suffix ? `/journal?${suffix}` : '/journal');
+    },
   });
   
   // Handle reflection action
@@ -128,11 +137,11 @@ export default function RecapPage() {
           variant="with-title"
           onBack={() => {
             haptic('light');
-            router.push('/');
+            router.push('/journal');
           }}
           onHome={() => {
             haptic('light');
-            router.push('/');
+            router.push('/journal');
           }}
         />
         
@@ -140,7 +149,7 @@ export default function RecapPage() {
           <RecapEmptyState 
             status={status === 'ready' ? 'unavailable' : status}
             onRetry={handleRetry}
-            onDismiss={() => router.push('/')}
+            onDismiss={() => router.push('/journal')}
           />
         </main>
         <DevDiagnosticsPanel />
@@ -161,7 +170,7 @@ export default function RecapPage() {
         }}
         onHome={() => {
           haptic('light');
-          router.push('/');
+          router.push('/journal');
         }}
       />
       
@@ -183,7 +192,7 @@ export default function RecapPage() {
         onDismissError={dismissActionError}
         onReturnHome={() => {
           haptic('light');
-          router.push('/');
+          router.push('/journal');
         }}
         allReviewed={allReviewed}
         isSaving={isSaving}

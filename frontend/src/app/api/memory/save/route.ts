@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const userId = await resolveSophiaUserId(body.user_id);
+    const userId = await resolveSophiaUserId();
     if (!userId) {
       return NextResponse.json(
         { error: 'Unable to resolve user_id' },

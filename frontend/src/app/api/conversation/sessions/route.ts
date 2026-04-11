@@ -10,15 +10,15 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthHeader, getServerAuthToken } from '../../../lib/auth/server-auth';
+import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { logger } from '../../../lib/error-logger';
 
 const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export async function GET(req: NextRequest) {
-  const token = await getServerAuthToken();
+  const authHeader = await getUserScopedAuthHeader();
 
-  if (!token) {
+  if (!authHeader) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
@@ -36,7 +36,7 @@ export async function GET(req: NextRequest) {
       `${BACKEND_URL}/api/v1/conversations/sessions?${params}`,
       {
         headers: {
-          'Authorization': await getServerAuthHeader(),
+          'Authorization': authHeader,
           'Content-Type': 'application/json',
         },
         signal: AbortSignal.timeout(10000),

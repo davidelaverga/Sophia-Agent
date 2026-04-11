@@ -1,10 +1,9 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import { getServerAuthToken } from "../../../lib/auth/server-auth";
+import { getAuthenticatedUserId, getUserScopedAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = await getServerAuthToken();
 
   if (!backendUrl) {
     return NextResponse.json({ error: "Server configuration incomplete" }, { status: 500 });
@@ -21,6 +20,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
   }
 
+  const userId = await getAuthenticatedUserId();
+  if (!userId) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  const apiKey = await getUserScopedAuthToken();
+  if (!apiKey) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
   try {
     // Call backend /api/reflections/run with share_to_discord flag
     const shareToDiscord = body.action === "share_discord";
@@ -33,7 +42,7 @@ export async function POST(request: NextRequest) {
       },
       body: JSON.stringify({
         conversation_id: body.conversation_id,
-        user_id: body.user_id || "anonymous",
+        user_id: userId,
         share_to_discord: shareToDiscord,
       }),
     });

@@ -1,17 +1,21 @@
 """Sophia session management stubs.
 
 Development stubs for /api/v1/sessions/* endpoints.
-These return valid response shapes so the frontend can proceed
-without the full offline pipeline being built yet.
+These keep the frontend contract stable while still bootstrapping
+real LangGraph threads for live continuity.
 """
 
+import os
 import uuid
 from datetime import UTC, datetime
 
-from fastapi import APIRouter
+import httpx
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
+
+LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -81,12 +85,62 @@ class SessionEndResponse(BaseModel):
 # Endpoints
 # ---------------------------------------------------------------------------
 
+def _get_langgraph_base_url() -> str:
+    return (
+        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("SOPHIA_BACKEND_BASE_URL")
+        or "http://127.0.0.1:2024"
+    ).strip().rstrip("/")
+
+
+async def _create_langgraph_thread() -> str:
+    try:
+        async with httpx.AsyncClient(
+            timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.post(
+                f"{_get_langgraph_base_url()}/threads",
+                json={},
+            )
+            response.raise_for_status()
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="LangGraph timed out while creating the session thread.",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="LangGraph is unavailable for session start.",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"LangGraph thread creation failed with HTTP {exc.response.status_code}.",
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="LangGraph thread creation returned invalid JSON.",
+        ) from exc
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("thread_id"), str):
+        raise HTTPException(
+            status_code=502,
+            detail="LangGraph thread creation returned no thread_id.",
+        )
+
+    return payload["thread_id"]
+
 @router.post("/start", response_model=SessionStartResponse)
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     """Create a new session (dev stub)."""
     now = datetime.now(UTC).isoformat()
     session_id = str(uuid.uuid4())
-    thread_id = str(uuid.uuid4())
+    thread_id = await _create_langgraph_thread()
     message_id = str(uuid.uuid4())
     return SessionStartResponse(
         session_id=session_id,

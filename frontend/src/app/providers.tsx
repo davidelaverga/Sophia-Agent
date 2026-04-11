@@ -2,6 +2,7 @@
 
 import { createContext, useContext, useMemo } from 'react'
 
+import { useBackendTokenSync } from '@/app/hooks/useBackendTokenSync'
 import { authBypassEnabled, authBypassUserId } from '@/app/lib/auth/dev-bypass'
 import { authClient } from '@/server/better-auth/client'
 
@@ -25,7 +26,18 @@ const AuthContext = createContext<AuthHookResult>({
 })
 
 export function Providers({ children }: { children: React.ReactNode }) {
-  return <AuthContext.Provider value={useAuthInternal()}>{children}</AuthContext.Provider>
+  return (
+    <AuthContext.Provider value={useAuthInternal()}>
+      <BackendTokenSyncBootstrap />
+      {children}
+    </AuthContext.Provider>
+  )
+}
+
+function BackendTokenSyncBootstrap() {
+  const { user, loading } = useAuth()
+  useBackendTokenSync({ user, loading })
+  return null
 }
 
 function useAuthInternal(): AuthHookResult {

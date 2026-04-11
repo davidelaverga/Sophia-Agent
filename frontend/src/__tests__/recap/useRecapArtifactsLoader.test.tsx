@@ -126,6 +126,20 @@ describe('useRecapArtifactsLoader', () => {
             prompt: 'What shifted when you chose to stop here?',
           },
         }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [
+            {
+              id: 'mem-processing-1',
+              text: 'User wants to end sessions cleanly when they have enough signal.',
+              category: 'preference',
+              created_at: '2026-03-03T20:02:00.000Z',
+            },
+          ],
+          count: 1,
+          fallbackApplied: true,
+        }),
       );
 
     global.fetch = fetchMock as unknown as typeof fetch;
@@ -144,14 +158,19 @@ describe('useRecapArtifactsLoader', () => {
     expect(result.current.status).toBe('processing');
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(1500);
+      vi.advanceTimersByTime(1500);
     });
 
     await flushEffects();
 
     expect(setArtifacts).toHaveBeenCalledWith(
       'sess-processing',
-      expect.objectContaining({ takeaway: 'A clean ending still counts.' }),
+      expect.objectContaining({
+        takeaway: 'A clean ending still counts.',
+        memoryCandidates: [
+          expect.objectContaining({ id: 'mem-processing-1' }),
+        ],
+      }),
     );
     expect(result.current.status).toBe('ready');
   });

@@ -1,24 +1,27 @@
 import { type NextRequest, NextResponse } from "next/server"
 
-import { getServerAuthToken } from "../../../lib/auth/server-auth"
+import { getAuthenticatedUserId, getUserScopedAuthToken } from "../../../lib/auth/server-auth"
 
 const BACKEND_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"
 
 export async function GET(request: NextRequest) {
   try {
-    // Get user_id from query params
-    const { searchParams } = new URL(request.url)
-    const userId = searchParams.get("user_id")
+    const userId = await getAuthenticatedUserId()
 
     if (!userId) {
       return NextResponse.json(
-        { error: "user_id is required" },
-        { status: 400 }
+        { error: "Not authenticated" },
+        { status: 401 }
       )
     }
 
-    // Use user's backend token or fallback
-    const token = await getServerAuthToken()
+    const token = await getUserScopedAuthToken()
+    if (!token) {
+      return NextResponse.json(
+        { error: "Not authenticated" },
+        { status: 401 }
+      )
+    }
 
     const response = await fetch(
       `${BACKEND_URL}/api/community/user-impact?user_id=${encodeURIComponent(userId)}`,

@@ -12,6 +12,7 @@ import { haptic } from '../../hooks/useHaptics';
 import { cn } from '../../lib/utils';
 import type { PresetType, ContextMode } from '../../types/session';
 
+import { useSweepGlow } from './sweepLight';
 import { RITUALS, type MicState } from './types';
 
 interface MicCTAProps {
@@ -40,6 +41,7 @@ export function MicCTA({
     : null;
 
   const isActive = micState !== 'idle' || isStartingSession;
+  const sweepRef = useSweepGlow();
 
   return (
     <div
@@ -76,12 +78,41 @@ export function MicCTA({
     >
       {/* mic-outer — 88×88, contains rings + core */}
       <div
+        ref={sweepRef as React.RefObject<HTMLDivElement>}
         data-onboarding="mic-cta"
         className={cn(
-          'relative flex h-[88px] w-[88px] items-center justify-center transition-transform duration-300',
+          'relative flex h-[88px] w-[88px] items-center justify-center rounded-full transition-transform duration-300',
           'cursor-pointer hover:scale-[1.04]',
           isStartingSession && 'cursor-wait',
         )}
+        style={{
+          filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.18))',
+          boxShadow: [
+            // Cast shadow — away from the light, deeper when closer
+            'calc((10px + 6px * var(--sweep-proximity, 0)) * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+            'calc((10px + 6px * var(--sweep-proximity, 0)) * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+            'calc((16px + 8px * var(--sweep-proximity, 0)) * var(--sweep-glow, 0))',
+            '0px',
+            'rgba(0, 0, 0, calc(var(--sweep-glow, 0) * 0.28))',
+          ].join(' ') + ', ' +
+          [
+            // Lit edge — glow on the light-facing side
+            'calc(-4px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+            'calc(-4px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+            'calc(10px * var(--sweep-glow, 0))',
+            'calc(2px * var(--sweep-glow, 0))',
+            'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.22))',
+          ].join(' ') + ', ' +
+          [
+            // Inner highlight — directional light catching inside the button
+            'inset',
+            'calc(-3px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+            'calc(-3px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+            'calc(8px * var(--sweep-glow, 0))',
+            '0px',
+            'rgba(220, 200, 255, calc(var(--sweep-glow, 0) * 0.10))',
+          ].join(' '),
+        }}
       >
         {/* Breathing rings — prototype: inset 0 / -10px / -20px */}
         <span
@@ -89,7 +120,16 @@ export function MicCTA({
             'absolute inset-0 rounded-full border transition-colors duration-1000',
             isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
           )}
-          style={{ borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)' }}
+          style={{
+            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
+            boxShadow: [
+              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(6px * var(--sweep-glow, 0))',
+              '0px',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.12))',
+            ].join(' '),
+          }}
         />
         <span
           className={cn(
@@ -99,6 +139,13 @@ export function MicCTA({
           style={{
             borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
             animationDelay: isActive ? '0.3s' : '0.8s',
+            boxShadow: [
+              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(5px * var(--sweep-glow, 0))',
+              '0px',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.08))',
+            ].join(' '),
           }}
         />
         <span
@@ -109,6 +156,13 @@ export function MicCTA({
           style={{
             borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
             animationDelay: isActive ? '0.6s' : '1.6s',
+            boxShadow: [
+              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(4px * var(--sweep-glow, 0))',
+              '0px',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.05))',
+            ].join(' '),
           }}
         />
 

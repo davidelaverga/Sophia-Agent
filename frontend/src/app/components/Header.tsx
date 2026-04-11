@@ -1,8 +1,8 @@
 "use client"
 
-import { Settings, History, Home } from "lucide-react"
+import { Settings, Home } from "lucide-react"
 import { useRouter } from "next/navigation"
-import { useState, lazy, Suspense, Fragment } from "react"
+import { Fragment } from "react"
 
 import { useCopy, useTranslation } from "../copy"
 import { haptic } from "../hooks/useHaptics"
@@ -14,14 +14,10 @@ import { ActiveModeIndicator } from "./ActiveModeIndicator"
 import { FoundingSupporterBadge } from "./FoundingSupporterBadge"
 import { ThemeToggle } from "./ThemeToggle"
 
-// Lazy load HistoryDrawer
-const HistoryDrawer = lazy(() => import("./HistoryDrawer").then(mod => ({ default: mod.HistoryDrawer })))
-
 export function Header() {
   const router = useRouter()
   const copy = useCopy()
   const { t } = useTranslation()
-  const [showHistory, setShowHistory] = useState(false)
 
   const status = usePresenceStore((state) => state.status)
   const detail = usePresenceStore((state) => state.detail)
@@ -118,29 +114,6 @@ export function Header() {
           </span>
         </button>
         
-        {/* History button */}
-        <button
-          type="button"
-          onClick={() => {
-            haptic('light')
-            setShowHistory(true)
-          }}
-          className="group/btn relative flex h-10 w-10 items-center justify-center rounded-xl border border-sophia-surface-border bg-sophia-button hover:border-sophia-purple/40 hover:scale-105 shadow-md dark:shadow-lg dark:shadow-sophia-purple/20 transition-all duration-200"
-          aria-label={t("welcomeBack.historyTitle")}
-        >
-          <span className="group/icon relative flex items-center justify-center">
-            <History className="h-5 w-5 text-sophia-text2 group-hover/btn:text-sophia-purple transition-colors" />
-            
-            {/* Tooltip */}
-            <div className="absolute top-full mt-3 left-1/2 -translate-x-1/2 px-3 py-2 text-xs rounded-lg opacity-0 group-hover/icon:opacity-100 transition-opacity duration-300 delay-200 pointer-events-none whitespace-nowrap z-50 bg-sophia-surface text-sophia-text shadow-lg border border-sophia-surface-border">
-              <div className="text-center">
-                {t("header.tooltip.history")}
-              </div>
-              <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 rotate-45 bg-sophia-surface border-l border-t border-sophia-surface-border"></div>
-            </div>
-          </span>
-        </button>
-        
         <ThemeToggle dataOnboardingId="header-theme-toggle" />
         
         {/* Settings button */}
@@ -169,16 +142,6 @@ export function Header() {
       </div>
     </header>
       
-    {/* History Drawer - outside header for proper z-index */}
-    {showHistory && (
-      <Suspense fallback={null}>
-        <HistoryDrawer
-          isOpen={showHistory}
-          onClose={() => setShowHistory(false)}
-          onConversationLoaded={() => setShowHistory(false)}
-        />
-      </Suspense>
-    )}
     </Fragment>
   )
 }

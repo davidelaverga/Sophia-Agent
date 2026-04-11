@@ -1,5 +1,6 @@
 """Tests for the voice gateway endpoint."""
 
+import re
 from unittest.mock import ANY, AsyncMock, patch
 
 import httpx
@@ -7,11 +8,31 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.gateway.routers.voice import _dispatch_voice_agent, router
+from app.gateway.auth import require_authorized_user_scope
+from app.gateway.routers.voice import _dispatch_voice_agent, _get_voice_server_url, router
 
 app = FastAPI()
 app.include_router(router)
+app.dependency_overrides[require_authorized_user_scope] = lambda: "test-user"
 client = TestClient(app)
+
+
+@pytest.fixture
+def secure_client():
+    secure_app = FastAPI()
+    secure_app.include_router(router)
+    return TestClient(secure_app)
+
+
+@pytest.fixture(autouse=True)
+def _reset_active_voice_sessions():
+    from app.gateway.routers.voice import _active_voice_session_locks, _active_voice_sessions
+
+    _active_voice_sessions.clear()
+    _active_voice_session_locks.clear()
+    yield
+    _active_voice_sessions.clear()
+    _active_voice_session_locks.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +66,13 @@ def _stream_env(monkeypatch):
 
 class TestVoiceConnect:
     """POST /api/sophia/{user_id}/voice/connect"""
+
+    def test_requires_authorization_when_auth_dependency_is_active(self, secure_client):
+        resp = secure_client.post(
+            "/api/sophia/user_123/voice/connect",
+            json={"platform": "voice"},
+        )
+        assert resp.status_code == 401
 
     def test_happy_path_returns_credentials(self):
         with _mock_dispatch_success():
@@ -82,6 +110,36 @@ class TestVoiceConnect:
             platform="ios_voice",
             context_mode="work",
             ritual="debrief",
+            session_id=None,
+            thread_id=None,
+        )
+
+    def test_forwards_session_and_thread_ids_to_voice_dispatch(self):
+        with patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+            return_value="test-session-id",
+        ) as dispatch:
+            resp = client.post(
+                "/api/sophia/user_456/voice/connect",
+                json={
+                    "platform": "voice",
+                    "context_mode": "life",
+                    "ritual": "vent",
+                    "session_id": "session-123",
+                    "thread_id": "thread-456",
+                },
+            )
+
+        assert resp.status_code == 200
+        dispatch.assert_awaited_once_with(
+            call_id=ANY,
+            call_type="default",
+            platform="voice",
+            context_mode="life",
+            ritual="vent",
+            session_id="session-123",
+            thread_id="thread-456",
         )
 
     def test_text_platform_accepted(self):
@@ -134,6 +192,43 @@ class TestVoiceConnect:
                 json={"platform": "voice"},
             )
         assert resp1.json()["call_id"] != resp2.json()["call_id"]
+
+    def test_mixed_case_user_id_is_normalized_for_call_id(self):
+        with _mock_dispatch_success():
+            resp = client.post(
+                "/api/sophia/krEDzdbKU9ingOR78XxYFLSI7iyQeF0h/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 200
+        call_id = resp.json()["call_id"]
+        assert call_id.startswith("sophia-kredzdbku9ingor78xxyflsi7iyqef0h-")
+        assert re.fullmatch(r"[a-z0-9_-]+", call_id)
+
+    def test_reconnect_closes_previous_session_for_same_user(self):
+        with patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+            side_effect=["session-1", "session-2"],
+        ), patch(
+            "app.gateway.routers.voice._disconnect_voice_session",
+            new_callable=AsyncMock,
+        ) as disconnect_voice_session:
+            first = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+            second = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+        disconnect_voice_session.assert_awaited_once_with(
+            first.json()["call_id"],
+            "session-1",
+        )
 
     def test_missing_stream_api_key_returns_503(self, monkeypatch):
         monkeypatch.delenv("STREAM_API_KEY", raising=False)
@@ -287,6 +382,34 @@ class TestVoiceDisconnect:
         )
         assert resp.status_code == 422
 
+    def test_disconnect_clears_tracked_active_session(self):
+        from app.gateway.routers.voice import _active_voice_sessions
+
+        with patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+            return_value="tracked-session",
+        ):
+            connect_response = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        with patch(
+            "app.gateway.routers.voice._disconnect_voice_session",
+            new_callable=AsyncMock,
+        ):
+            disconnect_response = client.post(
+                "/api/sophia/user_123/voice/disconnect",
+                json={
+                    "call_id": connect_response.json()["call_id"],
+                    "session_id": "tracked-session",
+                },
+            )
+
+        assert disconnect_response.status_code == 204
+        assert "user_123" not in _active_voice_sessions
+
 
 @pytest.mark.anyio
 async def test_dispatch_voice_agent_posts_runtime_context():
@@ -310,11 +433,13 @@ async def test_dispatch_voice_agent_posts_runtime_context():
 
     assert session_id == "test-session-id"
     mock_client.post.assert_awaited_once_with(
-        "http://localhost:8000/calls/sophia-user_123-abc12345/sessions",
+        f"{_get_voice_server_url()}/calls/sophia-user_123-abc12345/sessions",
         json={
             "call_type": "default",
             "platform": "voice",
             "context_mode": "gaming",
             "ritual": "vent",
+            "session_id": None,
+            "thread_id": None,
         },
     )

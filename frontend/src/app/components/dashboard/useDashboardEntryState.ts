@@ -40,6 +40,18 @@ type PendingStart = {
   voiceMode: boolean;
 };
 
+type FreshStartSeed = {
+  userId: string;
+  sessionId?: string;
+  presetType: PresetType;
+  contextMode: ContextMode;
+  startedAt: string;
+  messageCount: number;
+  intention?: string;
+  focusCue?: string;
+  voiceMode: boolean;
+};
+
 const GENERIC_BOOTSTRAP_OPENERS = new Set([
   'hey there. how can i help today?',
   'hey there! how can i help you today?',
@@ -69,10 +81,11 @@ export function useDashboardEntryState() {
   const [micState, setMicState] = useState<MicState>('idle');
   const [showReplaceSessionConfirm, setShowReplaceSessionConfirm] = useState(false);
   const { containerRef: replaceModalRef } = useFocusTrap(showReplaceSessionConfirm);
+  const [showFreshStartPrompt, setShowFreshStartPrompt] = useState(false);
+  const { containerRef: freshStartModalRef } = useFocusTrap(showFreshStartPrompt);
   const [pendingStart, setPendingStart] = useState<PendingStart | null>(null);
   const [isLaunchingSession, setIsLaunchingSession] = useState(false);
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
-  const [showHistoryDrawer, setShowHistoryDrawer] = useState(false);
   const [showResumeBanner, setShowResumeBanner] = useState(false);
   const [backendActiveSession, setBackendActiveSession] = useState<{
     session_id: string;
@@ -81,6 +94,7 @@ export function useDashboardEntryState() {
     started_at: string;
     turn_count: number;
     intention?: string;
+    focus_cue?: string;
   } | null>(null);
   const [bootstrapOpener, setBootstrapOpener] = useState<BootstrapOpenerResponse | null>(null);
 
@@ -369,14 +383,27 @@ export function useDashboardEntryState() {
     router.push('/session');
   }, [backendActiveSession, startSessionAPI, user?.id, router]);
 
-  const handleStartFresh = useCallback(async () => {
-    haptic('light');
+  const buildFreshStartSeed = useCallback((): FreshStartSeed => ({
+    userId: user?.id || `demo-${Date.now()}`,
+    sessionId: backendActiveSession?.session_id || activeSession?.sessionId,
+    presetType: (backendActiveSession?.session_type || activeSession?.presetType || 'open') as PresetType,
+    contextMode: (backendActiveSession?.preset_context || activeSession?.contextMode || 'life') as ContextMode,
+    startedAt: backendActiveSession?.started_at || activeSession?.startedAt || new Date().toISOString(),
+    messageCount: backendActiveSession?.turn_count || activeSession?.messages?.length || 0,
+    intention: backendActiveSession?.intention || activeSession?.intention,
+    focusCue: backendActiveSession?.focus_cue || activeSession?.focusCue,
+    voiceMode: activeSession?.voiceMode ?? false,
+  }), [backendActiveSession, activeSession, user?.id]);
 
-    const sessionId = backendActiveSession?.session_id || activeSession?.sessionId;
-    const presetType = (backendActiveSession?.session_type || activeSession?.presetType || 'open') as PresetType;
-    const activeContextMode = (backendActiveSession?.preset_context || activeSession?.contextMode || 'life') as ContextMode;
-    const startedAt = backendActiveSession?.started_at || activeSession?.startedAt || new Date().toISOString();
-    const messageCount = backendActiveSession?.turn_count || activeSession?.messages?.length || 0;
+  const finalizeFreshStart = useCallback(async (): Promise<FreshStartSeed> => {
+    const seed = buildFreshStartSeed();
+    const {
+      sessionId,
+      presetType,
+      contextMode: freshContextMode,
+      startedAt,
+      messageCount,
+    } = seed;
 
     if (sessionId) {
       try {
@@ -389,7 +416,7 @@ export function useDashboardEntryState() {
           useSessionHistoryStore.getState().addSession({
             sessionId,
             presetType,
-            contextMode: activeContextMode,
+            contextMode: freshContextMode,
             startedAt,
             endedAt: result.data.ended_at,
             messageCount: result.data.turn_count || messageCount,
@@ -400,7 +427,7 @@ export function useDashboardEntryState() {
           useSessionHistoryStore.getState().addSession({
             sessionId,
             presetType,
-            contextMode: activeContextMode,
+            contextMode: freshContextMode,
             startedAt,
             endedAt: new Date().toISOString(),
             messageCount,
@@ -412,7 +439,7 @@ export function useDashboardEntryState() {
         useSessionHistoryStore.getState().addSession({
           sessionId,
           presetType,
-          contextMode: activeContextMode,
+          contextMode: freshContextMode,
           startedAt,
           endedAt: new Date().toISOString(),
           messageCount,
@@ -428,13 +455,82 @@ export function useDashboardEntryState() {
     clearSession();
     teardownSessionClientState(sessionId);
     setBackendActiveSession(null);
+    setBootstrapOpener(null);
     setShowResumeBanner(false);
-  }, [backendActiveSession, activeSession, endSession, clearSession]);
 
-  const handleConversationLoaded = useCallback(() => {
-    setShowHistoryDrawer(false);
-    router.push('/session');
-  }, [router]);
+    return seed;
+  }, [buildFreshStartSeed, endSession, clearSession]);
+
+  const handleStartFresh = useCallback(async () => {
+    haptic('light');
+    setShowFreshStartPrompt(true);
+  }, []);
+
+  const handleCancelFreshStart = useCallback(() => {
+    haptic('light');
+    setShowFreshStartPrompt(false);
+  }, []);
+
+  const handleRestartWithSameRitual = useCallback(async () => {
+    haptic('medium');
+    setShowFreshStartPrompt(false);
+
+    const seed = await finalizeFreshStart();
+    const ritualSelection = seed.presetType === 'prepare' || seed.presetType === 'debrief' || seed.presetType === 'reset' || seed.presetType === 'vent'
+      ? seed.presetType
+      : null;
+
+    setContextMode(seed.contextMode);
+    setSelectedRitual(ritualSelection);
+
+    setIsLaunchingSession(true);
+    try {
+      const result = await startSessionEntry({
+        userId: seed.userId,
+        preset: seed.presetType,
+        contextMode: seed.contextMode,
+        voiceMode: seed.voiceMode,
+        intention: seed.intention,
+        focusCue: seed.focusCue,
+      });
+
+      if (!result.success) {
+        const errorMessage = 'error' in result && typeof result.error === 'string' ? result.error : null;
+        showToast({
+          message: errorMessage || "Couldn't start session.",
+          variant: 'warning',
+          durationMs: 3200,
+        });
+      }
+    } finally {
+      setIsLaunchingSession(false);
+    }
+  }, [finalizeFreshStart, startSessionEntry, showToast]);
+
+  const handleChooseDifferentRitual = useCallback(async () => {
+    haptic('light');
+    setShowFreshStartPrompt(false);
+
+    const seed = await finalizeFreshStart();
+    setContextMode(seed.contextMode);
+    setSelectedRitual(null);
+    showToast({
+      message: 'Previous session cleared. Choose how you want to begin.',
+      variant: 'info',
+      durationMs: 2800,
+    });
+  }, [finalizeFreshStart, showToast]);
+
+  useEffect(() => {
+    if (!showFreshStartPrompt) return;
+
+    const handleEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleCancelFreshStart();
+    };
+
+    document.addEventListener('keydown', handleEsc);
+    return () => document.removeEventListener('keydown', handleEsc);
+  }, [showFreshStartPrompt, handleCancelFreshStart]);
 
   return {
     user,
@@ -458,10 +554,10 @@ export function useDashboardEntryState() {
     isStartingSession,
     showSettingsDrawer,
     setShowSettingsDrawer,
-    showHistoryDrawer,
-    setShowHistoryDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
+    showFreshStartPrompt,
+    freshStartModalRef,
     handleConfirmReplaceSession,
     handleCancelReplaceSession,
     handleCallSophia,
@@ -469,6 +565,8 @@ export function useDashboardEntryState() {
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,
-    handleConversationLoaded,
+    handleCancelFreshStart,
+    handleRestartWithSameRitual,
+    handleChooseDifferentRitual,
   };
 }

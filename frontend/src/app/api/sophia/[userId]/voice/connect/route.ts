@@ -1,14 +1,30 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthHeader } from '../../../../../lib/auth/server-auth';
+import { getAuthenticatedUserId, getUserScopedAuthHeader } from '../../../../../lib/auth/server-auth';
+import { getPrimaryGatewayUrl } from '../../../../_lib/gateway-url';
 
-const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8001';
+const BACKEND_URL = getPrimaryGatewayUrl();
 
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ userId: string }> },
 ) {
   const { userId } = await params;
+  const authenticatedUserId = await getAuthenticatedUserId();
+
+  if (!authenticatedUserId) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  }
+
+  if (authenticatedUserId !== userId) {
+    return NextResponse.json({ error: 'Token does not grant access to this user' }, { status: 403 });
+  }
+
+  const authHeader = await getUserScopedAuthHeader();
+  if (!authHeader) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  }
+
   const url = new URL(`${BACKEND_URL}/api/sophia/${encodeURIComponent(userId)}/voice/connect`);
 
   req.nextUrl.searchParams.forEach((value, key) => {
@@ -19,7 +35,7 @@ export async function POST(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: await getServerAuthHeader(),
+      Authorization: authHeader,
     },
     body: await req.text(),
   });

@@ -1,20 +1,22 @@
 'use client';
 
-import { History, Settings } from 'lucide-react';
+import { BookOpen, Settings } from 'lucide-react';
+import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { haptic } from '../hooks/useHaptics';
 import { cn } from '../lib/utils';
 import type { ContextMode } from '../types/session';
 
+import { CelestialComet } from './dashboard/CelestialComet';
 import { ContextTabs } from './dashboard/ContextTabs';
 import { EnhancedFieldBackground } from './dashboard/EnhancedFieldBackground';
 import { RitualOrbit } from './dashboard/RitualOrbit';
 import { RitualThread } from './dashboard/RitualThread';
 import { SettingsDrawer } from './dashboard/SettingsDrawer';
+import { useSweepGlow } from './dashboard/sweepLight';
 import { CONTEXTS } from './dashboard/types';
 import { useDashboardEntryState } from './dashboard/useDashboardEntryState';
-import { HistoryDrawer } from './HistoryDrawer';
 import { ResumeBanner } from './session/ResumeBanner';
 import { ThemeToggle } from './ThemeToggle';
 
@@ -48,6 +50,7 @@ function FieldChromeButton({
 }
 
 export function EnhancedFieldDashboard() {
+  const router = useRouter();
   const {
     currentContext,
     contextMode,
@@ -67,10 +70,10 @@ export function EnhancedFieldDashboard() {
     isStartingSession,
     showSettingsDrawer,
     setShowSettingsDrawer,
-    showHistoryDrawer,
-    setShowHistoryDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
+    showFreshStartPrompt,
+    freshStartModalRef,
     handleConfirmReplaceSession,
     handleCancelReplaceSession,
     handleCallSophia,
@@ -78,14 +81,19 @@ export function EnhancedFieldDashboard() {
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,
-    handleConversationLoaded,
+    handleCancelFreshStart,
+    handleRestartWithSameRitual,
+    handleChooseDifferentRitual,
   } = useDashboardEntryState();
 
   const contextConfig = CONTEXTS.find((context) => context.value === currentContext) ?? CONTEXTS[0];
   const greeting = getGreeting(contextConfig);
+  const greetingGlowRef = useSweepGlow();
   const subtitle = selectedRitual
     ? contextConfig.ritualPrompts[selectedRitual]
     : contextConfig.subtitle;
+  const resumableSessionType = backendActiveSession?.session_type || sessionSummary?.sessionType || activeSession?.presetType || 'open';
+  const resumableSessionUsesRitual = resumableSessionType === 'prepare' || resumableSessionType === 'debrief' || resumableSessionType === 'reset' || resumableSessionType === 'vent';
 
   // ── Entrance choreography ──────────────────────────────────
   // Matches prototype: tabs(100ms) → greeting(200ms) → mic(500ms) → orbit(700ms)
@@ -139,19 +147,20 @@ export function EnhancedFieldDashboard() {
       )}
     >
       <EnhancedFieldBackground contextMode={contextMode} />
+      <CelestialComet contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
       <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex items-start justify-end px-4 py-4 sm:px-6">
         <div className="pointer-events-auto flex items-center gap-2">
           <ThemeToggle />
           <FieldChromeButton
-            ariaLabel="Open history"
+            ariaLabel="Open journal"
             onClick={() => {
               haptic('light');
-              setShowHistoryDrawer(true);
+              router.push('/journal');
             }}
           >
-            <History className="h-4 w-4" />
+            <BookOpen className="h-4 w-4" />
           </FieldChromeButton>
           <FieldChromeButton
             ariaLabel="Open settings"
@@ -216,9 +225,88 @@ export function EnhancedFieldDashboard() {
         </div>
       )}
 
+      {showFreshStartPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-6">
+          <button
+            type="button"
+            aria-label="Close"
+            className="cosmic-modal-backdrop absolute inset-0"
+            onClick={handleCancelFreshStart}
+          />
+          <div
+            ref={freshStartModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="start-fresh-title"
+            className={cn(
+              'cosmic-surface-panel-strong relative w-full max-w-sm rounded-[14px] p-5'
+            )}
+          >
+            <h3
+              id="start-fresh-title"
+              className="font-cormorant text-[1.35rem] font-light leading-snug"
+              style={{ color: 'var(--cosmic-text-strong)' }}
+            >
+              Start fresh
+            </h3>
+            <p className="mt-1.5 text-[13px] font-light" style={{ color: 'var(--cosmic-text-muted)' }}>
+              {resumableSessionUsesRitual
+                ? 'We can clear this session and begin again. Do you want to keep the same ritual, or choose a different one first?'
+                : 'We can clear this session and begin again. Do you want another open session, or would you rather choose a ritual first?'}
+            </p>
+            <div className="mt-5 flex gap-2.5">
+              <button
+                type="button"
+                onClick={handleRestartWithSameRitual}
+                className={cn(
+                  'cosmic-accent-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300'
+                )}
+              >
+                {resumableSessionUsesRitual ? 'Same ritual' : 'Start open'}
+              </button>
+              <button
+                type="button"
+                onClick={handleChooseDifferentRitual}
+                className={cn(
+                  'cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300'
+                )}
+              >
+                Choose ritual
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={handleCancelFreshStart}
+              className="mt-3 w-full text-center text-[12px] font-light transition-colors duration-300 hover:text-[var(--cosmic-text)]"
+              style={{ color: 'var(--cosmic-text-whisper)' }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="relative z-10 flex min-h-screen flex-col px-6 sm:px-8">
         {/* Greeting — near top, matching prototype clamp(28px,6vh,48px) */}
-        <div className="pointer-events-none mx-auto max-w-[480px] pt-[clamp(28px,6vh,48px)] text-center">
+        <div
+          ref={greetingGlowRef as React.RefObject<HTMLDivElement>}
+          className="pointer-events-none mx-auto max-w-[480px] pt-[clamp(28px,6vh,48px)] text-center"
+          style={{
+            filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.18))',
+            textShadow: [
+              // Directional shadow — cast away from the light
+              'calc(6px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(6px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(12px * var(--sweep-glow, 0))',
+              'rgba(0, 0, 0, calc(var(--sweep-glow, 0) * 0.18))',
+            ].join(' ') + ', ' + [
+              // Ambient glow halo
+              '0 0',
+              'calc(10px * var(--sweep-glow, 0))',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.20))',
+            ].join(' '),
+          }}
+        >
           <h1
             className={cn(
               'font-cormorant text-[clamp(24px,3.5vw,32px)] font-light leading-[1.4] tracking-[0.01em]',
@@ -304,19 +392,9 @@ export function EnhancedFieldDashboard() {
         </div>
       </div>
 
-      <HistoryDrawer
-        isOpen={showHistoryDrawer}
-        onClose={() => setShowHistoryDrawer(false)}
-        onConversationLoaded={handleConversationLoaded}
-      />
-
       <SettingsDrawer
         isOpen={showSettingsDrawer}
         onClose={() => setShowSettingsDrawer(false)}
-        onShowHistory={() => {
-          setShowSettingsDrawer(false);
-          setShowHistoryDrawer(true);
-        }}
       />
     </div>
   );

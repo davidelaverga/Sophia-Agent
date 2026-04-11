@@ -142,6 +142,7 @@ $env:DEER_FLOW_CONFIG_PATH = $ConfigPath
 $env:SOPHIA_BACKEND_MODE = "deerflow"
 $env:SOPHIA_LANGGRAPH_BASE_URL = "http://127.0.0.1:2024"
 $env:SOPHIA_ASSISTANT_ID = "sophia_companion"
+$env:SOPHIA_AUTH_BACKEND_URL = "http://127.0.0.1:3000"
 $env:VOICE_SERVER_URL = "http://127.0.0.1:8000"
 $env:BETTER_AUTH_SECRET = $betterAuthSecret
 $env:BETTER_AUTH_URL = $betterAuthUrl
@@ -161,6 +162,7 @@ Write-Host "  Backend mode: deerflow" -ForegroundColor White
 Write-Host "  LangGraph:    $($env:SOPHIA_LANGGRAPH_BASE_URL)" -ForegroundColor White
 Write-Host "  Gateway:      $($env:NEXT_PUBLIC_GATEWAY_URL)" -ForegroundColor White
 Write-Host "  Voice:        $($env:VOICE_SERVER_URL)" -ForegroundColor White
+Write-Host "  Auth bridge:  $($env:SOPHIA_AUTH_BACKEND_URL)" -ForegroundColor White
 Write-Host "  User ID:      $UserId" -ForegroundColor White
 Write-Host "  Auth bypass:  $([string](-not $NoAuthBypass).ToString().ToLower())" -ForegroundColor White
 Write-Host "" 

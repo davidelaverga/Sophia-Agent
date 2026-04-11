@@ -6,7 +6,7 @@
 
 'use client';
 
-import { ArrowUpRight, Clock3, Settings, Sparkles, X } from 'lucide-react';
+import { ArrowUpRight, Settings, Sparkles, X } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
 
@@ -17,10 +17,9 @@ import { ThemeToggle } from '../ThemeToggle';
 interface SettingsDrawerProps {
   isOpen: boolean;
   onClose: () => void;
-  onShowHistory?: () => void;
 }
 
-export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawerProps) {
+export function SettingsDrawer({ isOpen, onClose }: SettingsDrawerProps) {
   const router = useRouter();
   const [isClosing, setIsClosing] = useState(false);
   const [isAnimatingIn, setIsAnimatingIn] = useState(true);
@@ -154,30 +153,6 @@ export function SettingsDrawer({ isOpen, onClose, onShowHistory }: SettingsDrawe
                 </div>
                 <p className="mt-1 text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
                   Voice, account, memory, and conversation preferences.
-                </p>
-              </div>
-            </div>
-          </button>
-
-          <button
-            onClick={() => {
-              handleAction(() => onShowHistory?.());
-            }}
-            className={cn(
-              'cosmic-surface-panel cosmic-focus-ring w-full rounded-[1.4rem] p-4 text-left transition-all hover:-translate-y-0.5',
-            )}
-          >
-            <div className="flex items-start gap-3">
-              <div className="cosmic-surface-soft flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ color: 'var(--cosmic-text-muted)' }}>
-                <Clock3 className="h-4 w-4" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>History</span>
-                  <ArrowUpRight className="h-4 w-4" style={{ color: 'var(--cosmic-text-whisper)' }} />
-                </div>
-                <p className="mt-1 text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
-                  Open the full session archive and revisit recap artifacts.
                 </p>
               </div>
             </div>

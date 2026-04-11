@@ -155,8 +155,16 @@ export function PresenceArtifactPanel({
       <div
         className={cn(
           "relative pointer-events-auto",
-          isVoiceMode && "cursor-pointer"
+          isVoiceMode && "cursor-pointer",
+          !isVoiceMode && "rounded-2xl px-5 py-4"
         )}
+        style={!isVoiceMode ? {
+          background: 'var(--cosmic-panel)',
+          borderRadius: '16px',
+          border: '1px solid var(--cosmic-border-soft)',
+          backdropFilter: 'blur(20px) saturate(1.2)',
+          WebkitBackdropFilter: 'blur(20px) saturate(1.2)',
+        } : undefined}
         onClick={isVoiceMode ? handleDismiss : undefined}
       >
         {/* Dismiss hint — whisper-thin, top-right */}
@@ -187,9 +195,9 @@ export function PresenceArtifactPanel({
             <p
               className="font-cormorant text-[17px] leading-[1.75] font-light text-center"
               style={{
-                color: revealStep >= 1 ? 'var(--cosmic-text)' : 'transparent',
+                color: revealStep >= 1 ? 'var(--cosmic-text-strong)' : 'transparent',
                 textShadow: isActive
-                  ? `0 0 20px color-mix(in srgb, ${bloomColor} 15%, transparent)`
+                  ? `0 0 24px color-mix(in srgb, ${bloomColor} 22%, transparent)`
                   : "none",
                 transition: 'color 1.4s ease, text-shadow 2s ease',
               }}
@@ -240,9 +248,9 @@ export function PresenceArtifactPanel({
               <p
                 className="font-cormorant text-[15px] italic leading-[1.7] font-light"
                 style={{
-                  color: reflectionTapped ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text)',
+                  color: reflectionTapped ? 'var(--cosmic-text-whisper)' : 'var(--cosmic-text-strong)',
                   textShadow: !reflectionTapped && isActive
-                    ? `0 0 16px color-mix(in srgb, ${bloomColor} 12%, transparent)`
+                    ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
                     : "none",
                   transition: "color 0.7s ease, text-shadow 1s ease",
                 }}
@@ -287,7 +295,7 @@ export function PresenceArtifactPanel({
                   "transition-all duration-[800ms] cursor-default",
                 )}
                 style={{
-                  color: 'var(--cosmic-text-whisper)',
+                  color: 'var(--cosmic-text-muted)',
                   animationDelay: `${i * 200}ms`,
                 }}
                 onClick={(e) => e.stopPropagation()}
@@ -335,9 +343,12 @@ export function PresenceArtifactPanel({
 export function ArtifactToggleIcon({
   hasArtifacts,
   onClick,
+  isNew,
 }: {
   hasArtifacts: boolean
   onClick: () => void
+  /** True when new/unseen insights are available */
+  isNew?: boolean
 }) {
   if (!hasArtifacts) return null
 
@@ -345,21 +356,40 @@ export function ArtifactToggleIcon({
     <button
       onClick={() => { haptic("light"); onClick() }}
       className={cn(
-        "group flex items-center gap-1.5",
-        "transition-all duration-700 cursor-pointer",
+        "group flex items-center gap-2 px-3 py-1.5 rounded-full",
+        "transition-all duration-500 cursor-pointer",
+        isNew && "animate-[insightPulse_2.5s_ease-in-out_infinite]",
       )}
-      style={{ color: 'var(--cosmic-text-faint)' }}
-      aria-label="Show insights"
+      style={{
+        color: isNew ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text)',
+        background: isNew
+          ? 'color-mix(in srgb, var(--sophia-purple) 18%, var(--cosmic-panel))'
+          : 'var(--cosmic-panel-soft)',
+        border: isNew
+          ? '1px solid color-mix(in srgb, var(--sophia-purple) 35%, transparent)'
+          : '1px solid var(--cosmic-border-soft)',
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+      }}
+      aria-label={isNew ? "New insights available" : "Show insights"}
     >
-      {/* Tiny bloom dot */}
+      {/* Bloom dot */}
       <span
-        className="w-1.5 h-1.5 rounded-full transition-all duration-700 group-hover:shadow-[0_0_8px_var(--cosmic-border)]"
+        className={cn(
+          "w-2 h-2 rounded-full transition-all duration-700",
+          isNew && "shadow-[0_0_10px_var(--sophia-glow)]",
+        )}
         style={{
-          background: 'color-mix(in srgb, var(--sophia-purple) 30%, var(--cosmic-panel-soft))',
+          background: isNew
+            ? 'var(--sophia-glow)'
+            : 'color-mix(in srgb, var(--sophia-purple) 50%, var(--cosmic-panel-soft))',
         }}
       />
-      <span className="text-[9px] tracking-[0.14em] lowercase">
-        insights
+      <span className={cn(
+        "text-[11px] tracking-[0.1em] lowercase font-medium",
+        isNew && "text-[12px]",
+      )}>
+        {isNew ? 'new insight' : 'insights'}
       </span>
     </button>
   )

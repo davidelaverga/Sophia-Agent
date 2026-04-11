@@ -6,6 +6,7 @@ import { haptic } from '../../hooks/useHaptics';
 import { cn } from '../../lib/utils';
 import type { ContextMode } from '../../types/session';
 
+import { useSweepGlow } from './sweepLight';
 import type { RitualConfig } from './types';
 
 interface RitualNodeProps {
@@ -41,6 +42,7 @@ export function RitualNode({
   staggerDelay = 0,
 }: RitualNodeProps) {
   const [isActive, setIsActive] = useState(false);
+  const sweepRef = useSweepGlow();
   const Icon = ritual.icon;
   const label = ritual.labels[context];
   const showDescription = isSelected || isActive;
@@ -83,13 +85,41 @@ export function RitualNode({
       }}
     >
       <span
+        ref={sweepRef as React.RefObject<HTMLSpanElement>}
         className={cn(
           'cosmic-surface-panel relative flex h-[50px] w-[50px] items-center justify-center rounded-full transition-all duration-300'
         )}
-        style={isSelected ? {
-          borderColor: 'var(--cosmic-border-strong)',
-          boxShadow: '0 0 32px color-mix(in srgb, var(--sophia-purple) 22%, transparent)',
-        } : undefined}
+        style={{
+          ...(isSelected ? { borderColor: 'var(--cosmic-border-strong)' } : {}),
+          filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.15))',
+          boxShadow: isSelected
+            ? '0 0 32px color-mix(in srgb, var(--sophia-purple) 22%, transparent)'
+            : [
+                // Cast shadow — away from the light, depth scales with proximity
+                'calc((8px + 4px * var(--sweep-proximity, 0)) * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+                'calc((8px + 4px * var(--sweep-proximity, 0)) * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+                'calc((12px + 6px * var(--sweep-proximity, 0)) * var(--sweep-glow, 0))',
+                '0px',
+                'rgba(0, 0, 0, calc(var(--sweep-glow, 0) * 0.22))',
+              ].join(' ') + ', ' +
+              [
+                // Lit edge — glow on the light-facing side
+                'calc(-3px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+                'calc(-3px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+                'calc(8px * var(--sweep-glow, 0))',
+                'calc(2px * var(--sweep-glow, 0))',
+                'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.18))',
+              ].join(' ') + ', ' +
+              [
+                // Inner highlight — soft center glow when lit
+                'inset',
+                'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+                'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+                'calc(6px * var(--sweep-glow, 0))',
+                '0px',
+                'rgba(220, 200, 255, calc(var(--sweep-glow, 0) * 0.08))',
+              ].join(' '),
+        }}
       >
         {isSuggested && !isSelected && (
           <span className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-[var(--sophia-glow)] shadow-[0_0_10px_var(--sophia-glow)]" />

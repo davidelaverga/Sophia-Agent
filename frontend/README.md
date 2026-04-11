@@ -66,6 +66,10 @@ pnpm start
 
 Key environment variables (see `.env.example` for full list):
 
+Frontend auth runtime note:
+- Better Auth in this app is configured against Postgres via `BETTER_AUTH_DATABASE_URL` or `DATABASE_URL`.
+- `frontend/pnpm-lock.yaml` can still contain `better-sqlite3` because Better Auth publishes optional adapters; that lockfile entry alone does not mean SQLite is used at runtime.
+
 ```bash
 # Frontend auth
 BETTER_AUTH_URL="http://localhost:3000"
@@ -134,6 +138,38 @@ src/
 - Turbopack enabled by default in development for faster builds
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
+
+## Validation Status
+
+Validated locally on 2026-04-09 for the current frontend branch state:
+
+- `pnpm test:e2e:auth` passes.
+- `pnpm test:e2e:live` passes when the local LangGraph, gateway, voice server, and frontend stack is running.
+- `pnpm lint` passes with warnings only (no errors).
+- `pnpm typecheck` passes.
+- `BETTER_AUTH_SECRET=local-dev-secret pnpm build` passes.
+
+Current known gap:
+
+- `pnpm test` is not fully green at the moment because several UI-unit suites still reflect older component contracts rather than the current implementation. The active failing areas are:
+	- `src/__tests__/components/SessionLayoutChromeFade.test.tsx`
+	- `src/__tests__/components/SettingsDrawer.test.tsx`
+	- `src/__tests__/components/VoiceFirstComposer.test.tsx`
+	- `src/__tests__/hooks/useChromeFade.test.tsx`
+
+For deployment-oriented validation (Render/Vercel), the practical production gate on this branch is:
+
+```bash
+pnpm lint
+pnpm typecheck
+BETTER_AUTH_SECRET=local-dev-secret pnpm build
+```
+
+Notes:
+
+- Production builds require `BETTER_AUTH_SECRET` to be set.
+- Use a high-entropy secret in real Render/Vercel environments; `local-dev-secret` is sufficient only for local validation.
+- The live E2E suite depends on the local Sophia service stack; it is not a standalone frontend-only check.
 
 ## License
 

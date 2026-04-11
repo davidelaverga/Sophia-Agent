@@ -1,24 +1,49 @@
 """Voice session API — Stream token generation, agent dispatch, and call lifecycle."""
 
+import asyncio
 import logging
 import os
+import re
 import time
 import uuid
+from dataclasses import dataclass
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authorized_user_scope
+
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api/sophia", tags=["voice"])
+router = APIRouter(
+    prefix="/api/sophia",
+    tags=["voice"],
+    dependencies=[Depends(require_authorized_user_scope)],
+)
 
 SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
 SUPPORTED_CONTEXT_MODES = {"work", "gaming", "life"}
 VOICE_SERVER_DISPATCH_TIMEOUT = 10.0
 
 
+@dataclass(frozen=True)
+class ActiveVoiceSession:
+    call_id: str
+    session_id: str
+
+
+_active_voice_sessions: dict[str, ActiveVoiceSession] = {}
+_active_voice_session_locks: dict[str, asyncio.Lock] = {}
+_active_voice_session_locks_guard = asyncio.Lock()
+
+
 def _get_voice_server_url() -> str:
     return os.getenv("VOICE_SERVER_URL", "http://localhost:8000").rstrip("/")
+
+
+async def _get_active_voice_session_lock(user_id: str) -> asyncio.Lock:
+    async with _active_voice_session_locks_guard:
+        return _active_voice_session_locks.setdefault(user_id, asyncio.Lock())
 
 
 class VoiceConnectRequest(BaseModel):
@@ -27,6 +52,14 @@ class VoiceConnectRequest(BaseModel):
     platform: str = Field(..., description="Platform signal: voice | text | ios_voice")
     context_mode: str = Field(default="life", description="Context adaptation: work | gaming | life")
     ritual: str | None = Field(default=None, description="Active ritual: prepare | debrief | vent | reset | None")
+    session_id: str | None = Field(
+        default=None,
+        description="Frontend companion session ID for continuity",
+    )
+    thread_id: str | None = Field(
+        default=None,
+        description="LangGraph thread ID to reuse for this voice session",
+    )
 
 
 class VoiceConnectResponse(BaseModel):
@@ -61,6 +94,13 @@ def _get_stream_api_secret() -> str:
     if not secret:
         raise HTTPException(status_code=503, detail="STREAM_API_SECRET not configured")
     return secret
+
+
+def _sanitize_call_id_fragment(value: str) -> str:
+    """Normalize user-derived fragments to the voice server's call_id charset."""
+
+    normalized = re.sub(r"[^a-z0-9_-]+", "-", value.lower()).strip("-_")
+    return normalized or "user"
 
 
 def _generate_stream_token(api_secret: str, user_id: str) -> str:
@@ -117,25 +157,51 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
     api_key = _get_stream_api_key()
     api_secret = _get_stream_api_secret()
 
-    call_id = f"sophia-{user_id}-{uuid.uuid4().hex[:8]}"
+    call_id = f"sophia-{_sanitize_call_id_fragment(user_id)}-{uuid.uuid4().hex[:8]}"
     call_type = "default"
     token = _generate_stream_token(api_secret, user_id)
 
-    # Dispatch the voice agent to join this call
-    session_id = await _dispatch_voice_agent(
-        call_id=call_id,
-        call_type=call_type,
-        platform=body.platform,
-        context_mode=body.context_mode,
-        ritual=body.ritual,
-    )
+    lock = await _get_active_voice_session_lock(user_id)
+    async with lock:
+        previous_session = _active_voice_sessions.get(user_id)
+        if previous_session is not None:
+            logger.info(
+                "voice.connect closing previous session user_id=%s call_id=%s session_id=%s",
+                user_id,
+                previous_session.call_id,
+                previous_session.session_id,
+            )
+            await _disconnect_voice_session(
+                previous_session.call_id,
+                previous_session.session_id,
+            )
+            if _active_voice_sessions.get(user_id) == previous_session:
+                _active_voice_sessions.pop(user_id, None)
+
+        session_id = await _dispatch_voice_agent(
+            call_id=call_id,
+            call_type=call_type,
+            platform=body.platform,
+            context_mode=body.context_mode,
+            ritual=body.ritual,
+            session_id=body.session_id,
+            thread_id=body.thread_id,
+        )
+
+        if session_id:
+            _active_voice_sessions[user_id] = ActiveVoiceSession(
+                call_id=call_id,
+                session_id=session_id,
+            )
 
     logger.info(
-        "voice.connect user_id=%s platform=%s context_mode=%s ritual=%s call_id=%s session_id=%s",
+        "voice.connect user_id=%s platform=%s context_mode=%s ritual=%s companion_session_id=%s thread_id=%s call_id=%s session_id=%s",
         user_id,
         body.platform,
         body.context_mode,
         body.ritual,
+        body.session_id,
+        body.thread_id,
         call_id,
         session_id,
     )
@@ -155,6 +221,8 @@ async def _dispatch_voice_agent(
     platform: str,
     context_mode: str,
     ritual: str | None,
+    session_id: str | None = None,
+    thread_id: str | None = None,
 ) -> str | None:
     """Tell the Vision Agents voice server to spawn an agent for this call.
 
@@ -174,6 +242,8 @@ async def _dispatch_voice_agent(
                     "platform": platform,
                     "context_mode": context_mode,
                     "ritual": ritual,
+                    "session_id": session_id,
+                    "thread_id": thread_id,
                 },
             )
             resp.raise_for_status()
@@ -233,8 +303,25 @@ async def _dispatch_voice_agent(
 )
 async def voice_disconnect(user_id: str, body: VoiceDisconnectRequest) -> None:
     """Request the voice server to close the agent session."""
+    await _disconnect_voice_session(body.call_id, body.session_id)
+
+    lock = await _get_active_voice_session_lock(user_id)
+    async with lock:
+        active_session = _active_voice_sessions.get(user_id)
+        if active_session == ActiveVoiceSession(call_id=body.call_id, session_id=body.session_id):
+            _active_voice_sessions.pop(user_id, None)
+
+    logger.info(
+        "voice.disconnect user_id=%s call_id=%s session_id=%s",
+        user_id,
+        body.call_id,
+        body.session_id,
+    )
+
+
+async def _disconnect_voice_session(call_id: str, session_id: str) -> None:
     voice_url = _get_voice_server_url()
-    url = f"{voice_url}/calls/{body.call_id}/sessions/{body.session_id}"
+    url = f"{voice_url}/calls/{call_id}/sessions/{session_id}"
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
@@ -242,15 +329,15 @@ async def voice_disconnect(user_id: str, body: VoiceDisconnectRequest) -> None:
             if resp.status_code == 404:
                 logger.info(
                     "voice.disconnect session already gone call_id=%s session_id=%s",
-                    body.call_id,
-                    body.session_id,
+                    call_id,
+                    session_id,
                 )
                 return
             resp.raise_for_status()
     except (httpx.ConnectError, httpx.TimeoutException):
         logger.warning(
             "voice.disconnect — voice server unreachable, relying on idle timeout for call_id=%s",
-            body.call_id,
+            call_id,
         )
     except httpx.HTTPStatusError as exc:
         logger.warning(
@@ -261,13 +348,6 @@ async def voice_disconnect(user_id: str, body: VoiceDisconnectRequest) -> None:
     except httpx.RequestError as exc:
         logger.warning(
             "voice.disconnect failed — request error for call_id=%s: %s",
-            body.call_id,
+            call_id,
             exc,
         )
-
-    logger.info(
-        "voice.disconnect user_id=%s call_id=%s session_id=%s",
-        user_id,
-        body.call_id,
-        body.session_id,
-    )

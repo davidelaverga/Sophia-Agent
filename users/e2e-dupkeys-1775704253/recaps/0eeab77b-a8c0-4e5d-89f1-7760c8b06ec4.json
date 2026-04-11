@@ -1,0 +1,17 @@
+{
+  "session_id": "0eeab77b-a8c0-4e5d-89f1-7760c8b06ec4",
+  "thread_id": "45593cab-1df3-4d83-b484-aaa686731743",
+  "session_type": "debrief",
+  "context_mode": "gaming",
+  "started_at": "2026-04-09T03:11:02.404Z",
+  "ended_at": "2026-04-09T03:11:37.516401+00:00",
+  "turn_count": 3,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "The smallest details are often the most trustworthy ones. You know your own ritual \u2014 hold onto it.",
+    "reflection_candidate": {
+      "prompt": "When you reach for that marigold-citrus blend tonight, what are you actually needing in that moment? Rest, or something else?"
+    },
+    "status": "ready"
+  }
+}

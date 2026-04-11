@@ -10,9 +10,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authorized_user_scope
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.review_metadata_store import (
@@ -23,7 +24,11 @@ from deerflow.sophia.review_metadata_store import (
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/sophia", tags=["sophia"])
+router = APIRouter(
+    prefix="/api/sophia",
+    tags=["sophia"],
+    dependencies=[Depends(require_authorized_user_scope)],
+)
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
@@ -126,6 +131,54 @@ class JournalResponse(BaseModel):
     count: int = Field(default=0)
 
 
+def _sort_memories_desc(memories: list[dict]) -> list[dict]:
+    def sort_key(memory: dict) -> tuple[int, str]:
+        created_at = memory.get("created_at")
+        if isinstance(created_at, str):
+            return (1, created_at)
+        return (0, "")
+
+    return sorted(memories, key=sort_key, reverse=True)
+
+
+def _memory_timestamp(memory: dict) -> str:
+    updated_at = memory.get("updated_at") if isinstance(memory, dict) else None
+    if isinstance(updated_at, str) and updated_at:
+        return updated_at
+
+    created_at = memory.get("created_at") if isinstance(memory, dict) else None
+    if isinstance(created_at, str) and created_at:
+        return created_at
+
+    return ""
+
+
+def _dedupe_memories_by_id(memories: list[dict]) -> list[dict]:
+    deduped: list[dict] = []
+    index_by_id: dict[str, int] = {}
+
+    for memory in memories:
+        if not isinstance(memory, dict):
+            deduped.append(memory)
+            continue
+
+        memory_id = memory.get("id")
+        if not isinstance(memory_id, str) or not memory_id:
+            deduped.append(memory)
+            continue
+
+        existing_index = index_by_id.get(memory_id)
+        if existing_index is None:
+            index_by_id[memory_id] = len(deduped)
+            deduped.append(memory)
+            continue
+
+        if _memory_timestamp(memory) >= _memory_timestamp(deduped[existing_index]):
+            deduped[existing_index] = memory
+
+    return deduped
+
+
 class ToneDataPoint(BaseModel):
     date: str = Field(..., description="Date (YYYY-MM-DD)")
     avg_tone: float = Field(default=0.0, description="Average tone estimate")
@@ -198,11 +251,22 @@ class SessionEndResponse(BaseModel):
 # Helper: normalize Mem0 memory to MemoryItem
 # ---------------------------------------------------------------------------
 
+def _get_primary_category(mem: dict) -> str | None:
+    categories = mem.get("categories") if isinstance(mem, dict) else None
+    if isinstance(categories, list):
+        for category in categories:
+            if isinstance(category, str) and category:
+                return category
+        return None
+
+    category = mem.get("category") if isinstance(mem, dict) else None
+    return category if isinstance(category, str) and category else None
+
 def _to_memory_item(mem: dict) -> MemoryItem:
     return MemoryItem(
         id=mem.get("id", ""),
         content=mem.get("memory", mem.get("content", "")),
-        category=mem.get("categories", [None])[0] if isinstance(mem.get("categories"), list) else mem.get("category"),
+        category=_get_primary_category(mem),
         metadata=mem.get("metadata"),
         created_at=mem.get("created_at"),
         updated_at=mem.get("updated_at"),
@@ -434,6 +498,7 @@ async def list_memories(
         result = client.get_all(filters={"user_id": user_id})
         memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
         memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+        memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
             "session.finalization list_memories_result user_id=%s status=%s count=%s",
@@ -683,42 +748,63 @@ async def reflect(user_id: str, body: ReflectRequest) -> ReflectResponse:
 async def journal(
     user_id: str,
     category: str | None = Query(default=None, description="Filter by category"),
-    search: str | None = Query(default=None, description="Search memories by keyword"),
+    memory_type: str | None = Query(default=None, alias="type", description="Alias for category filter"),
+    search: str | None = Query(default=None, description="Case-insensitive text search"),
+    status: str | None = Query(default=None, description="Filter by metadata.status"),
 ) -> JournalResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        if search:
-            # Semantic search via Mem0 search API
-            from deerflow.sophia.mem0_client import search_memories
-            results = await asyncio.to_thread(
-                search_memories, user_id, search,
-                categories=[category] if category else None,
-            )
-            entries = [
-                JournalEntry(
-                    id=m.get("id", ""),
-                    content=m.get("content", ""),
-                    category=m.get("category"),
-                    metadata=None,
-                    created_at=None,
-                )
-                for m in results
-            ]
-            return JournalResponse(entries=entries, count=len(entries))
+        selected_category = category or memory_type
+        normalized_search = search.strip().lower() if isinstance(search, str) and search.strip() else None
+        memories_raw: list[dict]
 
-        # Browse all memories (optionally filtered by category)
-        filters: dict = {"user_id": user_id}
-        if category:
-            filters["categories"] = category
-        result = client.get_all(filters=filters)
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
-        memories_raw = apply_review_metadata_overlays(user_id, memories_raw)
+        if normalized_search:
+            from deerflow.sophia.mem0_client import search_memories
+
+            memories_raw = await asyncio.to_thread(
+                search_memories,
+                user_id,
+                normalized_search,
+                categories=[selected_category] if selected_category else None,
+            )
+            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+
+            # Preserve the previous plain-text search behavior if Mem0 search returns no results.
+            if not memories_raw:
+                filters: dict = {"user_id": user_id}
+                if selected_category:
+                    filters["categories"] = selected_category
+                result = client.get_all(filters=filters)
+                memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+                memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+                memories_raw = [
+                    memory
+                    for memory in memories_raw
+                    if any(
+                        isinstance(target, str) and normalized_search in target.lower()
+                        for target in [
+                            memory.get("memory", memory.get("content", "")),
+                            *(memory.get("categories") if isinstance(memory.get("categories"), list) else []),
+                        ]
+                    )
+                ]
+        else:
+            filters = {"user_id": user_id}
+            if selected_category:
+                filters["categories"] = selected_category
+            result = client.get_all(filters=filters)
+            memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+            memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+
+        memories_raw = _sort_memories_desc(memories_raw)
+        memories_raw = _dedupe_memories_by_id(memories_raw)
+
         entries = [
             JournalEntry(
                 id=m.get("id", ""),
                 content=m.get("memory", m.get("content", "")),
-                category=m.get("categories", [None])[0] if isinstance(m.get("categories"), list) else m.get("category"),
+                category=_get_primary_category(m),
                 metadata=m.get("metadata"),
                 created_at=m.get("created_at"),
             )

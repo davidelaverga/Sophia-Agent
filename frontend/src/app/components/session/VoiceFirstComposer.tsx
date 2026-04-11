@@ -183,14 +183,27 @@ export function VoiceFirstComposer({
       textOnly
         ? 'p-4 sm:pb-4 pb-2'
         : 'fixed bottom-8 left-1/2 -translate-x-1/2 z-30'
-    )}>
+    )}
+    style={textOnly ? {
+      background: 'color-mix(in srgb, var(--cosmic-panel) 80%, transparent)',
+      borderTop: '1px solid var(--cosmic-border-soft)',
+      backdropFilter: 'blur(16px) saturate(1.1)',
+      WebkitBackdropFilter: 'blur(16px) saturate(1.1)',
+    } : undefined}
+    >
       <div className={cn(textOnly && 'max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto')}>
         
         {/* Sophia Presence Indicator — text mode only, atmospheric */}
         {textOnly && (
         <div className="flex justify-center mb-3">
           <div role="status" aria-live="polite" className="flex items-center gap-2">
-            <span className="text-[10px] tracking-[0.14em] lowercase transition-all duration-500" style={{ color: 'var(--cosmic-text-faint)' }}>
+            {isTyping && (
+              <span
+                className="w-1.5 h-1.5 rounded-full animate-pulse"
+                style={{ background: 'var(--sophia-purple)', boxShadow: '0 0 6px var(--sophia-glow)' }}
+              />
+            )}
+            <span className="text-[10px] tracking-[0.14em] lowercase transition-all duration-500" style={{ color: 'var(--cosmic-text-muted)' }}>
               {isTyping ? 'sophia is typing…' : ''}
             </span>
           </div>
@@ -351,15 +364,23 @@ export function VoiceFirstComposer({
                     disabled={disabled}
                     className={cn(
                       'flex-1 px-4 py-2.5 rounded-2xl border transition-all duration-200 resize-none',
-                      'text-sm placeholder:text-[color:var(--cosmic-text-faint)]',
-                      'cosmic-focus-ring focus-visible:outline-none',
+                      'text-sm placeholder:text-[color:var(--cosmic-text-muted)]',
+                      'focus-visible:outline-none',
                       'min-h-[40px] max-h-[100px]',
                       disabled && 'opacity-50 cursor-not-allowed'
                     )}
                     style={{
-                      backgroundColor: 'var(--input-bg)',
-                      color: 'var(--cosmic-text)',
-                      borderColor: 'var(--cosmic-border-soft)',
+                      backgroundColor: 'color-mix(in srgb, var(--input-bg) 90%, var(--sophia-purple) 10%)',
+                      color: 'var(--cosmic-text-strong)',
+                      borderColor: 'var(--cosmic-border)',
+                    }}
+                    onFocus={(e) => {
+                      e.currentTarget.style.borderColor = 'color-mix(in srgb, var(--sophia-purple) 50%, var(--cosmic-border))';
+                      e.currentTarget.style.boxShadow = '0 0 0 1px color-mix(in srgb, var(--sophia-purple) 25%, transparent), 0 0 16px color-mix(in srgb, var(--sophia-purple) 10%, transparent)';
+                    }}
+                    onBlur={(e) => {
+                      e.currentTarget.style.borderColor = 'var(--cosmic-border)';
+                      e.currentTarget.style.boxShadow = 'none';
                     }}
                   />
                   
@@ -378,7 +399,10 @@ export function VoiceFirstComposer({
                         ? 'cosmic-accent-pill active:scale-95'
                         : 'cursor-not-allowed'
                     )}
-                    style={!value.trim() || disabled ? { color: 'var(--cosmic-text-faint)' } : undefined}
+                    style={!value.trim() || disabled
+                      ? { color: 'var(--cosmic-text-faint)' }
+                      : { boxShadow: '0 0 12px color-mix(in srgb, var(--sophia-glow) 20%, transparent)' }
+                    }
                   >
                     {justSent ? (
                       <Check className="w-4 h-4 animate-scaleIn" />

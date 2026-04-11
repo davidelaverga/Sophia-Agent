@@ -13,12 +13,9 @@
  * - POST /api/v4/chat
  */
 
-import { headers } from "next/headers"
 import { type NextRequest, NextResponse } from "next/server"
 
-import { auth } from "@/server/better-auth"
-
-import { getServerAuthToken } from "../../../lib/auth/server-auth"
+import { getUserScopedAuthToken } from "../../../lib/auth/server-auth"
 
 // ============================================================================
 // TYPES
@@ -209,32 +206,25 @@ function sanitizeResponse(responseText: string): { text: string; artifacts: Reco
 
 
 // ============================================================================
-// AUTHENTICATION HELPER
-// ============================================================================
-
-async function getAuthenticatedUser(): Promise<string | undefined> {
-  try {
-    const session = await auth.api.getSession({ headers: await headers() })
-    return session?.user?.id
-  } catch {
-    return undefined
-  }
-}
-
-// ============================================================================
 // MAIN HANDLER
 // ============================================================================
 
 export async function POST(request: NextRequest) {
   // 1. Validate Configuration
   const apiBase = process.env.BACKEND_API_URL
-  // Get user token or fallback to server key
-  const apiKey = await getServerAuthToken()
 
   if (!apiBase) {
     return NextResponse.json(
       { error: "Server configuration incomplete" },
       { status: 500 }
+    )
+  }
+
+  const apiKey = await getUserScopedAuthToken()
+  if (!apiKey) {
+    return NextResponse.json(
+      { error: 'Not authenticated' },
+      { status: 401 }
     )
   }
 
@@ -254,12 +244,6 @@ export async function POST(request: NextRequest) {
       { error: "Missing message" },
       { status: 400 }
     )
-  }
-
-  // 3. Resolve User Identity
-  let userId = body.user_id
-  if (!userId) {
-    userId = await getAuthenticatedUser()
   }
 
   const conversationId = body.conversationId || crypto.randomUUID()

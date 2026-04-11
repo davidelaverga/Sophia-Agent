@@ -1,8 +1,8 @@
 {
-  "session_count": 68,
+  "session_count": 79,
   "avg_pause_ms": 0.0,
-  "avg_words_per_turn": 9.791531047817571,
-  "multi_clause_frequency": 0.4681072499906195,
-  "cancel_merge_frequency": 0.4705851782689564,
-  "last_updated": "2026-04-06T19:13:34.680675+00:00"
+  "avg_words_per_turn": 10.043950119334136,
+  "multi_clause_frequency": 0.4775618260253437,
+  "cancel_merge_frequency": 0.4476319075346777,
+  "last_updated": "2026-04-08T23:34:59.223211+00:00"
 }

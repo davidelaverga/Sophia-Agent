@@ -23,13 +23,13 @@ export const copy = {
   auth: {
     title: "Sophia",
     subtitle: "A calm, emotionally-aware companion.",
-    button: "Continue with Discord",
+    button: "Continue with Google",
     loading: "Opening a gentle space...",
     connecting: "Connecting...",
     footerNote: "By continuing, you agree to our terms and privacy policy",
     errors: {
-      discord: "Discord sign-in failed. Please try again.",
-      unexpected: "We could not contact Discord. Please try again shortly.",
+      signIn: "Google sign-in failed. Please try again.",
+      unexpected: "We could not contact Google. Please try again shortly.",
     },
   },
   header: {

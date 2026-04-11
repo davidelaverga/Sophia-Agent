@@ -8,16 +8,21 @@
  * Usage:
  * Add to main app component:
  * ```tsx
- * useBackendTokenSync()
+ * useBackendTokenSync({ user, loading })
  * ```
  */
 
 "use client"
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
-import { useAuth } from '../providers'
+import { authBypassEnabled } from '../lib/auth/dev-bypass'
 import { useAuthTokenStore } from '../stores/auth-token-store'
+
+export interface BackendTokenSyncAuthState {
+  user: { id: string } | null
+  loading: boolean
+}
 
 export interface BackendTokenSyncState {
   /** Whether sync is in progress */
@@ -34,8 +39,7 @@ export interface BackendTokenSyncState {
  * Hook that automatically syncs backend token when needed.
  * Should be used at the app level to ensure token is available.
  */
-export function useBackendTokenSync(): BackendTokenSyncState {
-  const { user, loading } = useAuth()
+export function useBackendTokenSync({ user, loading }: BackendTokenSyncAuthState): BackendTokenSyncState {
   const token = useAuthTokenStore(state => state.token)
   const setToken = useAuthTokenStore(state => state.setToken)
 
@@ -43,15 +47,19 @@ export function useBackendTokenSync(): BackendTokenSyncState {
   const [syncCompleted, setSyncCompleted] = useState(false)
   const [syncError, setSyncError] = useState<string | null>(null)
 
-  // Track if we've already attempted sync to avoid infinite loops
-  const syncAttemptedRef = useRef(false)
+  // Track the last user id we attempted to sync so failures do not loop forever.
+  const attemptedUserIdRef = useRef<string | null>(null)
+  const previousUserIdRef = useRef<string | null>(null)
+  const currentUserId = user?.id ?? null
 
   // Check if we need to sync: have Better Auth user but no backend token in store
-  const needsSync = !!user && !token
+  const needsSync = !authBypassEnabled && !!user && !token
 
   // Sync function that can be called manually or automatically
-  const doSync = async (): Promise<boolean> => {
-    if (!user) return false
+  const doSync = useCallback(async (): Promise<boolean> => {
+    if (!currentUserId) return false
+
+    attemptedUserIdRef.current = currentUserId
 
     setIsSyncing(true)
     setSyncError(null)
@@ -61,11 +69,28 @@ export function useBackendTokenSync(): BackendTokenSyncState {
 
       if (res.ok) {
         const data = await res.json()
-        // The server already set the httpOnly cookie.
-        // Update Zustand store for UI awareness.
-        setToken(data.user?.id ?? 'synced')
+
+        if (data.skipped === true) {
+          setSyncCompleted(true)
+          return true
+        }
+
+        if (data.user?.id) {
+          // The server already set the httpOnly cookie.
+          // Store a marker token so UI auth checks stay accurate.
+          setToken('httponly-session-active', {
+            id: data.user.id,
+            email: data.user.email ?? null,
+            username: data.user.username ?? null,
+            discord_id: null,
+          })
+          setSyncCompleted(true)
+          return true
+        }
+
+        setSyncError('Sync completed without a backend session')
         setSyncCompleted(true)
-        return true
+        return false
       }
 
       const err = await res.json().catch(() => ({ error: 'Unknown error' }))
@@ -80,22 +105,25 @@ export function useBackendTokenSync(): BackendTokenSyncState {
     } finally {
       setIsSyncing(false)
     }
-  }
+  }, [currentUserId, setToken])
+
+  // Reset sync state only when the authenticated Better Auth user changes.
+  useEffect(() => {
+    if (previousUserIdRef.current === currentUserId) return
+
+    previousUserIdRef.current = currentUserId
+    attemptedUserIdRef.current = null
+    setSyncCompleted(false)
+    setSyncError(null)
+  }, [currentUserId])
 
   // Auto-sync when conditions are met
   useEffect(() => {
-    if (loading || !needsSync || syncAttemptedRef.current || isSyncing) return
-    syncAttemptedRef.current = true
-    void doSync()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, needsSync, isSyncing])
+    if (loading || !needsSync || isSyncing || !currentUserId) return
+    if (attemptedUserIdRef.current === currentUserId) return
 
-  // Reset sync attempt flag when user changes (new login)
-  useEffect(() => {
-    if (user?.id) {
-      syncAttemptedRef.current = false
-    }
-  }, [user?.id])
+    void doSync()
+  }, [currentUserId, doSync, loading, needsSync, isSyncing])
 
   return {
     isSyncing,

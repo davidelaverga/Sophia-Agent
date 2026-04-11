@@ -55,6 +55,8 @@ class SophiaLLM(LLM):
         self._runtime_platform = settings.platform
         self._runtime_context_mode = settings.context_mode
         self._runtime_ritual = settings.ritual
+        self._runtime_session_id: str | None = None
+        self._runtime_thread_id: str | None = None
 
     def bind_session_context(
         self,
@@ -62,10 +64,14 @@ class SophiaLLM(LLM):
         platform: str,
         context_mode: str,
         ritual: str | None,
+        session_id: str | None,
+        thread_id: str | None,
     ) -> None:
         self._runtime_platform = platform
         self._runtime_context_mode = context_mode
         self._runtime_ritual = ritual
+        self._runtime_session_id = session_id
+        self._runtime_thread_id = thread_id
 
     def attach_tts(self, tts: Any) -> None:
         self._tts_ref = tts
@@ -375,6 +381,8 @@ class SophiaLLM(LLM):
             platform=self._runtime_platform,
             ritual=self._runtime_ritual,
             context_mode=self._runtime_context_mode,
+            session_id=self._runtime_session_id,
+            thread_id=self._runtime_thread_id,
         )
 
         await self._emit_call_event(

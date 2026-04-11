@@ -102,15 +102,20 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
       {/* Sophia Avatar - visible for assistant messages */}
       {!isUser && (
         <div className={cn(
-          'shrink-0 w-7 h-7 rounded-full flex items-center justify-center mr-2 mt-3',
-          'bg-transparent'
-        )}>
+          'shrink-0 w-7 h-7 rounded-full flex items-center justify-center mr-2.5 mt-3',
+        )}
+        style={{
+          background: isLatest
+            ? 'color-mix(in srgb, var(--sophia-purple) 14%, var(--cosmic-panel-soft))'
+            : 'var(--cosmic-panel-soft)',
+          border: '1px solid var(--cosmic-border-soft)',
+        }}
+        >
           <Sparkles className={cn(
-            'w-3.5 h-3.5 transition-all duration-500',
+            'w-3 h-3 transition-all duration-500',
             isLatest && 'animate-[sparkle_2s_ease-in-out_infinite]',
-            !isLatest && 'opacity-50'
           )}
-          style={{ color: isLatest ? 'var(--cosmic-text)' : 'var(--cosmic-text-faint)' }} />
+          style={{ color: isLatest ? 'var(--sophia-purple)' : 'var(--cosmic-text-whisper)' }} />
         </div>
       )}
       
@@ -123,19 +128,26 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
                 isQueued && 'border-dashed opacity-70'
               )
             : cn(
-                'bg-transparent font-light'
+                'border font-light'
               ),
           // Subtle glow for assistant's latest message
-          !isUser && isLatest && 'shadow-[0_0_20px_var(--cosmic-glow-soft)]',
+          !isUser && isLatest && 'shadow-[0_0_24px_var(--cosmic-border-soft)]',
           // Dashed border for incomplete messages
           isIncomplete && 'border-dashed border-amber-400/50'
         )}
         style={isUser ? {
-          background: 'var(--cosmic-panel-soft)',
-          borderColor: isQueued ? 'var(--cosmic-text-faint)' : 'var(--cosmic-border-soft)',
+          background: 'var(--user-bubble)',
+          borderColor: isQueued ? 'var(--cosmic-text-faint)' : 'color-mix(in srgb, var(--cosmic-teal) 8%, var(--cosmic-border-soft))',
           backdropFilter: 'blur(12px) saturate(1.1)',
           WebkitBackdropFilter: 'blur(12px) saturate(1.1)',
-        } : undefined}
+        } : {
+          background: 'var(--sophia-bubble)',
+          borderColor: 'var(--cosmic-border-soft)',
+          borderLeftColor: isLatest ? 'color-mix(in srgb, var(--sophia-purple) 30%, transparent)' : undefined,
+          borderLeftWidth: isLatest ? '2px' : undefined,
+          backdropFilter: 'blur(16px) saturate(1.15)',
+          WebkitBackdropFilter: 'blur(16px) saturate(1.15)',
+        }}
       >
         {(isVoiceTranscript || isVoiceResponse) && (
           <span
@@ -156,8 +168,8 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           isIncomplete && 'opacity-80'
         )}
         style={{
-          color: isUser ? 'var(--cosmic-text)' : 'var(--cosmic-text-strong)',
-          textShadow: '0 1px 8px rgba(0,0,0,0.25)',
+          color: 'var(--cosmic-text-strong)',
+          textShadow: '0 1px 6px rgba(0,0,0,0.18)',
         }}
         >
           {renderedContent}

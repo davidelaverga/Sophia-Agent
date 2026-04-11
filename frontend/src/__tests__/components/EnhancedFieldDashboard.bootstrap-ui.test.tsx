@@ -1,10 +1,15 @@
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const resolveDashboardBootstrapStateMock = vi.fn();
 const useSessionStoreMock = vi.fn();
 const useConnectivityStoreMock = vi.fn();
 const useUiStoreMock = vi.fn();
+const showToastMock = vi.fn();
+const startSessionMock = vi.fn();
+const startSessionEntryMock = vi.fn();
+const endSessionMock = vi.fn();
 let sessionStartLoadingMock = false;
 
 vi.mock('../../app/lib/dashboard-bootstrap-orchestration', () => ({
@@ -48,7 +53,7 @@ vi.mock('../../app/lib/telemetry', () => ({
 vi.mock('../../app/stores/ui-store', () => ({
   useUiStore: (selector: (state: { showToast: (...args: unknown[]) => void }) => unknown) => {
     const state = {
-      showToast: vi.fn(),
+      showToast: showToastMock,
     };
     useUiStoreMock(selector);
     return selector(state);
@@ -104,8 +109,8 @@ vi.mock('../../app/stores/session-store', () => {
 
 vi.mock('../../app/hooks/useSessionStart', () => ({
   useSessionStart: () => ({
-    start: vi.fn(),
-    startSessionEntry: vi.fn(),
+    start: startSessionMock,
+    startSessionEntry: startSessionEntryMock,
     checkActiveSession: vi.fn().mockResolvedValue({ has_active_session: false }),
     isLoading: sessionStartLoadingMock,
   }),
@@ -116,8 +121,8 @@ vi.mock('../../app/lib/api/bootstrap-api', () => ({
 }));
 
 vi.mock('../../app/lib/api/sessions-api', () => ({
-  endSession: vi.fn(),
-  isSuccess: vi.fn(() => true),
+  endSession: (...args: unknown[]) => endSessionMock(...args),
+  isSuccess: (value: { success?: boolean } | null | undefined) => Boolean(value?.success),
 }));
 
 vi.mock('../../app/components/dashboard/EnhancedFieldBackground', () => ({
@@ -145,7 +150,12 @@ vi.mock('../../app/components/dashboard/SettingsDrawer', () => ({
 }));
 
 vi.mock('../../app/components/session/ResumeBanner', () => ({
-  ResumeBanner: () => <div data-testid="resume-banner">Resume banner visible</div>,
+  ResumeBanner: ({ onStartFresh }: { onStartFresh: () => void }) => (
+    <div data-testid="resume-banner">
+      Resume banner visible
+      <button type="button" onClick={onStartFresh}>Start fresh from resume</button>
+    </div>
+  ),
 }));
 
 import { EnhancedFieldDashboard } from '../../app/components/EnhancedFieldDashboard';
@@ -154,6 +164,10 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sessionStartLoadingMock = false;
+    startSessionMock.mockReset();
+    startSessionEntryMock.mockReset();
+    endSessionMock.mockReset();
+    showToastMock.mockReset();
   });
 
   it('renders ResumeBanner and suppresses opener when state resolves to resume-backend', async () => {
@@ -217,5 +231,67 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
     });
 
     expect(screen.queryByTestId('resume-banner')).not.toBeInTheDocument();
+  });
+
+  it('asks whether to reuse the ritual before starting fresh from resume', async () => {
+    const user = userEvent.setup();
+    resolveDashboardBootstrapStateMock.mockResolvedValue({
+      mode: 'resume-backend',
+      session: {
+        session_id: 'sess-active',
+        session_type: 'prepare',
+        preset_context: 'gaming',
+        started_at: new Date().toISOString(),
+        turn_count: 2,
+      },
+    });
+    endSessionMock.mockResolvedValue({
+      success: true,
+      data: {
+        status: 'ended',
+        session_id: 'sess-active',
+        ended_at: new Date().toISOString(),
+        duration_minutes: 3,
+        turn_count: 2,
+        offer_debrief: false,
+      },
+    });
+    startSessionEntryMock.mockResolvedValue({
+      success: true,
+      sessionId: 'sess-new',
+      threadId: 'thread-new',
+      greetingMessage: 'Hello again.',
+      messageId: 'msg-1',
+      memoryHighlights: [],
+      isResumed: false,
+      hasMemory: false,
+    });
+
+    render(<EnhancedFieldDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resume-banner')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Start fresh from resume' }));
+
+    expect(screen.getByRole('dialog', { name: 'Start fresh' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Same ritual' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Choose ritual' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Same ritual' }));
+
+    await waitFor(() => {
+      expect(endSessionMock).toHaveBeenCalledWith({
+        session_id: 'sess-active',
+        offer_debrief: false,
+      });
+    });
+
+    expect(startSessionEntryMock).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'user-1',
+      preset: 'prepare',
+      contextMode: 'gaming',
+    }));
   });
 });

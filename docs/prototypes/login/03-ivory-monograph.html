@@ -1,0 +1,475 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia Login Prototype 03 - Ivory Monograph</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Newsreader:opsz,wght@6..72,300;6..72,400;6..72,500&family=Outfit:wght@300;400;500;600;700&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --paper: #f4efe7;
+    --paper-2: #ece5d7;
+    --ink: #1f1b18;
+    --muted: rgba(31, 27, 24, 0.66);
+    --quiet: rgba(31, 27, 24, 0.4);
+    --line: rgba(31, 27, 24, 0.1);
+    --gold: #b28a48;
+    --moss: #68796c;
+    --panel: rgba(255, 252, 246, 0.76);
+    --shadow: 0 34px 80px rgba(46, 36, 24, 0.12);
+  }
+
+  body {
+    min-height: 100vh;
+    font-family: 'Outfit', sans-serif;
+    color: var(--ink);
+    background:
+      radial-gradient(circle at 18% 16%, rgba(178, 138, 72, 0.12), transparent 22%),
+      radial-gradient(circle at 80% 24%, rgba(104, 121, 108, 0.12), transparent 18%),
+      linear-gradient(135deg, #f7f2e8 0%, #f0e8da 52%, #f8f4eb 100%);
+    overflow: hidden;
+    position: relative;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  body::before,
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  body::before {
+    background-image:
+      linear-gradient(rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.16)),
+      url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180' viewBox='0 0 180 180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='180' height='180' filter='url(%23n)' opacity='.06'/%3E%3C/svg%3E");
+    mix-blend-mode: multiply;
+    opacity: 0.55;
+  }
+
+  body::after {
+    background:
+      linear-gradient(90deg, transparent 0 10%, rgba(178, 138, 72, 0.08) 10.1% 10.15%, transparent 10.2% 89.8%, rgba(178, 138, 72, 0.08) 89.85% 89.9%, transparent 90%),
+      linear-gradient(transparent 0 8%, rgba(31, 27, 24, 0.05) 8.1% 8.15%, transparent 8.2% 91.8%, rgba(31, 27, 24, 0.05) 91.85% 91.9%, transparent 92%);
+    opacity: 0.6;
+  }
+
+  .page {
+    position: relative;
+    min-height: 100vh;
+    padding: 26px;
+  }
+
+  .shell {
+    min-height: calc(100vh - 52px);
+    border-radius: 30px;
+    background: linear-gradient(180deg, rgba(255, 250, 242, 0.74), rgba(245, 238, 228, 0.9));
+    border: 1px solid rgba(31, 27, 24, 0.08);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+    position: relative;
+  }
+
+  .shell::before {
+    content: "";
+    position: absolute;
+    inset: 22px;
+    border-radius: 22px;
+    border: 1px solid rgba(31, 27, 24, 0.06);
+    pointer-events: none;
+  }
+
+  .topbar {
+    position: relative;
+    z-index: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 18px;
+    padding: 28px 34px 0;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .stamp {
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid rgba(31, 27, 24, 0.12);
+    display: grid;
+    place-items: center;
+    position: relative;
+    background: radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.9), rgba(178, 138, 72, 0.12));
+  }
+
+  .stamp::before {
+    content: "S";
+    font-family: 'Newsreader', serif;
+    font-size: 22px;
+    color: var(--gold);
+  }
+
+  .brand-copy small,
+  .tag {
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 11px;
+    color: var(--quiet);
+  }
+
+  .brand-copy strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 15px;
+  }
+
+  .tag {
+    padding: 11px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.44);
+  }
+
+  .layout {
+    position: relative;
+    z-index: 1;
+    min-height: calc(100vh - 116px);
+    display: grid;
+    grid-template-columns: 1.05fr 0.95fr;
+    gap: 24px;
+    padding: 24px 34px 34px;
+  }
+
+  .hero {
+    position: relative;
+    padding: 44px 16px 24px 8px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .hero::before,
+  .hero::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  .hero::before {
+    width: 460px;
+    height: 460px;
+    right: 4%;
+    top: 6%;
+    background: radial-gradient(circle, rgba(178, 138, 72, 0.13), transparent 60%);
+  }
+
+  .hero::after {
+    width: 280px;
+    height: 280px;
+    left: -60px;
+    bottom: -20px;
+    border: 1px solid rgba(31, 27, 24, 0.08);
+  }
+
+  .eyebrow {
+    color: var(--gold);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 12px;
+    margin-bottom: 18px;
+  }
+
+  h1 {
+    font-family: 'Newsreader', serif;
+    font-size: clamp(54px, 7vw, 86px);
+    line-height: 0.95;
+    font-weight: 400;
+    max-width: 11ch;
+    letter-spacing: -0.04em;
+  }
+
+  .lead {
+    margin-top: 22px;
+    font-size: 18px;
+    line-height: 1.75;
+    color: var(--muted);
+    max-width: 42ch;
+  }
+
+  .editorial-row {
+    margin-top: 34px;
+    display: grid;
+    grid-template-columns: 1.2fr 0.8fr;
+    gap: 18px;
+    max-width: 720px;
+  }
+
+  .note,
+  .mini-card,
+  .login-card {
+    border-radius: 24px;
+    border: 1px solid rgba(31, 27, 24, 0.08);
+    background: var(--panel);
+    backdrop-filter: blur(16px);
+  }
+
+  .note {
+    padding: 22px;
+  }
+
+  .note strong,
+  .mini-card strong,
+  .login-card strong {
+    display: block;
+    font-size: 12px;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--gold);
+    margin-bottom: 10px;
+  }
+
+  .note p,
+  .mini-card p,
+  .bullet span,
+  .login-card p,
+  .footer-line {
+    color: var(--muted);
+    line-height: 1.72;
+  }
+
+  .mini-card {
+    padding: 22px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .mini-card b {
+    font-family: 'Newsreader', serif;
+    font-size: 42px;
+    font-weight: 400;
+    color: var(--ink);
+  }
+
+  .panel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .login-card {
+    position: relative;
+    width: min(100%, 480px);
+    padding: 28px;
+    box-shadow: 0 28px 72px rgba(46, 36, 24, 0.12);
+    overflow: hidden;
+  }
+
+  .login-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background:
+      radial-gradient(circle at 88% 16%, rgba(104, 121, 108, 0.16), transparent 22%),
+      radial-gradient(circle at 16% 100%, rgba(178, 138, 72, 0.12), transparent 26%);
+    pointer-events: none;
+  }
+
+  .login-card h2 {
+    font-family: 'Newsreader', serif;
+    font-size: 52px;
+    line-height: 0.94;
+    font-weight: 400;
+    letter-spacing: -0.04em;
+    margin-bottom: 16px;
+    position: relative;
+  }
+
+  .login-card p,
+  .features,
+  .button,
+  .footer-line {
+    position: relative;
+  }
+
+  .features {
+    margin-top: 22px;
+    display: grid;
+    gap: 14px;
+  }
+
+  .bullet {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding-top: 14px;
+    border-top: 1px solid rgba(31, 27, 24, 0.08);
+  }
+
+  .bullet:first-child {
+    border-top: none;
+    padding-top: 0;
+  }
+
+  .bullet i {
+    display: inline-block;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: rgba(178, 138, 72, 0.12);
+    border: 1px solid rgba(178, 138, 72, 0.16);
+    flex: 0 0 auto;
+  }
+
+  .button {
+    margin-top: 26px;
+    width: 100%;
+    padding: 18px 20px;
+    border: none;
+    border-radius: 18px;
+    background: linear-gradient(180deg, #2a2622, #171411);
+    color: #f7f0e6;
+    font: 600 15px 'Outfit', sans-serif;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    cursor: pointer;
+    box-shadow: 0 18px 38px rgba(36, 28, 20, 0.22);
+    transition: transform 180ms ease, box-shadow 180ms ease;
+  }
+
+  .button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 22px 42px rgba(36, 28, 20, 0.26);
+  }
+
+  .button-mark {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: conic-gradient(#ea4335 0 90deg, #fbbc05 90deg 180deg, #34a853 180deg 270deg, #4285f4 270deg 360deg);
+    box-shadow: inset 0 0 0 3px #fff;
+  }
+
+  .footer-line {
+    margin-top: 18px;
+    font-size: 12px;
+  }
+
+  @media (max-width: 1040px) {
+    .layout {
+      grid-template-columns: 1fr;
+    }
+
+    .hero {
+      padding-right: 0;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .page { padding: 12px; }
+    .shell { min-height: calc(100vh - 24px); border-radius: 24px; }
+    .topbar,
+    .layout { padding-left: 18px; padding-right: 18px; }
+    .topbar { flex-direction: column; align-items: flex-start; }
+    .editorial-row { grid-template-columns: 1fr; }
+    .login-card { padding: 22px; }
+    .login-card h2 { font-size: 44px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .button { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="page">
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="stamp"></div>
+          <div class="brand-copy">
+            <small>Prototype 03</small>
+            <strong>Ivory Monograph</strong>
+          </div>
+        </div>
+        <div class="tag">Light luxury direction</div>
+      </header>
+
+      <section class="layout">
+        <section class="hero">
+          <div>
+            <div class="eyebrow">Sophia login, reframed as a private editorial welcome</div>
+            <h1>Less cosmic nightclub, more quiet high-end publication.</h1>
+            <p class="lead">
+              This option deliberately breaks from the usual dark-glass look. It still feels intimate and premium,
+              but through warm paper, restrained gold, and a more literary sense of presence.
+            </p>
+
+            <div class="editorial-row">
+              <div class="note">
+                <strong>Why this works</strong>
+                <p>
+                  The layout feels expensive because it relies on proportion, typography, and material cues instead of noise.
+                  It would suit a more mature or aspirational brand expression.
+                </p>
+              </div>
+              <div class="mini-card">
+                <div>
+                  <strong>Overall tone</strong>
+                  <p>Warm, assured, and distinctly premium.</p>
+                </div>
+                <b>Quiet prestige</b>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <aside class="panel">
+          <div class="login-card">
+            <strong>Access</strong>
+            <h2>Return to your companion.</h2>
+            <p>
+              Sign in to reopen your journal, session continuity, saved reflections, and voice-ready account state.
+            </p>
+
+            <div class="features">
+              <div class="bullet">
+                <i></i>
+                <span>Premium because the hierarchy is calm and intentional, not because the page is overloaded.</span>
+              </div>
+              <div class="bullet">
+                <i></i>
+                <span>Useful if you want the login experience to feel more human, literary, and less overtly technical.</span>
+              </div>
+              <div class="bullet">
+                <i></i>
+                <span>Still compatible with a single Google action and the same auth plumbing you have now.</span>
+              </div>
+            </div>
+
+            <button class="button" type="button">
+              <span class="button-mark"></span>
+              Continue with Google
+            </button>
+
+            <p class="footer-line">
+              Static HTML prototype for visual exploration. Pair this with a carefully tuned light theme and subtle motion only.
+            </p>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

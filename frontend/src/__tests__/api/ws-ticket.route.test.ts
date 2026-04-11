@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
-  getServerAuthToken: vi.fn(),
+  getUserScopedAuthToken: vi.fn(),
 }));
 
 vi.mock('../../app/lib/rate-limiter', () => ({
@@ -14,7 +14,7 @@ vi.mock('../../app/lib/rate-limiter', () => ({
 }));
 
 import { POST } from '../../app/api/ws-ticket/route';
-import { getServerAuthToken } from '../../app/lib/auth/server-auth';
+import { getUserScopedAuthToken } from '../../app/lib/auth/server-auth';
 import { apiLimiters } from '../../app/lib/rate-limiter';
 
 describe('/api/ws-ticket POST', () => {
@@ -32,7 +32,7 @@ describe('/api/ws-ticket POST', () => {
   });
 
   it('returns 401 when unauthenticated', async () => {
-    vi.mocked(getServerAuthToken).mockResolvedValue('');
+    vi.mocked(getUserScopedAuthToken).mockResolvedValue('');
 
     const response = await POST();
     const data = await response.json();
@@ -42,7 +42,7 @@ describe('/api/ws-ticket POST', () => {
   });
 
   it('returns token when authenticated', async () => {
-    vi.mocked(getServerAuthToken).mockResolvedValue('token-123');
+    vi.mocked(getUserScopedAuthToken).mockResolvedValue('token-123');
 
     const response = await POST();
     const data = await response.json();

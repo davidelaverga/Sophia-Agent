@@ -33,7 +33,6 @@ import {
   WhisperIndicator,
   ReflectionOverlay,
   EmergenceOverlay,
-  AtmosphericFeedback,
   DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
@@ -571,7 +570,6 @@ function SessionPageContent() {
     showExitConfirm,
     showDebriefOffer,
     showEmergence,
-    showFeedback,
     debriefData,
     isNavigatingToRecap,
     handleEndSession,
@@ -580,7 +578,6 @@ function SessionPageContent() {
     handleStartDebrief,
     handleSkipToRecap,
     handleEmergenceComplete,
-    handleFeedbackComplete,
   } = useSessionExitOrchestration({
     isReadOnly,
     isSophiaResponding,
@@ -779,6 +776,16 @@ function SessionPageContent() {
     backendSessionIdForMemory: session?.sessionId,
   });
   
+  // Scroll conversation to bottom when artifact panel opens in text mode
+  // so the latest messages stay visible above the panel
+  useEffect(() => {
+    if (focusMode === 'text' && showArtifacts && showArtifactsUi) {
+      requestAnimationFrame(() => {
+        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      });
+    }
+  }, [focusMode, showArtifacts, showArtifactsUi, messagesEndRef]);
+
   // Loading state — the breathing nebula IS the loading indicator (R41)
   if (shouldShowLoading) {
     return (
@@ -814,7 +821,7 @@ function SessionPageContent() {
           )}
 
           {/* Conversation pane — hidden in voice mode but stays mounted to preserve scroll */}
-          <div className={focusMode !== 'text' ? 'hidden' : 'flex-1 flex flex-col min-h-0'}>
+          <div className={focusMode !== 'text' ? 'hidden' : 'flex-1 flex flex-col min-h-0 text-mode-elevated'}>
             <SessionConversationPane
             messages={messages}
             isInitializingChat={isInitializingChat}
@@ -864,11 +871,19 @@ function SessionPageContent() {
           />
           </div>
           
-          {/* Voice Caption — ephemeral text overlay in voice mode */}
-          <VoiceCaption
-            messages={messages}
-            isVoiceMode={focusMode !== 'text'}
-          />
+          {/* Voice Caption — ephemeral text overlay in voice mode.
+              Pushed higher when the artifact panel is open to prevent overlap. */}
+          <div
+            className={cn(
+              'transition-all duration-700 ease-out',
+              focusMode !== 'text' && showArtifacts && showArtifactsUi && 'voice-caption-raised'
+            )}
+          >
+            <VoiceCaption
+              messages={messages}
+              isVoiceMode={focusMode !== 'text'}
+            />
+          </div>
           
           {/* Whisper Indicator — atmospheric presence label */}
           <WhisperIndicator opacity={chromeOpacity} />
@@ -895,10 +910,10 @@ function SessionPageContent() {
             )}
             style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
           >
-            <ModeToggle opacity={chromeOpacity} />
+            <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
           </div>
           
-          {/* Inline Artifact Panel — text mode: above composer, voice mode: floating above mic */}
+          {/* Inline Artifact Panel — text mode: above composer */}
           {focusMode === 'text' && showArtifacts && showArtifactsUi && (
             <PresenceArtifactPanel
               artifacts={artifacts}
@@ -911,12 +926,27 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Artifact toggle pill — centered above composer when dismissed in text mode */}
+          {/* Artifact toggle pill — text mode: inline above composer */}
           {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
             <div className="flex justify-center mb-2">
               <ArtifactToggleIcon
                 hasArtifacts={!!(artifacts?.takeaway)}
                 onClick={handleOpenArtifactsPanel}
+                isNew={hasNewArtifacts}
+              />
+            </div>
+          )}
+
+          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && (
+            <div
+              className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
+              style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <ArtifactToggleIcon
+                hasArtifacts={!!(artifacts?.takeaway)}
+                onClick={handleOpenArtifactsPanel}
+                isNew={hasNewArtifacts}
               />
             </div>
           )}
@@ -943,7 +973,7 @@ function SessionPageContent() {
           </VoiceComposerErrorBoundary>
         </div>
         
-        {/* Voice mode: Floating artifact panel above mic */}
+        {/* Floating artifact panel — voice mode: fixed above mic */}
         {focusMode !== 'text' && (
           <PresenceArtifactPanel
             artifacts={artifacts}
@@ -1014,13 +1044,6 @@ function SessionPageContent() {
         isVisible={showEmergence}
         onComplete={handleEmergenceComplete}
         onDimPresence={handleDimPresence}
-      />
-
-      {/* Atmospheric Feedback — session-level rating (R20, R29) */}
-      <AtmosphericFeedback
-        sessionId={sessionId}
-        isVisible={showFeedback}
-        onComplete={handleFeedbackComplete}
       />
 
       {/* Idle Timeout Whisper Overlay */}
