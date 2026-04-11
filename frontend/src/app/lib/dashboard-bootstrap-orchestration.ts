@@ -53,7 +53,10 @@ export async function resolveDashboardBootstrapState({
     break;
   }
 
-  if (backendActiveSession) {
+  // A recent explicit session end can race backend active-session teardown.
+  // In that window we prefer the fresh-entry surface over immediately
+  // resurrecting the stale resume banner.
+  if (backendActiveSession && !hasRecentSessionEndHint) {
     return {
       mode: 'resume-backend',
       session: backendActiveSession,

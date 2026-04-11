@@ -6,11 +6,19 @@ const baseURL =
   process.env.PLAYWRIGHT_TEST_BASE_URL ??
   process.env.E2E_BASE_URL ??
   `http://${host}:${port}`;
+const reuseExistingServer =
+  process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === 'true'
+    ? true
+    : process.env.PLAYWRIGHT_REUSE_EXISTING_SERVER === 'false'
+      ? false
+      : !process.env.CI;
 
 const webServerEnv = {
   ...process.env,
   NEXT_PUBLIC_DEV_BYPASS_AUTH: process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH ?? 'true',
   NEXT_PUBLIC_SOPHIA_USER_ID: process.env.NEXT_PUBLIC_SOPHIA_USER_ID ?? 'e2e-user',
+  NEXT_PUBLIC_GATEWAY_URL: process.env.NEXT_PUBLIC_GATEWAY_URL ?? 'http://localhost:8001',
+  SOPHIA_LANGGRAPH_BASE_URL: process.env.SOPHIA_LANGGRAPH_BASE_URL ?? 'http://127.0.0.1:2024',
 };
 
 export default defineConfig({
@@ -42,7 +50,7 @@ export default defineConfig({
     command: `pnpm exec next dev --hostname ${host} --port ${port}`,
     url: baseURL,
     env: webServerEnv,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer,
     timeout: 120_000,
   },
 });

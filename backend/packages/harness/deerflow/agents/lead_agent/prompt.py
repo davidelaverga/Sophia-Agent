@@ -427,6 +427,9 @@ def get_deferred_tools_prompt_section() -> str:
     Returns empty string when tool_search is disabled or no tools are deferred.
     """
     from deerflow.tools.builtins.tool_search import get_deferred_registry
+    registry = get_deferred_registry()
+    if not registry:
+        return ""
 
     try:
         from deerflow.config import get_app_config
@@ -434,10 +437,6 @@ def get_deferred_tools_prompt_section() -> str:
         if not get_app_config().tool_search.enabled:
             return ""
     except FileNotFoundError:
-        return ""
-
-    registry = get_deferred_registry()
-    if not registry:
         return ""
 
     names = "\n".join(e.name for e in registry.entries)

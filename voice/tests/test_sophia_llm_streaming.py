@@ -530,6 +530,8 @@ async def test_simple_response_uses_bound_runtime_session_context() -> None:
         platform="ios_voice",
         context_mode="gaming",
         ritual="vent",
+        session_id="session-123",
+        thread_id="thread-456",
     )
 
     await llm.simple_response(
@@ -541,6 +543,8 @@ async def test_simple_response_uses_bound_runtime_session_context() -> None:
     assert adapter.requests[0].platform == "ios_voice"
     assert adapter.requests[0].context_mode == "gaming"
     assert adapter.requests[0].ritual == "vent"
+    assert adapter.requests[0].session_id == "session-123"
+    assert adapter.requests[0].thread_id == "thread-456"
 
 
 @pytest.mark.anyio

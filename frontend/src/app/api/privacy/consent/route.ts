@@ -1,21 +1,21 @@
-import { headers } from "next/headers";
 import { type NextRequest, NextResponse } from "next/server";
 
-import { auth } from "@/server/better-auth";
-
-import { getServerAuthToken } from "../../../lib/auth/server-auth";
+import { getAuthenticatedUserId, getUserScopedAuthToken } from "../../../lib/auth/server-auth";
 
 export async function POST(request: NextRequest) {
   const backendUrl = process.env.BACKEND_API_URL;
-  const apiKey = await getServerAuthToken();
 
   if (!backendUrl) {
     return NextResponse.json({ error: "Server configuration incomplete" }, { status: 500 });
   }
 
-  // 🔒 SECURITY: Authenticate user before accepting consent changes
-  const session = await auth.api.getSession({ headers: await headers() });
-  if (!session?.user) {
+  const userId = await getAuthenticatedUserId();
+  if (!userId) {
+    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+  }
+
+  const apiKey = await getUserScopedAuthToken();
+  if (!apiKey) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 

@@ -13,17 +13,14 @@
 
 'use client';
 
-import { Settings, History, Home, MessageCircle, ArrowLeft, Clock } from 'lucide-react';
+import { Settings, Home, MessageCircle, ArrowLeft, Clock } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
-import { useState, lazy, Suspense } from 'react';
+import { useState } from 'react';
 
 import { haptic } from '../hooks/useHaptics';
 import { cn } from '../lib/utils';
 
 import { ThemeToggle } from './ThemeToggle';
-
-// Lazy load HistoryDrawer for /chat route
-const HistoryDrawer = lazy(() => import('./HistoryDrawer').then(mod => ({ default: mod.HistoryDrawer })));
 
 // ============================================================================
 // TYPES
@@ -137,7 +134,6 @@ export function SharedHeader({
 }: SharedHeaderProps) {
   const router = useRouter();
   const pathname = usePathname();
-  const [showHistory, setShowHistory] = useState(false);
   
   // Auto-detect variant based on pathname
   const variant: HeaderVariant = variantOverride ?? (
@@ -227,16 +223,6 @@ export function SharedHeader({
         {/* Right: Contextual Actions */}
         <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
           
-          {/* Chat-specific: History button */}
-          {variant === 'chat' && (
-            <HeaderButton
-              onClick={() => setShowHistory(true)}
-              icon={<History className="h-5 w-5 text-sophia-text2 group-hover/btn:text-sophia-purple transition-colors" />}
-              label="History"
-              tooltip="Chat History"
-            />
-          )}
-          
           {/* Dashboard & Recap: Chat button */}
           {(variant === 'dashboard' || variant === 'recap') && (
             <HeaderButton
@@ -267,17 +253,6 @@ export function SharedHeader({
           />
         </div>
       </header>
-      
-      {/* History Drawer for chat variant */}
-      {variant === 'chat' && showHistory && (
-        <Suspense fallback={null}>
-          <HistoryDrawer
-            isOpen={showHistory}
-            onClose={() => setShowHistory(false)}
-            onConversationLoaded={() => setShowHistory(false)}
-          />
-        </Suspense>
-      )}
       
     </>
   );

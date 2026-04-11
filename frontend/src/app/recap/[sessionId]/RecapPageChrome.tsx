@@ -37,7 +37,7 @@ export function RecapPageFloatingHeader({ variant, onBack, onHome }: RecapPageFl
         </button>
 
         {variant === 'with-title' && (
-          <span className="font-cormorant text-[14px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-whisper)' }}>session recap</span>
+          <span className="font-cormorant text-[14px] tracking-[0.06em]" style={{ color: 'var(--cosmic-text-muted)' }}>session recap</span>
         )}
 
         <button
@@ -92,7 +92,7 @@ export function RecapBottomActionBar({
           <button
             onClick={onReturnHome}
             className={cn(
-              'cosmic-whisper-button cosmic-focus-ring rounded-full px-4 py-2 text-[11px] tracking-[0.08em] uppercase transition-colors'
+              'cosmic-ghost-pill cosmic-focus-ring rounded-full px-4 py-2 text-[11px] tracking-[0.08em] uppercase transition-colors'
             )}
           >
             Return home
@@ -111,7 +111,7 @@ export function RecapBottomActionBar({
               {isSaving ? 'saving...' : 'complete'}
             </button>
           ) : (
-            <span className="font-cormorant italic text-[13px]" style={{ color: 'var(--cosmic-text-whisper)' }}>choose your memories above</span>
+            <span className="font-cormorant italic text-[13px]" style={{ color: 'var(--cosmic-text-muted)' }}>choose your memories above</span>
           )}
         </div>
       </div>

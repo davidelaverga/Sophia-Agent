@@ -4,7 +4,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 
 import { useCompanionRuntime } from "../companion-runtime/useCompanionRuntime"
 import { copy } from "../copy"
-import { useBackendTokenSync } from "../hooks/useBackendTokenSync"
 import { useInterrupt } from "../hooks/useInterrupt"
 import { usePlatformSignal } from "../hooks/usePlatformSignal"
 import { useSessionPersistence } from "../hooks/useSessionPersistence"
@@ -142,7 +141,6 @@ const EMPTY_RECAP_STORE: ChatRouteExperience["setRecapArtifacts"] = () => undefi
 export function useChatRouteExperience(): ChatRouteExperience {
   useSessionPersistence()
   useUsageMonitor()
-  useBackendTokenSync()
 
   const { user } = useAuth()
   const platform = usePlatformSignal()

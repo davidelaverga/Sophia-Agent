@@ -74,6 +74,7 @@ Write-Host "[sophia] Starting Gateway on :8001 ..." -ForegroundColor Cyan
 $gwJob = Start-Job -Name sophia-gateway -ScriptBlock {
     Set-Location $using:ROOT\backend
     $env:PYTHONPATH = "."
+    $env:SOPHIA_AUTH_BACKEND_URL = "http://127.0.0.1:3000"
     & uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 2>&1
 }
 

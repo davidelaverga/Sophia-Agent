@@ -9,7 +9,7 @@ export async function GET(
 ) {
   try {
     const { sessionId } = await params;
-    const userId = await resolveSophiaUserId(request.nextUrl.searchParams.get('user_id'));
+    const userId = await resolveSophiaUserId();
 
     if (!userId) {
       return NextResponse.json({ error: 'Unable to resolve user_id' }, { status: 401 });

@@ -43,8 +43,8 @@ Frontend (Next.js) ──▶ Gateway API (FastAPI :8001) ──▶ LangGraph Bac
 
 ### Auth Architecture (Two-Token System)
 
-1. **Frontend session** — Better Auth cookie-based session (Discord OAuth)
-2. **Backend API token** — `sophia-backend-token` httpOnly cookie (30-day expiry), obtained by calling the Sophia backend `/api/v1/auth/discord/login` after OAuth
+1. **Frontend session** — Better Auth cookie-based session (Google OAuth)
+2. **Backend API token** — `sophia-backend-token` httpOnly cookie (30-day expiry), obtained by calling the Sophia backend legacy social-login bridge after OAuth
 
 Client-side auth: `useAuth()` hook from `providers.tsx` returns `{user, loading, signOut}`.
 Server-side auth: `auth.api.getSession({ headers: await headers() })` from `@/server/better-auth`.
@@ -70,8 +70,8 @@ See `.env.example` for all required variables. Key ones:
 
 ```
 BETTER_AUTH_SECRET=          # Required for build
-DISCORD_CLIENT_ID=           # Discord OAuth (optional in dev with bypass)
-DISCORD_CLIENT_SECRET=
+GOOGLE_CLIENT_ID=            # Google OAuth (optional in dev with bypass)
+GOOGLE_CLIENT_SECRET=
 NEXT_PUBLIC_API_URL=http://localhost:8000
 NEXT_PUBLIC_GATEWAY_URL=http://localhost:8001
 NEXT_PUBLIC_DEV_BYPASS_AUTH=true   # Skip auth in development

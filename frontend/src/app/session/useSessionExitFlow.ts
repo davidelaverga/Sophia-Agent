@@ -219,7 +219,6 @@ export function useSessionExitFlow({
   const [debriefData, setDebriefData] = useState<DebriefData | null>(null);
   const [isNavigatingToRecap, setIsNavigatingToRecap] = useState(false);
   const [showEmergence, setShowEmergence] = useState(false);
-  const [showFeedback, setShowFeedback] = useState(false);
   const [pendingRecapSessionId, setPendingRecapSessionId] = useState<string | null>(null);
 
   const openExitConfirm = useCallback(() => {
@@ -232,7 +231,6 @@ export function useSessionExitFlow({
         setIsNavigatingToRecap(true);
         setPendingRecapSessionId(null);
         setShowEmergence(false);
-        setShowFeedback(false);
       });
       markRecentSessionEnd(recapSessionId);
       endSessionStore();
@@ -268,7 +266,7 @@ export function useSessionExitFlow({
     const startedAt = sessionStartedAt || new Date().toISOString();
     const presetType = sessionPresetType || 'open';
     const contextMode = sessionContextMode || 'life';
-    // Session exit should always continue into the recap feedback flow.
+    // Session exit should always continue into the recap flow.
     const shouldOfferDebrief = false;
     const serializedMessages = serializeSessionMessages(messages);
     const serializedArtifacts = serializeLiveArtifactsForSessionEnd(currentArtifacts);
@@ -426,15 +424,10 @@ export function useSessionExitFlow({
     messages,
   ]);
 
-  // ── Emergence → Feedback → Recap flow ─────────────────────────────────────
+  // ── Emergence → Recap flow ────────────────────────────────────────────────
 
   const handleEmergenceComplete = useCallback(() => {
     setShowEmergence(false);
-    setShowFeedback(true);
-  }, []);
-
-  const handleFeedbackComplete = useCallback(() => {
-    setShowFeedback(false);
     if (pendingRecapSessionId) {
       finalizeExitToRecap(pendingRecapSessionId);
     }
@@ -566,7 +559,6 @@ export function useSessionExitFlow({
     showExitConfirm,
     showDebriefOffer,
     showEmergence,
-    showFeedback,
     debriefData,
     isNavigatingToRecap,
     openExitConfirm,
@@ -576,7 +568,6 @@ export function useSessionExitFlow({
     handleStartDebrief,
     handleSkipToRecap,
     handleEmergenceComplete,
-    handleFeedbackComplete,
     handleAbruptExit,
   };
 }

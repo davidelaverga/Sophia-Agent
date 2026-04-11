@@ -1,10 +1,8 @@
-import { headers as nextHeaders } from 'next/headers';
+import { getAuthenticatedUserId, getUserScopedAuthHeader, refreshUserScopedAuthHeader } from '@/app/lib/auth/server-auth';
 
-import { authBypassEnabled, authBypassUserId } from '@/app/lib/auth/dev-bypass';
-import { getServerAuthHeader } from '@/app/lib/auth/server-auth';
-import { auth } from '@/server/better-auth';
+import { getPrimaryGatewayUrl } from './gateway-url';
 
-export const SOPHIA_GATEWAY_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_GATEWAY_URL || 'http://localhost:8001';
+export const SOPHIA_GATEWAY_URL = getPrimaryGatewayUrl();
 
 function normalizeUserId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -19,22 +17,8 @@ function normalizeUserId(value: string | null | undefined): string | null {
   return trimmed;
 }
 
-export async function resolveSophiaUserId(explicitUserId?: string | null): Promise<string | null> {
-  const provided = normalizeUserId(explicitUserId);
-  if (provided) {
-    return provided;
-  }
-
-  if (authBypassEnabled) {
-    return authBypassUserId;
-  }
-
-  try {
-    const session = await auth.api.getSession({ headers: await nextHeaders() });
-    return normalizeUserId(session?.user?.id ?? null);
-  } catch {
-    return null;
-  }
+export async function resolveSophiaUserId(): Promise<string | null> {
+  return getAuthenticatedUserId();
 }
 
 export function isSyntheticMemoryId(memoryId: string | null | undefined): boolean {
@@ -43,20 +27,42 @@ export function isSyntheticMemoryId(memoryId: string | null | undefined): boolea
     return true;
   }
 
-  return normalized.startsWith('candidate-') || /^mem_\d+$/.test(normalized);
+  return normalized.startsWith('candidate-') || normalized.startsWith('local:') || /^mem_\d+$/.test(normalized);
 }
 
 export async function fetchSophiaApi(path: string, init: RequestInit): Promise<Response> {
   const requestHeaders = new Headers(init.headers);
+  const authHeader = await getUserScopedAuthHeader();
 
   if (init.body !== undefined && !requestHeaders.has('Content-Type')) {
     requestHeaders.set('Content-Type', 'application/json');
   }
 
-  requestHeaders.set('Authorization', await getServerAuthHeader());
+  if (!authHeader) {
+    return new Response(JSON.stringify({ error: 'Not authenticated' }), {
+      status: 401,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
 
-  return fetch(`${SOPHIA_GATEWAY_URL}${path}`, {
-    ...init,
-    headers: requestHeaders,
-  });
+  const execute = (authorization: string) => {
+    const headers = new Headers(requestHeaders)
+    headers.set('Authorization', authorization)
+
+    return fetch(`${SOPHIA_GATEWAY_URL}${path}`, {
+      ...init,
+      headers,
+    })
+  }
+
+  let response = await execute(authHeader)
+
+  if (response.status === 401 || response.status === 403) {
+    const refreshedAuthHeader = await refreshUserScopedAuthHeader()
+    if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
+      response = await execute(refreshedAuthHeader)
+    }
+  }
+
+  return response
 }

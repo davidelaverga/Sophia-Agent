@@ -10,7 +10,7 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getServerAuthHeader } from '../../../lib/auth/server-auth';
+import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
@@ -44,13 +44,18 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
+
+    const authHeader = await getUserScopedAuthHeader();
+    if (!authHeader) {
+      return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+    }
     
     // Forward to backend — 🔒 token read from httpOnly cookie server-side
     const backendResponse = await fetch(`${BACKEND_URL}/api/v1/companion/invoke`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': await getServerAuthHeader(),
+        'Authorization': authHeader,
       },
       body: JSON.stringify({
         invoke_type,

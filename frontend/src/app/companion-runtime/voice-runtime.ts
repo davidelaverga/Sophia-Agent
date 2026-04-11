@@ -9,6 +9,7 @@ const DEFAULT_VOICE_CANCEL_RETRY_MESSAGE = 'Voice response cancelled. Retry?';
 export function useCompanionVoiceRuntime({
   userId,
   sessionId,
+  threadId,
   onUserTranscriptFallback,
   appendAssistantMessage,
   ingestArtifacts,
@@ -60,27 +61,31 @@ export function useCompanionVoiceRuntime({
 
   const voiceState = useStreamVoiceSession(userId, {
     sessionId,
+    threadId,
     onUserTranscript: handleUserTranscript,
     onAssistantResponse: handleAssistantResponse,
     onArtifacts: handleVoiceArtifacts,
   });
 
+  const voiceError = voiceState.error;
+  const canRetryVoiceTurn = voiceState.hasRetryableVoiceTurn();
+
   useEffect(() => {
-    if (!voiceState.error) return;
-    if (!lastVoiceTranscript && !voiceState.hasRetryableVoiceTurn()) return;
+    if (!voiceError) return;
+    if (!lastVoiceTranscript && !canRetryVoiceTurn) return;
 
     setVoiceRetryState((prev) => {
       const transcript = lastVoiceTranscript || '';
-      if (prev?.transcript === transcript && prev.message === voiceState.error) {
+      if (prev?.transcript === transcript && prev.message === voiceError) {
         return prev;
       }
 
       return {
         transcript,
-        message: voiceState.error,
+        message: voiceError,
       };
     });
-  }, [voiceState, lastVoiceTranscript]);
+  }, [canRetryVoiceTurn, lastVoiceTranscript, voiceError]);
 
   useEffect(() => {
     if (!pendingVoiceRetryPlayback) return;

@@ -2,7 +2,8 @@ import type { NextRequest } from 'next/server';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
-  getServerAuthToken: vi.fn(() => 'token-123'),
+  getAuthenticatedUserId: vi.fn(() => 'user-123'),
+  getUserScopedAuthToken: vi.fn(() => 'token-123'),
 }));
 
 import { OPTIONS, POST } from '../../app/api/resume/route';
@@ -10,6 +11,28 @@ import { OPTIONS, POST } from '../../app/api/resume/route';
 describe('/api/resume POST', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('returns 401 when no authenticated user can be resolved', async () => {
+    const { getAuthenticatedUserId } = await import('../../app/lib/auth/server-auth');
+    vi.mocked(getAuthenticatedUserId).mockResolvedValueOnce(null);
+
+    const req = new Request('http://localhost:3000/api/resume', {
+      method: 'POST',
+      body: JSON.stringify({
+        thread_id: 'thread-1',
+        session_id: 'session-1',
+        interrupt_kind: 'RESET_OFFER',
+        selected_option_id: 'accept',
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    }) as unknown as NextRequest;
+
+    const response = await POST(req);
+    const data = await response.json();
+
+    expect(response.status).toBe(401);
+    expect(data.error).toBe('Not authenticated');
   });
 
   it('returns 400 for missing required fields', async () => {
@@ -70,6 +93,37 @@ describe('/api/resume POST', () => {
 
     expect(response.status).toBe(502);
     expect(data.error).toBe('Backend temporarily unavailable');
+  });
+
+  it('ignores client user_id and forwards the authenticated user id', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response('ok', { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+    );
+
+    const req = new Request('http://localhost:3000/api/resume', {
+      method: 'POST',
+      body: JSON.stringify({
+        thread_id: 'thread-1',
+        session_id: 'session-1',
+        user_id: 'attacker-user',
+        interrupt_kind: 'RESET_OFFER',
+        selected_option_id: 'accept',
+      }),
+      headers: { 'Content-Type': 'application/json' },
+    }) as unknown as NextRequest;
+
+    const response = await POST(req);
+
+    expect(response.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledWith(
+      'http://localhost:8000/api/v1/chat/text/resume',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({ Authorization: 'Bearer token-123' }),
+        body: expect.stringContaining('"user_id":"user-123"'),
+      }),
+    );
+    expect((global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].body).not.toContain('attacker-user');
   });
 
   it('OPTIONS does not return wildcard CORS when no allowed origin is configured', async () => {

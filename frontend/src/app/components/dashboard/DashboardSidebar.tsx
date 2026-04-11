@@ -21,7 +21,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useState, useCallback, lazy, Suspense } from 'react';
+import { useCallback } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { humanizeTime } from '../../lib/humanize-time';
@@ -29,11 +29,6 @@ import type { PresetType, ContextMode } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
 import { useConversationStore } from '../../stores/conversation-store';
 import { useSessionHistoryStore, type SessionHistoryEntry } from '../../stores/session-history-store';
-
-// Lazy load HistoryDrawer
-const HistoryDrawer = lazy(() => 
-  import('../HistoryDrawer').then(mod => ({ default: mod.HistoryDrawer }))
-);
 
 // =============================================================================
 // CONFIGS
@@ -287,20 +282,11 @@ export function ConversationHistorySidebar({
   onToggle,
   className 
 }: ConversationHistorySidebarProps) {
-  const router = useRouter();
-  const [showFullDrawer, setShowFullDrawer] = useState(false);
-  const conversations = useConversationStore((state) => state.conversations);
   const refreshConversations = useConversationStore((state) => state.refreshConversations);
   const sessions = useSessionHistoryStore((state) => state.sessions);
   
   // Get latest session with takeaway for "Last Insight"
   const lastInsightSession = sessions.find(s => s.takeawayPreview);
-  
-  // Handle conversation loaded - navigate to session
-  const handleConversationLoaded = useCallback(() => {
-    setShowFullDrawer(false);
-    router.push('/session');
-  }, [router]);
   
   // Refresh on expand
   const handleToggle = useCallback(() => {
@@ -403,86 +389,12 @@ export function ConversationHistorySidebar({
                     </div>
                   </div>
                   
-                  {/* View history button */}
-                  {conversations.length > 0 && (
-                    <button
-                      onClick={() => {
-                        haptic('light');
-                        setShowFullDrawer(true);
-                      }}
-                      className={cn(
-                        'w-full py-2 text-[12px] font-medium',
-                        'text-sophia-text2 hover:text-sophia-purple',
-                        'transition-colors',
-                        'focus:outline-none focus-visible:underline'
-                      )}
-                    >
-                      View conversation history
-                    </button>
-                  )}
                 </div>
               )}
             </div>
           </div>
         )}
       </div>
-      
-      {/* Full History Drawer */}
-      {showFullDrawer && (
-        <Suspense fallback={null}>
-          <HistoryDrawer
-            isOpen={showFullDrawer}
-            onClose={() => setShowFullDrawer(false)}
-            onConversationLoaded={handleConversationLoaded}
-          />
-        </Suspense>
-      )}
-    </>
-  );
-}
-
-// =============================================================================
-// MOBILE FLOATING BUTTONS
-// =============================================================================
-
-interface MobileFloatingButtonsProps {
-  onOpenHistory: () => void;
-}
-
-export function MobileFloatingButtons({ 
-  onOpenHistory 
-}: MobileFloatingButtonsProps) {
-  const sessions = useSessionHistoryStore((state) => state.sessions);
-  const unviewedCount = sessions.filter(s => !s.recapViewed).length;
-  
-  return (
-    <>
-      {/* Mobile: History */}
-      <button
-        onClick={() => {
-          haptic('light');
-          onOpenHistory();
-        }}
-        className={cn(
-          'lg:hidden fixed right-3 top-1/2 -translate-y-1/2 z-30',
-          'w-10 h-10 rounded-full',
-          'bg-sophia-surface backdrop-blur-sm',
-          'border border-sophia-surface-border shadow-soft',
-          'flex items-center justify-center',
-          'hover:border-sophia-purple/30 hover:scale-105',
-          'active:scale-95',
-          'transition-all duration-150',
-          'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple'
-        )}
-        aria-label="History"
-      >
-        <Clock className="w-4 h-4 text-sophia-text2" />
-        {unviewedCount > 0 && (
-          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sophia-purple text-[8px] font-semibold text-white flex items-center justify-center">
-            {unviewedCount > 9 ? '9+' : unviewedCount}
-          </span>
-        )}
-      </button>
     </>
   );
 }

@@ -57,7 +57,7 @@ describe('useSessionExitFlow', () => {
     vi.clearAllMocks();
   });
 
-  it('keeps the end-session flow on feedback and recap instead of offering debrief', async () => {
+  it('keeps the end-session flow on emergence and recap instead of offering debrief', async () => {
     endSessionApiMock.mockResolvedValue({
       success: true,
       data: {
@@ -122,12 +122,6 @@ describe('useSessionExitFlow', () => {
       result.current.handleEmergenceComplete();
     });
 
-    expect(result.current.showFeedback).toBe(true);
-
-    await act(async () => {
-      result.current.handleFeedbackComplete();
-    });
-
     expect(navigateToMock).toHaveBeenCalledWith('/recap/session-1');
     expect(endSessionStoreMock).toHaveBeenCalledTimes(1);
     expect(clearSessionStoreMock).toHaveBeenCalledTimes(1);
@@ -188,12 +182,6 @@ describe('useSessionExitFlow', () => {
 
     await act(async () => {
       result.current.handleEmergenceComplete();
-    });
-
-    expect(result.current.showFeedback).toBe(true);
-
-    await act(async () => {
-      result.current.handleFeedbackComplete();
     });
 
     expect(navigateToMock).toHaveBeenCalledWith('/recap/session-2');
@@ -403,10 +391,6 @@ describe('useSessionExitFlow', () => {
 
     await act(async () => {
       result.current.handleEmergenceComplete();
-    });
-
-    await act(async () => {
-      result.current.handleFeedbackComplete();
     });
 
     const paths = navigateToMock.mock.calls.map(([path]) => path);

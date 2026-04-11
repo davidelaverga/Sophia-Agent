@@ -7,7 +7,6 @@ export { PresenceIndicator } from './PresenceIndicator';
 export { RitualCard } from './RitualCard';
 export { MicCTA } from './MicCTA';
 export { ContextTabs } from './ContextTabs';
-export { DashboardCosmicBackground } from './DashboardCosmicBackground';
 export { RITUALS, CONTEXTS, PRESENCE_STATES } from './types';
 export type { MicState, RitualConfig, ContextConfig } from './types';
 
@@ -15,7 +14,6 @@ export type { MicState, RitualConfig, ContextConfig } from './types';
 export {
   RecentSessionsSidebar,
   ConversationHistorySidebar,
-  MobileFloatingButtons,
   MobileBottomSheet,
   MobileSessionsContent,
 } from './DashboardSidebar';

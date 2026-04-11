@@ -55,6 +55,8 @@ class SophiaLLM(LLM):
         self._runtime_platform = settings.platform
         self._runtime_context_mode = settings.context_mode
         self._runtime_ritual = settings.ritual
+        self._runtime_session_id: str | None = None
+        self._runtime_thread_id: str | None = None
 
     def bind_session_context(
         self,
@@ -62,10 +64,14 @@ class SophiaLLM(LLM):
         platform: str,
         context_mode: str,
         ritual: str | None,
+        session_id: str | None,
+        thread_id: str | None,
     ) -> None:
         self._runtime_platform = platform
         self._runtime_context_mode = context_mode
         self._runtime_ritual = ritual
+        self._runtime_session_id = session_id
+        self._runtime_thread_id = thread_id
 
     def attach_tts(self, tts: Any) -> None:
         self._tts_ref = tts
@@ -330,6 +336,12 @@ class SophiaLLM(LLM):
         participant: Participant | None = None,
     ) -> LLMResponseEvent[Any]:
         user_id = self._resolve_user_id(participant)
+        logger.info(
+            "[VOICE:LLM] GENERATE_START | user_id=%s | platform=%s | "
+            "ritual=%s | context_mode=%s | message='%s'",
+            user_id, self._runtime_platform, self._runtime_ritual,
+            self._runtime_context_mode, text[:80],
+        )
         if not text.strip():
             self.note_stage_error(
                 "silence-empty-transcript",
@@ -369,6 +381,8 @@ class SophiaLLM(LLM):
             platform=self._runtime_platform,
             ritual=self._runtime_ritual,
             context_mode=self._runtime_context_mode,
+            session_id=self._runtime_session_id,
+            thread_id=self._runtime_thread_id,
         )
 
         await self._emit_call_event(
@@ -443,6 +457,10 @@ class SophiaLLM(LLM):
 
                 if first_token_ms is None:
                     first_token_ms = (time.perf_counter() - request_started) * 1000
+                    logger.info(
+                        "[VOICE:LLM] DEERFLOW_STREAMING | user_id=%s | first_token_ms=%.0f",
+                        request.user_id, first_token_ms,
+                    )
                     self.note_first_text_emitted(request.user_id)
                     await self.emit_pending_user_ended(request.user_id)
                     await self.emit_turn_event("agent_started", request.user_id)
@@ -507,6 +525,14 @@ class SophiaLLM(LLM):
                 "Backend stream ended without an artifact payload.",
                 recoverable=False,
             )
+
+        total_ms = (time.perf_counter() - request_started) * 1000
+        logger.info(
+            "[VOICE:LLM] GENERATE_COMPLETE | user_id=%s | "
+            "response_length=%d | artifact_seen=%s | chunks=%d | total_ms=%.0f",
+            request.user_id, len("".join(text_parts)),
+            artifact_seen, sequence, total_ms,
+        )
 
         return (
             "".join(text_parts),

@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "dev:mobile": "dotenv -e .env.dev -- next dev -H 0.0.0.0",
+    "auth:migrate": "dotenv -e .env -- node ./scripts/migrate-better-auth.mjs",
     "build": "next build",
     "build:dev": "dotenv -e .env.dev -- next build",
     "start": "next start",
@@ -17,7 +18,11 @@
     "test:ui": "vitest --ui",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
+    "test:e2e:auth": "cross-env PORT=3101 PLAYWRIGHT_TEST_BASE_URL=http://127.0.0.1:3101 PLAYWRIGHT_REUSE_EXISTING_SERVER=false BETTER_AUTH_URL=http://127.0.0.1:3101 NEXT_PUBLIC_DEV_BYPASS_AUTH=false SOPHIA_E2E_TEST_AUTH=true SOPHIA_AUTH_BACKEND_URL=http://127.0.0.1:3101 playwright test tests/e2e/auth-real-login.spec.ts --project=chromium --workers=1",
     "test:e2e:memory": "playwright test tests/e2e/memory-highlights.spec.ts",
+    "test:e2e:ritual-journal": "playwright test tests/e2e/ritual-journal.spec.ts --workers=1",
+    "test:e2e:voice": "playwright test tests/e2e/voice-webrtc.spec.ts --workers=1",
+    "test:e2e:live": "playwright test tests/e2e/ritual-journal.spec.ts tests/e2e/voice-webrtc.spec.ts --workers=1",
     "test:e2e:ci": "playwright test tests/e2e/memory-highlights.spec.ts --project=chromium",
     "capture:session": "node scripts/capture-live-session.mjs",
     "benchmark:voice": "node scripts/run-voice-benchmark.mjs",
@@ -45,10 +50,10 @@
     "ai": "^6.0.35",
     "autoprefixer": "^10.4.16",
     "better-auth": "^1.5.6",
-    "better-sqlite3": "^12.8.0",
     "clsx": "^2.0.0",
     "lucide-react": "^0.294.0",
     "next": "^16.1.7",
+    "pg": "^8.20.0",
     "postcss": "^8.4.32",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
@@ -62,8 +67,8 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "20.10.5",
+    "@types/pg": "^8.20.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.7.0",
@@ -79,10 +84,5 @@
     "typescript": "^5.8.2",
     "typescript-eslint": "^8.58.0",
     "vitest": "^2.1.9"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3"
-    ]
   }
 }

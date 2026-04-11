@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
-import Database from "better-sqlite3";
+
+import { getBetterAuthDatabase } from "./database";
 
 // Vercel is serverless — no writable filesystem for SQLite.
 // Use in-memory DB in production (auth is bypassed via DEV_BYPASS_AUTH anyway).
@@ -8,11 +9,11 @@ const db = new Database(isServerless ? ":memory:" : "./sqlite.db");
 
 export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
-  database: db,
+  database: getBetterAuthDatabase(),
   socialProviders: {
-    discord: {
-      clientId: process.env.DISCORD_CLIENT_ID,
-      clientSecret: process.env.DISCORD_CLIENT_SECRET,
+    google: {
+      clientId: process.env.GOOGLE_CLIENT_ID,
+      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
     },
   },
 });

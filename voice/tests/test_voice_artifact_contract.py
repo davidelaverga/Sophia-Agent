@@ -284,12 +284,22 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
     bound_context: dict[str, object] = {}
 
     class FakeLLM:
-        def bind_session_context(self, *, platform: str, context_mode: str, ritual: str | None) -> None:
+        def bind_session_context(
+            self,
+            *,
+            platform: str,
+            context_mode: str,
+            ritual: str | None,
+            session_id: str | None,
+            thread_id: str | None,
+        ) -> None:
             bound_context.update(
                 {
                     "platform": platform,
                     "context_mode": context_mode,
                     "ritual": ritual,
+                    "session_id": session_id,
+                    "thread_id": thread_id,
                 }
             )
 
@@ -321,6 +331,8 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
                 "platform": "ios_voice",
                 "context_mode": "gaming",
                 "ritual": "vent",
+                "session_id": "session-123",
+                "thread_id": "thread-456",
             },
         )
 
@@ -329,6 +341,8 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
         "platform": "ios_voice",
         "context_mode": "gaming",
         "ritual": "vent",
+        "session_id": "session-123",
+        "thread_id": "thread-456",
     }
 
 

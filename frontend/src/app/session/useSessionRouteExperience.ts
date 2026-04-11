@@ -157,6 +157,7 @@ export function useSessionRouteExperience({
   } = useCompanionVoiceRuntime({
     userId,
     sessionId: hasValidBackendSessionId ? backendSessionId : undefined,
+    threadId: activeThreadId,
     onUserTranscriptFallback: appendVoiceUserMessage,
     appendAssistantMessage: appendVoiceAssistantMessage,
     ingestArtifacts,

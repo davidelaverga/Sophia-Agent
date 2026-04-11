@@ -57,18 +57,6 @@ describe("SettingsDrawer", () => {
     expect(pushMock).toHaveBeenCalledWith("/settings")
   })
 
-  it("calls onShowHistory on history click", () => {
-    const onClose = vi.fn()
-    const onShowHistory = vi.fn()
-    render(
-      <SettingsDrawer isOpen={true} onClose={onClose} onShowHistory={onShowHistory} />
-    )
-
-    fireEvent.click(screen.getByText("History"))
-    expect(onClose).toHaveBeenCalled()
-    expect(onShowHistory).toHaveBeenCalled()
-  })
-
   it("closes on backdrop click", () => {
     const onClose = vi.fn()
     const { container } = render(

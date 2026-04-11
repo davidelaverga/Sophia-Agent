@@ -92,7 +92,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
         self,
         request: BackendRequest,
     ) -> AsyncIterator[BackendEvent]:
-        thread_id = await self._get_or_create_thread(request.user_id)
+        thread_id = request.thread_id or await self._get_or_create_thread(request.user_id)
         payload = {
             "assistant_id": self.settings.assistant_id,
             "input": {"messages": [{"role": "user", "content": request.text}]},
@@ -107,6 +107,13 @@ class DeerFlowBackendAdapter(BackendAdapter):
             },
             "stream_mode": ["messages-tuple", "values"],
         }
+
+        logger.info(
+            "[VOICE:LLM] DEERFLOW_CALL | url=/threads/%s/runs/stream | "
+            "assistant_id=%s | user_id=%s | platform=%s | ritual=%s",
+            thread_id, self.settings.assistant_id, request.user_id,
+            request.platform, request.ritual,
+        )
 
         try:
             async with self._http.stream(
@@ -278,6 +285,10 @@ class DeerFlowBackendAdapter(BackendAdapter):
 
         except httpx.TimeoutException as exc:
             self._thread_ids.pop(request.user_id, None)
+            logger.error(
+                "[VOICE:LLM] DEERFLOW_ERROR | error=timeout | user_id=%s | thread_id=%s",
+                request.user_id, thread_id,
+            )
             raise BackendStageError(
                 "backend-timeout",
                 "Timed out while streaming a DeerFlow response.",
@@ -285,6 +296,10 @@ class DeerFlowBackendAdapter(BackendAdapter):
             ) from exc
         except httpx.HTTPStatusError as exc:
             self._thread_ids.pop(request.user_id, None)
+            logger.error(
+                "[VOICE:LLM] DEERFLOW_ERROR | status_code=%s | user_id=%s | thread_id=%s",
+                exc.response.status_code, request.user_id, thread_id,
+            )
             raise BackendStageError(
                 "backend-request",
                 f"DeerFlow responded with HTTP {exc.response.status_code}.",
@@ -292,6 +307,10 @@ class DeerFlowBackendAdapter(BackendAdapter):
             ) from exc
         except httpx.HTTPError as exc:
             self._thread_ids.pop(request.user_id, None)
+            logger.error(
+                "[VOICE:LLM] DEERFLOW_ERROR | error=%s | user_id=%s | thread_id=%s",
+                str(exc), request.user_id, thread_id,
+            )
             raise BackendStageError(
                 "backend-request",
                 "Failed to contact the DeerFlow backend.",

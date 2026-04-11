@@ -1,38 +1,61 @@
 import { cookies, headers } from 'next/headers'
 import { NextResponse } from 'next/server'
 
-import { discordLogin } from '@/app/lib/auth/backend-auth'
-import { auth } from '@/server/better-auth'
+import { providerLogin } from '@/app/lib/auth/backend-auth'
+import { authBypassEnabled } from '@/app/lib/auth/dev-bypass'
+import { getSession } from '@/server/better-auth'
+
+function isLegacyBridgeUnavailable(error: unknown): boolean {
+  if (typeof error === 'object' && error !== null && 'status' in error && error.status === 404) {
+    return true
+  }
+
+  return error instanceof Error && /\b404\b/.test(error.message)
+}
 
 /**
  * POST /api/auth/sync-backend
  *
  * After Better Auth establishes a session, call this to sync with the
- * Sophia backend.  Reads the Discord account ID from the Better Auth DB,
- * calls the backend discordLogin endpoint, and sets the sophia-backend-token
- * httpOnly cookie.
+ * Sophia backend. Reads the Google account ID from Better Auth,
+ * sends it through the legacy backend auth bridge, and sets the
+ * sophia-backend-token httpOnly cookie.
  */
 export async function POST() {
-  const session = await auth.api.getSession({ headers: await headers() })
+  if (authBypassEnabled) {
+    return NextResponse.json({
+      ok: true,
+      skipped: true,
+      reason: 'Auth bypass enabled',
+    })
+  }
+
+  const session = await getSession()
 
   if (!session?.user) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
   }
 
   try {
-    // Get linked accounts for the current user
-    const accounts = await auth.api.listUserAccounts({ headers: await headers() })
-    const discordAccount = (accounts as { accountId: string; providerId: string }[])?.find(
-      (a) => a.providerId === 'discord',
-    )
+    const requestHeaders = await headers()
+    let providerUserId = session.user.id
 
-    if (!discordAccount) {
-      return NextResponse.json({ error: 'No Discord account linked' }, { status: 400 })
+    try {
+      const { auth } = await import('@/server/better-auth/config')
+      const accounts = await auth.api.listUserAccounts({ headers: requestHeaders })
+      providerUserId = (accounts as { accountId: string; providerId: string }[])
+        ?.find((account) => account.providerId === 'google')
+        ?.accountId || session.user.id
+    } catch {
+      providerUserId = session.user.id
     }
 
-    const backendUser = await discordLogin({
-      discord_id: discordAccount.accountId,
+    const backendUser = await providerLogin({
+      provider: 'google',
+      canonicalUserId: session.user.id,
+      providerUserId,
       email: session.user.email || '',
+      forwardedCookieHeader: requestHeaders.get('cookie') || undefined,
       username: session.user.name || undefined,
     })
 
@@ -48,12 +71,25 @@ export async function POST() {
 
       return NextResponse.json({
         ok: true,
-        user: { id: backendUser.id, email: backendUser.email },
+        user: {
+          id: backendUser.id,
+          email: backendUser.email,
+          username: backendUser.username ?? session.user.name ?? null,
+        },
       })
     }
 
     return NextResponse.json({ error: 'No token returned from backend' }, { status: 502 })
-  } catch {
-    return NextResponse.json({ error: 'Backend sync failed' }, { status: 502 })
+  } catch (error) {
+    if (isLegacyBridgeUnavailable(error)) {
+      return NextResponse.json({
+        ok: true,
+        skipped: true,
+        reason: 'Legacy backend auth bridge unavailable',
+      })
+    }
+
+    const message = error instanceof Error ? error.message : 'Backend sync failed'
+    return NextResponse.json({ error: message }, { status: 502 })
   }
 }

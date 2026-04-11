@@ -1,5 +1,6 @@
 import { CallingState } from "@stream-io/video-react-sdk"
 import { renderHook, act } from "@testing-library/react"
+import { StrictMode, createElement, type ReactNode } from "react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
 import { useStreamVoiceSession } from "../../app/hooks/useStreamVoiceSession"
@@ -156,6 +157,32 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("connecting")
   })
 
+  it("includes session_id and thread_id when the voice session is bound to an active session", async () => {
+    const { result } = renderHook(() =>
+      useStreamVoiceSession("user-1", {
+        sessionId: "session-123",
+        threadId: "thread-456",
+      }),
+    )
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/connect",
+      expect.objectContaining({
+        body: JSON.stringify({
+          platform: "voice",
+          context_mode: "gaming",
+          ritual: "vent",
+          session_id: "session-123",
+          thread_id: "thread-456",
+        }),
+      }),
+    )
+  })
+
   it("sends a null ritual for open or chat sessions", async () => {
     mockSessionContextMode = "life"
     mockSessionPresetType = "open"
@@ -223,6 +250,68 @@ describe("useStreamVoiceSession", () => {
     expect(mockJoin).not.toHaveBeenCalled()
   })
 
+  it("ignores concurrent startTalking calls while a connect request is already in flight", async () => {
+    let resolveFetch: ((value: {
+      ok: boolean
+      json: () => Promise<Record<string, unknown>>
+      text: () => Promise<string>
+    }) => void) | null = null
+
+    mockFetch.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        resolveFetch = resolve
+      }),
+    )
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      const firstStart = result.current.startTalking()
+      const secondStart = result.current.startTalking()
+
+      await Promise.resolve()
+      expect(mockFetch).toHaveBeenCalledTimes(1)
+
+      resolveFetch?.({
+        ok: true,
+        json: () => Promise.resolve({
+          api_key: "test-key",
+          token: "test-token",
+          call_type: "audio_room",
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+        }),
+        text: () => Promise.resolve(""),
+      })
+
+      await Promise.all([firstStart, secondStart])
+    })
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not treat Strict Mode effect cleanup as a permanent destroy flag", async () => {
+    mockCall = makeCallMock()
+
+    const wrapper = ({ children }: { children: ReactNode }) =>
+      createElement(StrictMode, null, children)
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"), { wrapper })
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      1,
+      "/api/sophia/user-1/voice/connect",
+      expect.objectContaining({
+        method: "POST",
+      }),
+    )
+  })
+
   it("startTalking with no userId sets error", async () => {
     const { result } = renderHook(() => useStreamVoiceSession(undefined))
 
@@ -271,6 +360,25 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("connecting")
 
     mockRemoteParticipantSessionIds = ["voice-session-123"]
+    rerender()
+
+    expect(result.current.stage).toBe("listening")
+  })
+
+  it("transitions to listening when any remote participant joins the one-on-one call", async () => {
+    mockCall = makeCallMock()
+
+    const { result, rerender } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    mockCallingState = CallingState.JOINED
+    rerender()
+    expect(result.current.stage).toBe("connecting")
+
+    mockRemoteParticipantSessionIds = ["unexpected-remote-session"]
     rerender()
 
     expect(result.current.stage).toBe("listening")

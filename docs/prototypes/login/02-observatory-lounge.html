@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia Login Prototype 02 - Observatory Lounge</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,300;9..144,400;9..144,500&family=Sora:wght@300;400;500;600;700&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #061015;
+    --bg-2: #0d171c;
+    --teal: #86d7d2;
+    --ice: #d7eff2;
+    --fog: rgba(215, 239, 242, 0.66);
+    --quiet: rgba(215, 239, 242, 0.4);
+    --line: rgba(134, 215, 210, 0.14);
+    --panel: rgba(9, 21, 27, 0.72);
+    --panel-2: rgba(11, 25, 33, 0.86);
+    --metal: #8e9da7;
+  }
+
+  body {
+    min-height: 100vh;
+    font-family: 'Sora', sans-serif;
+    background:
+      radial-gradient(circle at 18% 22%, rgba(134, 215, 210, 0.12), transparent 24%),
+      radial-gradient(circle at 80% 14%, rgba(181, 221, 255, 0.1), transparent 20%),
+      linear-gradient(135deg, #041015 0%, #0a171d 42%, #071117 100%);
+    color: var(--ice);
+    overflow: hidden;
+    position: relative;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .rings,
+  .mesh,
+  .glow {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .rings {
+    background:
+      radial-gradient(circle at center, transparent 0 19%, rgba(134, 215, 210, 0.08) 19.2% 19.5%, transparent 19.8%),
+      radial-gradient(circle at center, transparent 0 29%, rgba(134, 215, 210, 0.05) 29.2% 29.5%, transparent 29.8%),
+      radial-gradient(circle at center, transparent 0 44%, rgba(134, 215, 210, 0.04) 44.2% 44.4%, transparent 44.8%);
+    opacity: 0.8;
+  }
+
+  .mesh {
+    background:
+      linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+    background-size: 72px 72px;
+    mask-image: radial-gradient(circle at center, rgba(0, 0, 0, 0.9), transparent 84%);
+    opacity: 0.26;
+  }
+
+  .glow::before,
+  .glow::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(36px);
+  }
+
+  .glow::before {
+    width: 260px;
+    height: 260px;
+    left: 12%;
+    top: 20%;
+    background: rgba(134, 215, 210, 0.16);
+  }
+
+  .glow::after {
+    width: 340px;
+    height: 340px;
+    right: 8%;
+    bottom: 8%;
+    background: rgba(172, 201, 255, 0.12);
+  }
+
+  .frame {
+    position: relative;
+    min-height: 100vh;
+    padding: 26px;
+  }
+
+  .shell {
+    min-height: calc(100vh - 52px);
+    border-radius: 34px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: linear-gradient(180deg, rgba(8, 18, 24, 0.78), rgba(5, 14, 19, 0.9));
+    box-shadow: 0 32px 120px rgba(0, 0, 0, 0.46);
+    backdrop-filter: blur(18px);
+    overflow: hidden;
+    position: relative;
+  }
+
+  .shell::before {
+    content: "";
+    position: absolute;
+    inset: 22px;
+    border: 1px solid rgba(134, 215, 210, 0.08);
+    border-radius: 26px;
+  }
+
+  .topbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 18px;
+    position: relative;
+    z-index: 1;
+    padding: 28px 34px 0;
+  }
+
+  .brand {
+    display: flex;
+    gap: 14px;
+    align-items: center;
+  }
+
+  .brand-mark {
+    width: 46px;
+    height: 46px;
+    border-radius: 50%;
+    border: 1px solid rgba(134, 215, 210, 0.2);
+    position: relative;
+    box-shadow: inset 0 0 0 8px rgba(134, 215, 210, 0.03);
+  }
+
+  .brand-mark::before,
+  .brand-mark::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+  }
+
+  .brand-mark::before {
+    inset: 12px;
+    background: linear-gradient(180deg, rgba(215, 239, 242, 0.9), rgba(134, 215, 210, 0.52));
+  }
+
+  .brand-mark::after {
+    width: 10px;
+    height: 10px;
+    right: -3px;
+    top: 9px;
+    background: var(--teal);
+    box-shadow: 0 0 18px rgba(134, 215, 210, 0.8);
+  }
+
+  .brand-copy small,
+  .capsule {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.16em;
+    color: var(--quiet);
+  }
+
+  .brand-copy strong {
+    display: block;
+    margin-top: 4px;
+    font-size: 15px;
+    letter-spacing: 0.04em;
+  }
+
+  .capsule {
+    padding: 12px 16px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: minmax(280px, 0.7fr) minmax(420px, 1fr) minmax(340px, 0.75fr);
+    gap: 18px;
+    padding: 26px 34px 34px;
+    min-height: calc(100vh - 112px);
+    position: relative;
+    z-index: 1;
+  }
+
+  .rail,
+  .center,
+  .login {
+    border-radius: 30px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: linear-gradient(180deg, rgba(11, 24, 31, 0.7), rgba(8, 18, 24, 0.86));
+    backdrop-filter: blur(16px);
+  }
+
+  .rail,
+  .login {
+    padding: 24px;
+  }
+
+  .rail {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .rail h2,
+  .center h1,
+  .login h2 {
+    font-family: 'Fraunces', serif;
+    font-weight: 400;
+  }
+
+  .rail h2 {
+    font-size: 34px;
+    line-height: 1.04;
+    margin-top: 10px;
+  }
+
+  .rail p,
+  .login p,
+  .spec span,
+  .signal p {
+    color: var(--fog);
+    line-height: 1.7;
+  }
+
+  .rail-grid {
+    margin-top: 26px;
+    display: grid;
+    gap: 12px;
+  }
+
+  .signal {
+    padding: 16px 18px;
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .signal strong {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 13px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--teal);
+  }
+
+  .signal p {
+    font-size: 13px;
+  }
+
+  .center {
+    position: relative;
+    padding: 34px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .center::before,
+  .center::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid rgba(134, 215, 210, 0.12);
+  }
+
+  .center::before {
+    width: 560px;
+    height: 560px;
+    left: 50%;
+    top: 52%;
+    transform: translate(-50%, -50%);
+  }
+
+  .center::after {
+    width: 320px;
+    height: 320px;
+    left: 50%;
+    top: 52%;
+    transform: translate(-50%, -50%);
+  }
+
+  .hero-copy {
+    max-width: 560px;
+    position: relative;
+    z-index: 1;
+  }
+
+  .hero-copy small {
+    display: inline-block;
+    margin-bottom: 18px;
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    color: var(--teal);
+    font-size: 11px;
+  }
+
+  .center h1 {
+    font-size: clamp(46px, 6vw, 72px);
+    line-height: 0.96;
+    max-width: 9ch;
+  }
+
+  .center p {
+    margin-top: 18px;
+    max-width: 44ch;
+    color: var(--fog);
+    font-size: 16px;
+    line-height: 1.75;
+  }
+
+  .scope {
+    position: relative;
+    z-index: 1;
+    align-self: center;
+    width: min(72vw, 340px);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    display: grid;
+    place-items: center;
+    background:
+      radial-gradient(circle at center, rgba(134, 215, 210, 0.18), transparent 42%),
+      radial-gradient(circle at center, rgba(255, 255, 255, 0.04), transparent 58%);
+    box-shadow: inset 0 0 80px rgba(134, 215, 210, 0.06);
+  }
+
+  .scope::before,
+  .scope::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    border: 1px solid rgba(134, 215, 210, 0.1);
+  }
+
+  .scope::before {
+    inset: 26px;
+  }
+
+  .scope::after {
+    inset: 72px;
+  }
+
+  .scope-core {
+    width: 112px;
+    height: 112px;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 35% 35%, rgba(255, 255, 255, 0.78), transparent 24%),
+      linear-gradient(180deg, rgba(134, 215, 210, 0.78), rgba(110, 148, 215, 0.42));
+    box-shadow: 0 0 54px rgba(134, 215, 210, 0.3);
+  }
+
+  .specs {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .spec {
+    padding: 14px 16px 16px;
+    border-radius: 18px;
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    background: rgba(255, 255, 255, 0.025);
+  }
+
+  .spec strong {
+    display: block;
+    margin-bottom: 8px;
+    color: var(--ice);
+    font-size: 13px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+
+  .spec span {
+    font-size: 13px;
+  }
+
+  .login {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .login small {
+    color: var(--teal);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 11px;
+  }
+
+  .login h2 {
+    margin-top: 14px;
+    font-size: 42px;
+    line-height: 0.96;
+  }
+
+  .login p {
+    margin-top: 18px;
+    font-size: 15px;
+  }
+
+  .status-board {
+    margin-top: 24px;
+    padding: 18px;
+    border-radius: 22px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.03);
+    display: grid;
+    gap: 14px;
+  }
+
+  .status-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    font-size: 13px;
+  }
+
+  .status-row span:first-child {
+    color: var(--quiet);
+  }
+
+  .status-row span:last-child {
+    color: var(--ice);
+  }
+
+  .button {
+    margin-top: 24px;
+    border: 0;
+    border-radius: 18px;
+    padding: 17px 20px;
+    width: 100%;
+    background: linear-gradient(180deg, #def3f4, #b6dcde);
+    color: #0d161b;
+    font: 700 15px 'Sora', sans-serif;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    cursor: pointer;
+    box-shadow: 0 24px 44px rgba(0, 0, 0, 0.3);
+    transition: transform 180ms ease, box-shadow 180ms ease;
+  }
+
+  .button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 28px 52px rgba(0, 0, 0, 0.34);
+  }
+
+  .button-mark {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: conic-gradient(#ea4335 0 90deg, #fbbc05 90deg 180deg, #34a853 180deg 270deg, #4285f4 270deg 360deg);
+    box-shadow: inset 0 0 0 3px #fff;
+  }
+
+  .meta {
+    margin-top: 18px;
+    color: var(--quiet);
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+  }
+
+  @media (max-width: 1160px) {
+    .layout {
+      grid-template-columns: 1fr;
+    }
+
+    .center {
+      min-height: 760px;
+    }
+
+    .scope {
+      margin: 24px auto;
+    }
+  }
+
+  @media (max-width: 720px) {
+    .frame { padding: 12px; }
+    .shell { min-height: calc(100vh - 24px); border-radius: 24px; }
+    .topbar,
+    .layout { padding-left: 18px; padding-right: 18px; }
+    .topbar { flex-direction: column; align-items: flex-start; }
+    .center { padding: 22px; min-height: auto; }
+    .rail,
+    .login { padding: 20px; }
+    .specs { grid-template-columns: 1fr; }
+    .meta { flex-direction: column; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .button { transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="rings"></div>
+  <div class="mesh"></div>
+  <div class="glow"></div>
+
+  <div class="frame">
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark"></div>
+          <div class="brand-copy">
+            <small>Prototype 02</small>
+            <strong>Observatory Lounge</strong>
+          </div>
+        </div>
+        <div class="capsule">Voice transport + memory continuity</div>
+      </header>
+
+      <section class="layout">
+        <aside class="rail">
+          <div>
+            <small class="capsule" style="display:inline-block; padding:0; border:none; background:none;">Signal quality</small>
+            <h2>A more product-luxury login, not a floating modal.</h2>
+            <p style="margin-top:16px; font-size:15px;">
+              This option leans into instrumentation, precision, and calm confidence.
+              It feels closer to a premium studio system than a social-auth afterthought.
+            </p>
+            <div class="rail-grid">
+              <div class="signal">
+                <strong>Presence</strong>
+                <p>The page uses concentric geometry to signal depth and continuity before the user even signs in.</p>
+              </div>
+              <div class="signal">
+                <strong>Control</strong>
+                <p>Structured rails give room for trust messaging without cluttering the primary CTA.</p>
+              </div>
+              <div class="signal">
+                <strong>Readiness</strong>
+                <p>Useful for a voice-first product because it feels like entering an active system.</p>
+              </div>
+            </div>
+          </div>
+          <div class="signal" style="margin-top:18px;">
+            <strong>Suggested tone</strong>
+            <p>Sharper than the current glass card. Better if you want Sophia to read as advanced, composed, and technically premium.</p>
+          </div>
+        </aside>
+
+        <section class="center">
+          <div class="hero-copy">
+            <small>Companion access</small>
+            <h1>Step back into the active session field.</h1>
+            <p>
+              Your journal, recent recaps, saved memories, and voice session readiness are framed as one continuous system.
+              The composition is dramatic, but the action stays singular.
+            </p>
+          </div>
+
+          <div class="scope">
+            <div class="scope-core"></div>
+          </div>
+
+          <div class="specs">
+            <div class="spec">
+              <strong>Focused CTA</strong>
+              <span>One high-contrast button, zero ambiguity.</span>
+            </div>
+            <div class="spec">
+              <strong>System feel</strong>
+              <span>Structured rails make the product feel deliberate and engineered.</span>
+            </div>
+            <div class="spec">
+              <strong>Premium motion</strong>
+              <span>Concentric fields and glow cues can animate lightly without noise.</span>
+            </div>
+          </div>
+        </section>
+
+        <aside class="login">
+          <div>
+            <small>Authentication</small>
+            <h2>Continue with your private profile.</h2>
+            <p>
+              Sign in once to restore your companion identity, synchronized voice transport, and memory-backed journal context.
+            </p>
+
+            <div class="status-board">
+              <div class="status-row"><span>Session continuity</span><span>Enabled</span></div>
+              <div class="status-row"><span>Voice-ready state</span><span>Recovered</span></div>
+              <div class="status-row"><span>Journal + recap access</span><span>Linked</span></div>
+            </div>
+
+            <button class="button" type="button">
+              <span class="button-mark"></span>
+              Continue with Google
+            </button>
+
+            <div class="meta">
+              <span>Static HTML prototype</span>
+              <span>Premium system direction</span>
+            </div>
+          </div>
+        </aside>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

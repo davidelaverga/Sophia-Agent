@@ -1,0 +1,17 @@
+{
+  "session_id": "510cfecc-ced3-4661-844b-58bf5587d15d",
+  "thread_id": "a5e47890-6707-4c69-8fa8-f35129cb60e1",
+  "session_type": "debrief",
+  "context_mode": "gaming",
+  "started_at": "2026-04-09T02:54:17.334Z",
+  "ended_at": "2026-04-09T02:54:57.868158+00:00",
+  "turn_count": 3,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Real continuity isn't about me remembering perfectly. It's about you staying anchored to your own rituals and bringing them to me clearly.",
+    "reflection_candidate": {
+      "prompt": "What does it mean to you when someone remembers a detail about your life? Is it the memory itself, or what it signals about attention?"
+    },
+    "status": "ready"
+  }
+}

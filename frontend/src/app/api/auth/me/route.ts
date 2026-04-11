@@ -10,10 +10,10 @@
  * 🔒 SECURITY: The raw token is NEVER returned to the client.
  */
 
-import { cookies, headers } from 'next/headers';
+import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 
-import { auth } from '@/server/better-auth';
+import { getSession } from '@/server/better-auth';
 
 const COOKIE_NAME = 'sophia-backend-token';
 
@@ -28,7 +28,7 @@ export async function GET() {
     let username: string | null = null;
 
     try {
-      const session = await auth.api.getSession({ headers: await headers() });
+      const session = await getSession();
       if (session?.user) {
         userId = session.user.id;
         email = session.user.email ?? null;

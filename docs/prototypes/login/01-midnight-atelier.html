@@ -1,0 +1,608 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sophia Login Prototype 01 - Midnight Atelier</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Manrope:wght@400;500;600;700&display=swap');
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #090a0f;
+    --bg-2: #11131d;
+    --panel: rgba(14, 17, 27, 0.74);
+    --panel-strong: rgba(18, 22, 34, 0.88);
+    --line: rgba(255, 255, 255, 0.08);
+    --text: #f7f4ee;
+    --muted: rgba(247, 244, 238, 0.64);
+    --quiet: rgba(247, 244, 238, 0.38);
+    --champagne: #d9c19b;
+    --lavender: #bca5f4;
+    --aura: rgba(188, 165, 244, 0.18);
+    --shadow: 0 40px 120px rgba(0, 0, 0, 0.48);
+  }
+
+  body {
+    min-height: 100vh;
+    font-family: 'Manrope', sans-serif;
+    background:
+      radial-gradient(circle at 18% 24%, rgba(217, 193, 155, 0.12), transparent 28%),
+      radial-gradient(circle at 82% 18%, rgba(188, 165, 244, 0.18), transparent 26%),
+      radial-gradient(circle at 70% 72%, rgba(71, 102, 160, 0.18), transparent 30%),
+      linear-gradient(135deg, #07080c 0%, #11131a 54%, #090b12 100%);
+    color: var(--text);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  body::before,
+  body::after {
+    content: "";
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  body::before {
+    background:
+      linear-gradient(transparent 0%, rgba(9, 10, 15, 0.22) 100%),
+      repeating-linear-gradient(90deg, transparent 0 74px, rgba(255, 255, 255, 0.02) 74px 75px);
+    mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.92), transparent 92%);
+  }
+
+  body::after {
+    background-image:
+      radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.08) 0 1px, transparent 1px),
+      radial-gradient(circle at 72% 38%, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px),
+      radial-gradient(circle at 58% 84%, rgba(255, 255, 255, 0.06) 0 1px, transparent 1px);
+    background-size: 180px 180px, 220px 220px, 260px 260px;
+    opacity: 0.45;
+  }
+
+  .frame {
+    position: relative;
+    min-height: 100vh;
+    padding: 28px;
+  }
+
+  .shell {
+    min-height: calc(100vh - 56px);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    background: linear-gradient(180deg, rgba(11, 13, 20, 0.82), rgba(8, 10, 17, 0.72));
+    border-radius: 32px;
+    box-shadow: var(--shadow);
+    backdrop-filter: blur(18px);
+    overflow: hidden;
+    position: relative;
+  }
+
+  .shell::before {
+    content: "";
+    position: absolute;
+    inset: 24px;
+    border: 1px solid rgba(217, 193, 155, 0.12);
+    border-radius: 24px;
+    pointer-events: none;
+  }
+
+  .shell::after {
+    content: "";
+    position: absolute;
+    width: 560px;
+    height: 560px;
+    right: -180px;
+    top: -220px;
+    background: radial-gradient(circle, rgba(188, 165, 244, 0.22), transparent 62%);
+    pointer-events: none;
+    filter: blur(12px);
+    animation: drift 12s ease-in-out infinite;
+  }
+
+  .topbar {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 26px 34px 0;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .crest {
+    width: 42px;
+    height: 42px;
+    border-radius: 14px;
+    border: 1px solid rgba(217, 193, 155, 0.26);
+    background:
+      radial-gradient(circle at 28% 28%, rgba(255, 255, 255, 0.38), transparent 28%),
+      linear-gradient(145deg, rgba(217, 193, 155, 0.26), rgba(188, 165, 244, 0.26));
+    display: grid;
+    place-items: center;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.28);
+  }
+
+  .crest::before {
+    content: "S";
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 24px;
+    color: var(--text);
+  }
+
+  .brand-copy small,
+  .status {
+    text-transform: uppercase;
+    letter-spacing: 0.2em;
+    font-size: 11px;
+    color: var(--quiet);
+  }
+
+  .brand-copy strong {
+    display: block;
+    margin-top: 5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+  }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: rgba(255, 255, 255, 0.02);
+  }
+
+  .status::before {
+    content: "";
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--champagne);
+    box-shadow: 0 0 14px rgba(217, 193, 155, 0.9);
+  }
+
+  .content {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: 1.1fr 0.9fr;
+    gap: 24px;
+    min-height: calc(100vh - 130px);
+    padding: 28px 34px 34px;
+  }
+
+  .hero,
+  .panel {
+    position: relative;
+  }
+
+  .hero {
+    padding: 54px 28px 28px 28px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .eyebrow {
+    color: var(--champagne);
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    font-size: 12px;
+    margin-bottom: 20px;
+  }
+
+  h1 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: clamp(58px, 8vw, 96px);
+    line-height: 0.92;
+    font-weight: 400;
+    letter-spacing: -0.03em;
+    max-width: 720px;
+  }
+
+  .hero p {
+    max-width: 540px;
+    margin-top: 24px;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1.7;
+  }
+
+  .ribbon {
+    margin-top: 38px;
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 20px;
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.07);
+    width: fit-content;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  }
+
+  .ribbon b {
+    color: var(--text);
+    font-weight: 600;
+  }
+
+  .ribbon span {
+    color: var(--quiet);
+    font-size: 14px;
+  }
+
+  .milestones {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 42px;
+    max-width: 760px;
+  }
+
+  .milestone {
+    padding: 18px 18px 20px;
+    border-radius: 22px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.015));
+    border: 1px solid rgba(255, 255, 255, 0.07);
+  }
+
+  .milestone strong {
+    display: block;
+    font-size: 28px;
+    margin-bottom: 8px;
+    color: var(--champagne);
+    font-weight: 600;
+  }
+
+  .milestone span {
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  .panel {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .card-stack {
+    position: relative;
+    width: min(100%, 480px);
+  }
+
+  .card-shadow,
+  .card {
+    border-radius: 30px;
+  }
+
+  .card-shadow {
+    position: absolute;
+    inset: 20px -8px -20px 20px;
+    background: linear-gradient(180deg, rgba(188, 165, 244, 0.16), rgba(217, 193, 155, 0.08));
+    filter: blur(28px);
+    opacity: 0.9;
+  }
+
+  .card {
+    position: relative;
+    padding: 28px;
+    background: linear-gradient(180deg, rgba(20, 24, 36, 0.92), rgba(13, 16, 26, 0.92));
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 32px 100px rgba(0, 0, 0, 0.42);
+    overflow: hidden;
+  }
+
+  .card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.05), transparent 42%);
+    pointer-events: none;
+  }
+
+  .card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+  }
+
+  .card-head small {
+    color: var(--champagne);
+    text-transform: uppercase;
+    letter-spacing: 0.18em;
+    font-size: 11px;
+  }
+
+  .card-head h2 {
+    margin-top: 12px;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 44px;
+    font-weight: 400;
+    line-height: 0.95;
+  }
+
+  .orbit {
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    position: relative;
+    flex: 0 0 auto;
+  }
+
+  .orbit::before,
+  .orbit::after {
+    content: "";
+    position: absolute;
+    inset: 12px;
+    border: 1px solid rgba(217, 193, 155, 0.22);
+    border-radius: 50%;
+  }
+
+  .orbit::after {
+    inset: 28px;
+    background: radial-gradient(circle, rgba(217, 193, 155, 0.9), rgba(188, 165, 244, 0.2) 58%, transparent 72%);
+    border: none;
+    filter: blur(0.5px);
+  }
+
+  .card-copy {
+    margin-top: 22px;
+    color: var(--muted);
+    font-size: 15px;
+    line-height: 1.7;
+  }
+
+  .feature-list {
+    margin-top: 24px;
+    display: grid;
+    gap: 14px;
+  }
+
+  .feature {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 14px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+  }
+
+  .feature:first-child { border-top: none; }
+
+  .feature i {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: rgba(217, 193, 155, 0.12);
+    color: var(--champagne);
+    font-style: normal;
+    font-size: 12px;
+    border: 1px solid rgba(217, 193, 155, 0.2);
+    flex: 0 0 auto;
+  }
+
+  .feature strong {
+    display: block;
+    font-size: 14px;
+    margin-bottom: 4px;
+  }
+
+  .feature span {
+    display: block;
+    color: var(--quiet);
+    line-height: 1.55;
+    font-size: 13px;
+  }
+
+  .login-button {
+    margin-top: 28px;
+    width: 100%;
+    border: 0;
+    border-radius: 20px;
+    background: linear-gradient(180deg, #fbf7ef, #ece2cf);
+    color: #171717;
+    font: 700 15px 'Manrope', sans-serif;
+    padding: 18px 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    cursor: pointer;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.28);
+    transition: transform 180ms ease, box-shadow 180ms ease;
+  }
+
+  .login-button:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 24px 48px rgba(0, 0, 0, 0.32);
+  }
+
+  .google {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: conic-gradient(#ea4335 0 90deg, #fbbc05 90deg 180deg, #34a853 180deg 270deg, #4285f4 270deg 360deg);
+    box-shadow: inset 0 0 0 3px #fff;
+  }
+
+  .subtle-row {
+    margin-top: 18px;
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    color: var(--quiet);
+    font-size: 12px;
+  }
+
+  .subtle-row span:last-child {
+    text-align: right;
+  }
+
+  .footer-note {
+    margin-top: 16px;
+    color: var(--quiet);
+    font-size: 12px;
+    line-height: 1.7;
+  }
+
+  @keyframes drift {
+    0%, 100% { transform: translate3d(0, 0, 0); }
+    50% { transform: translate3d(-24px, 18px, 0); }
+  }
+
+  @media (max-width: 980px) {
+    .content {
+      grid-template-columns: 1fr;
+      padding-top: 12px;
+    }
+
+    .hero {
+      padding: 44px 20px 6px;
+    }
+
+    .panel {
+      padding: 0 8px 12px;
+    }
+
+    h1 { font-size: clamp(48px, 12vw, 74px); }
+  }
+
+  @media (max-width: 640px) {
+    .frame { padding: 12px; }
+    .shell { min-height: calc(100vh - 24px); border-radius: 24px; }
+    .topbar,
+    .content { padding-left: 18px; padding-right: 18px; }
+    .topbar { flex-direction: column; align-items: flex-start; gap: 16px; }
+    .status { font-size: 10px; }
+    .milestones { grid-template-columns: 1fr; }
+    .card { padding: 22px; }
+    .card-head { flex-direction: column; }
+    .orbit { width: 72px; height: 72px; }
+    .subtle-row { flex-direction: column; }
+    .subtle-row span:last-child { text-align: left; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .shell::after,
+    .login-button { animation: none; transition: none; }
+  }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <main class="shell">
+      <div class="topbar">
+        <div class="brand">
+          <div class="crest"></div>
+          <div class="brand-copy">
+            <small>Private companion</small>
+            <strong>Sophia</strong>
+          </div>
+        </div>
+        <div class="status">Voice continuity enabled</div>
+      </div>
+
+      <section class="content">
+        <div class="hero">
+          <div class="eyebrow">Prototype 01 / Midnight Atelier</div>
+          <h1>Enter a calmer, more considered room.</h1>
+          <p>
+            This direction treats login like the threshold to a private salon instead of a utility screen.
+            The mood is editorial, restrained, and expensive without feeling cold.
+          </p>
+          <div class="ribbon">
+            <b>Designed for trust-first onboarding</b>
+            <span>Soft prestige, strong hierarchy, minimal friction.</span>
+          </div>
+
+          <div class="milestones">
+            <div class="milestone">
+              <strong>1 tap</strong>
+              <span>Primary action remains immediate and obvious.</span>
+            </div>
+            <div class="milestone">
+              <strong>Private</strong>
+              <span>Memory, recap, and voice continuity are framed as benefits.</span>
+            </div>
+            <div class="milestone">
+              <strong>Premium</strong>
+              <span>Editorial typography and softer metallic accents lift the feel.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="card-stack">
+            <div class="card-shadow"></div>
+            <div class="card">
+              <div class="card-head">
+                <div>
+                  <small>Sign in</small>
+                  <h2>Resume your thread.</h2>
+                </div>
+                <div class="orbit"></div>
+              </div>
+
+              <p class="card-copy">
+                Keep your sessions, rituals, recaps, and journal context stitched together across devices.
+              </p>
+
+              <div class="feature-list">
+                <div class="feature">
+                  <i>01</i>
+                  <div>
+                    <strong>Context returns with you</strong>
+                    <span>Recent sessions and saved reflections feel continuous, not restarted.</span>
+                  </div>
+                </div>
+                <div class="feature">
+                  <i>02</i>
+                  <div>
+                    <strong>Voice and text stay in sync</strong>
+                    <span>A single login keeps your voice transport, journal, and recap flow aligned.</span>
+                  </div>
+                </div>
+                <div class="feature">
+                  <i>03</i>
+                  <div>
+                    <strong>Calm privacy language</strong>
+                    <span>The page signals discretion without reading like enterprise compliance software.</span>
+                  </div>
+                </div>
+              </div>
+
+              <button class="login-button" type="button">
+                <span class="google"></span>
+                Continue with Google
+              </button>
+
+              <div class="subtle-row">
+                <span>Google is the single sign-in action</span>
+                <span>Static premium prototype</span>
+              </div>
+
+              <p class="footer-note">
+                Sophia uses your account to reconnect you with the right sessions, recaps, and companion history when you return.
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

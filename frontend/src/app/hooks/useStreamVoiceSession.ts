@@ -34,6 +34,7 @@ import {
 
 type UseStreamVoiceSessionOptions = {
   sessionId?: string
+  threadId?: string
   onUserTranscript?: (text: string) => void
   onAssistantResponse?: (text: string) => void
   onArtifacts?: (artifacts: Record<string, unknown>) => void
@@ -105,14 +106,20 @@ async function fetchStreamCredentials(
   platform: string,
   contextMode: ContextMode,
   ritual: string | null,
+  sessionId?: string,
+  threadId?: string,
+  signal?: AbortSignal,
 ): Promise<StreamVoiceCredentials> {
   const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/connect`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal,
     body: JSON.stringify({
       platform,
       context_mode: contextMode,
       ritual,
+      ...(sessionId ? { session_id: sessionId } : {}),
+      ...(threadId ? { thread_id: threadId } : {}),
     }),
   })
   if (!res.ok) {
@@ -174,7 +181,13 @@ export function useStreamVoiceSession(
   userId?: string,
   options: UseStreamVoiceSessionOptions = {},
 ): StreamVoiceSessionReturn {
-  const { sessionId, onUserTranscript, onAssistantResponse, onArtifacts } = options
+  const {
+    sessionId,
+    threadId,
+    onUserTranscript,
+    onAssistantResponse,
+    onArtifacts,
+  } = options
 
   // --- State ---------------------------------------------------------------
   const [stage, setStage] = useState<VoiceStage>("idle")
@@ -199,6 +212,9 @@ export function useStreamVoiceSession(
   const onUserTranscriptRef = useRef(onUserTranscript)
   const onAssistantResponseRef = useRef(onAssistantResponse)
   const sessionIdRef = useRef(sessionId)
+  const pendingStartControllerRef = useRef<AbortController | null>(null)
+  const startRequestVersionRef = useRef(0)
+  const startInFlightRef = useRef(false)
 
   // Keep refs current without re-binding effects
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
@@ -274,6 +290,13 @@ export function useStreamVoiceSession(
       ...recentUserTranscriptIdsRef.current.filter((existingId) => existingId !== utteranceId),
       utteranceId,
     ].slice(-RECENT_UTTERANCE_IDS_LIMIT)
+  }, [])
+
+  const cancelPendingStartRequest = useCallback(() => {
+    startRequestVersionRef.current += 1
+    startInFlightRef.current = false
+    pendingStartControllerRef.current?.abort()
+    pendingStartControllerRef.current = null
   }, [])
 
   const markSophiaReady = useCallback(
@@ -440,10 +463,15 @@ export function useStreamVoiceSession(
     if (callingState !== CallingState.JOINED) return
 
     const voiceAgentSessionId = credentials?.sessionId
-    if (!voiceAgentSessionId) return
-    if (!remoteParticipantSessionIds.includes(voiceAgentSessionId)) return
+    const hasRemoteParticipant = remoteParticipantSessionIds.length > 0
+    if (!hasRemoteParticipant) return
 
-    markSophiaReady("remote-participant")
+    markSophiaReady("remote-participant", {
+      matchedExpectedSession: voiceAgentSessionId
+        ? remoteParticipantSessionIds.includes(voiceAgentSessionId)
+        : false,
+      remoteParticipantCount: remoteParticipantSessionIds.length,
+    })
   }, [
     callingState,
     credentials?.sessionId,
@@ -619,6 +647,27 @@ export function useStreamVoiceSession(
       return
     }
 
+    if (startInFlightRef.current || callingState === CallingState.JOINING) {
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "start-talking-ignored",
+        payload: {
+          reason: "duplicate-connect",
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
+      return
+    }
+
+    cancelPendingStartRequest()
+
+    const requestVersion = startRequestVersionRef.current + 1
+    const controller = new AbortController()
+
+    startRequestVersionRef.current = requestVersion
+    pendingStartControllerRef.current = controller
+    startInFlightRef.current = true
+
     errorStageLockRef.current = false
     clearStartupReadyTimeout()
     isSophiaReadyRef.current = false
@@ -650,7 +699,35 @@ export function useStreamVoiceSession(
         platform,
         contextMode,
         resolveVoiceRitual(presetType),
+        sessionId,
+        threadId,
+        controller.signal,
       )
+
+      if (destroyedRef.current || startRequestVersionRef.current !== requestVersion) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "stale-connect-response",
+          payload: {
+            destroyed: destroyedRef.current,
+            requestVersion,
+            currentRequestVersion: startRequestVersionRef.current,
+            callId: creds.callId,
+            callType: creds.callType,
+            voiceAgentSessionId: creds.sessionId ?? null,
+            sessionId: sessionIdRef.current ?? null,
+          },
+        })
+        if (creds.sessionId) {
+          try {
+            await requestVoiceDisconnect(userId, creds)
+          } catch {
+            // Best-effort cleanup for stale connect responses.
+          }
+        }
+        return
+      }
+
       if (!creds.sessionId) {
         logger.warn("Voice connect returned without session_id", {
           component: "StreamVoiceSession",
@@ -678,6 +755,10 @@ export function useStreamVoiceSession(
       setCredentials(creds)
       // join() will be triggered by useStreamVoice once credentials cause client init
     } catch (err) {
+      if (controller.signal.aborted) {
+        return
+      }
+
       const message = err instanceof Error ? err.message : "Failed to connect"
       setError(message)
       setStage("error")
@@ -690,14 +771,23 @@ export function useStreamVoiceSession(
           sessionId: sessionIdRef.current ?? null,
         },
       })
+    } finally {
+      if (startRequestVersionRef.current === requestVersion) {
+        startInFlightRef.current = false
+        pendingStartControllerRef.current = null
+      }
     }
   }, [
+    callingState,
+    cancelPendingStartRequest,
     clearStartupReadyTimeout,
     contextMode,
     failVoiceStartup,
     platform,
     presetType,
+    sessionId,
     setVoiceFailed,
+    threadId,
     userId,
   ])
 
@@ -710,6 +800,7 @@ export function useStreamVoiceSession(
   }, [credentials, call, callingState, join])
 
   const stopTalking = useCallback(async () => {
+    cancelPendingStartRequest()
     clearThinking()
     clearStartupReadyTimeout()
     recordSophiaCaptureEvent({
@@ -735,15 +826,18 @@ export function useStreamVoiceSession(
     setSpeakingPresence(false)
     settlePresence()
   }, [
+    cancelPendingStartRequest,
     clearStartupReadyTimeout,
     leave,
     clearThinking,
+    requestCurrentVoiceDisconnect,
     setListeningPresence,
     setSpeakingPresence,
     settlePresence,
   ])
 
   const bargeIn = useCallback(() => {
+    cancelPendingStartRequest()
     clearThinking()
     clearStartupReadyTimeout()
     recordSophiaCaptureEvent({
@@ -766,15 +860,18 @@ export function useStreamVoiceSession(
     setSpeakingPresence(false)
     settlePresence()
   }, [
+    cancelPendingStartRequest,
     clearStartupReadyTimeout,
     leave,
     clearThinking,
+    requestCurrentVoiceDisconnect,
     setListeningPresence,
     setSpeakingPresence,
     settlePresence,
   ])
 
   const resetVoiceState = useCallback(() => {
+    cancelPendingStartRequest()
     clearThinking()
     clearStartupReadyTimeout()
     recordSophiaCaptureEvent({
@@ -796,19 +893,30 @@ export function useStreamVoiceSession(
     setFinalReply("")
     setError(undefined)
     resetPresence()
-  }, [clearStartupReadyTimeout, leave, clearThinking, resetPresence])
+  }, [cancelPendingStartRequest, clearStartupReadyTimeout, leave, clearThinking, requestCurrentVoiceDisconnect, resetPresence])
 
   // --- Cleanup on unmount --------------------------------------------------
   useEffect(() => {
+    destroyedRef.current = false
+
     return () => {
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "hook-cleanup",
+        payload: {
+          sessionId: sessionIdRef.current ?? null,
+          requestVersion: startRequestVersionRef.current,
+        },
+      })
       destroyedRef.current = true
+      cancelPendingStartRequest()
       void requestCurrentVoiceDisconnect({ keepalive: true })
       if (thinkingTimeoutRef.current) {
         clearTimeout(thinkingTimeoutRef.current)
       }
       clearStartupReadyTimeout()
     }
-  }, [clearStartupReadyTimeout, requestCurrentVoiceDisconnect])
+  }, [cancelPendingStartRequest, clearStartupReadyTimeout, requestCurrentVoiceDisconnect])
 
   return {
     stage,
