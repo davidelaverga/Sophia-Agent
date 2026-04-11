@@ -111,11 +111,12 @@ float occluderShadow(vec2 coord, vec2 lightUV, float aspect) {
     float perpDist = length(lightToFrag - closest);
 
     float behindOcc = max(0.0, proj - lightToOccLen);
-    float coneWidth = occR + behindOcc * 0.15;
+    float coneWidth = occR + behindOcc * 0.25;
 
-    // Softer penumbra with noise on the edge
+    // Softer penumbra with noise on the edge — wider spread at distance
     float edgeNoise = fbm(coord * 12.0 + u_time * 0.02) * 0.3;
-    float shadowFactor = smoothstep(coneWidth * 0.5, coneWidth * 1.6 + edgeNoise * coneWidth, perpDist);
+    float penumbraScale = 1.6 + behindOcc * 0.8;
+    float shadowFactor = smoothstep(coneWidth * 0.5, coneWidth * penumbraScale + edgeNoise * coneWidth, perpDist);
     float distanceFade = 1.0 / (1.0 + behindOcc * 1.2);
     shadowFactor = mix(shadowFactor, 1.0, 1.0 - distanceFade);
 
@@ -203,11 +204,23 @@ void main() {
     rim += (rimBand + outerGlow) * litSide * litSide * litSide * u_fade * 0.10;
   }
 
+  // ── Chromatic aberration — split RGB with slight angular offsets ──
+  vec2 lightDir = normalize(uv - lightUV + 0.001);
+  float caStrength = 0.003 * u_fade; // subtle 3px-equivalent shift
+  float raysR = godRays(uv + lightDir * caStrength, lightUV, aspect) * u_fade * edgeFade;
+  float raysB = godRays(uv - lightDir * caStrength, lightUV, aspect) * u_fade * edgeFade;
+  // Green channel uses the original 'rays' value (no offset)
+
   // Compose with chromatic depth — rays slightly warmer near source
   float warmth = smoothstep(1.5, 0.3, dist);
   vec3 warmRayCol = mix(u_rayColor, u_coreColor, warmth * 0.15);
 
-  vec3 rayContrib = rays * warmRayCol * 0.18;
+  // Per-channel ray contribution with chromatic split
+  vec3 rayContrib = vec3(
+    raysR * warmRayCol.r * 0.18,
+    rays  * warmRayCol.g * 0.18,
+    raysB * warmRayCol.b * 0.18
+  );
   vec3 scatterContrib = scatter * u_ambientColor * 0.6;
   vec3 rimContrib = rim * u_coreColor * 0.4;
 
@@ -433,11 +446,93 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
   if (reducedMotion) return null;
 
   return (
-    <canvas
-      ref={canvasRef}
+    <>
+      <canvas
+        ref={canvasRef}
+        aria-hidden="true"
+        className="pointer-events-none fixed inset-0"
+        style={{ zIndex: 1, mixBlendMode: 'screen', imageRendering: 'pixelated' }}
+      />
+      <LensFlare />
+    </>
+  );
+}
+
+/* ─── Lens Flare overlay ─────────────────────────────────────── */
+
+/**
+ * 3 hexagonal bokeh artifacts along the light→screen-center axis.
+ * Pure HTML/CSS, positioned by a rAF loop reading sweepLight globals.
+ * Only visible during active drift — fade matches sweepLight.intensity.
+ */
+const FLARE_STOPS: { t: number; size: number; alpha: number; hue: number }[] = [
+  { t: 0.35, size: 28, alpha: 0.12, hue: 270 },   // near light — violet
+  { t: 0.55, size: 18, alpha: 0.08, hue: 240 },   // mid — blue
+  { t: 0.75, size: 22, alpha: 0.06, hue: 210 },   // far — teal
+];
+
+function LensFlare() {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const children = el.children;
+    let raf = 0;
+
+    const tick = () => {
+      if (!sweepLight.active || sweepLight.intensity < 0.01) {
+        el.style.opacity = '0';
+        raf = requestAnimationFrame(tick);
+        return;
+      }
+
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      const lx = sweepLight.x;
+      const ly = sweepLight.y;
+      const cx = w * 0.5;
+      const cy = h * 0.5;
+
+      el.style.opacity = `${sweepLight.intensity}`;
+
+      for (let i = 0; i < FLARE_STOPS.length; i++) {
+        const stop = FLARE_STOPS[i]!;
+        const child = children[i] as HTMLElement | undefined;
+        if (!child) continue;
+        const fx = lx + (cx - lx) * stop.t;
+        const fy = ly + (cy - ly) * stop.t;
+        child.style.left = `${fx - stop.size * 0.5}px`;
+        child.style.top = `${fy - stop.size * 0.5}px`;
+      }
+
+      raf = requestAnimationFrame(tick);
+    };
+
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  return (
+    <div
+      ref={containerRef}
       aria-hidden="true"
       className="pointer-events-none fixed inset-0"
-      style={{ zIndex: 1, mixBlendMode: 'screen', imageRendering: 'pixelated' }}
-    />
+      style={{ zIndex: 1, opacity: 0, transition: 'opacity 0.6s ease' }}
+    >
+      {FLARE_STOPS.map((stop, i) => (
+        <div
+          key={i}
+          className="absolute rounded-full"
+          style={{
+            width: `${stop.size}px`,
+            height: `${stop.size}px`,
+            background: `radial-gradient(circle, hsla(${stop.hue}, 60%, 75%, ${stop.alpha}) 0%, transparent 70%)`,
+            clipPath: 'polygon(50% 0%, 93% 25%, 93% 75%, 50% 100%, 7% 75%, 7% 25%)',
+            filter: 'blur(2px)',
+          }}
+        />
+      ))}
+    </div>
   );
 }

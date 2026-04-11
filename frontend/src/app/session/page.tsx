@@ -910,10 +910,10 @@ function SessionPageContent() {
             )}
             style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
           >
-            <ModeToggle opacity={chromeOpacity} />
+            <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
           </div>
           
-          {/* Inline Artifact Panel — text mode: above composer, voice mode: floating above mic */}
+          {/* Inline Artifact Panel — text mode: above composer */}
           {focusMode === 'text' && showArtifacts && showArtifactsUi && (
             <PresenceArtifactPanel
               artifacts={artifacts}
@@ -926,7 +926,7 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Artifact toggle pill — centered above composer when dismissed in text mode */}
+          {/* Artifact toggle pill — text mode: inline above composer */}
           {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
             <div className="flex justify-center mb-2">
               <ArtifactToggleIcon
@@ -937,11 +937,11 @@ function SessionPageContent() {
             </div>
           )}
 
-          {/* Artifact toggle pill — voice mode: fixed above mic */}
+          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
           {focusMode !== 'text' && !showArtifacts && showArtifactsUi && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: '170px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+              style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
             >
               <ArtifactToggleIcon
                 hasArtifacts={!!(artifacts?.takeaway)}
@@ -973,7 +973,7 @@ function SessionPageContent() {
           </VoiceComposerErrorBoundary>
         </div>
         
-        {/* Voice mode: Floating artifact panel above mic */}
+        {/* Floating artifact panel — voice mode: fixed above mic */}
         {focusMode !== 'text' && (
           <PresenceArtifactPanel
             artifacts={artifacts}

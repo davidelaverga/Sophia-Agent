@@ -557,7 +557,7 @@ button, a, [role="button"] {
   --cosmic-shadow-lg: 0 30px 100px color-mix(in srgb, var(--bg) 48%, transparent), inset 0 0 30px color-mix(in srgb, var(--sophia-purple) 2%, transparent);
   --cosmic-reading-corridor: radial-gradient(ellipse 65% 80% at 50% 50%, color-mix(in srgb, var(--bg) 94%, transparent) 0%, color-mix(in srgb, var(--bg) 78%, transparent) 55%, color-mix(in srgb, var(--bg) 30%, transparent) 100%);
   --cosmic-modal-backdrop: color-mix(in srgb, var(--bg) 55%, transparent);
-  --cosmic-bottom-bar-bg: color-mix(in srgb, var(--bg) 72%, transparent);
+  --cosmic-bottom-bar-bg: color-mix(in srgb, var(--bg) 82%, transparent);
 }
 
 /* WebKit/Blink */
@@ -779,8 +779,8 @@ a {
 .cosmic-bottom-bar {
   border-top: 1px solid var(--cosmic-border-soft);
   background: var(--cosmic-bottom-bar-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
 }
 
 .cosmic-reading-corridor {

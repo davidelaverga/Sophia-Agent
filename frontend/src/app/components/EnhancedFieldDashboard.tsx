@@ -72,6 +72,8 @@ export function EnhancedFieldDashboard() {
     setShowSettingsDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
+    showFreshStartPrompt,
+    freshStartModalRef,
     handleConfirmReplaceSession,
     handleCancelReplaceSession,
     handleCallSophia,
@@ -79,6 +81,9 @@ export function EnhancedFieldDashboard() {
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,
+    handleCancelFreshStart,
+    handleRestartWithSameRitual,
+    handleChooseDifferentRitual,
   } = useDashboardEntryState();
 
   const contextConfig = CONTEXTS.find((context) => context.value === currentContext) ?? CONTEXTS[0];
@@ -87,6 +92,8 @@ export function EnhancedFieldDashboard() {
   const subtitle = selectedRitual
     ? contextConfig.ritualPrompts[selectedRitual]
     : contextConfig.subtitle;
+  const resumableSessionType = backendActiveSession?.session_type || sessionSummary?.sessionType || activeSession?.presetType || 'open';
+  const resumableSessionUsesRitual = resumableSessionType === 'prepare' || resumableSessionType === 'debrief' || resumableSessionType === 'reset' || resumableSessionType === 'vent';
 
   // ── Entrance choreography ──────────────────────────────────
   // Matches prototype: tabs(100ms) → greeting(200ms) → mic(500ms) → orbit(700ms)
@@ -218,17 +225,85 @@ export function EnhancedFieldDashboard() {
         </div>
       )}
 
+      {showFreshStartPrompt && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-6">
+          <button
+            type="button"
+            aria-label="Close"
+            className="cosmic-modal-backdrop absolute inset-0"
+            onClick={handleCancelFreshStart}
+          />
+          <div
+            ref={freshStartModalRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="start-fresh-title"
+            className={cn(
+              'cosmic-surface-panel-strong relative w-full max-w-sm rounded-[14px] p-5'
+            )}
+          >
+            <h3
+              id="start-fresh-title"
+              className="font-cormorant text-[1.35rem] font-light leading-snug"
+              style={{ color: 'var(--cosmic-text-strong)' }}
+            >
+              Start fresh
+            </h3>
+            <p className="mt-1.5 text-[13px] font-light" style={{ color: 'var(--cosmic-text-muted)' }}>
+              {resumableSessionUsesRitual
+                ? 'We can clear this session and begin again. Do you want to keep the same ritual, or choose a different one first?'
+                : 'We can clear this session and begin again. Do you want another open session, or would you rather choose a ritual first?'}
+            </p>
+            <div className="mt-5 flex gap-2.5">
+              <button
+                type="button"
+                onClick={handleRestartWithSameRitual}
+                className={cn(
+                  'cosmic-accent-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300'
+                )}
+              >
+                {resumableSessionUsesRitual ? 'Same ritual' : 'Start open'}
+              </button>
+              <button
+                type="button"
+                onClick={handleChooseDifferentRitual}
+                className={cn(
+                  'cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300'
+                )}
+              >
+                Choose ritual
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={handleCancelFreshStart}
+              className="mt-3 w-full text-center text-[12px] font-light transition-colors duration-300 hover:text-[var(--cosmic-text)]"
+              style={{ color: 'var(--cosmic-text-whisper)' }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="relative z-10 flex min-h-screen flex-col px-6 sm:px-8">
         {/* Greeting — near top, matching prototype clamp(28px,6vh,48px) */}
         <div
           ref={greetingGlowRef as React.RefObject<HTMLDivElement>}
           className="pointer-events-none mx-auto max-w-[480px] pt-[clamp(28px,6vh,48px)] text-center"
           style={{
-            filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.12))',
+            filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.18))',
             textShadow: [
+              // Directional shadow — cast away from the light
+              'calc(6px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(6px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(12px * var(--sweep-glow, 0))',
+              'rgba(0, 0, 0, calc(var(--sweep-glow, 0) * 0.18))',
+            ].join(' ') + ', ' + [
+              // Ambient glow halo
               '0 0',
-              'calc(8px * var(--sweep-glow, 0))',
-              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.15))',
+              'calc(10px * var(--sweep-glow, 0))',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.20))',
             ].join(' '),
           }}
         >

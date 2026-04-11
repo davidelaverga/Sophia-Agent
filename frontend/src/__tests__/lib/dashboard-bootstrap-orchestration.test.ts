@@ -112,4 +112,40 @@ describe('resolveDashboardBootstrapState', () => {
 
     expect(result.mode).toBe('resume-local');
   });
+
+  it('suppresses stale backend resume after a recent session end', async () => {
+    const checkActiveSession = vi.fn().mockResolvedValue({
+      has_active_session: true,
+      session: {
+        session_id: 'sess-stale-persisting',
+        thread_id: 'thread-stale-persisting',
+        session_type: 'debrief',
+        preset_context: 'gaming',
+        status: 'active',
+        started_at: new Date().toISOString(),
+        turn_count: 4,
+      },
+    });
+    const fetchBootstrapOpener = vi.fn().mockResolvedValue({
+      success: true,
+      data: {
+        opener_text: '',
+        suggested_ritual: null,
+        emotional_context: null,
+        has_opener: false,
+      },
+    });
+
+    const result = await resolveDashboardBootstrapState({
+      hasLocalActiveSession: false,
+      hasRecentSessionEndHint: true,
+      checkActiveSession,
+      fetchBootstrapOpener,
+      sleep: async () => undefined,
+    });
+
+    expect(checkActiveSession).toHaveBeenCalledTimes(3);
+    expect(fetchBootstrapOpener).toHaveBeenCalledTimes(1);
+    expect(result.mode).toBe('none');
+  });
 });

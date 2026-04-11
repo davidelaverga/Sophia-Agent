@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useDeviceFidelity } from '../../hooks/useDeviceFidelity';
 import type { ContextMode } from '../../types/session';
 
+import { sweepLight } from './sweepLight';
+
 type ThemeKind = 'dark' | 'light';
 type Rgb = [number, number, number];
 
@@ -366,6 +368,33 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
         ctx.fillStyle = `rgba(${pr | 0}, ${pg | 0}, ${pb | 0}, ${alpha * 0.68})`;
         ctx.fill();
       });
+
+      // ── Directional volumetric wash from sweep light ──
+      // Single full-canvas gradient that subtly brightens the light-facing side.
+      if (sweepLight.active && sweepLight.intensity > 0.01) {
+        const slx = sweepLight.x;
+        const sly = sweepLight.y;
+        const sI = sweepLight.intensity;
+        // Gradient from light position toward opposite edge
+        const oppX = cx + (cx - slx) * 0.6;
+        const oppY = cy + (cy - sly) * 0.6;
+        const washR = Math.max(width, height) * 0.9;
+        const wash = ctx.createRadialGradient(slx, sly, 0, slx, sly, washR);
+        const washA = 0.035 * sI;  // very subtle
+        wash.addColorStop(0, `rgba(200, 180, 255, ${washA})`);
+        wash.addColorStop(0.4, `rgba(180, 160, 230, ${washA * 0.4})`);
+        wash.addColorStop(1, 'rgba(180, 160, 230, 0)');
+        ctx.fillStyle = wash;
+        ctx.fillRect(0, 0, width, height);
+
+        // Counter-shadow on the far side — very faint darkening
+        const darkWash = ctx.createRadialGradient(oppX, oppY, 0, oppX, oppY, washR * 0.7);
+        const darkA = 0.02 * sI;
+        darkWash.addColorStop(0, `rgba(0, 0, 0, ${darkA})`);
+        darkWash.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = darkWash;
+        ctx.fillRect(0, 0, width, height);
+      }
 
       if (currentVig > 0.001) {
         const vignette = ctx.createRadialGradient(

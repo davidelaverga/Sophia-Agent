@@ -118,7 +118,7 @@ test('journal allows editing and deleting a saved memory', async ({ page }, test
   await endSession(page);
 
   await page.goto(`/recap/${sessionId}`);
-  const keptCount = await completeRecapReview(page);
+  await completeRecapReview(page);
 
   await page.waitForURL(/\/journal\?/, { timeout: 45_000 });
 
@@ -171,8 +171,9 @@ test('journal allows editing and deleting a saved memory', async ({ page }, test
   expect(journalAfterEdit.entries.some((entry) => entry.content.includes(updatedDetail))).toBeTruthy();
   expect(journalAfterEdit.entries.some((entry) => entry.content.includes(originalDetail))).toBeFalsy();
 
-  page.once('dialog', (dialog) => dialog.accept());
   await updatedEntryCard.getByRole('button', { name: 'Delete' }).click();
+  await expect(updatedEntryCard.getByText('Delete this memory?')).toBeVisible({ timeout: 10_000 });
+  await updatedEntryCard.getByRole('button', { name: 'Delete memory' }).click();
 
   await expect(page.locator('article', { hasText: updatedDetail })).toHaveCount(0, { timeout: 20_000 });
 

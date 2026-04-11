@@ -186,25 +186,27 @@ void main(){
     float along=dot(toP,cDir);
     float perp=dot(toP,cPerp);
     float headD=length(toP);
-    float headCore=exp(-headD*headD*3000.0)*cb*2.5;
-    float headGlow=exp(-headD*headD*300.0)*cb*0.6;
-    float headHalo=exp(-headD*headD*40.0)*cb*0.12;
+    float headPinpoint=exp(-headD*headD*12000.0)*cb*3.5;
+    float headCore=exp(-headD*headD*3000.0)*cb*2.0;
+    float headGlow=exp(-headD*headD*500.0)*cb*0.7;
+    float headHalo=exp(-headD*headD*60.0)*cb*0.15;
     float trailMask=smoothstep(0.0,0.5,-along);
-    float trailCore=exp(-perp*perp*8000.0)*0.8;
-    float trailMid=exp(-perp*perp*1500.0)*0.4;
-    float trailWide=exp(-perp*perp*200.0)*0.08;
-    float trailFade=exp(along*5.0)*trailMask;
-    float trail=(trailCore+trailMid+trailWide)*trailFade*cb;
+    float trailHot=exp(-perp*perp*18000.0)*1.0;
+    float trailCore=exp(-perp*perp*6000.0)*0.7;
+    float trailMid=exp(-perp*perp*1500.0)*0.35;
+    float trailWide=exp(-perp*perp*200.0)*0.06;
+    float trailFade=exp(along*6.0)*trailMask;
+    float trail=(trailHot+trailCore+trailMid+trailWide)*trailFade*cb;
     float scatter=0.0;
-    for(int j=0;j<4;j++){
+    for(int j=0;j<6;j++){
       float fj=float(j);
-      float sOff=-0.02-fj*0.04;
+      float sOff=-0.015-fj*0.03;
       vec2 sp=cp+cDir*sOff;
-      float sd=length(uv-sp+cPerp*(hash(sp+fj)*0.01-0.005));
-      scatter+=exp(-sd*sd*4000.0)*cb*0.15*(1.0-fj*0.2);
+      float sd=length(uv-sp+cPerp*(hash(sp+fj)*0.008-0.004));
+      scatter+=exp(-sd*sd*6000.0)*cb*0.12*(1.0-fj*0.14);
     }
-    vec3 headCol=vec3(0.95,0.93,1.0)*headCore+vec3(0.75,0.70,0.95)*headGlow+vec3(0.50,0.45,0.70)*headHalo;
-    vec3 trailCol=mix(vec3(0.65,0.55,0.90),vec3(0.55,0.40,0.30),trailMask*0.7)*(trail+scatter);
+    vec3 headCol=vec3(1.0,0.98,1.0)*headPinpoint+vec3(0.95,0.93,1.0)*headCore+vec3(0.75,0.70,0.95)*headGlow+vec3(0.50,0.45,0.70)*headHalo;
+    vec3 trailCol=mix(vec3(0.70,0.60,0.95),vec3(0.55,0.40,0.30),trailMask*0.7)*(trail+scatter);
     col+=(headCol+trailCol)*starY;
   }
 
@@ -352,21 +354,23 @@ void main(){
     if(cb<0.005) continue;
     vec2 cDir=vec2(cos(cAng),-sin(cAng));
     vec2 cPerp=vec2(-cDir.y,cDir.x);
-    vec2 rcp=vec2(cp.x,1.0-cp.y);
+    vec2 rcp=vec2(cp.x,1.0-cp.y)+distort*0.5;
     vec2 toP=refUV-rcp;
     float along=dot(toP,cDir);
     float perp=dot(toP,cPerp);
     float headD=length(toP);
-    float head=exp(-headD*headD*120.0)*cb*1.2;
-    float headSoft=exp(-headD*headD*20.0)*cb*0.25;
+    float headBright=exp(-headD*headD*200.0)*cb*1.8;
+    float headSoft=exp(-headD*headD*30.0)*cb*0.5;
+    float headPool=exp(-headD*headD*8.0)*cb*0.15;
     float trailMask=smoothstep(0.0,0.4,-along);
-    float trailW=exp(-perp*perp*400.0);
-    float trailFade=exp(along*3.5)*trailMask;
-    float trail=trailW*trailFade*cb*0.4;
-    float horizFade=smoothstep(0.0,0.4,uv.y)*smoothstep(1.0,0.5,uv.y);
-    float rBright=(head+headSoft+trail)*horizFade*0.7;
-    vec3 rCol=mix(vec3(0.65,0.60,0.90),vec3(0.50,0.40,0.30),trailMask*0.5);
-    col+=rCol*rBright;
+    float trailW=exp(-perp*perp*600.0);
+    float trailSoft=exp(-perp*perp*80.0)*0.25;
+    float trailFade=exp(along*4.0)*trailMask;
+    float trail=(trailW+trailSoft)*trailFade*cb*0.5;
+    float horizFade=smoothstep(0.0,0.35,uv.y)*smoothstep(1.0,0.45,uv.y);
+    float rBright=(headBright+headSoft+headPool+trail)*horizFade*1.0;
+    vec3 rCol=mix(vec3(0.70,0.65,0.95),vec3(0.50,0.40,0.30),trailMask*0.5);
+    col+=rCol*rBright*depth;
   }
 
   col+=c_glow*smoothstep(0.1,0.0,1.0-uv.y)*0.035;
@@ -650,7 +654,7 @@ function AuroraBackground() {
   const rafRef = useRef(0);
   const t0 = useRef(performance.now());
   const lastFrameRef = useRef(0);
-  const nextCometRef = useRef(3 + Math.random() * 4);
+  const nextCometRef = useRef(8 + Math.random() * 10);
 
   useEffect(() => {
     if (IS_TEST_ENV) {
@@ -713,7 +717,7 @@ function AuroraBackground() {
       nextCometRef.current -= dt;
       if (nextCometRef.current <= 0) {
         spawnComet();
-        nextCometRef.current = 4 + Math.random() * 8;
+        nextCometRef.current = 12 + Math.random() * 18;
       }
       updateComets(dt);
 
@@ -1522,7 +1526,7 @@ function ProgressIndicator({ total, reviewed }: { total: number; reviewed: numbe
           />
         ))}
       </div>
-      <span className="text-[9px] tabular-nums tracking-[0.1em]" style={{ color: 'var(--cosmic-text-faint)' }}>{reviewed}/{total}</span>
+      <span className="text-[9px] tabular-nums tracking-[0.1em]" style={{ color: 'var(--cosmic-text-muted)' }}>{reviewed}/{total}</span>
     </div>
   );
 }
@@ -1546,6 +1550,7 @@ function MemoryOrb({
   const [editValue, setEditValue] = useState(pendingEditText || getCandidateText(candidate));
   const category = getRecapCategoryPresentation(candidate.category);
   const displayText = pendingEditText || getCandidateText(candidate);
+  const isLongText = displayText.length > 150;
   const confidence = candidate.confidence;
 
   useEffect(() => {
@@ -1575,8 +1580,8 @@ function MemoryOrb({
         'absolute transition-all ease-out',
         isCenter ? 'z-20 duration-600' : 'z-10 duration-700',
         positionClasses,
-        !isCenter && 'opacity-[0.08] blur-[8px]',
-        !isCenter && !disabled && 'cursor-pointer hover:opacity-[0.15] hover:blur-[4px]'
+        !isCenter && 'opacity-[0.18] blur-[4px]',
+        !isCenter && !disabled && 'cursor-pointer hover:opacity-[0.30] hover:blur-[2px]'
       )}
       onClick={!isCenter ? onClick : undefined}
       role={isCenter ? 'article' : 'button'}
@@ -1642,14 +1647,14 @@ function MemoryOrb({
           viewBox="0 0 100 100"
           style={{ transform: 'rotate(-90deg)' }}
         >
-          <circle cx="50" cy="50" r="49" fill="none" stroke="rgba(255,255,255,0.02)" strokeWidth="0.3" />
+          <circle cx="50" cy="50" r="49" fill="none" stroke="rgba(255,255,255,0.04)" strokeWidth="0.8" />
           <circle
             cx="50"
             cy="50"
             r="49"
             fill="none"
             stroke="url(#confGrad)"
-            strokeWidth="0.5"
+            strokeWidth="1.5"
             strokeDasharray={`${confidence * 308} 308`}
             strokeLinecap="round"
             className="transition-all duration-1000 ease-out"
@@ -1668,7 +1673,7 @@ function MemoryOrb({
         className={cn(
           'relative overflow-hidden rounded-full',
           isCenter
-            ? 'h-[260px] w-[260px] sm:h-[310px] sm:w-[310px] md:h-[350px] md:w-[350px]'
+            ? 'h-[310px] w-[310px] sm:h-[370px] sm:w-[370px] md:h-[420px] md:w-[420px]'
             : 'h-[260px] w-[260px] sm:h-[310px] sm:w-[310px]'
         )}
         style={{
@@ -1698,7 +1703,7 @@ function MemoryOrb({
 
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center px-8 sm:px-11">
           {isCenter && (
-            <span className="mb-2 shrink-0 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 40%, transparent)' }}>
+            <span className="mb-2 shrink-0 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 55%, transparent)' }}>
               <span aria-hidden="true">{category.icon}</span>{' '}
               <span>{category.label}</span>
             </span>
@@ -1750,12 +1755,25 @@ function MemoryOrb({
               </div>
             </div>
           ) : (
-            <div className={cn(
-              'flex-1 min-h-0 flex items-center',
-              isCenter && 'max-h-[160px] sm:max-h-[200px] md:max-h-[230px] overflow-y-auto scrollbar-thin'
-            )}>
+            <div
+              className={cn(
+                'flex-1 min-h-0 flex items-center',
+                isCenter && 'max-h-[140px] sm:max-h-[180px] md:max-h-[220px] overflow-y-auto scrollbar-thin'
+              )}
+              style={isCenter ? {
+                maskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+                WebkitMaskImage: 'linear-gradient(to bottom, transparent 0%, black 8%, black 92%, transparent 100%)',
+              } : undefined}
+            >
               <p
-                className={cn('font-cormorant text-center leading-relaxed w-full', isCenter ? 'text-[16px] sm:text-[19px]' : 'text-[14px]')}
+                className={cn(
+                  'font-cormorant text-center leading-relaxed w-full',
+                  isCenter
+                    ? isLongText
+                      ? 'text-[14px] sm:text-[16px]'
+                      : 'text-[16px] sm:text-[19px]'
+                    : 'text-[14px]'
+                )}
                 style={{ color: isCenter ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text-whisper)' }}
               >
                 {displayText}
@@ -1769,9 +1787,10 @@ function MemoryOrb({
                 event.stopPropagation();
                 setShowReason((previous) => !previous);
               }}
-              className="mt-3 text-[9px] uppercase tracking-[0.1em] transition-colors"
-              style={{ color: showReason ? 'color-mix(in srgb, var(--sophia-purple) 40%, transparent)' : 'var(--cosmic-text-faint)' }}
+              className="mt-3 flex items-center gap-1 text-[9px] uppercase tracking-[0.1em] transition-colors hover:underline"
+              style={{ color: showReason ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-muted)' }}
             >
+              <span className="text-[8px]">?</span>
               {showReason ? 'Hide' : 'Why this?'}
             </button>
           )}
@@ -1881,7 +1900,7 @@ function ReflectionCard({
       >
         <div className="mb-3 flex items-center gap-2">
           <span className="text-base">💭</span>
-          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 35%, transparent)' }}>
+          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
             {tag ? TAG_LABELS[tag] ?? 'Something to reflect on' : 'Something to reflect on'}
           </p>
         </div>
@@ -1889,7 +1908,7 @@ function ReflectionCard({
         {onReflect && (
           <button
             onClick={onReflect}
-            className="cosmic-ghost-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
+            className="cosmic-accent-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
           >
             Sit with this for a moment →
           </button>
@@ -2265,7 +2284,7 @@ export function RecapCosmicPoolOrbit({
           )}
           data-onboarding="recap-summary"
         >
-          <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 30%, transparent)' }}>
+          <span className="mb-4 text-[10px] uppercase tracking-[0.14em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
             key takeaway
           </span>
           <div className="relative max-w-2xl">
@@ -2303,7 +2322,7 @@ export function RecapCosmicPoolOrbit({
               'relative flex w-full items-center justify-center transition-all duration-[1200ms] ease-out',
               showEntrance ? 'translate-y-0 opacity-100' : 'translate-y-8 opacity-0'
             )}
-            style={{ minHeight: 400, transitionDelay: '300ms' }}
+            style={{ minHeight: 420, transitionDelay: '300ms' }}
           >
             {safeFocusedIndex > 0 && (
               <button
@@ -2325,7 +2344,7 @@ export function RecapCosmicPoolOrbit({
               </button>
             )}
 
-            <div className="relative flex h-[360px] w-full items-center justify-center sm:h-[420px]">
+            <div className="relative flex h-[420px] w-full items-center justify-center sm:h-[480px]">
               {visibleCandidates.map(({ candidate, position }) => (
                 <MemoryOrb
                   key={`${candidate.id}-${position}`}

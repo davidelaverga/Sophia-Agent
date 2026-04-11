@@ -406,6 +406,7 @@ export function JournalPageClient() {
   const [viewMode, setViewMode] = useState<JournalViewMode>('pool')
   const [periodMenuOpen, setPeriodMenuOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null)
   const [draftText, setDraftText] = useState('')
   const [entryActionError, setEntryActionError] = useState<string | null>(null)
   const [pendingEntryAction, setPendingEntryAction] = useState<PendingEntryAction | null>(null)
@@ -526,6 +527,12 @@ export function JournalPageClient() {
           return
         }
 
+        if (deleteConfirmId) {
+          setDeleteConfirmId(null)
+          setEntryActionError(null)
+          return
+        }
+
         if (selectedIdRef.current) {
           setSelectedId(null)
           return
@@ -540,7 +547,7 @@ export function JournalPageClient() {
 
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [periodMenuOpen])
+  }, [deleteConfirmId, periodMenuOpen])
 
   useEffect(() => {
     const handlePointerDown = (event: PointerEvent) => {
@@ -627,12 +634,25 @@ export function JournalPageClient() {
       setDraftText('')
       setEntryActionError(null)
     }
-  }, [editingId, entries])
+
+    if (deleteConfirmId && !entries.some((entry) => entry.id === deleteConfirmId)) {
+      setDeleteConfirmId(null)
+      setEntryActionError(null)
+    }
+  }, [deleteConfirmId, editingId, entries])
+
+  useEffect(() => {
+    if (viewMode === 'pool' && deleteConfirmId && selectedId !== deleteConfirmId) {
+      setDeleteConfirmId(null)
+      setEntryActionError(null)
+    }
+  }, [deleteConfirmId, selectedId, viewMode])
 
   const beginEditingEntry = useCallback((entry: SceneEntry) => {
     haptic('light')
     setSelectedId(entry.id)
     setEditingId(entry.id)
+    setDeleteConfirmId(null)
     setDraftText(entry.content)
     setEntryActionError(null)
   }, [])
@@ -640,6 +660,19 @@ export function JournalPageClient() {
   const cancelEditingEntry = useCallback(() => {
     setEditingId(null)
     setDraftText('')
+    setEntryActionError(null)
+  }, [])
+
+  const requestDeleteEntry = useCallback((entry: SceneEntry) => {
+    haptic('medium')
+    setSelectedId(entry.id)
+    setDeleteConfirmId(entry.id)
+    setEntryActionError(null)
+  }, [])
+
+  const cancelDeleteEntry = useCallback(() => {
+    haptic('light')
+    setDeleteConfirmId(null)
     setEntryActionError(null)
   }, [])
 
@@ -695,10 +728,6 @@ export function JournalPageClient() {
   }, [draftText])
 
   const deleteEntry = useCallback(async (entry: SceneEntry) => {
-    if (!window.confirm('Delete this memory from the Journal?')) {
-      return
-    }
-
     setPendingEntryAction({ id: entry.id, kind: 'delete' })
     setEntryActionError(null)
 
@@ -719,6 +748,7 @@ export function JournalPageClient() {
         setEditingId(null)
         setDraftText('')
       }
+      setDeleteConfirmId((current) => (current === entry.id ? null : current))
       haptic('success')
     } catch (error) {
       logger.logError(error, { component: 'Journal', action: 'delete_memory' })
@@ -730,6 +760,53 @@ export function JournalPageClient() {
       ))
     }
   }, [editingId, selectedId])
+
+  const renderDeleteConfirm = useCallback((entry: SceneEntry) => {
+    if (deleteConfirmId !== entry.id) {
+      return null
+    }
+
+    const isDeleting = pendingEntryAction?.id === entry.id && pendingEntryAction.kind === 'delete'
+
+    return (
+      <div
+        className={styles.deleteConfirmCard}
+        role="alertdialog"
+        aria-modal="false"
+        aria-labelledby={`journal-delete-title-${entry.id}`}
+        aria-describedby={`journal-delete-copy-${entry.id}`}
+      >
+        <div className={styles.deleteConfirmHeader}>
+          <AlertCircle className={styles.deleteConfirmIcon} />
+          <div>
+            <p id={`journal-delete-title-${entry.id}`} className={styles.deleteConfirmTitle}>Delete this memory?</p>
+            <p id={`journal-delete-copy-${entry.id}`} className={styles.deleteConfirmText}>
+              This removes it from your Journal scene and can&apos;t be undone.
+            </p>
+          </div>
+        </div>
+        <div className={styles.deleteConfirmActions}>
+          <button
+            type="button"
+            className={styles.deleteConfirmCancel}
+            onClick={cancelDeleteEntry}
+            disabled={isDeleting}
+          >
+            Keep memory
+          </button>
+          <button
+            type="button"
+            className={styles.deleteConfirmDanger}
+            onClick={() => void deleteEntry(entry)}
+            disabled={isDeleting}
+          >
+            {isDeleting ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
+            Delete memory
+          </button>
+        </div>
+      </div>
+    )
+  }, [cancelDeleteEntry, deleteConfirmId, deleteEntry, pendingEntryAction])
 
   useEffect(() => {
     if (!showInteractiveScene) {
@@ -1779,7 +1856,11 @@ export function JournalPageClient() {
           )}
         </div>
 
-        <div ref={detailRef} className={classNames(styles.detailPanel, showDetailPanel && styles.detailPanelVisible, editingId === selectedEntry?.id && styles.detailPanelEditing)}>
+        <div
+          ref={detailRef}
+          className={classNames(styles.detailPanel, showDetailPanel && styles.detailPanelVisible, editingId === selectedEntry?.id && styles.detailPanelEditing)}
+          style={selectedEntry ? { ['--detail-accent' as string]: selectedEntry.presentation.color } : undefined}
+        >
           {selectedEntry && (
             <>
               <div className={styles.detailHeader}>
@@ -1848,14 +1929,15 @@ export function JournalPageClient() {
                 <button
                   type="button"
                   className={classNames(styles.detailActionButton, styles.detailActionDanger)}
-                  onClick={() => void deleteEntry(selectedEntry)}
+                  onClick={() => requestDeleteEntry(selectedEntry)}
                   disabled={pendingEntryAction?.id === selectedEntry.id}
                 >
                   {pendingEntryAction?.id === selectedEntry.id && pendingEntryAction.kind === 'delete' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
                   Delete
                 </button>
               </div>
-              {entryActionError && editingId === selectedEntry.id && (
+              {renderDeleteConfirm(selectedEntry)}
+              {entryActionError && (editingId === selectedEntry.id || deleteConfirmId === selectedEntry.id) && (
                 <div className={styles.detailError}>
                   <AlertCircle className={styles.detailErrorIcon} />
                   {entryActionError}
@@ -1971,14 +2053,15 @@ export function JournalPageClient() {
                       <button
                         type="button"
                         className={classNames(styles.listActionButton, styles.listActionDanger)}
-                        onClick={() => void deleteEntry(entry)}
+                        onClick={() => requestDeleteEntry(entry)}
                         disabled={isPendingEntry}
                       >
                         {isPendingEntry && pendingEntryAction?.kind === 'delete' ? <Loader2 className={styles.actionSpinner} /> : <Trash2 className={styles.actionIcon} />}
                         Delete
                       </button>
                     </div>
-                    {entryActionError && isEditingEntry && (
+                    {renderDeleteConfirm(entry)}
+                    {entryActionError && (isEditingEntry || deleteConfirmId === entry.id) && (
                       <div className={styles.listError}>
                         <AlertCircle className={styles.detailErrorIcon} />
                         {entryActionError}
