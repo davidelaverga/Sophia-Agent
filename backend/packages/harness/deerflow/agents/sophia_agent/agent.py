@@ -25,6 +25,7 @@ from deerflow.agents.sophia_agent.middlewares.session_state import SessionStateM
 from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
 from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
@@ -107,22 +108,22 @@ def make_sophia_agent(config: RunnableConfig):
             (SKILLS_PATH / "voice.md", True),
             (SKILLS_PATH / "techniques.md", True),
         ),
-        # 6. Platform signal
+        # 4. Platform signal
         PlatformContextMiddleware(),
-        # 7-8. User context
+        # 5. Derive prior completed turns before first-turn-only middleware runs.
+        TurnCountMiddleware(),
+        # 6-7. User context
         UserIdentityMiddleware(user_id),
         SessionStateMiddleware(user_id),
-        # 9-11. Calibration (order matters: tone -> context -> ritual -> skill)
+        # 8-10. Calibration (order matters: tone -> context -> ritual -> skill)
         ToneGuidanceMiddleware(SKILLS_PATH / "tone_guidance.md"),
         ContextAdaptationMiddleware(SKILLS_PATH / "context", context_mode),
         RitualMiddleware(SKILLS_PATH / "rituals", ritual),
-        # 12. Skill routing (reads tone band + ritual from state)
+        # 11. Skill routing (reads tone band + ritual from state)
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
-        # 13. Memory (after ritual+skill set — retrieval biased by both)
+        # 12. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
-        # 14. Builder session bridge (handoff payload -> state, task polling)
-        BuilderSessionMiddleware(),
-        # 15. Artifact system
+        # 13. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
     ]
 

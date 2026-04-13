@@ -1,5 +1,7 @@
 import { useCallback } from 'react';
 
+import { reconcileVoiceTranscript } from '../lib/voice-transcript-reconciliation';
+
 type MessagePart = { type: 'text'; text: string };
 
 type VoiceChatMessage = {
@@ -30,6 +32,22 @@ export function useSessionVoiceMessages({
         textPart && typeof textPart === 'object' && 'text' in textPart && typeof textPart.text === 'string'
           ? textPart.text.trim()
           : undefined;
+
+      if (last?.role === 'user' && last.id.startsWith('voice-user-') && lastText) {
+        const reconciledTranscript = reconcileVoiceTranscript(lastText, normalized);
+        if (reconciledTranscript.incremental) {
+          if (!reconciledTranscript.changed) {
+            return prev;
+          }
+
+          const updated = [...prev];
+          updated[updated.length - 1] = {
+            ...last,
+            parts: [{ type: 'text' as const, text: reconciledTranscript.text }],
+          };
+          return updated;
+        }
+      }
 
       if (last?.role === 'user' && lastText === normalized) {
         return prev;

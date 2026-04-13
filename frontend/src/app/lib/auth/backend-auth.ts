@@ -121,6 +121,21 @@ async function getAuthBackendUrl(): Promise<string> {
   return 'http://localhost:3000'
 }
 
+async function getProviderLoginUrls(): Promise<string[]> {
+  const configuredUrl = normalizeUrl(process.env.SOPHIA_AUTH_BACKEND_URL)
+    ?? normalizeUrl(process.env.NEXT_PUBLIC_SOPHIA_AUTH_BACKEND_URL)
+    ?? normalizeUrl(process.env.NEXT_PUBLIC_APP_URL)
+  const requestOrigin = await resolveCurrentAppOrigin()
+
+  return [...new Set([
+    configuredUrl,
+    requestOrigin,
+    'http://localhost:3000',
+  ].filter((value): value is string => Boolean(value)))].map(
+    (baseUrl) => `${baseUrl}/api/v1/auth/discord/login`,
+  )
+}
+
 function createBackendRequestError(message: string, status?: number): BackendRequestError {
   const error = new Error(message) as BackendRequestError
   error.status = status
@@ -144,50 +159,69 @@ function createBackendRequestError(message: string, status?: number): BackendReq
 export async function providerLogin(
   data: ProviderLoginRequest
 ): Promise<BackendUserResponse> {
-  const url = `${await getAuthBackendUrl()}/api/v1/auth/discord/login`
+  const urls = await getProviderLoginUrls()
   
   try {
-    // Add timeout to prevent hanging forever
-    const controller = new AbortController()
-    const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+    let lastNotFoundError: BackendRequestError | null = null
 
-    const requestHeaders: HeadersInit = {
-      'Content-Type': 'application/json',
+    for (const url of urls) {
+      // Add timeout to prevent hanging forever
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
+
+      const requestHeaders: HeadersInit = {
+        'Content-Type': 'application/json',
+      }
+
+      if (data.forwardedCookieHeader) {
+        requestHeaders.Cookie = data.forwardedCookieHeader
+      }
+
+      try {
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: requestHeaders,
+          body: JSON.stringify({
+            canonical_user_id: data.canonicalUserId,
+            discord_id: data.providerUserId,
+            email: data.email,
+            username: data.username,
+            discriminator: data.discriminator,
+            avatar: data.avatar,
+          }),
+          signal: controller.signal,
+        })
+
+        if (!response.ok) {
+          const error: BackendAuthError = await response.json().catch(() => ({
+            detail: `HTTP ${response.status}: ${response.statusText}`,
+          }))
+          const requestError = createBackendRequestError(
+            error.detail || 'Failed to login with backend',
+            response.status,
+          )
+
+          if (response.status === 404) {
+            lastNotFoundError = requestError
+            continue
+          }
+
+          throw requestError
+        }
+
+        const user: BackendUserResponse = await response.json()
+
+        return user
+      } finally {
+        clearTimeout(timeoutId)
+      }
     }
 
-    if (data.forwardedCookieHeader) {
-      requestHeaders.Cookie = data.forwardedCookieHeader
+    if (lastNotFoundError) {
+      throw lastNotFoundError
     }
-    
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: requestHeaders,
-      body: JSON.stringify({
-        canonical_user_id: data.canonicalUserId,
-        discord_id: data.providerUserId,
-        email: data.email,
-        username: data.username,
-        discriminator: data.discriminator,
-        avatar: data.avatar,
-      }),
-      signal: controller.signal,
-    })
-    
-    clearTimeout(timeoutId)
-    
-    if (!response.ok) {
-      const error: BackendAuthError = await response.json().catch(() => ({
-        detail: `HTTP ${response.status}: ${response.statusText}`,
-      }))
-      throw createBackendRequestError(
-        error.detail || 'Failed to login with backend',
-        response.status,
-      )
-    }
-    
-    const user: BackendUserResponse = await response.json()
-    
-    return user
+
+    throw new Error('Network error during provider login')
   } catch (error) {
     if (error instanceof Error) {
       if (error.name === 'AbortError') {

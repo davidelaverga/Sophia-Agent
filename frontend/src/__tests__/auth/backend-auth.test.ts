@@ -58,6 +58,53 @@ describe('backend-auth bridge resolution', () => {
     )
   })
 
+  it('falls back to the current frontend origin for provider login when the configured auth backend URL has no legacy bridge route', async () => {
+    process.env.SOPHIA_AUTH_BACKEND_URL = 'https://sophia-backend-g8fe.onrender.com'
+    headersMock.mockResolvedValue(new Headers({
+      'x-forwarded-host': 'www.sophia-ei.com',
+      'x-forwarded-proto': 'https',
+    }))
+
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: 'Not Found' }), {
+          status: 404,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({
+          id: 'user-1',
+          email: 'user@example.com',
+          username: 'User',
+          discord_id: null,
+          is_active: true,
+          api_token: 'token-123',
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      ) as unknown as typeof fetch
+
+    await providerLogin({
+      provider: 'google',
+      providerUserId: 'google-account-123',
+      canonicalUserId: 'session-user-1',
+      email: 'user@example.com',
+    })
+
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      1,
+      'https://sophia-backend-g8fe.onrender.com/api/v1/auth/discord/login',
+      expect.objectContaining({ method: 'POST' }),
+    )
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      2,
+      'https://www.sophia-ei.com/api/v1/auth/discord/login',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
   it('uses forwarded host and protocol when present', async () => {
     headersMock.mockResolvedValue(new Headers({
       'x-forwarded-host': 'sophia.example.com',

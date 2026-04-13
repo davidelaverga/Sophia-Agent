@@ -9,8 +9,8 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
+import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 
 // =============================================================================
 // TYPES

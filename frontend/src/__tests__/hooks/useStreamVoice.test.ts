@@ -1,4 +1,4 @@
-import { CallingState } from "@stream-io/video-react-sdk"
+import { CallingState, StreamVideoClient } from "@stream-io/video-react-sdk"
 import { renderHook, act } from "@testing-library/react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
@@ -9,6 +9,8 @@ import { useStreamVoice, type StreamVoiceCredentials } from "../../app/hooks/use
 const mockLeave = vi.fn().mockResolvedValue(undefined)
 const mockJoin = vi.fn().mockResolvedValue(undefined)
 const mockCameraDisable = vi.fn().mockResolvedValue(undefined)
+const mockMicrophoneDisable = vi.fn().mockResolvedValue(undefined)
+const mockDisableSpeakingWhileMutedNotification = vi.fn().mockResolvedValue(undefined)
 const mockMicrophoneEnable = vi.fn().mockResolvedValue(undefined)
 const mockDisconnectUser = vi.fn().mockResolvedValue(undefined)
 
@@ -20,7 +22,11 @@ const mockCall = {
   join: mockJoin,
   leave: mockLeave,
   camera: { disable: mockCameraDisable },
-  microphone: { enable: mockMicrophoneEnable },
+  microphone: {
+    disable: mockMicrophoneDisable,
+    disableSpeakingWhileMutedNotification: mockDisableSpeakingWhileMutedNotification,
+    enable: mockMicrophoneEnable,
+  },
   bindAudioElement: vi.fn(() => vi.fn()),
   state: {
     callingState$: {
@@ -82,9 +88,18 @@ describe("useStreamVoice", () => {
 
     expect(result.current.client).not.toBeNull()
     expect(result.current.call).not.toBeNull()
+    expect(vi.mocked(StreamVideoClient)).toHaveBeenCalledWith(
+      expect.objectContaining({
+        apiKey: "test-key",
+        token: "test-token",
+        options: {
+          devicePersistence: { enabled: false },
+        },
+      })
+    )
   })
 
-  it("join() disables camera, joins, then enables the microphone", async () => {
+  it("join() disables local media defaults, joins, and then enables the microphone", async () => {
     const { result } = renderHook(() =>
       useStreamVoice({ userId: "user-1", credentials: validCredentials })
     )
@@ -94,15 +109,42 @@ describe("useStreamVoice", () => {
     })
 
     expect(mockCameraDisable).toHaveBeenCalled()
+    expect(mockDisableSpeakingWhileMutedNotification).toHaveBeenCalled()
+    expect(mockMicrophoneDisable).toHaveBeenCalled()
     expect(mockJoin).toHaveBeenCalledWith({ create: true })
     expect(mockMicrophoneEnable).toHaveBeenCalled()
+    expect(mockCall.state.remoteParticipants$.subscribe).toHaveBeenCalledTimes(2)
 
     expect(mockCameraDisable.mock.invocationCallOrder[0]).toBeLessThan(
+      mockDisableSpeakingWhileMutedNotification.mock.invocationCallOrder[0]
+    )
+    expect(
+      mockDisableSpeakingWhileMutedNotification.mock.invocationCallOrder[0]
+    ).toBeLessThan(mockMicrophoneDisable.mock.invocationCallOrder[0])
+    expect(mockMicrophoneDisable.mock.invocationCallOrder[0]).toBeLessThan(
       mockJoin.mock.invocationCallOrder[0]
     )
     expect(mockJoin.mock.invocationCallOrder[0]).toBeLessThan(
       mockMicrophoneEnable.mock.invocationCallOrder[0]
     )
+  })
+
+  it("still binds remote audio when microphone enable fails after join", async () => {
+    mockMicrophoneEnable.mockRejectedValueOnce(
+      new Error("Requested device not found")
+    )
+
+    const { result } = renderHook(() =>
+      useStreamVoice({ userId: "user-1", credentials: validCredentials })
+    )
+
+    await act(async () => {
+      await result.current.join()
+    })
+
+    expect(mockJoin).toHaveBeenCalledWith({ create: true })
+    expect(mockCall.state.remoteParticipants$.subscribe).toHaveBeenCalledTimes(2)
+    expect(result.current.error).toBe("Requested device not found")
   })
 
   it("leave() calls call.leave and resets to IDLE", async () => {

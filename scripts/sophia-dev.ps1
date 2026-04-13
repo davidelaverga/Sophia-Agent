@@ -31,6 +31,12 @@ $gatewayEnvBlock = @{
     SOPHIA_AUTH_BACKEND_URL = "http://127.0.0.1:3000"
 }
 
+$langgraphEnvBlock = @{
+    BG_JOB_ISOLATED_LOOPS = if ($env:BG_JOB_ISOLATED_LOOPS) { $env:BG_JOB_ISOLATED_LOOPS } else { "true" }
+}
+
+$langgraphJobsPerWorker = if ($env:N_JOBS_PER_WORKER) { $env:N_JOBS_PER_WORKER } else { "4" }
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 function Test-PortOpen([int]$Port, [int]$TimeoutMs = 500) {
@@ -89,13 +95,20 @@ $jobs = @()
 foreach ($svc in $services) {
     $dir  = Join-Path $RepoRoot $svc.Dir
     $log  = Join-Path $RepoRoot "logs" "$($svc.Name.ToLower()).log"
-    $cmd  = $svc.Cmd
+    $cmd  = if ($name -eq "LangGraph") {
+        "$($svc.Cmd) --n-jobs-per-worker $langgraphJobsPerWorker"
+    } else {
+        $svc.Cmd
+    }
     $name = $svc.Name
 
     Write-Host "  Starting $name..." -ForegroundColor White
 
     $envBlock = if ($name -eq "Gateway") {
+    $envBlock = if ($name -eq "Gateway") {
         $gatewayEnvBlock
+    } elseif ($name -eq "LangGraph") {
+        $langgraphEnvBlock
     } else {
         @{}
     }

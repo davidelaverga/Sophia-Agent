@@ -21,6 +21,42 @@ logger = logging.getLogger(__name__)
 
 TONE_DELTA_THRESHOLD = 0.3
 
+_VOICE_ARTIFACT_INSTRUCTIONS = """<artifact_contract>
+Every turn has two outputs:
+- Spoken reply in normal assistant text.
+- Exactly one emit_artifact tool call after the spoken reply. Never print JSON in the reply.
+
+emit_artifact is REQUIRED on every turn with these 13 fields:
+- session_goal: stable session-level aim unless the topic genuinely shifts.
+- active_goal: what you are doing for the user right now.
+- next_step: likely best next move for the following turn.
+- takeaway: one concrete thing worth remembering.
+- reflection: one later question, or null.
+- tone_estimate: honest 0.0-4.0 read of where the user ends this turn.
+- tone_target: min(tone_estimate + 0.5, 4.0).
+- active_tone_band: shutdown | grief_fear | anger_antagonism | engagement | enthusiasm.
+- skill_loaded: exact injected skill name, or active_listening if none is visible.
+- ritual_phase: ritual.step or freeform.topic.
+- voice_emotion_primary: choose the delivery intent, not the user's raw state.
+- voice_emotion_secondary: close fallback emotion.
+- voice_speed: slow | gentle | normal | engaged | energetic.
+
+Voice defaults:
+- shutdown or grief: calm or sympathetic, slow or gentle.
+- reflective exploration: curious or contemplative, normal.
+- clean challenge or stuck-loop work: determined, confident, or curious, engaged.
+- good news, breakthrough, or celebrating_breakthrough: enthusiasm band with excited or proud, engaged or energetic.
+
+First turn:
+- Build session_goal from ritual + opening message + known context.
+
+Later turns:
+- Keep session_goal stable unless the session truly changes.
+- Update active_goal, next_step, tone_estimate, and delivery based on this turn.
+
+After the emit_artifact call, stop. Do not call more tools.
+</artifact_contract>"""
+
 
 class ArtifactState(AgentState):
     skip_expensive: NotRequired[bool]
@@ -30,6 +66,7 @@ class ArtifactState(AgentState):
     builder_result: NotRequired[dict | None]
     builder_task: NotRequired[dict | None]
     active_tone_band: NotRequired[str]
+    platform: NotRequired[str]
 
 
 class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
@@ -50,7 +87,9 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
             log_middleware("Artifact", "skipped (crisis)", _t0)
             return None
 
-        blocks = [self._instructions]
+        platform = state.get("platform") or runtime.context.get("platform")
+        instructions = _VOICE_ARTIFACT_INSTRUCTIONS if platform in ("voice", "ios_voice") else self._instructions
+        blocks = [instructions]
 
         # --- Builder synthesis injection ---
         builder_result = state.get("builder_result")
@@ -83,7 +122,7 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
         existing = list(state.get("system_prompt_blocks", []))
         existing.extend(blocks)
-        log_middleware("Artifact", "instructions injected", _t0)
+        log_middleware("Artifact", f"instructions injected (platform={platform or 'default'})", _t0)
         return {"system_prompt_blocks": existing}
 
     @override

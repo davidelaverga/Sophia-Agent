@@ -10,13 +10,13 @@ import {
 import { mapBackendArtifactsToRecapV1 } from '../lib/artifacts-adapter';
 import { errorCopy } from '../lib/error-copy';
 import { logger } from '../lib/error-logger';
-import { markRecentSessionEnd } from '../lib/recent-session-end';
 import type { RecapArtifactsV1 } from '../lib/recap-types';
+import { markRecentSessionEnd } from '../lib/recent-session-end';
 import { teardownSessionClientState } from '../lib/session-teardown';
 import { useRecapStore } from '../stores/recap-store';
 import { useSessionHistoryStore } from '../stores/session-history-store';
 import { useUiStore as useUiToastStore } from '../stores/ui-store';
-import type { PresetType, ContextMode, RitualArtifacts } from '../types/session';
+import type { ContextMode, PresetType, RitualArtifacts, SessionEndRequest } from '../types/session';
 
 interface DebriefData {
   prompt: string;
@@ -92,7 +92,7 @@ function mapLiveArtifactsToRecapV1({
 
 function serializeLiveArtifactsForSessionEnd(
   currentArtifacts?: RitualArtifacts | null,
-): NonNullable<import('../types/session').SessionEndRequest['recap_artifacts']> | undefined {
+): NonNullable<SessionEndRequest['recap_artifacts']> | undefined {
   if (!currentArtifacts) {
     return undefined;
   }
@@ -157,7 +157,7 @@ function mergeRecapArtifacts(
   };
 }
 
-function serializeSessionMessages(messages?: ExitSessionMessage[]): NonNullable<import('../types/session').SessionEndRequest['messages']> {
+function serializeSessionMessages(messages?: ExitSessionMessage[]): NonNullable<SessionEndRequest['messages']> {
   if (!Array.isArray(messages)) {
     return [];
   }

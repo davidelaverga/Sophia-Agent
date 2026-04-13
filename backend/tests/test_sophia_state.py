@@ -1,6 +1,5 @@
 """Tests for SophiaState TypedDict schema."""
 
-import operator
 from pathlib import Path
 from typing import get_type_hints
 
@@ -34,17 +33,11 @@ def test_sophia_state_has_all_required_fields():
         assert field in hints, f"Missing field: {field}"
 
 
-def test_system_prompt_blocks_uses_add_reducer():
-    """system_prompt_blocks uses operator.add so middleware blocks accumulate.
-
-    This is safe because before_agent runs once per invocation (tool loops
-    go to before_model, not before_agent). Without operator.add, LangGraph
-    uses LastValue semantics and only the last middleware's blocks survive.
-    """
+def test_system_prompt_blocks_does_not_use_add_reducer():
+    """system_prompt_blocks should be plain state because middlewares extend it manually."""
     hints = get_type_hints(SophiaState, include_extras=True)
     annotation = hints["system_prompt_blocks"]
-    assert hasattr(annotation, "__metadata__"), "system_prompt_blocks should be Annotated"
-    assert annotation.__metadata__[0] is operator.add
+    assert not hasattr(annotation, "__metadata__")
 
 
 def test_skills_reorganized():
