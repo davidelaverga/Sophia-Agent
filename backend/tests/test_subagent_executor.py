@@ -241,6 +241,69 @@ class TestAsyncExecutionPath:
         assert result.ai_messages[1]["id"] == "msg-2"
 
     @pytest.mark.anyio
+    async def test_aexecute_tracks_last_ai_message_summary(self, classes, base_config, mock_agent, msg):
+        """Test that the latest AI turn summary is captured for diagnostics."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        final_message = AIMessage(
+            content="Done",
+            tool_calls=[{"id": "tc-emit", "name": "emit_builder_artifact", "args": {"artifact_type": "document"}}],
+        )
+        final_state = {"messages": [msg.human("Task"), final_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.last_ai_message_summary is not None
+        assert result.last_ai_message_summary["tool_names"] == ["emit_builder_artifact"]
+        assert result.last_ai_message_summary["has_emit_builder_artifact"] is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_records_late_ai_summary_after_external_timeout(self, classes, base_config, mock_agent, msg):
+        """Test timeout-safe diagnostics for AI turns that arrive after terminal timeout."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        late_message = AIMessage(content="Late response", tool_calls=[{"id": "tc-bash", "name": "bash", "args": {"command": "ls"}}])
+        chunk = {"messages": [msg.human("Task"), late_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([chunk])
+
+        result_holder = SubagentResult(
+            task_id="task-timeout",
+            trace_id="trace-timeout",
+            status=SubagentStatus.TIMED_OUT,
+            started_at=datetime.now(),
+            timed_out_at=datetime.now(),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result is result_holder
+        assert result.status == SubagentStatus.TIMED_OUT
+        assert result.late_ai_message_summary is not None
+        assert result.late_ai_message_summary["tool_names"] == ["bash"]
+        assert result.timeout_observed_during_stream is True
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_duplicate_messages(self, classes, base_config, mock_agent, msg):
         """Test that duplicate AI messages are not added."""
         SubagentExecutor = classes["SubagentExecutor"]

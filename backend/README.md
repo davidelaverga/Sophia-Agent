@@ -52,6 +52,25 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 - **Tool system** with sandbox, MCP, community, and built-in tools
 - **Subagent delegation** for parallel task execution
 - **System prompt** with skills injection, memory context, and working directory guidance
+### Sophia Companion + Builder
+
+The Sophia graphs (`sophia_companion`, `sophia_builder`) now use a stateful builder handoff flow:
+
+- `switch_to_builder` queues builder work asynchronously and returns a structured `builder_handoff` payload immediately (no blocking polling loop)
+- `switch_to_builder` now resolves builder `user_id` from runtime configurable/context first and prefers the latest non-empty in-turn `emit_artifact` tool payload over stale persisted artifacts when building delegation context (empty payloads fall back to state artifacts)
+- `switch_to_builder` also emits handoff resolution diagnostics (`user_id_source`, `artifact_source`, and source-presence flags) in both logs and handoff payloads for faster production triage
+- `BuilderSessionMiddleware` consumes the handoff payload, tracks task status from background execution, writes `builder_task` / `builder_result` into companion state, and logs adopted handoffs plus timeout debug fields (`task_id`, `last_tool_calls`, `late_tool_calls_after_timeout`)
+- Builder execution now tracks non-artifact tool turns and escalates endgame instructions so the builder explicitly finalizes with `emit_builder_artifact`
+- Background subagent timeout handling preserves terminal safety while capturing late-turn diagnostics (`last` and `late` tool-call summaries) for debugging
+- Companion synthesis remains in `ArtifactMiddleware` and runs when `builder_task.status == "completed"`
+- Companion chain now includes config-driven `SummarizationMiddleware` wiring
+- Builder chain now includes `SandboxMiddleware` and `TodoMiddleware` for execution parity
+
+Regression command for this flow:
+
+```bash
+PYTHONPATH=. uv run pytest tests/test_sophia_builder_flow.py -v
+```
 
 ### Middleware Chain
 
@@ -323,6 +342,7 @@ make format     # Format code (ruff)
 - **Python**: 3.12+ with type hints
 - **Quotes**: Double quotes
 - **Indentation**: 4 spaces
+- **Import hygiene**: keep imports used and remove unused imports (`ruff` F401)
 
 ### Testing
 
