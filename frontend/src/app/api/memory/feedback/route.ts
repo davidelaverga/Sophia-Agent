@@ -5,8 +5,8 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
+import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
 
 interface MemoryFeedbackRequest {
   action: 'approve' | 'reject';
@@ -50,7 +50,7 @@ export async function POST(request: NextRequest) {
       }
 
       const backendResponse = await fetchSophiaApi(
-        `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id as string)}`,
+        `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id)}`,
         {
           method: 'DELETE',
         }
@@ -79,7 +79,7 @@ export async function POST(request: NextRequest) {
 
     const backendResponse = !isSyntheticMemoryId(body.original_memory_id)
       ? await fetchSophiaApi(
-          `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id as string)}`,
+          `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id)}`,
           {
             method: 'PUT',
             body: JSON.stringify({

@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { fetchSophiaApi, resolveSophiaUserId } from '../../../../_lib/sophia';
 import { logger } from '../../../../../lib/error-logger';
+import { fetchSophiaApi, resolveSophiaUserId } from '../../../../_lib/sophia';
 
 export async function GET(
   request: NextRequest,

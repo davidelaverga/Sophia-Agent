@@ -10,10 +10,10 @@ import { cookies, headers } from 'next/headers'
 
 import { getSession } from '@/server/better-auth'
 
-import { providerLogin } from './backend-auth'
 import { debugWarn } from '../debug-logger'
 import { logger } from '../error-logger'
 
+import { providerLogin } from './backend-auth'
 import { authBypassEnabled, authBypassUserId } from './dev-bypass'
 
 const COOKIE_NAME = 'sophia-backend-token'

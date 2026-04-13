@@ -5,8 +5,9 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from vision_agents.core import Agent, AgentLauncher, Runner, User
@@ -32,10 +33,7 @@ from vision_agents.core.stt.events import (
     STTPartialTranscriptEvent,
     STTTranscriptEvent,
 )
-from vision_agents.core.tts.events import (
-    TTSSynthesisCompleteEvent,
-    TTSSynthesisStartEvent,
-)
+from vision_agents.core.tts.events import TTSSynthesisStartEvent
 from vision_agents.core.turn_detection.events import TurnEndedEvent
 from vision_agents.plugins.deepgram import STT as DeepgramSTT
 from vision_agents.plugins.getstream import Edge as StreamEdge
@@ -45,9 +43,11 @@ from voice.rhythm import RhythmTracker
 from voice.sophia_llm import SophiaLLM
 from voice.sophia_turn import SophiaTurnDetection
 from voice.sophia_tts import SophiaTTS
+from voice.sse_broker import VoiceEventBroker
 
 
 logger = logging.getLogger(__name__)
+voice_event_broker = VoiceEventBroker()
 
 
 def _has_substantive_transcript(text: str) -> bool:
@@ -74,6 +74,12 @@ class SophiaStartSessionRequest(BaseModel):
     )
 
 
+class SophiaWarmupSessionRequest(BaseModel):
+    """Request body for prewarming the backend path for an active Sophia session."""
+
+    user_id: str = Field(..., description="Authenticated user ID for the upcoming turn")
+
+
 session_router = APIRouter()
 
 
@@ -98,6 +104,46 @@ def _bind_agent_session_context(
         session_id=session_id,
         thread_id=thread_id,
     )
+
+
+def _attach_agent_event_emitter(
+    agent: Agent,
+    *,
+    call_id: str,
+    session_id: str,
+) -> None:
+    llm = getattr(agent, "llm", None)
+    attach_call_emitter = getattr(llm, "attach_call_emitter", None)
+    if not callable(attach_call_emitter):
+        raise RuntimeError("Agent LLM does not support runtime event emitter binding.")
+
+    async def _emit(payload: dict[str, object]) -> None:
+        await agent.send_custom_event(payload)
+        await voice_event_broker.publish(call_id, session_id, payload)
+
+    attach_call_emitter(_emit)
+
+
+def _schedule_agent_backend_warmup(
+    agent: Agent,
+    *,
+    user_id: str,
+) -> bool:
+    llm = getattr(agent, "llm", None)
+    start_backend_warmup = getattr(llm, "start_backend_warmup", None)
+    if not callable(start_backend_warmup):
+        raise RuntimeError("Agent LLM does not support backend warmup scheduling.")
+
+    return bool(start_backend_warmup(user_id))
+
+
+def _schedule_agent_tts_warmup(agent: Agent) -> bool:
+    tts = getattr(agent, "tts", None)
+    start_warmup = getattr(tts, "start_warmup", None)
+    if not callable(start_warmup):
+        return False
+
+    return bool(start_warmup())
 
 
 @session_router.post(
@@ -156,6 +202,11 @@ async def start_sophia_session(
             session_id=request.session_id,
             thread_id=request.thread_id,
         )
+        _attach_agent_event_emitter(
+            session.agent,
+            call_id=session.call_id,
+            session_id=session.id,
+        )
     except Exception as exc:
         logger.exception("Failed to bind Sophia session context")
         await launcher.close_session(session.id)
@@ -176,6 +227,133 @@ async def start_sophia_session(
         call_id=session.call_id,
         session_started_at=session.started_at,
     )
+
+
+@session_router.get(
+    "/calls/{call_id}/sessions/{session_id}/events",
+    summary="Stream Sophia session events",
+    description="Stream browser-facing SSE events for an active Sophia voice session.",
+    dependencies=[Depends(can_view_session)],
+)
+async def stream_sophia_session_events(
+    call_id: str,
+    session_id: str,
+    request: Request,
+    launcher: AgentLauncher = Depends(get_launcher),
+) -> StreamingResponse:
+    session_info = await launcher.get_session_info(call_id, session_id)
+    if session_info is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with id '{session_id}' not found",
+        )
+
+    return StreamingResponse(
+        voice_event_broker.stream(call_id, session_id, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@session_router.post(
+    "/calls/{call_id}/sessions/{session_id}/warmup",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Prewarm Sophia backend session path",
+    description="Schedule a best-effort backend warmup for an active Sophia voice session.",
+    dependencies=[Depends(can_view_session)],
+)
+async def warmup_sophia_session(
+    call_id: str,
+    session_id: str,
+    request: SophiaWarmupSessionRequest,
+    launcher: AgentLauncher = Depends(get_launcher),
+) -> Response:
+    session = launcher.get_session(session_id)
+    if session is None:
+        session_info = await launcher.get_session_info(call_id, session_id)
+        if session_info is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session with id '{session_id}' not found",
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Session is not active on this voice node.",
+        )
+
+    try:
+        backend_started = _schedule_agent_backend_warmup(
+            session.agent,
+            user_id=request.user_id,
+        )
+    except Exception as exc:
+        logger.exception("Failed to schedule Sophia backend warmup")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to schedule Sophia backend warmup",
+        ) from exc
+
+    tts_started = _schedule_agent_tts_warmup(session.agent)
+
+    logger.info(
+        "[VOICE:SESSION] WARMUP | session_id=%s | call_id=%s | user_id=%s | backend_started=%s | tts_started=%s",
+        session_id,
+        call_id,
+        request.user_id,
+        backend_started,
+        tts_started,
+    )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+async def _close_sophia_session(
+    launcher: AgentLauncher,
+    call_id: str,
+    session_id: str,
+) -> None:
+    session_info = await launcher.get_session_info(call_id, session_id)
+    if session_info is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with id '{session_id}' not found",
+        )
+
+    await launcher.request_close_session(call_id, session_id)
+    await voice_event_broker.close_session(call_id, session_id)
+
+
+@session_router.delete(
+    "/calls/{call_id}/sessions/{session_id}",
+    summary="Request closure of an agent session",
+    dependencies=[Depends(can_close_session)],
+)
+async def close_sophia_session(
+    call_id: str,
+    session_id: str,
+    launcher: AgentLauncher = Depends(get_launcher),
+) -> Response:
+    await _close_sophia_session(launcher, call_id, session_id)
+    return Response(status_code=202)
+
+
+@session_router.post(
+    "/calls/{call_id}/sessions/{session_id}/close",
+    summary="Request closure of an agent session (sendBeacon alternative)",
+    description="Alternative endpoint for requesting session closure via the browser sendBeacon API.",
+    dependencies=[Depends(can_close_session)],
+)
+async def close_sophia_session_beacon(
+    call_id: str,
+    session_id: str,
+    launcher: AgentLauncher = Depends(get_launcher),
+) -> Response:
+    await _close_sophia_session(launcher, call_id, session_id)
+    return Response(status_code=202)
 
 
 def create_fastapi_app(
@@ -199,6 +377,18 @@ def create_fastapi_app(
         if (
             isinstance(route, APIRoute)
             and route.path == "/calls/{call_id}/sessions"
+            and route.methods == {"POST"}
+        ):
+            continue
+        if (
+            isinstance(route, APIRoute)
+            and route.path == "/calls/{call_id}/sessions/{session_id}"
+            and route.methods == {"DELETE"}
+        ):
+            continue
+        if (
+            isinstance(route, APIRoute)
+            and route.path == "/calls/{call_id}/sessions/{session_id}/close"
             and route.methods == {"POST"}
         ):
             continue
@@ -280,16 +470,19 @@ def attach_runtime_observers(
             llm.note_continuation_handling(getattr(participant, "user_id", None))
             return
 
-        recovered = await coordinator.recover_late_continuation(text, participant)
+        recovered = await coordinator.recover_late_continuation(
+            text,
+            participant,
+            queue_for_next_submission=True,
+        )
         if recovered is None:
             return
 
         llm.note_continuation_handling(getattr(participant, "user_id", None))
         logger.info(
-            "[FLOW] Resubmitting recovered late continuation chars=%d",
+            "[FLOW] Queued recovered late continuation chars=%d",
             len(recovered),
         )
-        asyncio.ensure_future(agent.simple_response(recovered, participant))
 
     @agent.stt.events.subscribe
     async def _on_partial_transcript(event: STTPartialTranscriptEvent) -> None:
@@ -334,18 +527,11 @@ def attach_runtime_observers(
 
     @agent.tts.events.subscribe
     async def _on_tts_synthesis_start(_: TTSSynthesisStartEvent) -> None:
-        coordinator.on_agent_started()
-        await llm.emit_turn_event("agent_started")
         clear_turn_end_guard = getattr(turn_det, "clear_turn_end_guard", None)
         if callable(clear_turn_end_guard):
             clear_turn_end_guard()
         if hasattr(turn_det, "reset_transcript"):
             turn_det.reset_transcript()
-
-    @agent.tts.events.subscribe
-    async def _on_tts_synthesis_complete(_: TTSSynthesisCompleteEvent) -> None:
-        coordinator.on_agent_ended()
-        await llm.emit_turn_event("agent_ended")
 
 
 async def create_agent(**kwargs) -> Agent:
@@ -430,26 +616,61 @@ async def create_agent(**kwargs) -> Agent:
 
     async def _stabilized_simple_response(transcript: str, participant: object):
         resolved_transcript = transcript
-        recovered_transcript = await coordinator.recover_late_continuation(
+        queued_recovered_transcript = coordinator.consume_pending_recovered_response(
             transcript,
             participant,
         )
-        if recovered_transcript is not None:
+        if queued_recovered_transcript is not None:
             llm.note_continuation_handling(getattr(participant, "user_id", None))
-            resolved_transcript = recovered_transcript
+            resolved_transcript = queued_recovered_transcript
             logger.info(
                 "[FLOW] Recovered late continuation before backend request chars=%d",
                 len(resolved_transcript),
             )
+        else:
+            recovered_transcript = await coordinator.recover_late_continuation(
+                transcript,
+                participant,
+            )
+            if recovered_transcript is not None:
+                llm.note_continuation_handling(getattr(participant, "user_id", None))
+                resolved_transcript = recovered_transcript
+                logger.info(
+                    "[FLOW] Recovered late continuation before backend request chars=%d",
+                    len(resolved_transcript),
+                )
 
-        should_stabilize_submission = getattr(turn_detection, "should_stabilize_submission", None)
-        if callable(should_stabilize_submission) and should_stabilize_submission(transcript):
+        stabilization_wait_ms = 0
+        stabilization_reason: str | None = None
+        get_submission_stabilization_plan = getattr(
+            turn_detection,
+            "get_submission_stabilization_plan",
+            None,
+        )
+        if callable(get_submission_stabilization_plan):
+            stabilization_wait_ms, stabilization_reason = get_submission_stabilization_plan(
+                settings.fragile_window_ms,
+                transcript,
+            )
+        else:
+            should_stabilize_submission = getattr(turn_detection, "should_stabilize_submission", None)
+            if callable(should_stabilize_submission) and should_stabilize_submission(transcript):
+                stabilization_wait_ms = settings.fragile_window_ms
+                stabilization_reason = "legacy"
+
+        if stabilization_wait_ms > 0:
             llm.note_continuation_handling(getattr(participant, "user_id", None))
-            await asyncio.sleep(settings.fragile_window_ms / 1000)
+            wait_started = time.perf_counter()
+            await asyncio.sleep(stabilization_wait_ms / 1000)
+            actual_wait_ms = (time.perf_counter() - wait_started) * 1000
+            llm.note_submission_stabilized(getattr(participant, "user_id", None), actual_wait_ms)
             resolved_transcript = _resolve_turn_transcript(participant, transcript)
             logger.info(
-                "[FLOW] Stabilized turn submission before backend request chars=%d",
+                "[FLOW] Stabilized turn submission before backend request chars=%d requested_ms=%d actual_ms=%.0f reason=%s",
                 len(resolved_transcript),
+                stabilization_wait_ms,
+                actual_wait_ms,
+                stabilization_reason or "unknown",
             )
 
         if not _has_substantive_transcript(resolved_transcript):
@@ -457,7 +678,10 @@ async def create_agent(**kwargs) -> Agent:
             return LLMResponseEvent(original=None, text="")
 
         coordinator.mark_response_submitted(resolved_transcript, participant)
-        return await original_simple_response(resolved_transcript, participant)
+        response = await original_simple_response(resolved_transcript, participant)
+        coordinator.on_agent_ended()
+        await llm.emit_turn_event("agent_ended", user_id=getattr(participant, "user_id", None))
+        return response
 
     agent.simple_response = _stabilized_simple_response
 
@@ -484,9 +708,6 @@ async def create_agent(**kwargs) -> Agent:
         on_backend_stall=lambda participant, transcript: _handle_backend_stall(participant),
         record_turn=rhythm_tracker.record_turn,
         send_acknowledgment=_send_ack,
-        resubmit_response=lambda transcript, participant: agent.simple_response(
-            transcript, participant
-        ),
     )
 
     original_note_first_text_emitted = llm.note_first_text_emitted

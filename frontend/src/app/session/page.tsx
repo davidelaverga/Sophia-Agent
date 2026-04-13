@@ -28,6 +28,7 @@ import {
   SessionConversationPane,
   VoiceFirstComposer,
   VoiceCaption,
+  VoiceMetricsPanel,
   PresenceArtifactPanel,
   ArtifactToggleIcon,
   WhisperIndicator,
@@ -462,6 +463,7 @@ function SessionPageContent() {
   });
 
   const [hasNewArtifacts, setHasNewArtifacts] = useState(false);
+  const [isVoiceCaptionVisible, setIsVoiceCaptionVisible] = useState(false);
   const previousArtifactCountRef = useRef(0);
   const previousReadyCountRef = useRef(0);
   const previousArtifactSignatureRef = useRef('');
@@ -811,6 +813,8 @@ function SessionPageContent() {
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
+          <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
+
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
               A radial vignette that darkens the center (where text lives) and fades to
               transparent at the edges, letting the cosmic field breathe through. */}
@@ -882,6 +886,7 @@ function SessionPageContent() {
             <VoiceCaption
               messages={messages}
               isVoiceMode={focusMode !== 'text'}
+              onVisibilityChange={setIsVoiceCaptionVisible}
             />
           </div>
           
@@ -938,7 +943,7 @@ function SessionPageContent() {
           )}
 
           {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && (
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}

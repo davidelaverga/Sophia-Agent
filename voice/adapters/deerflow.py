@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -17,6 +18,12 @@ from voice.config import VoiceSettings
 
 
 logger = logging.getLogger(__name__)
+
+_DEERFLOW_WARMUP_USER_ID = "__voice_warmup__"
+_DEERFLOW_WARMUP_TEXT = "Warmup ping. Reply with a short acknowledgment."
+_DEERFLOW_STREAM_MODE = ["messages-tuple", "values"]
+_DEERFLOW_ON_DISCONNECT = "cancel"
+_DEERFLOW_MULTITASK_STRATEGY = "rollback"
 
 
 class DeerFlowBackendAdapter(BackendAdapter):
@@ -92,21 +99,16 @@ class DeerFlowBackendAdapter(BackendAdapter):
         self,
         request: BackendRequest,
     ) -> AsyncIterator[BackendEvent]:
+        adapter_started = time.perf_counter()
         thread_id = request.thread_id or await self._get_or_create_thread(request.user_id)
-        payload = {
-            "assistant_id": self.settings.assistant_id,
-            "input": {"messages": [{"role": "user", "content": request.text}]},
-            "config": {
-                "configurable": {
-                    "user_id": request.user_id,
-                    "platform": request.platform,
-                    "ritual": request.ritual,
-                    "context_mode": request.context_mode,
-                    "thread_id": thread_id,
-                }
-            },
-            "stream_mode": ["messages-tuple", "values"],
-        }
+        payload = self._build_run_payload(
+            text=request.text,
+            user_id=request.user_id,
+            platform=request.platform,
+            ritual=request.ritual,
+            context_mode=request.context_mode,
+            thread_id=thread_id,
+        )
 
         logger.info(
             "[VOICE:LLM] DEERFLOW_CALL | url=/threads/%s/runs/stream | "
@@ -123,6 +125,12 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 timeout=self.settings.backend_timeout_seconds,
             ) as response:
                 response.raise_for_status()
+                logger.info(
+                    "voice.metric metric=deerflow_stream_open_ms user_id=%s value=%.2f thread_id=%s",
+                    request.user_id,
+                    (time.perf_counter() - adapter_started) * 1000,
+                    thread_id,
+                )
 
                 # Track SSE event type and accumulate tool call JSON.
                 current_event_type = ""
@@ -130,8 +138,8 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 active_tool_calls: dict[str, dict] = {}
                 saw_artifact_tool = False
                 streamed_artifact: dict[str, object] | None = None
-                final_state_artifact: dict[str, object] | None = None
                 initial_values_artifact: dict[str, object] | None = None
+                first_backend_event_logged = False
 
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -157,6 +165,15 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             recoverable=False,
                         )
                         return
+
+                    if not first_backend_event_logged:
+                        first_backend_event_logged = True
+                        logger.info(
+                            "voice.metric metric=deerflow_first_event_ms user_id=%s value=%.2f sse_event=%s",
+                            request.user_id,
+                            (time.perf_counter() - adapter_started) * 1000,
+                            current_event_type or "message",
+                        )
 
                     # Handle error events (SSE event line or data-level)
                     if current_event_type == "error":
@@ -188,7 +205,13 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             saw_artifact_tool
                             or values_artifact != initial_values_artifact
                         ):
-                            final_state_artifact = values_artifact
+                            logger.info(
+                                "voice.artifact source=values streamed_present=%s streamed_matches=%s early=true",
+                                streamed_artifact is not None,
+                                streamed_artifact == values_artifact,
+                            )
+                            yield BackendEvent.artifact_payload(values_artifact)
+                            return
                         continue
 
                     # HTTP SSE uses `event: messages` for messages-tuple frames.
@@ -261,16 +284,9 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             if artifact is not None:
                                 streamed_artifact = artifact
 
-                artifact = final_state_artifact or streamed_artifact
+                artifact = streamed_artifact
                 if artifact is not None:
-                    if final_state_artifact is not None:
-                        logger.info(
-                            "voice.artifact source=values streamed_present=%s streamed_matches=%s",
-                            streamed_artifact is not None,
-                            streamed_artifact == final_state_artifact,
-                        )
-                    else:
-                        logger.info("voice.artifact source=streamed fallback=true")
+                    logger.info("voice.artifact source=streamed fallback=true")
                     yield BackendEvent.artifact_payload(artifact)
                 elif saw_artifact_tool:
                     logger.error(
@@ -317,6 +333,100 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 original=exc,
             ) from exc
 
+    async def warmup(self, request: BackendRequest) -> None:
+        warmup_started = time.perf_counter()
+
+        if request.thread_id is None:
+            await self._get_or_create_thread(request.user_id)
+
+        warmup_thread_id = await self._create_thread()
+        payload = self._build_run_payload(
+            text=_DEERFLOW_WARMUP_TEXT,
+            user_id=_DEERFLOW_WARMUP_USER_ID,
+            platform=request.platform,
+            ritual=request.ritual,
+            context_mode=request.context_mode,
+            thread_id=warmup_thread_id,
+        )
+
+        logger.info(
+            "[VOICE:LLM] DEERFLOW_WARMUP_START | warmup_thread_id=%s | platform=%s | ritual=%s | context_mode=%s",
+            warmup_thread_id,
+            request.platform,
+            request.ritual,
+            request.context_mode,
+        )
+
+        try:
+            async with self._http.stream(
+                "POST",
+                f"/threads/{warmup_thread_id}/runs/stream",
+                json=payload,
+                timeout=self.settings.backend_timeout_seconds,
+            ) as response:
+                response.raise_for_status()
+
+                async for line in response.aiter_lines():
+                    line = line.strip()
+                    if not line.startswith("data:"):
+                        continue
+
+                    raw_data = line[5:].strip()
+                    if not raw_data or raw_data == "[DONE]":
+                        continue
+
+                    try:
+                        data = json.loads(raw_data)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if isinstance(data, dict) and data.get("type") in {"run_error", "error"}:
+                        message = str(data.get("data", data.get("message", "warmup_error")))
+                        raise BackendStageError(
+                            "backend-warmup",
+                            f"DeerFlow warmup returned an error event: {message}",
+                        )
+
+                    if isinstance(data, list) and data:
+                        logger.info(
+                            "voice.metric metric=deerflow_warmup_ms user_id=%s value=%.2f result=streamed",
+                            request.user_id,
+                            (time.perf_counter() - warmup_started) * 1000,
+                        )
+                        return
+
+                    if self._extract_values_artifact(data) is not None:
+                        logger.info(
+                            "voice.metric metric=deerflow_warmup_ms user_id=%s value=%.2f result=artifact",
+                            request.user_id,
+                            (time.perf_counter() - warmup_started) * 1000,
+                        )
+                        return
+
+                logger.info(
+                    "voice.metric metric=deerflow_warmup_ms user_id=%s value=%.2f result=empty",
+                    request.user_id,
+                    (time.perf_counter() - warmup_started) * 1000,
+                )
+        except httpx.TimeoutException as exc:
+            raise BackendStageError(
+                "backend-warmup",
+                "Timed out while warming the DeerFlow backend.",
+                original=exc,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            raise BackendStageError(
+                "backend-warmup",
+                f"DeerFlow warmup responded with HTTP {exc.response.status_code}.",
+                original=exc,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BackendStageError(
+                "backend-warmup",
+                "Failed to contact the DeerFlow backend for warmup.",
+                original=exc,
+            ) from exc
+
     async def _get_or_create_thread(self, user_id: str) -> str:
         existing = self._thread_ids.get(user_id)
         if existing:
@@ -327,29 +437,59 @@ class DeerFlowBackendAdapter(BackendAdapter):
             if existing:
                 return existing
 
-            try:
-                response = await self._http.post(
-                    "/threads",
-                    json={},
-                    timeout=self.settings.readiness_timeout_seconds,
-                )
-                response.raise_for_status()
-            except httpx.TimeoutException as exc:
-                raise BackendStageError(
-                    "backend-request",
-                    "Timed out while creating a DeerFlow thread.",
-                    original=exc,
-                ) from exc
-            except httpx.HTTPError as exc:
-                raise BackendStageError(
-                    "backend-request",
-                    "Failed to create a DeerFlow thread.",
-                    original=exc,
-                ) from exc
-
-            thread_id = response.json()["thread_id"]
+            thread_id = await self._create_thread()
             self._thread_ids[user_id] = thread_id
             return thread_id
+
+    async def _create_thread(self) -> str:
+        try:
+            response = await self._http.post(
+                "/threads",
+                json={},
+                timeout=self.settings.readiness_timeout_seconds,
+            )
+            response.raise_for_status()
+        except httpx.TimeoutException as exc:
+            raise BackendStageError(
+                "backend-request",
+                "Timed out while creating a DeerFlow thread.",
+                original=exc,
+            ) from exc
+        except httpx.HTTPError as exc:
+            raise BackendStageError(
+                "backend-request",
+                "Failed to create a DeerFlow thread.",
+                original=exc,
+            ) from exc
+
+        return response.json()["thread_id"]
+
+    def _build_run_payload(
+        self,
+        *,
+        text: str,
+        user_id: str,
+        platform: str,
+        ritual: str | None,
+        context_mode: str,
+        thread_id: str,
+    ) -> dict[str, object]:
+        return {
+            "assistant_id": self.settings.assistant_id,
+            "input": {"messages": [{"role": "user", "content": text}]},
+            "config": {
+                "configurable": {
+                    "user_id": user_id,
+                    "platform": platform,
+                    "ritual": ritual,
+                    "context_mode": context_mode,
+                    "thread_id": thread_id,
+                }
+            },
+            "stream_mode": list(_DEERFLOW_STREAM_MODE),
+            "on_disconnect": _DEERFLOW_ON_DISCONNECT,
+            "multitask_strategy": _DEERFLOW_MULTITASK_STRATEGY,
+        }
 
     def _parse_accumulated_artifact(
         self, tool_calls: dict[str, dict],

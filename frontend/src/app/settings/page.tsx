@@ -9,11 +9,11 @@ import { ArrowLeft, Heart, LogOut, Settings, Shield, Sparkles, Trash2 } from 'lu
 import { useRouter } from 'next/navigation';
 import { useState } from 'react';
 
-import { ThemeToggle } from '../components/ThemeToggle';
 import { EnhancedFieldBackground } from '../components/dashboard/EnhancedFieldBackground';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { OnboardingSettingsPanel } from '../components/settings/OnboardingSettingsPanel';
 import { PrivacyPanel } from '../components/settings/PrivacyPanel';
+import { ThemeToggle } from '../components/ThemeToggle';
 import { haptic } from '../hooks/useHaptics';
 import { authBypassConfiguredValue, authBypassEnabled, authBypassSource } from '../lib/auth/dev-bypass';
 import { clearLocalSessionData } from '../lib/debug-tools';

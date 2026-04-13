@@ -1,0 +1,17 @@
+{
+  "session_id": "69a0df26-970b-470e-8015-75054b44f796",
+  "thread_id": "1939a6df-24c5-4009-a7d8-65f4d4f1cba5",
+  "session_type": "prepare",
+  "context_mode": "gaming",
+  "started_at": "2026-04-12T21:14:38.363Z",
+  "ended_at": "2026-04-12T21:25:05.306943+00:00",
+  "turn_count": 18,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "When pain gets too big, we reach for what we can solve. That's not weakness\u2014it's how we breathe.",
+    "reflection_candidate": {
+      "prompt": "What was something about them you're going to miss most?"
+    },
+    "status": "ready"
+  }
+}

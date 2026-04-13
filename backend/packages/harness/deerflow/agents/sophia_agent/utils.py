@@ -8,6 +8,29 @@ from pathlib import Path
 _mw_logger = logging.getLogger("sophia.middleware")
 
 
+def _extract_text_content(content: object) -> list[str]:
+    if content is None:
+        return []
+
+    if isinstance(content, str):
+        return [content]
+
+    if isinstance(content, dict):
+        parts: list[str] = []
+        for key in ("text", "content", "value", "input"):
+            if key in content:
+                parts.extend(_extract_text_content(content[key]))
+        return parts
+
+    if isinstance(content, (list, tuple)):
+        parts: list[str] = []
+        for item in content:
+            parts.extend(_extract_text_content(item))
+        return parts
+
+    return []
+
+
 def log_middleware(name: str, context: str, start_time: float) -> None:
     """Log middleware execution with name, context summary, and latency.
 
@@ -60,10 +83,18 @@ def extract_last_message_text(messages: list) -> str:
     """
     if not messages:
         return ""
-    last_message = messages[-1]
-    content = getattr(last_message, "content", "")
-    if isinstance(content, list):
-        content = " ".join(
-            p.get("text", "") for p in content if isinstance(p, dict)
-        )
-    return str(content)
+
+    preferred_messages = [
+        message
+        for message in reversed(messages)
+        if getattr(message, "type", None) in ("human", "user")
+    ]
+    candidates = preferred_messages or list(reversed(messages))
+
+    for message in candidates:
+        content = getattr(message, "content", "")
+        parts = [part.strip() for part in _extract_text_content(content) if part and part.strip()]
+        if parts:
+            return " ".join(parts)
+
+    return ""

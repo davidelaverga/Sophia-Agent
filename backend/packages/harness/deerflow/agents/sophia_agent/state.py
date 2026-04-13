@@ -1,5 +1,4 @@
-import operator
-from typing import Annotated, NotRequired
+from typing import NotRequired
 
 from langchain.agents import AgentState
 
@@ -45,14 +44,10 @@ class SophiaState(AgentState):
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
 
-    # Prompt assembly — accumulated by middlewares in before_agent, assembled in before_model.
-    # NOTE: operator.add is kept here for documentation purposes (it signals "append"
-    # semantics), but the LangGraph middleware framework uses dict merge (last-write-wins)
-    # for middleware return values — it does NOT apply the channel reducer from the state
-    # schema.  Therefore each middleware explicitly reads the existing list from state and
-    # extends it before returning.  This is the only correct way to accumulate blocks
-    # across the middleware chain.
-    system_prompt_blocks: Annotated[list[str], operator.add]
+    # Prompt assembly — accumulated manually by before_agent middlewares for the current turn
+    # only, then assembled in PromptAssemblyMiddleware before the model call. This must not
+    # use an additive reducer because each middleware already extends the list explicitly.
+    system_prompt_blocks: NotRequired[list[str]]
 
     # Title
     title: NotRequired[str | None]

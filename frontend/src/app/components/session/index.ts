@@ -19,6 +19,7 @@ export { ReflectionPromptBubble, ReflectionResponseBubble } from './ReflectionBu
 export { MessageFeedback, FeedbackToast } from './MessageFeedback';
 export { VoiceFirstComposer, type VoiceStatus } from './VoiceFirstComposer';
 export { VoiceCaption } from './VoiceCaption';
+export { VoiceMetricsPanel } from './VoiceMetricsPanel';
 export { PresenceArtifactPanel, ArtifactToggleIcon } from './PresenceArtifactPanel';
 export { WhisperIndicator } from './WhisperIndicator';
 export { ReflectionOverlay } from './ReflectionOverlay';
