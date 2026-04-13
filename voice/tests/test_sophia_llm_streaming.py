@@ -200,6 +200,43 @@ async def test_transcript_events_stream_before_artifact() -> None:
 
 
 @pytest.mark.anyio
+async def test_simple_response_splits_multi_sentence_backend_chunks_for_earlier_streaming() -> None:
+    emitted: list[dict] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        emitted.append(payload)
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.text_chunk("Good. Your pets are the priority."),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+
+    await llm.simple_response(
+        "test",
+        participant=SimpleNamespace(user_id="user-1"),
+    )
+
+    transcript_events = [payload for payload in emitted if payload["type"] == "sophia.transcript"]
+    assert transcript_events[0]["data"] == {
+        "text": "Good. ",
+        "is_final": False,
+    }
+    assert transcript_events[1]["data"] == {
+        "text": "Good. Your pets are the priority.",
+        "is_final": False,
+    }
+    assert transcript_events[2]["data"] == {
+        "text": "Good. Your pets are the priority.",
+        "is_final": True,
+    }
+
+
+@pytest.mark.anyio
 async def test_pending_user_ended_emits_on_first_backend_progress_before_agent_started() -> None:
     emitted: list[dict] = []
     sequence: list[str] = []
@@ -260,6 +297,93 @@ async def test_pending_user_ended_emits_on_first_backend_progress_before_agent_s
 
 
 @pytest.mark.anyio
+async def test_user_transcript_event_does_not_block_backend_request_start() -> None:
+    backend_requested = asyncio.Event()
+    allow_user_transcript_emit = asyncio.Event()
+
+    class SignalingAdapter(FakeAdapter):
+        async def stream_events(self, request: BackendRequest):
+            assert request.user_id == "user-1"
+            self.requests.append(request)
+            backend_requested.set()
+            for event in self._events:
+                yield event
+                if event.kind == "text":
+                    self.text_events_consumed += 1
+
+    async def fake_emitter(payload: dict) -> None:
+        if payload["type"] == "sophia.user_transcript":
+            await allow_user_transcript_emit.wait()
+
+    adapter = SignalingAdapter(
+        [
+            BackendEvent.text_chunk("ok"),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+
+    response_task = asyncio.create_task(
+        llm.simple_response(
+            "test",
+            participant=SimpleNamespace(user_id="user-1"),
+        )
+    )
+
+    await asyncio.wait_for(backend_requested.wait(), timeout=0.1)
+    allow_user_transcript_emit.set()
+
+    response = await response_task
+    assert response.text == "ok"
+
+
+@pytest.mark.anyio
+async def test_first_transcript_event_does_not_wait_for_turn_event_delivery() -> None:
+    transcript_seen = asyncio.Event()
+    allow_turn_emit = asyncio.Event()
+    emitted: list[dict] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        if payload["type"] == "sophia.turn":
+            await allow_turn_emit.wait()
+
+        emitted.append(payload)
+        if payload["type"] == "sophia.transcript" and payload["data"]["is_final"] is False:
+            transcript_seen.set()
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.text_chunk("ok"),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+    participant = SimpleNamespace(user_id="user-1")
+    llm.note_turn_end(participant)
+
+    response_task = asyncio.create_task(
+        llm.simple_response(
+            "test",
+            participant=participant,
+        )
+    )
+
+    await asyncio.wait_for(transcript_seen.wait(), timeout=0.1)
+    assert [payload["type"] for payload in emitted[:2]] == [
+        "sophia.user_transcript",
+        "sophia.transcript",
+    ]
+
+    allow_turn_emit.set()
+    response = await response_task
+    assert response.text == "ok"
+
+
+@pytest.mark.anyio
 async def test_simple_response_emits_completion_diagnostic_without_tts_events() -> None:
     emitted: list[dict] = []
 
@@ -301,6 +425,8 @@ async def test_simple_response_emits_completion_diagnostic_without_tts_events() 
         assert emitted[0]["data"]["text"] == "I lost someone really important to me, and I still don't know how to make sense of it."
         assert isinstance(emitted[0]["data"].get("utterance_id"), str)
         assert emitted[-1]["data"]["reason"] == "completed"
+        assert emitted[-1]["data"]["backend_request_start_ms"] is not None
+        assert emitted[-1]["data"]["backend_first_event_ms"] is not None
         assert emitted[-1]["data"]["first_audio_ms"] is None
     finally:
         sophia_llm_module.TURN_COMPLETION_GRACE_MS = original_grace_ms

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 
 import httpx
@@ -92,6 +93,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
         self,
         request: BackendRequest,
     ) -> AsyncIterator[BackendEvent]:
+        adapter_started = time.perf_counter()
         thread_id = request.thread_id or await self._get_or_create_thread(request.user_id)
         payload = {
             "assistant_id": self.settings.assistant_id,
@@ -123,6 +125,12 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 timeout=self.settings.backend_timeout_seconds,
             ) as response:
                 response.raise_for_status()
+                logger.info(
+                    "voice.metric metric=deerflow_stream_open_ms user_id=%s value=%.2f thread_id=%s",
+                    request.user_id,
+                    (time.perf_counter() - adapter_started) * 1000,
+                    thread_id,
+                )
 
                 # Track SSE event type and accumulate tool call JSON.
                 current_event_type = ""
@@ -130,8 +138,8 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 active_tool_calls: dict[str, dict] = {}
                 saw_artifact_tool = False
                 streamed_artifact: dict[str, object] | None = None
-                final_state_artifact: dict[str, object] | None = None
                 initial_values_artifact: dict[str, object] | None = None
+                first_backend_event_logged = False
 
                 async for line in response.aiter_lines():
                     line = line.strip()
@@ -157,6 +165,15 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             recoverable=False,
                         )
                         return
+
+                    if not first_backend_event_logged:
+                        first_backend_event_logged = True
+                        logger.info(
+                            "voice.metric metric=deerflow_first_event_ms user_id=%s value=%.2f sse_event=%s",
+                            request.user_id,
+                            (time.perf_counter() - adapter_started) * 1000,
+                            current_event_type or "message",
+                        )
 
                     # Handle error events (SSE event line or data-level)
                     if current_event_type == "error":
@@ -188,7 +205,13 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             saw_artifact_tool
                             or values_artifact != initial_values_artifact
                         ):
-                            final_state_artifact = values_artifact
+                            logger.info(
+                                "voice.artifact source=values streamed_present=%s streamed_matches=%s early=true",
+                                streamed_artifact is not None,
+                                streamed_artifact == values_artifact,
+                            )
+                            yield BackendEvent.artifact_payload(values_artifact)
+                            return
                         continue
 
                     # HTTP SSE uses `event: messages` for messages-tuple frames.
@@ -261,16 +284,9 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             if artifact is not None:
                                 streamed_artifact = artifact
 
-                artifact = final_state_artifact or streamed_artifact
+                artifact = streamed_artifact
                 if artifact is not None:
-                    if final_state_artifact is not None:
-                        logger.info(
-                            "voice.artifact source=values streamed_present=%s streamed_matches=%s",
-                            streamed_artifact is not None,
-                            streamed_artifact == final_state_artifact,
-                        )
-                    else:
-                        logger.info("voice.artifact source=streamed fallback=true")
+                    logger.info("voice.artifact source=streamed fallback=true")
                     yield BackendEvent.artifact_payload(artifact)
                 elif saw_artifact_tool:
                     logger.error(

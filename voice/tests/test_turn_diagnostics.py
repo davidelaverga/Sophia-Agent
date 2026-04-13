@@ -20,6 +20,10 @@ def test_tracker_dedupes_agent_phases_and_emits_completion() -> None:
 
     assert tracker.note_agent_phase("user-1", "agent_started") is False
 
+    request_start_ms = tracker.note_backend_request_start("user-1", 10.05)
+    assert request_start_ms is not None
+    first_event_ms = tracker.note_backend_first_event("user-1", 10.08)
+    assert first_event_ms is not None
     tracker.note_first_text("user-1", 10.1)
     backend_complete_ms = tracker.note_backend_complete("user-1", 10.3)
     assert backend_complete_ms is not None
@@ -30,6 +34,8 @@ def test_tracker_dedupes_agent_phases_and_emits_completion() -> None:
     assert diagnostic is not None
     assert diagnostic.reason == "completed"
     assert diagnostic.raw_false_end_count == 1
+    assert diagnostic.backend_request_start_ms is not None
+    assert diagnostic.backend_first_event_ms is not None
     assert diagnostic.duplicate_phase_counts == {"agent_started": 1}
 
 
@@ -109,6 +115,10 @@ async def test_llm_emits_turn_diagnostic_and_suppresses_duplicate_agent_phases()
         llm.note_turn_end(participant)
         await llm.emit_turn_event("user_ended", user_id="user-1")
         time.sleep(0.001)
+        llm.note_backend_request_started("user-1")
+        time.sleep(0.001)
+        llm.note_backend_first_event("user-1")
+        time.sleep(0.001)
         llm.note_first_text_emitted("user-1")
         time.sleep(0.001)
         llm.note_backend_completed("user-1")
@@ -134,6 +144,8 @@ async def test_llm_emits_turn_diagnostic_and_suppresses_duplicate_agent_phases()
             "agent_ended": 1,
             "agent_started": 1,
         }
+        assert diagnostic["backend_request_start_ms"] is not None
+        assert diagnostic["backend_first_event_ms"] is not None
         assert diagnostic["backend_complete_ms"] is not None
         assert diagnostic["first_audio_ms"] is not None
     finally:

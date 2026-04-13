@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -32,6 +33,36 @@ from voice.voice_delivery_profile import (
 logger = logging.getLogger(__name__)
 
 TURN_COMPLETION_GRACE_MS = 400
+_STREAMING_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?])(?=\s)")
+
+
+def _split_streaming_text(text: str) -> list[str]:
+    if not text:
+        return []
+
+    chunks: list[str] = []
+    start = 0
+
+    for match in _STREAMING_SENTENCE_BOUNDARY.finditer(text):
+        boundary = match.start()
+        if boundary <= start:
+            continue
+
+        # Keep ellipses and repeated punctuation together as one chunk.
+        if text[boundary - 1] == "." and boundary >= 2 and text[boundary - 2] == ".":
+            continue
+
+        whitespace_end = boundary
+        while whitespace_end < len(text) and text[whitespace_end].isspace():
+            whitespace_end += 1
+
+        chunks.append(text[start:whitespace_end])
+        start = whitespace_end
+
+    if start < len(text):
+        chunks.append(text[start:])
+
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 class SophiaLLM(LLM):
@@ -51,6 +82,7 @@ class SophiaLLM(LLM):
         self._turn_diagnostics = TurnDiagnosticsTracker()
         self._active_response_user_id: str | None = None
         self._turn_completion_tasks: dict[str, asyncio.Task[None]] = {}
+        self._background_call_event_tasks: set[asyncio.Task[None]] = set()
         self._pending_user_ended_user_ids: set[str] = set()
         self._runtime_platform = settings.platform
         self._runtime_context_mode = settings.context_mode
@@ -139,7 +171,53 @@ class SophiaLLM(LLM):
         await self._backend.probe()
 
     async def close(self) -> None:
+        self._cancel_background_call_event_tasks()
         await self._backend.close()
+
+    def _cancel_background_call_event_tasks(self) -> None:
+        for task in tuple(self._background_call_event_tasks):
+            task.cancel()
+        self._background_call_event_tasks.clear()
+
+    def _schedule_background_call_event(
+        self,
+        coro: Awaitable[None],
+    ) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        task = loop.create_task(coro)
+        self._background_call_event_tasks.add(task)
+        task.add_done_callback(self._finalize_background_call_event_task)
+
+    def _finalize_background_call_event_task(
+        self,
+        task: asyncio.Task[None],
+    ) -> None:
+        self._background_call_event_tasks.discard(task)
+
+        if task.cancelled():
+            return
+
+        exc = task.exception()
+        if exc is not None:
+            logger.warning(
+                "voice.call_emitter_error background call-event task failed",
+                exc_info=exc,
+            )
+
+    async def _drain_background_call_event_tasks(self) -> None:
+        while self._background_call_event_tasks:
+            tasks = tuple(self._background_call_event_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            for task in tasks:
+                self._background_call_event_tasks.discard(task)
+
+    async def _emit_first_response_turn_events(self, user_id: str) -> None:
+        await self.emit_pending_user_ended(user_id)
+        await self.emit_turn_event("agent_started", user_id)
 
     def note_turn_end(self, participant: Participant | None) -> None:
         user_id = self._resolve_user_id(participant)
@@ -181,6 +259,36 @@ class SophiaLLM(LLM):
             "voice.metric metric=first_text_ms user_id=%s value=%.2f backend=%s",
             user_id,
             first_text_ms,
+            self.settings.backend_mode,
+        )
+
+    def note_backend_request_started(self, user_id: str) -> None:
+        request_start_ms = self._turn_diagnostics.note_backend_request_start(
+            user_id,
+            time.perf_counter(),
+        )
+        if request_start_ms is None:
+            return
+
+        logger.info(
+            "voice.metric metric=backend_request_start_ms user_id=%s value=%.2f backend=%s",
+            user_id,
+            request_start_ms,
+            self.settings.backend_mode,
+        )
+
+    def note_backend_first_event(self, user_id: str) -> None:
+        first_event_ms = self._turn_diagnostics.note_backend_first_event(
+            user_id,
+            time.perf_counter(),
+        )
+        if first_event_ms is None:
+            return
+
+        logger.info(
+            "voice.metric metric=backend_first_event_ms user_id=%s value=%.2f backend=%s",
+            user_id,
+            first_event_ms,
             self.settings.backend_mode,
         )
 
@@ -385,18 +493,23 @@ class SophiaLLM(LLM):
             thread_id=self._runtime_thread_id,
         )
 
-        await self._emit_call_event(
-            {
-                "type": "sophia.user_transcript",
-                "data": {
-                    "text": request.text,
-                    "utterance_id": item_id,
+        self._schedule_background_call_event(
+            self._emit_call_event(
+                {
+                    "type": "sophia.user_transcript",
+                    "data": {
+                        "text": request.text,
+                        "utterance_id": item_id,
+                    },
                 },
-            },
-            event_type="sophia.user_transcript",
+                event_type="sophia.user_transcript",
+            )
         )
+        if self._call_emitter is not None:
+            await asyncio.sleep(0)
 
         try:
+            self.note_backend_request_started(request.user_id)
             response_text, original, first_token_ms = await self._stream_backend(
                 request=request,
                 item_id=item_id,
@@ -436,6 +549,7 @@ class SophiaLLM(LLM):
                 model=self.settings.llm_label,
             )
         )
+        await self._drain_background_call_event_tasks()
 
         return LLMResponseEvent(original=original, text=response_text)
 
@@ -449,40 +563,51 @@ class SophiaLLM(LLM):
         sequence = 0
         first_token_ms: float | None = None
         artifact_seen = False
+        backend_event_seen = False
 
         async for event in self._backend.stream_events(request):
+            if not backend_event_seen:
+                backend_event_seen = True
+                self.note_backend_first_event(request.user_id)
+
             if event.kind == "text":
                 if not event.text:
                     continue
 
-                if first_token_ms is None:
-                    first_token_ms = (time.perf_counter() - request_started) * 1000
-                    logger.info(
-                        "[VOICE:LLM] DEERFLOW_STREAMING | user_id=%s | first_token_ms=%.0f",
-                        request.user_id, first_token_ms,
-                    )
-                    self.note_first_text_emitted(request.user_id)
-                    await self.emit_pending_user_ended(request.user_id)
-                    await self.emit_turn_event("agent_started", request.user_id)
+                for text_chunk in _split_streaming_text(event.text):
+                    is_first_chunk = first_token_ms is None
+                    if first_token_ms is None:
+                        first_token_ms = (time.perf_counter() - request_started) * 1000
+                        logger.info(
+                            "[VOICE:LLM] DEERFLOW_STREAMING | user_id=%s | first_token_ms=%.0f",
+                            request.user_id, first_token_ms,
+                        )
+                        self.note_first_text_emitted(request.user_id)
 
-                text_parts.append(event.text)
-                self.events.send(
-                    llm_events.LLMResponseChunkEvent(
-                        plugin_name="sophia_llm",
-                        item_id=item_id,
-                        output_index=0,
-                        content_index=sequence,
-                        sequence_number=sequence,
-                        delta=event.text,
-                        is_first_chunk=sequence == 0,
-                        time_to_first_token_ms=first_token_ms if sequence == 0 else None,
+                    text_parts.append(text_chunk)
+                    self.events.send(
+                        llm_events.LLMResponseChunkEvent(
+                            plugin_name="sophia_llm",
+                            item_id=item_id,
+                            output_index=0,
+                            content_index=sequence,
+                            sequence_number=sequence,
+                            delta=text_chunk,
+                            is_first_chunk=sequence == 0,
+                            time_to_first_token_ms=first_token_ms if sequence == 0 else None,
+                        )
                     )
-                )
-                await self._emit_transcript_event(
-                    "".join(text_parts),
-                    is_final=False,
-                )
-                sequence += 1
+                    if is_first_chunk:
+                        self._schedule_background_call_event(
+                            self._emit_first_response_turn_events(request.user_id)
+                        )
+                        if self._call_emitter is not None:
+                            await asyncio.sleep(0)
+                    await self._emit_transcript_event(
+                        "".join(text_parts),
+                        is_final=False,
+                    )
+                    sequence += 1
                 continue
 
             if event.kind == "artifact":

@@ -195,6 +195,7 @@ describe('voice benchmark analysis', () => {
     expect(report.comparisons.emotionFamilyHit).toBe(true);
     expect(report.comparisons.toneBandHit).toBe(true);
     expect(report.classification.auto).toBe('completed');
+    expect(report.telemetry?.summary.bottleneckKind).toBe('healthy');
   });
 
   it('classifies repeated unresolved user-ended storms as no turn closure', () => {
@@ -268,6 +269,7 @@ describe('voice benchmark analysis', () => {
     expect(report.metrics.artifact_receipt).toBe(false);
     expect(report.metrics.terminal_reason).toBe('silence_timing');
     expect(report.classification.auto).toBe('no_turn_closure');
+    expect(report.telemetry?.summary.bottleneckKind).toBe('turn-segmentation');
     expect(report.manualReview.responseIntent.required).toBe(false);
   });
 
@@ -317,6 +319,7 @@ describe('voice benchmark analysis', () => {
     expect(report.harness.classification.reason).toBe('microphone_stream_without_audio');
     expect(report.harness.configured.durationMs).toBe(4200);
     expect(report.harness.observed.totalSampleWindows).toBe(24);
+    expect(report.telemetry?.summary.bottleneckKind).toBe('microphone');
   });
 
   it('treats downstream turn events as proof that input reached Sophia', () => {
@@ -450,31 +453,31 @@ describe('voice benchmark analysis', () => {
       }),
       buildEvent({
         at: '2026-04-02T02:26:40.462Z',
-        category: 'stream-custom',
+        category: 'voice-sse',
         name: 'sophia.user_transcript',
         data: { text: 'leave it, it actually happened.' },
       }),
       buildEvent({
         at: '2026-04-02T02:26:59.900Z',
-        category: 'stream-custom',
+        category: 'voice-sse',
         name: 'sophia.turn',
         data: { phase: 'user_ended' },
       }),
       buildEvent({
         at: '2026-04-02T02:27:00.000Z',
-        category: 'stream-custom',
+        category: 'voice-sse',
         name: 'sophia.turn',
         data: { phase: 'agent_started' },
       }),
       buildEvent({
         at: '2026-04-02T02:27:01.000Z',
-        category: 'stream-custom',
+        category: 'voice-sse',
         name: 'sophia.transcript',
         data: { is_final: true, text: 'I heard the pause. Keep going.' },
       }),
       buildEvent({
         at: '2026-04-02T02:27:01.100Z',
-        category: 'stream-custom',
+        category: 'voice-sse',
         name: 'sophia.artifact',
         data: {
           active_tone_band: 'engagement',
@@ -484,7 +487,7 @@ describe('voice benchmark analysis', () => {
       }),
       buildEvent({
         at: '2026-04-02T02:27:01.200Z',
-        category: 'stream-custom',
+        category: 'voice-sse',
         name: 'sophia.turn_diagnostic',
         data: {
           reason: 'completed',
@@ -501,6 +504,7 @@ describe('voice benchmark analysis', () => {
 
     expect(report.metrics.first_committed_user_transcript_at).toBe('2026-04-02T02:26:40.462Z');
     expect(report.metrics.first_user_ended_at).toBe('2026-04-02T02:26:59.900Z');
+    expect(report.metrics.first_audio_ms).toBe(21000);
     expect(report.metrics.turn_close_ms).toBe(19538);
     expect(report.metrics.raw_turn_close_ms).toBe(19538);
     expect(report.metrics.turn_close_metric_source).toBe('committed_user_transcript');
@@ -600,8 +604,13 @@ describe('voice benchmark analysis', () => {
     expect(summary.total_cases).toBe(2);
     expect(summary.completed_cases).toBe(1);
     expect(summary.completion_rate).toBe(0.5);
+    expect(summary.dominant_bottleneck).toBe('healthy');
     expect(summary.median_false_user_ended_count).toBe(1);
+    expect(summary.median_backend_complete_ms).toBeNull();
+    expect(summary.median_first_text_ms).toBeNull();
+    expect(summary.median_first_audio_ms).toBeNull();
     expect(summary.median_raw_turn_close_ms).toBeNull();
+    expect(summary.median_session_ready_ms).toBeNull();
     expect(summary.median_turn_close_ms).toBe(2000);
     expect(summary.emotion_family_hit_rate).toBe(1);
     expect(summary.tone_band_hit_rate).toBe(1);
@@ -610,6 +619,16 @@ describe('voice benchmark analysis', () => {
       harness_input_missing: 0,
       no_turn_closure: 1,
       wrong_emitted_artifact: 0,
+    });
+    expect(summary.bottleneck_counts).toEqual({
+      idle: 0,
+      healthy: 1,
+      startup: 0,
+      microphone: 0,
+      'turn-segmentation': 0,
+      backend: 1,
+      tts: 0,
+      transport: 0,
     });
     expect(summary.harness_input_detected_cases).toBe(2);
     expect(summary.harness_input_missing_cases).toBe(0);

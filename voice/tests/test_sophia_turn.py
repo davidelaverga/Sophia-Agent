@@ -291,6 +291,12 @@ class TestAdaptiveSilence:
 
         assert td.should_stabilize_submission() is False
 
+    async def test_should_not_stabilize_submission_for_long_stable_non_final_phrase(self):
+        td = _make_detector()
+        td.update_transcript("I think the meeting went really well overall and I'm ready")
+
+        assert td.should_stabilize_submission() is False
+
 
 # ---------------------------------------------------------------------------
 # Continuation signal tests (Layer 1 — R2)

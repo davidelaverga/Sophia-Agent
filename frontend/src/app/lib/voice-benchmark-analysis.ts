@@ -1,3 +1,13 @@
+import type { SophiaCaptureSnapshot } from './session-capture';
+import {
+  buildVoiceDeveloperMetricsFromCapture,
+  buildVoiceTelemetrySummary,
+  type VoiceBottleneckKind,
+  type VoiceCaptureEvent,
+  type VoiceDeveloperMetrics,
+  type VoiceTelemetrySummary,
+} from './voice-runtime-metrics';
+
 export type VoiceBenchmarkAutoClassification =
   | 'completed'
   | 'harness_input_missing'
@@ -86,6 +96,7 @@ export interface VoiceBenchmarkCaseReport {
     duplicate_phase_counts: Record<string, number>;
     false_user_ended_count: number;
     first_agent_started_at: string | null;
+    first_audio_ms: number | null;
     first_committed_user_transcript_at: string | null;
     first_user_ended_at: string | null;
     join_latency_ms: number | null;
@@ -117,6 +128,10 @@ export interface VoiceBenchmarkCaseReport {
     auto: VoiceBenchmarkAutoClassification;
     blockedManualReason: string | null;
   };
+  telemetry: {
+    summary: VoiceTelemetrySummary;
+    metrics: VoiceDeveloperMetrics;
+  } | null;
   manualReview: {
     responseIntent: {
       expected: string | null;
@@ -135,16 +150,22 @@ export interface VoiceBenchmarkCaseReport {
 
 export interface VoiceBenchmarkSuiteSummary {
   auto_class_counts: Record<VoiceBenchmarkAutoClassification, number>;
+  bottleneck_counts: Record<VoiceBottleneckKind, number>;
   completed_cases: number;
   completion_rate: number;
+  dominant_bottleneck: VoiceBottleneckKind | null;
   emotion_family_hit_rate: number | null;
   harness_input_detected_cases: number;
   harness_input_missing_cases: number;
+  median_backend_complete_ms: number | null;
+  median_first_text_ms: number | null;
   max_join_latency_ms: number | null;
   mean_join_latency_ms: number | null;
   median_false_user_ended_count: number | null;
+  median_first_audio_ms: number | null;
   median_join_latency_ms: number | null;
   median_raw_turn_close_ms: number | null;
+  median_session_ready_ms: number | null;
   median_turn_close_ms: number | null;
   min_join_latency_ms: number | null;
   suite: string;
@@ -158,6 +179,11 @@ type CaptureEvent = {
   name?: unknown;
   payload?: unknown;
   recordedAt?: unknown;
+};
+
+type CaptureBundleInput = {
+  events?: CaptureEvent[];
+  snapshot?: unknown;
 };
 
 type CapturePayload = {
@@ -248,6 +274,26 @@ function getCaptureEvents(payload: CapturePayload): CaptureEvent[] {
   return asArray(payload.captureBundle?.events) as CaptureEvent[];
 }
 
+function toVoiceRuntimeCaptureEvents(events: CaptureEvent[]): VoiceCaptureEvent[] {
+  return events.flatMap((event, index) => {
+    const category = asString(event.category);
+    const name = asString(event.name);
+    const recordedAt = asString(event.recordedAt);
+
+    if (!category || !name || !recordedAt) {
+      return [];
+    }
+
+    return [{
+      seq: index + 1,
+      recordedAt,
+      category,
+      name,
+      payload: event.payload,
+    }];
+  });
+}
+
 function getCaptureExportedAt(payload: CapturePayload): string | null {
   return asString(payload.captureBundle?.exportedAt);
 }
@@ -261,14 +307,18 @@ function getEventName(event: CaptureEvent): string | null {
 }
 
 function getEventPhase(event: CaptureEvent): string | null {
-  return asString(getEventData(event)?.phase);
+  return asString(getEventData(event)?.phase) ?? asString(getEventData(event)?.status);
+}
+
+function isSophiaVoiceEventCategory(category: unknown): boolean {
+  return category === 'stream-custom' || category === 'voice-sse';
 }
 
 function getLatestArtifact(payload: CapturePayload): Record<string, unknown> | null {
   const events = getCaptureEvents(payload);
   const artifactEvent = findLast(
     events,
-    (event) => event.category === 'stream-custom' && getEventName(event) === 'sophia.artifact'
+    (event) => isSophiaVoiceEventCategory(event.category) && getEventName(event) === 'sophia.artifact'
   );
 
   const snapshotArtifact = getNestedRecord(payload, [
@@ -294,7 +344,7 @@ function getLatestTurnDiagnostic(payload: CapturePayload): Record<string, unknow
   const events = getCaptureEvents(payload);
   const diagnosticEvent = findLast(
     events,
-    (event) => event.category === 'stream-custom' && getEventName(event) === 'sophia.turn_diagnostic'
+    (event) => isSophiaVoiceEventCategory(event.category) && getEventName(event) === 'sophia.turn_diagnostic'
   );
 
   return diagnosticEvent ? getEventData(diagnosticEvent) : null;
@@ -306,6 +356,34 @@ function getConfiguredFakeAudio(payload: CapturePayload): Record<string, unknown
 
 function getObservedMicrophone(payload: CapturePayload): Record<string, unknown> | null {
   return getNestedRecord(payload, ['captureBundle', 'snapshot', 'harness', 'microphone']);
+}
+
+function getRuntimeTelemetry(payload: CapturePayload): {
+  summary: VoiceTelemetrySummary;
+  metrics: VoiceDeveloperMetrics;
+} | null {
+  const captureBundle = asRecord(payload.captureBundle) as CaptureBundleInput | null;
+  if (!captureBundle) {
+    return null;
+  }
+
+  const runtimeEvents = toVoiceRuntimeCaptureEvents(getCaptureEvents(payload));
+  if (runtimeEvents.length === 0 && captureBundle.snapshot == null) {
+    return null;
+  }
+
+  const metrics = buildVoiceDeveloperMetricsFromCapture({
+    capture: {
+      events: runtimeEvents,
+      snapshot: (captureBundle.snapshot ?? null) as SophiaCaptureSnapshot | null,
+    },
+    nowMs: getMsFromIso(getCaptureExportedAt(payload)) ?? undefined,
+  })
+
+  return {
+    summary: buildVoiceTelemetrySummary(metrics),
+    metrics,
+  }
 }
 
 function getNestedRecord(root: unknown, path: string[]): Record<string, unknown> | null {
@@ -347,7 +425,7 @@ function hasArtifactReceipt(artifact: Record<string, unknown> | null): boolean {
 function getLatestFinalTranscriptText(payload: CapturePayload): string | null {
   const events = getCaptureEvents(payload);
   const finalTranscript = findLast(events, (event) => {
-    if (event.category !== 'stream-custom' || getEventName(event) !== 'sophia.transcript') {
+    if (!isSophiaVoiceEventCategory(event.category) || getEventName(event) !== 'sophia.transcript') {
       return false;
     }
 
@@ -457,24 +535,26 @@ export function analyzeVoiceBenchmarkCapture({
   definition: VoiceBenchmarkCaseDefinition;
 }): VoiceBenchmarkCaseReport {
   const events = getCaptureEvents(capture);
+  const telemetry = getRuntimeTelemetry(capture);
   const terminalDiagnostic = getLatestTurnDiagnostic(capture);
   const diagnosticFirstTextMs = asNumber(terminalDiagnostic?.first_text_ms);
+  const diagnosticFirstAudioMs = asNumber(terminalDiagnostic?.first_audio_ms);
   const startRequested =
     events.find(
       (event) => event.category === 'voice-session' && getEventName(event) === 'start-talking-requested'
     ) ?? null;
   const joined = getJoinedAtEvent(events);
   const userEndedEvents = events.filter(
-    (event) => event.category === 'stream-custom' && getEventName(event) === 'sophia.turn' && getEventPhase(event) === 'user_ended'
+    (event) => isSophiaVoiceEventCategory(event.category) && getEventName(event) === 'sophia.turn' && getEventPhase(event) === 'user_ended'
   );
   const userTranscriptEvents = events.filter(
-    (event) => event.category === 'stream-custom' && getEventName(event) === 'sophia.user_transcript'
+    (event) => isSophiaVoiceEventCategory(event.category) && getEventName(event) === 'sophia.user_transcript'
   );
   const agentStartedEvents = events.filter(
-    (event) => event.category === 'stream-custom' && getEventName(event) === 'sophia.turn' && getEventPhase(event) === 'agent_started'
+    (event) => isSophiaVoiceEventCategory(event.category) && getEventName(event) === 'sophia.turn' && getEventPhase(event) === 'agent_started'
   );
   const agentEndedEvents = events.filter(
-    (event) => event.category === 'stream-custom' && getEventName(event) === 'sophia.turn' && getEventPhase(event) === 'agent_ended'
+    (event) => isSophiaVoiceEventCategory(event.category) && getEventName(event) === 'sophia.turn' && getEventPhase(event) === 'agent_ended'
   );
 
   const firstUserEndedAt = getIsoAt(userEndedEvents[0] ?? null);
@@ -672,6 +752,7 @@ export function analyzeVoiceBenchmarkCapture({
       duplicate_phase_counts: resolvedDuplicatePhaseCounts,
       false_user_ended_count: diagnosticRawFalseEndCount ?? falseUserEndedCount,
       first_agent_started_at: firstAgentStartedAt,
+      first_audio_ms: diagnosticFirstAudioMs,
       first_committed_user_transcript_at: firstCommittedUserTranscriptAt,
       first_user_ended_at: firstUserEndedAt,
       join_latency_ms: joinLatencyMs,
@@ -703,6 +784,7 @@ export function analyzeVoiceBenchmarkCapture({
       auto: autoClassification,
       blockedManualReason,
     },
+    telemetry,
     manualReview: {
       responseIntent: {
         expected: definition.expected?.responseIntent ?? null,
@@ -729,8 +811,20 @@ export function summarizeVoiceBenchmarkReports({
 }): VoiceBenchmarkSuiteSummary {
   const completedReports = reports.filter((report) => report.metrics.response_completion);
   const joinLatencies = compactNumbers(reports.map((report) => report.metrics.join_latency_ms));
+  const sessionReadyValues = compactNumbers(
+    reports.map((report) => report.telemetry?.metrics.timings.sessionReadyMs ?? null)
+  );
+  const firstTextValues = compactNumbers(
+    reports.map((report) => report.telemetry?.metrics.lastTurn.firstTextMs ?? null)
+  );
+  const backendCompleteValues = compactNumbers(
+    reports.map((report) => report.telemetry?.metrics.lastTurn.backendCompleteMs ?? null)
+  );
   const turnCloseValues = compactNumbers(
     completedReports.map((report) => report.metrics.turn_close_ms)
+  );
+  const firstAudioValues = compactNumbers(
+    completedReports.map((report) => report.metrics.first_audio_ms)
   );
   const rawTurnCloseValues = compactNumbers(
     completedReports.map((report) => report.metrics.raw_turn_close_ms)
@@ -748,15 +842,45 @@ export function summarizeVoiceBenchmarkReports({
     no_turn_closure: 0,
     wrong_emitted_artifact: 0,
   };
+  const bottleneckCounts: Record<VoiceBottleneckKind, number> = {
+    idle: 0,
+    healthy: 0,
+    startup: 0,
+    microphone: 0,
+    'turn-segmentation': 0,
+    backend: 0,
+    tts: 0,
+    transport: 0,
+  };
 
   for (const report of reports) {
     autoClassCounts[report.classification.auto] += 1;
+    if (report.telemetry) {
+      bottleneckCounts[report.telemetry.summary.bottleneckKind] += 1;
+    }
   }
+
+  const dominantBottleneck = Object.entries(bottleneckCounts).reduce<VoiceBottleneckKind | null>(
+    (selected, [kind, count]) => {
+      if (count === 0) {
+        return selected;
+      }
+
+      if (!selected) {
+        return kind as VoiceBottleneckKind;
+      }
+
+      return bottleneckCounts[selected] >= count ? selected : (kind as VoiceBottleneckKind);
+    },
+    null
+  );
 
   return {
     auto_class_counts: autoClassCounts,
+    bottleneck_counts: bottleneckCounts,
     completed_cases: completedReports.length,
     completion_rate: reports.length === 0 ? 0 : Number((completedReports.length / reports.length).toFixed(2)),
+    dominant_bottleneck: dominantBottleneck,
     emotion_family_hit_rate:
       emotionComparisons.length === 0
         ? null
@@ -769,11 +893,15 @@ export function summarizeVoiceBenchmarkReports({
       (report) => report.harness.classification.inputReceived
     ).length,
     harness_input_missing_cases: autoClassCounts.harness_input_missing,
+    median_backend_complete_ms: median(backendCompleteValues),
+    median_first_text_ms: median(firstTextValues),
     max_join_latency_ms: joinLatencies.length === 0 ? null : Math.max(...joinLatencies),
     mean_join_latency_ms: mean(joinLatencies),
     median_false_user_ended_count: median(falseUserEndedCounts),
+    median_first_audio_ms: median(firstAudioValues),
     median_join_latency_ms: median(joinLatencies),
     median_raw_turn_close_ms: median(rawTurnCloseValues),
+    median_session_ready_ms: median(sessionReadyValues),
     median_turn_close_ms: median(turnCloseValues),
     min_join_latency_ms: joinLatencies.length === 0 ? null : Math.min(...joinLatencies),
     suite: manifest.suite,

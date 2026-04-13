@@ -6,10 +6,13 @@ import os
 import re
 import time
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
@@ -69,6 +72,14 @@ class VoiceConnectResponse(BaseModel):
     token: str
     call_type: str
     call_id: str
+    thread_id: str | None = Field(
+        default=None,
+        description="LangGraph thread ID associated with this voice session",
+    )
+    stream_url: str | None = Field(
+        default=None,
+        description="Browser-facing SSE endpoint for Sophia transcript and artifact events",
+    )
     session_id: str | None = Field(
         default=None,
         description="Voice agent session ID (from Vision Agents server)",
@@ -80,6 +91,10 @@ class VoiceDisconnectRequest(BaseModel):
 
     call_id: str = Field(..., description="The call_id returned from /voice/connect")
     session_id: str = Field(..., description="The session_id returned from /voice/connect")
+    thread_id: str | None = Field(
+        default=None,
+        description="LangGraph thread ID associated with the session",
+    )
 
 
 def _get_stream_api_key() -> str:
@@ -101,6 +116,19 @@ def _sanitize_call_id_fragment(value: str) -> str:
 
     normalized = re.sub(r"[^a-z0-9_-]+", "-", value.lower()).strip("-_")
     return normalized or "user"
+
+
+def _build_voice_events_stream_url(user_id: str, call_id: str, session_id: str | None) -> str | None:
+    if not session_id:
+        return None
+
+    encoded_user_id = quote(user_id, safe="")
+    encoded_call_id = quote(call_id, safe="")
+    encoded_session_id = quote(session_id, safe="")
+    return (
+        f"/api/sophia/{encoded_user_id}/voice/events"
+        f"?call_id={encoded_call_id}&session_id={encoded_session_id}"
+    )
 
 
 def _generate_stream_token(api_secret: str, user_id: str) -> str:
@@ -211,7 +239,81 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
         token=token,
         call_type=call_type,
         call_id=call_id,
+        thread_id=body.thread_id,
+        stream_url=_build_voice_events_stream_url(user_id, call_id, session_id),
         session_id=session_id,
+    )
+
+
+@router.get(
+    "/{user_id}/voice/events",
+    summary="Stream voice session events",
+    description="Proxy the voice service SSE stream to the authenticated browser client.",
+)
+async def voice_events(
+    user_id: str,
+    call_id: str = Query(..., description="The voice call ID returned from /voice/connect"),
+    session_id: str = Query(..., description="The voice session ID returned from /voice/connect"),
+) -> StreamingResponse:
+    voice_url = _get_voice_server_url()
+    url = f"{voice_url}/calls/{call_id}/sessions/{session_id}/events"
+    client = httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0),
+    )
+
+    try:
+        request = client.build_request(
+            "GET",
+            url,
+            headers={"Accept": "text/event-stream"},
+        )
+        response = await client.send(request, stream=True)
+    except httpx.ConnectError as exc:
+        await client.aclose()
+        raise HTTPException(
+            status_code=503,
+            detail="Voice event stream unavailable.",
+        ) from exc
+    except httpx.RequestError as exc:
+        await client.aclose()
+        raise HTTPException(
+            status_code=503,
+            detail="Voice event stream request failed.",
+        ) from exc
+
+    if response.status_code == 404:
+        await response.aclose()
+        await client.aclose()
+        raise HTTPException(status_code=404, detail="Voice session not found.")
+
+    if response.status_code >= 400:
+        try:
+            detail = (await response.aread()).decode("utf-8", errors="replace")[:200]
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Voice event stream failed with HTTP {response.status_code}: {detail}",
+        )
+
+    async def _proxy_stream() -> AsyncIterator[bytes]:
+        try:
+            async for chunk in response.aiter_bytes():
+                yield chunk
+        finally:
+            await response.aclose()
+            await client.aclose()
+
+    return StreamingResponse(
+        _proxy_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

@@ -620,6 +620,51 @@ async def test_stream_events_prefer_final_values_artifact_over_streamed_args() -
 
 
 @pytest.mark.anyio
+async def test_stream_events_return_immediately_after_final_values_artifact() -> None:
+    artifact = _valid_artifact()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: messages",
+                "data: " + json.dumps([
+                    {
+                        "type": "AIMessageChunk",
+                        "content": [{"text": "Hi", "type": "text", "index": 0}],
+                        "tool_calls": [
+                            {"name": "emit_artifact", "args": artifact, "id": "call-1", "type": "tool_call"},
+                        ],
+                    },
+                    {"id": "meta-1"},
+                ]),
+                "event: values",
+                "data: " + json.dumps({"current_artifact": artifact}),
+                "event: messages",
+                "data: {not-json}",
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["text", "artifact"]
+    assert events[0].text == "Hi"
+    assert events[1].artifact == artifact
+
+
+@pytest.mark.anyio
 async def test_stream_events_recover_artifact_from_final_values_after_partial_tool_args() -> None:
     artifact = _valid_artifact()
 

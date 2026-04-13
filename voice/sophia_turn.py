@@ -75,6 +75,7 @@ _FRAGMENT_START_PATTERN: re.Pattern[str] = re.compile(
 )
 
 _TURN_END_GUARD_RELEASE_NEW_WORDS = 4
+_NON_FINAL_STABLE_SUBMISSION_MAX_WORDS = 6
 
 
 class SophiaTurnDetection(SmartTurnDetection):
@@ -177,11 +178,16 @@ class SophiaTurnDetection(SmartTurnDetection):
             return True
 
         word_count = len(text.split())
-        return (
-            not self._current_transcript_is_final
-            or self._has_continuation_signal(text)
-            or self._is_fragment(text, word_count)
-        )
+        if self._has_continuation_signal(text) or self._is_fragment(text, word_count):
+            return True
+
+        if self._current_transcript_is_final:
+            return False
+
+        # Non-final transcripts are common even when the spoken thought is
+        # already stable. Only pay the extra stabilization delay for short
+        # phrases where pause-mid-thought risk is still high.
+        return word_count <= _NON_FINAL_STABLE_SUBMISSION_MAX_WORDS
 
     def clear_turn_end_guard(self) -> None:
         self._turn_end_guard_active = False
