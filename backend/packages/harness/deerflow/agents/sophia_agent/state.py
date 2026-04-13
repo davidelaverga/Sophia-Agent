@@ -47,6 +47,11 @@ class SophiaState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
+    builder_allowed_urls: NotRequired[list[str]]
+    builder_search_sources: NotRequired[list[dict]]
+    builder_web_budget: NotRequired[dict]
+    allow_web_research: NotRequired[bool]
+    explicit_user_urls: NotRequired[list[str]]
 
     # Planning
     todos: NotRequired[list | None]

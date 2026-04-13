@@ -12,9 +12,10 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
@@ -22,8 +23,9 @@ from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityM
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.config.app_config import get_app_config
-from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
+from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
+from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.tools.builtins import present_file_tool
 
@@ -41,6 +43,7 @@ def make_sophia_builder(config: RunnableConfig):
     user_id = cfg.get("user_id", "default_user")
     model_name = cfg.get("model_name")
     return _create_builder_agent(user_id=user_id, model_name=model_name)
+
 
 def _resolve_builder_model_name(model_name: str | None) -> tuple[str, str]:
     """Resolve model name and source for builder creation logging."""
@@ -104,34 +107,35 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
     )
-    # 8-middleware chain for builder execution.
-    # TodoListMiddleware deferred to Phase 2
-    middlewares = [
-        # 1. Infrastructure — shares thread with companion
-        ThreadDataMiddleware(lazy_init=True),
-        # 2. Sandbox execution capabilities for file/tool operations
-        SandboxMiddleware(lazy_init=True),
-        # 3. Values — soul.md only (voice.md not needed, builder doesn't speak)
-        FileInjectionMiddleware((SKILLS_PATH / "soul.md", False)),
-        # 4. User personalization — identity file shapes what builder creates
-        UserIdentityMiddleware(user_id),
-        # 5. Task briefing — translates companion artifact into builder guidance
-        BuilderTaskMiddleware(),
-        # 6. Planning — todo list always enabled for delegated build execution
-        _create_builder_todo_middleware(),
-        # 7. Builder artifact capture — after-model reads emit_builder_artifact
-        BuilderArtifactMiddleware(),
-        # 8. Prompt assembly — assembles system_prompt_blocks into system message
-        PromptAssemblyMiddleware(),
-    ]
+    middlewares = build_subagent_runtime_middlewares(lazy_init=True)
+    middlewares.extend(
+        [
+        # 1. Values — soul.md only (voice.md not needed, builder doesn't speak)
+            FileInjectionMiddleware((SKILLS_PATH / "soul.md", False)),
+        # 2. User personalization — identity file shapes what builder creates
+            UserIdentityMiddleware(user_id),
+        # 3. Task briefing — translates companion artifact into builder guidance
+            BuilderTaskMiddleware(),
+        # 4. Builder-only web research rules and state initialization
+            BuilderResearchPolicyMiddleware(),
+        # 5. Planning — todo list always enabled for delegated build execution
+            _create_builder_todo_middleware(),
+        # 6. Builder artifact capture — after-model reads emit_builder_artifact
+            BuilderArtifactMiddleware(),
+        # 7. Prompt assembly — assembles system_prompt_blocks into system message
+            PromptAssemblyMiddleware(),
+        ]
+    )
 
-    # Sandbox tools (bash, file ops) + present_files + emit_builder_artifact
+    # Guarded builder tools: sandbox/file ops + web research + artifact tools.
     tools = [
         bash_tool,
         ls_tool,
         read_file_tool,
         write_file_tool,
         str_replace_tool,
+        builder_web_search,
+        builder_web_fetch,
         present_file_tool,
         emit_builder_artifact,
     ]

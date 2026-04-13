@@ -25,6 +25,8 @@ class BuilderTaskState(AgentState):
     delegation_context: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
+    builder_search_sources: NotRequired[list[dict]]
+    allow_web_research: NotRequired[bool]
 
 
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
@@ -47,6 +49,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         relevant_memories: list[str] = delegation_context.get("relevant_memories", [])
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
+        allow_web_research = bool(
+            state.get("allow_web_research", delegation_context.get("allow_web_research", False))
+        )
+        tracked_sources = [
+            source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
+        ]
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
         recent_tool_names = [
             str(name).strip()
@@ -90,6 +98,29 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
+
+        if task_type == "research":
+            sections.append(
+                "<research_output_requirements>\n"
+                "- For factual claims from external sources, use inline citations in the format [citation:Title](URL).\n"
+                "- End the report with a Sources section using [Title](URL) - note format.\n"
+                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
+                "</research_output_requirements>"
+            )
+        elif allow_web_research:
+            sections.append(
+                "<source_output_requirements>\n"
+                "- If you use external sources, include a concise Sources appendix in the deliverable or create a small sidecar markdown file.\n"
+                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
+                "</source_output_requirements>"
+            )
+
+        if tracked_sources:
+            source_lines = [
+                f"- {source.get('title', source.get('url', 'Untitled'))} — {source.get('url', '')}"
+                for source in tracked_sources[:8]
+            ]
+            sections.append("<tracked_sources>\n" + "\n".join(source_lines) + "\n</tracked_sources>")
 
         # Completion instruction
         sections.append(

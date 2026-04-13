@@ -104,6 +104,8 @@ def test_switch_to_builder_queues_background_task(monkeypatch):
         "Prefers concise slide headlines",
         "Avoids cluttered visuals",
     ]
+    assert captured["kwargs"]["extra_configurable"]["delegation_context"]["allow_web_research"] is False
+    assert captured["kwargs"]["extra_configurable"]["delegation_context"]["search_mode"] == "autonomous"
     assert events[-1]["type"] == "task_started"
     assert events[-1]["task_id"] == "tc-builder-1"
 
@@ -256,6 +258,53 @@ def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
     assert handoff_resolution["artifact_source"] == "latest_emit_artifact_tool_call"
     assert handoff_resolution["latest_emit_artifact_present"] is True
     assert handoff_resolution["current_artifact_present"] is True
+
+
+def test_switch_to_builder_enables_web_research_for_research_task(monkeypatch):
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(self, task: str, task_id: str | None = None):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime({"user_id": "user_123"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Research the latest AI voice companion pricing trends and compare current competitors. Use https://example.com/seed as a seed source.",
+        task_type="research",
+        tool_call_id="tc-builder-research",
+    )
+    payload = json.loads(response)
+    delegation_context = payload["delegation_context"]
+
+    assert delegation_context["allow_web_research"] is True
+    assert delegation_context["search_mode"] == "autonomous"
+    assert delegation_context["explicit_user_urls"] == ["https://example.com/seed"]
+    assert delegation_context["builder_web_budget"]["search_limit"] == 5
+    assert delegation_context["builder_web_budget"]["fetch_limit"] == 8
 
 def test_switch_to_builder_ignores_empty_emit_artifact_payload(monkeypatch):
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
@@ -666,11 +715,17 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
 
     def _capture_builder(**kwargs):
         captured_builder["middleware"] = kwargs["middleware"]
+        captured_builder["tools"] = kwargs["tools"]
         return DummyAgent()
 
     monkeypatch.setattr(builder_module, "create_agent", _capture_builder)
     builder_module._create_builder_agent(user_id="user_123")
 
     builder_types = [type(mw).__name__ for mw in captured_builder["middleware"]]
+    builder_tool_names = [getattr(tool, "name", None) for tool in captured_builder["tools"]]
     assert "SandboxMiddleware" in builder_types
+    assert "ToolErrorHandlingMiddleware" in builder_types
     assert "TodoMiddleware" in builder_types
+    assert "BuilderResearchPolicyMiddleware" in builder_types
+    assert "builder_web_search" in builder_tool_names
+    assert "builder_web_fetch" in builder_tool_names

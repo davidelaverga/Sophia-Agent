@@ -123,7 +123,9 @@ def make_sophia_agent(config: RunnableConfig):
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
         # 12. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
-        # 13. Artifact system
+        # 13. Builder session tracking (must run before ArtifactMiddleware synthesis)
+        BuilderSessionMiddleware(),
+        # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
     ]
 

@@ -19,6 +19,11 @@ from pydantic import BaseModel, Field
 
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.sophia.builder_web_policy import (
+    extract_explicit_user_urls,
+    make_builder_web_budget,
+    should_allow_builder_web_research,
+)
 from deerflow.subagents import SubagentExecutor, get_subagent_config
 
 logger = logging.getLogger(__name__)
@@ -211,6 +216,9 @@ def switch_to_builder(
     active_ritual = state.get("active_ritual")
     ritual_phase = state.get("ritual_phase")
     memory_snippets = _resolve_memory_snippets(state)
+    allow_web_research = should_allow_builder_web_research(task_type, task)
+    explicit_user_urls = extract_explicit_user_urls(task)
+    builder_web_budget = make_builder_web_budget(task_type)
     sandbox_state = state.get("sandbox")
     thread_data = state.get("thread_data")
     thread_id = _resolve_thread_id(runtime)
@@ -247,6 +255,10 @@ def switch_to_builder(
         "relevant_memories": memory_snippets[:5],
         "active_ritual": active_ritual,
         "ritual_phase": ritual_phase,
+        "allow_web_research": allow_web_research,
+        "search_mode": "autonomous",
+        "explicit_user_urls": explicit_user_urls,
+        "builder_web_budget": builder_web_budget,
         "handoff_resolution": handoff_resolution,
     }
 
