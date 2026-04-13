@@ -52,8 +52,8 @@ _CONTINUATION_PATTERNS: list[re.Pattern[str]] = [
 # mid-sentence fragments (e.g. "are getting better", "with my friend").
 # Only applied when word_count <= _FRAGMENT_MAX_WORDS, except for a slightly
 # longer conjunction-led restart like "but I still feel off sometimes".
-_FRAGMENT_MAX_WORDS = 5
-_CONJUNCTION_FRAGMENT_MAX_WORDS = 6
+_FRAGMENT_MAX_WORDS = 3
+_CONJUNCTION_FRAGMENT_MAX_WORDS = 4
 _FRAGMENT_CONJUNCTION_START_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:and|but|because|so|or|although|though)\b",
     re.IGNORECASE,
@@ -87,12 +87,12 @@ class SophiaTurnDetection(SmartTurnDetection):
         self,
         echo_cooldown_ms: int = DEFAULT_ECHO_COOLDOWN_MS,
         *,
-        adaptive_silence_short_ms: int = 1000,
-        adaptive_silence_medium_ms: int = 1500,
-        adaptive_silence_long_ms: int = 2000,
-        adaptive_silence_ceiling_ms: int = 2800,
-        adaptive_silence_continuation_bonus_ms: int = 800,
-        adaptive_silence_fragment_bonus_ms: int = 1400,
+        adaptive_silence_short_ms: int = 700,
+        adaptive_silence_medium_ms: int = 1000,
+        adaptive_silence_long_ms: int = 1400,
+        adaptive_silence_ceiling_ms: int = 1800,
+        adaptive_silence_continuation_bonus_ms: int = 400,
+        adaptive_silence_fragment_bonus_ms: int = 800,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
