@@ -27,4 +27,12 @@ memory:
   enabled: false
 
 summarization:
-  enabled: false
+  enabled: true
+  # Summarize old messages when conversation exceeds these thresholds.
+  # Keeps backend latency stable across long voice sessions.
+  trigger:
+    type: messages
+    count: 10        # Summarize after 10 messages (5 turns)
+  keep:
+    type: last
+    count: 4         # Keep last 4 messages (2 turns) unsummarized
