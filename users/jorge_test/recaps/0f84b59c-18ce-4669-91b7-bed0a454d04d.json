@@ -1,0 +1,17 @@
+{
+  "session_id": "0f84b59c-18ce-4669-91b7-bed0a454d04d",
+  "thread_id": "be183ab8-ccca-4f20-9398-6890f911caf0",
+  "session_type": "debrief",
+  "context_mode": "life",
+  "started_at": "2026-04-08T22:17:22.594Z",
+  "ended_at": "2026-04-08T22:35:31.501313+00:00",
+  "turn_count": 20,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Sometimes clarity comes in layers. First he was grateful but vague. Now he's specific but still guarded. The question beneath the question is: what's he actually carrying?",
+    "reflection_candidate": {
+      "prompt": "What makes it hard for you to just say what you actually need right now?"
+    },
+    "status": "ready"
+  }
+}

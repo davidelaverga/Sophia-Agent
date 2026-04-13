@@ -403,7 +403,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
-            "injected_memory_contents": memory_contents,
+            "injected_memory_contents": memory_lines,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }
 
