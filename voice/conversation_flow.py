@@ -8,7 +8,8 @@ the coordinator:
 2. Interrupts TTS playback.
 3. Sends a brief acknowledgment ("Go on.", "Mm-hmm.", …).
 4. Waits for the user to finish their full thought.
-5. Resubmits the merged transcript as a single turn.
+5. Queues the merged transcript so the next framework submission uses the
+    full turn once.
 
 If the fragile window expires without new speech, normal response proceeds
 with zero added latency (R8).
@@ -51,9 +52,6 @@ class ConversationFlowCoordinator:
         Sync or async callback to stop TTS playback immediately.
     send_acknowledgment:
         Async callback that speaks an acknowledgment phrase via TTS.
-    resubmit_response:
-        Async callback(transcript, participant) to submit a merged transcript
-        as a new LLM turn.
     """
 
     def __init__(
@@ -68,7 +66,6 @@ class ConversationFlowCoordinator:
         send_acknowledgment: Callable[[str], Awaitable[None]],
         on_backend_stall: Callable[[object | None, str], Awaitable[None]],
         record_turn: Callable[[int, list[float], bool], None] | None,
-        resubmit_response: Callable[[str, object], Awaitable[None]],
     ) -> None:
         self._fragile_window_ms = fragile_window_ms
         self._merge_min_new_words = merge_min_new_words
@@ -81,7 +78,6 @@ class ConversationFlowCoordinator:
         self._send_acknowledgment = send_acknowledgment
         self._on_backend_stall = on_backend_stall
         self._record_turn = record_turn
-        self._resubmit_response = resubmit_response
 
         # Per-turn state
         self._original_transcript: str = ""
@@ -102,6 +98,8 @@ class ConversationFlowCoordinator:
         self._submitted_participant: Optional[object] = None
         self._response_in_progress: bool = False
         self._backend_progress_seen: bool = False
+        self._pending_recovered_transcript: str | None = None
+        self._pending_recovered_participant: Optional[object] = None
 
     # ------------------------------------------------------------------
     # Public event handlers
@@ -174,7 +172,7 @@ class ConversationFlowCoordinator:
     def on_merge_turn_ended(self, transcript: str) -> None:
         """Called when the user finishes their continued thought after cancel.
 
-        Merges original + continuation and resubmits.
+        Merges original + continuation and queues it for the next submission.
         """
         if not self._merge_pending:
             return
@@ -182,15 +180,16 @@ class ConversationFlowCoordinator:
         self._merge_pending = False
         merged = self._merge_transcripts(self._original_transcript, transcript)
         if not merged.strip():
-            logger.warning("[FLOW] Skipping resubmit — merged transcript is empty")
+            logger.warning("[FLOW] Skipping queued merge — merged transcript is empty")
             return
         self._original_transcript = merged
         self._active_turn_fingerprint = self._fingerprint(merged)
         self._active_turn_word_count = len(merged.split()) if merged.strip() else 0
         self._last_turn_end_at = time.monotonic()
+        self._pending_recovered_transcript = merged
+        self._pending_recovered_participant = self._participant
         self._start_backend_stall_timer()
-        logger.info("[FLOW] Resubmitting merged transcript (%d chars)", len(merged))
-        asyncio.ensure_future(self._resubmit_response(merged, self._participant))
+        logger.info("[FLOW] Queued merged transcript for next submission (%d chars)", len(merged))
 
     def on_agent_started(self) -> None:
         self._cancel_backend_stall()
@@ -270,6 +269,8 @@ class ConversationFlowCoordinator:
         self,
         transcript: str,
         participant: object,
+        *,
+        queue_for_next_submission: bool = False,
     ) -> str | None:
         if not self._response_in_progress:
             return None
@@ -316,6 +317,30 @@ class ConversationFlowCoordinator:
         self._participant = participant
         self._active_turn_fingerprint = self._fingerprint(merged)
         self._active_turn_word_count = len(merged.split())
+        self._last_turn_end_at = time.monotonic()
+        if queue_for_next_submission:
+            self._pending_recovered_transcript = merged
+            self._pending_recovered_participant = participant
+        return merged
+
+    def consume_pending_recovered_response(
+        self,
+        transcript: str,
+        participant: object,
+    ) -> str | None:
+        pending = self._pending_recovered_transcript
+        pending_participant = self._pending_recovered_participant
+        if pending is None or not self._same_participant(participant, pending_participant):
+            return None
+
+        self._pending_recovered_transcript = None
+        self._pending_recovered_participant = None
+
+        merged = self._merge_transcripts(pending, transcript)
+        self._original_transcript = merged
+        self._participant = participant
+        self._active_turn_fingerprint = self._fingerprint(merged)
+        self._active_turn_word_count = len(merged.split()) if merged.strip() else 0
         self._last_turn_end_at = time.monotonic()
         return merged
 
@@ -433,6 +458,8 @@ class ConversationFlowCoordinator:
         self._submitted_participant = None
         self._response_in_progress = False
         self._backend_progress_seen = False
+        self._pending_recovered_transcript = None
+        self._pending_recovered_participant = None
 
     def _should_suppress_repeat(self, fingerprint: str) -> bool:
         return self._active_turn_fingerprint is not None and fingerprint == self._active_turn_fingerprint

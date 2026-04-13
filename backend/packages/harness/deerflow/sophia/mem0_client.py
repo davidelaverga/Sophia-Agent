@@ -49,6 +49,8 @@ _cache_lock = threading.Lock()
 _client = None
 _client_initialized = False
 _client_lock = threading.Lock()
+_warm_up_completed = False
+_warm_up_lock = threading.Lock()
 
 
 def _get_client():
@@ -83,21 +85,33 @@ def warm_up() -> None:
     request doesn't pay the cold-start latency (~1-2s for client init + ping).
     Safe to call multiple times — the client is a singleton.
     """
-    import time
-    _t0 = time.perf_counter()
-    client = _get_client()
-    if client is None:
-        logger.warning("[Mem0] warm_up: client unavailable")
+    global _warm_up_completed
+
+    if _warm_up_completed:
         return
-    try:
-        # The Mem0 SDK pings the server on first API call.
-        # Do a lightweight search to trigger that ping now.
-        client.search(query="warm_up", filters={"user_id": "__warmup__"}, limit=1)
-        elapsed = (time.perf_counter() - _t0) * 1000
-        logger.info("[Mem0] warm_up completed (%.0fms)", elapsed)
-    except Exception:
-        elapsed = (time.perf_counter() - _t0) * 1000
-        logger.warning("[Mem0] warm_up ping failed (%.0fms)", elapsed, exc_info=True)
+
+    with _warm_up_lock:
+        if _warm_up_completed:
+            return
+
+        _t0 = time.perf_counter()
+        client = _get_client()
+        if client is None:
+            logger.warning("[Mem0] warm_up: client unavailable")
+            _warm_up_completed = True
+            return
+
+        try:
+            # The Mem0 SDK pings the server on first API call.
+            # Do a lightweight search to trigger that ping now.
+            client.search(query="warm_up", filters={"user_id": "__warmup__"}, limit=1)
+            elapsed = (time.perf_counter() - _t0) * 1000
+            logger.info("[Mem0] warm_up completed (%.0fms)", elapsed)
+        except Exception:
+            elapsed = (time.perf_counter() - _t0) * 1000
+            logger.warning("[Mem0] warm_up ping failed (%.0fms)", elapsed, exc_info=True)
+        finally:
+            _warm_up_completed = True
 
 
 def search_memories(
@@ -105,6 +119,7 @@ def search_memories(
     query: str,
     categories: list[str] | None = None,
     context_mode: str | None = None,
+    limit: int = 10,
 ) -> list[dict]:
     """Search Mem0 for memories matching the query, categories, and context.
 
@@ -117,10 +132,11 @@ def search_memories(
             returned but ranked lower.
 
     Returns a list of memory dicts with 'id', 'content', and 'category' fields.
-    Results are cached per (user_id, query, categories, context_mode) for 60 seconds.
+    Results are cached per (user_id, query, categories, context_mode, limit)
+    for 60 seconds.
     Thread-safe with bounded cache size.
     """
-    cache_key = f"{user_id}:{query}:{','.join(sorted(categories or []))}:{context_mode or ''}"
+    cache_key = f"{user_id}:{query}:{','.join(sorted(categories or []))}:{context_mode or ''}:{limit}"
 
     # Check cache (thread-safe)
     with _cache_lock:
@@ -139,7 +155,7 @@ def search_memories(
         results = client.search(
             query=query,
             filters={"user_id": user_id},
-            limit=10,
+            limit=limit,
         )
 
         # Normalize results to list of dicts

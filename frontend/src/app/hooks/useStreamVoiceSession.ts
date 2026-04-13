@@ -3,12 +3,12 @@
 /**
  * useStreamVoiceSession — Replaces useVoiceLoop for Stream WebRTC transport.
  *
- * Maps Stream SDK call state + custom events to the VoiceStage interface
+ * Maps Stream SDK call state + browser-facing Sophia events to the VoiceStage interface
  * that all UI components depend on. Handles:
  * - Token fetching from backend (Unit 1 endpoint)
  * - Call lifecycle via useStreamVoice (Unit 2)
  * - VoiceStage transitions from CallingState + participant events
- * - Transcript and artifact forwarding via Stream custom events
+ * - Transcript and artifact forwarding via SSE, with Stream custom events as fallback
  */
 
 import { CallingState } from "@stream-io/video-react-sdk"
@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { logger } from "../lib/error-logger"
 import { recordSophiaCaptureEvent } from "../lib/session-capture"
 import type { ContextMode, PresetType } from "../lib/session-types"
+import { reconcileVoiceTranscript } from "../lib/voice-transcript-reconciliation"
 import type { VoiceStage } from "../lib/voice-types"
 import { usePresenceStore } from "../stores/presence-store"
 import { useSessionStore } from "../stores/session-store"
@@ -39,6 +40,8 @@ type UseStreamVoiceSessionOptions = {
   onAssistantResponse?: (text: string) => void
   onArtifacts?: (artifacts: Record<string, unknown>) => void
 }
+
+type SophiaVoiceEventSource = "custom" | "sse"
 
 export type StreamVoiceSessionReturn = {
   stage: VoiceStage
@@ -76,6 +79,8 @@ const STARTUP_READY_TIMEOUT_MS = 10_000
 const STARTUP_READY_TIMEOUT_MESSAGE = "Sophia voice is unavailable right now. Try again."
 const TOKEN_ENDPOINT = "/api/sophia"
 const RECENT_UTTERANCE_IDS_LIMIT = 20
+const AUTO_PRECONNECT_DELAY_MS = 250
+const PREPARED_VOICE_CONNECT_TTL_MS = 30_000
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -99,6 +104,24 @@ function callingStateToVoiceStage(
     default:
       return "idle"
   }
+}
+
+function buildVoiceConnectKey(
+  userId: string,
+  platform: string,
+  contextMode: ContextMode,
+  ritual: string | null,
+  sessionId?: string,
+  threadId?: string,
+): string {
+  return JSON.stringify({
+    userId,
+    platform,
+    contextMode,
+    ritual,
+    sessionId: sessionId ?? null,
+    threadId: threadId ?? null,
+  })
 }
 
 async function fetchStreamCredentials(
@@ -133,6 +156,24 @@ async function fetchStreamCredentials(
     callType: data.call_type,
     callId: data.call_id,
     sessionId: typeof data.session_id === "string" ? data.session_id : null,
+    threadId: typeof data.thread_id === "string" ? data.thread_id : null,
+    streamUrl: typeof data.stream_url === "string" ? data.stream_url : null,
+  }
+}
+
+async function prewarmStreamVoiceConnect(
+  userId: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/connect`, {
+    method: "GET",
+    signal,
+    cache: "no-store",
+  })
+
+  if (!res.ok) {
+    const body = await res.text().catch(() => "")
+    throw new Error(`Voice connect prewarm failed (${res.status}): ${body}`)
   }
 }
 
@@ -149,6 +190,7 @@ async function requestVoiceDisconnect(
     body: JSON.stringify({
       call_id: credentials.callId,
       session_id: credentials.sessionId,
+      ...(credentials.threadId ? { thread_id: credentials.threadId } : {}),
     }),
     keepalive: options.keepalive,
   })
@@ -159,6 +201,33 @@ async function requestVoiceDisconnect(
 
   const body = await res.text().catch(() => "")
   throw new Error(`Voice disconnect failed (${res.status}): ${body}`)
+}
+
+async function requestVoiceWarmup(
+  userId: string,
+  credentials: StreamVoiceCredentials,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!credentials.sessionId) {
+    return
+  }
+
+  const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/warmup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({
+      call_id: credentials.callId,
+      session_id: credentials.sessionId,
+    }),
+  })
+
+  if (res.ok) {
+    return
+  }
+
+  const body = await res.text().catch(() => "")
+  throw new Error(`Voice warmup failed (${res.status}): ${body}`)
 }
 
 function resolveVoiceRitual(presetType: PresetType | null): string | null {
@@ -203,6 +272,7 @@ export function useStreamVoiceSession(
   const thinkingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const startupReadyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recentUserTranscriptIdsRef = useRef<string[]>([])
+  const currentTurnUserTranscriptRef = useRef<string | null>(null)
   const destroyedRef = useRef(false)
   const errorStageLockRef = useRef(false)
   const isSophiaReadyRef = useRef(false)
@@ -215,6 +285,20 @@ export function useStreamVoiceSession(
   const pendingStartControllerRef = useRef<AbortController | null>(null)
   const startRequestVersionRef = useRef(0)
   const startInFlightRef = useRef(false)
+  const eventSourceRef = useRef<EventSource | null>(null)
+  const preferSseEventsRef = useRef(false)
+  const connectPrewarmPromiseRef = useRef<Promise<void> | null>(null)
+  const connectPrewarmControllerRef = useRef<AbortController | null>(null)
+  const connectPrewarmAttemptedUserIdRef = useRef<string | null>(null)
+  const autoPreconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const preparedVoiceConnectKeyRef = useRef<string | null>(null)
+  const preparedVoiceConnectPromiseRef = useRef<Promise<StreamVoiceCredentials | null> | null>(null)
+  const preparedVoiceConnectControllerRef = useRef<AbortController | null>(null)
+  const preparedVoiceCredentialsRef = useRef<StreamVoiceCredentials | null>(null)
+  const preparedVoiceCredentialsAtRef = useRef<number>(0)
+  const backendWarmupKeyRef = useRef<string | null>(null)
+  const backendWarmupControllerRef = useRef<AbortController | null>(null)
+  const autoPreconnectEnabledRef = useRef(true)
 
   // Keep refs current without re-binding effects
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
@@ -224,15 +308,24 @@ export function useStreamVoiceSession(
   useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
   useEffect(() => { isSophiaReadyRef.current = isSophiaReady }, [isSophiaReady])
   useEffect(() => {
+    autoPreconnectEnabledRef.current = true
+  }, [sessionId, threadId, userId])
+  useEffect(() => {
     if (credentials?.callId && credentials?.sessionId) {
       disconnectRequestKeyRef.current = null
     }
   }, [credentials?.callId, credentials?.sessionId])
+  useEffect(() => {
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
+    backendWarmupKeyRef.current = null
+  }, [sessionId, threadId, userId])
 
   // --- Platform signal ------------------------------------------------------
   const platform = usePlatformSignal()
   const contextMode = useSessionStore((state) => state.session?.contextMode ?? "life")
   const presetType = useSessionStore((state) => state.session?.presetType ?? null)
+  const voiceRitual = resolveVoiceRitual(presetType)
 
   // --- Stores --------------------------------------------------------------
   const addVoiceMessage = useVoiceStore((s) => s.addMessage)
@@ -292,12 +385,311 @@ export function useStreamVoiceSession(
     ].slice(-RECENT_UTTERANCE_IDS_LIMIT)
   }, [])
 
+  const clearCurrentTurnUserTranscript = useCallback(() => {
+    currentTurnUserTranscriptRef.current = null
+  }, [])
+
   const cancelPendingStartRequest = useCallback(() => {
     startRequestVersionRef.current += 1
     startInFlightRef.current = false
     pendingStartControllerRef.current?.abort()
     pendingStartControllerRef.current = null
   }, [])
+
+  const closeEventSource = useCallback(() => {
+    preferSseEventsRef.current = false
+    eventSourceRef.current?.close()
+    eventSourceRef.current = null
+  }, [])
+
+  const clearAutoPreconnectTimer = useCallback(() => {
+    if (autoPreconnectTimerRef.current) {
+      clearTimeout(autoPreconnectTimerRef.current)
+      autoPreconnectTimerRef.current = null
+    }
+  }, [])
+
+  const clearPreparedVoiceConnectRefs = useCallback(() => {
+    preparedVoiceConnectControllerRef.current?.abort()
+    preparedVoiceConnectControllerRef.current = null
+    preparedVoiceConnectPromiseRef.current = null
+    preparedVoiceConnectKeyRef.current = null
+    preparedVoiceCredentialsRef.current = null
+    preparedVoiceCredentialsAtRef.current = 0
+  }, [])
+
+  const releasePreparedVoiceConnect = useCallback(async (options: { keepalive?: boolean } = {}) => {
+    const preparedCredentials = preparedVoiceCredentialsRef.current
+    const activeCredentials = credentialsRef.current
+
+    clearPreparedVoiceConnectRefs()
+
+    if (!userId || !preparedCredentials?.sessionId) {
+      return
+    }
+
+    if (
+      activeCredentials?.callId === preparedCredentials.callId
+      && activeCredentials?.sessionId === preparedCredentials.sessionId
+    ) {
+      return
+    }
+
+    try {
+      await requestVoiceDisconnect(userId, preparedCredentials, options)
+    } catch {
+      // Best-effort cleanup for unused preconnected sessions.
+    }
+  }, [clearPreparedVoiceConnectRefs, userId])
+
+  const prewarmVoiceConnect = useCallback(() => {
+    if (!userId) {
+      return null
+    }
+
+    if (
+      connectPrewarmAttemptedUserIdRef.current === userId
+      || connectPrewarmPromiseRef.current !== null
+    ) {
+      return connectPrewarmPromiseRef.current
+    }
+
+    connectPrewarmAttemptedUserIdRef.current = userId
+    const controller = new AbortController()
+    connectPrewarmControllerRef.current = controller
+
+    const promise = prewarmStreamVoiceConnect(userId, controller.signal)
+      .catch((err) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        logger.debug("StreamVoiceSession", "Voice connect prewarm failed", {
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      })
+      .finally(() => {
+        if (connectPrewarmControllerRef.current === controller) {
+          connectPrewarmControllerRef.current = null
+        }
+        if (connectPrewarmPromiseRef.current === promise) {
+          connectPrewarmPromiseRef.current = null
+        }
+      })
+
+    connectPrewarmPromiseRef.current = promise
+    return promise
+  }, [userId])
+
+  const preconnectVoiceSession = useCallback(() => {
+    if (!userId || !autoPreconnectEnabledRef.current) {
+      return null
+    }
+
+    const connectKey = buildVoiceConnectKey(
+      userId,
+      platform,
+      contextMode,
+      voiceRitual,
+      sessionId,
+      threadId,
+    )
+
+    if (
+      preparedVoiceConnectKeyRef.current === connectKey
+      && preparedVoiceCredentialsRef.current
+      && Date.now() - preparedVoiceCredentialsAtRef.current < PREPARED_VOICE_CONNECT_TTL_MS
+    ) {
+      return Promise.resolve(preparedVoiceCredentialsRef.current)
+    }
+
+    if (
+      preparedVoiceConnectKeyRef.current === connectKey
+      && preparedVoiceConnectPromiseRef.current !== null
+    ) {
+      return preparedVoiceConnectPromiseRef.current
+    }
+
+    void releasePreparedVoiceConnect()
+
+    const controller = new AbortController()
+    preparedVoiceConnectControllerRef.current = controller
+    preparedVoiceConnectKeyRef.current = connectKey
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "preconnect-started",
+      payload: {
+        userId,
+        platform,
+        sessionId: sessionIdRef.current ?? null,
+        threadId: threadId ?? null,
+      },
+    })
+
+    const promise = (async () => {
+      if (connectPrewarmPromiseRef.current !== null) {
+        await connectPrewarmPromiseRef.current
+      }
+
+      const creds = await fetchStreamCredentials(
+        userId,
+        platform,
+        contextMode,
+        voiceRitual,
+        sessionId,
+        threadId,
+        controller.signal,
+      )
+
+      if (
+        controller.signal.aborted
+        || destroyedRef.current
+        || preparedVoiceConnectControllerRef.current !== controller
+        || preparedVoiceConnectKeyRef.current !== connectKey
+      ) {
+        if (creds.sessionId) {
+          try {
+            await requestVoiceDisconnect(userId, creds)
+          } catch {
+            // Best-effort cleanup for stale prefetched credentials.
+          }
+        }
+        return null
+      }
+
+      preparedVoiceCredentialsRef.current = creds
+      preparedVoiceCredentialsAtRef.current = Date.now()
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "preconnect-ready",
+        payload: {
+          callId: creds.callId,
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: creds.sessionId ?? null,
+        },
+      })
+      return creds
+    })()
+      .catch((err) => {
+        if (!controller.signal.aborted) {
+          logger.debug("StreamVoiceSession", "Voice session preconnect failed", {
+            userId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          recordSophiaCaptureEvent({
+            category: "voice-session",
+            name: "preconnect-failed",
+            payload: {
+              error: err instanceof Error ? err.message : String(err),
+              sessionId: sessionIdRef.current ?? null,
+            },
+          })
+        }
+        return null
+      })
+      .finally(() => {
+        if (preparedVoiceConnectPromiseRef.current === promise) {
+          preparedVoiceConnectPromiseRef.current = null
+        }
+        if (preparedVoiceConnectControllerRef.current === controller) {
+          preparedVoiceConnectControllerRef.current = null
+        }
+      })
+
+    preparedVoiceConnectPromiseRef.current = promise
+    return promise
+  }, [
+    connectPrewarmPromiseRef,
+    contextMode,
+    platform,
+    releasePreparedVoiceConnect,
+    sessionId,
+    threadId,
+    userId,
+    voiceRitual,
+  ])
+
+  const consumePreparedVoiceConnect = useCallback(async () => {
+    if (!userId) {
+      return null
+    }
+
+    const connectKey = buildVoiceConnectKey(
+      userId,
+      platform,
+      contextMode,
+      voiceRitual,
+      sessionId,
+      threadId,
+    )
+
+    const preparedCredentials = preparedVoiceCredentialsRef.current
+    if (
+      preparedVoiceConnectKeyRef.current === connectKey
+      && preparedCredentials
+      && Date.now() - preparedVoiceCredentialsAtRef.current < PREPARED_VOICE_CONNECT_TTL_MS
+    ) {
+      clearPreparedVoiceConnectRefs()
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "preconnect-reused",
+        payload: {
+          callId: preparedCredentials.callId,
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: preparedCredentials.sessionId ?? null,
+        },
+      })
+      return preparedCredentials
+    }
+
+    if (
+      preparedVoiceConnectKeyRef.current === connectKey
+      && preparedVoiceConnectPromiseRef.current !== null
+    ) {
+      const prefetchedCredentials = await preparedVoiceConnectPromiseRef.current
+      if (!prefetchedCredentials) {
+        return null
+      }
+
+      if (
+        preparedVoiceConnectKeyRef.current === connectKey
+        && preparedVoiceCredentialsRef.current?.callId === prefetchedCredentials.callId
+        && preparedVoiceCredentialsRef.current?.sessionId === prefetchedCredentials.sessionId
+      ) {
+        clearPreparedVoiceConnectRefs()
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "preconnect-reused",
+          payload: {
+            callId: prefetchedCredentials.callId,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: prefetchedCredentials.sessionId ?? null,
+          },
+        })
+      }
+
+      return prefetchedCredentials
+    }
+
+    if (
+      preparedVoiceConnectKeyRef.current === connectKey
+      && preparedCredentials
+    ) {
+      await releasePreparedVoiceConnect()
+    }
+
+    return null
+  }, [
+    clearPreparedVoiceConnectRefs,
+    contextMode,
+    platform,
+    releasePreparedVoiceConnect,
+    sessionId,
+    threadId,
+    userId,
+    voiceRitual,
+  ])
 
   const markSophiaReady = useCallback(
     (
@@ -390,6 +782,106 @@ export function useStreamVoiceSession(
     },
     [userId],
   )
+
+  const handleSophiaEvent = useCallback((
+    type: string,
+    data: Record<string, unknown> | undefined,
+    source: SophiaVoiceEventSource,
+  ) => {
+    if (source === "custom" && preferSseEventsRef.current && type.startsWith("sophia.")) {
+      return
+    }
+
+    if (type.startsWith("sophia.")) {
+      recordSophiaCaptureEvent({
+        category: source === "sse" ? "voice-sse" : "stream-custom",
+        name: type,
+        payload: {
+          data,
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
+    }
+
+    if (type === "sophia.transcript") {
+      const text = typeof data?.text === "string" ? data.text : ""
+      if (!text) return
+
+      const isFinal = data?.is_final === true || data?.final === true
+      if (isFinal) {
+        setFinalReply(text)
+        setPartialReply("")
+        addVoiceMessage(text)
+        onAssistantResponseRef.current?.(text)
+      } else {
+        setPartialReply(text)
+      }
+    }
+
+    if (type === "sophia.user_transcript") {
+      const text = typeof data?.text === "string" ? data.text : ""
+      if (!text) return
+
+      const utteranceId = typeof data?.utterance_id === "string" ? data.utterance_id : null
+      if (utteranceId) {
+        if (hasSeenUserTranscriptId(utteranceId)) {
+          recordSophiaCaptureEvent({
+            category: "voice-session",
+            name: "duplicate-user-transcript-ignored",
+            payload: {
+              utteranceId,
+              sessionId: sessionIdRef.current ?? null,
+            },
+          })
+          return
+        }
+
+        rememberUserTranscriptId(utteranceId)
+      }
+
+      const reconciledTranscript = reconcileVoiceTranscript(currentTurnUserTranscriptRef.current, text)
+      if (!reconciledTranscript.changed && currentTurnUserTranscriptRef.current) {
+        return
+      }
+
+      currentTurnUserTranscriptRef.current = reconciledTranscript.text
+      onUserTranscriptRef.current?.(reconciledTranscript.text)
+    }
+
+    if (type === "sophia.artifact" && data) {
+      onArtifactsRef.current?.(data)
+    }
+
+    if (type === "sophia.turn") {
+      const phase = typeof data?.phase === "string"
+        ? data.phase
+        : data?.status === "started"
+          ? "agent_started"
+          : data?.status === "completed"
+            ? "agent_ended"
+            : null
+
+      if (phase === "agent_started") {
+        clearThinking()
+        setStage("speaking")
+        setListeningPresence(false)
+        setSpeakingPresence(true)
+        setMetaPresence("speaking")
+      } else if (phase === "agent_ended") {
+        clearCurrentTurnUserTranscript()
+        setStage("listening")
+        setSpeakingPresence(false)
+        setListeningPresence(true)
+        setMetaPresence("listening")
+      } else if (phase === "user_ended") {
+        setStage("thinking")
+        setListeningPresence(false)
+        setSpeakingPresence(false)
+        setMetaPresence("thinking")
+        startThinkingTimeout()
+      }
+    }
+  }, [addVoiceMessage, clearCurrentTurnUserTranscript, clearThinking, hasSeenUserTranscriptId, rememberUserTranscriptId, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
 
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
   useEffect(() => {
@@ -538,89 +1030,20 @@ export function useStreamVoiceSession(
     }
   }, [clearStartupReadyTimeout, setVoiceFailed, streamError])
 
-  // --- Custom event listener (transcripts + artifacts) ---------------------
+  // --- Stream custom event fallback ---------------------------------------
   useEffect(() => {
     if (!call || callingState !== CallingState.JOINED) return
+    if (credentials?.streamUrl && typeof EventSource === "function") return
 
     const handleCustomEvent = (event: { type: string; custom: Record<string, unknown> }) => {
-      const { type } = event.custom ?? {}
+      const eventType = typeof event.custom?.type === "string" ? event.custom.type : null
+      if (!eventType) return
 
-      if (typeof type === "string" && type.startsWith("sophia.")) {
-        recordSophiaCaptureEvent({
-          category: "stream-custom",
-          name: type,
-          payload: {
-            data: event.custom.data,
-            sessionId: sessionIdRef.current ?? null,
-          },
-        })
-      }
-
-      if (type === "sophia.transcript") {
-        const data = event.custom.data as { text?: string; is_final?: boolean } | undefined
-        if (!data?.text) return
-
-        if (data.is_final) {
-          setFinalReply(data.text)
-          setPartialReply("")
-          addVoiceMessage(data.text)
-          onAssistantResponseRef.current?.(data.text)
-        } else {
-          setPartialReply(data.text)
-        }
-      }
-
-      if (type === "sophia.user_transcript") {
-        const data = event.custom.data as { text?: string; utterance_id?: string } | undefined
-        if (!data?.text) return
-
-        if (typeof data.utterance_id === "string") {
-          if (hasSeenUserTranscriptId(data.utterance_id)) {
-            recordSophiaCaptureEvent({
-              category: "voice-session",
-              name: "duplicate-user-transcript-ignored",
-              payload: {
-                utteranceId: data.utterance_id,
-                sessionId: sessionIdRef.current ?? null,
-              },
-            })
-            return
-          }
-
-          rememberUserTranscriptId(data.utterance_id)
-        }
-
-        onUserTranscriptRef.current?.(data.text)
-      }
-
-      if (type === "sophia.artifact") {
-        const data = event.custom.data as Record<string, unknown> | undefined
-        if (data) {
-          onArtifactsRef.current?.(data)
-        }
-      }
-
-      if (type === "sophia.turn") {
-        const data = event.custom.data as { phase?: string } | undefined
-        if (data?.phase === "agent_started") {
-          clearThinking()
-          setStage("speaking")
-          setListeningPresence(false)
-          setSpeakingPresence(true)
-          setMetaPresence("speaking")
-        } else if (data?.phase === "agent_ended") {
-          setStage("listening")
-          setSpeakingPresence(false)
-          setListeningPresence(true)
-          setMetaPresence("listening")
-        } else if (data?.phase === "user_ended") {
-          setStage("thinking")
-          setListeningPresence(false)
-          setSpeakingPresence(false)
-          setMetaPresence("thinking")
-          startThinkingTimeout()
-        }
-      }
+      handleSophiaEvent(
+        eventType,
+        event.custom.data as Record<string, unknown> | undefined,
+        "custom",
+      )
     }
 
     const unsubscribe = call.on("custom", handleCustomEvent as Parameters<typeof call.on>[1])
@@ -628,7 +1051,232 @@ export function useStreamVoiceSession(
     return () => {
       unsubscribe()
     }
-  }, [call, callingState, addVoiceMessage, clearThinking, hasSeenUserTranscriptId, rememberUserTranscriptId, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
+  }, [call, callingState, credentials?.streamUrl, handleSophiaEvent])
+
+  useEffect(() => {
+    if (!credentials?.streamUrl || !credentials.sessionId) {
+      closeEventSource()
+      return
+    }
+
+    if (typeof EventSource !== "function") {
+      return
+    }
+
+    const eventSource = new EventSource(credentials.streamUrl)
+    eventSourceRef.current = eventSource
+
+    const handleOpen = () => {
+      if (eventSourceRef.current !== eventSource) return
+
+      preferSseEventsRef.current = true
+      recordSophiaCaptureEvent({
+        category: "voice-sse",
+        name: "stream-open",
+        payload: {
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: credentials.sessionId,
+          streamUrl: credentials.streamUrl,
+        },
+      })
+    }
+    const handleError = () => {
+      if (eventSourceRef.current !== eventSource) return
+
+      recordSophiaCaptureEvent({
+        category: "voice-sse",
+        name: "stream-error",
+        payload: {
+          readyState: eventSource.readyState,
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: credentials.sessionId,
+        },
+      })
+
+      if (eventSource.readyState === EventSource.CLOSED) {
+        preferSseEventsRef.current = false
+        eventSource.close()
+        if (eventSourceRef.current === eventSource) {
+          eventSourceRef.current = null
+        }
+      }
+    }
+
+    const eventTypes = [
+      "sophia.transcript",
+      "sophia.user_transcript",
+      "sophia.artifact",
+      "sophia.turn",
+      "sophia.turn_diagnostic",
+    ] as const
+
+    const eventListeners = eventTypes.map((eventType) => {
+      const listener = (event: MessageEvent<string>) => {
+        try {
+          const parsed = JSON.parse(event.data) as {
+            type?: string
+            data?: Record<string, unknown>
+          }
+          if (typeof parsed.type !== "string") return
+
+          handleSophiaEvent(parsed.type, parsed.data, "sse")
+        } catch {
+          recordSophiaCaptureEvent({
+            category: "voice-sse",
+            name: "invalid-event-payload",
+            payload: {
+              eventType,
+              sessionId: sessionIdRef.current ?? null,
+            },
+          })
+        }
+      }
+
+      eventSource.addEventListener(eventType, listener as EventListener)
+      return { eventType, listener }
+    })
+
+    eventSource.addEventListener("open", handleOpen)
+    eventSource.addEventListener("error", handleError)
+
+    return () => {
+      for (const { eventType, listener } of eventListeners) {
+        eventSource.removeEventListener(eventType, listener as EventListener)
+      }
+      eventSource.removeEventListener("open", handleOpen)
+      eventSource.removeEventListener("error", handleError)
+
+      if (eventSourceRef.current === eventSource) {
+        preferSseEventsRef.current = false
+        eventSourceRef.current = null
+      }
+
+      eventSource.close()
+    }
+  }, [closeEventSource, credentials?.sessionId, credentials?.streamUrl, handleSophiaEvent])
+
+  useEffect(() => {
+    if (!userId) {
+      autoPreconnectEnabledRef.current = true
+      clearAutoPreconnectTimer()
+      connectPrewarmAttemptedUserIdRef.current = null
+      connectPrewarmPromiseRef.current = null
+      connectPrewarmControllerRef.current?.abort()
+      connectPrewarmControllerRef.current = null
+      clearPreparedVoiceConnectRefs()
+      return
+    }
+
+    void prewarmVoiceConnect()
+  }, [clearAutoPreconnectTimer, clearPreparedVoiceConnectRefs, prewarmVoiceConnect, userId])
+
+  const activeCallId = credentials?.callId ?? null
+  const activeVoiceAgentSessionId = credentials?.sessionId ?? null
+
+  useEffect(() => {
+    if (!userId || !activeCallId || !activeVoiceAgentSessionId) {
+      return
+    }
+
+    const warmupKey = `${userId}:${activeCallId}:${activeVoiceAgentSessionId}`
+    if (backendWarmupKeyRef.current === warmupKey) {
+      return
+    }
+
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupKeyRef.current = warmupKey
+
+    const controller = new AbortController()
+    backendWarmupControllerRef.current = controller
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "backend-warmup-started",
+      payload: {
+        callId: activeCallId,
+        sessionId: sessionIdRef.current ?? null,
+        voiceAgentSessionId: activeVoiceAgentSessionId,
+      },
+    })
+
+    void requestVoiceWarmup(userId, credentials, controller.signal)
+      .then(() => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (backendWarmupControllerRef.current === controller) {
+          backendWarmupControllerRef.current = null
+        }
+
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "backend-warmup-completed",
+          payload: {
+            callId: activeCallId,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: activeVoiceAgentSessionId,
+          },
+        })
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (backendWarmupControllerRef.current === controller) {
+          backendWarmupControllerRef.current = null
+        }
+
+        logger.debug("StreamVoiceSession", "Voice backend warmup failed", {
+          userId,
+          callId: activeCallId,
+          voiceAgentSessionId: activeVoiceAgentSessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "backend-warmup-failed",
+          payload: {
+            callId: activeCallId,
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: activeVoiceAgentSessionId,
+          },
+        })
+      })
+  }, [activeCallId, activeVoiceAgentSessionId, credentials, userId])
+
+  useEffect(() => {
+    if (
+      !userId
+      || !autoPreconnectEnabledRef.current
+      || Boolean(credentials)
+      || callingState !== CallingState.IDLE
+      || startInFlightRef.current
+    ) {
+      return
+    }
+
+    clearAutoPreconnectTimer()
+    autoPreconnectTimerRef.current = setTimeout(() => {
+      autoPreconnectTimerRef.current = null
+
+      if (
+        !autoPreconnectEnabledRef.current
+        || destroyedRef.current
+        || credentialsRef.current
+        || startInFlightRef.current
+      ) {
+        return
+      }
+
+      void preconnectVoiceSession()
+    }, AUTO_PRECONNECT_DELAY_MS)
+
+    return () => {
+      clearAutoPreconnectTimer()
+    }
+  }, [callingState, clearAutoPreconnectTimer, credentials, preconnectVoiceSession, userId])
 
   // --- Actions -------------------------------------------------------------
 
@@ -660,6 +1308,8 @@ export function useStreamVoiceSession(
     }
 
     cancelPendingStartRequest()
+    autoPreconnectEnabledRef.current = false
+    clearAutoPreconnectTimer()
 
     const requestVersion = startRequestVersionRef.current + 1
     const controller = new AbortController()
@@ -669,9 +1319,11 @@ export function useStreamVoiceSession(
     startInFlightRef.current = true
 
     errorStageLockRef.current = false
+    closeEventSource()
     clearStartupReadyTimeout()
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    currentTurnUserTranscriptRef.current = null
     setIsSophiaReady(false)
     setStage("connecting")
     setError(undefined)
@@ -688,21 +1340,35 @@ export function useStreamVoiceSession(
     })
 
     try {
-      logger.debug("StreamVoiceSession", "Fetching credentials", {
-        userId,
-        platform,
-        contextMode,
-        ritual: resolveVoiceRitual(presetType),
-      })
-      const creds = await fetchStreamCredentials(
-        userId,
-        platform,
-        contextMode,
-        resolveVoiceRitual(presetType),
-        sessionId,
-        threadId,
-        controller.signal,
-      )
+      let creds = await consumePreparedVoiceConnect()
+
+      if (connectPrewarmPromiseRef.current !== null) {
+        await connectPrewarmPromiseRef.current
+      }
+
+      if (!creds) {
+        logger.debug("StreamVoiceSession", "Fetching credentials", {
+          userId,
+          platform,
+          contextMode,
+          ritual: voiceRitual,
+        })
+        creds = await fetchStreamCredentials(
+          userId,
+          platform,
+          contextMode,
+          voiceRitual,
+          sessionId,
+          threadId,
+          controller.signal,
+        )
+      } else {
+        logger.debug("StreamVoiceSession", "Using prefetched voice credentials", {
+          userId,
+          callId: creds.callId,
+          voiceAgentSessionId: creds.sessionId,
+        })
+      }
 
       if (destroyedRef.current || startRequestVersionRef.current !== requestVersion) {
         recordSophiaCaptureEvent({
@@ -780,15 +1446,18 @@ export function useStreamVoiceSession(
   }, [
     callingState,
     cancelPendingStartRequest,
+    clearAutoPreconnectTimer,
+    closeEventSource,
     clearStartupReadyTimeout,
     contextMode,
+    consumePreparedVoiceConnect,
     failVoiceStartup,
     platform,
-    presetType,
     sessionId,
     setVoiceFailed,
     threadId,
     userId,
+    voiceRitual,
   ])
 
   // Auto-join when credentials arrive and call is ready
@@ -801,8 +1470,13 @@ export function useStreamVoiceSession(
 
   const stopTalking = useCallback(async () => {
     cancelPendingStartRequest()
+    autoPreconnectEnabledRef.current = false
+    clearAutoPreconnectTimer()
+    closeEventSource()
     clearThinking()
     clearStartupReadyTimeout()
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "stop-talking-requested",
@@ -811,6 +1485,7 @@ export function useStreamVoiceSession(
       },
     })
     await requestCurrentVoiceDisconnect()
+    await releasePreparedVoiceConnect()
     try {
       await leave()
     } catch {
@@ -819,6 +1494,7 @@ export function useStreamVoiceSession(
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    currentTurnUserTranscriptRef.current = null
     setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
@@ -827,10 +1503,13 @@ export function useStreamVoiceSession(
     settlePresence()
   }, [
     cancelPendingStartRequest,
+    clearAutoPreconnectTimer,
+    closeEventSource,
     clearStartupReadyTimeout,
     leave,
     clearThinking,
     requestCurrentVoiceDisconnect,
+    releasePreparedVoiceConnect,
     setListeningPresence,
     setSpeakingPresence,
     settlePresence,
@@ -838,8 +1517,13 @@ export function useStreamVoiceSession(
 
   const bargeIn = useCallback(() => {
     cancelPendingStartRequest()
+    autoPreconnectEnabledRef.current = false
+    clearAutoPreconnectTimer()
+    closeEventSource()
     clearThinking()
     clearStartupReadyTimeout()
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "barge-in",
@@ -847,12 +1531,14 @@ export function useStreamVoiceSession(
         sessionId: sessionIdRef.current ?? null,
       },
     })
+    void releasePreparedVoiceConnect()
     void requestCurrentVoiceDisconnect()
     // Leave the call — Voice Agent detects disconnect as barge-in
     leave().catch(() => {})
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    currentTurnUserTranscriptRef.current = null
     setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
@@ -861,10 +1547,13 @@ export function useStreamVoiceSession(
     settlePresence()
   }, [
     cancelPendingStartRequest,
+    clearAutoPreconnectTimer,
+    closeEventSource,
     clearStartupReadyTimeout,
     leave,
     clearThinking,
     requestCurrentVoiceDisconnect,
+    releasePreparedVoiceConnect,
     setListeningPresence,
     setSpeakingPresence,
     settlePresence,
@@ -872,8 +1561,13 @@ export function useStreamVoiceSession(
 
   const resetVoiceState = useCallback(() => {
     cancelPendingStartRequest()
+    autoPreconnectEnabledRef.current = false
+    clearAutoPreconnectTimer()
+    closeEventSource()
     clearThinking()
     clearStartupReadyTimeout()
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "reset-voice-state",
@@ -881,11 +1575,13 @@ export function useStreamVoiceSession(
         sessionId: sessionIdRef.current ?? null,
       },
     })
+    void releasePreparedVoiceConnect()
     void requestCurrentVoiceDisconnect()
     leave().catch(() => {})
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    currentTurnUserTranscriptRef.current = null
     setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
@@ -893,7 +1589,7 @@ export function useStreamVoiceSession(
     setFinalReply("")
     setError(undefined)
     resetPresence()
-  }, [cancelPendingStartRequest, clearStartupReadyTimeout, leave, clearThinking, requestCurrentVoiceDisconnect, resetPresence])
+  }, [cancelPendingStartRequest, clearAutoPreconnectTimer, closeEventSource, clearStartupReadyTimeout, leave, clearThinking, releasePreparedVoiceConnect, requestCurrentVoiceDisconnect, resetPresence])
 
   // --- Cleanup on unmount --------------------------------------------------
   useEffect(() => {
@@ -909,14 +1605,23 @@ export function useStreamVoiceSession(
         },
       })
       destroyedRef.current = true
+      autoPreconnectEnabledRef.current = false
+      clearAutoPreconnectTimer()
+      backendWarmupControllerRef.current?.abort()
+      backendWarmupControllerRef.current = null
+      connectPrewarmControllerRef.current?.abort()
+      connectPrewarmControllerRef.current = null
+      connectPrewarmPromiseRef.current = null
       cancelPendingStartRequest()
+      closeEventSource()
+      void releasePreparedVoiceConnect({ keepalive: true })
       void requestCurrentVoiceDisconnect({ keepalive: true })
       if (thinkingTimeoutRef.current) {
         clearTimeout(thinkingTimeoutRef.current)
       }
       clearStartupReadyTimeout()
     }
-  }, [cancelPendingStartRequest, clearStartupReadyTimeout, requestCurrentVoiceDisconnect])
+  }, [cancelPendingStartRequest, clearAutoPreconnectTimer, closeEventSource, clearStartupReadyTimeout, releasePreparedVoiceConnect, requestCurrentVoiceDisconnect])
 
   return {
     stage,

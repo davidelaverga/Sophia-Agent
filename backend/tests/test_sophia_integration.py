@@ -69,8 +69,7 @@ class TestMiddlewareChainOrdering:
         """Simulate running before_agent on all middlewares in order.
 
         Each middleware now explicitly reads and extends system_prompt_blocks,
-        so we use last-write-wins (dict merge) here — matching the real
-        LangGraph middleware framework behavior.
+        so we use last-write-wins (dict merge) here.
         """
         for mw in middlewares:
             if hasattr(mw, "before_agent"):
@@ -92,6 +91,7 @@ class TestMiddlewareChainOrdering:
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+        from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
 
         middlewares = [
             CrisisCheckMiddleware(),
@@ -101,6 +101,7 @@ class TestMiddlewareChainOrdering:
                 (skills_path / "techniques.md", True),
             ),
             PlatformContextMiddleware(),
+            TurnCountMiddleware(),
             ToneGuidanceMiddleware(skills_path / "tone_guidance.md"),
             ContextAdaptationMiddleware(skills_path / "context", "life"),
             RitualMiddleware(skills_path / "rituals", None),
@@ -115,21 +116,22 @@ class TestMiddlewareChainOrdering:
 
         # Verify state populated
         assert state.get("platform") == "voice"
+        assert state.get("turn_count") == 0
         assert state.get("active_tone_band") == "engagement"  # default
         assert state.get("context_mode") == "life"
         assert state.get("active_ritual") is None
         assert state.get("active_skill") is not None
         assert state.get("skip_expensive") is not True
 
-        # Verify prompt blocks accumulated
+        # Verify prompt blocks accumulated once each without reducer-driven duplication.
         blocks = state.get("system_prompt_blocks", [])
-        assert len(blocks) >= 5  # soul + voice + techniques + platform + tone + context + skill + artifact
+        assert len(blocks) == 8
 
         # Check specific content
         block_text = "\n".join(blocks)
         assert "Sophia" in block_text  # from soul.md
         assert "voice" in block_text.lower()  # from platform context
-        assert "Artifacts" in block_text  # from artifact_instructions
+        assert "emit_artifact" in block_text
 
     def test_crisis_fast_path(self, skills_path):
         """Crisis message activates fast-path — only soul.md + crisis_redirect injected."""
@@ -167,8 +169,9 @@ class TestMiddlewareChainOrdering:
         assert state.get("skip_expensive") is True
         assert state.get("active_skill") == "crisis_redirect"
 
-        # Only soul.md + crisis_redirect skill injected
+        # Only soul.md + crisis_redirect skill injected, with no duplicated carry-over.
         blocks = state.get("system_prompt_blocks", [])
+        assert len(blocks) == 2
         block_text = "\n".join(blocks)
         assert "Sophia" in block_text  # soul.md always injected
         assert "crisis_redirect" in block_text  # skill injected

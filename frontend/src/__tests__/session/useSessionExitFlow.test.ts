@@ -2,8 +2,8 @@ import { act, renderHook } from '@testing-library/react';
 import { useState } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { useSessionPageGuards } from '../../app/session/useSessionPageGuards';
 import { useSessionExitFlow } from '../../app/session/useSessionExitFlow';
+import { useSessionPageGuards } from '../../app/session/useSessionPageGuards';
 
 const hapticMock = vi.fn();
 const endSessionApiMock = vi.fn();

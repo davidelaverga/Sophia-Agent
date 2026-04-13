@@ -72,8 +72,11 @@ trap cleanup_on_failure INT TERM
 
 mkdir -p logs
 
+: "${N_JOBS_PER_WORKER:=4}"
+: "${BG_JOB_ISOLATED_LOOPS:=true}"
+
 echo "Starting LangGraph server..."
-nohup sh -c 'cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking --no-reload > ../logs/langgraph.log 2>&1' &
+nohup sh -c "cd backend && NO_COLOR=1 BG_JOB_ISOLATED_LOOPS=$BG_JOB_ISOLATED_LOOPS uv run langgraph dev --no-browser --allow-blocking --no-reload --n-jobs-per-worker $N_JOBS_PER_WORKER > ../logs/langgraph.log 2>&1" &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "✗ LangGraph failed to start. Last log output:"
     tail -60 logs/langgraph.log

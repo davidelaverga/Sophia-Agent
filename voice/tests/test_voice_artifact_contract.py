@@ -4,15 +4,14 @@ import inspect
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import get_type_hints
+from unittest.mock import AsyncMock
 
 import pytest
 import voice.server as server
 from fastapi.testclient import TestClient
+from vision_agents.core.stt.events import STTTranscriptEvent
 from vision_agents.core.turn_detection.events import TurnEndedEvent
-from vision_agents.core.tts.events import (
-    TTSSynthesisCompleteEvent,
-    TTSSynthesisStartEvent,
-)
+from vision_agents.core.tts.events import TTSSynthesisStartEvent
 
 from voice.server import attach_runtime_observers
 from voice.tests.conftest import make_settings
@@ -100,6 +99,15 @@ class FakeCoordinator:
         self,
         text: str,
         participant: object,
+        *,
+        queue_for_next_submission: bool = False,
+    ) -> str | None:
+        return None
+
+    def consume_pending_recovered_response(
+        self,
+        transcript: str,
+        participant: object,
     ) -> str | None:
         return None
 
@@ -118,6 +126,9 @@ class FakeLLMObserver:
     def note_echo_suppression(self, user_id: str | None) -> None:
         return None
 
+    def note_continuation_handling(self, user_id: str | None) -> None:
+        return None
+
     def note_stage_error(
         self,
         stage: str,
@@ -130,7 +141,7 @@ class FakeLLMObserver:
 
 
 @pytest.mark.anyio
-async def test_attach_runtime_observers_forward_turn_phases() -> None:
+async def test_attach_runtime_observers_resets_turn_guard_without_emitting_tts_phases() -> None:
     turn_detection = FakeTurnDetection()
     participant = SimpleNamespace(transcript="Need a second", user_id="user-1")
     agent = SimpleNamespace(
@@ -146,14 +157,54 @@ async def test_attach_runtime_observers_forward_turn_phases() -> None:
 
     await turn_detection.events.emit(TurnEndedEvent(participant=participant))
     await agent.tts.events.emit(TTSSynthesisStartEvent(text="Hello"))
-    await agent.tts.events.emit(TTSSynthesisCompleteEvent(text="Hello"))
 
     assert llm.turn_end_participants == [participant]
-    assert llm.turn_phases == ["agent_started", "agent_ended"]
+    assert llm.turn_phases == []
     assert coordinator.turns == [("Need a second", participant)]
-    assert coordinator.agent_started == 1
-    assert coordinator.agent_ended == 1
+    assert coordinator.agent_started == 0
+    assert coordinator.agent_ended == 0
     assert turn_detection.reset_calls == 1
+
+
+@pytest.mark.anyio
+async def test_attach_runtime_observers_queues_late_continuation_without_manual_resubmit() -> None:
+    turn_detection = FakeTurnDetection()
+    participant = SimpleNamespace(transcript="Need a second", user_id="user-1")
+
+    async def _unexpected_simple_response(*args, **kwargs):  # noqa: ANN002,ANN003
+        raise AssertionError("runtime observer should not resubmit directly")
+
+    agent = SimpleNamespace(
+        turn_detection=turn_detection,
+        stt=SimpleNamespace(events=FakeEventBus()),
+        tts=SimpleNamespace(events=FakeEventBus()),
+        simple_response=_unexpected_simple_response,
+        _transcript_buffer="Need a second",
+    )
+    llm = FakeLLMObserver()
+
+    class RecoveringCoordinator(FakeCoordinator):
+        async def recover_late_continuation(
+            self,
+            text: str,
+            participant: object,
+            *,
+            queue_for_next_submission: bool = False,
+        ) -> str | None:
+            if queue_for_next_submission:
+                return "Need a second thought"
+            return None
+
+    coordinator = RecoveringCoordinator()
+
+    attach_runtime_observers(agent, llm, coordinator)
+
+    event = STTTranscriptEvent(text="Need a second")
+    event.participant = participant
+    await agent.stt.events.emit(event)
+
+    assert coordinator.partials == ["Need a second"]
+    assert llm.turn_phases == []
 
 
 @pytest.mark.anyio
@@ -284,6 +335,9 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
     bound_context: dict[str, object] = {}
 
     class FakeLLM:
+        def attach_call_emitter(self, emitter) -> None:  # noqa: ANN001
+            self.emitter = emitter
+
         def bind_session_context(
             self,
             *,
@@ -315,7 +369,10 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
                 id="session-123",
                 call_id=call_id,
                 started_at=datetime.now(timezone.utc),
-                agent=SimpleNamespace(llm=FakeLLM()),
+                agent=SimpleNamespace(
+                    llm=FakeLLM(),
+                    send_custom_event=AsyncMock(),
+                ),
             )
 
         async def close_session(self, session_id: str, wait: bool = False) -> bool:
@@ -344,6 +401,50 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
         "session_id": "session-123",
         "thread_id": "thread-456",
     }
+
+
+def test_session_warmup_schedules_backend_warmup_on_bound_llm() -> None:
+    warmup_requests: list[str] = []
+    tts_warmup_requests: list[str] = []
+    session = SimpleNamespace(agent=SimpleNamespace(llm=None, tts=None))
+
+    class FakeLLM:
+        def start_backend_warmup(self, user_id: str) -> bool:
+            warmup_requests.append(user_id)
+            return True
+
+    class FakeTTS:
+        def start_warmup(self) -> bool:
+            tts_warmup_requests.append("started")
+            return True
+
+    session.agent.llm = FakeLLM()
+    session.agent.tts = FakeTTS()
+
+    class FakeLauncher:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        def get_session(self, session_id: str):
+            return session
+
+        async def get_session_info(self, call_id: str, session_id: str):
+            return SimpleNamespace(id=session_id, call_id=call_id)
+
+    app = server.create_fastapi_app(FakeLauncher())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/calls/sophia-user_123-abc12345/sessions/session-123/warmup",
+            json={"user_id": "dev-user"},
+        )
+
+    assert response.status_code == 202
+    assert warmup_requests == ["dev-user"]
+    assert tts_warmup_requests == ["started"]
 
 
 @pytest.mark.anyio

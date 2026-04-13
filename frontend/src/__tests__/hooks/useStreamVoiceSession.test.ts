@@ -1,5 +1,5 @@
 import { CallingState } from "@stream-io/video-react-sdk"
-import { renderHook, act } from "@testing-library/react"
+import { renderHook, act, waitFor } from "@testing-library/react"
 import { StrictMode, createElement, type ReactNode } from "react"
 import { describe, it, expect, vi, beforeEach } from "vitest"
 
@@ -76,6 +76,55 @@ const mockFetch = vi.fn()
 vi.stubGlobal("fetch", mockFetch)
 
 // ---------------------------------------------------------------------------
+// Mock: EventSource
+// ---------------------------------------------------------------------------
+
+type EventSourceHandler = (event: { data?: string }) => void
+
+class MockEventSource {
+  static CONNECTING = 0
+  static OPEN = 1
+  static CLOSED = 2
+  static latest: MockEventSource | null = null
+
+  readyState = MockEventSource.CONNECTING
+  url: string
+  private listeners = new Map<string, Set<EventSourceHandler>>()
+
+  constructor(url: string) {
+    this.url = url
+    MockEventSource.latest = this
+  }
+
+  addEventListener(type: string, handler: EventSourceHandler) {
+    const handlers = this.listeners.get(type) ?? new Set<EventSourceHandler>()
+    handlers.add(handler)
+    this.listeners.set(type, handlers)
+  }
+
+  removeEventListener(type: string, handler: EventSourceHandler) {
+    this.listeners.get(type)?.delete(handler)
+  }
+
+  close() {
+    this.readyState = MockEventSource.CLOSED
+  }
+
+  emitOpen() {
+    this.readyState = MockEventSource.OPEN
+    this.listeners.get("open")?.forEach((handler) => handler({}))
+  }
+
+  emit(type: string, payload: Record<string, unknown>) {
+    this.listeners.get(type)?.forEach((handler) =>
+      handler({ data: JSON.stringify(payload) }),
+    )
+  }
+}
+
+vi.stubGlobal("EventSource", MockEventSource)
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -95,6 +144,20 @@ function emitCustomEvent(type: string, data: Record<string, unknown>) {
   }
 }
 
+function getFetchCalls(url: string, method?: string) {
+  return mockFetch.mock.calls.filter(([requestUrl, init]) => {
+    if (requestUrl !== url) {
+      return false
+    }
+
+    if (!method) {
+      return true
+    }
+
+    return (init as { method?: string } | undefined)?.method === method
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -109,6 +172,7 @@ describe("useStreamVoiceSession", () => {
     mockSessionContextMode = "gaming"
     mockSessionPresetType = "vent"
     callEventHandlers.clear()
+    MockEventSource.latest = null
     vi.useRealTimers()
 
     mockFetch.mockResolvedValue({
@@ -120,6 +184,8 @@ describe("useStreamVoiceSession", () => {
           call_type: "audio_room",
           call_id: "test-call-123",
           session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
+          stream_url: "/api/sophia/user-1/voice/events?call_id=test-call-123&session_id=voice-session-123",
         }),
       text: () => Promise.resolve(""),
     })
@@ -206,10 +272,23 @@ describe("useStreamVoiceSession", () => {
   })
 
   it("startTalking transitions to error on fetch failure", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 503,
-      text: () => Promise.resolve("Service unavailable"),
+    mockFetch.mockImplementation(async (url, init) => {
+      if (
+        url === "/api/sophia/user-1/voice/connect"
+        && (init as { method?: string } | undefined)?.method === "POST"
+      ) {
+        return {
+          ok: false,
+          status: 503,
+          text: () => Promise.resolve("Service unavailable"),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
     })
 
     const { result } = renderHook(() => useStreamVoiceSession("user-1"))
@@ -225,17 +304,30 @@ describe("useStreamVoiceSession", () => {
 
   it("startTalking transitions to error when connect returns no session_id", async () => {
     mockCall = makeCallMock()
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          api_key: "test-key",
-          token: "test-token",
-          call_type: "audio_room",
-          call_id: "test-call-123",
-          session_id: null,
-        }),
-      text: () => Promise.resolve(""),
+    mockFetch.mockImplementation(async (url, init) => {
+      if (
+        url === "/api/sophia/user-1/voice/connect"
+        && (init as { method?: string } | undefined)?.method === "POST"
+      ) {
+        return {
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              api_key: "test-key",
+              token: "test-token",
+              call_type: "audio_room",
+              call_id: "test-call-123",
+              session_id: null,
+            }),
+          text: () => Promise.resolve(""),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
     })
 
     const { result } = renderHook(() => useStreamVoiceSession("user-1"))
@@ -257,11 +349,22 @@ describe("useStreamVoiceSession", () => {
       text: () => Promise<string>
     }) => void) | null = null
 
-    mockFetch.mockImplementationOnce(
-      () => new Promise((resolve) => {
-        resolveFetch = resolve
-      }),
-    )
+    mockFetch.mockImplementation((url, init) => {
+      if (
+        url === "/api/sophia/user-1/voice/connect"
+        && (init as { method?: string } | undefined)?.method === "POST"
+      ) {
+        return new Promise((resolve) => {
+          resolveFetch = resolve
+        })
+      }
+
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      })
+    })
 
     const { result } = renderHook(() => useStreamVoiceSession("user-1"))
 
@@ -269,8 +372,9 @@ describe("useStreamVoiceSession", () => {
       const firstStart = result.current.startTalking()
       const secondStart = result.current.startTalking()
 
-      await Promise.resolve()
-      expect(mockFetch).toHaveBeenCalledTimes(1)
+      await waitFor(() => {
+        expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(1)
+      })
 
       resolveFetch?.({
         ok: true,
@@ -280,6 +384,8 @@ describe("useStreamVoiceSession", () => {
           call_type: "audio_room",
           call_id: "test-call-123",
           session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
+          stream_url: "/api/sophia/user-1/voice/events?call_id=test-call-123&session_id=voice-session-123",
         }),
         text: () => Promise.resolve(""),
       })
@@ -287,7 +393,7 @@ describe("useStreamVoiceSession", () => {
       await Promise.all([firstStart, secondStart])
     })
 
-    expect(mockFetch).toHaveBeenCalledTimes(1)
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(1)
   })
 
   it("does not treat Strict Mode effect cleanup as a permanent destroy flag", async () => {
@@ -302,13 +408,73 @@ describe("useStreamVoiceSession", () => {
       await result.current.startTalking()
     })
 
-    expect(mockFetch).toHaveBeenCalledTimes(1)
-    expect(mockFetch).toHaveBeenNthCalledWith(
-      1,
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(1)
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")[0]).toEqual([
       "/api/sophia/user-1/voice/connect",
       expect.objectContaining({
         method: "POST",
       }),
+    ])
+  })
+
+  it("prefetches a delayed voice session and reuses it on startTalking", async () => {
+    vi.useFakeTimers()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(1)
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(1)
+    expect(result.current.stage).toBe("connecting")
+  })
+
+  it("disconnects an unused prefetched session on unmount", async () => {
+    vi.useFakeTimers()
+
+    const { unmount } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    unmount()
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/disconnect",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
+        }),
+      }),
+    )
+  })
+
+  it("opens an EventSource when connect returns a stream_url", async () => {
+    mockCall = makeCallMock()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(MockEventSource.latest?.url).toBe(
+      "/api/sophia/user-1/voice/events?call_id=test-call-123&session_id=voice-session-123",
     )
   })
 
@@ -515,6 +681,50 @@ describe("useStreamVoiceSession", () => {
     expect(onUserTranscript).toHaveBeenCalledWith("hello from user")
   })
 
+  it("reconciles growing sophia.user_transcript events across a pause and ignores residue replays", () => {
+    mockCallingState = CallingState.JOINED
+    mockCall = makeCallMock()
+
+    const onUserTranscript = vi.fn()
+    renderHook(() =>
+      useStreamVoiceSession("user-1", { onUserTranscript }),
+    )
+
+    act(() => {
+      emitCustomEvent("sophia.user_transcript", {
+        text: "Good good evening, Sofia.",
+        utterance_id: "utterance-1",
+      })
+      emitCustomEvent("sophia.user_transcript", {
+        text: "Good good evening, Sofia. How are you?",
+        utterance_id: "utterance-2",
+      })
+      emitCustomEvent("sophia.user_transcript", {
+        text: "How are you?",
+        utterance_id: "utterance-3",
+      })
+    })
+
+    expect(onUserTranscript.mock.calls).toEqual([
+      ["Good good evening, Sofia."],
+      ["Good good evening, Sofia. How are you?"],
+    ])
+
+    act(() => {
+      emitCustomEvent("sophia.turn", { phase: "agent_ended" })
+      emitCustomEvent("sophia.user_transcript", {
+        text: "Well, as you know, I enjoy talking to you.",
+        utterance_id: "utterance-4",
+      })
+    })
+
+    expect(onUserTranscript.mock.calls).toEqual([
+      ["Good good evening, Sofia."],
+      ["Good good evening, Sofia. How are you?"],
+      ["Well, as you know, I enjoy talking to you."],
+    ])
+  })
+
   it("handles sophia.artifact custom event", () => {
     mockCallingState = CallingState.JOINED
     mockCall = makeCallMock()
@@ -572,10 +782,42 @@ describe("useStreamVoiceSession", () => {
     })
 
     act(() => {
-      emitCustomEvent("sophia.turn", { phase: "agent_ended" })
+      MockEventSource.latest?.emit("sophia.turn", {
+        type: "sophia.turn",
+        data: { phase: "agent_ended" },
+      })
     })
 
     expect(result.current.stage).toBe("listening")
+  })
+
+  it("handles sophia.transcript SSE events and ignores duplicate custom delivery after SSE opens", async () => {
+    mockCallingState = CallingState.JOINED
+    mockCall = makeCallMock()
+
+    const onAssistantResponse = vi.fn()
+    const { result } = renderHook(() =>
+      useStreamVoiceSession("user-1", { onAssistantResponse }),
+    )
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    act(() => {
+      MockEventSource.latest?.emitOpen()
+      MockEventSource.latest?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: { text: "Hello from SSE", is_final: true },
+      })
+      emitCustomEvent("sophia.transcript", { text: "Hello from custom", is_final: true })
+    })
+
+    expect(result.current.finalReply).toBe("Hello from SSE")
+    expect(mockAddMessage).toHaveBeenCalledTimes(1)
+    expect(mockAddMessage).toHaveBeenCalledWith("Hello from SSE")
+    expect(onAssistantResponse).toHaveBeenCalledTimes(1)
+    expect(onAssistantResponse).toHaveBeenCalledWith("Hello from SSE")
   })
 
   it("stopTalking leaves call and resets to idle", async () => {
@@ -603,8 +845,7 @@ describe("useStreamVoiceSession", () => {
       await result.current.stopTalking()
     })
 
-    expect(mockFetch).toHaveBeenNthCalledWith(
-      2,
+    expect(mockFetch).toHaveBeenCalledWith(
       "/api/sophia/user-1/voice/disconnect",
       expect.objectContaining({
         method: "POST",
@@ -612,6 +853,7 @@ describe("useStreamVoiceSession", () => {
         body: JSON.stringify({
           call_id: "test-call-123",
           session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
         }),
       }),
     )
@@ -651,8 +893,7 @@ describe("useStreamVoiceSession", () => {
       await Promise.resolve()
     })
 
-    expect(mockFetch).toHaveBeenNthCalledWith(
-      2,
+    expect(mockFetch).toHaveBeenCalledWith(
       "/api/sophia/user-1/voice/disconnect",
       expect.objectContaining({
         method: "POST",
@@ -660,6 +901,7 @@ describe("useStreamVoiceSession", () => {
         body: JSON.stringify({
           call_id: "test-call-123",
           session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
         }),
       }),
     )

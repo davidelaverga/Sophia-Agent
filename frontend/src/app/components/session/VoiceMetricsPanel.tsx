@@ -1,0 +1,1154 @@
+"use client"
+
+import {
+  Activity,
+  AlertTriangle,
+  AudioLines,
+  Clipboard,
+  ChevronDown,
+  ChevronUp,
+  Clock3,
+  Download,
+  Ear,
+  Gauge,
+  GripVertical,
+  Mic,
+  Radio,
+  RotateCcw,
+  Sparkles,
+} from "lucide-react"
+import { startTransition, useEffect, useMemo, useRef, useState } from "react"
+
+import { registerSophiaCaptureBridge } from "../../lib/session-capture"
+import { cn } from "../../lib/utils"
+import {
+  buildVoiceDeveloperMetrics,
+  buildVoiceTelemetrySummary,
+  type VoiceDeveloperMetrics,
+  type VoiceRegressionMarker,
+} from "../../lib/voice-runtime-metrics"
+import type { VoiceStateProps } from "../../lib/voice-types"
+import { useUiStore } from "../../stores/ui-store"
+
+type VoiceMetricsPanelProps = {
+  voiceState: VoiceStateProps
+  defaultExpanded?: boolean
+  layout?: "inline" | "floating"
+}
+
+type FloatingPanelBounds = {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+type PointerInteraction = {
+  pointerId: number
+  startX: number
+  startY: number
+  origin: FloatingPanelBounds
+}
+
+const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v1"
+const FLOATING_PANEL_MIN_WIDTH = 320
+const FLOATING_PANEL_MAX_WIDTH = 720
+const FLOATING_PANEL_MIN_HEIGHT = 260
+const FLOATING_PANEL_MAX_HEIGHT = 760
+const FLOATING_PANEL_EDGE_PADDING = 12
+const FLOATING_PANEL_TOP_PADDING = 76
+const FLOATING_PANEL_HEADER_OFFSET = 164
+
+function getDefaultFloatingBounds(viewportWidth: number, viewportHeight: number): FloatingPanelBounds {
+  const width = viewportWidth < 640
+    ? Math.max(FLOATING_PANEL_MIN_WIDTH, viewportWidth - 24)
+    : Math.min(460, Math.max(360, Math.round(viewportWidth * 0.3)))
+  const height = viewportHeight < 760
+    ? Math.max(FLOATING_PANEL_MIN_HEIGHT + 40, viewportHeight - 140)
+    : 560
+
+  return clampFloatingBounds({
+    left: viewportWidth - width - 24,
+    top: viewportWidth < 640 ? FLOATING_PANEL_TOP_PADDING : 88,
+    width,
+    height,
+  }, viewportWidth, viewportHeight)
+}
+
+function clampFloatingBounds(
+  bounds: FloatingPanelBounds,
+  viewportWidth: number,
+  viewportHeight: number,
+): FloatingPanelBounds {
+  const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, Math.min(FLOATING_PANEL_MAX_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)))
+  const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, Math.min(FLOATING_PANEL_MAX_HEIGHT, viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_EDGE_PADDING))
+  const width = Math.min(Math.max(bounds.width, FLOATING_PANEL_MIN_WIDTH), maxWidth)
+  const height = Math.min(Math.max(bounds.height, FLOATING_PANEL_MIN_HEIGHT), maxHeight)
+  const maxLeft = Math.max(FLOATING_PANEL_EDGE_PADDING, viewportWidth - width - FLOATING_PANEL_EDGE_PADDING)
+  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - 120)
+
+  return {
+    left: Math.min(Math.max(bounds.left, FLOATING_PANEL_EDGE_PADDING), maxLeft),
+    top: Math.min(Math.max(bounds.top, FLOATING_PANEL_TOP_PADDING), maxTop),
+    width,
+    height,
+  }
+}
+
+function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: FloatingPanelBounds; expanded: boolean } | null {
+  if (typeof window === "undefined") return null
+
+  try {
+    const raw = window.localStorage.getItem(FLOATING_PANEL_STORAGE_KEY)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw) as Partial<FloatingPanelBounds> & { expanded?: boolean }
+    if (
+      typeof parsed.left !== "number"
+      || typeof parsed.top !== "number"
+      || typeof parsed.width !== "number"
+      || typeof parsed.height !== "number"
+    ) {
+      return null
+    }
+
+    return {
+      bounds: {
+        left: parsed.left,
+        top: parsed.top,
+        width: parsed.width,
+        height: parsed.height,
+      },
+      expanded: typeof parsed.expanded === "boolean" ? parsed.expanded : defaultExpanded,
+    }
+  } catch {
+    return null
+  }
+}
+
+export function VoiceMetricsPanel({
+  voiceState,
+  defaultExpanded = true,
+  layout = "inline",
+}: VoiceMetricsPanelProps) {
+  const showToast = useUiStore((state) => state.showToast)
+  const [expanded, setExpanded] = useState(defaultExpanded)
+  const [floatingBounds, setFloatingBounds] = useState<FloatingPanelBounds>({
+    left: 24,
+    top: 88,
+    width: 420,
+    height: 560,
+  })
+  const [hasHydratedFloatingState, setHasHydratedFloatingState] = useState(layout !== "floating")
+  const [isDragging, setIsDragging] = useState(false)
+  const [isResizing, setIsResizing] = useState(false)
+  const dragRef = useRef<PointerInteraction | null>(null)
+  const resizeRef = useRef<PointerInteraction | null>(null)
+  const [metrics, setMetrics] = useState<VoiceDeveloperMetrics>(() =>
+    buildVoiceDeveloperMetrics({
+      stage: voiceState.stage,
+      events: [],
+      snapshot: null,
+      runtimeError: voiceState.error,
+    }),
+  )
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+
+    registerSophiaCaptureBridge()
+
+    const sync = () => {
+      const capture = window.__sophiaCapture
+      capture?.enable()
+
+      const snapshot = capture?.snapshot() ?? null
+      const events = capture?.getEvents() ?? []
+
+      startTransition(() => {
+        setMetrics(
+          buildVoiceDeveloperMetrics({
+            stage: voiceState.stage,
+            events,
+            snapshot,
+            runtimeError: voiceState.error,
+          }),
+        )
+      })
+    }
+
+    sync()
+    const intervalId = window.setInterval(sync, 250)
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [voiceState.error, voiceState.stage])
+
+  const panelTone = useMemo(() => {
+    if (metrics.regressions.some((marker) => marker.level === "bad")) {
+      return "bad" as const
+    }
+
+    if (metrics.regressions.some((marker) => marker.level === "warn")) {
+      return "warn" as const
+    }
+
+    return metrics.health.level
+  }, [metrics.health.level, metrics.regressions])
+
+  const summaryCards = useMemo(
+    () => [
+      {
+        label: "Session ready",
+        value: metrics.timings.sessionReadyMs,
+        hint: "start -> Sophia ready",
+        icon: Sparkles,
+        tone: metrics.thresholds.sessionReady.status,
+      },
+      {
+        label: "Join latency",
+        value: metrics.timings.joinLatencyMs,
+        hint: "credentials -> joined",
+        icon: Radio,
+        tone: metrics.thresholds.joinLatency.status,
+      },
+      {
+        label: "Committed response",
+        value: metrics.pipeline.committedTurnCloseMs ?? metrics.pipeline.userEndedToFirstTextMs ?? metrics.pipeline.userEndedToAgentStartMs,
+        hint: metrics.pipeline.committedTurnCloseMs !== null
+          ? "committed transcript -> agent start"
+          : "public turn -> first visible response",
+        icon: Clock3,
+        tone: metrics.thresholds.committedResponse.status,
+      },
+      {
+        label: "Raw first text",
+        value: metrics.lastTurn.firstTextMs,
+        hint: "diagnostic raw speech end -> first text",
+        icon: AudioLines,
+        tone: metrics.thresholds.firstText.status,
+      },
+      {
+        label: "Raw first audio",
+        value: metrics.lastTurn.firstAudioMs,
+        hint: "diagnostic raw speech end -> first audio",
+        icon: AudioLines,
+        tone: metrics.thresholds.firstAudio.status,
+      },
+      {
+        label: "Raw backend done",
+        value: metrics.lastTurn.backendCompleteMs,
+        hint: "diagnostic raw speech end -> backend complete",
+        icon: Gauge,
+        tone: metrics.thresholds.backendComplete.status,
+      },
+      {
+        label: metrics.thresholds.responseWindow.label,
+        value: metrics.stage === "thinking"
+          ? metrics.timings.currentThinkingMs
+          : metrics.lastTurn.responseDurationMs,
+        hint: metrics.stage === "thinking" ? "live thinking timer" : "agent started -> ended",
+        icon: Activity,
+        tone: metrics.thresholds.responseWindow.status,
+      },
+    ],
+    [metrics],
+  )
+
+  const compactSummaryCards = useMemo(
+    () => summaryCards.filter((card) => ["Session ready", "Committed response", "Raw first text"].includes(card.label)),
+    [summaryCards],
+  )
+
+  const displayedSummaryCards = layout === "floating" && !expanded ? compactSummaryCards : summaryCards
+
+  useEffect(() => {
+    if (layout !== "floating" || typeof window === "undefined") return
+
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const persisted = readPersistedFloatingBounds(defaultExpanded)
+    const nextBounds = persisted?.bounds ?? getDefaultFloatingBounds(viewportWidth, viewportHeight)
+
+    setFloatingBounds(clampFloatingBounds(nextBounds, viewportWidth, viewportHeight))
+    setExpanded(persisted?.expanded ?? defaultExpanded)
+    setHasHydratedFloatingState(true)
+  }, [defaultExpanded, layout])
+
+  useEffect(() => {
+    if (layout !== "floating" || typeof window === "undefined" || !hasHydratedFloatingState) return
+
+    window.localStorage.setItem(
+      FLOATING_PANEL_STORAGE_KEY,
+      JSON.stringify({ ...floatingBounds, expanded }),
+    )
+  }, [expanded, floatingBounds, hasHydratedFloatingState, layout])
+
+  useEffect(() => {
+    if (layout !== "floating" || typeof window === "undefined") return
+
+    const handleResize = () => {
+      setFloatingBounds((current) => clampFloatingBounds(current, window.innerWidth, window.innerHeight))
+    }
+
+    window.addEventListener("resize", handleResize)
+    return () => window.removeEventListener("resize", handleResize)
+  }, [layout])
+
+  useEffect(() => {
+    if (layout !== "floating") return
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const dragState = dragRef.current
+      if (event.pointerId === dragState?.pointerId) {
+        const { origin, startX, startY } = dragState
+        setFloatingBounds(
+          clampFloatingBounds({
+            ...origin,
+            left: origin.left + (event.clientX - startX),
+            top: origin.top + (event.clientY - startY),
+          }, window.innerWidth, window.innerHeight),
+        )
+        return
+      }
+
+      const resizeState = resizeRef.current
+      if (event.pointerId === resizeState?.pointerId) {
+        const { origin, startX, startY } = resizeState
+        setFloatingBounds(
+          clampFloatingBounds({
+            ...origin,
+            width: origin.width + (event.clientX - startX),
+            height: origin.height + (event.clientY - startY),
+          }, window.innerWidth, window.innerHeight),
+        )
+      }
+    }
+
+    const stopInteraction = (event: PointerEvent) => {
+      if (event.pointerId === dragRef.current?.pointerId) {
+        dragRef.current = null
+        setIsDragging(false)
+      }
+
+      if (event.pointerId === resizeRef.current?.pointerId) {
+        resizeRef.current = null
+        setIsResizing(false)
+      }
+    }
+
+    window.addEventListener("pointermove", handlePointerMove)
+    window.addEventListener("pointerup", stopInteraction)
+    window.addEventListener("pointercancel", stopInteraction)
+
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove)
+      window.removeEventListener("pointerup", stopInteraction)
+      window.removeEventListener("pointercancel", stopInteraction)
+    }
+  }, [layout])
+
+  const serializeSessionJson = () => {
+    if (typeof window === "undefined") {
+      return null
+    }
+
+    const capture = window.__sophiaCapture
+    if (!capture) {
+      return null
+    }
+
+    return JSON.stringify(
+      {
+        reportType: "voice-telemetry-report",
+        version: 1,
+        source: "session-ui",
+        exportedAt: new Date().toISOString(),
+        summary: buildVoiceTelemetrySummary(metrics),
+        metrics,
+        captureBundle: capture.export(),
+      },
+      null,
+      2,
+    )
+  }
+
+  const copySessionJson = async () => {
+    try {
+      const payload = serializeSessionJson()
+      if (!payload || typeof navigator?.clipboard?.writeText !== "function") {
+        showToast({ message: "Session JSON is unavailable right now", variant: "warning", durationMs: 2200 })
+        return
+      }
+
+      await navigator.clipboard.writeText(payload)
+      showToast({ message: "Voice telemetry report copied", variant: "success", durationMs: 1800 })
+    } catch {
+      showToast({ message: "Could not copy session JSON", variant: "error", durationMs: 2200 })
+    }
+  }
+
+  const exportSessionJson = () => {
+    try {
+      const payload = serializeSessionJson()
+      if (!payload || typeof document === "undefined") {
+        showToast({ message: "Session JSON is unavailable right now", variant: "warning", durationMs: 2200 })
+        return
+      }
+
+      const blob = new Blob([payload], { type: "application/json" })
+      const href = URL.createObjectURL(blob)
+      const anchor = document.createElement("a")
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-")
+
+      anchor.href = href
+      anchor.download = `sophia-voice-telemetry-report-${stamp}.json`
+      anchor.click()
+      URL.revokeObjectURL(href)
+      showToast({ message: "Voice telemetry report exported", variant: "success", durationMs: 1800 })
+    } catch {
+      showToast({ message: "Could not export session JSON", variant: "error", durationMs: 2200 })
+    }
+  }
+
+  const beginDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (layout !== "floating") return
+
+    event.preventDefault()
+    dragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: floatingBounds,
+    }
+    setIsDragging(true)
+  }
+
+  const beginResize = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (layout !== "floating") return
+
+    event.preventDefault()
+    resizeRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      origin: floatingBounds,
+    }
+    setIsResizing(true)
+  }
+
+  const resetFloatingPanel = () => {
+    if (typeof window === "undefined") return
+
+    setFloatingBounds(getDefaultFloatingBounds(window.innerWidth, window.innerHeight))
+    setExpanded(defaultExpanded)
+  }
+
+  const floatingContainerStyle = layout === "floating"
+    ? {
+        left: floatingBounds.left,
+        top: floatingBounds.top,
+        width: floatingBounds.width,
+      }
+    : undefined
+
+  const panelStyle = layout === "floating" && expanded
+    ? { height: floatingBounds.height }
+    : undefined
+
+  const latestFalseEndsDisplay = Math.max((metrics.lastTurn.falseUserEndedCount ?? 1) - 1, 0)
+
+  const panel = (
+    <section className={cn(
+      "relative overflow-hidden rounded-[28px] border text-sophia-text shadow-soft transition-colors duration-300",
+      panelToneClass(panelTone),
+      layout === "floating" && "flex max-h-[calc(100vh-88px)] flex-col backdrop-blur-md",
+      isDragging && "select-none",
+      isResizing && "select-none",
+    )} style={panelStyle}>
+      <div className="flex flex-col gap-4 border-b border-white/8 px-5 py-5 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex min-w-0 flex-1 gap-3">
+          {layout === "floating" && (
+            <button
+              type="button"
+              onPointerDown={beginDrag}
+              title="Drag telemetry panel"
+              className={cn(
+                "mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text",
+                isDragging && "cursor-grabbing bg-white/10 text-sophia-text",
+                !isDragging && "cursor-grab",
+              )}
+              style={{ touchAction: "none" }}
+            >
+              <GripVertical className="h-4 w-4" />
+            </button>
+          )}
+
+          <div className="min-w-0 space-y-3">
+            <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.32em] text-sophia-text2/70">
+              <Activity className="h-3.5 w-3.5" />
+              Voice runtime telemetry
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <ToneBadge label={metrics.health.title} tone={metrics.health.level} />
+              <ToneBadge label={`Stage: ${metrics.stage}`} tone="neutral" />
+              <ToneBadge
+                label={`Transport: ${metrics.transport.activeSource.toUpperCase()}`}
+                tone={metrics.transport.activeSource === "custom" ? "warn" : "good"}
+              />
+              <ToneBadge
+                label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
+                tone={metrics.microphone.detectedAudio ? "good" : "warn"}
+              />
+              {metrics.regressions.length > 0 && (
+                <ToneBadge
+                  label={`${metrics.regressions.length} regression ${metrics.regressions.length === 1 ? "marker" : "markers"}`}
+                  tone={panelTone === "bad" ? "bad" : "warn"}
+                />
+              )}
+            </div>
+            <p className={cn(
+              "leading-relaxed text-sophia-text2",
+              layout === "floating" && !expanded ? "max-w-none text-xs" : "max-w-3xl text-sm",
+            )}>
+              {metrics.health.detail}
+            </p>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 self-start">
+          {(layout === "inline" || expanded) && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  void copySessionJson()
+                }}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+              >
+                <Clipboard className="h-3.5 w-3.5" />
+                Copy JSON
+              </button>
+              <button
+                type="button"
+                onClick={exportSessionJson}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Export JSON
+              </button>
+            </>
+          )}
+          {layout === "floating" && (
+            <button
+              type="button"
+              onClick={resetFloatingPanel}
+              title="Reset panel position and size"
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              Reset
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+          >
+            {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+            {expanded ? "Collapse metrics" : layout === "floating" ? "Expand panel" : "Expand metrics"}
+          </button>
+        </div>
+      </div>
+
+      <div
+        className={cn(
+          layout === "floating" && expanded && "min-h-0 overflow-y-auto pr-1",
+        )}
+        style={layout === "floating" && expanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
+      >
+        <div className={cn(
+          "grid gap-3 px-5 py-5",
+          layout === "floating" && !expanded
+            ? "grid-cols-1 sm:grid-cols-3"
+            : "sm:grid-cols-2 xl:grid-cols-3",
+        )}>
+          {displayedSummaryCards.map((card) => (
+            <MetricCard
+              key={card.label}
+              icon={card.icon}
+              label={card.label}
+              hint={withThresholdHint(card.hint, metrics.thresholds[thresholdKeyForLabel(card.label)])}
+              value={formatMs(card.value)}
+              tone={card.tone}
+              emphasize={card.label === "Current wait" && metrics.timings.currentThinkingMs !== null && metrics.timings.currentThinkingMs > 4000}
+              compact={layout === "floating" && !expanded}
+            />
+          ))}
+        </div>
+
+        {expanded && (
+          <>
+            <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[1.1fr_0.9fr]">
+              <BottleneckCard metrics={metrics} />
+              <InfoCard
+                icon={Sparkles}
+                title="Startup path"
+                rows={[
+                  ["request -> credentials", formatMs(metrics.startup.requestToCredentialsMs)],
+                  ["credentials -> join", formatMs(metrics.startup.credentialsToJoinMs)],
+                  ["join -> ready", formatMs(metrics.startup.joinToReadyMs)],
+                  ["join -> audio bound", formatMs(metrics.startup.joinToRemoteAudioMs)],
+                  ["start -> mic audio", formatMs(metrics.startup.startToMicAudioMs)],
+                  ["start -> first transcript", formatMs(metrics.startup.startToFirstUserTranscriptMs)],
+                ]}
+                footer="This isolates the cold-start path before Sophia can even begin to answer your turn."
+                tone={metrics.bottleneck.kind === "startup" ? metrics.bottleneck.level : metrics.thresholds.sessionReady.status}
+              />
+            </div>
+
+            <div className="grid gap-3 border-t border-white/8 px-5 py-5 md:grid-cols-3">
+              {metrics.regressions.length === 0 && (
+                <div className="md:col-span-3 rounded-3xl border border-emerald-300/15 bg-emerald-300/6 px-4 py-4 text-sm text-emerald-100/90">
+                  No active regression markers. The latest thresholds are within target ranges for this voice turn.
+                </div>
+              )}
+              {metrics.regressions.map((marker) => (
+                <RegressionCard key={marker.key} marker={marker} />
+              ))}
+            </div>
+
+            <div className="grid gap-4 border-t border-white/8 px-5 py-5 xl:grid-cols-[1.2fr_0.8fr]">
+              <div className="space-y-4">
+                <div className="grid gap-4 lg:grid-cols-2">
+                  <InfoCard
+                    icon={Mic}
+                    title="Microphone"
+                    rows={[
+                      ["Streams", String(metrics.microphone.streamCount)],
+                      ["Tracks", String(metrics.microphone.audioTrackCount)],
+                      ["Detected audio", metrics.microphone.detectedAudio ? "yes" : "no"],
+                      ["First audio", formatIsoAge(metrics.microphone.firstAudioAt)],
+                      ["Last audio", formatIsoAge(metrics.microphone.lastAudioAt)],
+                      ["Peak RMS", formatDecimal(metrics.microphone.maxRms)],
+                      ["Peak abs", formatDecimal(metrics.microphone.maxAbsPeak)],
+                      ["Sample windows", String(metrics.microphone.totalSampleWindows)],
+                      ["Probe errors", String(metrics.microphone.errorCount)],
+                    ]}
+                    footer={metrics.microphone.lastError ?? "Browser probe installed and listening for non-silent windows."}
+                    tone={metrics.regressions.some((marker) => marker.key === "microphone" && marker.level === "bad")
+                      ? "bad"
+                      : metrics.regressions.some((marker) => marker.key === "microphone")
+                        ? "warn"
+                        : metrics.microphone.detectedAudio
+                          ? "good"
+                          : "warn"}
+                  />
+                  <InfoCard
+                    icon={Ear}
+                    title="Turn flow"
+                    rows={[
+                      ["Turns", String(metrics.counts.turns)],
+                      ["User transcripts", String(metrics.counts.userTranscripts)],
+                      ["Assistant transcripts", String(metrics.counts.assistantTranscripts)],
+                      ["Artifacts", String(metrics.counts.artifacts)],
+                      ["Diagnostics", String(metrics.counts.diagnostics)],
+                      ["Committed transcript -> agent start", formatMs(metrics.pipeline.committedTurnCloseMs)],
+                      ["User end -> agent start", formatMs(metrics.pipeline.userEndedToAgentStartMs)],
+                      ["transcript -> user ended", formatMs(metrics.pipeline.transcriptToUserEndedMs)],
+                    ]}
+                    footer={buildTurnFlowFooter(metrics)}
+                    tone={metrics.regressions.some((marker) => marker.key === "turn-segmentation" && marker.level === "bad")
+                      ? "bad"
+                      : metrics.regressions.some((marker) => marker.key === "turn-segmentation")
+                        ? "warn"
+                        : metrics.lastTurn.status === "failed"
+                          ? "bad"
+                          : "neutral"}
+                  />
+                </div>
+
+                <InfoCard
+                  icon={Gauge}
+                  title="Response pipeline"
+                  rows={[
+                    ["mic -> transcript", formatMs(metrics.pipeline.micToUserTranscriptMs)],
+                    ["committed transcript -> agent start", formatMs(metrics.pipeline.committedTurnCloseMs)],
+                    ["user end -> first visible text", formatMs(metrics.pipeline.userEndedToFirstTextMs)],
+                    ["user end -> agent start", formatMs(metrics.pipeline.userEndedToAgentStartMs)],
+                    ["user end -> request", formatMs(metrics.pipeline.userEndedToRequestStartMs)],
+                    ["pre-request stabilization", formatMs(metrics.pipeline.submissionStabilizationMs)],
+                    ["request -> first backend event", formatMs(metrics.pipeline.requestStartToFirstBackendEventMs)],
+                    ["first backend event -> raw first text", formatMs(metrics.pipeline.firstBackendEventToFirstTextMs)],
+                    ["request -> raw first text", formatMs(metrics.pipeline.requestStartToFirstTextMs)],
+                    ["raw speech end -> first text", formatMs(metrics.pipeline.rawSpeechEndToFirstTextMs)],
+                    ["raw first text -> backend done", formatMs(metrics.pipeline.firstTextToBackendCompleteMs)],
+                    ["raw speech end -> backend done", formatMs(metrics.pipeline.rawSpeechEndToBackendCompleteMs)],
+                    ["raw backend done -> first audio", formatMs(metrics.pipeline.backendToFirstAudioMs)],
+                    ["raw first text -> first audio", formatMs(metrics.pipeline.textToFirstAudioMs)],
+                    ["raw speech end -> first audio", formatMs(metrics.pipeline.rawSpeechEndToFirstAudioMs)],
+                    ["response window", formatMs(metrics.lastTurn.responseDurationMs)],
+                  ]}
+                  footer="Committed turn-close, pre-request stabilization, and raw diagnostic latency are shown separately so transcript settling does not look like a pure backend stall."
+                  tone={metrics.bottleneck.kind === "backend" || metrics.bottleneck.kind === "tts" || metrics.bottleneck.kind === "commit-boundary"
+                    ? metrics.bottleneck.level
+                    : "neutral"}
+                />
+              </div>
+
+              <div className="space-y-4">
+                <InfoCard
+                  icon={Radio}
+                  title="Transport + session"
+                  rows={[
+                    ["Session", metrics.sessionIds.sessionId ?? "pending"],
+                    ["Thread", metrics.sessionIds.threadId ?? "pending"],
+                    ["Call", metrics.sessionIds.callId ?? "pending"],
+                    ["Voice agent", metrics.sessionIds.voiceAgentSessionId ?? "pending"],
+                    ["Run", metrics.sessionIds.runId ?? "pending"],
+                    ["Transport", metrics.transport.activeSource.toUpperCase()],
+                    ["Remote participants", metrics.transport.remoteParticipantCount?.toString() ?? "pending"],
+                    ["SSE open", formatMs(metrics.timings.sseOpenMs)],
+                    ["Last event age", formatMs(metrics.timings.lastEventAgeMs)],
+                  ]}
+                  footer={metrics.transport.streamOpen
+                    ? "Browser SSE bridge is open for voice events."
+                    : metrics.transport.activeSource === "custom"
+                      ? "Fallback transport is Stream custom events."
+                      : "Waiting for event transport to come online."}
+                  tone={metrics.bottleneck.kind === "transport" ? metrics.bottleneck.level : metrics.transport.activeSource === "custom" ? "warn" : "neutral"}
+                />
+
+                <InfoCard
+                  icon={Activity}
+                  title="Event counters"
+                  rows={[
+                    ["Total events", String(metrics.events.total)],
+                    ["voice-sse", String(metrics.events.voiceSse)],
+                    ["stream-custom", String(metrics.events.streamCustom)],
+                    ["voice-runtime", String(metrics.events.voiceRuntime)],
+                    ["voice-session", String(metrics.events.voiceSession)],
+                    ["harness-input", String(metrics.events.harnessInput)],
+                    ["SSE errors", String(metrics.events.sseErrors)],
+                    ["Invalid payloads", String(metrics.events.invalidPayloads)],
+                    ["Duplicate transcripts", String(metrics.events.duplicateUserTranscriptIgnored)],
+                    ["Stale connect", String(metrics.events.staleConnectResponses)],
+                  ]}
+                  footer="These counters are useful when the bottleneck is transport noise or repeated retries rather than model latency."
+                  tone={metrics.bottleneck.kind === "transport" ? metrics.bottleneck.level : "neutral"}
+                />
+
+                <InfoCard
+                  icon={AlertTriangle}
+                  title="Latest diagnostic"
+                  rows={[
+                    ["Turn ID", metrics.lastTurn.turnId ?? "pending"],
+                    ["Status", metrics.lastTurn.status ?? "pending"],
+                    ["Reason", metrics.lastTurn.reason ?? "pending"],
+                    ["Extra false ends", latestFalseEndsDisplay.toString()],
+                    ["Last user", metrics.lastTurn.lastUserTranscript ? truncate(metrics.lastTurn.lastUserTranscript, 34) : "pending"],
+                    ["Last Sophia", metrics.lastTurn.lastAssistantTranscript ? truncate(metrics.lastTurn.lastAssistantTranscript, 34) : "pending"],
+                  ]}
+                  footer={formatDuplicatePhaseFooter(metrics.lastTurn.duplicatePhaseCounts)}
+                  tone={metrics.regressions.some((marker) => (marker.key === "backend-stall" || marker.key === "commit-boundary") && marker.level === "bad")
+                    ? "bad"
+                    : metrics.regressions.some((marker) => marker.key === "backend-stall" || marker.key === "commit-boundary")
+                      ? "warn"
+                      : metrics.lastTurn.status === "failed"
+                        ? "bad"
+                        : metrics.lastTurn.reason && metrics.lastTurn.reason !== "completed"
+                          ? "warn"
+                          : "neutral"}
+                />
+
+                <RecentTurnsCard turns={metrics.recentTurns} />
+
+                <div className="rounded-3xl border border-white/8 bg-white/4 p-4">
+                  <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sophia-text">
+                    <Sparkles className="h-4 w-4 text-sophia-text2/80" />
+                    Recent timeline
+                  </div>
+                  <div className="space-y-2.5">
+                    {metrics.timeline.length === 0 && (
+                      <p className="text-sm text-sophia-text2">
+                        Waiting for capture events from the current voice turn.
+                      </p>
+                    )}
+                    {metrics.timeline.map((item) => (
+                      <div key={item.id} className="rounded-2xl border border-white/6 bg-black/15 px-3 py-2.5">
+                        <div className="flex items-center justify-between gap-3 text-xs">
+                          <div className="flex items-center gap-2 text-sophia-text">
+                            <span className={timelineToneClass(item.tone)} />
+                            <span className="font-medium">{item.label}</span>
+                          </div>
+                          <span className="text-sophia-text2/70">{item.sinceStartMs === null ? "--" : `+${formatMsCompact(item.sinceStartMs)}`}</span>
+                        </div>
+                        <p className="mt-1 text-xs leading-relaxed text-sophia-text2">
+                          {item.detail}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+
+      {layout === "floating" && expanded && (
+        <button
+          type="button"
+          aria-label="Resize telemetry panel"
+          onPointerDown={beginResize}
+          className={cn(
+            "absolute bottom-3 right-3 h-6 w-6 cursor-se-resize rounded-sm border-r-2 border-b-2 border-white/35 opacity-80 transition-opacity hover:opacity-100",
+            isResizing && "opacity-100",
+          )}
+          style={{ touchAction: "none" }}
+        />
+      )}
+    </section>
+  )
+
+  if (layout === "floating") {
+    if (!hasHydratedFloatingState) {
+      return null
+    }
+
+    return (
+      <div className="pointer-events-auto fixed z-40" style={floatingContainerStyle}>
+        {panel}
+      </div>
+    )
+  }
+
+  return panel
+}
+
+function BottleneckCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
+  return (
+    <div className={cn(
+      "rounded-3xl border p-5",
+      metrics.bottleneck.level === "bad"
+        ? "border-rose-300/20 bg-rose-300/8"
+        : metrics.bottleneck.level === "warn"
+          ? "border-amber-300/20 bg-amber-300/8"
+          : metrics.bottleneck.level === "good"
+            ? "border-emerald-300/15 bg-emerald-300/6"
+            : "border-white/8 bg-white/4",
+    )}>
+      <div className="flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Activity className="h-4 w-4" />
+        Primary bottleneck
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <ToneBadge label={metrics.bottleneck.title} tone={metrics.bottleneck.level} />
+        <ToneBadge label={`kind: ${metrics.bottleneck.kind}`} tone="neutral" />
+      </div>
+      <p className="mt-3 text-sm leading-relaxed text-sophia-text2">
+        {metrics.bottleneck.detail}
+      </p>
+      <div className="mt-4 space-y-2">
+        {metrics.bottleneck.evidence.length === 0 && (
+          <p className="text-xs text-sophia-text2/80">No supporting evidence yet for this turn.</p>
+        )}
+        {metrics.bottleneck.evidence.map((item) => (
+          <div key={item} className="rounded-2xl border border-white/8 bg-black/15 px-3 py-2 text-xs text-sophia-text2">
+            {item}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function MetricCard({
+  icon: Icon,
+  label,
+  hint,
+  value,
+  tone,
+  emphasize = false,
+  compact = false,
+}: {
+  icon: typeof Activity
+  label: string
+  hint: string
+  value: string
+  tone: "good" | "warn" | "bad" | "neutral"
+  emphasize?: boolean
+  compact?: boolean
+}) {
+  return (
+    <div className={cn(
+      compact ? "rounded-3xl border px-3 py-3" : "rounded-3xl border px-4 py-4",
+      metricCardToneClass(tone, emphasize),
+    )}>
+      <div className="flex items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-sophia-text2/65">{label}</p>
+          <p className={cn(
+            "mt-2 font-semibold tracking-tight text-sophia-text",
+            compact ? "text-xl" : "text-2xl",
+          )}>{value}</p>
+        </div>
+        <div className={cn(
+          "flex items-center justify-center rounded-2xl bg-black/20 text-sophia-text2",
+          compact ? "h-9 w-9" : "h-10 w-10",
+        )}>
+          <Icon className="h-4 w-4" />
+        </div>
+      </div>
+      <p className={cn("text-xs text-sophia-text2/75", compact ? "mt-2" : "mt-3")}>{hint}</p>
+    </div>
+  )
+}
+
+function RegressionCard({ marker }: { marker: VoiceRegressionMarker }) {
+  return (
+    <div className={cn(
+      "rounded-3xl border px-4 py-4",
+      marker.level === "bad"
+        ? "border-rose-300/20 bg-rose-300/8"
+        : "border-amber-300/20 bg-amber-300/8",
+    )}>
+      <div className="flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        {marker.key === "microphone" ? (
+          <Mic className="h-4 w-4" />
+        ) : marker.key === "turn-segmentation" ? (
+          <AlertTriangle className="h-4 w-4" />
+        ) : (
+          <Activity className="h-4 w-4" />
+        )}
+        {marker.title}
+      </div>
+      <p className="mt-2 text-sm leading-relaxed text-sophia-text2">{marker.detail}</p>
+    </div>
+  )
+}
+
+function RecentTurnsCard({ turns }: { turns: VoiceDeveloperMetrics["recentTurns"] }) {
+  return (
+    <div className="rounded-3xl border border-white/8 bg-white/4 p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Clock3 className="h-4 w-4 text-sophia-text2/80" />
+        Recent turn diagnostics
+      </div>
+      <div className="space-y-2.5">
+        {turns.length === 0 && (
+          <p className="text-sm text-sophia-text2">No completed diagnostics yet in this voice session.</p>
+        )}
+        {turns.map((turn, index) => (
+          <div key={`${turn.turnId ?? "turn"}-${index}`} className="rounded-2xl border border-white/8 bg-black/15 px-3 py-3">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <span className="font-medium text-sophia-text">{turn.turnId ?? `turn ${index + 1}`}</span>
+              <span className="text-sophia-text2/75">{turn.status ?? "pending"}</span>
+            </div>
+            <div className="mt-2 grid gap-1 text-xs text-sophia-text2 sm:grid-cols-2">
+              <span>reason: {turn.reason ?? "pending"}</span>
+              <span>committed turn close: {formatMs(turn.committedTurnCloseMs)}</span>
+              <span>committed to agent start: {formatMs(turn.committedTranscriptToAgentStartMs)}</span>
+              <span>request to first backend event: {formatMs(turn.requestStartToFirstBackendEventMs)}</span>
+              <span>raw first text: {formatMs(turn.firstTextMs)}</span>
+              <span>raw backend done: {formatMs(turn.backendCompleteMs)}</span>
+              <span>raw first audio: {formatMs(turn.firstAudioMs)}</span>
+              <span>extra false ends: {Math.max((turn.falseUserEndedCount ?? 1) - 1, 0)}</span>
+              <span>duplicate phases: {turn.duplicatePhaseTotal}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function InfoCard({
+  icon: Icon,
+  title,
+  rows,
+  footer,
+  tone,
+}: {
+  icon: typeof Activity
+  title: string
+  rows: Array<[string, string]>
+  footer: string
+  tone: "good" | "warn" | "bad" | "neutral"
+}) {
+  return (
+    <div className="rounded-3xl border border-white/8 bg-white/4 p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Icon className="h-4 w-4 text-sophia-text2/80" />
+        {title}
+        <span className={tonePillClass(tone)} />
+      </div>
+      <div className="space-y-2">
+        {rows.map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-4 text-sm">
+            <span className="text-sophia-text2/75">{label}</span>
+            <span className="truncate text-right font-medium text-sophia-text">{value}</span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-4 text-xs leading-relaxed text-sophia-text2/75">{footer}</p>
+    </div>
+  )
+}
+
+function ToneBadge({ label, tone }: { label: string; tone: "good" | "warn" | "bad" | "neutral" }) {
+  return (
+    <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium ${toneBadgeClass(tone)}`}>
+      <span className={timelineToneClass(tone)} />
+      {label}
+    </span>
+  )
+}
+
+function buildTurnFlowFooter(metrics: VoiceDeveloperMetrics): string {
+  if (metrics.stage === "thinking" && metrics.timings.currentThinkingMs !== null) {
+    return `Sophia is currently waiting ${formatMs(metrics.timings.currentThinkingMs)} after the latest user-end event.`
+  }
+
+  if (metrics.lastTurn.responseDurationMs !== null) {
+    return `The latest spoken response lasted ${formatMs(metrics.lastTurn.responseDurationMs)} from agent start to agent end.`
+  }
+
+  return "Turn metrics will fill in once the backend emits user-end, agent start, and diagnostic events."
+}
+
+function formatDuplicatePhaseFooter(counts: Record<string, number>): string {
+  const entries = Object.entries(counts)
+  if (entries.length === 0) {
+    return "No duplicate turn phases were recorded in the latest diagnostic."
+  }
+
+  return entries.map(([key, value]) => `${key}: ${value}`).join(" | ")
+}
+
+function formatMs(value: number | null): string {
+  if (value === null) return "--"
+  if (value < 1000) return `${Math.round(value)} ms`
+  return `${(value / 1000).toFixed(2)} s`
+}
+
+function formatIsoAge(value: string | null): string {
+  if (!value) return "--"
+
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return value
+
+  const ageMs = Date.now() - timestamp
+  return ageMs < 1000 ? `${Math.max(ageMs, 0)}ms ago` : `${(Math.max(ageMs, 0) / 1000).toFixed(2)}s ago`
+}
+
+function formatMsCompact(value: number): string {
+  if (value < 1000) return `${Math.round(value)}ms`
+  return `${(value / 1000).toFixed(2)}s`
+}
+
+function formatDecimal(value: number | null): string {
+  return value === null ? "--" : value.toFixed(3)
+}
+
+function thresholdKeyForLabel(label: string): keyof VoiceDeveloperMetrics["thresholds"] {
+  switch (label) {
+    case "Session ready":
+      return "sessionReady"
+    case "Join latency":
+      return "joinLatency"
+    case "Committed response":
+      return "committedResponse"
+    case "Raw first text":
+      return "firstText"
+    case "Raw first audio":
+      return "firstAudio"
+    case "Raw backend done":
+      return "backendComplete"
+    default:
+      return "responseWindow"
+  }
+}
+
+function withThresholdHint(
+  hint: string,
+  threshold: VoiceDeveloperMetrics["thresholds"][keyof VoiceDeveloperMetrics["thresholds"]],
+): string {
+  return `${hint} | warn ${formatMsCompact(threshold.warnAtMs)} | bad ${formatMsCompact(threshold.badAtMs)}`
+}
+
+function truncate(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`
+}
+
+function toneBadgeClass(tone: "good" | "warn" | "bad" | "neutral"): string {
+  switch (tone) {
+    case "good":
+      return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100"
+    case "warn":
+      return "border-amber-300/20 bg-amber-300/10 text-amber-100"
+    case "bad":
+      return "border-rose-300/20 bg-rose-300/10 text-rose-100"
+    default:
+      return "border-white/10 bg-white/6 text-sophia-text2"
+  }
+}
+
+function metricCardToneClass(
+  tone: "good" | "warn" | "bad" | "neutral",
+  emphasize: boolean,
+): string {
+  if (tone === "bad") {
+    return "border-rose-300/20 bg-rose-300/8"
+  }
+
+  if (tone === "warn" || emphasize) {
+    return "border-amber-300/20 bg-amber-400/8"
+  }
+
+  if (tone === "good") {
+    return "border-emerald-300/15 bg-emerald-300/6"
+  }
+
+  return "border-white/8 bg-white/4"
+}
+
+function panelToneClass(tone: "good" | "warn" | "bad" | "neutral"): string {
+  switch (tone) {
+    case "good":
+      return "border-emerald-300/20 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.18),transparent_35%),linear-gradient(135deg,rgba(17,24,24,0.98),rgba(10,15,20,0.92))]"
+    case "warn":
+      return "border-amber-300/20 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.18),transparent_35%),linear-gradient(135deg,rgba(26,21,17,0.98),rgba(16,13,10,0.92))]"
+    case "bad":
+      return "border-rose-300/20 bg-[radial-gradient(circle_at_top_left,rgba(251,113,133,0.18),transparent_35%),linear-gradient(135deg,rgba(28,18,20,0.98),rgba(18,12,14,0.92))]"
+    default:
+      return "border-sophia-surface-border/70 bg-[radial-gradient(circle_at_top_left,rgba(151,118,255,0.14),transparent_35%),linear-gradient(135deg,rgba(21,24,34,0.98),rgba(13,15,24,0.92))]"
+  }
+}
+
+function tonePillClass(tone: "good" | "warn" | "bad" | "neutral"): string {
+  switch (tone) {
+    case "good":
+      return "ml-auto h-2.5 w-2.5 rounded-full bg-emerald-300 shadow-[0_0_16px_rgba(110,231,183,0.7)]"
+    case "warn":
+      return "ml-auto h-2.5 w-2.5 rounded-full bg-amber-300 shadow-[0_0_16px_rgba(252,211,77,0.7)]"
+    case "bad":
+      return "ml-auto h-2.5 w-2.5 rounded-full bg-rose-300 shadow-[0_0_16px_rgba(253,164,175,0.7)]"
+    default:
+      return "ml-auto h-2.5 w-2.5 rounded-full bg-sophia-text2/40"
+  }
+}
+
+function timelineToneClass(tone: "good" | "warn" | "bad" | "neutral"): string {
+  switch (tone) {
+    case "good":
+      return "h-2 w-2 rounded-full bg-emerald-300 shadow-[0_0_10px_rgba(110,231,183,0.8)]"
+    case "warn":
+      return "h-2 w-2 rounded-full bg-amber-300 shadow-[0_0_10px_rgba(252,211,77,0.8)]"
+    case "bad":
+      return "h-2 w-2 rounded-full bg-rose-300 shadow-[0_0_10px_rgba(253,164,175,0.8)]"
+    default:
+      return "h-2 w-2 rounded-full bg-sophia-text2/50"
+  }
+}

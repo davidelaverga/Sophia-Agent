@@ -28,7 +28,6 @@ def _make_coordinator(**overrides) -> ConversationFlowCoordinator:
         record_turn=MagicMock(),
         send_acknowledgment=AsyncMock(),
         same_turn_repeat_debounce_ms=1200,
-        resubmit_response=AsyncMock(),
     )
     defaults.update(overrides)
     return ConversationFlowCoordinator(**defaults)
@@ -148,7 +147,7 @@ class TestCancelAndMerge:
 class TestMergeAndResubmit:
     pytestmark = pytest.mark.anyio
 
-    async def test_merge_resubmit_called_on_second_turn_end(self):
+    async def test_merge_is_queued_for_next_submission(self):
         coord = _make_coordinator(fragile_window_ms=500)
         participant = MagicMock()
         assert coord.on_turn_ended("I just feel", participant) is True
@@ -158,16 +157,22 @@ class TestMergeAndResubmit:
 
         # User finishes; second turn ended
         coord.on_merge_turn_ended("I just feel like nobody really gets it")
-        await asyncio.sleep(0.05)
-        coord._resubmit_response.assert_called_once()
-        merged = coord._resubmit_response.call_args[0][0]
-        assert "nobody really gets it" in merged
+
+        merged = coord.consume_pending_recovered_response(
+            "I just feel like nobody really gets it",
+            participant,
+        )
+        assert merged == "I just feel like nobody really gets it"
+        assert coord.consume_pending_recovered_response(
+            "I just feel like nobody really gets it",
+            participant,
+        ) is None
         assert coord.is_merge_pending is False
 
-    async def test_merge_not_called_without_pending(self):
+    async def test_merge_not_queued_without_pending(self):
         coord = _make_coordinator()
         coord.on_merge_turn_ended("some text")
-        coord._resubmit_response.assert_not_called()
+        assert coord.consume_pending_recovered_response("some text", MagicMock()) is None
 
     async def test_merge_transcripts_continuation_already_contains_original(self):
         merged = ConversationFlowCoordinator._merge_transcripts(
@@ -358,6 +363,30 @@ class TestErrorResilience:
         coord._interrupt_tts.assert_called_once()
         coord._send_acknowledgment.assert_not_called()
 
+    async def test_late_continuation_can_queue_merge_for_next_submission(self):
+        coord = _make_coordinator()
+        participant = MagicMock()
+        participant.user_id = "user-1"
+
+        assert coord.on_turn_ended("Things are getting better", participant) is True
+        coord.mark_response_submitted("Things are getting better", participant)
+        coord.on_agent_started()
+
+        merged = await coord.recover_late_continuation(
+            "Things are getting better just not",
+            participant,
+            queue_for_next_submission=True,
+        )
+
+        assert merged == "Things are getting better just not"
+        assert (
+            coord.consume_pending_recovered_response(
+                "Things are getting better just not as fast as I thought",
+                participant,
+            )
+            == "Things are getting better just not as fast as I thought"
+        )
+
     async def test_late_continuation_ignored_after_response_finishes(self):
         coord = _make_coordinator()
         participant = MagicMock()
@@ -395,12 +424,11 @@ class TestErrorResilience:
         assert coord.is_merge_pending is True
 
         coord.on_merge_turn_ended("But if I'm honest, I also feel jealous.")
-        await asyncio.sleep(0.05)
 
-        coord._resubmit_response.assert_called_once_with(
-            "for my friend. But if I'm honest, I also feel jealous.",
+        assert coord.consume_pending_recovered_response(
+            "But if I'm honest, I also feel jealous.",
             participant,
-        )
+        ) == "for my friend. But if I'm honest, I also feel jealous."
 
     async def test_pre_response_continuation_ignored_after_backend_progress(self):
         coord = _make_coordinator()
