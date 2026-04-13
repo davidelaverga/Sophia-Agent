@@ -569,7 +569,14 @@ def make_sophia_builder(config: RunnableConfig):
     ]
 
     tools = [
-        *deerflow_default_tools,   # bash, file ops, web search, present_files
+        bash_tool,
+        ls_tool,
+        read_file_tool,
+        write_file_tool,
+        str_replace_tool,
+        builder_web_search,   # guarded builder-only web search
+        builder_web_fetch,    # exact-URL fetch for approved sources only
+        present_file_tool,
         emit_builder_artifact,      # REQUIRED as final action
     ]
 

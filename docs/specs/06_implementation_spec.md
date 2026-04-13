@@ -113,7 +113,7 @@ def make_sophia_agent(config: RunnableConfig):
 {
   "graphs": {
     "sophia_companion": "./backend/src/agents/sophia_agent/graph.py:graph",
-    "sophia_builder": "./backend/src/agents/lead_agent/graph.py:graph"
+    "sophia_builder": "deerflow.agents.sophia_agent.builder_agent:make_sophia_builder"
   },
   "env": ".env",
   "python_version": "3.12",
