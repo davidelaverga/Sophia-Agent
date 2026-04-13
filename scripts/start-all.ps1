@@ -48,7 +48,9 @@ Stop-AllServices
 Write-Host "[sophia] Starting LangGraph on :2024 ..." -ForegroundColor Cyan
 $lgJob = Start-Job -Name sophia-langgraph -ScriptBlock {
     Set-Location $using:ROOT\backend
-    & uv run langgraph dev --no-browser --allow-blocking --no-reload 2>&1
+    $jobsPerWorker = if ($env:N_JOBS_PER_WORKER) { $env:N_JOBS_PER_WORKER } else { "4" }
+    if (-not $env:BG_JOB_ISOLATED_LOOPS) { $env:BG_JOB_ISOLATED_LOOPS = "true" }
+    & uv run langgraph dev --no-browser --allow-blocking --no-reload --n-jobs-per-worker $jobsPerWorker 2>&1
 }
 
 # Wait for LangGraph to be ready before starting services that depend on it

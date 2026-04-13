@@ -58,13 +58,35 @@ class TestExtractLastMessageText:
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
         msg = MagicMock()
         msg.content = "Hello world"
+        msg.type = "human"
         assert extract_last_message_text([msg]) == "Hello world"
 
     def test_multimodal_list_content(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
         msg = MagicMock()
         msg.content = [{"text": "Hello"}, {"text": "world"}]
+        msg.type = "human"
         assert extract_last_message_text([msg]) == "Hello world"
+
+    def test_nested_content_dict(self):
+        from deerflow.agents.sophia_agent.utils import extract_last_message_text
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = [{"type": "text", "content": "Hello"}, {"value": "world"}]
+        assert extract_last_message_text([msg]) == "Hello world"
+
+    def test_prefers_latest_user_message(self):
+        from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
+        user = MagicMock()
+        user.type = "human"
+        user.content = "Hey Sophia"
+
+        trailing = MagicMock()
+        trailing.type = "system"
+        trailing.content = ""
+
+        assert extract_last_message_text([user, trailing]) == "Hey Sophia"
 
     def test_empty_messages(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
@@ -275,6 +297,43 @@ class TestPlatformContextMiddleware:
         mw = self._get_middleware()
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
         assert result is None
+
+
+# --- TurnCountMiddleware ---
+
+class TestTurnCountMiddleware:
+    def _get_middleware(self):
+        from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
+        return TurnCountMiddleware()
+
+    def test_first_turn_reports_zero_completed_turns(self):
+        mw = self._get_middleware()
+        result = mw.before_agent({"messages": [_make_message("hello")]}, _make_runtime())
+        assert result == {"turn_count": 0}
+
+    def test_counts_prior_user_turns_from_history(self):
+        mw = self._get_middleware()
+        state = {
+            "messages": [
+                _make_message("hello"),
+                _make_message("hi there", msg_type="ai"),
+                _make_message("follow-up question"),
+            ]
+        }
+        result = mw.before_agent(state, _make_runtime())
+        assert result == {"turn_count": 1}
+
+    def test_non_user_tail_still_counts_completed_user_turns(self):
+        mw = self._get_middleware()
+        state = {
+            "messages": [
+                _make_message("hello"),
+                _make_message("hi there", msg_type="ai"),
+                _make_message("artifact recorded", msg_type="tool"),
+            ]
+        }
+        result = mw.before_agent(state, _make_runtime())
+        assert result == {"turn_count": 1}
 
 
 # --- UserIdentityMiddleware ---
@@ -566,6 +625,53 @@ When user is enthusiastic (3.5-4.0), celebrate with them.
         path.write_text(content)
         return path
 
+    def _create_structured_tone_file(self, tmp_path: Path) -> Path:
+        content = """# Sophia - Tone Guidance
+
+## The Rule
+Meet the user where they are before you try to lift them.
+
+## The 2.0 Line
+Below 2.0, stay emotional. Above 2.0, reasoning can help.
+
+## Section 2 - Operational Bands
+
+### Band 1 - Shutdown
+Stay extremely gentle.
+
+### Band 2 - Grief/Fear
+Validate the pain precisely.
+
+### Band 3 - Anger/Antagonism
+Name the pressure and give it direction.
+
+### Band 4 - Engagement
+Match pace and sharpen the next step.
+
+### Band 5 - Enthusiasm
+Celebrate with them first.
+
+## Section 3 - Response Posture and Examples
+
+### Band 1 - Pure Presence
+Short and steady.
+
+### Band 2 - Validate First
+Specific validation, then one question.
+
+### Band 3 - Think Alongside
+Extend the thread without resolving it.
+
+### Band 4 - Match and Push
+Ask what matters most right now.
+
+### Band 5 - Be There for the Moment
+Witness the win before anything else.
+"""
+        path = tmp_path / "tone_guidance_structured.md"
+        path.write_text(content)
+        return path
+
     def test_parses_bands(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
         path = self._create_tone_file(tmp_path)
@@ -573,6 +679,17 @@ When user is enthusiastic (3.5-4.0), celebrate with them.
         assert len(mw._bands) == 5
         assert "shutdown" in mw._bands
         assert "enthusiasm" in mw._bands
+
+    def test_parses_structured_skill_file(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
+        path = self._create_structured_tone_file(tmp_path)
+        mw = ToneGuidanceMiddleware(path)
+
+        assert len(mw._bands) == 5
+        assert "Meet the user where they are" in mw._bands["engagement"]
+        assert "Match and Push" in mw._bands["engagement"]
+        assert "Stay extremely gentle" not in mw._bands["engagement"]
 
     def test_default_tone_maps_to_engagement(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
@@ -941,6 +1058,29 @@ class TestArtifactMiddleware:
         result = mw.before_agent({"messages": []}, _make_runtime())
         assert "Artifact instructions content" in result["system_prompt_blocks"][0]
 
+    def test_voice_platform_uses_compact_instructions(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("ORIGINAL_ARTIFACT_SENTINEL")
+        mw = ArtifactMiddleware(path)
+
+        result = mw.before_agent({"messages": [], "platform": "voice"}, _make_runtime(platform="voice"))
+        block = result["system_prompt_blocks"][0]
+        assert "ORIGINAL_ARTIFACT_SENTINEL" not in block
+        assert "emit_artifact" in block
+        assert "tone_target" in block
+
+    def test_text_platform_keeps_original_instructions(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("ORIGINAL_ARTIFACT_SENTINEL")
+        mw = ArtifactMiddleware(path)
+
+        result = mw.before_agent({"messages": [], "platform": "text"}, _make_runtime(platform="text"))
+        assert "ORIGINAL_ARTIFACT_SENTINEL" in result["system_prompt_blocks"][0]
+
     def test_captures_tool_call(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
         path = tmp_path / "artifact_instructions.md"
@@ -1089,8 +1229,9 @@ class TestPromptAssemblyMiddleware:
         assert msgs[1].content == "hello"
 
     def test_empty_blocks_passes_through(self):
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         from langchain_core.messages import HumanMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         mw = PromptAssemblyMiddleware()
 
         human_msg = HumanMessage(content="hello")
@@ -1108,8 +1249,9 @@ class TestPromptAssemblyMiddleware:
         assert captured["request"] is request
 
     def test_removes_old_system_messages(self):
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         from langchain_core.messages import HumanMessage, SystemMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
         mw = PromptAssemblyMiddleware()
 
         old_sys = SystemMessage(content="old system", id="old-sys")
@@ -1418,6 +1560,199 @@ class TestMem0CategorySelection:
         assert "m3" in result_ids  # life memory still present in work context
         # But work memory should be first
         assert results[0]["category"] == "deadline"
+
+
+class TestMem0MemoryMiddleware:
+    def test_voice_uses_smaller_limit(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=[],
+        ) as mock_search:
+            mw.before_agent(
+                {
+                    "messages": [_make_message("tell me more about training")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-1", platform="voice"),
+            )
+
+        assert mock_search.call_args.kwargs["limit"] == 4
+
+    def test_voice_reuses_recent_similar_results(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [{"id": "m1", "content": "User likes physiology books", "category": "preference"}]
+        mw = Mem0MemoryMiddleware("user-1")
+        runtime = _make_runtime(thread_id="thread-1", platform="voice")
+
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ) as mock_search:
+            first = mw.before_agent(
+                {
+                    "messages": [_make_message("Any physiology books you recommend?")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                runtime,
+            )
+            second = mw.before_agent(
+                {
+                    "messages": [_make_message("What other physiology books are good?")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                runtime,
+            )
+
+        assert mock_search.call_count == 1
+        assert first is not None
+        assert second is not None
+        assert "User likes physiology books" in second["system_prompt_blocks"][-1]
+
+    def test_voice_reuses_recent_follow_up_results_without_overlap(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [{"id": "m1", "content": "User is weighing long-term planning decisions", "category": "pattern"}]
+        mw = Mem0MemoryMiddleware("user-1")
+        runtime = _make_runtime(thread_id="thread-1", platform="voice")
+
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ) as mock_search:
+            mw.before_agent(
+                {
+                    "messages": [_make_message("Should I save first or start investing now?")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                    "turn_count": 0,
+                },
+                runtime,
+            )
+            second = mw.before_agent(
+                {
+                    "messages": [_make_message("Could you tell me more about that?")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                    "turn_count": 1,
+                },
+                runtime,
+            )
+
+        assert mock_search.call_count == 1
+        assert second is not None
+        assert "long-term planning" in second["system_prompt_blocks"][-1]
+
+    def test_voice_does_not_reuse_dissimilar_results(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [{"id": "m1", "content": "User likes physiology books", "category": "preference"}]
+        mw = Mem0MemoryMiddleware("user-1")
+        runtime = _make_runtime(thread_id="thread-1", platform="voice")
+
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ) as mock_search:
+            mw.before_agent(
+                {
+                    "messages": [_make_message("Any physiology books you recommend?")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                runtime,
+            )
+            mw.before_agent(
+                {
+                    "messages": [_make_message("How is my work stress showing up lately?")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                runtime,
+            )
+
+        assert mock_search.call_count == 2
+
+    def test_blank_query_skips_search(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=[],
+        ) as mock_search:
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("   ")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-1", platform="voice"),
+            )
+
+        assert result is None
+        mock_search.assert_not_called()
+
+    def test_low_signal_voice_turn_skips_search_without_cache(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=[],
+        ) as mock_search:
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("Thanks, Sophia. That helps.")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                    "turn_count": 0,
+                },
+                _make_runtime(thread_id="thread-1", platform="voice"),
+            )
+
+        assert result is None
+        mock_search.assert_not_called()
+
+    def test_voice_warmup_user_skips_search(self):
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        mw = Mem0MemoryMiddleware("__voice_warmup__")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=[],
+        ) as mock_search:
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("Warmup ping. Reply with a short acknowledgment.")],
+                    "platform": "voice",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-1", platform="voice"),
+            )
+
+        assert result is None
+        mock_search.assert_not_called()
 
 
 # --- SophiaTitleMiddleware ---

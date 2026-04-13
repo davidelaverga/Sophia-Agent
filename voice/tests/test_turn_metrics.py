@@ -19,6 +19,8 @@ async def test_turn_metrics_log_first_text_and_audio(caplog) -> None:
 
     llm.note_turn_end(participant)
     time.sleep(0.001)
+    llm.note_submission_stabilized("user-1", 175.0)
+    time.sleep(0.001)
     llm.note_backend_request_started("user-1")
     time.sleep(0.001)
     llm.note_backend_first_event("user-1")
@@ -30,6 +32,7 @@ async def test_turn_metrics_log_first_text_and_audio(caplog) -> None:
     llm.note_tts_audio_emitted("user-1")
     await llm.events.wait()
 
+    assert "metric=submission_stabilization_ms" in caplog.text
     assert "metric=backend_request_start_ms" in caplog.text
     assert "metric=backend_first_event_ms" in caplog.text
     assert "metric=first_text_ms" in caplog.text

@@ -202,6 +202,7 @@ describe('buildVoiceDeveloperMetrics', () => {
             reason: 'completed',
             raw_false_end_count: 1,
             duplicate_phase_counts: {},
+            submission_stabilization_ms: 180,
             backend_request_start_ms: 350,
             backend_first_event_ms: 500,
             first_text_ms: 900,
@@ -237,10 +238,17 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.startup.requestToCredentialsMs).toBe(200);
     expect(metrics.startup.joinToReadyMs).toBe(250);
     expect(metrics.pipeline.userEndedToRequestStartMs).toBe(350);
+    expect(metrics.pipeline.submissionStabilizationMs).toBe(180);
     expect(metrics.pipeline.requestStartToFirstBackendEventMs).toBe(150);
     expect(metrics.pipeline.firstBackendEventToFirstTextMs).toBe(400);
     expect(metrics.pipeline.requestStartToFirstTextMs).toBe(550);
+    expect(metrics.pipeline.committedTurnCloseMs).toBe(700);
+    expect(metrics.pipeline.userEndedToFirstTextMs).toBe(900);
+    expect(metrics.pipeline.rawSpeechEndToFirstTextMs).toBe(900);
     expect(metrics.pipeline.textToFirstAudioMs).toBe(200);
+    expect(metrics.recentTurns[0]?.committedTurnCloseMs).toBe(300);
+    expect(metrics.recentTurns[0]?.committedTranscriptToAgentStartMs).toBe(700);
+    expect(metrics.recentTurns[0]?.requestStartToFirstBackendEventMs).toBe(150);
     expect(metrics.bottleneck.kind).toBe('healthy');
     expect(metrics.thresholds.firstAudio.status).toBe('good');
     expect(metrics.regressions).toHaveLength(0);
@@ -503,6 +511,118 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.regressions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ key: 'backend-stall', level: 'warn' }),
+      ]),
+    );
+  });
+
+  it('separates committed response latency from raw diagnostic latency', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-13T04:20:03.600Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-13T04:20:04.620Z',
+        category: 'voice-runtime',
+        name: 'call-joined',
+        payload: { callId: 'call-dev', callingState: 'joined', voiceAgentSessionId: 'voice-agent-dev' },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-13T04:20:04.691Z',
+        category: 'voice-session',
+        name: 'sophia-ready',
+        payload: { reason: 'remote-participant', remoteParticipantCount: 1, voiceAgentSessionId: 'voice-agent-dev' },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-13T04:24:09.195Z',
+        category: 'voice-sse',
+        name: 'sophia.user_transcript',
+        payload: { data: { text: 'I think you are right.' } },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-04-13T04:24:19.379Z',
+        category: 'voice-sse',
+        name: 'sophia.user_transcript',
+        payload: { data: { text: 'I think you are right. Thank you, Sofia. You always help me when it comes to figuring out how I truly feel. Thank you.' } },
+      }),
+      buildEvent({
+        seq: 6,
+        at: '2026-04-13T04:24:21.396Z',
+        category: 'voice-sse',
+        name: 'sophia.turn',
+        payload: { data: { phase: 'user_ended' } },
+      }),
+      buildEvent({
+        seq: 7,
+        at: '2026-04-13T04:24:22.026Z',
+        category: 'voice-sse',
+        name: 'sophia.turn',
+        payload: { data: { phase: 'agent_started' } },
+      }),
+      buildEvent({
+        seq: 8,
+        at: '2026-04-13T04:24:22.037Z',
+        category: 'voice-sse',
+        name: 'sophia.transcript',
+        payload: { data: { text: 'You', is_final: false } },
+      }),
+      buildEvent({
+        seq: 9,
+        at: '2026-04-13T04:24:25.193Z',
+        category: 'voice-sse',
+        name: 'sophia.turn',
+        payload: { data: { phase: 'agent_ended' } },
+      }),
+      buildEvent({
+        seq: 10,
+        at: '2026-04-13T04:24:25.818Z',
+        category: 'voice-sse',
+        name: 'sophia.turn_diagnostic',
+        payload: {
+          data: {
+            turn_id: 'turn-drift',
+            status: 'completed',
+            reason: 'completed',
+            raw_false_end_count: 1,
+            duplicate_phase_counts: {},
+            backend_request_start_ms: 29.46,
+            backend_first_event_ms: 12410.68,
+            first_text_ms: 12410.89,
+            backend_complete_ms: 15573.03,
+            first_audio_ms: 14983.29,
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'idle',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-13T04:24:40.934Z'),
+    });
+
+    expect(metrics.pipeline.committedTurnCloseMs).toBe(2647);
+    expect(metrics.pipeline.userEndedToAgentStartMs).toBe(630);
+    expect(metrics.pipeline.userEndedToFirstTextMs).toBe(641);
+    expect(metrics.pipeline.rawSpeechEndToFirstTextMs).toBe(12410.89);
+    expect(metrics.health.title).toBe('Committed response was fast');
+    expect(metrics.bottleneck.kind).toBe('commit-boundary');
+    expect(metrics.regressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'commit-boundary', level: 'warn' }),
+      ]),
+    );
+    expect(metrics.regressions).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'backend-stall' }),
       ]),
     );
   });

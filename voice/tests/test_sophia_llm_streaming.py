@@ -20,6 +20,7 @@ class FakeAdapter(BackendAdapter):
         self._events = events
         self.probed = False
         self.requests: list[BackendRequest] = []
+        self.warmup_requests: list[BackendRequest] = []
         self.text_events_consumed = 0
 
     async def probe(self) -> None:
@@ -32,6 +33,9 @@ class FakeAdapter(BackendAdapter):
             yield event
             if event.kind == "text":
                 self.text_events_consumed += 1
+
+    async def warmup(self, request: BackendRequest) -> None:
+        self.warmup_requests.append(request)
 
 
 class FakeTTS:
@@ -234,6 +238,131 @@ async def test_simple_response_splits_multi_sentence_backend_chunks_for_earlier_
         "text": "Good. Your pets are the priority.",
         "is_final": True,
     }
+
+
+@pytest.mark.anyio
+async def test_simple_response_splits_long_clause_backend_chunks_for_earlier_audio() -> None:
+    emitted: list[dict] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        emitted.append(payload)
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.text_chunk(
+                "I can hear the relief in that, and I don't want you to rush past it.",
+            ),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+
+    await llm.simple_response(
+        "test",
+        participant=SimpleNamespace(user_id="user-1"),
+    )
+
+    transcript_events = [payload for payload in emitted if payload["type"] == "sophia.transcript"]
+    assert transcript_events[0]["data"] == {
+        "text": "I can hear the relief in that, ",
+        "is_final": False,
+    }
+    assert transcript_events[1]["data"] == {
+        "text": "I can hear the relief in that, and I don't want you to rush past it.",
+        "is_final": False,
+    }
+    assert transcript_events[2]["data"] == {
+        "text": "I can hear the relief in that, and I don't want you to rush past it.",
+        "is_final": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_simple_response_soft_splits_long_backend_chunks_without_punctuation() -> None:
+    emitted: list[dict] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        emitted.append(payload)
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.text_chunk(
+                "You do not need to solve the whole thing tonight because naming the next honest step is already enough for now",
+            ),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+
+    await llm.simple_response(
+        "test",
+        participant=SimpleNamespace(user_id="user-1"),
+    )
+
+    transcript_events = [payload for payload in emitted if payload["type"] == "sophia.transcript"]
+    assert transcript_events[0]["data"] == {
+        "text": "You do not need to solve the whole thing tonight because naming the next ",
+        "is_final": False,
+    }
+    assert transcript_events[1]["data"] == {
+        "text": "You do not need to solve the whole thing tonight because naming the next honest step is already enough for now",
+        "is_final": False,
+    }
+    assert transcript_events[2]["data"] == {
+        "text": "You do not need to solve the whole thing tonight because naming the next honest step is already enough for now",
+        "is_final": True,
+    }
+
+
+@pytest.mark.anyio
+async def test_start_backend_warmup_runs_once_per_bound_session_context() -> None:
+    adapter = FakeAdapter([])
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.bind_session_context(
+        platform="voice",
+        context_mode="work",
+        ritual="prepare",
+        session_id="session-1",
+        thread_id="thread-1",
+    )
+
+    assert llm.start_backend_warmup("user-1") is True
+    await asyncio.sleep(0)
+    assert llm.start_backend_warmup("user-1") is False
+    assert adapter.warmup_requests == [
+        BackendRequest(
+            text="[voice backend warmup]",
+            user_id="user-1",
+            platform="voice",
+            ritual="prepare",
+            context_mode="work",
+            session_id="session-1",
+            thread_id="thread-1",
+        )
+    ]
+
+    llm.bind_session_context(
+        platform="voice",
+        context_mode="life",
+        ritual=None,
+        session_id="session-2",
+        thread_id="thread-2",
+    )
+    assert llm.start_backend_warmup("user-1") is True
+    await asyncio.sleep(0)
+    assert adapter.warmup_requests[-1] == BackendRequest(
+        text="[voice backend warmup]",
+        user_id="user-1",
+        platform="voice",
+        ritual=None,
+        context_mode="life",
+        session_id="session-2",
+        thread_id="thread-2",
+    )
 
 
 @pytest.mark.anyio

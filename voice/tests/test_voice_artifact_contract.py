@@ -403,6 +403,50 @@ def test_start_session_binds_runtime_context_to_agent_llm() -> None:
     }
 
 
+def test_session_warmup_schedules_backend_warmup_on_bound_llm() -> None:
+    warmup_requests: list[str] = []
+    tts_warmup_requests: list[str] = []
+    session = SimpleNamespace(agent=SimpleNamespace(llm=None, tts=None))
+
+    class FakeLLM:
+        def start_backend_warmup(self, user_id: str) -> bool:
+            warmup_requests.append(user_id)
+            return True
+
+    class FakeTTS:
+        def start_warmup(self) -> bool:
+            tts_warmup_requests.append("started")
+            return True
+
+    session.agent.llm = FakeLLM()
+    session.agent.tts = FakeTTS()
+
+    class FakeLauncher:
+        async def start(self) -> None:
+            return None
+
+        async def stop(self) -> None:
+            return None
+
+        def get_session(self, session_id: str):
+            return session
+
+        async def get_session_info(self, call_id: str, session_id: str):
+            return SimpleNamespace(id=session_id, call_id=call_id)
+
+    app = server.create_fastapi_app(FakeLauncher())
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/calls/sophia-user_123-abc12345/sessions/session-123/warmup",
+            json={"user_id": "dev-user"},
+        )
+
+    assert response.status_code == 202
+    assert warmup_requests == ["dev-user"]
+    assert tts_warmup_requests == ["started"]
+
+
 @pytest.mark.anyio
 async def test_create_agent_skips_non_substantive_simple_response(monkeypatch) -> None:
     created: dict[str, object] = {}

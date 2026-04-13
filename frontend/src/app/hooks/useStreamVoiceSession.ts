@@ -203,6 +203,33 @@ async function requestVoiceDisconnect(
   throw new Error(`Voice disconnect failed (${res.status}): ${body}`)
 }
 
+async function requestVoiceWarmup(
+  userId: string,
+  credentials: StreamVoiceCredentials,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!credentials.sessionId) {
+    return
+  }
+
+  const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/warmup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    signal,
+    body: JSON.stringify({
+      call_id: credentials.callId,
+      session_id: credentials.sessionId,
+    }),
+  })
+
+  if (res.ok) {
+    return
+  }
+
+  const body = await res.text().catch(() => "")
+  throw new Error(`Voice warmup failed (${res.status}): ${body}`)
+}
+
 function resolveVoiceRitual(presetType: PresetType | null): string | null {
   switch (presetType) {
     case "prepare":
@@ -269,6 +296,8 @@ export function useStreamVoiceSession(
   const preparedVoiceConnectControllerRef = useRef<AbortController | null>(null)
   const preparedVoiceCredentialsRef = useRef<StreamVoiceCredentials | null>(null)
   const preparedVoiceCredentialsAtRef = useRef<number>(0)
+  const backendWarmupKeyRef = useRef<string | null>(null)
+  const backendWarmupControllerRef = useRef<AbortController | null>(null)
   const autoPreconnectEnabledRef = useRef(true)
 
   // Keep refs current without re-binding effects
@@ -286,6 +315,11 @@ export function useStreamVoiceSession(
       disconnectRequestKeyRef.current = null
     }
   }, [credentials?.callId, credentials?.sessionId])
+  useEffect(() => {
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
+    backendWarmupKeyRef.current = null
+  }, [sessionId, threadId, userId])
 
   // --- Platform signal ------------------------------------------------------
   const platform = usePlatformSignal()
@@ -413,7 +447,10 @@ export function useStreamVoiceSession(
       return null
     }
 
-    if (connectPrewarmAttemptedUserIdRef.current === userId || connectPrewarmPromiseRef.current) {
+    if (
+      connectPrewarmAttemptedUserIdRef.current === userId
+      || connectPrewarmPromiseRef.current !== null
+    ) {
       return connectPrewarmPromiseRef.current
     }
 
@@ -469,7 +506,7 @@ export function useStreamVoiceSession(
 
     if (
       preparedVoiceConnectKeyRef.current === connectKey
-      && preparedVoiceConnectPromiseRef.current
+      && preparedVoiceConnectPromiseRef.current !== null
     ) {
       return preparedVoiceConnectPromiseRef.current
     }
@@ -491,7 +528,7 @@ export function useStreamVoiceSession(
     })
 
     const promise = (async () => {
-      if (connectPrewarmPromiseRef.current) {
+      if (connectPrewarmPromiseRef.current !== null) {
         await connectPrewarmPromiseRef.current
       }
 
@@ -608,7 +645,7 @@ export function useStreamVoiceSession(
 
     if (
       preparedVoiceConnectKeyRef.current === connectKey
-      && preparedVoiceConnectPromiseRef.current
+      && preparedVoiceConnectPromiseRef.current !== null
     ) {
       const prefetchedCredentials = await preparedVoiceConnectPromiseRef.current
       if (!prefetchedCredentials) {
@@ -1133,6 +1170,82 @@ export function useStreamVoiceSession(
     void prewarmVoiceConnect()
   }, [clearAutoPreconnectTimer, clearPreparedVoiceConnectRefs, prewarmVoiceConnect, userId])
 
+  const activeCallId = credentials?.callId ?? null
+  const activeVoiceAgentSessionId = credentials?.sessionId ?? null
+
+  useEffect(() => {
+    if (!userId || !activeCallId || !activeVoiceAgentSessionId) {
+      return
+    }
+
+    const warmupKey = `${userId}:${activeCallId}:${activeVoiceAgentSessionId}`
+    if (backendWarmupKeyRef.current === warmupKey) {
+      return
+    }
+
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupKeyRef.current = warmupKey
+
+    const controller = new AbortController()
+    backendWarmupControllerRef.current = controller
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "backend-warmup-started",
+      payload: {
+        callId: activeCallId,
+        sessionId: sessionIdRef.current ?? null,
+        voiceAgentSessionId: activeVoiceAgentSessionId,
+      },
+    })
+
+    void requestVoiceWarmup(userId, credentials, controller.signal)
+      .then(() => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (backendWarmupControllerRef.current === controller) {
+          backendWarmupControllerRef.current = null
+        }
+
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "backend-warmup-completed",
+          payload: {
+            callId: activeCallId,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: activeVoiceAgentSessionId,
+          },
+        })
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (backendWarmupControllerRef.current === controller) {
+          backendWarmupControllerRef.current = null
+        }
+
+        logger.debug("StreamVoiceSession", "Voice backend warmup failed", {
+          userId,
+          callId: activeCallId,
+          voiceAgentSessionId: activeVoiceAgentSessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "backend-warmup-failed",
+          payload: {
+            callId: activeCallId,
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: activeVoiceAgentSessionId,
+          },
+        })
+      })
+  }, [activeCallId, activeVoiceAgentSessionId, credentials, userId])
+
   useEffect(() => {
     if (
       !userId
@@ -1229,7 +1342,7 @@ export function useStreamVoiceSession(
     try {
       let creds = await consumePreparedVoiceConnect()
 
-      if (connectPrewarmPromiseRef.current) {
+      if (connectPrewarmPromiseRef.current !== null) {
         await connectPrewarmPromiseRef.current
       }
 
@@ -1340,11 +1453,11 @@ export function useStreamVoiceSession(
     consumePreparedVoiceConnect,
     failVoiceStartup,
     platform,
-    presetType,
     sessionId,
     setVoiceFailed,
     threadId,
     userId,
+    voiceRitual,
   ])
 
   // Auto-join when credentials arrive and call is ready
@@ -1362,6 +1475,8 @@ export function useStreamVoiceSession(
     closeEventSource()
     clearThinking()
     clearStartupReadyTimeout()
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "stop-talking-requested",
@@ -1407,6 +1522,8 @@ export function useStreamVoiceSession(
     closeEventSource()
     clearThinking()
     clearStartupReadyTimeout()
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "barge-in",
@@ -1449,6 +1566,8 @@ export function useStreamVoiceSession(
     closeEventSource()
     clearThinking()
     clearStartupReadyTimeout()
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupControllerRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "reset-voice-state",
@@ -1488,6 +1607,8 @@ export function useStreamVoiceSession(
       destroyedRef.current = true
       autoPreconnectEnabledRef.current = false
       clearAutoPreconnectTimer()
+      backendWarmupControllerRef.current?.abort()
+      backendWarmupControllerRef.current = null
       connectPrewarmControllerRef.current?.abort()
       connectPrewarmControllerRef.current = null
       connectPrewarmPromiseRef.current = null

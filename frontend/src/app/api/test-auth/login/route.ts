@@ -1,5 +1,5 @@
 import { makeSignature } from 'better-auth/crypto';
-import { NextRequest, NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 
 import { auth } from '@/server/better-auth/config';
 import { ensureBetterAuthSchema } from '@/server/better-auth/migrations';

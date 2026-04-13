@@ -214,23 +214,32 @@ export function VoiceMetricsPanel({
         tone: metrics.thresholds.joinLatency.status,
       },
       {
-        label: "First text",
-        value: metrics.lastTurn.firstTextMs,
-        hint: "user end -> text",
+        label: "Committed response",
+        value: metrics.pipeline.committedTurnCloseMs ?? metrics.pipeline.userEndedToFirstTextMs ?? metrics.pipeline.userEndedToAgentStartMs,
+        hint: metrics.pipeline.committedTurnCloseMs !== null
+          ? "committed transcript -> agent start"
+          : "public turn -> first visible response",
         icon: Clock3,
+        tone: metrics.thresholds.committedResponse.status,
+      },
+      {
+        label: "Raw first text",
+        value: metrics.lastTurn.firstTextMs,
+        hint: "diagnostic raw speech end -> first text",
+        icon: AudioLines,
         tone: metrics.thresholds.firstText.status,
       },
       {
-        label: "First audio",
+        label: "Raw first audio",
         value: metrics.lastTurn.firstAudioMs,
-        hint: "user end -> TTS",
+        hint: "diagnostic raw speech end -> first audio",
         icon: AudioLines,
         tone: metrics.thresholds.firstAudio.status,
       },
       {
-        label: "Backend done",
+        label: "Raw backend done",
         value: metrics.lastTurn.backendCompleteMs,
-        hint: "user end -> backend complete",
+        hint: "diagnostic raw speech end -> backend complete",
         icon: Gauge,
         tone: metrics.thresholds.backendComplete.status,
       },
@@ -248,7 +257,7 @@ export function VoiceMetricsPanel({
   )
 
   const compactSummaryCards = useMemo(
-    () => summaryCards.filter((card) => ["Session ready", "First text", "First audio"].includes(card.label)),
+    () => summaryCards.filter((card) => ["Session ready", "Committed response", "Raw first text"].includes(card.label)),
     [summaryCards],
   )
 
@@ -645,6 +654,7 @@ export function VoiceMetricsPanel({
                       ["Assistant transcripts", String(metrics.counts.assistantTranscripts)],
                       ["Artifacts", String(metrics.counts.artifacts)],
                       ["Diagnostics", String(metrics.counts.diagnostics)],
+                      ["Committed transcript -> agent start", formatMs(metrics.pipeline.committedTurnCloseMs)],
                       ["User end -> agent start", formatMs(metrics.pipeline.userEndedToAgentStartMs)],
                       ["transcript -> user ended", formatMs(metrics.pipeline.transcriptToUserEndedMs)],
                     ]}
@@ -664,18 +674,24 @@ export function VoiceMetricsPanel({
                   title="Response pipeline"
                   rows={[
                     ["mic -> transcript", formatMs(metrics.pipeline.micToUserTranscriptMs)],
+                    ["committed transcript -> agent start", formatMs(metrics.pipeline.committedTurnCloseMs)],
+                    ["user end -> first visible text", formatMs(metrics.pipeline.userEndedToFirstTextMs)],
+                    ["user end -> agent start", formatMs(metrics.pipeline.userEndedToAgentStartMs)],
                     ["user end -> request", formatMs(metrics.pipeline.userEndedToRequestStartMs)],
+                    ["pre-request stabilization", formatMs(metrics.pipeline.submissionStabilizationMs)],
                     ["request -> first backend event", formatMs(metrics.pipeline.requestStartToFirstBackendEventMs)],
-                    ["first backend event -> first text", formatMs(metrics.pipeline.firstBackendEventToFirstTextMs)],
-                    ["request -> first text", formatMs(metrics.pipeline.requestStartToFirstTextMs)],
-                    ["user end -> first text", formatMs(metrics.pipeline.userEndedToFirstTextMs)],
-                    ["first text -> backend done", formatMs(metrics.pipeline.firstTextToBackendCompleteMs)],
-                    ["backend done -> first audio", formatMs(metrics.pipeline.backendToFirstAudioMs)],
-                    ["text -> first audio", formatMs(metrics.pipeline.textToFirstAudioMs)],
+                    ["first backend event -> raw first text", formatMs(metrics.pipeline.firstBackendEventToFirstTextMs)],
+                    ["request -> raw first text", formatMs(metrics.pipeline.requestStartToFirstTextMs)],
+                    ["raw speech end -> first text", formatMs(metrics.pipeline.rawSpeechEndToFirstTextMs)],
+                    ["raw first text -> backend done", formatMs(metrics.pipeline.firstTextToBackendCompleteMs)],
+                    ["raw speech end -> backend done", formatMs(metrics.pipeline.rawSpeechEndToBackendCompleteMs)],
+                    ["raw backend done -> first audio", formatMs(metrics.pipeline.backendToFirstAudioMs)],
+                    ["raw first text -> first audio", formatMs(metrics.pipeline.textToFirstAudioMs)],
+                    ["raw speech end -> first audio", formatMs(metrics.pipeline.rawSpeechEndToFirstAudioMs)],
                     ["response window", formatMs(metrics.lastTurn.responseDurationMs)],
                   ]}
-                  footer="This shows where the latency accumulates once the user turn has already been committed."
-                  tone={metrics.bottleneck.kind === "backend" || metrics.bottleneck.kind === "tts"
+                  footer="Committed turn-close, pre-request stabilization, and raw diagnostic latency are shown separately so transcript settling does not look like a pure backend stall."
+                  tone={metrics.bottleneck.kind === "backend" || metrics.bottleneck.kind === "tts" || metrics.bottleneck.kind === "commit-boundary"
                     ? metrics.bottleneck.level
                     : "neutral"}
                 />
@@ -735,9 +751,9 @@ export function VoiceMetricsPanel({
                     ["Last Sophia", metrics.lastTurn.lastAssistantTranscript ? truncate(metrics.lastTurn.lastAssistantTranscript, 34) : "pending"],
                   ]}
                   footer={formatDuplicatePhaseFooter(metrics.lastTurn.duplicatePhaseCounts)}
-                  tone={metrics.regressions.some((marker) => marker.key === "backend-stall" && marker.level === "bad")
+                  tone={metrics.regressions.some((marker) => (marker.key === "backend-stall" || marker.key === "commit-boundary") && marker.level === "bad")
                     ? "bad"
-                    : metrics.regressions.some((marker) => marker.key === "backend-stall")
+                    : metrics.regressions.some((marker) => marker.key === "backend-stall" || marker.key === "commit-boundary")
                       ? "warn"
                       : metrics.lastTurn.status === "failed"
                         ? "bad"
@@ -932,9 +948,12 @@ function RecentTurnsCard({ turns }: { turns: VoiceDeveloperMetrics["recentTurns"
             </div>
             <div className="mt-2 grid gap-1 text-xs text-sophia-text2 sm:grid-cols-2">
               <span>reason: {turn.reason ?? "pending"}</span>
-              <span>first text: {formatMs(turn.firstTextMs)}</span>
-              <span>backend done: {formatMs(turn.backendCompleteMs)}</span>
-              <span>first audio: {formatMs(turn.firstAudioMs)}</span>
+              <span>committed turn close: {formatMs(turn.committedTurnCloseMs)}</span>
+              <span>committed to agent start: {formatMs(turn.committedTranscriptToAgentStartMs)}</span>
+              <span>request to first backend event: {formatMs(turn.requestStartToFirstBackendEventMs)}</span>
+              <span>raw first text: {formatMs(turn.firstTextMs)}</span>
+              <span>raw backend done: {formatMs(turn.backendCompleteMs)}</span>
+              <span>raw first audio: {formatMs(turn.firstAudioMs)}</span>
               <span>extra false ends: {Math.max((turn.falseUserEndedCount ?? 1) - 1, 0)}</span>
               <span>duplicate phases: {turn.duplicatePhaseTotal}</span>
             </div>
@@ -1039,11 +1058,13 @@ function thresholdKeyForLabel(label: string): keyof VoiceDeveloperMetrics["thres
       return "sessionReady"
     case "Join latency":
       return "joinLatency"
-    case "First text":
+    case "Committed response":
+      return "committedResponse"
+    case "Raw first text":
       return "firstText"
-    case "First audio":
+    case "Raw first audio":
       return "firstAudio"
-    case "Backend done":
+    case "Raw backend done":
       return "backendComplete"
     default:
       return "responseWindow"

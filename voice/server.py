@@ -74,6 +74,12 @@ class SophiaStartSessionRequest(BaseModel):
     )
 
 
+class SophiaWarmupSessionRequest(BaseModel):
+    """Request body for prewarming the backend path for an active Sophia session."""
+
+    user_id: str = Field(..., description="Authenticated user ID for the upcoming turn")
+
+
 session_router = APIRouter()
 
 
@@ -116,6 +122,28 @@ def _attach_agent_event_emitter(
         await voice_event_broker.publish(call_id, session_id, payload)
 
     attach_call_emitter(_emit)
+
+
+def _schedule_agent_backend_warmup(
+    agent: Agent,
+    *,
+    user_id: str,
+) -> bool:
+    llm = getattr(agent, "llm", None)
+    start_backend_warmup = getattr(llm, "start_backend_warmup", None)
+    if not callable(start_backend_warmup):
+        raise RuntimeError("Agent LLM does not support backend warmup scheduling.")
+
+    return bool(start_backend_warmup(user_id))
+
+
+def _schedule_agent_tts_warmup(agent: Agent) -> bool:
+    tts = getattr(agent, "tts", None)
+    start_warmup = getattr(tts, "start_warmup", None)
+    if not callable(start_warmup):
+        return False
+
+    return bool(start_warmup())
 
 
 @session_router.post(
@@ -229,6 +257,58 @@ async def stream_sophia_session_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@session_router.post(
+    "/calls/{call_id}/sessions/{session_id}/warmup",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Prewarm Sophia backend session path",
+    description="Schedule a best-effort backend warmup for an active Sophia voice session.",
+    dependencies=[Depends(can_view_session)],
+)
+async def warmup_sophia_session(
+    call_id: str,
+    session_id: str,
+    request: SophiaWarmupSessionRequest,
+    launcher: AgentLauncher = Depends(get_launcher),
+) -> Response:
+    session = launcher.get_session(session_id)
+    if session is None:
+        session_info = await launcher.get_session_info(call_id, session_id)
+        if session_info is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Session with id '{session_id}' not found",
+            )
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Session is not active on this voice node.",
+        )
+
+    try:
+        backend_started = _schedule_agent_backend_warmup(
+            session.agent,
+            user_id=request.user_id,
+        )
+    except Exception as exc:
+        logger.exception("Failed to schedule Sophia backend warmup")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to schedule Sophia backend warmup",
+        ) from exc
+
+    tts_started = _schedule_agent_tts_warmup(session.agent)
+
+    logger.info(
+        "[VOICE:SESSION] WARMUP | session_id=%s | call_id=%s | user_id=%s | backend_started=%s | tts_started=%s",
+        session_id,
+        call_id,
+        request.user_id,
+        backend_started,
+        tts_started,
+    )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 async def _close_sophia_session(
@@ -560,14 +640,37 @@ async def create_agent(**kwargs) -> Agent:
                     len(resolved_transcript),
                 )
 
-        should_stabilize_submission = getattr(turn_detection, "should_stabilize_submission", None)
-        if callable(should_stabilize_submission) and should_stabilize_submission(transcript):
+        stabilization_wait_ms = 0
+        stabilization_reason: str | None = None
+        get_submission_stabilization_plan = getattr(
+            turn_detection,
+            "get_submission_stabilization_plan",
+            None,
+        )
+        if callable(get_submission_stabilization_plan):
+            stabilization_wait_ms, stabilization_reason = get_submission_stabilization_plan(
+                settings.fragile_window_ms,
+                transcript,
+            )
+        else:
+            should_stabilize_submission = getattr(turn_detection, "should_stabilize_submission", None)
+            if callable(should_stabilize_submission) and should_stabilize_submission(transcript):
+                stabilization_wait_ms = settings.fragile_window_ms
+                stabilization_reason = "legacy"
+
+        if stabilization_wait_ms > 0:
             llm.note_continuation_handling(getattr(participant, "user_id", None))
-            await asyncio.sleep(settings.fragile_window_ms / 1000)
+            wait_started = time.perf_counter()
+            await asyncio.sleep(stabilization_wait_ms / 1000)
+            actual_wait_ms = (time.perf_counter() - wait_started) * 1000
+            llm.note_submission_stabilized(getattr(participant, "user_id", None), actual_wait_ms)
             resolved_transcript = _resolve_turn_transcript(participant, transcript)
             logger.info(
-                "[FLOW] Stabilized turn submission before backend request chars=%d",
+                "[FLOW] Stabilized turn submission before backend request chars=%d requested_ms=%d actual_ms=%.0f reason=%s",
                 len(resolved_transcript),
+                stabilization_wait_ms,
+                actual_wait_ms,
+                stabilization_reason or "unknown",
             )
 
         if not _has_substantive_transcript(resolved_transcript):

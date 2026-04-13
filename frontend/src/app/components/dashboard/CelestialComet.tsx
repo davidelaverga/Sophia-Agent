@@ -386,8 +386,8 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       fade = Math.max(0, Math.min(1, fade));
       fade = smoothStep(fade);
 
-      const from = ANCHORS[anchorFrom]!;
-      const to = ANCHORS[anchorTo]!;
+      const from = ANCHORS[anchorFrom];
+      const to = ANCHORS[anchorTo];
       const lx = from[0] + (to[0] - from[0]) * posT;
       const ly = from[1] + (to[1] - from[1]) * posT;
 
@@ -497,7 +497,7 @@ function LensFlare() {
       el.style.opacity = `${sweepLight.intensity}`;
 
       for (let i = 0; i < FLARE_STOPS.length; i++) {
-        const stop = FLARE_STOPS[i]!;
+        const stop = FLARE_STOPS[i];
         const child = children[i] as HTMLElement | undefined;
         if (!child) continue;
         const fx = lx + (cx - lx) * stop.t;

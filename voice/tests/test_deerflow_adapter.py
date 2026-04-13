@@ -105,6 +105,83 @@ async def test_probe_reports_missing_assistant_from_search_endpoint() -> None:
             await adapter.probe()
 
 
+@pytest.mark.anyio
+async def test_warmup_precreates_real_thread_but_streams_on_isolated_warmup_thread() -> None:
+    artifact = _valid_artifact()
+    request_paths: list[str] = []
+    run_payloads: list[dict[str, object]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        request_paths.append(request.url.path)
+        if request.url.path == "/threads":
+            thread_id = "thread-user" if request_paths.count("/threads") == 1 else "thread-warmup"
+            return httpx.Response(200, json={"thread_id": thread_id})
+        if request.url.path == "/threads/thread-warmup/runs/stream":
+            run_payloads.append(json.loads(request.content))
+            return _sse_response(
+                "event: messages",
+                "data: " + json.dumps([
+                    {"type": "AIMessageChunk", "content": [{"text": "Warm.", "type": "text", "index": 0}]},
+                    {"id": "meta-warmup"},
+                ]),
+                "data: [DONE]",
+            )
+        if request.url.path == "/threads/thread-user/runs/stream":
+            run_payloads.append(json.loads(request.content))
+            return _sse_response(
+                "event: messages",
+                "data: " + json.dumps([
+                    {"type": "AIMessageChunk", "content": [{"text": "Hello", "type": "text", "index": 0}]},
+                    {"id": "meta-1"},
+                ]),
+                "data: " + json.dumps([
+                    {"type": "AIMessageChunk", "tool_calls": [{"name": "emit_artifact", "args": artifact, "id": "call-1", "type": "tool_call"}], "content": []},
+                    {"id": "meta-2"},
+                ]),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        await adapter.warmup(_make_request())
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert request_paths == [
+        "/threads",
+        "/threads",
+        "/threads/thread-warmup/runs/stream",
+        "/threads/thread-user/runs/stream",
+    ]
+    assert [event.kind for event in events] == ["text", "artifact"]
+    assert run_payloads[0]["config"]["configurable"] == {
+        "user_id": "__voice_warmup__",
+        "platform": "voice",
+        "ritual": "prepare",
+        "context_mode": "work",
+        "thread_id": "thread-warmup",
+    }
+    assert run_payloads[0]["on_disconnect"] == "cancel"
+    assert run_payloads[0]["multitask_strategy"] == "rollback"
+    assert run_payloads[1]["config"]["configurable"] == {
+        "user_id": "user-1",
+        "platform": "voice",
+        "ritual": "prepare",
+        "context_mode": "work",
+        "thread_id": "thread-user",
+    }
+    assert run_payloads[1]["on_disconnect"] == "cancel"
+    assert run_payloads[1]["multitask_strategy"] == "rollback"
+
+
 # ---- Stream events tests ----
 
 
@@ -179,6 +256,8 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
                 }
             },
             "stream_mode": ["messages-tuple", "values"],
+            "on_disconnect": "cancel",
+            "multitask_strategy": "rollback",
         }
     ]
 
@@ -270,6 +349,8 @@ async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() 
                 }
             },
             "stream_mode": ["messages-tuple", "values"],
+            "on_disconnect": "cancel",
+            "multitask_strategy": "rollback",
         }
     ]
 

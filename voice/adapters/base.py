@@ -95,5 +95,9 @@ class BackendAdapter(ABC):
     ) -> AsyncIterator[BackendEvent]:
         """Yield normalized backend events for one assistant turn."""
 
+    async def warmup(self, request: BackendRequest) -> None:
+        """Optionally prewarm backend request paths for an upcoming turn."""
+        return None
+
     async def close(self) -> None:
         return None

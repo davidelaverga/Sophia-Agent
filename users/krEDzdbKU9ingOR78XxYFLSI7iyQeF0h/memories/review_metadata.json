@@ -1,0 +1,63 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "memory_id": "local:e4cce8373873ab8c6fb8a86a90cd50652856a775009f316b1726219aba177096",
+      "content": "Luis's best friend of nearly 17 years (since approximately 2009, when they knew each other from school) passed away on 2026-04-12. His friend was ambitious, driven, and instrumental in encouraging Luis to pursue software engineering. Luis describes him as 'the light of the room' who made people feel seen and valued.",
+      "content_hash": "e4cce8373873ab8c6fb8a86a90cd50652856a775009f316b1726219aba177096",
+      "session_id": "69a0df26-970b-470e-8015-75054b44f796",
+      "metadata": {
+        "category": "relationship",
+        "importance": "structural",
+        "importance_score": 0.95,
+        "confidence": 0.98,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": -1.5,
+        "tags": [
+          "loss",
+          "grief",
+          "close_relationship",
+          "mentor_figure"
+        ]
+      },
+      "updated_at": "2026-04-12T21:25:19.980264+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": "local:cfe033a9b10cf46ca9c1b0e0d49b2a2f48496e7115c0b07620dab0622f2733dd",
+      "content": "Luis is grieving the loss of his best friend and specifically missing the emotional presence and way his friend made others feel valued and seen, rather than just the person's absence itself.",
+      "content_hash": "cfe033a9b10cf46ca9c1b0e0d49b2a2f48496e7115c0b07620dab0622f2733dd",
+      "session_id": "manual-create",
+      "metadata": {
+        "status": "approved",
+        "source": "recap",
+        "session_id": "69a0df26-970b-470e-8015-75054b44f796",
+        "session_type": "prepare",
+        "preset": "gaming",
+        "original_memory_id": "local:cfe033a9b10cf46ca9c1b0e0d49b2a2f48496e7115c0b07620dab0622f2733dd",
+        "category": "feeling"
+      },
+      "updated_at": "2026-04-12T21:37:19.656113+00:00",
+      "sync_state": "manual"
+    },
+    {
+      "memory_id": "local:9a0991a18c4d35d450563b3e9633d60143147f5e9199d9a483c4415f35b61a7b",
+      "content": "Luis' best friend of nearly 17 years (since approximately 2009, when they knew each other from school) passed away on 2026-04-12. His friend was ambitious, driven, and instrumental in encouraging Luis to pursue software engineering. Luis describes him as 'the light of the room' who made people feel seen and valued.",
+      "content_hash": "9a0991a18c4d35d450563b3e9633d60143147f5e9199d9a483c4415f35b61a7b",
+      "session_id": "manual-create",
+      "metadata": {
+        "status": "approved",
+        "source": "recap",
+        "session_id": "69a0df26-970b-470e-8015-75054b44f796",
+        "session_type": "prepare",
+        "preset": "gaming",
+        "original_memory_id": "local:e4cce8373873ab8c6fb8a86a90cd50652856a775009f316b1726219aba177096",
+        "category": "relationship"
+      },
+      "updated_at": "2026-04-12T21:37:27.151010+00:00",
+      "sync_state": "manual"
+    }
+  ]
+}

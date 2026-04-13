@@ -27,6 +27,7 @@ router = APIRouter(
 SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
 SUPPORTED_CONTEXT_MODES = {"work", "gaming", "life"}
 VOICE_SERVER_DISPATCH_TIMEOUT = 10.0
+VOICE_SERVER_WARMUP_TIMEOUT = 5.0
 
 
 @dataclass(frozen=True)
@@ -95,6 +96,13 @@ class VoiceDisconnectRequest(BaseModel):
         default=None,
         description="LangGraph thread ID associated with the session",
     )
+
+
+class VoiceWarmupRequest(BaseModel):
+    """Request body for backend warmup on an active voice session."""
+
+    call_id: str = Field(..., description="The call_id returned from /voice/connect")
+    session_id: str = Field(..., description="The session_id returned from /voice/connect")
 
 
 def _get_stream_api_key() -> str:
@@ -315,6 +323,40 @@ async def voice_events(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post(
+    "/{user_id}/voice/warmup",
+    status_code=202,
+    summary="Warm backend session path",
+    description="Schedule a best-effort Sophia backend warmup for an active voice session.",
+)
+async def voice_warmup(user_id: str, body: VoiceWarmupRequest) -> None:
+    voice_url = _get_voice_server_url()
+    url = f"{voice_url}/calls/{body.call_id}/sessions/{body.session_id}/warmup"
+
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_SERVER_WARMUP_TIMEOUT) as client:
+            resp = await client.post(
+                url,
+                json={"user_id": user_id},
+            )
+            resp.raise_for_status()
+    except httpx.ConnectError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Voice warmup failed because the voice server is unreachable.",
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(
+            status_code=504,
+            detail="Voice warmup timed out.",
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Voice warmup failed with status {exc.response.status_code}.",
+        ) from exc
 
 
 async def _dispatch_voice_agent(

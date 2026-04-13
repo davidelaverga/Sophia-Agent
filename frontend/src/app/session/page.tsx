@@ -463,6 +463,7 @@ function SessionPageContent() {
   });
 
   const [hasNewArtifacts, setHasNewArtifacts] = useState(false);
+  const [isVoiceCaptionVisible, setIsVoiceCaptionVisible] = useState(false);
   const previousArtifactCountRef = useRef(0);
   const previousReadyCountRef = useRef(0);
   const previousArtifactSignatureRef = useRef('');
@@ -885,6 +886,7 @@ function SessionPageContent() {
             <VoiceCaption
               messages={messages}
               isVoiceMode={focusMode !== 'text'}
+              onVisibilityChange={setIsVoiceCaptionVisible}
             />
           </div>
           
@@ -941,7 +943,7 @@ function SessionPageContent() {
           )}
 
           {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && (
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}

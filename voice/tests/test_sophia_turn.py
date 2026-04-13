@@ -297,6 +297,24 @@ class TestAdaptiveSilence:
 
         assert td.should_stabilize_submission() is False
 
+    async def test_submission_stabilization_plan_scales_short_non_final_phrase(self):
+        td = _make_detector()
+        td.update_transcript("I am doing fine")
+
+        assert td.get_submission_stabilization_plan(600) == (375, "short_non_final")
+
+    async def test_submission_stabilization_plan_preserves_fragment_hold(self):
+        td = _make_detector()
+        td.update_transcript("are getting better")
+
+        assert td.get_submission_stabilization_plan(600) == (600, "fragment")
+
+    async def test_submission_stabilization_plan_reduces_continuation_wait(self):
+        td = _make_detector()
+        td.update_transcript("It happened because")
+
+        assert td.get_submission_stabilization_plan(600) == (450, "continuation")
+
 
 # ---------------------------------------------------------------------------
 # Continuation signal tests (Layer 1 — R2)

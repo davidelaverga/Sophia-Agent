@@ -848,6 +848,7 @@ export function summarizeVoiceBenchmarkReports({
     startup: 0,
     microphone: 0,
     'turn-segmentation': 0,
+    'commit-boundary': 0,
     backend: 0,
     tts: 0,
     transport: 0,

@@ -32,7 +32,7 @@ export type VoiceMetricThreshold = {
 }
 
 export type VoiceRegressionMarker = {
-  key: "microphone" | "turn-segmentation" | "backend-stall"
+  key: "microphone" | "turn-segmentation" | "backend-stall" | "commit-boundary"
   title: string
   detail: string
   level: "warn" | "bad"
@@ -50,15 +50,20 @@ export type VoiceStartupMetrics = {
 export type VoicePipelineMetrics = {
   micToUserTranscriptMs: number | null
   transcriptToUserEndedMs: number | null
+  committedTurnCloseMs: number | null
   userEndedToRequestStartMs: number | null
+  submissionStabilizationMs: number | null
   requestStartToFirstBackendEventMs: number | null
   firstBackendEventToFirstTextMs: number | null
   requestStartToFirstTextMs: number | null
   userEndedToAgentStartMs: number | null
   userEndedToFirstTextMs: number | null
+  rawSpeechEndToFirstTextMs: number | null
   firstTextToBackendCompleteMs: number | null
   backendToFirstAudioMs: number | null
   textToFirstAudioMs: number | null
+  rawSpeechEndToBackendCompleteMs: number | null
+  rawSpeechEndToFirstAudioMs: number | null
 }
 
 export type VoiceEventCounters = {
@@ -80,6 +85,9 @@ export type VoiceRecentTurnSummary = {
   turnId: string | null
   status: string | null
   reason: string | null
+  committedTurnCloseMs: number | null
+  committedTranscriptToAgentStartMs: number | null
+  requestStartToFirstBackendEventMs: number | null
   firstTextMs: number | null
   backendCompleteMs: number | null
   firstAudioMs: number | null
@@ -94,6 +102,7 @@ export type VoiceBottleneckDiagnosis = {
     | "startup"
     | "microphone"
     | "turn-segmentation"
+    | "commit-boundary"
     | "backend"
     | "tts"
     | "transport"
@@ -115,9 +124,14 @@ export type VoiceTelemetrySummary = {
   regressionKeys: VoiceRegressionMarker["key"][]
   sessionReadyMs: number | null
   joinLatencyMs: number | null
-  firstTextMs: number | null
-  backendCompleteMs: number | null
-  firstAudioMs: number | null
+  committedResponseMs: number | null
+  committedResponseSource: "committed_user_transcript" | "public_turn_event" | null
+  publicTurnCloseMs: number | null
+  submissionStabilizationMs: number | null
+  committedFirstTextMs: number | null
+  rawFirstTextMs: number | null
+  rawBackendCompleteMs: number | null
+  rawFirstAudioMs: number | null
   responseWindowMs: number | null
 }
 
@@ -189,6 +203,7 @@ export type VoiceDeveloperMetrics = {
   thresholds: {
     sessionReady: VoiceMetricThreshold
     joinLatency: VoiceMetricThreshold
+    committedResponse: VoiceMetricThreshold
     firstText: VoiceMetricThreshold
     firstAudio: VoiceMetricThreshold
     backendComplete: VoiceMetricThreshold
@@ -423,6 +438,87 @@ function getBackendLagDetail(params: {
     .join(" | ")
 }
 
+function selectCommittedResponse(params: {
+  committedTurnCloseMs: number | null
+  userEndedToFirstTextMs: number | null
+  userEndedToAgentStartMs: number | null
+}): {
+  valueMs: number | null
+  source: "committed_user_transcript" | "public_turn_event" | null
+} {
+  const { committedTurnCloseMs, userEndedToFirstTextMs, userEndedToAgentStartMs } = params
+
+  if (committedTurnCloseMs !== null) {
+    return {
+      valueMs: committedTurnCloseMs,
+      source: "committed_user_transcript",
+    }
+  }
+
+  if (userEndedToAgentStartMs !== null) {
+    return {
+      valueMs: userEndedToAgentStartMs,
+      source: "public_turn_event",
+    }
+  }
+
+  if (userEndedToFirstTextMs !== null) {
+    return {
+      valueMs: userEndedToFirstTextMs,
+      source: "public_turn_event",
+    }
+  }
+
+  return {
+    valueMs: null,
+    source: null,
+  }
+}
+
+function hasCommitBoundaryDrift(params: {
+  committedResponseMs: number | null
+  rawFirstTextMs: number | null
+  rawFirstAudioMs: number | null
+  thresholds: VoiceDeveloperMetrics["thresholds"]
+}): boolean {
+  const { committedResponseMs, rawFirstTextMs, rawFirstAudioMs, thresholds } = params
+
+  if (committedResponseMs === null) {
+    return false
+  }
+
+  const rawLagDetected =
+    (rawFirstTextMs !== null && rawFirstTextMs >= thresholds.firstText.warnAtMs)
+    || (rawFirstAudioMs !== null && rawFirstAudioMs >= thresholds.firstAudio.warnAtMs)
+
+  if (!rawLagDetected || committedResponseMs >= thresholds.committedResponse.warnAtMs) {
+    return false
+  }
+
+  const largestGapMs = Math.max(
+    rawFirstTextMs !== null ? rawFirstTextMs - committedResponseMs : 0,
+    rawFirstAudioMs !== null ? rawFirstAudioMs - committedResponseMs : 0,
+  )
+
+  return largestGapMs >= 2000
+}
+
+function getCommitBoundaryDetail(params: {
+  committedResponseMs: number | null
+  publicTurnCloseMs: number | null
+  rawFirstTextMs: number | null
+  rawFirstAudioMs: number | null
+}): string {
+  const parts = compactStrings([
+    formatEvidenceMs("committed response", params.committedResponseMs),
+    formatEvidenceMs("public user end -> agent start", params.publicTurnCloseMs),
+    formatEvidenceMs("raw first text", params.rawFirstTextMs),
+    formatEvidenceMs("raw first audio", params.rawFirstAudioMs),
+  ])
+
+  return parts.join(" | ")
+}
+
 function compactStrings(values: Array<string | null>): string[] {
   return values.filter((value): value is string => Boolean(value))
 }
@@ -460,6 +556,7 @@ function buildThresholds(params: {
   stage: VoiceStage
   sessionReadyMs: number | null
   joinLatencyMs: number | null
+  committedResponseMs: number | null
   firstTextMs: number | null
   firstAudioMs: number | null
   backendCompleteMs: number | null
@@ -472,9 +569,10 @@ function buildThresholds(params: {
   return {
     sessionReady: createThreshold("Session ready", params.sessionReadyMs, 2500, 5000),
     joinLatency: createThreshold("Join latency", params.joinLatencyMs, 2000, 3500),
-    firstText: createThreshold("First text", params.firstTextMs, 2500, 5000),
-    firstAudio: createThreshold("First audio", params.firstAudioMs, 3000, 6000),
-    backendComplete: createThreshold("Backend done", params.backendCompleteMs, 2800, 5500),
+    committedResponse: createThreshold("Committed response", params.committedResponseMs, 3000, 6000),
+    firstText: createThreshold("Raw first text", params.firstTextMs, 2500, 5000),
+    firstAudio: createThreshold("Raw first audio", params.firstAudioMs, 3000, 6000),
+    backendComplete: createThreshold("Raw backend done", params.backendCompleteMs, 2800, 5500),
     responseWindow: createThreshold(
       responseLabel,
       responseValue,
@@ -492,6 +590,7 @@ function buildRegressionMarkers(params: {
   duplicatePhaseCounts: Record<string, number>
   latestReason: string | null
   currentThinkingMs: number | null
+  pipeline: VoicePipelineMetrics
   thresholds: VoiceDeveloperMetrics["thresholds"]
 }): VoiceRegressionMarker[] {
   const {
@@ -501,6 +600,7 @@ function buildRegressionMarkers(params: {
     falseUserEndedCount,
     latestReason,
     currentThinkingMs,
+    pipeline,
     thresholds,
   } = params
 
@@ -547,22 +647,54 @@ function buildRegressionMarkers(params: {
     })
   }
 
+  const committedResponse = selectCommittedResponse({
+    committedTurnCloseMs: pipeline.committedTurnCloseMs,
+    userEndedToFirstTextMs: pipeline.userEndedToFirstTextMs,
+    userEndedToAgentStartMs: pipeline.userEndedToAgentStartMs,
+  })
+  const commitBoundaryDrift = hasCommitBoundaryDrift({
+    committedResponseMs: committedResponse.valueMs,
+    rawFirstTextMs: pipeline.rawSpeechEndToFirstTextMs,
+    rawFirstAudioMs: pipeline.rawSpeechEndToFirstAudioMs,
+    thresholds,
+  })
+
+  if (commitBoundaryDrift) {
+    markers.push({
+      key: "commit-boundary",
+      title: "Raw and committed timing diverged",
+      detail: getCommitBoundaryDetail({
+        committedResponseMs: committedResponse.valueMs,
+        publicTurnCloseMs: pipeline.userEndedToAgentStartMs,
+        rawFirstTextMs: pipeline.rawSpeechEndToFirstTextMs,
+        rawFirstAudioMs: pipeline.rawSpeechEndToFirstAudioMs,
+      }),
+      level: "warn",
+    })
+  }
+
   const visibleBackendThresholds = [thresholds.firstText, thresholds.firstAudio].filter(
     (threshold) => threshold.status === "warn" || threshold.status === "bad",
   )
   const backendCompletionSlow = thresholds.backendComplete.status === "warn" || thresholds.backendComplete.status === "bad"
   const backendLagDetected =
-    latestReason === "backend_stall"
-    || (currentThinkingMs !== null && currentThinkingMs >= thresholds.responseWindow.warnAtMs)
-    || visibleBackendThresholds.length > 0
-    || backendCompletionSlow
+    !commitBoundaryDrift && (
+      latestReason === "backend_stall"
+      || (currentThinkingMs !== null && currentThinkingMs >= thresholds.responseWindow.warnAtMs)
+      || thresholds.committedResponse.status === "warn"
+      || thresholds.committedResponse.status === "bad"
+      || (committedResponse.valueMs === null && visibleBackendThresholds.length > 0)
+      || (committedResponse.valueMs === null && backendCompletionSlow)
+      || (thresholds.firstAudio.valueMs === null && backendCompletionSlow)
+    )
 
   if (backendLagDetected) {
     const level: VoiceRegressionMarker["level"] =
       latestReason === "backend_stall"
       || thresholds.responseWindow.status === "bad"
-      || visibleBackendThresholds.some((threshold) => threshold.status === "bad")
-      || (thresholds.firstAudio.valueMs === null && thresholds.backendComplete.status === "bad")
+      || thresholds.committedResponse.status === "bad"
+      || (committedResponse.valueMs === null && visibleBackendThresholds.some((threshold) => threshold.status === "bad"))
+      || (committedResponse.valueMs === null && thresholds.firstAudio.valueMs === null && thresholds.backendComplete.status === "bad")
         ? "bad"
         : "warn"
 
@@ -595,26 +727,58 @@ function buildEventCounters(events: NormalizedVoiceCaptureEvent[]): VoiceEventCo
 }
 
 function buildRecentTurns(events: NormalizedVoiceCaptureEvent[]): VoiceRecentTurnSummary[] {
-  return events
-    .filter((event) => event.name === "sophia.turn_diagnostic")
-    .slice(-4)
-    .reverse()
-    .map((event) => {
-      const data = eventData(event)
-      const duplicatePhaseCounts = normalizeDuplicatePhaseCounts(data?.duplicate_phase_counts)
-      const duplicatePhaseTotal = Object.values(duplicatePhaseCounts).reduce<number>((total, value) => total + value, 0)
+  const completedTurns: VoiceRecentTurnSummary[] = []
+  let lastUserTranscriptAtMs: number | null = null
+  let lastUserEndedAtMs: number | null = null
+  let firstAgentStartedAtMs: number | null = null
 
-      return {
-        turnId: asString(data?.turn_id),
-        status: asString(data?.status),
-        reason: asString(data?.reason),
-        firstTextMs: asFiniteNumber(data?.first_text_ms),
-        backendCompleteMs: asFiniteNumber(data?.backend_complete_ms),
-        firstAudioMs: asFiniteNumber(data?.first_audio_ms),
-        falseUserEndedCount: asFiniteNumber(data?.raw_false_end_count),
-        duplicatePhaseTotal,
+  for (const event of events) {
+    if (event.name === "sophia.user_transcript") {
+      lastUserTranscriptAtMs = event.atMs
+      continue
+    }
+
+    if (event.name === "sophia.turn") {
+      const phase = eventPhase(event)
+      if (phase === "user_ended") {
+        lastUserEndedAtMs = event.atMs
+        firstAgentStartedAtMs = null
+      } else if (phase === "agent_started" && firstAgentStartedAtMs === null) {
+        firstAgentStartedAtMs = event.atMs
       }
+      continue
+    }
+
+    if (event.name !== "sophia.turn_diagnostic") {
+      continue
+    }
+
+    const data = eventData(event)
+    const duplicatePhaseCounts = normalizeDuplicatePhaseCounts(data?.duplicate_phase_counts)
+    const duplicatePhaseTotal = Object.values(duplicatePhaseCounts).reduce<number>((total, value) => total + value, 0)
+    const backendRequestStartMs = asFiniteNumber(data?.backend_request_start_ms)
+    const backendFirstEventMs = asFiniteNumber(data?.backend_first_event_ms)
+
+    completedTurns.push({
+      turnId: asString(data?.turn_id),
+      status: asString(data?.status),
+      reason: asString(data?.reason),
+      committedTurnCloseMs: diffMs(lastUserTranscriptAtMs, lastUserEndedAtMs),
+      committedTranscriptToAgentStartMs: diffMs(lastUserTranscriptAtMs, firstAgentStartedAtMs),
+      requestStartToFirstBackendEventMs: diffMs(backendRequestStartMs, backendFirstEventMs),
+      firstTextMs: asFiniteNumber(data?.first_text_ms),
+      backendCompleteMs: asFiniteNumber(data?.backend_complete_ms),
+      firstAudioMs: asFiniteNumber(data?.first_audio_ms),
+      falseUserEndedCount: asFiniteNumber(data?.raw_false_end_count),
+      duplicatePhaseTotal,
     })
+
+    lastUserTranscriptAtMs = null
+    lastUserEndedAtMs = null
+    firstAgentStartedAtMs = null
+  }
+
+  return completedTurns.slice(-4).reverse()
 }
 
 function levelFromThresholdState(
@@ -674,10 +838,22 @@ function buildBottleneckDiagnosis(params: {
     || thresholds.sessionReady.status === "warn"
     || thresholds.sessionReady.status === "bad"
 
+  const committedResponse = selectCommittedResponse({
+    committedTurnCloseMs: pipeline.committedTurnCloseMs,
+    userEndedToFirstTextMs: pipeline.userEndedToFirstTextMs,
+    userEndedToAgentStartMs: pipeline.userEndedToAgentStartMs,
+  })
+  const commitBoundaryDrift = hasCommitBoundaryDrift({
+    committedResponseMs: committedResponse.valueMs,
+    rawFirstTextMs: pipeline.rawSpeechEndToFirstTextMs,
+    rawFirstAudioMs: pipeline.rawSpeechEndToFirstAudioMs,
+    thresholds,
+  })
+
   const ttsIsSlow =
     pipeline.textToFirstAudioMs !== null
     && pipeline.textToFirstAudioMs >= 1500
-    && (pipeline.userEndedToFirstTextMs === null || pipeline.userEndedToFirstTextMs < thresholds.firstText.warnAtMs)
+    && (committedResponse.valueMs === null || committedResponse.valueMs < thresholds.committedResponse.warnAtMs)
 
   if (stage === "idle" && turnCount === 0 && !startupIsSlow) {
     return {
@@ -739,6 +915,21 @@ function buildBottleneckDiagnosis(params: {
     }
   }
 
+  if (commitBoundaryDrift) {
+    return {
+      kind: "commit-boundary",
+      level: "warn",
+      title: "Raw and committed latency diverge",
+      detail: "The visible reply committed quickly, but the raw diagnostic clock stayed open much longer before the turn fully closed.",
+      evidence: compactStrings([
+        formatEvidenceMs("committed response", committedResponse.valueMs),
+        formatEvidenceMs("public user end -> agent start", pipeline.userEndedToAgentStartMs),
+        formatEvidenceMs("raw first text", pipeline.rawSpeechEndToFirstTextMs),
+        formatEvidenceMs("raw first audio", pipeline.rawSpeechEndToFirstAudioMs),
+      ]),
+    }
+  }
+
   if (ttsIsSlow) {
     return {
       kind: "tts",
@@ -746,7 +937,7 @@ function buildBottleneckDiagnosis(params: {
       title: "Playback/TTS is the bottleneck",
       detail: "Sophia produced text in time, but the gap from text generation to audible playback is the slowest part.",
       evidence: compactStrings([
-        formatEvidenceMs("user end -> first text", pipeline.userEndedToFirstTextMs),
+        formatEvidenceMs("committed response", committedResponse.valueMs),
         formatEvidenceMs("text -> first audio", pipeline.textToFirstAudioMs),
         formatEvidenceMs("backend -> first audio", pipeline.backendToFirstAudioMs),
       ]),
@@ -756,12 +947,14 @@ function buildBottleneckDiagnosis(params: {
   if (
     latestReason === "backend_stall"
     || latestStatus === "failed"
-    || thresholds.firstText.status === "warn"
-    || thresholds.firstText.status === "bad"
-    || thresholds.firstAudio.status === "warn"
-    || thresholds.firstAudio.status === "bad"
+    || thresholds.committedResponse.status === "warn"
+    || thresholds.committedResponse.status === "bad"
     || thresholds.responseWindow.status === "warn"
     || thresholds.responseWindow.status === "bad"
+    || (committedResponse.valueMs === null && thresholds.firstText.status === "warn")
+    || (committedResponse.valueMs === null && thresholds.firstText.status === "bad")
+    || (committedResponse.valueMs === null && thresholds.firstAudio.status === "warn")
+    || (committedResponse.valueMs === null && thresholds.firstAudio.status === "bad")
     || (thresholds.firstAudio.valueMs === null
       && (thresholds.backendComplete.status === "warn" || thresholds.backendComplete.status === "bad"))
   ) {
@@ -769,17 +962,19 @@ function buildBottleneckDiagnosis(params: {
       kind: "backend",
       level:
         latestReason === "backend_stall"
-        || thresholds.firstText.status === "bad"
-        || thresholds.firstAudio.status === "bad"
+        || thresholds.committedResponse.status === "bad"
         || thresholds.responseWindow.status === "bad"
-        || (thresholds.firstAudio.valueMs === null && thresholds.backendComplete.status === "bad")
+        || (committedResponse.valueMs === null && thresholds.firstText.status === "bad")
+        || (committedResponse.valueMs === null && thresholds.firstAudio.status === "bad")
+        || (committedResponse.valueMs === null && thresholds.firstAudio.valueMs === null && thresholds.backendComplete.status === "bad")
           ? "bad"
           : "warn",
       title: "Backend response is the bottleneck",
       detail: "The slowest segment is between the committed user turn and the backend producing enough response progress.",
       evidence: compactStrings([
+        formatEvidenceMs("committed response", committedResponse.valueMs),
         formatEvidenceMs("user end -> agent start", pipeline.userEndedToAgentStartMs),
-        formatEvidenceMs("user end -> first text", pipeline.userEndedToFirstTextMs),
+        formatEvidenceMs("raw first text", pipeline.rawSpeechEndToFirstTextMs),
         formatEvidenceMs("first text -> backend done", pipeline.firstTextToBackendCompleteMs),
         latestReason ? `reason: ${latestReason}` : null,
       ]),
@@ -825,8 +1020,9 @@ function buildBottleneckDiagnosis(params: {
     detail: "The visible latency is currently spread across startup and response phases without one clear failing segment.",
     evidence: compactStrings([
       formatEvidenceMs("join latency", thresholds.joinLatency.valueMs),
-      formatEvidenceMs("first text", thresholds.firstText.valueMs),
-      formatEvidenceMs("first audio", thresholds.firstAudio.valueMs),
+      formatEvidenceMs("committed response", thresholds.committedResponse.valueMs),
+      formatEvidenceMs("raw first text", thresholds.firstText.valueMs),
+      formatEvidenceMs("raw first audio", thresholds.firstAudio.valueMs),
     ]),
   }
 }
@@ -901,6 +1097,12 @@ export function buildVoiceDeveloperMetricsFromCapture({
 }
 
 export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): VoiceTelemetrySummary {
+  const committedResponse = selectCommittedResponse({
+    committedTurnCloseMs: metrics.pipeline.committedTurnCloseMs,
+    userEndedToFirstTextMs: metrics.pipeline.userEndedToFirstTextMs,
+    userEndedToAgentStartMs: metrics.pipeline.userEndedToAgentStartMs,
+  })
+
   return {
     stage: metrics.stage,
     healthLevel: metrics.health.level,
@@ -911,9 +1113,14 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
     regressionKeys: metrics.regressions.map((marker) => marker.key),
     sessionReadyMs: metrics.timings.sessionReadyMs,
     joinLatencyMs: metrics.timings.joinLatencyMs,
-    firstTextMs: metrics.lastTurn.firstTextMs,
-    backendCompleteMs: metrics.lastTurn.backendCompleteMs,
-    firstAudioMs: metrics.lastTurn.firstAudioMs,
+    committedResponseMs: committedResponse.valueMs,
+    committedResponseSource: committedResponse.source,
+    publicTurnCloseMs: metrics.pipeline.userEndedToAgentStartMs,
+    submissionStabilizationMs: metrics.pipeline.submissionStabilizationMs,
+    committedFirstTextMs: metrics.pipeline.userEndedToFirstTextMs,
+    rawFirstTextMs: metrics.lastTurn.firstTextMs,
+    rawBackendCompleteMs: metrics.lastTurn.backendCompleteMs,
+    rawFirstAudioMs: metrics.lastTurn.firstAudioMs,
     responseWindowMs:
       metrics.stage === "thinking"
         ? metrics.timings.currentThinkingMs
@@ -931,6 +1138,7 @@ function summarizeHealth(params: {
   userTranscriptCount: number
   assistantTranscriptCount: number
   turnCount: number
+  pipeline: VoicePipelineMetrics
   thresholds: VoiceDeveloperMetrics["thresholds"]
 }): VoiceDeveloperMetrics["health"] {
   const {
@@ -943,6 +1151,7 @@ function summarizeHealth(params: {
     userTranscriptCount,
     assistantTranscriptCount,
     turnCount,
+    pipeline,
     thresholds,
   } = params
 
@@ -990,6 +1199,17 @@ function summarizeHealth(params: {
   const latestStatus = asString(latestDiagnostic?.status)
   const falseUserEndedCount = asFiniteNumber(latestDiagnostic?.raw_false_end_count)
   const adjustedFalseEnds = adjustedFalseUserEndedCount(falseUserEndedCount)
+  const committedResponse = selectCommittedResponse({
+    committedTurnCloseMs: pipeline.committedTurnCloseMs,
+    userEndedToFirstTextMs: pipeline.userEndedToFirstTextMs,
+    userEndedToAgentStartMs: pipeline.userEndedToAgentStartMs,
+  })
+  const commitBoundaryDrift = hasCommitBoundaryDrift({
+    committedResponseMs: committedResponse.valueMs,
+    rawFirstTextMs: pipeline.rawSpeechEndToFirstTextMs,
+    rawFirstAudioMs: pipeline.rawSpeechEndToFirstAudioMs,
+    thresholds,
+  })
 
   if (latestStatus === "failed") {
     return {
@@ -1010,21 +1230,37 @@ function summarizeHealth(params: {
     }
   }
 
+  if (commitBoundaryDrift) {
+    return {
+      level: "warn",
+      title: "Committed response was fast",
+      detail: getCommitBoundaryDetail({
+        committedResponseMs: committedResponse.valueMs,
+        publicTurnCloseMs: pipeline.userEndedToAgentStartMs,
+        rawFirstTextMs: pipeline.rawSpeechEndToFirstTextMs,
+        rawFirstAudioMs: pipeline.rawSpeechEndToFirstAudioMs,
+      }),
+    }
+  }
+
   if (
     latestReason === "backend_stall"
-    || thresholds.firstText.status === "warn"
-    || thresholds.firstText.status === "bad"
-    || thresholds.firstAudio.status === "warn"
-    || thresholds.firstAudio.status === "bad"
+    || thresholds.committedResponse.status === "warn"
+    || thresholds.committedResponse.status === "bad"
+    || (committedResponse.valueMs === null && thresholds.firstText.status === "warn")
+    || (committedResponse.valueMs === null && thresholds.firstText.status === "bad")
+    || (committedResponse.valueMs === null && thresholds.firstAudio.status === "warn")
+    || (committedResponse.valueMs === null && thresholds.firstAudio.status === "bad")
     || (thresholds.firstAudio.valueMs === null
       && (thresholds.backendComplete.status === "warn" || thresholds.backendComplete.status === "bad"))
   ) {
     return {
       level:
         latestReason === "backend_stall"
-        || thresholds.firstText.status === "bad"
-        || thresholds.firstAudio.status === "bad"
-        || (thresholds.firstAudio.valueMs === null && thresholds.backendComplete.status === "bad")
+        || thresholds.committedResponse.status === "bad"
+        || (committedResponse.valueMs === null && thresholds.firstText.status === "bad")
+        || (committedResponse.valueMs === null && thresholds.firstAudio.status === "bad")
+        || (committedResponse.valueMs === null && thresholds.firstAudio.valueMs === null && thresholds.backendComplete.status === "bad")
           ? "bad"
           : "warn",
       title: "Backend felt slow",
@@ -1251,6 +1487,14 @@ export function buildVoiceDeveloperMetrics({
     )
   const readyEvent = findLast(activeEvents, (event) => event.name === "sophia-ready")
   const sseOpenEvent = findLast(activeEvents, (event) => event.name === "stream-open")
+  const lastUserEndedIndex = findLastIndex(
+    activeEvents,
+    (event) => event.name === "sophia.turn" && eventPhase(event) === "user_ended",
+  )
+  const lastAgentStartedIndex = findLastIndex(
+    activeEvents,
+    (event) => event.name === "sophia.turn" && eventPhase(event) === "agent_started",
+  )
   const lastUserTranscriptEvent = findLast(activeEvents, (event) => event.name === "sophia.user_transcript")
   const lastAssistantTranscriptEvent = findLast(
     activeEvents,
@@ -1274,6 +1518,12 @@ export function buildVoiceDeveloperMetrics({
   const firstMicAudioEvent = findFirst(activeEvents, (event) => event.name === "microphone-audio-detected")
   const firstUserTranscriptEvent = findFirst(activeEvents, (event) => event.name === "sophia.user_transcript")
   const remoteAudioBoundEvent = findLast(activeEvents, (event) => event.name === "remote-audio-bound")
+  const firstAssistantTextAfterLastUserEnded = lastUserEndedIndex >= 0
+    ? findFirst(
+      activeEvents.slice(lastUserEndedIndex + 1),
+      (event) => event.name === "sophia.transcript",
+    )
+    : null
 
   const userTranscriptCount = countWhere(activeEvents, (event) => event.name === "sophia.user_transcript")
   const assistantTranscriptCount = countWhere(
@@ -1319,9 +1569,23 @@ export function buildVoiceDeveloperMetrics({
   const firstTextMs = asFiniteNumber(lastDiagnostic?.first_text_ms)
   const backendCompleteMs = asFiniteNumber(lastDiagnostic?.backend_complete_ms)
   const firstAudioMs = asFiniteNumber(lastDiagnostic?.first_audio_ms)
+  const submissionStabilizationMs = asFiniteNumber(lastDiagnostic?.submission_stabilization_ms)
   const responseDurationMs = diffMs(lastAgentStartedEvent?.atMs ?? null, lastAgentEndedEvent?.atMs ?? null)
   const falseUserEndedCount = asFiniteNumber(lastDiagnostic?.raw_false_end_count)
   const duplicatePhaseCounts = normalizeDuplicatePhaseCounts(lastDiagnostic?.duplicate_phase_counts)
+  const lastCommittedUserTranscriptEvent = lastAgentStartedIndex >= 0
+    ? findLast(
+      activeEvents.slice(0, lastAgentStartedIndex + 1),
+      (event) => event.name === "sophia.user_transcript",
+    )
+    : null
+  const committedTurnCloseMs = diffMs(lastCommittedUserTranscriptEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null)
+  const committedFirstTextMs = diffMs(lastUserEndedEvent?.atMs ?? null, firstAssistantTextAfterLastUserEnded?.atMs ?? null)
+  const committedResponse = selectCommittedResponse({
+    committedTurnCloseMs,
+    userEndedToFirstTextMs: committedFirstTextMs,
+    userEndedToAgentStartMs: diffMs(lastUserEndedEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null),
+  })
   const startup: VoiceStartupMetrics = {
     requestToCredentialsMs: diffMs(lastStartEvent?.atMs ?? null, credentialsReceivedEvent?.atMs ?? null),
     credentialsToJoinMs: diffMs(credentialsReceivedEvent?.atMs ?? null, joinRequestedEvent?.atMs ?? null),
@@ -1333,20 +1597,26 @@ export function buildVoiceDeveloperMetrics({
   const pipeline: VoicePipelineMetrics = {
     micToUserTranscriptMs: diffMs(firstMicAudioEvent?.atMs ?? null, firstUserTranscriptEvent?.atMs ?? null),
     transcriptToUserEndedMs: diffMs(lastUserTranscriptEvent?.atMs ?? null, lastUserEndedEvent?.atMs ?? null),
+    committedTurnCloseMs,
     userEndedToRequestStartMs: backendRequestStartMs,
+    submissionStabilizationMs,
     requestStartToFirstBackendEventMs: diffMs(backendRequestStartMs, backendFirstEventMs),
     firstBackendEventToFirstTextMs: diffMs(backendFirstEventMs, firstTextMs),
     requestStartToFirstTextMs: diffMs(backendRequestStartMs, firstTextMs),
     userEndedToAgentStartMs: diffMs(lastUserEndedEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null),
-    userEndedToFirstTextMs: firstTextMs,
+    userEndedToFirstTextMs: committedFirstTextMs,
+    rawSpeechEndToFirstTextMs: firstTextMs,
     firstTextToBackendCompleteMs: diffMs(firstTextMs, backendCompleteMs),
     backendToFirstAudioMs: diffMs(backendCompleteMs, firstAudioMs),
     textToFirstAudioMs: diffMs(firstTextMs, firstAudioMs),
+    rawSpeechEndToBackendCompleteMs: backendCompleteMs,
+    rawSpeechEndToFirstAudioMs: firstAudioMs,
   }
   const thresholds = buildThresholds({
     stage,
     sessionReadyMs: diffMs(lastStartEvent?.atMs ?? null, readyEvent?.atMs ?? null),
     joinLatencyMs: diffMs(joinRequestedEvent?.atMs ?? credentialsReceivedEvent?.atMs ?? null, joinedEvent?.atMs ?? null),
+    committedResponseMs: committedResponse.valueMs,
     firstTextMs,
     firstAudioMs,
     backendCompleteMs,
@@ -1361,6 +1631,7 @@ export function buildVoiceDeveloperMetrics({
     duplicatePhaseCounts,
     latestReason: asString(lastDiagnostic?.reason),
     currentThinkingMs,
+    pipeline,
     thresholds,
   })
   const eventsSummary = buildEventCounters(activeEvents)
@@ -1392,6 +1663,7 @@ export function buildVoiceDeveloperMetrics({
     userTranscriptCount,
     assistantTranscriptCount,
     turnCount,
+    pipeline,
     thresholds,
   })
 

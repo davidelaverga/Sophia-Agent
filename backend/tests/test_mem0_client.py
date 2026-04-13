@@ -143,6 +143,15 @@ class TestSearchMemories:
             # Should include fact + no-category (empty passes through)
             assert len(result) == 2
 
+    def test_limit_passed_to_mem0_search(self):
+        from deerflow.sophia.mem0_client import search_memories
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = []
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
+            search_memories("user1", "query", limit=6)
+            assert mock_client.search.call_args.kwargs["limit"] == 6
+
     def test_exception_returns_empty(self):
         from deerflow.sophia.mem0_client import search_memories
 

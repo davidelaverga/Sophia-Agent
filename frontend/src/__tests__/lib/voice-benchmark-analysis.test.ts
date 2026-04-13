@@ -195,7 +195,7 @@ describe('voice benchmark analysis', () => {
     expect(report.comparisons.emotionFamilyHit).toBe(true);
     expect(report.comparisons.toneBandHit).toBe(true);
     expect(report.classification.auto).toBe('completed');
-    expect(report.telemetry?.summary.bottleneckKind).toBe('healthy');
+    expect(report.telemetry?.summary.bottleneckKind).toBe('backend');
   });
 
   it('classifies repeated unresolved user-ended storms as no turn closure', () => {
@@ -510,6 +510,9 @@ describe('voice benchmark analysis', () => {
     expect(report.metrics.turn_close_metric_source).toBe('committed_user_transcript');
     expect(report.metrics.terminal_reason).toBe('completed');
     expect(report.classification.auto).toBe('completed');
+    expect(report.telemetry?.summary.bottleneckKind).toBe('backend');
+    expect(report.telemetry?.summary.committedResponseMs).toBe(19538);
+    expect(report.telemetry?.summary.rawFirstTextMs).toBe(19538);
   });
 
   it('summarizes suite medians and hit rates from case reports', () => {
@@ -626,6 +629,7 @@ describe('voice benchmark analysis', () => {
       startup: 0,
       microphone: 0,
       'turn-segmentation': 0,
+      'commit-boundary': 0,
       backend: 1,
       tts: 0,
       transport: 0,

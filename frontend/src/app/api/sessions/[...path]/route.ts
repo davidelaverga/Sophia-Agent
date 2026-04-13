@@ -5,9 +5,9 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import type { MicroBriefingIntent } from '../../../types/session';
 import { getUserScopedAuthHeader, refreshUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
+import type { MicroBriefingIntent } from '../../../types/session';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
 
 const BACKEND_URL = getPrimaryGatewayUrl();

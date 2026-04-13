@@ -76,6 +76,8 @@ _FRAGMENT_START_PATTERN: re.Pattern[str] = re.compile(
 
 _TURN_END_GUARD_RELEASE_NEW_WORDS = 4
 _NON_FINAL_STABLE_SUBMISSION_MAX_WORDS = 6
+_SUBMISSION_STABILIZATION_RATIO = 0.25
+_MIN_SUBMISSION_STABILIZATION_MS = 120
 
 
 class SophiaTurnDetection(SmartTurnDetection):
@@ -188,6 +190,36 @@ class SophiaTurnDetection(SmartTurnDetection):
         # already stable. Only pay the extra stabilization delay for short
         # phrases where pause-mid-thought risk is still high.
         return word_count <= _NON_FINAL_STABLE_SUBMISSION_MAX_WORDS
+
+    def get_submission_stabilization_plan(
+        self,
+        max_window_ms: int,
+        transcript: str | None = None,
+    ) -> tuple[int, str | None]:
+        if max_window_ms <= 0:
+            return 0, None
+
+        text = (transcript or self._current_transcript).strip()
+        if not text:
+            return max_window_ms, "empty"
+
+        if not self.should_stabilize_submission(text):
+            return 0, None
+
+        word_count = len(text.split())
+        if self._is_fragment(text, word_count):
+            reason = "fragment"
+        elif self._has_continuation_signal(text):
+            reason = "continuation"
+        else:
+            reason = "short_non_final"
+
+        adaptive_window_ms = getattr(self, "_trailing_silence_ms", self._short_ms)
+        delay_ms = max(
+            _MIN_SUBMISSION_STABILIZATION_MS,
+            int(adaptive_window_ms * _SUBMISSION_STABILIZATION_RATIO),
+        )
+        return min(max_window_ms, delay_ms), reason
 
     def clear_turn_end_guard(self) -> None:
         self._turn_end_guard_active = False

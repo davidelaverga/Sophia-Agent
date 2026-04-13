@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Iterator
@@ -47,6 +48,8 @@ WARM_DEFAULT_ARTIFACT: dict[str, str] = {
     "voice_emotion_primary": "content",
     "voice_speed": "gentle",
 }
+
+_WARMUP_TRANSCRIPT = "Hey."
 
 # Keyword → (emotion, speed_float) mapping for user-side emotion hinting.
 # Scanned before TTS so the *current* turn's voice matches the user's emotional tone.
@@ -111,6 +114,8 @@ class SophiaTTS(CartesiaTTS):
         self._first_audio_callback: Callable[[str], None] | None = None
         self._error_callback: Callable[[str, str, str | None], None] | None = None
         self._echo_guard: SophiaTurnDetection | None = None
+        self._warmup_task: asyncio.Task[None] | None = None
+        self._warmup_completed = False
 
         @self.events.subscribe
         async def _on_tts_audio(event: TTSAudioEvent) -> None:
@@ -154,6 +159,75 @@ class SophiaTTS(CartesiaTTS):
     def attach_echo_guard(self, turn_detection: SophiaTurnDetection) -> None:
         """Wire TTS to suppress VAD while the agent is speaking."""
         self._echo_guard = turn_detection
+
+    def start_warmup(self) -> bool:
+        if self._warmup_completed:
+            return False
+
+        task = self._warmup_task
+        if task is not None and not task.done():
+            return False
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        task = loop.create_task(self._run_warmup())
+        self._warmup_task = task
+        task.add_done_callback(self._finalize_warmup_task)
+        return True
+
+    def _finalize_warmup_task(self, task: asyncio.Task[None]) -> None:
+        if self._warmup_task is task:
+            self._warmup_task = None
+
+        if task.cancelled():
+            return
+
+        exc = task.exception()
+        if exc is not None:
+            logger.warning("voice.tts_warmup status=failed_unhandled", exc_info=exc)
+            return
+
+    async def _consume_warmup_response(self, response: object) -> None:
+        if isinstance(response, (bytes, bytearray, memoryview)):
+            return
+
+        if hasattr(response, "__aiter__"):
+            async for chunk in response:  # type: ignore[attr-defined]
+                if chunk:
+                    return
+            return
+
+        if hasattr(response, "__iter__") and not isinstance(response, str):
+            for chunk in response:  # type: ignore[attr-defined]
+                if chunk:
+                    return
+
+    async def _run_warmup(self) -> None:
+        logger.info("voice.tts_warmup status=started model=%s", self.model_id)
+
+        try:
+            response = await self.client.tts.generate(
+                model_id=self.model_id,
+                transcript=_WARMUP_TRANSCRIPT,
+                output_format={
+                    "container": "raw",
+                    "encoding": "pcm_s16le",
+                    "sample_rate": self.sample_rate,
+                },
+                voice={"id": self.voice_id, "mode": "id"},
+            )
+            await self._consume_warmup_response(response.iter_bytes())
+        except asyncio.CancelledError:
+            logger.info("voice.tts_warmup status=cancelled model=%s", self.model_id)
+            raise
+        except Exception:
+            logger.warning("voice.tts_warmup status=failed model=%s", self.model_id, exc_info=True)
+        else:
+            self._warmup_completed = True
+            logger.info("voice.tts_warmup status=completed model=%s", self.model_id)
 
     def note_response_started(self, user_id: str) -> None:
         self._active_response_user_id = user_id
