@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 import re
+from typing import Annotated
 
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langgraph.types import Command
 from langgraph.typing import ContextT
 
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.sophia.builder_web_policy import normalize_builder_web_url
-from deerflow.sophia.tools.builder_web_search import _budget_guard, _merge_source_records, _resolve_configured_tool
+from deerflow.sophia.tools.builder_web_search import (
+    _budget_guard,
+    _merge_source_records,
+    _resolve_configured_tool,
+    _tool_response,
+)
 
 _TITLE_RE = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 
@@ -22,7 +29,11 @@ def _extract_title(content: str, fallback_url: str) -> str:
 
 
 @tool("builder_web_fetch", parse_docstring=True)
-def builder_web_fetch(runtime: ToolRuntime[ContextT, SophiaState], url: str) -> str:
+def builder_web_fetch(
+    runtime: ToolRuntime[ContextT, SophiaState],
+    url: str,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> Command:
     """Fetch an exact URL already approved for the current builder task.
 
     Only fetch exact URLs returned by builder_web_search or explicitly present in
@@ -32,11 +43,11 @@ def builder_web_fetch(runtime: ToolRuntime[ContextT, SophiaState], url: str) -> 
         url: Exact URL to fetch.
     """
     if runtime.state is None:
-        return "Error: Builder runtime state is not available."
+        return _tool_response(tool_call_id, "Error: Builder runtime state is not available.", tool_name="builder_web_fetch")
 
     state = runtime.state
     if not state.get("allow_web_research"):
-        return "Error: Web fetch is disabled for this builder task."
+        return _tool_response(tool_call_id, "Error: Web fetch is disabled for this builder task.", tool_name="builder_web_fetch")
 
     normalized_url = normalize_builder_web_url(url)
     allowed_urls = {
@@ -51,24 +62,36 @@ def builder_web_fetch(runtime: ToolRuntime[ContextT, SophiaState], url: str) -> 
     }
     allowed_urls.update(explicit_urls)
     if normalized_url not in allowed_urls:
-        return (
+        return _tool_response(
+            tool_call_id,
             "Error: URL not allowed for builder_web_fetch. "
-            "Only exact URLs provided in the task brief or returned by builder_web_search may be fetched."
+            "Only exact URLs provided in the task brief or returned by builder_web_search may be fetched.",
+            tool_name="builder_web_fetch",
         )
 
-    budget_error = _budget_guard(state, "fetch")
+    budget, budget_error = _budget_guard(state, "fetch")
     if budget_error:
-        return budget_error
+        return _tool_response(tool_call_id, budget_error, tool_name="builder_web_fetch")
 
     fetch_tool = _resolve_configured_tool("web_fetch")
     if fetch_tool is None:
-        return "Error: No configured web_fetch provider is available."
+        return _tool_response(
+            tool_call_id,
+            "Error: No configured web_fetch provider is available.",
+            tool_name="builder_web_fetch",
+            builder_web_budget=budget,
+        )
 
     raw_result = fetch_tool.run(normalized_url)
     if not isinstance(raw_result, str):
-        return "Error: Configured web_fetch provider returned a non-text response."
+        return _tool_response(
+            tool_call_id,
+            "Error: Configured web_fetch provider returned a non-text response.",
+            tool_name="builder_web_fetch",
+            builder_web_budget=budget,
+        )
     if raw_result.startswith("Error:"):
-        return raw_result
+        return _tool_response(tool_call_id, raw_result, tool_name="builder_web_fetch", builder_web_budget=budget)
 
     existing_sources = [
         source
@@ -81,5 +104,11 @@ def builder_web_fetch(runtime: ToolRuntime[ContextT, SophiaState], url: str) -> 
         "snippet": "",
         "query": "explicit_fetch",
     }
-    state["builder_search_sources"] = _merge_source_records(existing_sources, [source_record])
-    return raw_result
+    updated_sources = _merge_source_records(existing_sources, [source_record])
+    return _tool_response(
+        tool_call_id,
+        raw_result,
+        tool_name="builder_web_fetch",
+        builder_web_budget=budget,
+        builder_search_sources=updated_sources,
+    )

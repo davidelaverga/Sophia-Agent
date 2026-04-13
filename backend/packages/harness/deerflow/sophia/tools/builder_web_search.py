@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any
 
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool
+from langgraph.types import Command
 from langgraph.typing import ContextT
 
 from deerflow.agents.sophia_agent.state import SophiaState
@@ -50,21 +52,38 @@ def _merge_source_records(existing: list[dict[str, str]], new_sources: list[dict
     return list(merged.values())
 
 
-def _budget_guard(state: SophiaState, key: str) -> str | None:
+def _tool_response(
+    tool_call_id: str,
+    content: str,
+    *,
+    tool_name: str,
+    **updates: object,
+) -> Command:
+    payload = {
+        **updates,
+        "messages": [ToolMessage(content=content, tool_call_id=tool_call_id, name=tool_name)],
+    }
+    return Command(update=payload)
+
+
+def _budget_guard(state: SophiaState, key: str) -> tuple[dict[str, int], str | None]:
     budget = dict(state.get("builder_web_budget") or {})
     limit_key = f"{key}_limit"
     calls_key = f"{key}_calls"
     limit = int(budget.get(limit_key, 0) or 0)
     calls = int(budget.get(calls_key, 0) or 0)
     if limit and calls >= limit:
-        return f"Error: Builder {key} budget exhausted ({calls}/{limit}). Continue without more browsing."
+        return budget, f"Error: Builder {key} budget exhausted ({calls}/{limit}). Continue without more browsing."
     budget[calls_key] = calls + 1
-    state["builder_web_budget"] = budget
-    return None
+    return budget, None
 
 
 @tool("builder_web_search", parse_docstring=True)
-def builder_web_search(runtime: ToolRuntime[ContextT, SophiaState], query: str) -> str:
+def builder_web_search(
+    runtime: ToolRuntime[ContextT, SophiaState],
+    query: str,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> Command:
     """Search the web for current external information during builder execution.
 
     Use this only when the delegated task explicitly allows web research.
@@ -73,33 +92,53 @@ def builder_web_search(runtime: ToolRuntime[ContextT, SophiaState], query: str) 
         query: Search query for the external information needed.
     """
     if runtime.state is None:
-        return "Error: Builder runtime state is not available."
+        return _tool_response(tool_call_id, "Error: Builder runtime state is not available.", tool_name="builder_web_search")
 
     state = runtime.state
     if not state.get("allow_web_research"):
-        return "Error: Web research is disabled for this builder task."
+        return _tool_response(tool_call_id, "Error: Web research is disabled for this builder task.", tool_name="builder_web_search")
 
-    budget_error = _budget_guard(state, "search")
+    budget, budget_error = _budget_guard(state, "search")
     if budget_error:
-        return budget_error
+        return _tool_response(tool_call_id, budget_error, tool_name="builder_web_search")
 
     search_tool = _resolve_configured_tool("web_search")
     if search_tool is None:
-        return "Error: No configured web_search provider is available."
+        return _tool_response(
+            tool_call_id,
+            "Error: No configured web_search provider is available.",
+            tool_name="builder_web_search",
+            builder_web_budget=budget,
+        )
 
     raw_result = search_tool.run(query)
     if not isinstance(raw_result, str):
-        return "Error: Configured web_search provider returned a non-text response."
+        return _tool_response(
+            tool_call_id,
+            "Error: Configured web_search provider returned a non-text response.",
+            tool_name="builder_web_search",
+            builder_web_budget=budget,
+        )
     if raw_result.startswith("Error:"):
-        return raw_result
+        return _tool_response(tool_call_id, raw_result, tool_name="builder_web_search", builder_web_budget=budget)
 
     try:
         parsed = json.loads(raw_result)
     except json.JSONDecodeError:
-        return "Error: Configured web_search provider returned invalid JSON."
+        return _tool_response(
+            tool_call_id,
+            "Error: Configured web_search provider returned invalid JSON.",
+            tool_name="builder_web_search",
+            builder_web_budget=budget,
+        )
 
     if not isinstance(parsed, list):
-        return "Error: Configured web_search provider returned an unexpected payload."
+        return _tool_response(
+            tool_call_id,
+            "Error: Configured web_search provider returned an unexpected payload.",
+            tool_name="builder_web_search",
+            builder_web_budget=budget,
+        )
 
     normalized_results = [
         normalized
@@ -113,17 +152,24 @@ def builder_web_search(runtime: ToolRuntime[ContextT, SophiaState], query: str) 
         if str(url).strip()
     }
     allowed_urls.update(result["url"] for result in normalized_results)
-    state["builder_allowed_urls"] = sorted(allowed_urls)
+    updated_allowed_urls = sorted(allowed_urls)
 
     existing_sources = [
         source
         for source in (state.get("builder_search_sources") or [])
         if isinstance(source, dict)
     ]
-    state["builder_search_sources"] = _merge_source_records(existing_sources, normalized_results)
+    updated_sources = _merge_source_records(existing_sources, normalized_results)
 
     response_payload = [
         {"title": result["title"], "url": result["url"], "snippet": result["snippet"]}
         for result in normalized_results
     ]
-    return json.dumps(response_payload, indent=2, ensure_ascii=False)
+    return _tool_response(
+        tool_call_id,
+        json.dumps(response_payload, indent=2, ensure_ascii=False),
+        tool_name="builder_web_search",
+        builder_web_budget=budget,
+        builder_allowed_urls=updated_allowed_urls,
+        builder_search_sources=updated_sources,
+    )
