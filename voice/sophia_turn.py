@@ -44,8 +44,8 @@ _CONTINUATION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\blet me\s*$", re.I),
     re.compile(r"\bit'?s like\s*$", re.I),
     re.compile(r"\bthe thing is\s*$", re.I),
-    # Trailing prepositions / articles
-    re.compile(r"\b(?:to|for|with|the|a)\s*$", re.I),
+    # Trailing prepositions (only strong mid-sentence ones, not articles)
+    re.compile(r"\b(?:to|for|with)\s*$", re.I),
 ]
 
 # Fragment start patterns — short phrases beginning with function words are often
@@ -87,12 +87,12 @@ class SophiaTurnDetection(SmartTurnDetection):
         self,
         echo_cooldown_ms: int = DEFAULT_ECHO_COOLDOWN_MS,
         *,
-        adaptive_silence_short_ms: int = 700,
-        adaptive_silence_medium_ms: int = 1000,
-        adaptive_silence_long_ms: int = 1400,
-        adaptive_silence_ceiling_ms: int = 1800,
-        adaptive_silence_continuation_bonus_ms: int = 400,
-        adaptive_silence_fragment_bonus_ms: int = 800,
+        adaptive_silence_short_ms: int = 600,
+        adaptive_silence_medium_ms: int = 800,
+        adaptive_silence_long_ms: int = 1200,
+        adaptive_silence_ceiling_ms: int = 1400,
+        adaptive_silence_continuation_bonus_ms: int = 300,
+        adaptive_silence_fragment_bonus_ms: int = 500,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
