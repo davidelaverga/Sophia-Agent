@@ -137,15 +137,14 @@ def make_sophia_agent(config: RunnableConfig):
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # Prompt caching: system prompt (~37K chars) is cached for 5 minutes.
-    # Turn 2+ reads from cache → ~85% lower TTFT, 90% lower cost on input.
+    # Post-chain: prompt assembly, then caching, then title
     from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
-    middlewares.append(AnthropicPromptCachingMiddleware(ttl="5m"))
-
-    # Post-chain: prompt assembly, title
     middlewares.extend(
         [
             PromptAssemblyMiddleware(),
+            # Prompt caching AFTER assembly — adds cache_control to the assembled
+            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
+            AnthropicPromptCachingMiddleware(ttl="5m"),
             SophiaTitleMiddleware(),
         ]
     )
