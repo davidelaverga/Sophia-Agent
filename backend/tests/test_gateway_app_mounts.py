@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from app.gateway.auth import require_authorized_user_scope
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.sandbox_config import SandboxConfig
 
@@ -48,6 +49,7 @@ def test_gateway_app_mounts_voice_connect_route(monkeypatch):
     monkeypatch.setenv("STREAM_API_SECRET", "test-api-secret")
 
     app = create_app()
+    app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"
     with patch(
         "app.gateway.routers.voice._dispatch_voice_agent",
         new_callable=AsyncMock,

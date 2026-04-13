@@ -6,7 +6,6 @@ from fastapi.testclient import TestClient
 
 from app.gateway.routers.sessions import router
 
-
 app = FastAPI()
 app.include_router(router)
 client = TestClient(app)

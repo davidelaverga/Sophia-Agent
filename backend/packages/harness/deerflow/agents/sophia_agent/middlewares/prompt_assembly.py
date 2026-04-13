@@ -16,7 +16,6 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
-from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 
