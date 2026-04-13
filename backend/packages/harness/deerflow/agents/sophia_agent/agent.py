@@ -90,10 +90,13 @@ def make_sophia_agent(config: RunnableConfig):
         context_mode,
     )
 
+    # Voice needs short responses (1-3 sentences) — lower max_tokens reduces generation time.
+    # Text mode gets more room for longer responses.
+    voice_mode = platform in ("voice", "ios_voice")
     model = ChatAnthropic(
         model="claude-haiku-4-5-20251001",
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-        max_tokens=4096,
+        max_tokens=512 if voice_mode else 4096,
     )
 
     # Middleware chain — order is load-bearing.
@@ -131,6 +134,11 @@ def make_sophia_agent(config: RunnableConfig):
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
+
+    # Prompt caching: system prompt (~37K chars) is cached for 5 minutes.
+    # Turn 2+ reads from cache → ~85% lower TTFT, 90% lower cost on input.
+    from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+    middlewares.append(AnthropicPromptCachingMiddleware(ttl="5m"))
 
     # Post-chain: prompt assembly, title
     middlewares.extend(
