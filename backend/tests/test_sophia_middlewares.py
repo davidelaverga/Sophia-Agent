@@ -1790,6 +1790,7 @@ class TestEmitBuilderArtifactTool:
             "artifact_title": "Business Case Report",
             "steps_completed": 5,
             "decisions_made": ["Used simple format", "Included ROI section"],
+            "sources_used": [{"title": "Example", "url": "https://example.com"}],
             "companion_summary": "A clean business case document.",
             "companion_tone_hint": "Reassuring — user was stressed.",
             "confidence": 0.85,
@@ -1797,6 +1798,7 @@ class TestEmitBuilderArtifactTool:
         parsed = json.loads(result)
         assert parsed["artifact_type"] == "document"
         assert parsed["confidence"] == 0.85
+        assert parsed["sources_used"][0]["url"] == "https://example.com"
 
     def test_invalid_confidence_bounds(self):
         from deerflow.sophia.tools.emit_builder_artifact import BuilderArtifactInput
@@ -1871,6 +1873,69 @@ class TestBuilderTaskMiddleware:
         assert "<builder_endgame>" in briefing
         assert "emit_builder_artifact" in briefing
         assert "bash, write_file" in briefing
+
+    def test_adds_research_citation_requirements(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        mw = BuilderTaskMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "delegation_context": {
+                "companion_artifact": {"tone_estimate": 2.7, "active_tone_band": "engagement"},
+                "task_type": "research",
+                "relevant_memories": [],
+                "active_ritual": None,
+                "ritual_phase": None,
+                "allow_web_research": True,
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        briefing = result["system_prompt_blocks"][-1]
+        assert "[citation:Title](URL)" in briefing
+        assert "Sources section" in briefing
+
+
+class TestBuilderResearchPolicyMiddleware:
+    def test_initializes_web_policy_state_and_prompt(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
+
+        mw = BuilderResearchPolicyMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "delegation_context": {
+                "task_type": "research",
+                "allow_web_research": True,
+                "explicit_user_urls": ["https://example.com/source"],
+                "builder_web_budget": {"search_limit": 5, "fetch_limit": 8, "search_calls": 0, "fetch_calls": 0},
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        assert result["allow_web_research"] is True
+        assert result["explicit_user_urls"] == ["https://example.com/source"]
+        assert result["builder_allowed_urls"] == ["https://example.com/source"]
+        assert "Autonomous web research is enabled" in result["system_prompt_blocks"][-1]
+
+    def test_disables_web_policy_for_non_browsing_task(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
+
+        mw = BuilderResearchPolicyMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "delegation_context": {
+                "task_type": "frontend",
+                "allow_web_research": False,
+                "explicit_user_urls": [],
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        assert result["allow_web_research"] is False
+        assert "External browsing is disabled" in result["system_prompt_blocks"][-1]
 
 
 # --- BuilderArtifactMiddleware ---
