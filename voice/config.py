@@ -216,15 +216,15 @@ def get_settings() -> VoiceSettings:
             "Forced shim failure for testing.",
         ).strip(),
         shim_emit_invalid_artifact=_env_bool("SOPHIA_SHIM_EMIT_INVALID_ARTIFACT", False),
-        adaptive_silence_short_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_SHORT_MS", 700),
-        adaptive_silence_medium_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_MEDIUM_MS", 1000),
-        adaptive_silence_long_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_LONG_MS", 1400),
-        adaptive_silence_ceiling_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_CEILING_MS", 1800),
+        adaptive_silence_short_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_SHORT_MS", 600),
+        adaptive_silence_medium_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_MEDIUM_MS", 800),
+        adaptive_silence_long_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_LONG_MS", 1200),
+        adaptive_silence_ceiling_ms=_env_int("SOPHIA_ADAPTIVE_SILENCE_CEILING_MS", 1400),
         adaptive_silence_continuation_bonus_ms=_env_int(
-            "SOPHIA_ADAPTIVE_SILENCE_CONTINUATION_BONUS_MS", 400
+            "SOPHIA_ADAPTIVE_SILENCE_CONTINUATION_BONUS_MS", 300
         ),
         adaptive_silence_fragment_bonus_ms=_env_int(
-            "SOPHIA_ADAPTIVE_SILENCE_FRAGMENT_BONUS_MS", 800
+            "SOPHIA_ADAPTIVE_SILENCE_FRAGMENT_BONUS_MS", 500
         ),
         backend_stall_timeout_ms=_env_int("SOPHIA_BACKEND_STALL_TIMEOUT_MS", 8000),
         fragile_window_ms=_env_int("SOPHIA_FRAGILE_WINDOW_MS", 600),
