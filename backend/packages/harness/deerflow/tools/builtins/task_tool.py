@@ -167,6 +167,11 @@ def task_tool(
             logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
             cleanup_background_task(task_id)
             return f"Task Succeeded. Result: {result.result}"
+        elif result.status == SubagentStatus.CANCELLED:
+            writer({"type": "task_cancelled", "task_id": task_id, "error": result.error})
+            logger.info(f"[trace={trace_id}] Task {task_id} cancelled")
+            cleanup_background_task(task_id)
+            return f"Task cancelled. Reason: {result.error or 'Execution cancelled by user'}"
         elif result.status == SubagentStatus.FAILED:
             writer({"type": "task_failed", "task_id": task_id, "error": result.error})
             logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")

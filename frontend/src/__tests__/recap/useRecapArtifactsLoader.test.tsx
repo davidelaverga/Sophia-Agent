@@ -255,11 +255,18 @@ describe('useRecapArtifactsLoader', () => {
     const hydrated = await hydrateStoredArtifactsWithRecentMemories(
       {
         sessionId: 'sess-stored-artifacts',
+        threadId: 'thread-stored-artifacts',
         sessionType: 'debrief',
         contextMode: 'work',
         startedAt: '2026-03-03T19:46:00.000Z',
         endedAt: '2026-03-03T20:00:00.000Z',
         takeaway: 'The quieter plan was the real plan.',
+        builderArtifact: {
+          artifactTitle: 'Focus memo',
+          artifactType: 'document',
+          artifactPath: 'mnt/user-data/outputs/focus-memo.md',
+          decisionsMade: ['Dropped the redundant context section'],
+        },
         status: 'ready',
         memoryCandidates: [],
       },
@@ -272,7 +279,11 @@ describe('useRecapArtifactsLoader', () => {
     );
     expect(hydrated).toEqual(
       expect.objectContaining({
+        threadId: 'thread-stored-artifacts',
         takeaway: 'The quieter plan was the real plan.',
+        builderArtifact: expect.objectContaining({
+          artifactTitle: 'Focus memo',
+        }),
         memoryCandidates: [
           expect.objectContaining({
             id: 'candidate-memory-1',

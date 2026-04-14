@@ -969,6 +969,25 @@ a {
   background-size: 200% 100%;
 }
 
+/* Builder constellation orbit — particles trace an elliptical path */
+@keyframes builder-orbit {
+  0%   { transform: rotate(0deg)   translateX(var(--orbit-r)) rotate(0deg);   opacity: 0.18; }
+  25%  { opacity: 0.55; }
+  50%  { transform: rotate(180deg) translateX(var(--orbit-r)) rotate(-180deg); opacity: 0.18; }
+  75%  { opacity: 0.55; }
+  100% { transform: rotate(360deg) translateX(var(--orbit-r)) rotate(-360deg); opacity: 0.18; }
+}
+
+@keyframes builder-core-breath {
+  0%, 100% { transform: scale(1);   box-shadow: 0 0 12px color-mix(in srgb, var(--sophia-purple) 25%, transparent); }
+  50%      { transform: scale(1.15); box-shadow: 0 0 22px color-mix(in srgb, var(--sophia-purple) 45%, transparent); }
+}
+
+@keyframes builder-reveal {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)  scale(1); }
+}
+
 /* Skeleton shimmer effect for loading states */
 .skeleton-shimmer {
   background: linear-gradient(

@@ -155,7 +155,7 @@ def switch_to_builder(
     # 5. Execute + poll
     # ------------------------------------------------------------------
     task_id = tool_call_id or str(uuid.uuid4())[:8]
-    executor.execute_async(task, task_id=task_id)
+    executor.execute_async(task, task_id=task_id, owner_id=user_id)
     logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
 
     # Stream progress via get_stream_writer if available
@@ -186,6 +186,13 @@ def switch_to_builder(
             # Extract builder_result from final state
             builder_result = _extract_builder_result(result)
             return _format_success(builder_result)
+
+        elif result.status == SubagentStatus.CANCELLED:
+            logger.info("[Builder] Task %s cancelled", task_id)
+            if writer:
+                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error})
+            cleanup_background_task(task_id)
+            return _format_cancelled(result.error)
 
         elif result.status == SubagentStatus.FAILED:
             logger.error("[Builder] Task %s failed: %s", task_id, result.error)
@@ -257,3 +264,9 @@ def _format_success(builder_result: dict) -> str:
 def _format_error(error: str) -> str:
     """Format a builder error for the companion."""
     return f"Builder failed: {error}"
+
+
+def _format_cancelled(reason: str | None) -> str:
+    """Format a cancelled builder task for the companion."""
+    resolved_reason = reason or "Execution cancelled by user"
+    return f"Builder cancelled: {resolved_reason}"

@@ -4,6 +4,8 @@ import {
   extractStreamMetadata,
   normalizeStreamDataPart,
   parseArtifactsPayload,
+  parseBuilderArtifactPayload,
+  parseBuilderTaskPayload,
   parseInterruptPayload,
 } from '../../app/session/stream-contract-adapters';
 
@@ -59,6 +61,46 @@ describe('stream-contract-adapters', () => {
     expect(payload).toEqual({
       takeaway: 'Takeaway',
       reflection: 'What do you want to keep from this moment?',
+    });
+  });
+
+  it('normalizes builder artifact payloads and file paths', () => {
+    const payload = parseBuilderArtifactPayload({
+      artifact_title: 'Sprint brief',
+      artifact_type: 'document',
+      artifact_path: 'outputs/sprint-brief.md',
+      supporting_files: ['/mnt/user-data/outputs/notes.txt'],
+      companion_summary: 'The sprint brief is ready.',
+      decisions_made: ['Kept the scope tight'],
+    });
+
+    expect(payload).toEqual({
+      artifactTitle: 'Sprint brief',
+      artifactType: 'document',
+      artifactPath: 'mnt/user-data/outputs/sprint-brief.md',
+      supportingFiles: ['mnt/user-data/outputs/notes.txt'],
+      companionSummary: 'The sprint brief is ready.',
+      decisionsMade: ['Kept the scope tight'],
+    });
+  });
+
+  it('parses builder task payloads from stream parts', () => {
+    const payload = parseBuilderTaskPayload({
+      phase: 'running',
+      task_id: 'task-builder-1',
+      label: 'Builder: document',
+      detail: 'Working through step 2 of 4.',
+      message_index: 2,
+      total_messages: 4,
+    });
+
+    expect(payload).toEqual({
+      phase: 'running',
+      taskId: 'task-builder-1',
+      label: 'Builder: document',
+      detail: 'Working through step 2 of 4.',
+      messageIndex: 2,
+      totalMessages: 4,
     });
   });
 

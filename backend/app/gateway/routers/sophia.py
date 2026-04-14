@@ -247,6 +247,12 @@ class SessionEndResponse(BaseModel):
     debrief_prompt: str | None = Field(default=None)
 
 
+class TaskCancelResponse(BaseModel):
+    task_id: str = Field(..., description="Background task identifier")
+    status: str = Field(..., description="Cancellation status")
+    detail: str | None = Field(default=None, description="Optional status detail")
+
+
 # ---------------------------------------------------------------------------
 # Helper: normalize Mem0 memory to MemoryItem
 # ---------------------------------------------------------------------------
@@ -932,7 +938,46 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
 
 
 # ---------------------------------------------------------------------------
-# 7. Session End Trigger
+# 7. Background Task Control
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/tasks/{task_id}/cancel",
+    response_model=TaskCancelResponse,
+    summary="Cancel a running Sophia background task",
+)
+async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
+    _validate_user(user_id)
+
+    from deerflow.subagents.executor import cancel_background_task, get_background_task_result
+
+    result = get_background_task_result(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if result.owner_id and result.owner_id != user_id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    cancelled = cancel_background_task(task_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if cancelled.status.value != "cancelled":
+        return TaskCancelResponse(
+            task_id=task_id,
+            status=cancelled.status.value,
+            detail=cancelled.error,
+        )
+
+    return TaskCancelResponse(
+        task_id=task_id,
+        status="cancelled",
+        detail=cancelled.error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. Session End Trigger
 # ---------------------------------------------------------------------------
 
 @router.post(

@@ -20,6 +20,7 @@ import type {
   SessionMessage,
 } from '../lib/session-types';
 import { generateLocalId } from '../lib/utils';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
 
 // ============================================================================
 // STORE STATE INTERFACE
@@ -72,6 +73,7 @@ interface SessionState {
   
   // Artifacts
   storeArtifacts: (artifacts: RitualArtifacts, summary?: string) => void;
+  storeBuilderArtifact: (builderArtifact: BuilderArtifactV1 | null) => void;
   
   // Messages (for session recovery)
   updateMessages: (messages: SessionMessage[]) => void;
@@ -280,6 +282,19 @@ export const useSessionStore = create<SessionState>()(
           },
         });
       },
+
+      storeBuilderArtifact: (builderArtifact) => {
+        const { session } = get();
+        if (!session) return;
+
+        set({
+          session: {
+            ...session,
+            ...(builderArtifact ? { builderArtifact } : { builderArtifact: undefined }),
+            lastActivityAt: new Date().toISOString(),
+          },
+        });
+      },
       
       // Update messages (for session recovery)
       updateMessages: (messages) => {
@@ -340,6 +355,7 @@ export const selectSessionStatus = (state: SessionState) => state.session?.statu
 export const selectPresetType = (state: SessionState) => state.session?.presetType ?? null;
 export const selectContextMode = (state: SessionState) => state.session?.contextMode ?? null;
 export const selectArtifacts = (state: SessionState) => state.session?.artifacts ?? null;
+export const selectBuilderArtifact = (state: SessionState) => state.session?.builderArtifact ?? null;
 export const selectMessages = (state: SessionState) => state.session?.messages ?? [];
 
 // Session summary for ResumeBanner (unified approach - Week 4)

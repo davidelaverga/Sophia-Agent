@@ -36,6 +36,7 @@ import {
   DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
+import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
 import { UsageLimitModal } from '../components/UsageLimitModal';
@@ -159,10 +160,12 @@ function SessionPageContent() {
   const {
     session,
     artifacts,
+    builderArtifact: storedBuilderArtifact,
     storedMessages,
     updateMessages,
     updateSession,
     storeArtifacts,
+    storeBuilderArtifact,
     endSession,
     clearSession,
     setEnding,
@@ -241,6 +244,11 @@ function SessionPageContent() {
 
   const {
     artifactStatus,
+    builderArtifact,
+    builderTask,
+    clearBuilderTask,
+    cancelBuilderTask,
+    isCancellingBuilderTask,
     ingestArtifacts,
     applyMemoryCandidates,
     chatMessages,
@@ -275,7 +283,9 @@ function SessionPageContent() {
     backendSessionId,
     userId,
     artifacts,
+    storedBuilderArtifact,
     storeArtifacts,
+    storeBuilderArtifact,
     updateSession,
     showUsageLimitModal,
     recordConnectivityFailure,
@@ -452,6 +462,7 @@ function SessionPageContent() {
     isTyping,
     messages,
     artifacts,
+    builderArtifact,
     isStreaming,
     isReflectionVoiceFlowActive,
     userOpenedArtifacts,
@@ -467,17 +478,18 @@ function SessionPageContent() {
   const previousArtifactSignatureRef = useRef('');
 
   const artifactContentCount = useMemo(() => {
+    const hasBuilderArtifact = Boolean(builderArtifact);
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
-    return (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts]);
+    return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
+  }, [artifacts, builderArtifact]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length;
-  }, [artifactStatus]);
+    ).length + (builderArtifact ? 1 : 0);
+  }, [artifactStatus, builderArtifact]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -494,6 +506,13 @@ function SessionPageContent() {
   }, [artifactStatus]);
 
   const artifactSignature = useMemo(() => {
+    const builder = builderArtifact
+      ? [
+          builderArtifact.artifactTitle,
+          builderArtifact.artifactPath ?? '',
+          (builderArtifact.supportingFiles ?? []).join('|'),
+        ].join('::')
+      : '';
     const takeaway = artifacts?.takeaway?.trim() ?? '';
     const reflection = artifacts?.reflection_candidate?.prompt?.trim() ?? '';
     const memories = (artifacts?.memory_candidates ?? [])
@@ -501,10 +520,11 @@ function SessionPageContent() {
       .filter((memory) => memory.length > 0)
       .join('|');
 
-    return `${takeaway}::${reflection}::${memories}`;
-  }, [artifacts]);
+    return `${builder}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
+  const showBuilderTaskNotice = Boolean(builderTask && (builderTask.phase !== 'completed' || !builderArtifact));
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -638,6 +658,7 @@ function SessionPageContent() {
       setTimeout(() => removeInternalDebriefTriggerBubble(debriefTrigger), 180);
     },
     currentArtifacts: artifacts,
+    currentBuilderArtifact: builderArtifact,
     userId,
     threadId: resolvedThreadId,
     persistedSessionId: session?.sessionId,
@@ -900,23 +921,22 @@ function SessionPageContent() {
             />
           )}
           
-          {/* Mode Toggle — whisper-style voice/text switcher */}
-          <div
-            className={cn(
-              'flex justify-center',
-              focusMode !== 'text'
-                ? 'fixed bottom-[100px] left-1/2 -translate-x-1/2 z-30'
-                : 'pt-2'
-            )}
-            style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
-          >
-            <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
-          </div>
+          {/* Mode Toggle — voice mode: flows via slotBeforeText; text mode: inline here */}
+          {focusMode === 'text' && (
+            <div
+              className="flex justify-center pt-2"
+              style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+            </div>
+          )}
           
           {/* Inline Artifact Panel — text mode: above composer */}
           {focusMode === 'text' && showArtifacts && showArtifactsUi && (
             <PresenceArtifactPanel
               artifacts={artifacts}
+              builderArtifact={builderArtifact}
+              threadId={resolvedThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
               isVoiceMode={false}
@@ -926,11 +946,20 @@ function SessionPageContent() {
             />
           )}
 
+          {focusMode === 'text' && showBuilderTaskNotice && builderTask && (
+            <BuilderTaskNotice
+              task={builderTask}
+              onDismiss={clearBuilderTask}
+              onCancel={cancelBuilderTask}
+              isCancelling={isCancellingBuilderTask}
+            />
+          )}
+
           {/* Artifact toggle pill — text mode: inline above composer */}
           {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
             <div className="flex justify-center mb-2">
               <ArtifactToggleIcon
-                hasArtifacts={!!(artifacts?.takeaway)}
+                hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
                 onClick={handleOpenArtifactsPanel}
                 isNew={hasNewArtifacts}
               />
@@ -944,9 +973,23 @@ function SessionPageContent() {
               style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
             >
               <ArtifactToggleIcon
-                hasArtifacts={!!(artifacts?.takeaway)}
+                hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
                 onClick={handleOpenArtifactsPanel}
                 isNew={hasNewArtifacts}
+              />
+            </div>
+          )}
+
+          {focusMode !== 'text' && showBuilderTaskNotice && builderTask && (
+            <div
+              className="fixed left-1/2 -translate-x-1/2 z-30"
+              style={{ bottom: '172px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <BuilderTaskNotice
+                task={builderTask}
+                onDismiss={clearBuilderTask}
+                onCancel={cancelBuilderTask}
+                isCancelling={isCancellingBuilderTask}
               />
             </div>
           )}
@@ -969,6 +1012,16 @@ function SessionPageContent() {
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}
               textOnly={focusMode === 'text'}
+              slotBeforeText={
+                focusMode !== 'text' ? (
+                  <div
+                    className="flex justify-center"
+                    style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+                  >
+                    <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                  </div>
+                ) : undefined
+              }
             />
           </VoiceComposerErrorBoundary>
         </div>
@@ -977,6 +1030,8 @@ function SessionPageContent() {
         {focusMode !== 'text' && (
           <PresenceArtifactPanel
             artifacts={artifacts}
+            builderArtifact={builderArtifact}
+            threadId={resolvedThreadId}
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}
             isVoiceMode={true}

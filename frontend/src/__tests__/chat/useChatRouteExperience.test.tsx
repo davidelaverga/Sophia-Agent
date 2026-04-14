@@ -46,6 +46,7 @@ import { useMessageMetadataStore } from '../../app/stores/message-metadata-store
 import { useRecapStore } from '../../app/stores/recap-store'
 
 function resetStores() {
+  localStorage.clear()
   useChatStore.setState({
     messages: [],
     composerValue: '',
@@ -285,5 +286,171 @@ describe('useChatRouteExperience', () => {
         }),
       },
     )
+  })
+
+  it('rehydrates builder artifacts from persisted recap state', () => {
+    useCompanionRuntimeMock.mockReturnValue({
+      routeProfile: { id: 'chat' },
+      chatRuntime: {
+        chatMessages: [],
+        sendChatMessage: vi.fn(async () => undefined),
+        chatStatus: 'ready',
+        chatError: undefined,
+        setChatMessages: vi.fn(),
+        stopStreaming: vi.fn(),
+      },
+      streamContract: {
+        handleDataPart: vi.fn(),
+        handleFinish: vi.fn(),
+        markStreamTurnStarted: vi.fn(),
+      },
+      artifactsRuntime: {},
+      voiceRuntime: {
+        voiceState: {
+          stage: 'idle',
+          hasRetryableVoiceTurn: () => false,
+          retryLastVoiceTurn: async () => false,
+          resetVoiceState: vi.fn(),
+        },
+        setAssistantResponseSuppressedChecker: vi.fn(),
+        setOnUserTranscriptHandler: vi.fn(),
+      },
+    })
+
+    useChatStore.setState({ conversationId: 'conv-builder' })
+    useRecapStore.getState().setArtifacts('conv-builder', {
+      sessionId: 'conv-builder',
+      threadId: 'thread-builder',
+      sessionType: 'chat',
+      contextMode: 'life',
+      status: 'ready',
+      builderArtifact: {
+        artifactTitle: 'Launch brief',
+        artifactType: 'document',
+        artifactPath: 'mnt/user-data/outputs/launch-brief.md',
+        decisionsMade: ['Shortened the intro'],
+      },
+    })
+
+    const { result } = renderHook(() => useChatRouteExperience())
+
+    expect(result.current.builderArtifact).toMatchObject({
+      artifactTitle: 'Launch brief',
+      artifactType: 'document',
+    })
+  })
+
+  it('persists streamed builder artifacts into recap storage for chat reloads', () => {
+    useCompanionRuntimeMock.mockReturnValue({
+      routeProfile: { id: 'chat' },
+      chatRuntime: {
+        chatMessages: [],
+        sendChatMessage: vi.fn(async () => undefined),
+        chatStatus: 'ready',
+        chatError: undefined,
+        setChatMessages: vi.fn(),
+        stopStreaming: vi.fn(),
+      },
+      streamContract: {
+        handleDataPart: vi.fn(),
+        handleFinish: vi.fn(),
+        markStreamTurnStarted: vi.fn(),
+      },
+      artifactsRuntime: {},
+      voiceRuntime: {
+        voiceState: {
+          stage: 'idle',
+          hasRetryableVoiceTurn: () => false,
+          retryLastVoiceTurn: async () => false,
+          resetVoiceState: vi.fn(),
+        },
+        setAssistantResponseSuppressedChecker: vi.fn(),
+        setOnUserTranscriptHandler: vi.fn(),
+      },
+    })
+
+    useChatStore.setState({ conversationId: 'conv-stream' })
+    useMessageMetadataStore.setState({
+      metadataByMessage: {},
+      currentThreadId: 'thread-stream',
+      currentSessionId: 'conv-stream',
+      currentRunId: null,
+      emotionalWeather: null,
+    })
+
+    renderHook(() => useChatRouteExperience())
+
+    const runtimeArgs = useCompanionRuntimeMock.mock.calls[0]?.[0]
+    expect(runtimeArgs).toBeDefined()
+
+    act(() => {
+      runtimeArgs.stream.setBuilderArtifact({
+        artifactTitle: 'Roadmap deck',
+        artifactType: 'presentation',
+        artifactPath: 'mnt/user-data/outputs/roadmap-deck.pdf',
+        decisionsMade: ['Cut slide 12'],
+      })
+    })
+
+    expect(useRecapStore.getState().getArtifacts('conv-stream')).toMatchObject({
+      threadId: 'thread-stream',
+      builderArtifact: {
+        artifactTitle: 'Roadmap deck',
+        artifactType: 'presentation',
+      },
+    })
+  })
+
+  it('surfaces streamed builder task state in the chat route experience', () => {
+    useCompanionRuntimeMock.mockReturnValue({
+      routeProfile: { id: 'chat' },
+      chatRuntime: {
+        chatMessages: [],
+        sendChatMessage: vi.fn(async () => undefined),
+        chatStatus: 'ready',
+        chatError: undefined,
+        setChatMessages: vi.fn(),
+        stopStreaming: vi.fn(),
+      },
+      streamContract: {
+        handleDataPart: vi.fn(),
+        handleFinish: vi.fn(),
+        markStreamTurnStarted: vi.fn(),
+      },
+      artifactsRuntime: {},
+      voiceRuntime: {
+        voiceState: {
+          stage: 'idle',
+          hasRetryableVoiceTurn: () => false,
+          retryLastVoiceTurn: async () => false,
+          resetVoiceState: vi.fn(),
+        },
+        setAssistantResponseSuppressedChecker: vi.fn(),
+        setOnUserTranscriptHandler: vi.fn(),
+      },
+    })
+
+    const { result } = renderHook(() => useChatRouteExperience())
+    const runtimeArgs = useCompanionRuntimeMock.mock.calls[0]?.[0]
+
+    act(() => {
+      runtimeArgs.stream.setBuilderTask({
+        phase: 'running',
+        taskId: 'builder-task-1',
+        detail: 'Drafting the outline.',
+      })
+    })
+
+    expect(result.current.builderTask).toEqual({
+      phase: 'running',
+      taskId: 'builder-task-1',
+      detail: 'Drafting the outline.',
+    })
+
+    act(() => {
+      result.current.clearBuilderTask()
+    })
+
+    expect(result.current.builderTask).toBeNull()
   })
 })

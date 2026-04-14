@@ -9,6 +9,7 @@ const useSessionOutboundSendMock = vi.fn();
 const useSessionVoiceMessagesMock = vi.fn();
 const useCompanionVoiceRuntimeMock = vi.fn();
 const useSessionVoiceUiControlsMock = vi.fn();
+const cancelBuilderTaskMock = vi.fn();
 
 vi.mock('../../app/companion-runtime/artifacts-runtime', () => ({
   useCompanionArtifactsRuntime: (...args: unknown[]) => useCompanionArtifactsRuntimeMock(...args),
@@ -42,11 +43,16 @@ vi.mock('../../app/session/useSessionVoiceUiControls', () => ({
   useSessionVoiceUiControls: (...args: unknown[]) => useSessionVoiceUiControlsMock(...args),
 }));
 
+vi.mock('../../app/lib/builder-workflow', () => ({
+  cancelBuilderTask: (...args: unknown[]) => cancelBuilderTaskMock(...args),
+}));
+
 import { useSessionRouteExperience } from '../../app/session/useSessionRouteExperience';
 
 describe('useSessionRouteExperience', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    cancelBuilderTaskMock.mockResolvedValue({ detail: 'Builder cancelled.' });
 
     useCompanionArtifactsRuntimeMock.mockReturnValue({
       artifactStatus: {
@@ -117,7 +123,9 @@ describe('useSessionRouteExperience', () => {
         backendSessionId: 'session-1',
         userId: 'user-1',
         artifacts: null,
+        storedBuilderArtifact: null,
         storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
         updateSession: vi.fn(),
         showUsageLimitModal: vi.fn(),
         recordConnectivityFailure: vi.fn(),
@@ -135,6 +143,7 @@ describe('useSessionRouteExperience', () => {
 
     const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
       setInterrupt: (interrupt: { kind: string }) => void;
+      setBuilderTask: (task: { phase: string; detail?: string }) => void;
     };
 
     act(() => {
@@ -188,6 +197,12 @@ describe('useSessionRouteExperience', () => {
 
     expect(setOnUserTranscriptHandler).toHaveBeenCalledWith(appendVoiceUserMessage);
     expect(setAssistantResponseSuppressedChecker).toHaveBeenCalledWith(expect.any(Function));
+
+    act(() => {
+      streamContractCall.setBuilderTask({ phase: 'running', detail: 'Drafting the brief.' });
+    });
+
+    expect(result.current.builderTask).toEqual({ phase: 'running', detail: 'Drafting the brief.' });
   });
 
   it('passes active stream state through to voice runtime retry handling', () => {
@@ -210,7 +225,9 @@ describe('useSessionRouteExperience', () => {
         backendSessionId: 'session-1',
         userId: 'user-1',
         artifacts: null,
+        storedBuilderArtifact: null,
         storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
         updateSession: vi.fn(),
         showUsageLimitModal: vi.fn(),
         recordConnectivityFailure: vi.fn(),
@@ -225,5 +242,85 @@ describe('useSessionRouteExperience', () => {
     expect(useCompanionVoiceRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({ isTyping: true })
     );
+  });
+
+  it('cancels an active builder task and wraps stopStreaming', async () => {
+    const showToast = vi.fn();
+    const stopStreaming = vi.fn();
+
+    useCompanionChatRuntimeMock.mockReturnValue({
+      chatMessages: [],
+      sendChatMessage: vi.fn(),
+      chatStatus: 'ready',
+      chatError: undefined,
+      setChatMessages: vi.fn(),
+      stopStreaming,
+    });
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast,
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; detail?: string }) => void;
+    };
+
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'running',
+        taskId: 'task-builder-1',
+        detail: 'Drafting the brief.',
+      });
+    });
+
+    await act(async () => {
+      await result.current.cancelBuilderTask();
+    });
+
+    expect(cancelBuilderTaskMock).toHaveBeenCalledWith('task-builder-1');
+    expect(result.current.builderTask).toEqual({
+      phase: 'cancelled',
+      taskId: 'task-builder-1',
+      detail: 'Builder cancelled.',
+    });
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Builder cancelled.', variant: 'info' })
+    );
+
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'running',
+        taskId: 'task-builder-1',
+        detail: 'Retrying the build.',
+      });
+    });
+
+    await act(async () => {
+      result.current.stopStreaming();
+      await Promise.resolve();
+    });
+
+    expect(cancelBuilderTaskMock).toHaveBeenCalledTimes(2);
+    expect(stopStreaming).toHaveBeenCalledTimes(1);
   });
 });

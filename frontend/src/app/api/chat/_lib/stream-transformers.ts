@@ -1,3 +1,6 @@
+import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
+import type { BuilderTaskV1 } from '../../../types/builder-task';
+
 import {
   IS_PRODUCTION,
   secureLog,
@@ -48,6 +51,10 @@ interface SSEToken {
 type LangGraphToolAccumulator = {
   name: string;
   jsonParts: string[];
+};
+
+type BuilderTaskAccumulator = {
+  label?: string;
 };
 
 const LEAK_LEAD_LABELS = [
@@ -265,6 +272,22 @@ function parseAccumulatedArtifact(toolCalls: Record<string, LangGraphToolAccumul
   return null;
 }
 
+function parseAccumulatedBuilderArtifact(toolCalls: Record<string, LangGraphToolAccumulator>) {
+  for (const toolCall of Object.values(toolCalls)) {
+    if (toolCall.name !== 'emit_builder_artifact') continue;
+    const raw = toolCall.jsonParts.join('');
+    if (!raw.trim()) continue;
+
+    try {
+      return JSON.parse(raw);
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 function extractToolCallArtifact(toolCalls: unknown): Record<string, unknown> | null {
   if (!Array.isArray(toolCalls)) return null;
 
@@ -275,6 +298,19 @@ function extractToolCallArtifact(toolCalls: unknown): Record<string, unknown> | 
     if (record.args && typeof record.args === 'object') {
       return record.args as Record<string, unknown>;
     }
+  }
+
+  return null;
+}
+
+function extractToolCallBuilderArtifact(toolCalls: unknown) {
+  if (!Array.isArray(toolCalls)) return null;
+
+  for (const toolCall of toolCalls) {
+    if (!toolCall || typeof toolCall !== 'object') continue;
+    const record = toolCall as Record<string, unknown>;
+    if (record.name !== 'emit_builder_artifact') continue;
+    return record.args;
   }
 
   return null;
@@ -299,10 +335,129 @@ function extractValuesArtifact(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function extractValuesBuilderArtifact(data: unknown) {
+  if (!data || typeof data !== 'object') return null;
+
+  const record = data as Record<string, unknown>;
+  if (record.builder_result !== undefined) {
+    return record.builder_result;
+  }
+
+  const values = record.values;
+  if (!values || typeof values !== 'object') return null;
+
+  return (values as Record<string, unknown>).builder_result ?? null;
+}
+
+function isBuilderTaskDescription(description: string | undefined): boolean {
+  if (!description) return false;
+  return description.trim().toLowerCase().includes('builder');
+}
+
+function extractTaskMessageText(message: unknown): string | undefined {
+  if (typeof message === 'string') {
+    const cleaned = stripArtifactsDelimiter(message).trim();
+    return cleaned || undefined;
+  }
+
+  if (!message || typeof message !== 'object') {
+    return undefined;
+  }
+
+  const record = message as Record<string, unknown>;
+  const content = record.content;
+
+  if (typeof content === 'string') {
+    const cleaned = stripArtifactsDelimiter(content).trim();
+    return cleaned || undefined;
+  }
+
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+
+  const text = content
+    .map((part) => {
+      if (!part || typeof part !== 'object') return '';
+      const block = part as Record<string, unknown>;
+      return block.type === 'text' && typeof block.text === 'string' ? block.text : '';
+    })
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!text) return undefined;
+
+  const cleaned = stripArtifactsDelimiter(text).trim();
+  return cleaned || undefined;
+}
+
+function buildRunningTaskDetail(data: Record<string, unknown>): string | undefined {
+  const messageText = extractTaskMessageText(data.message);
+  if (messageText) return messageText;
+
+  const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
+  const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
+
+  if (typeof messageIndex === 'number' && typeof totalMessages === 'number' && totalMessages > 0) {
+    return `Working through step ${messageIndex} of ${totalMessages}.`;
+  }
+
+  if (typeof messageIndex === 'number') {
+    return `Working through step ${messageIndex}.`;
+  }
+
+  return undefined;
+}
+
+function buildBuilderTaskEvent(
+  phase: BuilderTaskV1['phase'],
+  data: Record<string, unknown>,
+  accumulator?: BuilderTaskAccumulator,
+): BuilderTaskV1 {
+  const taskId = typeof data.task_id === 'string' ? data.task_id : undefined;
+  const label = typeof data.description === 'string' ? data.description : accumulator?.label;
+  const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
+  const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
+
+  let detail: string | undefined;
+  switch (phase) {
+    case 'running':
+      detail = buildRunningTaskDetail(data);
+      break;
+    case 'completed':
+      detail = 'Deliverable ready.';
+      break;
+    case 'failed':
+      detail = typeof data.error === 'string'
+        ? data.error
+        : 'Builder failed before finishing the deliverable.';
+      break;
+    case 'timed_out':
+      detail = 'Builder took too long and timed out.';
+      break;
+    case 'cancelled':
+      detail = typeof data.error === 'string'
+        ? data.error
+        : 'Builder was cancelled before finishing the deliverable.';
+      break;
+  }
+
+  return {
+    phase,
+    ...(taskId ? { taskId } : {}),
+    ...(label ? { label } : {}),
+    ...(detail ? { detail } : {}),
+    ...(typeof messageIndex === 'number' ? { messageIndex } : {}),
+    ...(typeof totalMessages === 'number' ? { totalMessages } : {}),
+  };
+}
+
 export function createUIMessageStreamFromText(
   text: string,
   meta?: StreamMeta,
-  artifacts?: Record<string, unknown> | null
+  artifacts?: Record<string, unknown> | null,
+  builderArtifact?: unknown,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const messageId = createStreamId('msg');
@@ -330,6 +485,11 @@ export function createUIMessageStreamFromText(
 
       if (artifacts) {
         emit({ type: 'data-artifactsV1', data: artifacts });
+      }
+
+      const normalizedBuilderArtifact = normalizeBuilderArtifactPayload(builderArtifact);
+      if (normalizedBuilderArtifact) {
+        emit({ type: 'data-builderArtifactV1', data: normalizedBuilderArtifact });
       }
 
       if (meta && Object.keys(meta).length > 0) {
@@ -369,8 +529,12 @@ export function createSSEToUIMessageStream(
   const tokenOutputState: TokenOutputState = { hasEmittedText: false, stopped: false };
   const activeToolCalls: Record<string, LangGraphToolAccumulator> = {};
   let sawArtifactTool = false;
+  let sawBuilderArtifactTool = false;
   let finalArtifacts: Record<string, unknown> | null = null;
+  let finalBuilderArtifact = null;
   let initialValuesArtifact: Record<string, unknown> | null = null;
+  let initialValuesBuilderArtifact = null;
+  const activeBuilderTasks = new Map<string, BuilderTaskAccumulator>();
 
   const meta: StreamMeta = { ...(initialMeta || {}) };
 
@@ -378,6 +542,8 @@ export function createSSEToUIMessageStream(
     async start(controller) {
       const reader = upstream.getReader();
       let lastArtifactsSignature: string | null = null;
+      let lastBuilderArtifactSignature: string | null = null;
+      let lastBuilderTaskSignature: string | null = null;
 
       const emit = (payload: unknown) => {
         if (isClosed) return;
@@ -396,6 +562,31 @@ export function createSSEToUIMessageStream(
 
         lastArtifactsSignature = signature;
         emit({ type: 'data-artifactsV1', data: artifacts });
+      };
+
+      const emitBuilderArtifact = (builderArtifact: unknown) => {
+        const normalizedBuilderArtifact = normalizeBuilderArtifactPayload(builderArtifact);
+        if (!normalizedBuilderArtifact) {
+          return;
+        }
+
+        const signature = JSON.stringify(normalizedBuilderArtifact);
+        if (signature === lastBuilderArtifactSignature) {
+          return;
+        }
+
+        lastBuilderArtifactSignature = signature;
+        emit({ type: 'data-builderArtifactV1', data: normalizedBuilderArtifact });
+      };
+
+      const emitBuilderTask = (builderTask: BuilderTaskV1) => {
+        const signature = JSON.stringify(builderTask);
+        if (signature === lastBuilderTaskSignature) {
+          return;
+        }
+
+        lastBuilderTaskSignature = signature;
+        emit({ type: 'data-builderTaskV1', data: builderTask });
       };
 
       const ensureStart = () => {
@@ -437,6 +628,10 @@ export function createSSEToUIMessageStream(
 
             if (finalArtifacts) {
               emitArtifacts(finalArtifacts);
+            }
+
+            if (finalBuilderArtifact) {
+              emitBuilderArtifact(finalBuilderArtifact);
             }
 
             if (meta && Object.keys(meta).length > 0) {
@@ -521,6 +716,13 @@ export function createSSEToUIMessageStream(
                         finalArtifacts = normalizedArtifact;
                         emitArtifacts(normalizedArtifact);
                       }
+                    } else if (toolName === 'emit_builder_artifact') {
+                      sawBuilderArtifactTool = true;
+                      const builderArtifact = parseAccumulatedBuilderArtifact(activeToolCalls);
+                      if (builderArtifact) {
+                        finalBuilderArtifact = builderArtifact;
+                        emitBuilderArtifact(builderArtifact);
+                      }
                     }
                     break;
                   }
@@ -537,6 +739,13 @@ export function createSSEToUIMessageStream(
                       finalArtifacts = normalizedArtifact;
                       emitArtifacts(normalizedArtifact);
                     }
+                  }
+
+                  const directBuilderArtifact = extractToolCallBuilderArtifact(record.tool_calls);
+                  if (directBuilderArtifact) {
+                    sawBuilderArtifactTool = true;
+                    finalBuilderArtifact = directBuilderArtifact;
+                    emitBuilderArtifact(directBuilderArtifact);
                   }
 
                   const content = record.content;
@@ -580,6 +789,8 @@ export function createSSEToUIMessageStream(
                       const toolName = typeof blockRecord.name === 'string' ? blockRecord.name : '';
                       if (toolName === 'emit_artifact') {
                         sawArtifactTool = true;
+                      } else if (toolName === 'emit_builder_artifact') {
+                        sawBuilderArtifactTool = true;
                       }
                       if (toolId) {
                         activeToolCalls[toolId] = { name: toolName, jsonParts: [] };
@@ -600,6 +811,24 @@ export function createSSEToUIMessageStream(
                   break;
                 }
                 case 'values': {
+                  const builderArtifact = extractValuesBuilderArtifact(data);
+                  if (builderArtifact !== null) {
+                    const shouldEmitBuilderArtifact =
+                      initialValuesBuilderArtifact === null ||
+                      sawBuilderArtifactTool ||
+                      builderArtifact !== initialValuesBuilderArtifact;
+
+                    if (initialValuesBuilderArtifact === null) {
+                      initialValuesBuilderArtifact = builderArtifact;
+                    }
+
+                    finalBuilderArtifact = builderArtifact;
+
+                    if (shouldEmitBuilderArtifact) {
+                      emitBuilderArtifact(builderArtifact);
+                    }
+                  }
+
                   const artifact = extractValuesArtifact(data);
                   if (!artifact) {
                     break;
@@ -631,6 +860,124 @@ export function createSSEToUIMessageStream(
                 case 'session_start':
                 case 'agent_thinking':
                   break;
+                case 'task_started': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  const description = typeof taskData.description === 'string' ? taskData.description : undefined;
+                  if (!isBuilderTaskDescription(description)) {
+                    break;
+                  }
+
+                  if (taskId) {
+                    activeBuilderTasks.set(taskId, { label: description });
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('running', taskData, { label: description }));
+                  break;
+                }
+                case 'task_running': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('running', taskData, activeTask));
+                  break;
+                }
+                case 'task_completed': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('completed', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
+                case 'task_failed': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('failed', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
+                case 'task_timed_out': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('timed_out', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
+                case 'task_cancelled': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('cancelled', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
                 case 'error': {
                   const errorMessage =
                     data && typeof data === 'object'

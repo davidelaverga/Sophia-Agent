@@ -44,6 +44,8 @@ interface VoiceFirstComposerProps {
   micOnboardingId?: string;
   /** Text-only mode: hides mic, auto-expands text area, auto-focuses input */
   textOnly?: boolean;
+  /** Slot rendered between mic button and text area — used for ModeToggle in voice mode */
+  slotBeforeText?: React.ReactNode;
 }
 
 const VOICE_STATUS_LABELS: Record<VoiceStatus, string> = {
@@ -75,6 +77,7 @@ export function VoiceFirstComposer({
   containerOnboardingId,
   micOnboardingId,
   textOnly = false,
+  slotBeforeText,
 }: VoiceFirstComposerProps) {
   const [isTextExpanded, setIsTextExpanded] = useState(false);
   const [isPTT, setIsPTT] = useState(false);
@@ -102,6 +105,7 @@ export function VoiceFirstComposer({
 
   // In textOnly mode, the text area is always expanded
   const effectiveTextExpanded = textOnly || isTextExpanded;
+  const statusText = _statusText || (isTyping ? 'Sophia is thinking...' : 'Sophia — Ready');
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartYRef.current = e.touches[0]?.clientY ?? null;
@@ -212,6 +216,15 @@ export function VoiceFirstComposer({
         
         {/* Main Controls */}
         <div className="flex flex-col items-center gap-3">
+          {/* Status text — text mode only */}
+          {textOnly && (
+          <p
+            className="text-center text-[11px] tracking-[0.12em] uppercase transition-all duration-500"
+            style={{ color: 'var(--cosmic-text-muted)' }}
+          >
+            {statusText}
+          </p>
+          )}
           
           {/* Mic Hero Button — hidden in text-only mode */}
           {!textOnly && (
@@ -313,26 +326,31 @@ export function VoiceFirstComposer({
           </div>
           )}
           
-          {/* Text Input Toggle & Collapsible Area — text mode only in voice, always in text-only */}
+          {/* Slot: ModeToggle or other controls between mic and text area */}
+          {slotBeforeText}
+
+          {/* Text Input Toggle & Collapsible Area — text mode only */}
           {textOnly && (
           <div className="w-full">
             {!effectiveTextExpanded ? (
               // Collapsed state - just a hint button
-              <button
-                type="button"
-                onClick={handleTextToggle}
-                disabled={disabled}
-                aria-label="Switch to text input"
-                className={cn(
-                  'cosmic-focus-ring w-full rounded py-2 text-center text-sm transition-colors',
-                  disabled
-                    ? 'cursor-not-allowed'
-                    : 'hover:opacity-100'
-                )}
-                style={{ color: disabled ? 'var(--cosmic-text-faint)' : 'var(--cosmic-text-whisper)', opacity: disabled ? 1 : 0.88 }}
-              >
-                or type instead...
-              </button>
+              <div className="space-y-2 text-center">
+                <button
+                  type="button"
+                  onClick={handleTextToggle}
+                  disabled={disabled}
+                  aria-label="Switch to text input"
+                  className={cn(
+                    'cosmic-focus-ring w-full rounded py-2 text-center text-sm transition-colors',
+                    disabled
+                      ? 'cursor-not-allowed'
+                      : 'hover:opacity-100'
+                  )}
+                  style={{ color: disabled ? 'var(--cosmic-text-faint)' : 'var(--cosmic-text-whisper)', opacity: disabled ? 1 : 0.88 }}
+                >
+                  or type instead...
+                </button>
+              </div>
             ) : (
               // Expanded text input
               <div className="animate-fadeIn space-y-2" onTouchStart={textOnly ? undefined : handleTouchStart} onTouchEnd={textOnly ? undefined : handleTouchEnd}>
@@ -411,7 +429,7 @@ export function VoiceFirstComposer({
                     )}
                   </button>
                 </div>
-                
+
                 {/* Collapse hint — hidden in text-only mode */}
                 {!textOnly && (
                 <p className="text-center text-[10px]" style={{ color: 'var(--cosmic-text-faint)' }}>

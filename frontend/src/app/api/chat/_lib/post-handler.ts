@@ -1,6 +1,7 @@
 import { type NextRequest } from 'next/server';
 
 import { getAuthenticatedUserId } from '../../../lib/auth/server-auth';
+import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
 
@@ -256,13 +257,16 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       const resolvedThreadId = backendResponse.thread_id || responseThreadId || threadId || sessionId;
 
       const artifacts = normalizeArtifactsV1(backendResponse.artifacts || backendResponse.ritual_artifacts);
+      const builderArtifact = normalizeBuilderArtifactPayload(
+        backendResponse.builder_result || backendResponse.builderResult,
+      );
       const stream = createUIMessageStreamFromText(responseText, {
         thread_id: resolvedThreadId,
         session_id: sessionId,
         skill_used: backendResponse.skill_used,
         emotion_detected: backendResponse.emotion_detected,
         pending_interrupt: pendingInterrupt,
-      }, artifacts);
+      }, artifacts, builderArtifact);
 
       return new Response(stream, {
         headers: {

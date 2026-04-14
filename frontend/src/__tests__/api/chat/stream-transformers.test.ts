@@ -127,7 +127,7 @@ describe('stream-transformers token sanitization', () => {
     const upstream = buildSseStream([
       'event: messages\r\ndata: [{"type":"AIMessageChunk","content":[{"type":"text","text":"Hello"}]},{"run_id":"run_123"}]\r\n\r\n',
       'event: messages\r\ndata: [{"type":"AIMessageChunk","content":[{"type":"text","text":" world"}]},{}]\r\n\r\n',
-      'event: values\r\ndata: {"values":{"current_artifact":{"takeaway":"Stay grounded","reflection":"What felt different this time?","skill_loaded":"active_listening","voice_emotion_primary":"calm"}}}\r\n\r\n',
+      'event: values\r\ndata: {"values":{"current_artifact":{"takeaway":"Stay grounded","reflection":"What felt different this time?","skill_loaded":"active_listening","voice_emotion_primary":"calm"},"builder_result":{"artifact_title":"Sprint brief","artifact_type":"document","artifact_path":"outputs/sprint-brief.md","decisions_made":[]}}}\r\n\r\n',
     ]);
 
     const transformed = createSSEToUIMessageStream(upstream, {
@@ -141,6 +141,7 @@ describe('stream-transformers token sanitization', () => {
     );
 
     expect(objectEvents.some((event) => event.type === 'data-artifactsV1')).toBe(true);
+    expect(objectEvents.some((event) => event.type === 'data-builderArtifactV1')).toBe(true);
     expect(objectEvents.some((event) => event.type === 'data-sophia_meta')).toBe(true);
 
     const extracted = extractTextFromUiMessageStreamDump(rawDump);
@@ -159,6 +160,12 @@ describe('stream-transformers token sanitization', () => {
         artifacts_status: 'complete',
         takeaway: 'Stay grounded',
       },
+      {
+        artifact_title: 'Sprint brief',
+        artifact_type: 'document',
+        artifact_path: 'outputs/sprint-brief.md',
+        decisions_made: [],
+      },
     );
 
     const rawDump = await readStreamAsString(stream);
@@ -170,11 +177,53 @@ describe('stream-transformers token sanitization', () => {
     expect(String(objectEvents[0].type)).toBe('start');
     expect(String(objectEvents[1].type)).toBe('text-start');
     expect(objectEvents.some((event) => event.type === 'data-artifactsV1')).toBe(true);
+    expect(objectEvents.some((event) => event.type === 'data-builderArtifactV1')).toBe(true);
     expect(objectEvents.some((event) => event.type === 'data-sophia_meta')).toBe(true);
     expect(String(objectEvents[objectEvents.length - 1].type)).toBe('finish');
     expect(events[events.length - 1]).toBe('[DONE]');
 
     const extracted = extractTextFromUiMessageStreamDump(rawDump);
     expect(extracted).toContain('Centered response');
+  });
+
+  it('emits builder task lifecycle parts for builder background events', async () => {
+    const upstream = buildSseStream([
+      'event: task_started\ndata: {"task_id":"task-builder-1","description":"Builder: document"}\n\n',
+      'event: task_running\ndata: {"task_id":"task-builder-1","message":{"content":[{"type":"text","text":"Drafting the brief."}]},"message_index":2,"total_messages":4}\n\n',
+      'event: task_cancelled\ndata: {"task_id":"task-builder-1","error":"Execution cancelled by user"}\n\n',
+      'event: done\ndata: {"status":"complete"}\n\n',
+    ]);
+
+    const transformed = createSSEToUIMessageStream(upstream);
+    const rawDump = await readStreamAsString(transformed);
+    const objectEvents = parseDataEventsFromDump(rawDump).filter(
+      (event): event is Record<string, unknown> => typeof event === 'object' && event !== null,
+    );
+
+    const builderTaskEvents = objectEvents.filter((event) => event.type === 'data-builderTaskV1');
+    expect(builderTaskEvents).toHaveLength(3);
+    expect(builderTaskEvents[0]).toMatchObject({
+      data: {
+        phase: 'running',
+        taskId: 'task-builder-1',
+        label: 'Builder: document',
+      },
+    });
+    expect(builderTaskEvents[1]).toMatchObject({
+      data: {
+        phase: 'running',
+        taskId: 'task-builder-1',
+        detail: 'Drafting the brief.',
+        messageIndex: 2,
+        totalMessages: 4,
+      },
+    });
+    expect(builderTaskEvents[2]).toMatchObject({
+      data: {
+        phase: 'cancelled',
+        taskId: 'task-builder-1',
+        detail: 'Execution cancelled by user',
+      },
+    });
   });
 });

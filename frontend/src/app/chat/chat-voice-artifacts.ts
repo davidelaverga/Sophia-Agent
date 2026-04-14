@@ -9,6 +9,7 @@ type IngestChatVoiceArtifactsParams = {
   artifacts: Record<string, unknown>;
   conversationId?: string;
   setArtifacts: PersistArtifacts;
+  getArtifacts?: (sessionId: string) => RecapArtifactsV1 | undefined;
 };
 
 type ApplyChatRouteArtifactsParams = IngestChatVoiceArtifactsParams & {
@@ -36,6 +37,7 @@ export function ingestChatVoiceArtifacts({
   artifacts,
   conversationId,
   setArtifacts,
+  getArtifacts,
 }: IngestChatVoiceArtifactsParams): boolean {
   const payload = artifacts as BackendArtifactsPayload;
   const resolvedSessionId = resolveArtifactsSessionId(payload, conversationId);
@@ -49,7 +51,14 @@ export function ingestChatVoiceArtifacts({
     return false;
   }
 
-  setArtifacts(resolvedSessionId, mapped);
+  const previousArtifacts = getArtifacts?.(resolvedSessionId);
+
+  setArtifacts(resolvedSessionId, {
+    ...(previousArtifacts ?? {}),
+    ...mapped,
+    threadId: mapped.threadId ?? previousArtifacts?.threadId,
+    builderArtifact: mapped.builderArtifact ?? previousArtifacts?.builderArtifact,
+  });
   return true;
 }
 
@@ -57,6 +66,7 @@ export function applyChatRouteArtifacts({
   artifacts,
   conversationId,
   setArtifacts,
+  getArtifacts,
   setEmotion,
 }: ApplyChatRouteArtifactsParams): boolean {
   const primaryEmotion = artifacts.voice_emotion_primary;
@@ -68,6 +78,7 @@ export function applyChatRouteArtifacts({
     artifacts,
     conversationId,
     setArtifacts,
+    getArtifacts,
   });
 }
 

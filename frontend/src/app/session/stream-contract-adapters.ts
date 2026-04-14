@@ -1,5 +1,8 @@
-import { asRecord, readString } from '../lib/record-parsers';
+import { normalizeBuilderArtifactPayload } from '../lib/builder-artifacts';
+import { asRecord, readNumber, readString } from '../lib/record-parsers';
 import { InterruptPayloadSchema } from '../lib/schemas/session-schemas';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { BuilderTaskPhaseV1, BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 
@@ -15,6 +18,14 @@ export type StreamContractPart = {
   type: string;
   data: unknown;
 };
+
+const BUILDER_TASK_PHASES = new Set<BuilderTaskPhaseV1>([
+  'running',
+  'completed',
+  'failed',
+  'timed_out',
+  'cancelled',
+]);
 
 export function normalizeStreamDataPart(dataPart: unknown): StreamContractPart | null {
   const part = asRecord(dataPart);
@@ -60,6 +71,35 @@ export function parseArtifactsPayload(data: unknown): StreamArtifactsPayload | n
   }
 
   return payload;
+}
+
+export function parseBuilderArtifactPayload(data: unknown): BuilderArtifactV1 | null {
+  return normalizeBuilderArtifactPayload(data);
+}
+
+export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
+  const record = asRecord(data);
+  if (!record) return null;
+
+  const phase = readString(record, 'phase');
+  if (!phase || !BUILDER_TASK_PHASES.has(phase as BuilderTaskPhaseV1)) {
+    return null;
+  }
+
+  const taskId = readString(record, 'taskId') ?? readString(record, 'task_id');
+  const label = readString(record, 'label');
+  const detail = readString(record, 'detail');
+  const messageIndex = readNumber(record, 'messageIndex') ?? readNumber(record, 'message_index');
+  const totalMessages = readNumber(record, 'totalMessages') ?? readNumber(record, 'total_messages');
+
+  return {
+    phase: phase as BuilderTaskPhaseV1,
+    ...(taskId ? { taskId } : {}),
+    ...(label ? { label } : {}),
+    ...(detail ? { detail } : {}),
+    ...(typeof messageIndex === 'number' ? { messageIndex } : {}),
+    ...(typeof totalMessages === 'number' ? { totalMessages } : {}),
+  };
 }
 
 function normalizeInterruptAliases(raw: Record<string, unknown>): Record<string, unknown> {

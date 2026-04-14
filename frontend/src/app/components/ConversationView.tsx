@@ -21,6 +21,7 @@ import { ArtifactsPanelErrorBoundary } from "./error-boundaries"
 import { ErrorBoundary } from "./ErrorBoundary"
 import { ModeToggle } from "./ModeToggle"
 import { ArtifactsPanel } from "./session"
+import { BuilderTaskNotice } from "./session/BuilderTaskNotice"
 import { InterruptCard } from "./session/InterruptCard"
 import { SessionFeedbackToast } from "./SessionFeedbackToast"
 import { RetryAction } from "./ui/RetryAction"
@@ -43,9 +44,15 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
   const lastCompletedTurnId = useChatStore((state) => state.lastCompletedTurnId)
   const {
     conversationId,
+    threadId,
     recapArtifacts,
     setRecapArtifacts,
     chatArtifacts,
+    builderArtifact,
+    builderTask,
+    clearBuilderTask,
+    cancelBuilderTask,
+    isCancellingBuilderTask,
     voiceState,
     pendingInterrupt,
     interruptQueue,
@@ -212,6 +219,8 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
     setRecapArtifacts,
   })
 
+  const showBuilderTaskNotice = Boolean(builderTask && (builderTask.phase !== "completed" || !builderArtifact))
+
   // === Render ===
   
   return (
@@ -232,6 +241,14 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
             <Suspense fallback={<div className="h-48 animate-pulse rounded-2xl bg-sophia-surface" />}>
               <VoiceFocusView voiceState={voiceState} />
             </Suspense>
+            {showBuilderTaskNotice && builderTask && (
+              <BuilderTaskNotice
+                task={builderTask}
+                onDismiss={clearBuilderTask}
+                onCancel={cancelBuilderTask}
+                isCancelling={isCancellingBuilderTask}
+              />
+            )}
             {showVoiceRetry && (
               <div className="mt-3 px-1">
                 <RetryAction
@@ -289,12 +306,23 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
                 +{interruptQueue.length} {interruptQueue.length === 1 ? "question queued" : "questions queued"}
               </div>
             )}
+            {showBuilderTaskNotice && builderTask && (
+              <BuilderTaskNotice
+                task={builderTask}
+                onDismiss={clearBuilderTask}
+                onCancel={cancelBuilderTask}
+                isCancelling={isCancellingBuilderTask}
+              />
+            )}
             <Transcript onPromptSelect={handlePromptSelect} />
-            {chatArtifacts && (
+            {(chatArtifacts || builderArtifact) && (
               <ArtifactsPanelErrorBoundary>
                 <ArtifactsPanel
                   artifacts={chatArtifacts}
+                  builderArtifact={builderArtifact}
                   presetType="chat"
+                  sessionId={conversationId}
+                  threadId={threadId}
                   className="w-full"
                   onReflectionTap={handleReflectionTap}
                   onMemoryApprove={handleMemoryApprove}

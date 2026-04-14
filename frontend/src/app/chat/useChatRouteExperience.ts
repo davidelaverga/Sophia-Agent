@@ -9,6 +9,7 @@ import { usePlatformSignal } from "../hooks/usePlatformSignal"
 import { useSessionPersistence } from "../hooks/useSessionPersistence"
 import type { StreamVoiceSessionReturn } from "../hooks/useStreamVoiceSession"
 import { useUsageMonitor } from "../hooks/useUsageMonitor"
+import { cancelBuilderTask as requestBuilderTaskCancellation } from "../lib/builder-workflow"
 import { logger } from "../lib/error-logger"
 import {
   emitRecoveryTelemetry,
@@ -33,6 +34,8 @@ import { usePresenceStore } from "../stores/presence-store"
 import { useRecapStore } from "../stores/recap-store"
 import { useUiStore } from "../stores/ui-store"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
+import type { BuilderArtifactV1 } from "../types/builder-artifact"
+import type { BuilderTaskV1 } from "../types/builder-task"
 import type { RecapArtifactsV1 } from "../types/recap"
 import type { InterruptPayload, RitualArtifacts } from "../types/session"
 
@@ -107,9 +110,15 @@ export function buildChatRouteBody(params: {
 
 export type ChatRouteExperience = {
   conversationId?: string
+  threadId?: string
   recapArtifacts?: RecapArtifactsV1
   setRecapArtifacts: (sessionId: string, artifacts: RecapArtifactsV1) => void
   chatArtifacts: RitualArtifacts | null
+  builderArtifact: BuilderArtifactV1 | null
+  builderTask: BuilderTaskV1 | null
+  clearBuilderTask: () => void
+  cancelBuilderTask: () => Promise<void>
+  isCancellingBuilderTask: boolean
   voiceState: StreamVoiceSessionReturn
   pendingInterrupt: InterruptPayload | null
   interruptQueue: InterruptPayload[]
@@ -151,6 +160,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
   const syncRouteRuntimeState = useChatStore((state) => state.syncRouteRuntimeState)
 
   const setRecapArtifacts = useRecapStore((state) => state.setArtifacts)
+  const getRecapArtifacts = useRecapStore((state) => state.getArtifacts)
   const recapArtifacts = useRecapStore((state) =>
     conversationId ? state.artifacts[conversationId] : undefined
   )
@@ -158,6 +168,9 @@ export function useChatRouteExperience(): ChatRouteExperience {
     () => mapRecapArtifactsToRitualArtifacts(recapArtifacts),
     [recapArtifacts]
   )
+  const [builderArtifact, setBuilderArtifact] = useState<BuilderArtifactV1 | null>(recapArtifacts?.builderArtifact ?? null)
+  const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null)
+  const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false)
 
   const setEmotion = useEmotionStore((state) => state.setEmotion)
   const setCurrentContext = useMessageMetadataStore((state) => state.setCurrentContext)
@@ -240,9 +253,89 @@ export function useChatRouteExperience(): ChatRouteExperience {
       artifacts,
       conversationId,
       setArtifacts: setRecapArtifacts,
+      getArtifacts: getRecapArtifacts,
       setEmotion,
     })
-  }, [conversationId, setEmotion, setRecapArtifacts])
+  }, [conversationId, getRecapArtifacts, setEmotion, setRecapArtifacts])
+
+  useEffect(() => {
+    setBuilderArtifact(recapArtifacts?.builderArtifact ?? null)
+    setBuilderTask(null)
+    setIsCancellingBuilderTask(false)
+  }, [conversationId, recapArtifacts?.builderArtifact])
+
+  const clearBuilderTask = useCallback(() => {
+    setBuilderTask(null)
+  }, [])
+
+  const cancelBuilderTask = useCallback(async () => {
+    if (!builderTask?.taskId || builderTask.phase !== "running" || isCancellingBuilderTask) {
+      return
+    }
+
+    setIsCancellingBuilderTask(true)
+
+    try {
+      const response = await requestBuilderTaskCancellation(builderTask.taskId)
+      setBuilderTask((currentTask) => {
+        if (currentTask?.taskId !== builderTask.taskId) {
+          return currentTask
+        }
+
+        return {
+          ...currentTask,
+          phase: "cancelled",
+          detail: response.detail || "Builder was cancelled before finishing the deliverable.",
+        }
+      })
+      showToast({
+        message: "Builder cancelled.",
+        variant: "info",
+        durationMs: 2400,
+      })
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : "Could not cancel Builder right now.",
+        variant: "warning",
+        durationMs: 3200,
+      })
+    } finally {
+      setIsCancellingBuilderTask(false)
+    }
+  }, [builderTask, isCancellingBuilderTask, showToast])
+
+  const handleBuilderArtifact = useCallback((nextBuilderArtifact: BuilderArtifactV1 | null) => {
+    setBuilderArtifact(nextBuilderArtifact)
+    if (nextBuilderArtifact) {
+      setBuilderTask((currentTask) => currentTask
+        ? {
+            ...currentTask,
+            phase: 'completed',
+            detail: currentTask.detail || 'Deliverable ready.',
+          }
+        : currentTask)
+    }
+
+    const activeConversationId = useChatStore.getState().conversationId
+    if (!activeConversationId || !nextBuilderArtifact) {
+      return
+    }
+
+    const previousArtifacts = useRecapStore.getState().getArtifacts(activeConversationId)
+    useRecapStore.getState().setArtifacts(activeConversationId, {
+      sessionId: previousArtifacts?.sessionId || activeConversationId,
+      threadId: previousArtifacts?.threadId || activeThreadId || activeConversationId,
+      sessionType: previousArtifacts?.sessionType || 'chat',
+      contextMode: previousArtifacts?.contextMode || 'life',
+      startedAt: previousArtifacts?.startedAt,
+      endedAt: previousArtifacts?.endedAt,
+      takeaway: previousArtifacts?.takeaway,
+      reflectionCandidate: previousArtifacts?.reflectionCandidate,
+      memoryCandidates: previousArtifacts?.memoryCandidates,
+      builderArtifact: nextBuilderArtifact,
+      status: previousArtifacts?.status || 'ready',
+    })
+  }, [activeThreadId])
 
   const runtimeRefs = useRef<StreamRuntimeRefs>({
     handleDataPart: () => undefined,
@@ -380,8 +473,11 @@ export function useChatRouteExperience(): ChatRouteExperience {
   }, [routeRetry])
 
   const routeStop = useCallback(() => {
+    if (builderTask?.taskId && builderTask.phase === "running") {
+      void cancelBuilderTask()
+    }
     runtimeRefs.current.stopStreaming()
-  }, [])
+  }, [builderTask, cancelBuilderTask])
 
   const companionRuntime = useCompanionRuntime({
     routeProfile: "chat",
@@ -395,6 +491,8 @@ export function useChatRouteExperience(): ChatRouteExperience {
     },
     stream: {
       ingestArtifacts: handleStreamArtifacts,
+      setBuilderArtifact: handleBuilderArtifact,
+      setBuilderTask,
       setInterrupt,
       setCurrentContext,
       setMessageMetadata,
@@ -497,9 +595,15 @@ export function useChatRouteExperience(): ChatRouteExperience {
 
   return {
     conversationId,
+    threadId: activeThreadId,
     recapArtifacts,
     setRecapArtifacts: setRecapArtifacts || EMPTY_RECAP_STORE,
     chatArtifacts,
+    builderArtifact: builderArtifact ?? recapArtifacts?.builderArtifact ?? null,
+    builderTask,
+    clearBuilderTask,
+    cancelBuilderTask,
+    isCancellingBuilderTask,
     voiceState: companionRuntime.voiceRuntime.voiceState,
     pendingInterrupt,
     interruptQueue,

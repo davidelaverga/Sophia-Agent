@@ -1,3 +1,4 @@
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { ContextMode, PresetType, RitualArtifacts } from '../types/session';
 
 import { useSessionExitFlow } from './useSessionExitFlow';
@@ -36,6 +37,7 @@ type UseSessionExitOrchestrationParams = {
     sessionId: string;
   }) => void;
   currentArtifacts?: RitualArtifacts | null;
+  currentBuilderArtifact?: BuilderArtifactV1 | null;
   userId?: string;
   threadId?: string;
   persistedSessionId?: string;
@@ -62,6 +64,7 @@ export function useSessionExitOrchestration({
   promoteToDebriefMode,
   startDebriefWithLLM,
   currentArtifacts,
+  currentBuilderArtifact,
   userId,
   threadId,
   persistedSessionId,
@@ -101,6 +104,7 @@ export function useSessionExitOrchestration({
     promoteToDebriefMode,
     startDebriefWithLLM,
     currentArtifacts,
+    currentBuilderArtifact,
     userId,
     threadId,
     messages,
