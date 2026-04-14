@@ -88,3 +88,42 @@ def test_resolve_builder_limits_shortens_demo_budget():
 
     assert switch_module._resolve_builder_limits(True) == (16, 45)
     assert switch_module._resolve_builder_limits(False) == (50, 120)
+
+
+def test_build_builder_progress_description_uses_document_topic():
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    task = (
+        "Create exactly one markdown file at outputs/dangers-of-war.md. "
+        "Original request: Actually, I need your help, Sofia. Create a document about the dangers of war. "
+        "Topic: the dangers of war. "
+        "Length: about one page (roughly 450-600 words)."
+    )
+
+    description = switch_module._build_builder_progress_description(task, "document", False)
+
+    assert description == "Builder: document about the dangers of war"
+
+
+def test_build_builder_progress_description_summarizes_frontend_task():
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    description = switch_module._build_builder_progress_description(
+        "Create a landing page for Sofia with a hero, proof section, pricing cards, and FAQ.",
+        "frontend",
+        False,
+    )
+
+    assert description == "Builder: landing page for Sofia with a hero, proof section, pricing cards, and FAQ"
+
+
+def test_build_builder_progress_description_uses_demo_label_for_demo_mode():
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    description = switch_module._build_builder_progress_description(
+        switch_module._build_demo_builder_task(),
+        "document",
+        True,
+    )
+
+    assert description == "Builder: demo document deliverable"

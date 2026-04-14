@@ -96,7 +96,7 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
   const taskId = readString(record, 'taskId') ?? readString(record, 'task_id');
   const label = readString(record, 'label') ?? readString(record, 'description');
   const detail = readString(record, 'detail')
-    ?? (rawPhase === 'task_started' ? 'Builder is working on the deliverable.' : undefined);
+    ?? (rawPhase === 'task_started' && !label ? 'Builder is working on the deliverable.' : undefined);
   const messageIndex = readNumber(record, 'messageIndex') ?? readNumber(record, 'message_index');
   const totalMessages = readNumber(record, 'totalMessages') ?? readNumber(record, 'total_messages');
 

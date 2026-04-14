@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import replace
@@ -57,6 +58,17 @@ _BUILDER_GENERIC_DEMO_MARKERS = (
     "show me it working",
     "show it working",
 )
+
+_PROGRESS_TOPIC_RE = re.compile(r"\bTopic:\s*(.+?)(?:\.\s|$)", re.IGNORECASE)
+_PROGRESS_ORIGINAL_REQUEST_RE = re.compile(r"\bOriginal request:\s*(.+?)(?:\s+Topic:|$)", re.IGNORECASE)
+_PROGRESS_COMMAND_RE = re.compile(
+    r"(?:create|make|draft|write|generate|build|research|prepare|design|produce)\s+(.+)",
+    re.IGNORECASE,
+)
+_PROGRESS_LEADING_ARTICLE_RE = re.compile(r"^(?:a|an|the)\s+", re.IGNORECASE)
+_PROGRESS_WHITESPACE_RE = re.compile(r"\s+")
+_PROGRESS_TRAILING_PUNCTUATION_RE = re.compile(r"[\s.:;,-]+$")
+_PROGRESS_MAX_LENGTH = 88
 
 
 class SwitchToBuilderInput(BaseModel):
@@ -149,6 +161,7 @@ def switch_to_builder(
         task_type=task_type,
         companion_artifact=companion_artifact,
     )
+    progress_description = _build_builder_progress_description(task, task_type, demo_mode)
     if demo_mode:
         logger.info(
             "[Builder] normalized generic demo request to deterministic document flow"
@@ -216,7 +229,7 @@ def switch_to_builder(
     try:
         from langgraph.config import get_stream_writer
         writer = get_stream_writer()
-        writer({"type": "task_started", "task_id": task_id, "description": f"Builder: {task_type}"})
+        writer({"type": "task_started", "task_id": task_id, "description": progress_description})
     except Exception:
         writer = None
 
@@ -234,7 +247,12 @@ def switch_to_builder(
         if result.status == SubagentStatus.COMPLETED:
             logger.info("[Builder] Task %s completed after %d polls", task_id, poll_count)
             if writer:
-                writer({"type": "task_completed", "task_id": task_id, "result": result.result})
+                writer({
+                    "type": "task_completed",
+                    "task_id": task_id,
+                    "description": progress_description,
+                    "result": result.result,
+                })
             cleanup_background_task(task_id)
 
             # Extract builder_result from final state
@@ -265,29 +283,42 @@ def switch_to_builder(
                     {
                         "type": "task_running",
                         "task_id": task_id,
-                        "description": f"Builder: {task_type}",
-                        "detail": "Builder is working on the deliverable.",
+                        "description": progress_description,
                     }
                 )
 
         elif result.status == SubagentStatus.CANCELLED:
             logger.info("[Builder] Task %s cancelled", task_id)
             if writer:
-                writer({"type": "task_cancelled", "task_id": task_id, "error": result.error})
+                writer({
+                    "type": "task_cancelled",
+                    "task_id": task_id,
+                    "description": progress_description,
+                    "error": result.error,
+                })
             cleanup_background_task(task_id)
             return _format_cancelled(result.error)
 
         elif result.status == SubagentStatus.FAILED:
             logger.error("[Builder] Task %s failed: %s", task_id, result.error)
             if writer:
-                writer({"type": "task_failed", "task_id": task_id, "error": result.error})
+                writer({
+                    "type": "task_failed",
+                    "task_id": task_id,
+                    "description": progress_description,
+                    "error": result.error,
+                })
             cleanup_background_task(task_id)
             return _format_error(result.error or "Unknown error")
 
         elif result.status == SubagentStatus.TIMED_OUT:
             logger.warning("[Builder] Task %s timed out", task_id)
             if writer:
-                writer({"type": "task_timed_out", "task_id": task_id})
+                writer({
+                    "type": "task_timed_out",
+                    "task_id": task_id,
+                    "description": progress_description,
+                })
             cleanup_background_task(task_id)
             return _format_error(f"Timed out after {config.timeout_seconds}s")
 
@@ -340,6 +371,72 @@ def _normalize_builder_request(
         return task, task_type, False
 
     return _build_demo_builder_task(), "document", True
+
+
+def _build_builder_progress_description(task: str, task_type: str, demo_mode: bool) -> str:
+    """Return a short user-facing description for Builder lifecycle events."""
+    if demo_mode:
+        return "Builder: demo document deliverable"
+
+    summary = _extract_progress_summary(task, task_type)
+    if not summary:
+        summary = task_type.replace("_", " ")
+
+    return f"Builder: {_truncate_progress_summary(summary)}"
+
+
+def _extract_progress_summary(task: str, task_type: str) -> str:
+    normalized_task = _PROGRESS_WHITESPACE_RE.sub(" ", task).strip()
+    if not normalized_task:
+        return ""
+
+    if task_type == "document":
+        topic_match = _PROGRESS_TOPIC_RE.search(normalized_task)
+        if topic_match:
+            topic = _clean_progress_text(topic_match.group(1))
+            if topic:
+                return f"document about {topic}"
+
+    original_request_match = _PROGRESS_ORIGINAL_REQUEST_RE.search(normalized_task)
+    if original_request_match:
+        summary = _summarize_progress_request(original_request_match.group(1))
+        if summary:
+            return summary
+
+    summary = _summarize_progress_request(normalized_task)
+    if summary:
+        return summary
+
+    return task_type.replace("_", " ")
+
+
+def _summarize_progress_request(text: str) -> str:
+    cleaned = _clean_progress_text(text)
+    if not cleaned:
+        return ""
+
+    command_match = _PROGRESS_COMMAND_RE.search(cleaned)
+    if command_match:
+        cleaned = command_match.group(1)
+
+    cleaned = _PROGRESS_LEADING_ARTICLE_RE.sub("", cleaned).strip()
+    return _clean_progress_text(cleaned)
+
+
+def _clean_progress_text(text: str) -> str:
+    cleaned = _PROGRESS_WHITESPACE_RE.sub(" ", text).strip(" \t\r\n\"'")
+    cleaned = _PROGRESS_TRAILING_PUNCTUATION_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _truncate_progress_summary(text: str) -> str:
+    if len(text) <= _PROGRESS_MAX_LENGTH:
+        return text
+
+    truncated = text[: _PROGRESS_MAX_LENGTH - 3].rsplit(" ", 1)[0].strip()
+    if not truncated:
+        truncated = text[: _PROGRESS_MAX_LENGTH - 3].strip()
+    return f"{truncated}..."
 
 
 def _should_use_demo_builder_task(

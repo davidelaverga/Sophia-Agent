@@ -177,7 +177,7 @@ describe('useCompanionStreamContract', () => {
         data: {
           phase: 'failed',
           task_id: 'task-builder-1',
-          label: 'Builder: document',
+          label: 'Builder: document about the dangers of war',
           detail: 'Timed out while preparing the draft.',
         },
       });
@@ -186,7 +186,7 @@ describe('useCompanionStreamContract', () => {
     expect(setBuilderTask).toHaveBeenCalledWith({
       phase: 'failed',
       taskId: 'task-builder-1',
-      label: 'Builder: document',
+      label: 'Builder: document about the dangers of war',
       detail: 'Timed out while preparing the draft.',
     });
   });

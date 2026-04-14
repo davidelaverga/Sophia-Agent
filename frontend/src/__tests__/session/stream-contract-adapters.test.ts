@@ -88,7 +88,7 @@ describe('stream-contract-adapters', () => {
     const payload = parseBuilderTaskPayload({
       phase: 'running',
       task_id: 'task-builder-1',
-      label: 'Builder: document',
+      label: 'Builder: document about the dangers of war',
       detail: 'Working through step 2 of 4.',
       message_index: 2,
       total_messages: 4,
@@ -97,7 +97,7 @@ describe('stream-contract-adapters', () => {
     expect(payload).toEqual({
       phase: 'running',
       taskId: 'task-builder-1',
-      label: 'Builder: document',
+      label: 'Builder: document about the dangers of war',
       detail: 'Working through step 2 of 4.',
       messageIndex: 2,
       totalMessages: 4,
@@ -108,13 +108,25 @@ describe('stream-contract-adapters', () => {
     const payload = parseBuilderTaskPayload({
       type: 'task_started',
       task_id: 'task-builder-1',
-      description: 'Builder: document',
+      description: 'Builder: document about the dangers of war',
     });
 
     expect(payload).toEqual({
       phase: 'running',
       taskId: 'task-builder-1',
-      label: 'Builder: document',
+      label: 'Builder: document about the dangers of war',
+    });
+  });
+
+  it('falls back to a generic detail when a task_started event has no label', () => {
+    const payload = parseBuilderTaskPayload({
+      type: 'task_started',
+      task_id: 'task-builder-1',
+    });
+
+    expect(payload).toEqual({
+      phase: 'running',
+      taskId: 'task-builder-1',
       detail: 'Builder is working on the deliverable.',
     });
   });

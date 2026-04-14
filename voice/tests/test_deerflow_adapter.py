@@ -809,7 +809,7 @@ async def test_stream_events_forward_builder_task_events() -> None:
         if request.url.path == "/threads/thread-123/runs/stream":
             return _sse_response(
                 "event: task_started",
-                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document"}),
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
                 "event: task_running",
                 "data: " + json.dumps({"task_id": "builder-1", "message_index": 1, "total_messages": 3}),
                 "event: messages",
@@ -842,7 +842,7 @@ async def test_stream_events_forward_builder_task_events() -> None:
         events = [event async for event in adapter.stream_events(_make_request())]
 
     assert [event.kind for event in events] == ["builder_task", "builder_task", "text", "builder_task", "artifact"]
-    assert events[0].builder_task == {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}
+    assert events[0].builder_task == {"type": "task_started", "task_id": "builder-1", "description": "Builder: document about the dangers of war"}
     assert events[1].builder_task == {"type": "task_running", "task_id": "builder-1", "message_index": 1, "total_messages": 3}
     assert events[3].builder_task == {"type": "task_completed", "task_id": "builder-1", "result": "done"}
 
@@ -855,7 +855,7 @@ async def test_stream_events_fail_active_builder_task_before_backend_error() -> 
         if request.url.path == "/threads/thread-123/runs/stream":
             return _sse_response(
                 "event: task_started",
-                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document"}),
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
                 "event: error",
                 "data: " + json.dumps({"message": "An internal error occurred"}),
             )
@@ -877,7 +877,7 @@ async def test_stream_events_fail_active_builder_task_before_backend_error() -> 
     assert events[0].builder_task == {
         "type": "task_started",
         "task_id": "builder-1",
-        "description": "Builder: document",
+        "description": "Builder: document about the dangers of war",
     }
     assert events[1].builder_task == {
         "type": "task_failed",
@@ -952,7 +952,7 @@ async def test_stream_events_merge_builder_result_from_final_values_into_streame
         if request.url.path == "/threads/thread-123/runs/stream":
             return _sse_response(
                 "event: task_started",
-                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document"}),
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
                 "event: task_completed",
                 "data: " + json.dumps({"task_id": "builder-1", "result": "done"}),
                 "event: messages",

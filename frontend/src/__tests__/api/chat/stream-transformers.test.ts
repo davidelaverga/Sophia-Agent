@@ -188,7 +188,7 @@ describe('stream-transformers token sanitization', () => {
 
   it('emits builder task lifecycle parts for builder background events', async () => {
     const upstream = buildSseStream([
-      'event: task_started\ndata: {"task_id":"task-builder-1","description":"Builder: document"}\n\n',
+      'event: task_started\ndata: {"task_id":"task-builder-1","description":"Builder: document about the dangers of war"}\n\n',
       'event: task_running\ndata: {"task_id":"task-builder-1","message":{"content":[{"type":"text","text":"Drafting the brief."}]},"message_index":2,"total_messages":4}\n\n',
       'event: task_cancelled\ndata: {"task_id":"task-builder-1","error":"Execution cancelled by user"}\n\n',
       'event: done\ndata: {"status":"complete"}\n\n',
@@ -206,7 +206,7 @@ describe('stream-transformers token sanitization', () => {
       data: {
         phase: 'running',
         taskId: 'task-builder-1',
-        label: 'Builder: document',
+        label: 'Builder: document about the dangers of war',
       },
     });
     expect(builderTaskEvents[1]).toMatchObject({

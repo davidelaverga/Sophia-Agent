@@ -164,7 +164,7 @@ async def test_builder_task_forwarded_via_call_emitter() -> None:
     adapter = FakeAdapter(
         [
             BackendEvent.builder_task_payload(
-                {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}
+                {"type": "task_started", "task_id": "builder-1", "description": "Builder: document about the dangers of war"}
             ),
             BackendEvent.text_chunk("ok"),
             BackendEvent.artifact_payload(_valid_artifact()),
@@ -189,7 +189,7 @@ async def test_builder_task_forwarded_via_call_emitter() -> None:
 
     builder_task_events = [payload for payload in emitted if payload["type"] == "sophia.builder_task"]
     assert builder_task_events == [
-        {"type": "sophia.builder_task", "data": {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}}
+        {"type": "sophia.builder_task", "data": {"type": "task_started", "task_id": "builder-1", "description": "Builder: document about the dangers of war"}}
     ]
     assert progress_calls == ["user-1"]
 
@@ -204,7 +204,7 @@ async def test_builder_task_waits_for_text_before_emitting_agent_started() -> No
     adapter = FakeAdapter(
         [
             BackendEvent.builder_task_payload(
-                {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}
+                {"type": "task_started", "task_id": "builder-1", "description": "Builder: document about the dangers of war"}
             ),
             BackendEvent.text_chunk("ok"),
             BackendEvent.artifact_payload(_valid_artifact()),
