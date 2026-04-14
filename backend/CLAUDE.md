@@ -290,9 +290,9 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
 - `store.py` - JSON-file persistence mapping `channel_name:chat_id[:topic_id]` → `thread_id` (keys are `channel:chat` for root conversations and `channel:chat:topic` for threaded conversations)
-- `telegram_linking.py` - Persistent Telegram↔Sophia link store with one-time token issuance/redeem/unlink and chat activity tracking
+- `telegram_linking.py` - Persistent Telegram↔Sophia link store with one-time token issuance/redeem/unlink, reverse-map-safe chat relinking, and chat activity tracking
 - `session_resolver.py` - Dynamic Telegram run overrides that bind linked chats to `sophia_companion` with native memory backend and linked `context_mode`
-- `manager.py` - Core dispatcher: creates/reuses threads, enforces per-conversation concurrency locks, resolves dynamic session overrides, ingests channel-provided inbound files into uploads, keeps Slack/Telegram on `client.runs.wait()`, uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates, and publishes asynchronous builder completion notifications from handoff task IDs
+- `manager.py` - Core dispatcher: creates/reuses threads, enforces per-conversation concurrency locks, resolves dynamic session overrides, ingests channel-provided inbound files into uploads (with sandbox acquire/release around sync), keeps Slack/Telegram on `client.runs.wait()`, uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates, and publishes asynchronous builder completion notifications from handoff task IDs
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle) plus optional inbound file reader hook (`get_inbound_file_reader`)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml` and registers channel inbound file readers with `ChannelManager`
 - `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram.py` handles `/start <token>` linking, `/build`, and media ingestion)

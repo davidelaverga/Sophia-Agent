@@ -731,6 +731,7 @@ class ChannelManager:
         paths = get_paths()
         paths.ensure_thread_dirs(thread_id)
         uploads_dir = paths.sandbox_uploads_dir(thread_id)
+        sandbox_provider = None
 
         sandbox_id = None
         sandbox = None
@@ -744,44 +745,51 @@ class ChannelManager:
             logger.warning("[Manager] unable to acquire sandbox for inbound file sync; files will stay host-local", exc_info=True)
 
         stored_files: list[dict[str, Any]] = []
-        for idx, file_info in enumerate(inbound_files, start=1):
-            if not isinstance(file_info, dict):
-                continue
+        try:
+            for idx, file_info in enumerate(inbound_files, start=1):
+                if not isinstance(file_info, dict):
+                    continue
 
-            raw_content = file_info.get("content")
-            if isinstance(raw_content, str):
-                content = raw_content.encode("utf-8")
-            elif isinstance(raw_content, (bytes, bytearray)):
-                content = bytes(raw_content)
-            else:
-                continue
+                raw_content = file_info.get("content")
+                if isinstance(raw_content, str):
+                    content = raw_content.encode("utf-8")
+                elif isinstance(raw_content, (bytes, bytearray)):
+                    content = bytes(raw_content)
+                else:
+                    continue
 
-            safe_filename = self._make_safe_upload_filename(str(file_info.get("filename", "")), idx)
-            target_path = self._reserve_upload_path(uploads_dir, safe_filename)
-            target_path.write_bytes(content)
+                safe_filename = self._make_safe_upload_filename(str(file_info.get("filename", "")), idx)
+                target_path = self._reserve_upload_path(uploads_dir, safe_filename)
+                target_path.write_bytes(content)
 
-            virtual_path = f"{_UPLOADS_VIRTUAL_PREFIX}{target_path.name}"
-            mime_type = file_info.get("mime_type")
-            if not isinstance(mime_type, str) or not mime_type:
-                mime_type = mimetypes.guess_type(target_path.name)[0] or "application/octet-stream"
+                virtual_path = f"{_UPLOADS_VIRTUAL_PREFIX}{target_path.name}"
+                mime_type = file_info.get("mime_type")
+                if not isinstance(mime_type, str) or not mime_type:
+                    mime_type = mimetypes.guess_type(target_path.name)[0] or "application/octet-stream"
 
-            if sandbox is not None and sandbox_id and sandbox_id != "local":
+                if sandbox is not None and sandbox_id and sandbox_id != "local":
+                    try:
+                        sandbox.update_file(virtual_path, content)
+                    except Exception:
+                        logger.warning("[Manager] failed to sync inbound upload to sandbox: %s", virtual_path, exc_info=True)
+
+                stored_files.append(
+                    {
+                        "filename": target_path.name,
+                        "size": len(content),
+                        "virtual_path": virtual_path,
+                        "path": virtual_path,
+                        "extension": target_path.suffix,
+                        "mime_type": mime_type,
+                        "status": "uploaded",
+                    }
+                )
+        finally:
+            if sandbox_provider is not None and isinstance(sandbox_id, str) and sandbox_id:
                 try:
-                    sandbox.update_file(virtual_path, content)
+                    sandbox_provider.release(sandbox_id)
                 except Exception:
-                    logger.warning("[Manager] failed to sync inbound upload to sandbox: %s", virtual_path, exc_info=True)
-
-            stored_files.append(
-                {
-                    "filename": target_path.name,
-                    "size": len(content),
-                    "virtual_path": virtual_path,
-                    "path": virtual_path,
-                    "extension": target_path.suffix,
-                    "mime_type": mime_type,
-                    "status": "uploaded",
-                }
-            )
+                    logger.warning("[Manager] failed to release sandbox after inbound file sync: %s", sandbox_id, exc_info=True)
 
         logger.info("[Manager] stored inbound files: channel=%s chat_id=%s count=%d", msg.channel_name, msg.chat_id, len(stored_files))
         return stored_files

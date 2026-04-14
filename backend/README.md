@@ -135,6 +135,7 @@ The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram use the f
 
 Telegram now supports Sophia account linking and media-first workflows:
 - Web app creates one-time `/api/sophia/{user_id}/telegram/link` tokens, redeemed in Telegram with `/start <token>` (private chat).
+- Re-linking a Telegram chat to a different Sophia user clears the previous user reverse mapping to keep status/unlink behavior consistent.
 - Unlinked chats are gated; linked chats can send normal text, `/build <task>`, and photo/document inputs.
 - Telegram media is downloaded by the channel, persisted into thread uploads, and injected into the run input via `<uploaded_files>` plus `additional_kwargs.files`.
 
@@ -142,6 +143,7 @@ Telegram now supports Sophia account linking and media-first workflows:
 - Enforces one active run per conversation key (`channel:chat:topic`) and sends a busy message for overlapping requests.
 - Polls queued builder handoff tasks and publishes asynchronous completion/failure follow-up messages (including artifact attachments when available).
 - Registers optional per-channel inbound file readers (used by Telegram) through `ChannelService`.
+- Releases temporary sandbox acquisitions made for inbound file syncing after each ingestion run.
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
 
 ---
