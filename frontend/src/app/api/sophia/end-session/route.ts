@@ -1,7 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 import { logger } from '../../../lib/error-logger';
+import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 
 export async function POST(request: NextRequest) {
   try {
@@ -12,7 +12,8 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Unable to resolve user_id' }, { status: 401 });
     }
 
-    const { user_id: _ignoredUserId, ...payload } = body;
+    const payload = { ...body };
+    delete payload.user_id;
     const normalizedPayload = {
       ...payload,
       thread_id: typeof payload.thread_id === 'string' && payload.thread_id.trim().length > 0

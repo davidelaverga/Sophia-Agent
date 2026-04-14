@@ -86,7 +86,11 @@ class TestVoiceConnect:
         assert data["call_type"] == "default"
         assert data["call_id"].startswith("sophia-user_123-")
         assert len(data["token"]) > 0
+        assert data["thread_id"] is None
         assert data["session_id"] == "test-session-id"
+        assert data["stream_url"] == (
+            f"/api/sophia/user_123/voice/events?call_id={data['call_id']}&session_id=test-session-id"
+        )
 
     def test_returns_credentials_with_all_params(self):
         with patch(
@@ -103,6 +107,7 @@ class TestVoiceConnect:
         assert data["api_key"] == "test-api-key"
         assert data["call_type"] == "default"
         assert "user_456" in data["call_id"]
+        assert data["thread_id"] is None
         assert data["session_id"] == "test-session-id"
         dispatch.assert_awaited_once_with(
             call_id=ANY,
@@ -132,6 +137,10 @@ class TestVoiceConnect:
             )
 
         assert resp.status_code == 200
+        assert resp.json()["thread_id"] == "thread-456"
+        assert resp.json()["stream_url"] == (
+            f"/api/sophia/user_456/voice/events?call_id={resp.json()['call_id']}&session_id=test-session-id"
+        )
         dispatch.assert_awaited_once_with(
             call_id=ANY,
             call_type="default",
@@ -260,7 +269,45 @@ class TestVoiceConnect:
         data = resp.json()
         assert data["api_key"] == "test-api-key"
         assert data["call_id"].startswith("sophia-user_123-")
+        assert data["thread_id"] is None
         assert data["session_id"] is None
+        assert data["stream_url"] is None
+
+
+class TestVoiceEvents:
+    def test_events_proxy_streams_sse_payload(self):
+        request = httpx.Request(
+            "GET",
+            "http://test/calls/sophia-user_123-abc12345/sessions/test-session-id/events",
+        )
+        mock_response = httpx.Response(
+            200,
+            request=request,
+            headers={"content-type": "text/event-stream"},
+            content=(
+                b"event: sophia.transcript\n"
+                b"data: {\"type\":\"sophia.transcript\",\"data\":{\"text\":\"Hello\"}}\n\n"
+            ),
+        )
+
+        with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.send = AsyncMock(return_value=mock_response)
+            mock_client.aclose = AsyncMock(return_value=None)
+            mock_client.build_request = lambda *args, **kwargs: request
+            mock_client_cls.return_value = mock_client
+
+            resp = client.get(
+                "/api/sophia/user_123/voice/events",
+                params={
+                    "call_id": "sophia-user_123-abc12345",
+                    "session_id": "test-session-id",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        assert "sophia.transcript" in resp.text
 
 
 @pytest.mark.anyio

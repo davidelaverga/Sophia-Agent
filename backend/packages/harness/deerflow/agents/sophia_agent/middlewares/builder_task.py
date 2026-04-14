@@ -72,13 +72,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         }
         context_lines = [f"- {k}: {v}" for k, v in session_fields.items() if v]
         if context_lines:
-            sections.append(f"<session_context>\n" + "\n".join(context_lines) + "\n</session_context>")
+            sections.append("<session_context>\n" + "\n".join(context_lines) + "\n</session_context>")
 
         # Relevant memories (max 5)
         if relevant_memories:
             capped = relevant_memories[:5]
             memory_lines = [f"- {m}" for m in capped]
-            sections.append(f"<memories>\n" + "\n".join(memory_lines) + "\n</memories>")
+            sections.append("<memories>\n" + "\n".join(memory_lines) + "\n</memories>")
 
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")

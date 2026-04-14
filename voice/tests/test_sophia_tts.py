@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -72,6 +73,19 @@ async def test_stream_audio_primary_set_emotion_passed_directly() -> None:
 
     call_kwargs = tts.client.tts.generate.call_args.kwargs
     assert call_kwargs["generation_config"]["emotion"] == "calm"
+
+
+@pytest.mark.anyio
+async def test_start_warmup_primes_tts_once() -> None:
+    tts = _make_tts()
+
+    assert tts.start_warmup() is True
+    assert tts.start_warmup() is False
+
+    await asyncio.sleep(0)
+
+    assert tts.client.tts.generate.call_count == 1
+    assert tts._warmup_completed is True
 
 
 @pytest.mark.parametrize(

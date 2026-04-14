@@ -8,6 +8,7 @@ import { useVoiceToggle } from "../hooks/useVoiceToggle"
 import type { VoiceStateProps } from "../lib/voice-types"
 
 import { ChatCollapsed } from "./ChatCollapsed"
+import { VoiceMetricsPanel } from "./session/VoiceMetricsPanel"
 import { UsageHint } from "./UsageHint"
 import { VoiceMicButton, VoiceStatusText } from "./VoiceMicButton"
 import { VoiceTranscript } from "./VoiceTranscript"
@@ -57,6 +58,8 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
     <div className="space-y-4">
       {/* Chat collapsed indicator - easy switch to chat mode */}
       <ChatCollapsed />
+
+      <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
       
       <section 
         className={`rounded-2xl bg-sophia-surface p-6 shadow-soft animate-fadeIn transition-all duration-500 ${

@@ -24,6 +24,9 @@ class TurnDiagnostic:
     reason: TurnDiagnosticReason
     raw_false_end_count: int
     duplicate_phase_counts: dict[str, int]
+    submission_stabilization_ms: float | None = None
+    backend_request_start_ms: float | None = None
+    backend_first_event_ms: float | None = None
     first_text_ms: float | None = None
     backend_complete_ms: float | None = None
     first_audio_ms: float | None = None
@@ -35,6 +38,9 @@ class TurnDiagnostic:
             "reason": self.reason,
             "raw_false_end_count": self.raw_false_end_count,
             "duplicate_phase_counts": dict(self.duplicate_phase_counts),
+            "submission_stabilization_ms": self.submission_stabilization_ms,
+            "backend_request_start_ms": self.backend_request_start_ms,
+            "backend_first_event_ms": self.backend_first_event_ms,
             "first_text_ms": self.first_text_ms,
             "backend_complete_ms": self.backend_complete_ms,
             "first_audio_ms": self.first_audio_ms,
@@ -48,6 +54,9 @@ class _ActiveTurn:
     turn_id: str = field(default_factory=lambda: str(uuid4()))
     raw_false_end_count: int = 1
     duplicate_phase_counts: dict[str, int] = field(default_factory=dict)
+    submission_stabilization_ms: float | None = None
+    backend_request_start_ms: float | None = None
+    backend_first_event_ms: float | None = None
     first_text_ms: float | None = None
     backend_complete_ms: float | None = None
     first_audio_ms: float | None = None
@@ -119,6 +128,49 @@ class TurnDiagnosticsTracker:
 
         current.agent_ended_emitted = True
         return True
+
+    def note_backend_request_start(
+        self,
+        user_id: str,
+        now: float,
+    ) -> float | None:
+        current = self._turns.get(user_id)
+        if current is None or current.backend_request_start_ms is not None:
+            return None
+
+        current.backend_request_start_ms = (now - current.speech_ended_at) * 1000
+        return current.backend_request_start_ms
+
+    def note_submission_stabilization(
+        self,
+        user_id: str,
+        duration_ms: float,
+    ) -> float | None:
+        current = self._turns.get(user_id)
+        if current is None or current.terminal_status is not None:
+            return None
+
+        if current.submission_stabilization_ms is None:
+            current.submission_stabilization_ms = duration_ms
+        else:
+            current.submission_stabilization_ms = max(
+                current.submission_stabilization_ms,
+                duration_ms,
+            )
+
+        return current.submission_stabilization_ms
+
+    def note_backend_first_event(
+        self,
+        user_id: str,
+        now: float,
+    ) -> float | None:
+        current = self._turns.get(user_id)
+        if current is None or current.backend_first_event_ms is not None:
+            return None
+
+        current.backend_first_event_ms = (now - current.speech_ended_at) * 1000
+        return current.backend_first_event_ms
 
     def note_first_text(self, user_id: str, now: float) -> float | None:
         current = self._turns.get(user_id)
@@ -221,6 +273,9 @@ class TurnDiagnosticsTracker:
             reason=current.reason_hint,
             raw_false_end_count=current.raw_false_end_count,
             duplicate_phase_counts=dict(current.duplicate_phase_counts),
+            submission_stabilization_ms=current.submission_stabilization_ms,
+            backend_request_start_ms=current.backend_request_start_ms,
+            backend_first_event_ms=current.backend_first_event_ms,
             first_text_ms=current.first_text_ms,
             backend_complete_ms=current.backend_complete_ms,
             first_audio_ms=current.first_audio_ms,

@@ -235,20 +235,25 @@ async function startFromHomeAndCapture(page: Page): Promise<NormalizedHighlight[
 }
 
 async function endSessionAndWaitRequest(page: Page): Promise<void> {
-  const endReq = page.waitForResponse((res) => {
+  const endReq = page.waitForRequest((req) => {
     return (
-      res.request().method().toUpperCase() === 'POST' &&
-      isEndSessionRequest(res.url())
+      req.method().toUpperCase() === 'POST' &&
+      isEndSessionRequest(req.url())
     );
   }, { timeout: 15_000 });
 
   const headerEndButton = page.locator('button[title="End session"]').first();
   await expect(headerEndButton).toBeVisible({ timeout: 10_000 });
-  await headerEndButton.click();
+  await headerEndButton.click({ force: true });
 
   const confirmEndButton = page.getByRole('button', { name: /^end session$/i }).first();
   await expect(confirmEndButton).toBeVisible({ timeout: 5_000 });
-  await confirmEndButton.click();
+  await confirmEndButton.click({ force: true });
+
+  const leaveAnywayButton = page.getByRole('button', { name: /leave anyway/i }).first();
+  if (await leaveAnywayButton.isVisible({ timeout: 1_500 }).catch(() => false)) {
+    await leaveAnywayButton.click({ force: true });
+  }
 
   await endReq;
 }
@@ -278,6 +283,25 @@ function buildStartResponse(seed: {
 
 async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promise<void> {
   let startIndex = 0;
+
+  await page.route('**/api/sophia/**/voice/connect', async (route) => {
+    const method = route.request().method().toUpperCase();
+
+    if (method === 'GET') {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ ok: true, authReady: true, userId: 'mock-user' }),
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 503,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: 'Voice unavailable in memory-highlights E2E mock' }),
+    });
+  });
 
   await page.route('**/api/sessions/active', async (route) => {
     await route.fulfill({

@@ -11,6 +11,8 @@ interface VoiceCaptionProps {
   messages: UIMessage[]
   /** Whether currently in voice mode */
   isVoiceMode: boolean
+  /** Reports whether any live caption is currently visible */
+  onVisibilityChange?: (visible: boolean) => void
   /** Called on mode switch voice→text to flush immediately */
   onFlush?: () => void
 }
@@ -23,7 +25,7 @@ interface VoiceCaptionProps {
  * User's speech: centered, dimmer cosmic text, slightly smaller.
  * Fade-in 0.8s, hold 4s, fade-out 2s.
  */
-export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
+export function VoiceCaption({ messages, isVoiceMode, onVisibilityChange }: VoiceCaptionProps) {
   // Sophia caption (assistant messages)
   const {
     flush: flushSophiaCaption,
@@ -108,6 +110,10 @@ export function VoiceCaption({ messages, isVoiceMode }: VoiceCaptionProps) {
       showUserCaption(content)
     }
   }, [flushUserCaption, isVoiceMode, messages, showUserCaption])
+
+  useEffect(() => {
+    onVisibilityChange?.(isVoiceMode && (isSophiaVisible || isUserVisible))
+  }, [isSophiaVisible, isUserVisible, isVoiceMode, onVisibilityChange])
 
   if (!isVoiceMode) return null
   if (!isSophiaVisible && !isUserVisible) return null

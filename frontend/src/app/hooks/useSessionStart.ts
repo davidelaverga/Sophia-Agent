@@ -37,6 +37,16 @@ const activeSessionCache = {
 // Backend session start circuit-breaker (client-side)
 const SESSION_START_DISABLED_KEY = 'sophia.disableSessionStart';
 const SESSION_START_DISABLED_TTL_MS = 15 * 60 * 1000;
+const SESSION_START_HEALTHCHECK_TIMEOUT_MS = 5000;
+
+function clearSessionStartDisabled(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(SESSION_START_DISABLED_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function isSessionStartDisabled(): boolean {
   if (typeof window === 'undefined') return false;
@@ -64,6 +74,32 @@ function disableSessionStart(): void {
     );
   } catch {
     // ignore storage errors
+  }
+}
+
+async function canRecoverDisabledSessionStart(): Promise<boolean> {
+  if (typeof window === 'undefined') return true;
+
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), SESSION_START_HEALTHCHECK_TIMEOUT_MS);
+
+  try {
+    const response = await fetch('/api/health?deep=true', {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    clearSessionStartDisabled();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    window.clearTimeout(timeoutId);
   }
 }
 
@@ -241,17 +277,20 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
       
       // 2. Call backend API (unless disabled due to backend errors)
       if (isSessionStartDisabled()) {
-        const errorResult: SessionStartError = {
-          success: false,
-          error: 'Session start temporarily disabled (backend error). Please try again.',
-          code: 'SERVER_ERROR',
-        };
-        setLastResult(errorResult);
-        setError(errorResult.error);
-        onError?.(errorResult);
-        clearSession();
-        
-        return errorResult;
+        const recovered = await canRecoverDisabledSessionStart();
+        if (!recovered) {
+          const errorResult: SessionStartError = {
+            success: false,
+            error: 'Session start temporarily disabled (backend error). Please try again.',
+            code: 'SERVER_ERROR',
+          };
+          setLastResult(errorResult);
+          setError(errorResult.error);
+          onError?.(errorResult);
+          clearSession();
+          
+          return errorResult;
+        }
       }
 
       const result = await startSession({
@@ -282,6 +321,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
       
       // 3. Update store with real backend IDs
       const response = result.data;
+      clearSessionStartDisabled();
       const debugEnabled = isDebugEnabled();
       if (debugEnabled) {
         const validation = validateResponse(SessionStartResponseSchema, response, 'SessionStartResponse');

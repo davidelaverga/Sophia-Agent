@@ -201,7 +201,7 @@ declare global {
 }
 
 function canUseCapture(): boolean {
-  return process.env.NODE_ENV === 'development' && typeof window !== 'undefined';
+  return typeof window !== 'undefined';
 }
 
 function createEmptyMicrophoneSummary(

@@ -121,8 +121,11 @@ else
     GATEWAY_EXTRA_FLAGS=""
 fi
 
+: "${N_JOBS_PER_WORKER:=4}"
+: "${BG_JOB_ISOLATED_LOOPS:=true}"
+
 echo "Starting LangGraph server..."
-(cd backend && NO_COLOR=1 uv run langgraph dev --no-browser --allow-blocking $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
+(cd backend && NO_COLOR=1 BG_JOB_ISOLATED_LOOPS="$BG_JOB_ISOLATED_LOOPS" uv run langgraph dev --no-browser --allow-blocking --n-jobs-per-worker "$N_JOBS_PER_WORKER" $LANGGRAPH_EXTRA_FLAGS > ../logs/langgraph.log 2>&1) &
 ./scripts/wait-for-port.sh 2024 60 "LangGraph" || {
     echo "  See logs/langgraph.log for details"
     tail -20 logs/langgraph.log

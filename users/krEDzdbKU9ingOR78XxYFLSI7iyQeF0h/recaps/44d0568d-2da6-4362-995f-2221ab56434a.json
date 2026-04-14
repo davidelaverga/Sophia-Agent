@@ -1,0 +1,14 @@
+{
+  "session_id": "44d0568d-2da6-4362-995f-2221ab56434a",
+  "thread_id": "91f99ce6-9492-4735-b076-71691da51ebc",
+  "session_type": "prepare",
+  "context_mode": "gaming",
+  "started_at": "2026-04-12T21:44:54.611Z",
+  "ended_at": "2026-04-12T21:45:47.731759+00:00",
+  "turn_count": 3,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Presence doesn't require explanation. You're back, and that's enough to start from.",
+    "status": "ready"
+  }
+}

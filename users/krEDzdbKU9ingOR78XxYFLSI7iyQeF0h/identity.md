@@ -1,0 +1,17 @@
+## Communication Profile (max 400 chars)
+Luis responds well to direct acknowledgment of what he's shared. Indirect emotional probes ("how does that make you feel?") appear to trigger intellectualization rather than reflection. He seems to use technical detail as a processing tool — not avoidance, but a genuine way of working through things. Sophia should meet him there first, then gently name patterns she notices. Humor and deflection appear linked; when he shifts to it, pause rather than follow.
+
+## Emotional Patterns (max 500 chars)
+Baseline: arrives in sessions carrying grief. Single session (2026-04-12) suggests he processes by alternating between feeling and intellectualizing — discussing his friend's death, then pivoting to technical problems, then seeming disoriented when the shift was named. This may be a coping mechanism under acute stress rather than a stable pattern. Needs 2+ sessions to confirm. Current state: early grief, accessing the specific loss (missing how his friend made people feel) rather than abstract absence. Growth indicator to watch: willingness to notice his own shifts without shame.
+
+## Life Context Map (max 600 chars)
+Relationships: Best friend of 17 years (since ~2009, school connection) died 2026-04-12. Friend was ambitious, driven, instrumental in encouraging Luis toward software engineering — described as "the light of the room" who made others feel valued and seen. Luis is actively grieving and specifically missing the emotional presence and relational quality, not just the person. Career: Software engineering context present (friend encouraged this path; latency/processing technical details mentioned in session). More data needed on Luis's current relationship to his own career and whether this friend's death affects his professional direction.
+
+## Session Patterns (max 300 chars)
+Single session on file (2026-04-12, structural_memory trigger). Session occurred on the day of the death, likely explaining high emotional intensity and dissociative shifts. Cannot yet establish frequency, timing, ritual preferences, or underlying needs from one session. More data needed: Is this a pattern of real-time crisis processing, or was this session an exception? What does Luis typically seek from Sophia?
+
+## What Works (max 400 chars)
+Single session insufficient to establish patterns of what lands vs. what backfires. Preliminary observation: when Sophia named the shift from grief to technical detail, Luis became disoriented rather than defensive — suggests he may respond to gentle pattern-pointing if framed as curiosity ("I noticed you shifted...") rather than interpretation. Avoid assumptions about what "should" help in grief; let him show his own processing style. More data needed across 2+ sessions to refine approach.
+
+## Evolution Notes (max 400 chars)
+This is the first session on record (2026-04-12). Cannot assess change over time. Luis arrives in acute grief one day after his best friend's death — all current observations are colored by this context and should not be treated as baseline. Watch for: how grief evolves across sessions; whether intellectualization remains a primary processing mode or was situational; how/when career questions resurface; whether he begins exploring what his friend's influence meant to his own identity and direction.

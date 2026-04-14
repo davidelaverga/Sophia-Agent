@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import type { UIMessage } from '../components/session';
 import { debugLog } from '../lib/debug-logger';
 import { extractTextFromUiMessageStreamDump } from '../lib/ui-message-stream-parser';
+import { reconcileVoiceTranscript } from '../lib/voice-transcript-reconciliation';
 
 type ChatMessagePart = {
   type?: string;
@@ -84,6 +85,25 @@ export function useSessionMessageViewModel({
     const deduped: UIMessage[] = [];
     for (const message of mapped) {
       const previous = deduped[deduped.length - 1];
+      const overlappingVoiceUserTranscript =
+        previous?.role === 'user' &&
+        previous.voiceTranscript === true &&
+        message.role === 'user' &&
+        message.voiceTranscript === true;
+
+      if (overlappingVoiceUserTranscript) {
+        const reconciledTranscript = reconcileVoiceTranscript(previous.content, message.content);
+        if (reconciledTranscript.incremental) {
+          if (reconciledTranscript.changed) {
+            deduped[deduped.length - 1] = {
+              ...previous,
+              content: reconciledTranscript.text,
+            };
+          }
+          continue;
+        }
+      }
+
       const sameConsecutiveUserMessage =
         previous?.role === 'user' &&
         message.role === 'user' &&
