@@ -27,4 +27,10 @@ memory:
   enabled: false
 
 summarization:
-  enabled: false
+  enabled: true
+  trigger:
+    type: messages
+    value: 10
+  keep:
+    type: messages
+    value: 4

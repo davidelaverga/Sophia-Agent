@@ -393,8 +393,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Format memories for prompt injection
         memory_lines = []
         memory_ids = []
+        memory_contents = []
         for mem in results[:memory_limit]:
-            memory_lines.append(f"- {mem.get('content', '')}")
+            content = mem.get("content", "")
+            memory_contents.append(content)
+            memory_lines.append(f"- {content}")
             if mem.get("id"):
                 memory_ids.append(mem["id"])
 
@@ -403,6 +406,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
+            "injected_memory_contents": memory_lines,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }
 

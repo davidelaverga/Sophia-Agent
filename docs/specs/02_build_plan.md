@@ -59,7 +59,7 @@ body: { query: string, period: "this_week"|"this_month"|"overall" }
 3. Create `backend/src/sophia/` services directory
 4. Create `skills/public/sophia/` — copy all existing skill files
 5. Register `sophia_companion` in `langgraph.json` (points to sophia_agent/graph.py)
-6. Register `sophia_builder` in `langgraph.json` (points to lead_agent/graph.py unchanged)
+6. Register `sophia_builder` in `langgraph.json` (points to Sophia's dedicated builder agent)
 7. Write `SophiaState` TypedDict in `state.py`
 
 **Day 2–3: Minimal sophia_companion**

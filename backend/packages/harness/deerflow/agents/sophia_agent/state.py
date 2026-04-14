@@ -38,11 +38,23 @@ class SophiaState(AgentState):
 
     # Memory
     injected_memories: NotRequired[list[str]]
+    injected_memory_contents: NotRequired[list[str]]
 
     # Builder
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
+    builder_non_artifact_turns: NotRequired[int]
+    builder_last_tool_names: NotRequired[list[str]]
+    builder_tool_turn_summaries: NotRequired[list[dict]]
+    builder_allowed_urls: NotRequired[list[str]]
+    builder_search_sources: NotRequired[list[dict]]
+    builder_web_budget: NotRequired[dict]
+    allow_web_research: NotRequired[bool]
+    explicit_user_urls: NotRequired[list[str]]
+
+    # Planning
+    todos: NotRequired[list | None]
 
     # Prompt assembly — accumulated manually by before_agent middlewares for the current turn
     # only, then assembled in PromptAssemblyMiddleware before the model call. This must not

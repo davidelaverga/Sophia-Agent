@@ -65,6 +65,10 @@ class SubagentResult:
     final_state: dict[str, Any] | None = None
     owner_id: str | None = None
     cancel_requested: bool = False
+    last_ai_message_summary: dict[str, Any] | None = None
+    late_ai_message_summary: dict[str, Any] | None = None
+    timeout_observed_during_stream: bool = False
+    timed_out_at: datetime | None = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -255,6 +259,39 @@ class SubagentExecutor:
 
         return state
 
+    @staticmethod
+    def _summarize_content(content: Any, max_chars: int = 160) -> str | None:
+        if isinstance(content, str):
+            text = content.strip()
+            if not text:
+                return None
+            return text[:max_chars]
+        if isinstance(content, list):
+            chunks: list[str] = []
+            for block in content:
+                if isinstance(block, str):
+                    chunks.append(block.strip())
+                elif isinstance(block, dict) and isinstance(block.get("text"), str):
+                    chunks.append(block["text"].strip())
+            text = " ".join(part for part in chunks if part)
+            return text[:max_chars] if text else None
+        return None
+
+    def _summarize_ai_message(self, message: AIMessage) -> dict[str, Any]:
+        tool_calls = getattr(message, "tool_calls", []) or []
+        tool_names = [
+            tc.get("name")
+            for tc in tool_calls
+            if isinstance(tc, dict) and isinstance(tc.get("name"), str)
+        ]
+        return {
+            "message_id": getattr(message, "id", None),
+            "tool_call_count": len(tool_names),
+            "tool_names": tool_names,
+            "has_emit_builder_artifact": "emit_builder_artifact" in tool_names,
+            "text_preview": self._summarize_content(getattr(message, "content", None)),
+        }
+
     async def _aexecute(
         self,
         task: str,
@@ -282,6 +319,9 @@ class SubagentExecutor:
                 status=SubagentStatus.RUNNING,
                 started_at=datetime.now(),
             )
+
+        def _timed_out_externally() -> bool:
+            return result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT
 
         try:
             if cancel_event and cancel_event.is_set():
@@ -316,20 +356,61 @@ class SubagentExecutor:
 
                     final_state = chunk
 
+                    final_state = chunk
+
+                    messages = chunk.get("messages", [])
+                    last_message = messages[-1] if messages else None
+                    tool_names: list[str] = []
+                    if isinstance(last_message, AIMessage):
+                        message_summary = self._summarize_ai_message(last_message)
+                        tool_names = list(message_summary.get("tool_names", []))
+
+                        if _timed_out_externally():
+                            result.timeout_observed_during_stream = True
+                            result.late_ai_message_summary = message_summary
+                            logger.warning(
+                                f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; "
+                                f"late_tools={tool_names}"
+                            )
+                            return result
+
+                        result.last_ai_message_summary = message_summary
+                    elif _timed_out_externally():
+                        result.timeout_observed_during_stream = True
+                        logger.warning(
+                            f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; aborting local updates"
+                        )
+                        return result
+
                     previous_count = len(result.ai_messages)
                     self._collect_ai_messages_from_state(chunk, result)
                     if len(result.ai_messages) > previous_count:
-                        logger.info(
-                            f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
-                        )
+                        if tool_names:
+                            logger.info(
+                                f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message "
+                                f"#{len(result.ai_messages)} tools={tool_names}"
+                            )
+                        else:
+                            logger.info(
+                                f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
+                            )
             else:
                 final_state = await agent.ainvoke(state, config=run_config, context=context)  # type: ignore[arg-type]
                 self._collect_ai_messages_from_state(final_state, result)
+
+                messages = final_state.get("messages", []) if isinstance(final_state, dict) else []
+                for msg in reversed(messages):
+                    if isinstance(msg, AIMessage):
+                        result.last_ai_message_summary = self._summarize_ai_message(msg)
+                        break
 
             if cancel_event and cancel_event.is_set():
                 raise SubagentCancelledError("Execution cancelled by user")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+            if _timed_out_externally():
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} completed after timeout; ignoring completion write")
+                return result
 
             # Store final state for callers that need structured data (e.g., builder_result)
             result.final_state = final_state
@@ -374,6 +455,10 @@ class SubagentExecutor:
                     logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no messages in final state")
                     result.result = "No response generated"
 
+            if _timed_out_externally():
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} hit timeout before final status write; preserving TIMED_OUT")
+                return result
+
             result.status = SubagentStatus.COMPLETED
             result.completed_at = datetime.now()
 
@@ -384,6 +469,9 @@ class SubagentExecutor:
             result.completed_at = datetime.now()
 
         except Exception as e:
+            if _timed_out_externally():
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} raised after timeout; preserving TIMED_OUT state")
+                return result
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.status = SubagentStatus.FAILED
             result.error = str(e)
@@ -421,6 +509,9 @@ class SubagentExecutor:
         try:
             return asyncio.run(self._aexecute(task, result_holder, cancel_event))
         except Exception as e:
+            if result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT:
+                logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} execute() raised after timeout; preserving terminal TIMED_OUT")
+                return result_holder
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
             # Create a result with error if we don't have one
             if result_holder is not None:
@@ -486,24 +577,37 @@ class SubagentExecutor:
                     # Wait for execution with timeout
                     exec_result = execution_future.result(timeout=self.config.timeout_seconds)
                     with _background_tasks_lock:
-                        current = _background_tasks.get(task_id)
-                        if current is None or current.status == SubagentStatus.CANCELLED:
+                        task_state = _background_tasks.get(task_id)
+                        if task_state is None:
+                            logger.warning(f"[trace={self.trace_id}] Task {task_id} missing at completion write; skipping late update")
                             return
-                        current.status = exec_result.status
-                        current.result = exec_result.result
-                        current.error = exec_result.error
-                        current.completed_at = datetime.now()
-                        current.ai_messages = exec_result.ai_messages
-                        current.final_state = exec_result.final_state
+                        if task_state.status == SubagentStatus.CANCELLED:
+                            return
+                        if task_state.status == SubagentStatus.TIMED_OUT:
+                            logger.warning(
+                                f"[trace={self.trace_id}] Task {task_id} already timed out; ignoring late completion write"
+                            )
+                            return
+                        task_state.status = exec_result.status
+                        task_state.result = exec_result.result
+                        task_state.error = exec_result.error
+                        task_state.completed_at = exec_result.completed_at or datetime.now()
+                        task_state.ai_messages = exec_result.ai_messages
+                        task_state.final_state = exec_result.final_state
+                        task_state.last_ai_message_summary = exec_result.last_ai_message_summary
+                        task_state.late_ai_message_summary = exec_result.late_ai_message_summary
+                        task_state.timeout_observed_during_stream = exec_result.timeout_observed_during_stream
+                        task_state.timed_out_at = exec_result.timed_out_at
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:
-                        current = _background_tasks.get(task_id)
-                        if current is None or current.status == SubagentStatus.CANCELLED:
+                        task_state = _background_tasks.get(task_id)
+                        if task_state is None or task_state.status == SubagentStatus.CANCELLED:
                             return
-                        current.status = SubagentStatus.TIMED_OUT
-                        current.error = f"Execution timed out after {self.config.timeout_seconds} seconds"
-                        current.completed_at = datetime.now()
+                        task_state.status = SubagentStatus.TIMED_OUT
+                        task_state.error = f"Execution timed out after {self.config.timeout_seconds} seconds"
+                        task_state.completed_at = datetime.now()
+                        task_state.timed_out_at = task_state.completed_at
                     # Cancel the future (best effort - may not stop the actual execution)
                     cancel_event.set()
                     execution_future.cancel()
@@ -518,12 +622,15 @@ class SubagentExecutor:
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
-                    current = _background_tasks.get(task_id)
-                    if current is None or current.status == SubagentStatus.CANCELLED:
+                    task_state = _background_tasks.get(task_id)
+                    if task_state is None or task_state.status in {
+                        SubagentStatus.CANCELLED,
+                        SubagentStatus.TIMED_OUT,
+                    }:
                         return
-                    current.status = SubagentStatus.FAILED
-                    current.error = str(e)
-                    current.completed_at = datetime.now()
+                    task_state.status = SubagentStatus.FAILED
+                    task_state.error = str(e)
+                    task_state.completed_at = datetime.now()
             finally:
                 with _background_tasks_lock:
                     _background_task_futures.pop(task_id, None)

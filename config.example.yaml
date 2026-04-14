@@ -350,40 +350,32 @@ summarization:
   # Recommended: Use a lightweight, cost-effective model like "gpt-4o-mini" or similar
   model_name: null
 
-  # Trigger conditions - at least one required
-  # Summarization runs when ANY threshold is met (OR logic)
-  # You can specify a single trigger or a list of triggers
+  # Trigger: message-based is more predictable for Sophia since the system
+  # prompt already consumes ~9,144 tokens, leaving very little room with
+  # a token-based trigger of 15,564. 30 messages ≈ 15 voice exchanges.
   trigger:
-    # Trigger when token count reaches 15564
-    - type: tokens
-      value: 15564
-    # Uncomment to also trigger when message count reaches 50
-    # - type: messages
-    #   value: 50
-    # Uncomment to trigger when 80% of model's max input tokens is reached
-    # - type: fraction
-    #   value: 0.8
+    - type: messages
+      value: 30
 
-  # Context retention policy after summarization
-  # Specifies how much recent history to preserve
+  # Keep 16 messages (~8 voice exchanges) so Sophia retains enough
+  # conversational context for emotional continuity.
   keep:
-    # Keep the most recent 10 messages (recommended)
     type: messages
-    value: 10
-    # Alternative: Keep specific token count
-    # type: tokens
-    # value: 3000
-    # Alternative: Keep percentage of model's max input tokens
-    # type: fraction
-    # value: 0.3
+    value: 16
 
-  # Maximum tokens to keep when preparing messages for summarization
-  # Set to null to skip trimming (not recommended for very long conversations)
-  trim_tokens_to_summarize: 15564
+  # Trim the older messages to 6,000 tokens before sending to the
+  # summarization model — keeps the call fast and cheap.
+  trim_tokens_to_summarize: 6000
 
-  # Custom summary prompt template (null = use default LangChain prompt)
-  # The prompt should guide the model to extract important context
-  summary_prompt: null
+  # Custom prompt that produces third-person narration instead of the
+  # default "EXTRACTED CONTEXT:" header that Sophia confuses with user input.
+  summary_prompt: |
+    You are summarizing an earlier portion of a conversation between an AI companion named Sophia and a user.
+    Preserve: the user's emotional state, any decisions made, unresolved topics, and the current session goal.
+    Use third-person narration (e.g., "The user expressed frustration about...").
+    Do NOT use headers like "EXTRACTED CONTEXT" or any formatting that looks like user input.
+    Keep the summary under 300 words.
+    Begin with: "Earlier in this conversation:"
 
 # ============================================================================
 # Memory Configuration

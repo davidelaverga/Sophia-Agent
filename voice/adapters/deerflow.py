@@ -550,13 +550,14 @@ class DeerFlowBackendAdapter(BackendAdapter):
             "assistant_id": self.settings.assistant_id,
             "input": {"messages": [{"role": "user", "content": text}]},
             "config": {
+                "recursion_limit": 150,
                 "configurable": {
                     "user_id": user_id,
                     "platform": platform,
                     "ritual": ritual,
                     "context_mode": context_mode,
                     "thread_id": thread_id,
-                }
+                },
             },
             "stream_mode": list(_DEERFLOW_STREAM_MODE),
             "on_disconnect": _DEERFLOW_ON_DISCONNECT,

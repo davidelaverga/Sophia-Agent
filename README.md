@@ -42,7 +42,7 @@ Two services. One intelligence.
 │                                                           │
 │  LangGraph server (port 2024)                             │
 │  sophia_companion  ← 14-middleware chain                  │
-│  sophia_builder    ← DeerFlow lead_agent (unchanged)      │
+│  sophia_builder    ← Dedicated Sophia builder agent       │
 │  Mem0 Platform     ← 9-category typed persistent memory  │
 │  Offline pipeline  ← handoffs, extraction, identity, GEPA│
 └──────────────────────────────────────────────────────────┘
@@ -269,7 +269,7 @@ subagents:
 {
   "graphs": {
     "sophia_companion": "./backend/src/agents/sophia_agent/graph.py:graph",
-    "sophia_builder": "./backend/src/agents/lead_agent/graph.py:graph"
+    "sophia_builder": "deerflow.agents.sophia_agent.builder_agent:make_sophia_builder"
   },
   "env": ".env",
   "python_version": "3.12",
@@ -453,7 +453,7 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 
 Complex tasks rarely fit in a single pass. The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions.
 
-Sophia's `sophia_builder` delegates to DeerFlow's unmodified `lead_agent` graph. The companion asks all clarifying questions first, then hands off complete specs. The builder works asynchronously while the companion stays live.
+Sophia's `sophia_builder` is a dedicated builder agent. The companion asks all clarifying questions first, then hands off complete specs. The builder works asynchronously while the companion stays live, with guarded builder-only web research available on delegated tasks that explicitly allow it.
 
 ### Sandbox & File System
 
@@ -597,7 +597,7 @@ Full implementation detail in `docs/specs/`:
 
 ## Foundation
 
-Sophia is built on [DeerFlow](https://github.com/bytedance/deer-flow) (MIT License) by ByteDance. The unmodified `lead_agent` graph powers Sophia's builder subagent. DeerFlow's middleware pattern, LangGraph integration, sandbox system, and summarization pipeline are the architectural foundation.
+Sophia is built on [DeerFlow](https://github.com/bytedance/deer-flow) (MIT License) by ByteDance. DeerFlow's middleware pattern, LangGraph integration, sandbox system, and summarization pipeline are the architectural foundation, while Sophia's builder now runs through a dedicated builder agent with guarded tool access instead of reusing the lead agent wholesale.
 
 Sophia's companion intelligence, memory system, voice layer, and self-improvement loop are entirely new work built alongside DeerFlow — not on top of it as a dependency.
 

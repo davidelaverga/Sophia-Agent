@@ -11,6 +11,11 @@ from langchain_core.tools import tool
 from pydantic import BaseModel, Field
 
 
+class BuilderSourceReference(BaseModel):
+    title: str = Field(description="Human-readable source title.")
+    url: str = Field(description="Exact source URL used during research.")
+
+
 class BuilderArtifactInput(BaseModel):
     artifact_path: str = Field(description="Primary output file path (e.g., 'outputs/investor_deck.pptx').")
     artifact_type: Literal[
@@ -26,7 +31,10 @@ class BuilderArtifactInput(BaseModel):
     supporting_files: list[str] | None = Field(default=None, description="Additional files created alongside the primary artifact.")
     steps_completed: int = Field(description="Number of major steps executed during building.")
     decisions_made: list[str] = Field(description="2-4 key decisions made during the build process.")
-    sources_used: list[str] | None = Field(default=None, description="External sources consulted during building.")
+    sources_used: list[BuilderSourceReference | str] | None = Field(
+        default=None,
+        description="External sources consulted during building. Prefer structured {title, url} entries; legacy strings remain accepted.",
+    )
     companion_summary: str = Field(description="One sentence for the companion to paraphrase in Sophia's voice.")
     companion_tone_hint: str = Field(description="How the companion should present the result given the user's emotional state.")
     user_next_action: str | None = Field(default=None, description="What the user should do with the deliverable.")
@@ -40,4 +48,12 @@ def emit_builder_artifact(**kwargs) -> str:
     companion can relay the outcome to the user in Sophia's voice.
     IMPORTANT: Call this exactly once per build. After calling, do NOT call any more tools.
     Your build is complete after this tool call."""
-    return json.dumps(kwargs)
+    serializable = {
+        key: [item.model_dump() if hasattr(item, "model_dump") else item for item in value]
+        if isinstance(value, list)
+        else value.model_dump()
+        if hasattr(value, "model_dump")
+        else value
+        for key, value in kwargs.items()
+    }
+    return json.dumps(serializable)

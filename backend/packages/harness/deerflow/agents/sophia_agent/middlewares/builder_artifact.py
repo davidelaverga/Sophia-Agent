@@ -7,7 +7,7 @@ minimal result when the builder ends with plain text (no tool call).
 
 import logging
 import time
-from typing import NotRequired, override
+from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 class BuilderArtifactState(AgentState):
     builder_result: NotRequired[dict | None]
+    builder_non_artifact_turns: NotRequired[int]
+    builder_last_tool_names: NotRequired[list[str]]
+    builder_tool_turn_summaries: NotRequired[list[dict]]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -29,6 +32,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     state_schema = BuilderArtifactState
 
     @hook_config(can_jump_to=["end"])
+    @staticmethod
+    def _tool_names(tool_calls: list[dict[str, Any]]) -> list[str]:
+        names: list[str] = []
+        for call in tool_calls:
+            name = call.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    @staticmethod
+    def _append_turn_summary(state: BuilderArtifactState, summary: dict[str, Any]) -> list[dict]:
+        history = list(state.get("builder_tool_turn_summaries", []) or [])
+        history.append(summary)
+        return history[-12:]
     @override
     def after_model(self, state: BuilderArtifactState, runtime: Runtime) -> dict | None:
         """Capture emit_builder_artifact tool call result from latest messages."""
@@ -51,23 +68,57 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # AI message has tool calls -- look for emit_builder_artifact
             if tool_calls:
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
+                tool_names = self._tool_names(tool_calls)
+
                 if artifact_calls and len(artifact_calls) == len(tool_calls):
                     args = artifact_calls[-1].get("args", {})
+                    history = self._append_turn_summary(
+                        state,
+                        {
+                            "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                            "tool_names": tool_names,
+                            "has_emit_builder_artifact": True,
+                        },
+                    )
                     log_middleware(
                         "BuilderArtifact",
                         f"builder artifact captured: type={args.get('artifact_type')}, "
                         f"confidence={args.get('confidence')}",
                         _t0,
                     )
-                    return {"builder_result": args, "jump_to": "end"}
+                    return {
+                        "builder_result": args,
+                        "builder_non_artifact_turns": 0,
+                        "builder_last_tool_names": tool_names,
+                        "builder_tool_turn_summaries": history,
+                        "jump_to": "end",
+                    }
 
                 if artifact_calls:
                     log_middleware("BuilderArtifact", "mixed tool calls with builder artifact; loop continues", _t0)
                     return None
 
                 # Has tool calls but none are emit_builder_artifact -- agent loop continues
-                log_middleware("BuilderArtifact", "tool calls present but no builder artifact (loop continues)", _t0)
-                return None
+                non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+                history = self._append_turn_summary(
+                    state,
+                    {
+                        "turn": non_artifact_turns,
+                        "tool_names": tool_names,
+                        "has_emit_builder_artifact": False,
+                    },
+                )
+                joined_names = ", ".join(tool_names) if tool_names else "none"
+                log_middleware(
+                    "BuilderArtifact",
+                    f"tool calls present but no builder artifact: turn={non_artifact_turns}, tools={joined_names}",
+                    _t0,
+                )
+                return {
+                    "builder_non_artifact_turns": non_artifact_turns,
+                    "builder_last_tool_names": tool_names,
+                    "builder_tool_turn_summaries": history,
+                }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback
             fallback = {
@@ -81,8 +132,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "user_next_action": None,
                 "confidence": 0.3,
             }
+            history = self._append_turn_summary(
+                state,
+                {
+                    "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                    "tool_names": [],
+                    "has_emit_builder_artifact": False,
+                    "ended_with_plain_text": True,
+                },
+            )
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
-            return {"builder_result": fallback}
+            return {
+                "builder_result": fallback,
+                "builder_non_artifact_turns": 0,
+                "builder_last_tool_names": [],
+                "builder_tool_turn_summaries": history,
+            }
 
         log_middleware("BuilderArtifact", "no AI message found", _t0)
         return None

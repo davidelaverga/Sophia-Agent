@@ -7,12 +7,14 @@ import logging
 import os
 
 from langchain.agents import create_agent
+from langchain.agents.middleware import SummarizationMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -29,11 +31,41 @@ from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityM
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.config.summarization_config import get_summarization_config
+from deerflow.models import create_chat_model
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 from deerflow.sophia.tools.switch_to_builder import switch_to_builder
 
 logger = logging.getLogger(__name__)
+
+
+def _create_summarization_middleware() -> SummarizationMiddleware | None:
+    """Create a SummarizationMiddleware instance from app config."""
+    config = get_summarization_config()
+    if not config.enabled:
+        return None
+
+    trigger = None
+    if config.trigger is not None:
+        if isinstance(config.trigger, list):
+            trigger = [item.to_tuple() for item in config.trigger]
+        else:
+            trigger = config.trigger.to_tuple()
+
+    model = config.model_name if config.model_name else create_chat_model(thinking_enabled=False)
+
+    kwargs: dict = {
+        "model": model,
+        "trigger": trigger,
+        "keep": config.keep.to_tuple(),
+    }
+    if config.trim_tokens_to_summarize is not None:
+        kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
+    if config.summary_prompt is not None:
+        kwargs["summary_prompt"] = config.summary_prompt
+
+    return SummarizationMiddleware(**kwargs)
 
 
 def make_sophia_agent(config: RunnableConfig):
@@ -59,10 +91,13 @@ def make_sophia_agent(config: RunnableConfig):
         context_mode,
     )
 
+    # Voice needs short responses (1-3 sentences) — lower max_tokens reduces generation time.
+    # Text mode gets more room for longer responses.
+    voice_mode = platform in ("voice", "ios_voice")
     model = ChatAnthropic(
         model="claude-haiku-4-5-20251001",
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-        max_tokens=4096,
+        max_tokens=512 if voice_mode else 4096,
     )
 
     # Middleware chain — order is load-bearing.
@@ -92,15 +127,30 @@ def make_sophia_agent(config: RunnableConfig):
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
         # 12. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
-        # 13. Artifact system
+        # 13. Builder session tracking (must run before ArtifactMiddleware synthesis)
+        BuilderSessionMiddleware(),
+        # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
-        # 14. Deterministic Builder command routing for explicit document requests
+        # 15. Deterministic Builder command routing for explicit document requests
         BuilderCommandMiddleware(),
-        # Post-chain: prompt assembly, title
-        PromptAssemblyMiddleware(),
-        SophiaTitleMiddleware(),
-        # Note: summarization middleware will be wired during DeerFlow integration (Unit 14)
     ]
+
+    # 16. Summarization (config-driven trigger/keep policy)
+    summarization_middleware = _create_summarization_middleware()
+    if summarization_middleware is not None:
+        middlewares.append(summarization_middleware)
+
+    # Post-chain: prompt assembly, then caching, then title
+    from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+    middlewares.extend(
+        [
+            PromptAssemblyMiddleware(),
+            # Prompt caching AFTER assembly — adds cache_control to the assembled
+            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
+            AnthropicPromptCachingMiddleware(ttl="5m"),
+            SophiaTitleMiddleware(),
+        ]
+    )
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
     tools = [emit_artifact, switch_to_builder, retrieve_memories]

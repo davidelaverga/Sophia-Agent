@@ -163,6 +163,7 @@ export async function fetchBackendStreamWithBootstrap(
           messages: [{ role: 'user', content: backendPayload.message }],
         },
         config: {
+          recursion_limit: 150,
           configurable: {
             user_id: backendPayload.user_id,
             platform: backendPayload.platform || 'text',

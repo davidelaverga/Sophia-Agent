@@ -84,7 +84,7 @@ Ritual and context are passed as `configurable` parameters to the LangGraph serv
 │                                                          │
 │  LangGraph server (port 2024)                            │
 │  sophia_companion graph — 14-middleware chain            │
-│  sophia_builder — DeerFlow lead_agent as subagent        │
+│  sophia_builder — Dedicated Sophia builder subagent      │
 │  Mem0 Platform — 9-category typed persistent memory      │
 │  Offline pipeline — handoffs, extraction, identity, GEPA │
 └─────────────────────────────────────────────────────────┘
@@ -111,10 +111,10 @@ The core experience. Emotionally calibrated, ritual-aware, voice-first.
 ### Builder Mode (Subagent Delegation)
 Triggered when the user asks Sophia to CREATE something. Runs as a DeerFlow subagent via the `task()` pattern — the companion stays live in the conversation while the builder works in the background.
 
-- Graph: `sophia_builder` = DeerFlow `lead_agent` graph (unmodified)
+- Graph: `sophia_builder` = dedicated Sophia builder agent
 - Model: Claude Sonnet 4.6
-- Tools: Full DeerFlow toolset (bash, file ops, web search, present_files)
-- Middlewares: 7-step lean chain (no emotional middleware, no artifact system)
+- Tools: sandbox/file ops, `present_files`, `emit_builder_artifact`, and guarded builder-only web search/fetch
+- Middlewares: lean builder chain with task briefing, guarded web-research policy, todo tracking, and artifact capture
 - Companion relays progress: *"Still working, on step 2 of 3..."*
 - Clarification happens BEFORE `task()` call in the companion, not inside the builder
 
