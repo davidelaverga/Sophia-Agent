@@ -22,6 +22,7 @@ import {
   RecapMemoryOrbit,
   RecapEmptyState,
 } from '../../components/recap';
+import { BuilderDeliverableCard } from '../../components/session/ArtifactsPanel';
 import { haptic } from '../../hooks/useHaptics';
 import type { MemoryDecision } from '../../lib/recap-types';
 import { useRecapStore } from '../../stores/recap-store';
@@ -173,6 +174,15 @@ export default function RecapPage() {
           router.push('/journal');
         }}
       />
+
+      {artifacts.builderArtifact && (
+        <div className="mx-auto max-w-3xl px-4 pt-20">
+          <BuilderDeliverableCard
+            builderArtifact={artifacts.builderArtifact}
+            threadId={artifacts.threadId}
+          />
+        </div>
+      )}
       
       {/* Cinematic Memory Orbit Experience */}
       <RecapMemoryOrbit

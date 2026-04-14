@@ -161,6 +161,26 @@ describe('Session Store', () => {
     });
   });
 
+  describe('storeBuilderArtifact', () => {
+    it('should store builder artifacts in session state', () => {
+      const { createSession, storeBuilderArtifact } = useSessionStore.getState();
+
+      createSession('user-123', 'debrief', 'gaming');
+      storeBuilderArtifact({
+        artifactTitle: 'Postmortem draft',
+        artifactType: 'document',
+        artifactPath: 'mnt/user-data/outputs/postmortem.md',
+        decisionsMade: ['Removed the duplicate timeline'],
+      });
+
+      const state = useSessionStore.getState();
+      expect(state.session?.builderArtifact).toMatchObject({
+        artifactTitle: 'Postmortem draft',
+        artifactType: 'document',
+      });
+    });
+  });
+
   describe('incrementCompanionInvokes', () => {
     it('should track companion invocations', () => {
       const { createSession, incrementCompanionInvokes } = useSessionStore.getState();

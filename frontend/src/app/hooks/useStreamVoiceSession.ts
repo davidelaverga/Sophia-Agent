@@ -39,6 +39,7 @@ type UseStreamVoiceSessionOptions = {
   onUserTranscript?: (text: string) => void
   onAssistantResponse?: (text: string) => void
   onArtifacts?: (artifacts: Record<string, unknown>) => void
+  onBuilderTask?: (task: Record<string, unknown>) => void
 }
 
 type SophiaVoiceEventSource = "custom" | "sse"
@@ -256,6 +257,7 @@ export function useStreamVoiceSession(
     onUserTranscript,
     onAssistantResponse,
     onArtifacts,
+    onBuilderTask,
   } = options
 
   // --- State ---------------------------------------------------------------
@@ -279,6 +281,7 @@ export function useStreamVoiceSession(
   const credentialsRef = useRef<StreamVoiceCredentials | null>(null)
   const disconnectRequestKeyRef = useRef<string | null>(null)
   const onArtifactsRef = useRef(onArtifacts)
+  const onBuilderTaskRef = useRef(onBuilderTask)
   const onUserTranscriptRef = useRef(onUserTranscript)
   const onAssistantResponseRef = useRef(onAssistantResponse)
   const sessionIdRef = useRef(sessionId)
@@ -303,6 +306,7 @@ export function useStreamVoiceSession(
   // Keep refs current without re-binding effects
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
   useEffect(() => { onArtifactsRef.current = onArtifacts }, [onArtifacts])
+  useEffect(() => { onBuilderTaskRef.current = onBuilderTask }, [onBuilderTask])
   useEffect(() => { onUserTranscriptRef.current = onUserTranscript }, [onUserTranscript])
   useEffect(() => { onAssistantResponseRef.current = onAssistantResponse }, [onAssistantResponse])
   useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
@@ -852,6 +856,10 @@ export function useStreamVoiceSession(
       onArtifactsRef.current?.(data)
     }
 
+    if (type === "sophia.builder_task" && data) {
+      onBuilderTaskRef.current?.(data)
+    }
+
     if (type === "sophia.turn") {
       const phase = typeof data?.phase === "string"
         ? data.phase
@@ -1106,6 +1114,7 @@ export function useStreamVoiceSession(
       "sophia.transcript",
       "sophia.user_transcript",
       "sophia.artifact",
+      "sophia.builder_task",
       "sophia.turn",
       "sophia.turn_diagnostic",
     ] as const

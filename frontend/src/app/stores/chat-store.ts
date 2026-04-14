@@ -1,6 +1,7 @@
 "use client"
 
 import { create } from "zustand"
+import { createJSONStorage, persist } from 'zustand/middleware'
 
 import { copy } from "../copy"
 import { logger } from "../lib/error-logger"
@@ -100,7 +101,7 @@ const createMessage = (role: ChatMessage["role"], content: string, overrides: Pa
   ...overrides,
 })
 
-export const useChatStore = create<ChatStore>((set, get) => ({
+export const useChatStore = create<ChatStore>()(persist((set, get) => ({
   messages: [],
   composerValue: "",
   isLocked: false,
@@ -428,6 +429,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     })
   },
+}), {
+  name: 'sophia-chat-store',
+  storage: createJSONStorage(() => localStorage),
+  partialize: (state) => ({
+    conversationId: state.conversationId,
+  }),
 }))
 
 if (process.env.NODE_ENV !== "production") {

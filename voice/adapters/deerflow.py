@@ -21,9 +21,23 @@ logger = logging.getLogger(__name__)
 
 _DEERFLOW_WARMUP_USER_ID = "__voice_warmup__"
 _DEERFLOW_WARMUP_TEXT = "Warmup ping. Reply with a short acknowledgment."
-_DEERFLOW_STREAM_MODE = ["messages-tuple", "values"]
+_DEERFLOW_STREAM_MODE = ["messages-tuple", "values", "custom"]
 _DEERFLOW_ON_DISCONNECT = "cancel"
 _DEERFLOW_MULTITASK_STRATEGY = "rollback"
+_BUILDER_TASK_EVENT_TYPES = {
+    "task_started",
+    "task_running",
+    "task_completed",
+    "task_failed",
+    "task_timed_out",
+    "task_cancelled",
+}
+_BUILDER_TASK_TERMINAL_EVENT_TYPES = {
+    "task_completed",
+    "task_failed",
+    "task_timed_out",
+    "task_cancelled",
+}
 
 
 class DeerFlowBackendAdapter(BackendAdapter):
@@ -139,6 +153,10 @@ class DeerFlowBackendAdapter(BackendAdapter):
                 saw_artifact_tool = False
                 streamed_artifact: dict[str, object] | None = None
                 initial_values_artifact: dict[str, object] | None = None
+                final_values_artifact: dict[str, object] | None = None
+                final_builder_artifact: dict[str, object] | None = None
+                active_builder_task_ids: set[str] = set()
+                saw_builder_task_event = False
                 first_backend_event_logged = False
 
                 async for line in response.aiter_lines():
@@ -177,9 +195,15 @@ class DeerFlowBackendAdapter(BackendAdapter):
 
                     # Handle error events (SSE event line or data-level)
                     if current_event_type == "error":
+                        error_message = str(data.get("message") if isinstance(data, dict) else data)
+                        for builder_failure in self._build_active_builder_failure_events(
+                            active_builder_task_ids,
+                            error_message,
+                        ):
+                            yield BackendEvent.builder_task_payload(builder_failure)
                         yield BackendEvent.error_event(
                             "backend-stream",
-                            str(data.get("message") if isinstance(data, dict) else data),
+                            error_message,
                         )
                         return
 
@@ -187,30 +211,62 @@ class DeerFlowBackendAdapter(BackendAdapter):
                         isinstance(data, dict)
                         and data.get("type") in ("run_error", "error")
                     ):
+                        error_message = str(data.get("data", data.get("message", str(data))))
+                        for builder_failure in self._build_active_builder_failure_events(
+                            active_builder_task_ids,
+                            error_message,
+                        ):
+                            yield BackendEvent.builder_task_payload(builder_failure)
                         yield BackendEvent.error_event(
                             "backend-stream",
-                            str(data.get("data", data.get("message", str(data)))),
+                            error_message,
                         )
                         return
 
+                    builder_task_event = self._extract_builder_task_event(
+                        current_event_type,
+                        data,
+                        active_builder_task_ids,
+                    )
+                    if builder_task_event is not None:
+                        saw_builder_task_event = True
+                        yield BackendEvent.builder_task_payload(builder_task_event)
+                        continue
+
                     if current_event_type == "values":
                         values_artifact = self._extract_values_artifact(data)
+                        values_builder_artifact = self._extract_values_builder_artifact(data)
+                        if values_builder_artifact is not None:
+                            final_builder_artifact = values_builder_artifact
+
                         if values_artifact is None:
                             continue
 
+                        merged_values_artifact = values_artifact
+                        if values_builder_artifact is not None:
+                            merged_values_artifact = {
+                                **values_artifact,
+                                "builder_result": values_builder_artifact,
+                            }
+
                         if initial_values_artifact is None:
-                            initial_values_artifact = values_artifact
+                            initial_values_artifact = merged_values_artifact
+
+                        final_values_artifact = merged_values_artifact
 
                         if (
+                            not saw_builder_task_event
+                            and (
                             saw_artifact_tool
-                            or values_artifact != initial_values_artifact
+                                or merged_values_artifact != initial_values_artifact
+                            )
                         ):
                             logger.info(
                                 "voice.artifact source=values streamed_present=%s streamed_matches=%s early=true",
                                 streamed_artifact is not None,
-                                streamed_artifact == values_artifact,
+                                streamed_artifact == merged_values_artifact,
                             )
-                            yield BackendEvent.artifact_payload(values_artifact)
+                            yield BackendEvent.artifact_payload(merged_values_artifact)
                             return
                         continue
 
@@ -284,9 +340,25 @@ class DeerFlowBackendAdapter(BackendAdapter):
                             if artifact is not None:
                                 streamed_artifact = artifact
 
-                artifact = streamed_artifact
+                artifact = final_values_artifact or streamed_artifact
+                if artifact is not None and final_builder_artifact is not None and "builder_result" not in artifact:
+                    artifact = {
+                        **artifact,
+                        "builder_result": final_builder_artifact,
+                    }
+
                 if artifact is not None:
-                    logger.info("voice.artifact source=streamed fallback=true")
+                    if final_values_artifact is not None:
+                        logger.info(
+                            "voice.artifact source=values streamed_present=%s streamed_matches=%s early=false",
+                            streamed_artifact is not None,
+                            streamed_artifact == artifact,
+                        )
+                    else:
+                        logger.info(
+                            "voice.artifact source=streamed fallback=true builder_result_merged=%s",
+                            final_builder_artifact is not None,
+                        )
                     yield BackendEvent.artifact_payload(artifact)
                 elif saw_artifact_tool:
                     logger.error(
@@ -557,3 +629,92 @@ class DeerFlowBackendAdapter(BackendAdapter):
             return dict(artifact)
 
         return None
+
+    def _extract_values_builder_artifact(
+        self,
+        data: object,
+    ) -> dict[str, object] | None:
+        if not isinstance(data, dict):
+            return None
+
+        builder_result = data.get("builder_result")
+        if isinstance(builder_result, dict) and builder_result:
+            return dict(builder_result)
+
+        values = data.get("values")
+        if not isinstance(values, dict):
+            return None
+
+        builder_result = values.get("builder_result")
+        if isinstance(builder_result, dict) and builder_result:
+            return dict(builder_result)
+
+        return None
+
+    def _extract_builder_task_event(
+        self,
+        event_type: str,
+        data: object,
+        active_builder_task_ids: set[str],
+    ) -> dict[str, object] | None:
+        if not isinstance(data, dict):
+            return None
+
+        payload_type = data.get("type")
+        if isinstance(payload_type, str) and payload_type in _BUILDER_TASK_EVENT_TYPES:
+            normalized_type = payload_type
+        elif event_type in _BUILDER_TASK_EVENT_TYPES:
+            normalized_type = event_type
+        else:
+            return None
+
+        task_id = data.get("task_id")
+        if not isinstance(task_id, str) or not task_id:
+            return None
+
+        payload = dict(data)
+        payload.setdefault("type", normalized_type)
+
+        if normalized_type == "task_started":
+            if not self._is_builder_task_description(payload.get("description")):
+                return None
+            active_builder_task_ids.add(task_id)
+            return payload
+
+        if task_id not in active_builder_task_ids:
+            return None
+
+        if normalized_type in _BUILDER_TASK_TERMINAL_EVENT_TYPES:
+            active_builder_task_ids.discard(task_id)
+
+        return payload
+
+    @staticmethod
+    def _is_builder_task_description(description: object) -> bool:
+        return isinstance(description, str) and "builder" in description.lower()
+
+    @staticmethod
+    def _build_active_builder_failure_events(
+        active_builder_task_ids: set[str],
+        error_message: str,
+    ) -> list[dict[str, object]]:
+        if not active_builder_task_ids:
+            return []
+
+        normalized_error = error_message.lower()
+        failure_type = (
+            "task_timed_out"
+            if "timed out" in normalized_error or "timeout" in normalized_error
+            else "task_failed"
+        )
+
+        failure_events = [
+            {
+                "type": failure_type,
+                "task_id": task_id,
+                "error": error_message,
+            }
+            for task_id in active_builder_task_ids
+        ]
+        active_builder_task_ids.clear()
+        return failure_events

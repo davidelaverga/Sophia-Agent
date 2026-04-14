@@ -17,6 +17,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import SystemMessage
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import patch_dangling_tool_call_messages
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 
@@ -42,10 +43,17 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
         """Build messages with the assembled system prompt prepended."""
         _t0 = time.perf_counter()
 
+        patched_messages = patch_dangling_tool_call_messages(request.messages)
+        if patched_messages is not None:
+            request = request.override(messages=patched_messages)
+
         # Access system_prompt_blocks from the current state
         state = request.state
         blocks = state.get("system_prompt_blocks", [])
         if not blocks:
+            if patched_messages is not None:
+                log_middleware("PromptAssembly", "skipped assembly (patched dangling tool calls)", _t0)
+                return request
             log_middleware("PromptAssembly", "skipped (no blocks)", _t0)
             return None
 

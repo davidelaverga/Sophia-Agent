@@ -1,11 +1,14 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { useCompanionArtifactsRuntime } from '../companion-runtime/artifacts-runtime';
 import { useCompanionChatRuntime } from '../companion-runtime/chat-runtime';
 import { getCompanionRouteProfile } from '../companion-runtime/route-profiles';
 import { useCompanionStreamContract } from '../companion-runtime/stream-contract';
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
+import { cancelBuilderTask as requestBuilderTaskCancellation } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 
@@ -31,7 +34,9 @@ type UseSessionRouteExperienceParams = {
   backendSessionId?: string;
   userId?: string;
   artifacts: RitualArtifacts | null;
+  storedBuilderArtifact?: BuilderArtifactV1 | null;
   storeArtifacts: (artifacts: RitualArtifacts, summary?: string) => void;
+  storeBuilderArtifact: (builderArtifact: BuilderArtifactV1 | null) => void;
   updateSession: (updates: { artifacts?: RitualArtifacts; summary?: string }) => void;
   showUsageLimitModal: (info: unknown) => void;
   recordConnectivityFailure: () => void;
@@ -53,7 +58,9 @@ export function useSessionRouteExperience({
   backendSessionId,
   userId,
   artifacts,
+  storedBuilderArtifact,
   storeArtifacts,
+  storeBuilderArtifact,
   updateSession,
   showUsageLimitModal,
   recordConnectivityFailure,
@@ -66,6 +73,27 @@ export function useSessionRouteExperience({
   memoryHighlightsCount = 0,
 }: UseSessionRouteExperienceParams) {
   const routeProfile = getCompanionRouteProfile('ritual');
+  const [builderArtifact, setBuilderArtifact] = useState<BuilderArtifactV1 | null>(storedBuilderArtifact ?? null);
+  const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null);
+  const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false);
+
+  const setBuilderArtifactAndPersist = useCallback((nextBuilderArtifact: BuilderArtifactV1 | null) => {
+    setBuilderArtifact(nextBuilderArtifact);
+    if (nextBuilderArtifact) {
+      setBuilderTask((currentTask) => currentTask
+        ? {
+            ...currentTask,
+            phase: 'completed',
+            detail: currentTask.detail ?? 'Deliverable ready.',
+          }
+        : currentTask);
+    }
+    storeBuilderArtifact(nextBuilderArtifact);
+  }, [storeBuilderArtifact]);
+
+  const clearBuilderTask = useCallback(() => {
+    setBuilderTask(null);
+  }, []);
 
   const { artifactStatus, ingestArtifacts, applyMemoryCandidates } = useCompanionArtifactsRuntime({
     sessionId: activeSessionId,
@@ -86,6 +114,8 @@ export function useSessionRouteExperience({
 
   const { handleDataPart, handleFinish, markStreamTurnStarted } = useCompanionStreamContract({
     ingestArtifacts,
+    setBuilderArtifact: setBuilderArtifactAndPersist,
+    setBuilderTask,
     setInterrupt: routeIncomingInterrupt,
     setCurrentContext,
     setMessageMetadata,
@@ -93,6 +123,12 @@ export function useSessionRouteExperience({
     activeSessionId,
     activeThreadId,
   });
+
+  useEffect(() => {
+    setBuilderArtifact(storedBuilderArtifact ?? null);
+    setBuilderTask(null);
+    setIsCancellingBuilderTask(false);
+  }, [activeSessionId, storedBuilderArtifact]);
 
   useEffect(() => {
     if (!debugEnabled) return;
@@ -118,6 +154,49 @@ export function useSessionRouteExperience({
     recordConnectivityFailure,
     showToast,
   });
+
+  const cancelBuilderTask = useCallback(async () => {
+    if (!builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
+      return;
+    }
+
+    setIsCancellingBuilderTask(true);
+
+    try {
+      const response = await requestBuilderTaskCancellation(builderTask.taskId);
+      setBuilderTask((currentTask) => {
+        if (currentTask?.taskId !== builderTask.taskId) {
+          return currentTask;
+        }
+
+        return {
+          ...currentTask,
+          phase: 'cancelled',
+          detail: response.detail || 'Builder was cancelled before finishing the deliverable.',
+        };
+      });
+      showToast({
+        message: 'Builder cancelled.',
+        variant: 'info',
+        durationMs: 2400,
+      });
+    } catch (error) {
+      showToast({
+        message: error instanceof Error ? error.message : 'Could not cancel Builder right now.',
+        variant: 'warning',
+        durationMs: 3200,
+      });
+    } finally {
+      setIsCancellingBuilderTask(false);
+    }
+  }, [builderTask, isCancellingBuilderTask, showToast]);
+
+  const stopStreamingWithBuilderCancel = useCallback(() => {
+    if (builderTask?.taskId && builderTask.phase === 'running') {
+      void cancelBuilderTask();
+    }
+    void stopStreaming();
+  }, [builderTask, cancelBuilderTask, stopStreaming]);
 
   const { messages, latestAssistantMessage, setMessageTimestamp } = useSessionMessageViewModel({
     chatMessages,
@@ -161,6 +240,8 @@ export function useSessionRouteExperience({
     onUserTranscriptFallback: appendVoiceUserMessage,
     appendAssistantMessage: appendVoiceAssistantMessage,
     ingestArtifacts,
+    setBuilderArtifact: setBuilderArtifactAndPersist,
+    setBuilderTask,
     onRateLimitError: () => undefined,
     sendMessage,
     latestAssistantMessage,
@@ -183,6 +264,11 @@ export function useSessionRouteExperience({
   return {
     routeProfile,
     artifactStatus,
+    builderArtifact,
+    builderTask,
+    clearBuilderTask,
+    cancelBuilderTask,
+    isCancellingBuilderTask,
     ingestArtifacts,
     applyMemoryCandidates,
     chatMessages,
@@ -190,7 +276,7 @@ export function useSessionRouteExperience({
     chatStatus,
     chatError,
     setChatMessages,
-    stopStreaming,
+    stopStreaming: stopStreamingWithBuilderCancel,
     messages,
     latestAssistantMessage,
     setMessageTimestamp,

@@ -113,9 +113,15 @@ describe('ConversationView route shell', () => {
       <ConversationView
         routeExperience={{
           conversationId: 'chat-1',
+          threadId: 'thread-1',
           recapArtifacts: undefined,
           setRecapArtifacts: vi.fn(),
           chatArtifacts: { takeaway: 'Stay with the calmer thread.' },
+          builderArtifact: null,
+          builderTask: null,
+          clearBuilderTask: vi.fn(),
+          cancelBuilderTask: vi.fn(async () => undefined),
+          isCancellingBuilderTask: false,
           voiceState: {
             stage: 'idle',
             hasRetryableVoiceTurn: () => false,

@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useStreamVoiceSession } from '../hooks/useStreamVoiceSession';
+import {
+  parseBuilderArtifactPayload,
+  parseBuilderTaskPayload,
+} from '../session/stream-contract-adapters';
 
 import type { UseCompanionVoiceRuntimeOptions, CompanionVoiceRetryState } from './types';
 
@@ -13,6 +17,8 @@ export function useCompanionVoiceRuntime({
   onUserTranscriptFallback,
   appendAssistantMessage,
   ingestArtifacts,
+  setBuilderArtifact,
+  setBuilderTask,
   onRateLimitError: _onRateLimitError,
   sendMessage,
   latestAssistantMessage,
@@ -57,7 +63,20 @@ export function useCompanionVoiceRuntime({
 
   const handleVoiceArtifacts = useCallback((artifacts: Parameters<UseCompanionVoiceRuntimeOptions['ingestArtifacts']>[0]) => {
     ingestArtifacts(artifacts, 'voice');
-  }, [ingestArtifacts]);
+    const builderArtifact = parseBuilderArtifactPayload(
+      artifacts.builder_result ?? artifacts.builder_artifact ?? artifacts.builderArtifact
+    );
+    if (builderArtifact) {
+      setBuilderArtifact?.(builderArtifact);
+    }
+  }, [ingestArtifacts, setBuilderArtifact]);
+
+  const handleVoiceBuilderTask = useCallback((task: Record<string, unknown>) => {
+    const builderTask = parseBuilderTaskPayload(task);
+    if (builderTask) {
+      setBuilderTask?.(builderTask);
+    }
+  }, [setBuilderTask]);
 
   const voiceState = useStreamVoiceSession(userId, {
     sessionId,
@@ -65,6 +84,7 @@ export function useCompanionVoiceRuntime({
     onUserTranscript: handleUserTranscript,
     onAssistantResponse: handleAssistantResponse,
     onArtifacts: handleVoiceArtifacts,
+    onBuilderTask: handleVoiceBuilderTask,
   });
 
   const voiceError = voiceState.error;

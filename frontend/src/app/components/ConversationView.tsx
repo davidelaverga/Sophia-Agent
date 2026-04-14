@@ -1,13 +1,14 @@
 "use client"
 
 import { Mic, X } from "lucide-react"
-import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react"
+import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense } from "react"
 
 import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
 import type { ChatRouteExperience } from "../chat/useChatRouteExperience"
 import { useTranslation } from "../copy"
 import { useModeSwitch } from "../hooks/useModeSwitch"
 import { useReflectionPrompt } from "../hooks/useReflectionPrompt"
+import { buildThreadArtifactHref, getBuilderArtifactFiles } from "../lib/builder-artifacts"
 import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
 import { useChatStore } from "../stores/chat-store"
 import { useUiStore as useFocusModeStore } from "../stores/ui-store"
@@ -21,6 +22,7 @@ import { ArtifactsPanelErrorBoundary } from "./error-boundaries"
 import { ErrorBoundary } from "./ErrorBoundary"
 import { ModeToggle } from "./ModeToggle"
 import { ArtifactsPanel } from "./session"
+import { BuilderTaskNotice } from "./session/BuilderTaskNotice"
 import { InterruptCard } from "./session/InterruptCard"
 import { SessionFeedbackToast } from "./SessionFeedbackToast"
 import { RetryAction } from "./ui/RetryAction"
@@ -39,13 +41,20 @@ type ConversationViewProps = {
 export function ConversationView({ routeExperience }: ConversationViewProps) {
   const { t } = useTranslation()
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const artifactsPanelRef = useRef<HTMLDivElement>(null)
   const applyPrompt = useChatStore((state) => state.applyQuickPrompt)
   const lastCompletedTurnId = useChatStore((state) => state.lastCompletedTurnId)
   const {
     conversationId,
+    threadId,
     recapArtifacts,
     setRecapArtifacts,
     chatArtifacts,
+    builderArtifact,
+    builderTask,
+    clearBuilderTask,
+    cancelBuilderTask,
+    isCancellingBuilderTask,
     voiceState,
     pendingInterrupt,
     interruptQueue,
@@ -212,6 +221,30 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
     setRecapArtifacts,
   })
 
+  const builderPrimaryFile = useMemo(
+    () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
+    [builderArtifact],
+  )
+  const builderDownloadHref = useMemo(
+    () => buildThreadArtifactHref(threadId, builderPrimaryFile?.path, { download: true }),
+    [builderPrimaryFile?.path, threadId],
+  )
+
+  const handleOpenBuilderArtifact = useCallback(() => {
+    if (focusMode === 'voice') {
+      setMode('text')
+      setManualOverride(true)
+    }
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        artifactsPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    })
+  }, [focusMode, setMode, setManualOverride])
+
+  const showBuilderTaskNotice = Boolean(builderTask)
+
   // === Render ===
   
   return (
@@ -232,6 +265,18 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
             <Suspense fallback={<div className="h-48 animate-pulse rounded-2xl bg-sophia-surface" />}>
               <VoiceFocusView voiceState={voiceState} />
             </Suspense>
+            {showBuilderTaskNotice && builderTask && (
+              <BuilderTaskNotice
+                task={builderTask}
+                artifactTitle={builderArtifact?.artifactTitle}
+                onOpenArtifact={builderArtifact ? handleOpenBuilderArtifact : undefined}
+                downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                compact={true}
+                onDismiss={clearBuilderTask}
+                onCancel={cancelBuilderTask}
+                isCancelling={isCancellingBuilderTask}
+              />
+            )}
             {showVoiceRetry && (
               <div className="mt-3 px-1">
                 <RetryAction
@@ -289,19 +334,35 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
                 +{interruptQueue.length} {interruptQueue.length === 1 ? "question queued" : "questions queued"}
               </div>
             )}
+            {showBuilderTaskNotice && builderTask && (
+              <BuilderTaskNotice
+                task={builderTask}
+                artifactTitle={builderArtifact?.artifactTitle}
+                onOpenArtifact={builderArtifact ? handleOpenBuilderArtifact : undefined}
+                downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                onDismiss={clearBuilderTask}
+                onCancel={cancelBuilderTask}
+                isCancelling={isCancellingBuilderTask}
+              />
+            )}
             <Transcript onPromptSelect={handlePromptSelect} />
-            {chatArtifacts && (
-              <ArtifactsPanelErrorBoundary>
-                <ArtifactsPanel
-                  artifacts={chatArtifacts}
-                  presetType="chat"
-                  className="w-full"
-                  onReflectionTap={handleReflectionTap}
-                  onMemoryApprove={handleMemoryApprove}
-                  onMemoryReject={handleMemoryReject}
-                  memoryInlineFeedback={memoryInlineFeedback}
-                />
-              </ArtifactsPanelErrorBoundary>
+            {(chatArtifacts || builderArtifact) && (
+              <div ref={artifactsPanelRef}>
+                <ArtifactsPanelErrorBoundary>
+                  <ArtifactsPanel
+                    artifacts={chatArtifacts}
+                    builderArtifact={builderArtifact}
+                    presetType="chat"
+                    sessionId={conversationId}
+                    threadId={threadId}
+                    className="w-full"
+                    onReflectionTap={handleReflectionTap}
+                    onMemoryApprove={handleMemoryApprove}
+                    onMemoryReject={handleMemoryReject}
+                    memoryInlineFeedback={memoryInlineFeedback}
+                  />
+                </ArtifactsPanelErrorBoundary>
+              </div>
             )}
           </div>
         )}

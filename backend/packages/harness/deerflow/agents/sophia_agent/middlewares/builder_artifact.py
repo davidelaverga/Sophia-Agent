@@ -11,6 +11,7 @@ from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import hook_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 class BuilderArtifactState(AgentState):
-    messages: NotRequired[list]
     builder_result: NotRequired[dict | None]
 
 
@@ -28,6 +28,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     state_schema = BuilderArtifactState
 
+    @hook_config(can_jump_to=["end"])
     @override
     def after_model(self, state: BuilderArtifactState, runtime: Runtime) -> dict | None:
         """Capture emit_builder_artifact tool call result from latest messages."""
@@ -45,20 +46,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if getattr(msg, "type", None) != "ai":
                 continue
 
-            tool_calls = getattr(msg, "tool_calls", [])
+            tool_calls = getattr(msg, "tool_calls", []) or []
 
             # AI message has tool calls -- look for emit_builder_artifact
             if tool_calls:
-                for tc in tool_calls:
-                    if tc.get("name") == "emit_builder_artifact":
-                        args = tc.get("args", {})
-                        log_middleware(
-                            "BuilderArtifact",
-                            f"builder artifact captured: type={args.get('artifact_type')}, "
-                            f"confidence={args.get('confidence')}",
-                            _t0,
-                        )
-                        return {"builder_result": args}
+                artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
+                if artifact_calls and len(artifact_calls) == len(tool_calls):
+                    args = artifact_calls[-1].get("args", {})
+                    log_middleware(
+                        "BuilderArtifact",
+                        f"builder artifact captured: type={args.get('artifact_type')}, "
+                        f"confidence={args.get('confidence')}",
+                        _t0,
+                    )
+                    return {"builder_result": args, "jump_to": "end"}
+
+                if artifact_calls:
+                    log_middleware("BuilderArtifact", "mixed tool calls with builder artifact; loop continues", _t0)
+                    return None
 
                 # Has tool calls but none are emit_builder_artifact -- agent loop continues
                 log_middleware("BuilderArtifact", "tool calls present but no builder artifact (loop continues)", _t0)

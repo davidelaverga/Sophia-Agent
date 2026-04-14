@@ -1,3 +1,5 @@
+import type { BuilderArtifactV1 } from './builder-artifact';
+
 /**
  * Session Types for Sophia V2
  * Sprint 1+ Phase 3
@@ -168,6 +170,7 @@ export interface SessionEndRequest {
       reason?: string;
       source?: string;
     }>;
+    builder_artifact?: BuilderArtifactV1;
     memories_created?: number;
     status?: string;
   };
@@ -210,6 +213,7 @@ export interface SessionEndResponse {
       reason?: string;
       source?: string;
     }>;
+    builder_artifact?: BuilderArtifactV1;
     memories_created?: number;
     status?: string;
   };
@@ -347,6 +351,7 @@ export interface SessionClientStore {
   
   // Artifacts (populated on session end)
   artifacts?: RitualArtifacts;
+  builderArtifact?: BuilderArtifactV1;
   summary?: string;
 }
 

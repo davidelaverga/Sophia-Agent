@@ -20,6 +20,8 @@ describe('useCompanionStreamContract', () => {
     const { result } = renderHook(() =>
       useCompanionStreamContract({
         ingestArtifacts,
+        setBuilderArtifact: vi.fn(),
+        setBuilderTask: vi.fn(),
         setInterrupt: vi.fn(),
         setCurrentContext: vi.fn(),
         setMessageMetadata: vi.fn(),
@@ -43,6 +45,8 @@ describe('useCompanionStreamContract', () => {
     const { result } = renderHook(() =>
       useCompanionStreamContract({
         ingestArtifacts: vi.fn(),
+        setBuilderArtifact: vi.fn(),
+        setBuilderTask: vi.fn(),
         setInterrupt,
         setCurrentContext: vi.fn(),
         setMessageMetadata: vi.fn(),
@@ -74,6 +78,8 @@ describe('useCompanionStreamContract', () => {
     const { result } = renderHook(() =>
       useCompanionStreamContract({
         ingestArtifacts: vi.fn(),
+        setBuilderArtifact: vi.fn(),
+        setBuilderTask: vi.fn(),
         setInterrupt: vi.fn(),
         setCurrentContext,
         setMessageMetadata,
@@ -112,6 +118,76 @@ describe('useCompanionStreamContract', () => {
     );
     expect(emitTimingMock).toHaveBeenCalledWith('session.stream.turn_ms', 1234, {
       session_id: 'session-active',
+    });
+  });
+
+  it('routes builder artifact data parts to the caller', () => {
+    const setBuilderArtifact = vi.fn();
+
+    const { result } = renderHook(() =>
+      useCompanionStreamContract({
+        ingestArtifacts: vi.fn(),
+        setBuilderArtifact,
+        setBuilderTask: vi.fn(),
+        setInterrupt: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        sessionId: 'session-1',
+      })
+    );
+
+    act(() => {
+      result.current.handleDataPart({
+        type: 'data-builderArtifactV1',
+        data: {
+          artifact_title: 'Sprint brief',
+          artifact_type: 'document',
+          artifact_path: 'outputs/sprint-brief.md',
+          decisions_made: [],
+        },
+      });
+    });
+
+    expect(setBuilderArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({
+        artifactTitle: 'Sprint brief',
+        artifactPath: 'mnt/user-data/outputs/sprint-brief.md',
+      })
+    );
+  });
+
+  it('routes builder task data parts to the caller', () => {
+    const setBuilderTask = vi.fn();
+
+    const { result } = renderHook(() =>
+      useCompanionStreamContract({
+        ingestArtifacts: vi.fn(),
+        setBuilderArtifact: vi.fn(),
+        setBuilderTask,
+        setInterrupt: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        sessionId: 'session-1',
+      })
+    );
+
+    act(() => {
+      result.current.handleDataPart({
+        type: 'data-builderTaskV1',
+        data: {
+          phase: 'failed',
+          task_id: 'task-builder-1',
+          label: 'Builder: document about the dangers of war',
+          detail: 'Timed out while preparing the draft.',
+        },
+      });
+    });
+
+    expect(setBuilderTask).toHaveBeenCalledWith({
+      phase: 'failed',
+      taskId: 'task-builder-1',
+      label: 'Builder: document about the dangers of war',
+      detail: 'Timed out while preparing the draft.',
     });
   });
 });

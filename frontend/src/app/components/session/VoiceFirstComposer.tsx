@@ -44,6 +44,8 @@ interface VoiceFirstComposerProps {
   micOnboardingId?: string;
   /** Text-only mode: hides mic, auto-expands text area, auto-focuses input */
   textOnly?: boolean;
+  /** Slot rendered between mic button and text area — used for ModeToggle in voice mode */
+  slotBeforeText?: React.ReactNode;
 }
 
 const VOICE_STATUS_LABELS: Record<VoiceStatus, string> = {
@@ -75,6 +77,7 @@ export function VoiceFirstComposer({
   containerOnboardingId,
   micOnboardingId,
   textOnly = false,
+  slotBeforeText,
 }: VoiceFirstComposerProps) {
   const [isTextExpanded, setIsTextExpanded] = useState(false);
   const [isPTT, setIsPTT] = useState(false);
@@ -102,6 +105,13 @@ export function VoiceFirstComposer({
 
   // In textOnly mode, the text area is always expanded
   const effectiveTextExpanded = textOnly || isTextExpanded;
+  const textModeMicLabel = voiceStatus === 'listening'
+    ? 'stop voice'
+    : voiceStatus === 'speaking'
+      ? 'interrupt voice'
+      : voiceStatus === 'thinking' || isTyping
+        ? 'voice busy'
+        : 'tap mic to speak';
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartYRef.current = e.touches[0]?.clientY ?? null;
@@ -212,7 +222,9 @@ export function VoiceFirstComposer({
         
         {/* Main Controls */}
         <div className="flex flex-col items-center gap-3">
-          
+          {/* Slot: ModeToggle or other controls above the primary input controls */}
+          {slotBeforeText}
+
           {/* Mic Hero Button — hidden in text-only mode */}
           {!textOnly && (
           <div className="relative">
@@ -312,27 +324,55 @@ export function VoiceFirstComposer({
             )}
           </div>
           )}
-          
-          {/* Text Input Toggle & Collapsible Area — text mode only in voice, always in text-only */}
+
+          {/* Text-mode mic CTA lives under the mode toggle, inside the composer */}
+          {textOnly && (
+          <div className="flex justify-center">
+            <button
+              type="button"
+              onClick={handleMicClickInternal}
+              disabled={disabled || voiceStatus === 'thinking'}
+              aria-label={textModeMicLabel}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[11px] tracking-[0.08em] lowercase transition-all duration-300',
+                disabled || voiceStatus === 'thinking'
+                  ? 'cursor-not-allowed opacity-50'
+                  : 'hover:opacity-100'
+              )}
+              style={{
+                borderColor: 'var(--cosmic-border-soft)',
+                background: 'color-mix(in srgb, var(--cosmic-panel-soft) 78%, transparent)',
+                color: 'var(--cosmic-text-whisper)',
+              }}
+            >
+              <Mic className="h-3.5 w-3.5" />
+              <span>{textModeMicLabel}</span>
+            </button>
+          </div>
+          )}
+
+          {/* Text Input Toggle & Collapsible Area — text mode only */}
           {textOnly && (
           <div className="w-full">
             {!effectiveTextExpanded ? (
               // Collapsed state - just a hint button
-              <button
-                type="button"
-                onClick={handleTextToggle}
-                disabled={disabled}
-                aria-label="Switch to text input"
-                className={cn(
-                  'cosmic-focus-ring w-full rounded py-2 text-center text-sm transition-colors',
-                  disabled
-                    ? 'cursor-not-allowed'
-                    : 'hover:opacity-100'
-                )}
-                style={{ color: disabled ? 'var(--cosmic-text-faint)' : 'var(--cosmic-text-whisper)', opacity: disabled ? 1 : 0.88 }}
-              >
-                or type instead...
-              </button>
+              <div className="space-y-2 text-center">
+                <button
+                  type="button"
+                  onClick={handleTextToggle}
+                  disabled={disabled}
+                  aria-label="Switch to text input"
+                  className={cn(
+                    'cosmic-focus-ring w-full rounded py-2 text-center text-sm transition-colors',
+                    disabled
+                      ? 'cursor-not-allowed'
+                      : 'hover:opacity-100'
+                  )}
+                  style={{ color: disabled ? 'var(--cosmic-text-faint)' : 'var(--cosmic-text-whisper)', opacity: disabled ? 1 : 0.88 }}
+                >
+                  or type instead...
+                </button>
+              </div>
             ) : (
               // Expanded text input
               <div className="animate-fadeIn space-y-2" onTouchStart={textOnly ? undefined : handleTouchStart} onTouchEnd={textOnly ? undefined : handleTouchEnd}>
@@ -411,7 +451,7 @@ export function VoiceFirstComposer({
                     )}
                   </button>
                 </div>
-                
+
                 {/* Collapse hint — hidden in text-only mode */}
                 {!textOnly && (
                 <p className="text-center text-[10px]" style={{ color: 'var(--cosmic-text-faint)' }}>

@@ -12,6 +12,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -93,6 +94,8 @@ def make_sophia_agent(config: RunnableConfig):
         Mem0MemoryMiddleware(user_id),
         # 13. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
+        # 14. Deterministic Builder command routing for explicit document requests
+        BuilderCommandMiddleware(),
         # Post-chain: prompt assembly, title
         PromptAssemblyMiddleware(),
         SophiaTitleMiddleware(),

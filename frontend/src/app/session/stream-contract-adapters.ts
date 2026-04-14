@@ -1,5 +1,8 @@
-import { asRecord, readString } from '../lib/record-parsers';
+import { normalizeBuilderArtifactPayload } from '../lib/builder-artifacts';
+import { asRecord, readNumber, readString } from '../lib/record-parsers';
 import { InterruptPayloadSchema } from '../lib/schemas/session-schemas';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { BuilderTaskPhaseV1, BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 
@@ -15,6 +18,20 @@ export type StreamContractPart = {
   type: string;
   data: unknown;
 };
+
+const BUILDER_TASK_PHASE_MAP = {
+  running: 'running',
+  completed: 'completed',
+  failed: 'failed',
+  timed_out: 'timed_out',
+  cancelled: 'cancelled',
+  task_started: 'running',
+  task_running: 'running',
+  task_completed: 'completed',
+  task_failed: 'failed',
+  task_timed_out: 'timed_out',
+  task_cancelled: 'cancelled',
+} as const satisfies Record<string, BuilderTaskPhaseV1>;
 
 export function normalizeStreamDataPart(dataPart: unknown): StreamContractPart | null {
   const part = asRecord(dataPart);
@@ -60,6 +77,37 @@ export function parseArtifactsPayload(data: unknown): StreamArtifactsPayload | n
   }
 
   return payload;
+}
+
+export function parseBuilderArtifactPayload(data: unknown): BuilderArtifactV1 | null {
+  return normalizeBuilderArtifactPayload(data);
+}
+
+export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
+  const record = asRecord(data);
+  if (!record) return null;
+
+  const rawPhase = readString(record, 'phase') ?? readString(record, 'type');
+  const phase = rawPhase ? BUILDER_TASK_PHASE_MAP[rawPhase] : undefined;
+  if (!phase) {
+    return null;
+  }
+
+  const taskId = readString(record, 'taskId') ?? readString(record, 'task_id');
+  const label = readString(record, 'label') ?? readString(record, 'description');
+  const detail = readString(record, 'detail')
+    ?? (rawPhase === 'task_started' && !label ? 'Builder is working on the deliverable.' : undefined);
+  const messageIndex = readNumber(record, 'messageIndex') ?? readNumber(record, 'message_index');
+  const totalMessages = readNumber(record, 'totalMessages') ?? readNumber(record, 'total_messages');
+
+  return {
+    phase,
+    ...(taskId ? { taskId } : {}),
+    ...(label ? { label } : {}),
+    ...(detail ? { detail } : {}),
+    ...(typeof messageIndex === 'number' ? { messageIndex } : {}),
+    ...(typeof totalMessages === 'number' ? { totalMessages } : {}),
+  };
 }
 
 function normalizeInterruptAliases(raw: Record<string, unknown>): Record<string, unknown> {

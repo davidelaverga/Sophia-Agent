@@ -711,12 +711,19 @@ async def create_agent(**kwargs) -> Agent:
     )
 
     original_note_first_text_emitted = llm.note_first_text_emitted
+    original_note_backend_progress = llm.note_backend_progress
 
     def _note_first_text_emitted(user_id: str) -> None:
         coordinator.on_backend_progress()
         original_note_first_text_emitted(user_id)
 
     llm.note_first_text_emitted = _note_first_text_emitted
+
+    def _note_backend_progress(user_id: str) -> None:
+        coordinator.on_backend_progress()
+        original_note_backend_progress(user_id)
+
+    llm.note_backend_progress = _note_backend_progress
 
     async def _handle_backend_stall(participant: object | None) -> None:
         user_id = getattr(participant, "user_id", None)

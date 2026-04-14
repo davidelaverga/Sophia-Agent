@@ -4,6 +4,7 @@ import asyncio
 import logging
 import threading
 import uuid
+from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
@@ -31,6 +32,11 @@ class SubagentStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     TIMED_OUT = "timed_out"
+    CANCELLED = "cancelled"
+
+
+class SubagentCancelledError(Exception):
+    """Raised when a background subagent task is cancelled."""
 
 
 @dataclass
@@ -57,6 +63,8 @@ class SubagentResult:
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
     final_state: dict[str, Any] | None = None
+    owner_id: str | None = None
+    cancel_requested: bool = False
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -67,6 +75,8 @@ class SubagentResult:
 # Global storage for background task results
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
+_background_task_futures: dict[str, Future[Any]] = {}
+_background_task_cancel_events: dict[str, threading.Event] = {}
 
 # Thread pool for background task scheduling and orchestration
 _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
@@ -135,6 +145,7 @@ class SubagentExecutor:
         trace_id: str | None = None,
         pre_built_agent=None,
         extra_configurable: dict[str, Any] | None = None,
+        stream_messages: bool = True,
     ):
         """Initialize the executor.
 
@@ -148,6 +159,9 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
             pre_built_agent: Pre-built agent instance — bypasses _create_agent().
             extra_configurable: Additional configurable dict merged into run_config.
+            stream_messages: When True, execute via agent.astream() and collect AI
+                messages incrementally. When False, execute via agent.ainvoke() and
+                collect AI messages from the final state only.
         """
         self.config = config
         self.parent_model = parent_model
@@ -158,6 +172,7 @@ class SubagentExecutor:
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.pre_built_agent = pre_built_agent
         self.extra_configurable = extra_configurable
+        self.stream_messages = stream_messages
 
         # Filter tools based on config
         self.tools = _filter_tools(
@@ -167,6 +182,32 @@ class SubagentExecutor:
         )
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
+
+    @staticmethod
+    def _append_ai_message(result: SubagentResult, message: AIMessage) -> None:
+        """Append a unique AI message to the result holder."""
+        message_dict = message.model_dump()
+        message_id = message_dict.get("id")
+        if message_id:
+            is_duplicate = any(msg.get("id") == message_id for msg in result.ai_messages)
+        else:
+            is_duplicate = message_dict in result.ai_messages
+
+        if not is_duplicate:
+            result.ai_messages.append(message_dict)
+
+    def _collect_ai_messages_from_state(
+        self,
+        state: dict[str, Any] | None,
+        result: SubagentResult,
+    ) -> None:
+        """Collect AI messages from a state snapshot into the result holder."""
+        if not state:
+            return
+
+        for message in state.get("messages", []):
+            if isinstance(message, AIMessage):
+                self._append_ai_message(result, message)
 
     def _create_agent(self):
         """Create the agent instance. Uses pre_built_agent if provided."""
@@ -214,7 +255,12 @@ class SubagentExecutor:
 
         return state
 
-    async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    async def _aexecute(
+        self,
+        task: str,
+        result_holder: SubagentResult | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SubagentResult:
         """Execute a task asynchronously.
 
         Args:
@@ -238,6 +284,9 @@ class SubagentExecutor:
             )
 
         try:
+            if cancel_event and cancel_event.is_set():
+                raise SubagentCancelledError("Execution cancelled by user")
+
             agent = self._create_agent()
             state = self._build_initial_state(task)
 
@@ -257,32 +306,28 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
-            # Use stream instead of invoke to get real-time updates
-            # This allows us to collect AI messages as they are generated
             final_state = None
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                final_state = chunk
+            if self.stream_messages:
+                # Use stream mode when callers need progressive AI message updates
+                # (for example the generic task tool's task_running events).
+                async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+                    if cancel_event and cancel_event.is_set():
+                        raise SubagentCancelledError("Execution cancelled by user")
 
-                # Extract AI messages from the current state
-                messages = chunk.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    # Check if this is a new AI message
-                    if isinstance(last_message, AIMessage):
-                        # Convert message to dict for serialization
-                        message_dict = last_message.model_dump()
-                        # Only add if it's not already in the list (avoid duplicates)
-                        # Check by comparing message IDs if available, otherwise compare full dict
-                        message_id = message_dict.get("id")
-                        is_duplicate = False
-                        if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in result.ai_messages)
-                        else:
-                            is_duplicate = message_dict in result.ai_messages
+                    final_state = chunk
 
-                        if not is_duplicate:
-                            result.ai_messages.append(message_dict)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
+                    previous_count = len(result.ai_messages)
+                    self._collect_ai_messages_from_state(chunk, result)
+                    if len(result.ai_messages) > previous_count:
+                        logger.info(
+                            f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
+                        )
+            else:
+                final_state = await agent.ainvoke(state, config=run_config, context=context)  # type: ignore[arg-type]
+                self._collect_ai_messages_from_state(final_state, result)
+
+            if cancel_event and cancel_event.is_set():
+                raise SubagentCancelledError("Execution cancelled by user")
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
 
@@ -332,6 +377,12 @@ class SubagentExecutor:
             result.status = SubagentStatus.COMPLETED
             result.completed_at = datetime.now()
 
+        except SubagentCancelledError as e:
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled")
+            result.status = SubagentStatus.CANCELLED
+            result.error = str(e)
+            result.completed_at = datetime.now()
+
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
             result.status = SubagentStatus.FAILED
@@ -340,7 +391,12 @@ class SubagentExecutor:
 
         return result
 
-    def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    def execute(
+        self,
+        task: str,
+        result_holder: SubagentResult | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
 
         This method runs the async execution in a new event loop, allowing
@@ -363,7 +419,7 @@ class SubagentExecutor:
         # an async context where an event loop already exists). Subagent execution
         # errors are handled within _aexecute() and returned as FAILED status.
         try:
-            return asyncio.run(self._aexecute(task, result_holder))
+            return asyncio.run(self._aexecute(task, result_holder, cancel_event))
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
             # Create a result with error if we don't have one
@@ -380,7 +436,7 @@ class SubagentExecutor:
             result.completed_at = datetime.now()
             return result
 
-    def execute_async(self, task: str, task_id: str | None = None) -> str:
+    def execute_async(self, task: str, task_id: str | None = None, owner_id: str | None = None) -> str:
         """Start a task execution in the background.
 
         Args:
@@ -399,48 +455,78 @@ class SubagentExecutor:
             task_id=task_id,
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
+            owner_id=owner_id,
         )
+        cancel_event = threading.Event()
 
         logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
 
         with _background_tasks_lock:
             _background_tasks[task_id] = result
+            _background_task_cancel_events[task_id] = cancel_event
 
         # Submit to scheduler pool
         def run_task():
             with _background_tasks_lock:
-                _background_tasks[task_id].status = SubagentStatus.RUNNING
-                _background_tasks[task_id].started_at = datetime.now()
-                result_holder = _background_tasks[task_id]
+                current = _background_tasks.get(task_id)
+                if current is None or current.status == SubagentStatus.CANCELLED:
+                    return
+                current.status = SubagentStatus.RUNNING
+                current.started_at = datetime.now()
+                result_holder = current
 
             try:
                 # Submit execution to execution pool with timeout
                 # Pass result_holder so execute() can update it in real-time
-                execution_future: Future = _execution_pool.submit(self.execute, task, result_holder)
+                execution_future: Future = _execution_pool.submit(self.execute, task, result_holder, cancel_event)
+                with _background_tasks_lock:
+                    if task_id in _background_tasks:
+                        _background_task_futures[task_id] = execution_future
                 try:
                     # Wait for execution with timeout
                     exec_result = execution_future.result(timeout=self.config.timeout_seconds)
                     with _background_tasks_lock:
-                        _background_tasks[task_id].status = exec_result.status
-                        _background_tasks[task_id].result = exec_result.result
-                        _background_tasks[task_id].error = exec_result.error
-                        _background_tasks[task_id].completed_at = datetime.now()
-                        _background_tasks[task_id].ai_messages = exec_result.ai_messages
-                        _background_tasks[task_id].final_state = exec_result.final_state
+                        current = _background_tasks.get(task_id)
+                        if current is None or current.status == SubagentStatus.CANCELLED:
+                            return
+                        current.status = exec_result.status
+                        current.result = exec_result.result
+                        current.error = exec_result.error
+                        current.completed_at = datetime.now()
+                        current.ai_messages = exec_result.ai_messages
+                        current.final_state = exec_result.final_state
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:
-                        _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
-                        _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
-                        _background_tasks[task_id].completed_at = datetime.now()
+                        current = _background_tasks.get(task_id)
+                        if current is None or current.status == SubagentStatus.CANCELLED:
+                            return
+                        current.status = SubagentStatus.TIMED_OUT
+                        current.error = f"Execution timed out after {self.config.timeout_seconds} seconds"
+                        current.completed_at = datetime.now()
                     # Cancel the future (best effort - may not stop the actual execution)
+                    cancel_event.set()
                     execution_future.cancel()
+                except FuturesCancelledError:
+                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} future cancelled")
+                    with _background_tasks_lock:
+                        current = _background_tasks.get(task_id)
+                        if current is not None and current.status != SubagentStatus.CANCELLED:
+                            current.status = SubagentStatus.CANCELLED
+                            current.error = "Execution cancelled by user"
+                            current.completed_at = datetime.now()
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
-                    _background_tasks[task_id].status = SubagentStatus.FAILED
-                    _background_tasks[task_id].error = str(e)
-                    _background_tasks[task_id].completed_at = datetime.now()
+                    current = _background_tasks.get(task_id)
+                    if current is None or current.status == SubagentStatus.CANCELLED:
+                        return
+                    current.status = SubagentStatus.FAILED
+                    current.error = str(e)
+                    current.completed_at = datetime.now()
+            finally:
+                with _background_tasks_lock:
+                    _background_task_futures.pop(task_id, None)
 
         _scheduler_pool.submit(run_task)
         return task_id
@@ -497,9 +583,12 @@ def cleanup_background_task(task_id: str) -> None:
             SubagentStatus.COMPLETED,
             SubagentStatus.FAILED,
             SubagentStatus.TIMED_OUT,
+            SubagentStatus.CANCELLED,
         }
         if is_terminal_status or result.completed_at is not None:
             del _background_tasks[task_id]
+            _background_task_futures.pop(task_id, None)
+            _background_task_cancel_events.pop(task_id, None)
             logger.debug("Cleaned up background task: %s", task_id)
         else:
             logger.debug(
@@ -507,3 +596,44 @@ def cleanup_background_task(task_id: str) -> None:
                 task_id,
                 result.status.value if hasattr(result.status, "value") else result.status,
             )
+
+
+def cancel_background_task(task_id: str, reason: str = "Execution cancelled by user") -> SubagentResult | None:
+    """Cancel a running background task by ID.
+
+    Marks the task as cancelled immediately so polling callers can stop,
+    signals the execution loop to exit cooperatively, and attempts to cancel
+    the underlying Future if it has not started yet.
+    """
+
+    execution_future: Future[Any] | None = None
+    cancel_event: threading.Event | None = None
+
+    with _background_tasks_lock:
+        result = _background_tasks.get(task_id)
+        if result is None:
+            return None
+
+        if result.status in {
+            SubagentStatus.COMPLETED,
+            SubagentStatus.FAILED,
+            SubagentStatus.TIMED_OUT,
+            SubagentStatus.CANCELLED,
+        }:
+            return result
+
+        result.cancel_requested = True
+        result.status = SubagentStatus.CANCELLED
+        result.error = reason
+        result.completed_at = datetime.now()
+        execution_future = _background_task_futures.get(task_id)
+        cancel_event = _background_task_cancel_events.get(task_id)
+
+    if cancel_event is not None:
+        cancel_event.set()
+
+    if execution_future is not None:
+        execution_future.cancel()
+
+    logger.info("Cancelled background task: %s", task_id)
+    return result
