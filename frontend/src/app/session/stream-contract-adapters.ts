@@ -19,13 +19,19 @@ export type StreamContractPart = {
   data: unknown;
 };
 
-const BUILDER_TASK_PHASES = new Set<BuilderTaskPhaseV1>([
-  'running',
-  'completed',
-  'failed',
-  'timed_out',
-  'cancelled',
-]);
+const BUILDER_TASK_PHASE_MAP = {
+  running: 'running',
+  completed: 'completed',
+  failed: 'failed',
+  timed_out: 'timed_out',
+  cancelled: 'cancelled',
+  task_started: 'running',
+  task_running: 'running',
+  task_completed: 'completed',
+  task_failed: 'failed',
+  task_timed_out: 'timed_out',
+  task_cancelled: 'cancelled',
+} as const satisfies Record<string, BuilderTaskPhaseV1>;
 
 export function normalizeStreamDataPart(dataPart: unknown): StreamContractPart | null {
   const part = asRecord(dataPart);
@@ -81,19 +87,21 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
   const record = asRecord(data);
   if (!record) return null;
 
-  const phase = readString(record, 'phase');
-  if (!phase || !BUILDER_TASK_PHASES.has(phase as BuilderTaskPhaseV1)) {
+  const rawPhase = readString(record, 'phase') ?? readString(record, 'type');
+  const phase = rawPhase ? BUILDER_TASK_PHASE_MAP[rawPhase] : undefined;
+  if (!phase) {
     return null;
   }
 
   const taskId = readString(record, 'taskId') ?? readString(record, 'task_id');
-  const label = readString(record, 'label');
-  const detail = readString(record, 'detail');
+  const label = readString(record, 'label') ?? readString(record, 'description');
+  const detail = readString(record, 'detail')
+    ?? (rawPhase === 'task_started' ? 'Builder is working on the deliverable.' : undefined);
   const messageIndex = readNumber(record, 'messageIndex') ?? readNumber(record, 'message_index');
   const totalMessages = readNumber(record, 'totalMessages') ?? readNumber(record, 'total_messages');
 
   return {
-    phase: phase as BuilderTaskPhaseV1,
+    phase,
     ...(taskId ? { taskId } : {}),
     ...(label ? { label } : {}),
     ...(detail ? { detail } : {}),

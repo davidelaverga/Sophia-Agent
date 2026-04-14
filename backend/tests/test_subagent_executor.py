@@ -16,7 +16,7 @@ import asyncio
 import sys
 import threading
 from datetime import datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -148,6 +148,7 @@ def mock_agent():
     """Return a properly configured mock agent with async stream."""
     agent = MagicMock()
     agent.astream = MagicMock()
+    agent.ainvoke = MagicMock()
     return agent
 
 
@@ -237,6 +238,37 @@ class TestAsyncExecutionPath:
             result = await executor._aexecute("Task")
 
         assert result.status == SubagentStatus.COMPLETED
+        assert len(result.ai_messages) == 2
+        assert result.ai_messages[0]["id"] == "msg-1"
+        assert result.ai_messages[1]["id"] == "msg-2"
+
+    @pytest.mark.anyio
+    async def test_aexecute_collects_ai_messages_without_streaming(self, classes, base_config, mock_agent, msg):
+        """Test that AI messages are collected from the final state in non-streaming mode."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_state = {
+            "messages": [
+                msg.human("Task"),
+                msg.ai("First response", "msg-1"),
+                msg.ai("Second response", "msg-2"),
+            ]
+        }
+        mock_agent.ainvoke = AsyncMock(return_value=final_state)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            stream_messages=False,
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "Second response"
         assert len(result.ai_messages) == 2
         assert result.ai_messages[0]["id"] == "msg-1"
         assert result.ai_messages[1]["id"] == "msg-2"

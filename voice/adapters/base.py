@@ -35,9 +35,10 @@ class BackendRequest:
 
 @dataclass(frozen=True)
 class BackendEvent:
-    kind: Literal["text", "artifact", "error"]
+    kind: Literal["text", "artifact", "builder_task", "error"]
     text: str = ""
     artifact: dict[str, Any] | None = None
+    builder_task: dict[str, Any] | None = None
     stage: str | None = None
     message: str | None = None
     recoverable: bool = True
@@ -49,6 +50,10 @@ class BackendEvent:
     @classmethod
     def artifact_payload(cls, artifact: dict[str, Any]) -> "BackendEvent":
         return cls(kind="artifact", artifact=artifact)
+
+    @classmethod
+    def builder_task_payload(cls, builder_task: dict[str, Any]) -> "BackendEvent":
+        return cls(kind="builder_task", builder_task=builder_task)
 
     @classmethod
     def error_event(

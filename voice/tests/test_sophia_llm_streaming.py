@@ -154,6 +154,85 @@ async def test_artifact_forwarded_via_call_emitter() -> None:
 
 
 @pytest.mark.anyio
+async def test_builder_task_forwarded_via_call_emitter() -> None:
+    emitted: list[dict] = []
+    progress_calls: list[str] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        emitted.append(payload)
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.builder_task_payload(
+                {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}
+            ),
+            BackendEvent.text_chunk("ok"),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+
+    original_note_backend_progress = llm.note_backend_progress
+
+    def note_backend_progress(user_id: str) -> None:
+        progress_calls.append(user_id)
+        original_note_backend_progress(user_id)
+
+    llm.note_backend_progress = note_backend_progress
+
+    await llm.simple_response(
+        "test",
+        participant=SimpleNamespace(user_id="user-1"),
+    )
+
+    builder_task_events = [payload for payload in emitted if payload["type"] == "sophia.builder_task"]
+    assert builder_task_events == [
+        {"type": "sophia.builder_task", "data": {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}}
+    ]
+    assert progress_calls == ["user-1"]
+
+
+@pytest.mark.anyio
+async def test_builder_task_waits_for_text_before_emitting_agent_started() -> None:
+    emitted: list[dict] = []
+
+    async def fake_emitter(payload: dict) -> None:
+        emitted.append(payload)
+
+    adapter = FakeAdapter(
+        [
+            BackendEvent.builder_task_payload(
+                {"type": "task_started", "task_id": "builder-1", "description": "Builder: document"}
+            ),
+            BackendEvent.text_chunk("ok"),
+            BackendEvent.artifact_payload(_valid_artifact()),
+        ]
+    )
+    llm = SophiaLLM(make_settings(), adapter=adapter)
+    llm.attach_tts(FakeTTS())
+    llm.attach_call_emitter(fake_emitter)
+    participant = SimpleNamespace(user_id="user-1")
+    llm.note_turn_end(participant)
+
+    await llm.simple_response(
+        "test",
+        participant=participant,
+    )
+
+    sequence = [
+        f"{payload['type']}:{payload['data']['phase']}"
+        if payload["type"] == "sophia.turn"
+        else payload["type"]
+        for payload in emitted
+    ]
+
+    assert sequence.index("sophia.turn:user_ended") < sequence.index("sophia.builder_task")
+    assert sequence.index("sophia.builder_task") < sequence.index("sophia.turn:agent_started")
+
+
+@pytest.mark.anyio
 async def test_transcript_events_stream_before_artifact() -> None:
     emitted: list[dict] = []
 

@@ -240,6 +240,8 @@ export function useSessionRouteExperience({
     onUserTranscriptFallback: appendVoiceUserMessage,
     appendAssistantMessage: appendVoiceAssistantMessage,
     ingestArtifacts,
+    setBuilderArtifact: setBuilderArtifactAndPersist,
+    setBuilderTask,
     onRateLimitError: () => undefined,
     sendMessage,
     latestAssistantMessage,

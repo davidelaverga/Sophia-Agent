@@ -16,6 +16,8 @@ interface UseSessionVoiceCommandSystemParams {
   onUserTranscript: (text: string) => void;
   reflectionCandidate: ReflectionCandidate;
   handleReflectionTap: (reflection: { prompt: string; why?: string }, source: 'tap' | 'voice-command') => void;
+  canDownloadBuilderArtifact?: boolean;
+  handleDownloadBuilderArtifact?: () => boolean;
 
   pendingInterrupt: InterruptPayload | null;
   isResuming: boolean;
@@ -37,6 +39,8 @@ export function useSessionVoiceCommandSystem({
   onUserTranscript,
   reflectionCandidate,
   handleReflectionTap,
+  canDownloadBuilderArtifact = false,
+  handleDownloadBuilderArtifact,
   pendingInterrupt,
   isResuming,
   handleInterruptSelectWithRetry,
@@ -73,6 +77,20 @@ export function useSessionVoiceCommandSystem({
     ];
 
     return [...englishPatterns, ...spanishPatterns].some((pattern) => pattern.test(normalizedTranscript));
+  }, []);
+
+  const isDownloadVoiceCommand = useCallback((normalizedCommand: string) => {
+    const englishPatterns = [
+      /^download(\s+(it|that|file|artifact|deliverable))?(\s+now)?(\s+please)?$/,
+      /^download\s+the\s+(file|artifact|deliverable)(\s+now)?(\s+please)?$/,
+    ];
+
+    const spanishPatterns = [
+      /^descarga(r)?(\s+(el|lo|la))?(\s+(archivo|artefacto|entregable))?(\s+ahora)?(\s+por\s+favor)?$/,
+      /^descarga\s+el\s+(archivo|artefacto|entregable)(\s+ahora)?(\s+por\s+favor)?$/,
+    ];
+
+    return [...englishPatterns, ...spanishPatterns].some((pattern) => pattern.test(normalizedCommand));
   }, []);
 
   const suppressVoiceAssistantFromCommandRef = useRef(false);
@@ -161,6 +179,53 @@ export function useSessionVoiceCommandSystem({
     interceptVoiceAssistant,
     handleVoiceEndSession,
     showToast,
+  ]);
+
+  const routeDownloadCommand = useCallback((text: string) => {
+    if (isEnding || isReadOnly) return false;
+
+    const normalizedTranscript = normalizeVoiceCommand(text);
+    if (!normalizedTranscript) return false;
+
+    const hasWakeWord = /^(sophia|sofia)\s+/.test(normalizedTranscript);
+    const command = normalizedTranscript.replace(/^(sophia|sofia)\s+/, '').trim();
+
+    if (!isDownloadVoiceCommand(command)) {
+      return false;
+    }
+
+    if (!canDownloadBuilderArtifact) {
+      if (!hasWakeWord) {
+        return false;
+      }
+
+      showToast({
+        message: 'No deliverable ready to download yet.',
+        variant: 'warning',
+        durationMs: 2400,
+      });
+      return true;
+    }
+
+    interceptVoiceAssistant(10000, 'download voice command');
+    const started = handleDownloadBuilderArtifact?.() ?? false;
+
+    showToast({
+      message: started ? 'Downloading deliverable.' : 'Download unavailable right now.',
+      variant: started ? 'success' : 'error',
+      durationMs: started ? 2200 : 2600,
+    });
+
+    return true;
+  }, [
+    isEnding,
+    isReadOnly,
+    normalizeVoiceCommand,
+    isDownloadVoiceCommand,
+    canDownloadBuilderArtifact,
+    showToast,
+    interceptVoiceAssistant,
+    handleDownloadBuilderArtifact,
   ]);
 
   const routeInterruptCommand = useCallback((text: string) => {
@@ -312,10 +377,11 @@ export function useSessionVoiceCommandSystem({
   const routeVoiceCommand = useCallback((text: string) => {
     return (
       routeSessionCommand(text) ||
+      routeDownloadCommand(text) ||
       routeInterruptCommand(text) ||
       routeReflectionCommand(text)
     );
-  }, [routeSessionCommand, routeInterruptCommand, routeReflectionCommand]);
+  }, [routeSessionCommand, routeDownloadCommand, routeInterruptCommand, routeReflectionCommand]);
 
   const handleVoiceTranscript = useCallback((text: string) => {
     if (routeVoiceCommand(text)) {

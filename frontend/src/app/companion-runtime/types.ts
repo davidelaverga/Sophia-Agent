@@ -49,6 +49,8 @@ export type UseCompanionVoiceRuntimeOptions = {
   onUserTranscriptFallback: (text: string) => void;
   appendAssistantMessage: (text: string, suppressAssistantResponse: boolean) => void;
   ingestArtifacts: (artifacts: StreamArtifactsPayload, source: 'voice' | 'interrupt') => void;
+  setBuilderArtifact?: (artifact: BuilderArtifactV1 | null) => void;
+  setBuilderTask?: (task: BuilderTaskV1 | null) => void;
   onRateLimitError: (payload: {
     message: string;
     remaining?: number;

@@ -29,6 +29,7 @@ import {
   VoiceFirstComposer,
   VoiceCaption,
   VoiceMetricsPanel,
+  BuilderReadyPill,
   PresenceArtifactPanel,
   ArtifactToggleIcon,
   WhisperIndicator,
@@ -46,6 +47,7 @@ import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
+import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
@@ -526,7 +528,39 @@ function SessionPageContent() {
   }, [artifacts, builderArtifact]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
-  const showBuilderTaskNotice = Boolean(builderTask && (builderTask.phase !== 'completed' || !builderArtifact));
+  const showBuilderTaskNotice = Boolean(builderTask);
+  const builderPrimaryFile = useMemo(
+    () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
+    [builderArtifact],
+  );
+  const builderDownloadHref = useMemo(
+    () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
+    [builderPrimaryFile?.path, resolvedThreadId],
+  );
+  const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
+  const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.88);
+
+  const handleVoiceDownloadBuilderArtifact = useCallback(() => {
+    if (!builderDownloadHref || typeof document === 'undefined') {
+      return false;
+    }
+
+    const link = document.createElement('a');
+    link.href = builderDownloadHref;
+    link.style.display = 'none';
+    link.rel = 'noopener';
+    if (builderPrimaryFile?.name) {
+      link.download = builderPrimaryFile.name;
+    }
+    document.body.appendChild(link);
+    link.click();
+
+    window.setTimeout(() => {
+      link.remove();
+    }, 0);
+
+    return true;
+  }, [builderDownloadHref, builderPrimaryFile?.name]);
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -674,6 +708,8 @@ function SessionPageContent() {
     onUserTranscript: appendVoiceUserMessage,
     reflectionCandidate: artifacts?.reflection_candidate,
     handleReflectionTap,
+    canDownloadBuilderArtifact: Boolean(builderDownloadHref),
+    handleDownloadBuilderArtifact: handleVoiceDownloadBuilderArtifact,
     pendingInterrupt,
     isResuming,
     handleInterruptSelectWithRetry,
@@ -926,16 +962,6 @@ function SessionPageContent() {
             />
           )}
           
-          {/* Mode Toggle — voice mode: flows via slotBeforeText; text mode: inline here */}
-          {focusMode === 'text' && (
-            <div
-              className="flex justify-center pt-2"
-              style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
-            >
-              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
-            </div>
-          )}
-          
           {/* Inline Artifact Panel — text mode: above composer */}
           {focusMode === 'text' && showArtifacts && showArtifactsUi && (
             <PresenceArtifactPanel
@@ -954,6 +980,10 @@ function SessionPageContent() {
           {focusMode === 'text' && showBuilderTaskNotice && builderTask && (
             <BuilderTaskNotice
               task={builderTask}
+              artifactTitle={builderArtifact?.artifactTitle}
+              onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+              downloadHref={builderArtifact ? builderDownloadHref : undefined}
+              onDownload={builderArtifact ? () => haptic('medium') : undefined}
               onDismiss={clearBuilderTask}
               onCancel={cancelBuilderTask}
               isCancelling={isCancellingBuilderTask}
@@ -962,36 +992,64 @@ function SessionPageContent() {
 
           {/* Artifact toggle pill — text mode: inline above composer */}
           {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
-            <div className="flex justify-center mb-2">
-              <ArtifactToggleIcon
-                hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                onClick={handleOpenArtifactsPanel}
-                isNew={hasNewArtifacts}
-              />
-            </div>
+            builderArtifact && !builderTask ? (
+              <div className="mb-2 flex justify-center">
+                <BuilderReadyPill
+                  title={builderArtifact.artifactTitle}
+                  onOpen={handleOpenArtifactsPanel}
+                  downloadHref={builderDownloadHref}
+                  onDownload={() => haptic('medium')}
+                  isNew={hasNewArtifacts}
+                />
+              </div>
+            ) : (
+              <div className="flex justify-center mb-2">
+                <ArtifactToggleIcon
+                  hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
+                  onClick={handleOpenArtifactsPanel}
+                  isNew={hasNewArtifacts}
+                />
+              </div>
+            )
           )}
 
           {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && (
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+              style={{ bottom: '136px', opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
             >
-              <ArtifactToggleIcon
-                hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                onClick={handleOpenArtifactsPanel}
-                isNew={hasNewArtifacts}
-              />
+              {builderArtifact && !builderTask ? (
+                <BuilderReadyPill
+                  title={builderArtifact.artifactTitle}
+                  onOpen={handleOpenArtifactsPanel}
+                  downloadHref={builderDownloadHref}
+                  onDownload={() => haptic('medium')}
+                  isNew={hasNewArtifacts}
+                  compact={true}
+                />
+              ) : (
+                <ArtifactToggleIcon
+                  hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
+                  onClick={handleOpenArtifactsPanel}
+                  isNew={hasNewArtifacts}
+                />
+              )}
             </div>
           )}
 
           {focusMode !== 'text' && showBuilderTaskNotice && builderTask && (
             <div
-              className="fixed left-1/2 -translate-x-1/2 z-30"
-              style={{ bottom: '172px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+              className="fixed left-1/2 -translate-x-1/2 z-40"
+              style={{ bottom: '172px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
             >
               <BuilderTaskNotice
                 task={builderTask}
+                artifactTitle={builderArtifact?.artifactTitle}
+                onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+                downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                onDownload={builderArtifact ? () => haptic('medium') : undefined}
+                compact={true}
                 onDismiss={clearBuilderTask}
                 onCancel={cancelBuilderTask}
                 isCancelling={isCancellingBuilderTask}
@@ -1018,14 +1076,12 @@ function SessionPageContent() {
               focusRequestToken={composerFocusToken}
               textOnly={focusMode === 'text'}
               slotBeforeText={
-                focusMode !== 'text' ? (
-                  <div
-                    className="flex justify-center"
-                    style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
-                  >
-                    <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
-                  </div>
-                ) : undefined
+                <div
+                  className="flex justify-center"
+                  style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+                >
+                  <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                </div>
               }
             />
           </VoiceComposerErrorBoundary>

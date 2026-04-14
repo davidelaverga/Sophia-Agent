@@ -13,6 +13,7 @@ from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import hook_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -90,10 +91,25 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
         platform = state.get("platform") or runtime.context.get("platform")
         instructions = _VOICE_ARTIFACT_INSTRUCTIONS if platform in ("voice", "ios_voice") else self._instructions
         blocks = [instructions]
+        updates: dict[str, object] = {}
 
         # --- Builder synthesis injection ---
         builder_result = state.get("builder_result")
         builder_task = state.get("builder_task") or {}
+        if builder_result is not None and not builder_task.get("status"):
+            builder_task = {**builder_task, "status": "completed"}
+            updates["builder_task"] = builder_task
+
+        if builder_result is None:
+            recovered_builder_result = self._extract_builder_result_from_messages(state.get("messages", []))
+            if recovered_builder_result is not None:
+                builder_result = recovered_builder_result
+                builder_task = {**builder_task}
+                builder_task.setdefault("status", "completed")
+                updates["builder_result"] = builder_result
+                updates["builder_task"] = builder_task
+                log_middleware("Artifact", "recovered builder result from tool message", _t0)
+
         if builder_result and builder_task.get("status") == "completed":
             synthesis_block = self._build_synthesis_prompt(builder_result, state)
             blocks.append(synthesis_block)
@@ -102,7 +118,12 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
             existing = list(state.get("system_prompt_blocks", []))
             existing.extend(blocks)
             builder_task_updated = {**builder_task, "status": "synthesized"}
-            return {"system_prompt_blocks": existing, "builder_task": builder_task_updated}
+            updates.update({
+                "builder_result": builder_result,
+                "system_prompt_blocks": existing,
+                "builder_task": builder_task_updated,
+            })
+            return updates
 
         # Conditionally inject previous artifact
         prev = state.get("previous_artifact")
@@ -123,31 +144,47 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
         existing = list(state.get("system_prompt_blocks", []))
         existing.extend(blocks)
         log_middleware("Artifact", f"instructions injected (platform={platform or 'default'})", _t0)
-        return {"system_prompt_blocks": existing}
+        updates["system_prompt_blocks"] = existing
+        return updates
 
+    @hook_config(can_jump_to=["end"])
     @override
     def after_model(self, state: ArtifactState, runtime: Runtime) -> dict | None:
         """Capture emit_artifact tool call result from latest messages."""
         _t0 = time.perf_counter()
         messages = state.get("messages", [])
 
-        artifact_data = None
         for msg in reversed(messages):
             if getattr(msg, "type", None) == "ai":
-                tool_calls = getattr(msg, "tool_calls", [])
-                for tc in (tool_calls or []):
-                    if tc.get("name") == "emit_artifact":
-                        artifact_data = tc.get("args", {})
-                        break
-                if artifact_data:
-                    break
+                tool_calls = getattr(msg, "tool_calls", []) or []
+                if not tool_calls:
+                    log_middleware("Artifact", "no artifact in response", _t0)
+                    return None
 
-        if artifact_data:
-            log_middleware("Artifact", f"artifact captured: tone={artifact_data.get('tone_estimate')}", _t0)
-            return {
-                "previous_artifact": state.get("current_artifact"),
-                "current_artifact": artifact_data,
-            }
+                artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_artifact"]
+                if not artifact_calls:
+                    log_middleware("Artifact", "no artifact in response", _t0)
+                    return None
+
+                if len(artifact_calls) != len(tool_calls):
+                    log_middleware("Artifact", "mixed tool calls with emit_artifact; loop continues", _t0)
+                    return None
+
+                artifact_data = artifact_calls[-1].get("args", {})
+                builder_result = state.get("builder_result") or self._extract_builder_result_from_messages(messages)
+                updates = {
+                    "previous_artifact": state.get("current_artifact"),
+                    "current_artifact": artifact_data,
+                    "jump_to": "end",
+                }
+                if builder_result:
+                    builder_task = {**(state.get("builder_task") or {}), "status": "synthesized"}
+                    updates["builder_result"] = builder_result
+                    updates["builder_task"] = builder_task
+                    log_middleware("Artifact", f"artifact captured with builder handoff: tone={artifact_data.get('tone_estimate')}", _t0)
+                else:
+                    log_middleware("Artifact", f"artifact captured: tone={artifact_data.get('tone_estimate')}", _t0)
+                return updates
 
         log_middleware("Artifact", "no artifact in response", _t0)
         return None
@@ -214,3 +251,35 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
         parts.append("</builder_completed>")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _extract_builder_result_from_messages(messages: list) -> dict | None:
+        """Recover builder_result from the persisted switch_to_builder ToolMessage."""
+        for msg in reversed(messages):
+            if getattr(msg, "type", None) != "tool":
+                continue
+
+            if getattr(msg, "name", None) != "switch_to_builder":
+                continue
+
+            status = getattr(msg, "status", None)
+            if isinstance(status, str) and status.lower() != "success":
+                continue
+
+            content = getattr(msg, "content", None)
+            if not isinstance(content, str):
+                continue
+
+            _prefix, separator, payload = content.partition("Full result:")
+            if not separator:
+                continue
+
+            try:
+                parsed = json.loads(payload.strip())
+            except json.JSONDecodeError:
+                continue
+
+            if isinstance(parsed, dict) and parsed:
+                return parsed
+
+        return None

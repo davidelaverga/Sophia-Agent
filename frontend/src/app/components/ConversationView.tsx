@@ -1,13 +1,14 @@
 "use client"
 
 import { Mic, X } from "lucide-react"
-import { useEffect, useRef, useState, useCallback, lazy, Suspense } from "react"
+import { useEffect, useRef, useState, useCallback, useMemo, lazy, Suspense } from "react"
 
 import { useChatArtifactsPanelActions } from "../chat/useChatArtifactsPanelActions"
 import type { ChatRouteExperience } from "../chat/useChatRouteExperience"
 import { useTranslation } from "../copy"
 import { useModeSwitch } from "../hooks/useModeSwitch"
 import { useReflectionPrompt } from "../hooks/useReflectionPrompt"
+import { buildThreadArtifactHref, getBuilderArtifactFiles } from "../lib/builder-artifacts"
 import { diagnoseMicrophoneAccess, isMicrophoneLikelySupported } from "../lib/microphone-debug"
 import { useChatStore } from "../stores/chat-store"
 import { useUiStore as useFocusModeStore } from "../stores/ui-store"
@@ -40,6 +41,7 @@ type ConversationViewProps = {
 export function ConversationView({ routeExperience }: ConversationViewProps) {
   const { t } = useTranslation()
   const composerRef = useRef<HTMLTextAreaElement>(null)
+  const artifactsPanelRef = useRef<HTMLDivElement>(null)
   const applyPrompt = useChatStore((state) => state.applyQuickPrompt)
   const lastCompletedTurnId = useChatStore((state) => state.lastCompletedTurnId)
   const {
@@ -219,7 +221,29 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
     setRecapArtifacts,
   })
 
-  const showBuilderTaskNotice = Boolean(builderTask && (builderTask.phase !== "completed" || !builderArtifact))
+  const builderPrimaryFile = useMemo(
+    () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
+    [builderArtifact],
+  )
+  const builderDownloadHref = useMemo(
+    () => buildThreadArtifactHref(threadId, builderPrimaryFile?.path, { download: true }),
+    [builderPrimaryFile?.path, threadId],
+  )
+
+  const handleOpenBuilderArtifact = useCallback(() => {
+    if (focusMode === 'voice') {
+      setMode('text')
+      setManualOverride(true)
+    }
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        artifactsPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+      })
+    })
+  }, [focusMode, setMode, setManualOverride])
+
+  const showBuilderTaskNotice = Boolean(builderTask)
 
   // === Render ===
   
@@ -244,6 +268,10 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
             {showBuilderTaskNotice && builderTask && (
               <BuilderTaskNotice
                 task={builderTask}
+                artifactTitle={builderArtifact?.artifactTitle}
+                onOpenArtifact={builderArtifact ? handleOpenBuilderArtifact : undefined}
+                downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                compact={true}
                 onDismiss={clearBuilderTask}
                 onCancel={cancelBuilderTask}
                 isCancelling={isCancellingBuilderTask}
@@ -309,6 +337,9 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
             {showBuilderTaskNotice && builderTask && (
               <BuilderTaskNotice
                 task={builderTask}
+                artifactTitle={builderArtifact?.artifactTitle}
+                onOpenArtifact={builderArtifact ? handleOpenBuilderArtifact : undefined}
+                downloadHref={builderArtifact ? builderDownloadHref : undefined}
                 onDismiss={clearBuilderTask}
                 onCancel={cancelBuilderTask}
                 isCancelling={isCancellingBuilderTask}
@@ -316,20 +347,22 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
             )}
             <Transcript onPromptSelect={handlePromptSelect} />
             {(chatArtifacts || builderArtifact) && (
-              <ArtifactsPanelErrorBoundary>
-                <ArtifactsPanel
-                  artifacts={chatArtifacts}
-                  builderArtifact={builderArtifact}
-                  presetType="chat"
-                  sessionId={conversationId}
-                  threadId={threadId}
-                  className="w-full"
-                  onReflectionTap={handleReflectionTap}
-                  onMemoryApprove={handleMemoryApprove}
-                  onMemoryReject={handleMemoryReject}
-                  memoryInlineFeedback={memoryInlineFeedback}
-                />
-              </ArtifactsPanelErrorBoundary>
+              <div ref={artifactsPanelRef}>
+                <ArtifactsPanelErrorBoundary>
+                  <ArtifactsPanel
+                    artifacts={chatArtifacts}
+                    builderArtifact={builderArtifact}
+                    presetType="chat"
+                    sessionId={conversationId}
+                    threadId={threadId}
+                    className="w-full"
+                    onReflectionTap={handleReflectionTap}
+                    onMemoryApprove={handleMemoryApprove}
+                    onMemoryReject={handleMemoryReject}
+                    memoryInlineFeedback={memoryInlineFeedback}
+                  />
+                </ArtifactsPanelErrorBoundary>
+              </div>
             )}
           </div>
         )}

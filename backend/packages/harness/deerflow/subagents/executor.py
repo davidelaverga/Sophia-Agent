@@ -145,6 +145,7 @@ class SubagentExecutor:
         trace_id: str | None = None,
         pre_built_agent=None,
         extra_configurable: dict[str, Any] | None = None,
+        stream_messages: bool = True,
     ):
         """Initialize the executor.
 
@@ -158,6 +159,9 @@ class SubagentExecutor:
             trace_id: Trace ID from parent for distributed tracing.
             pre_built_agent: Pre-built agent instance — bypasses _create_agent().
             extra_configurable: Additional configurable dict merged into run_config.
+            stream_messages: When True, execute via agent.astream() and collect AI
+                messages incrementally. When False, execute via agent.ainvoke() and
+                collect AI messages from the final state only.
         """
         self.config = config
         self.parent_model = parent_model
@@ -168,6 +172,7 @@ class SubagentExecutor:
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.pre_built_agent = pre_built_agent
         self.extra_configurable = extra_configurable
+        self.stream_messages = stream_messages
 
         # Filter tools based on config
         self.tools = _filter_tools(
@@ -177,6 +182,32 @@ class SubagentExecutor:
         )
 
         logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
+
+    @staticmethod
+    def _append_ai_message(result: SubagentResult, message: AIMessage) -> None:
+        """Append a unique AI message to the result holder."""
+        message_dict = message.model_dump()
+        message_id = message_dict.get("id")
+        if message_id:
+            is_duplicate = any(msg.get("id") == message_id for msg in result.ai_messages)
+        else:
+            is_duplicate = message_dict in result.ai_messages
+
+        if not is_duplicate:
+            result.ai_messages.append(message_dict)
+
+    def _collect_ai_messages_from_state(
+        self,
+        state: dict[str, Any] | None,
+        result: SubagentResult,
+    ) -> None:
+        """Collect AI messages from a state snapshot into the result holder."""
+        if not state:
+            return
+
+        for message in state.get("messages", []):
+            if isinstance(message, AIMessage):
+                self._append_ai_message(result, message)
 
     def _create_agent(self):
         """Create the agent instance. Uses pre_built_agent if provided."""
@@ -275,35 +306,25 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
-            # Use stream instead of invoke to get real-time updates
-            # This allows us to collect AI messages as they are generated
             final_state = None
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                if cancel_event and cancel_event.is_set():
-                    raise SubagentCancelledError("Execution cancelled by user")
+            if self.stream_messages:
+                # Use stream mode when callers need progressive AI message updates
+                # (for example the generic task tool's task_running events).
+                async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
+                    if cancel_event and cancel_event.is_set():
+                        raise SubagentCancelledError("Execution cancelled by user")
 
-                final_state = chunk
+                    final_state = chunk
 
-                # Extract AI messages from the current state
-                messages = chunk.get("messages", [])
-                if messages:
-                    last_message = messages[-1]
-                    # Check if this is a new AI message
-                    if isinstance(last_message, AIMessage):
-                        # Convert message to dict for serialization
-                        message_dict = last_message.model_dump()
-                        # Only add if it's not already in the list (avoid duplicates)
-                        # Check by comparing message IDs if available, otherwise compare full dict
-                        message_id = message_dict.get("id")
-                        is_duplicate = False
-                        if message_id:
-                            is_duplicate = any(msg.get("id") == message_id for msg in result.ai_messages)
-                        else:
-                            is_duplicate = message_dict in result.ai_messages
-
-                        if not is_duplicate:
-                            result.ai_messages.append(message_dict)
-                            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
+                    previous_count = len(result.ai_messages)
+                    self._collect_ai_messages_from_state(chunk, result)
+                    if len(result.ai_messages) > previous_count:
+                        logger.info(
+                            f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
+                        )
+            else:
+                final_state = await agent.ainvoke(state, config=run_config, context=context)  # type: ignore[arg-type]
+                self._collect_ai_messages_from_state(final_state, result)
 
             if cancel_event and cancel_event.is_set():
                 raise SubagentCancelledError("Execution cancelled by user")

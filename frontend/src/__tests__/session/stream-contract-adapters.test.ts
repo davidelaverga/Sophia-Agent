@@ -104,6 +104,21 @@ describe('stream-contract-adapters', () => {
     });
   });
 
+  it('normalizes raw builder task lifecycle events from voice transport', () => {
+    const payload = parseBuilderTaskPayload({
+      type: 'task_started',
+      task_id: 'task-builder-1',
+      description: 'Builder: document',
+    });
+
+    expect(payload).toEqual({
+      phase: 'running',
+      taskId: 'task-builder-1',
+      label: 'Builder: document',
+      detail: 'Builder is working on the deliverable.',
+    });
+  });
+
   it('keeps previous stream metadata when incoming fields are missing', () => {
     const previous = {
       thread_id: 'thread-1',

@@ -93,6 +93,7 @@ New-Item -ItemType Directory -Path "logs" -Force | Out-Null
 $jobs = @()
 
 foreach ($svc in $services) {
+    $name = $svc.Name
     $dir  = Join-Path $RepoRoot $svc.Dir
     $log  = Join-Path $RepoRoot "logs" "$($svc.Name.ToLower()).log"
     $cmd  = if ($name -eq "LangGraph") {
@@ -100,11 +101,9 @@ foreach ($svc in $services) {
     } else {
         $svc.Cmd
     }
-    $name = $svc.Name
 
     Write-Host "  Starting $name..." -ForegroundColor White
 
-    $envBlock = if ($name -eq "Gateway") {
     $envBlock = if ($name -eq "Gateway") {
         $gatewayEnvBlock
     } elseif ($name -eq "LangGraph") {

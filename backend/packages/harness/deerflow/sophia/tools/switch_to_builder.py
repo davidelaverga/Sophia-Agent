@@ -6,22 +6,57 @@ pre-built builder agent and passes delegation_context through configurable
 so BuilderTaskMiddleware can inject tone/ritual guidance.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import time
 import uuid
 from dataclasses import replace
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
 
-from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.subagents import SubagentExecutor, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    cleanup_background_task,
+    get_background_task_result,
+)
 
 logger = logging.getLogger(__name__)
+
+_BUILDER_DEMO_MARKERS = (
+    "test builder",
+    "testing builder",
+    "builder flow",
+    "builder mode",
+    "builder functionality",
+    "builder working",
+    "show me builder",
+    "see builder work",
+    "see builder working",
+    "feature working",
+    "feature in action",
+    "sample project",
+    "demo builder",
+    "quick builder demo",
+    "test/exploration mode",
+)
+
+_BUILDER_GENERIC_DEMO_MARKERS = (
+    "quick draft",
+    "make anything",
+    "anything simple",
+    "just wanna see",
+    "just want to see",
+    "show me it working",
+    "show it working",
+)
 
 
 class SwitchToBuilderInput(BaseModel):
@@ -39,9 +74,9 @@ class SwitchToBuilderInput(BaseModel):
 def switch_to_builder(
     task: str,
     task_type: str,
-    runtime: ToolRuntime[ContextT, SophiaState] | None = None,
+    runtime: ToolRuntime[ContextT, dict[str, Any]] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
-) -> str:
+) -> Command | str:
     """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
     something requiring file creation or multi-step execution.
     Do NOT call for emotional conversation, reflection, or memory tasks.
@@ -64,6 +99,7 @@ def switch_to_builder(
 
     if runtime is not None:
         state = runtime.state or {}
+        configurable = runtime.config.get("configurable", {}) if runtime.config else {}
 
         # Companion artifact — full emotional snapshot
         companion_artifact = (
@@ -72,7 +108,7 @@ def switch_to_builder(
             or {}
         )
 
-        user_id = state.get("user_id", "default_user")
+        user_id = state.get("user_id") or configurable.get("user_id") or "default_user"
         active_ritual = state.get("active_ritual")
         ritual_phase = state.get("ritual_phase")
         injected_memories = state.get("injected_memories", [])
@@ -88,7 +124,7 @@ def switch_to_builder(
             thread_id = runtime.config.get("configurable", {}).get("thread_id")
 
         metadata = runtime.config.get("metadata", {}) if runtime.config else {}
-        parent_model = metadata.get("model_name")
+        parent_model = metadata.get("model_name") or configurable.get("model_name")
         trace_id = metadata.get("trace_id") or trace_id
 
     # Fallback: LangChain ContextVar
@@ -107,6 +143,16 @@ def switch_to_builder(
         active_ritual,
         thread_id,
     )
+
+    task, task_type, demo_mode = _normalize_builder_request(
+        task=task,
+        task_type=task_type,
+        companion_artifact=companion_artifact,
+    )
+    if demo_mode:
+        logger.info(
+            "[Builder] normalized generic demo request to deterministic document flow"
+        )
 
     # ------------------------------------------------------------------
     # 2. Build delegation context (per spec §2.1)
@@ -137,7 +183,13 @@ def switch_to_builder(
         return f"Builder task queued: [{task_type}] {task}"
 
     # Override limits for builder execution
-    config = replace(config, max_turns=50, timeout_seconds=120, name="sophia_builder")
+    max_turns, timeout_seconds = _resolve_builder_limits(demo_mode)
+    config = replace(
+        config,
+        max_turns=max_turns,
+        timeout_seconds=timeout_seconds,
+        name="sophia_builder",
+    )
 
     executor = SubagentExecutor(
         config=config,
@@ -149,12 +201,14 @@ def switch_to_builder(
         trace_id=trace_id,
         pre_built_agent=builder_agent,
         extra_configurable={"delegation_context": delegation_context},  # merged into initial state
+        stream_messages=False,
     )
 
     # ------------------------------------------------------------------
     # 5. Execute + poll
     # ------------------------------------------------------------------
     task_id = tool_call_id or str(uuid.uuid4())[:8]
+    response_tool_call_id = tool_call_id or getattr(runtime, "tool_call_id", "") if runtime is not None else tool_call_id
     executor.execute_async(task, task_id=task_id, owner_id=user_id)
     logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
 
@@ -185,7 +239,36 @@ def switch_to_builder(
 
             # Extract builder_result from final state
             builder_result = _extract_builder_result(result)
+            if response_tool_call_id:
+                return Command(
+                    update={
+                        "builder_result": builder_result,
+                        "builder_task": {
+                            "status": "completed",
+                            "task_id": task_id,
+                            "task_type": task_type,
+                        },
+                        "messages": [
+                            ToolMessage(
+                                content=_format_success(builder_result),
+                                tool_call_id=response_tool_call_id,
+                                name="switch_to_builder",
+                            )
+                        ],
+                    }
+                )
             return _format_success(builder_result)
+
+        elif result.status in {SubagentStatus.PENDING, SubagentStatus.RUNNING}:
+            if writer:
+                writer(
+                    {
+                        "type": "task_running",
+                        "task_id": task_id,
+                        "description": f"Builder: {task_type}",
+                        "detail": "Builder is working on the deliverable.",
+                    }
+                )
 
         elif result.status == SubagentStatus.CANCELLED:
             logger.info("[Builder] Task %s cancelled", task_id)
@@ -245,6 +328,64 @@ def _extract_builder_result(result) -> dict:
         "user_next_action": None,
         "confidence": 0.3,
     }
+
+
+def _normalize_builder_request(
+    task: str,
+    task_type: str,
+    companion_artifact: dict,
+) -> tuple[str, str, bool]:
+    """Coerce underspecified Builder demo requests into a small deterministic task."""
+    if not _should_use_demo_builder_task(task, task_type, companion_artifact):
+        return task, task_type, False
+
+    return _build_demo_builder_task(), "document", True
+
+
+def _should_use_demo_builder_task(
+    task: str,
+    task_type: str,
+    companion_artifact: dict,
+) -> bool:
+    """Detect explicit Builder smoke-test turns that should avoid open-ended frontend work."""
+    if task_type not in {"frontend", "research", "document"}:
+        return False
+
+    artifact_text = " ".join(
+        str(companion_artifact.get(field, ""))
+        for field in ("session_goal", "active_goal", "takeaway")
+    )
+    combined = f"{task} {artifact_text}".lower()
+
+    if any(marker in combined for marker in _BUILDER_DEMO_MARKERS):
+        return True
+
+    return "builder" in combined and any(
+        marker in combined for marker in _BUILDER_GENERIC_DEMO_MARKERS
+    )
+
+
+def _build_demo_builder_task() -> str:
+    """Return a small Builder task that proves the end-to-end flow quickly."""
+    return (
+        "Create exactly one markdown file named builder-demo.md in the outputs directory. "
+        "Keep it under 180 words and do not ask clarifying questions. "
+        "Use default placeholder content that demonstrates Builder completed a task successfully. "
+        "Use this structure: '# Builder Demo', '## What Sophia generated', '## Assumptions used', and '## Next step'. "
+        "After writing the file, call emit_builder_artifact as your final action with artifact_path='outputs/builder-demo.md', "
+        "artifact_type='document', artifact_title='Builder Demo Deliverable', steps_completed=3, "
+        "decisions_made=['Used a minimal markdown deliverable', 'Filled missing specs with defaults'], "
+        "companion_summary='Created a quick demo deliverable from defaults so the Builder flow can be verified.', "
+        "companion_tone_hint='Confident', user_next_action='Open or download the file, then ask for a real deliverable next.', "
+        "confidence=0.82. Create no other files and do not run extra commands."
+    )
+
+
+def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int]:
+    """Return recursion and timeout budgets for the delegated Builder task."""
+    if demo_mode:
+        return 16, 45
+    return 50, 120
 
 
 def _format_success(builder_result: dict) -> str:
