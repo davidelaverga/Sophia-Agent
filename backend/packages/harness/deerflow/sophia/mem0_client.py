@@ -145,11 +145,12 @@ def search_memories(
             logger.info("[Mem0Cache] HIT (%d results cached)", len(cached_results))
             return cached_results
 
-    logger.info("[Mem0Cache] MISS — calling Mem0 API")
+    logger.info("[Mem0Cache] MISS — calling Mem0 API (query='%s' limit=%d)", query[:80], limit)
     client = _get_client()
     if client is None:
         return []
 
+    _t0 = time.perf_counter()
     try:
         # Mem0 v2 API requires filters dict instead of top-level params
         results = client.search(
@@ -157,6 +158,8 @@ def search_memories(
             filters={"user_id": user_id},
             limit=limit,
         )
+
+        api_ms = (time.perf_counter() - _t0) * 1000
 
         # Normalize results to list of dicts
         memories = []
@@ -166,10 +169,12 @@ def search_memories(
             for r in results:
                 if isinstance(r, dict):
                     meta = r.get("metadata") or {}
+                    score = r.get("score", r.get("relevance_score"))
                     memories.append({
                         "id": r.get("id", ""),
                         "content": r.get("memory", r.get("content", "")),
                         "category": meta.get("category", "") if isinstance(meta, dict) else "",
+                        "score": score,
                     })
 
         # Filter by categories if specified
@@ -183,11 +188,22 @@ def search_memories(
         # Sort by context relevance if context_mode specified
         if context_mode:
             context_categories = _CONTEXT_CATEGORIES.get(context_mode, set())
-            # Memories matching the context's categories come first
             memories.sort(
                 key=lambda m: (
                     0 if m.get("category") in context_categories else 1,
                 ),
+            )
+
+        # Log each retrieved memory with score and content preview
+        logger.info(
+            "[Mem0Search] %d results in %.0fms (query='%s')",
+            len(memories), api_ms, query[:60],
+        )
+        for i, mem in enumerate(memories):
+            score_str = f" score={mem['score']:.3f}" if mem.get("score") is not None else ""
+            logger.info(
+                "[Mem0Search]   [%d] [%s]%s %s",
+                i, mem.get("category", "?"), score_str, (mem.get("content", ""))[:120],
             )
 
         # Update cache (thread-safe, bounded by TTLCache maxsize)
@@ -197,7 +213,7 @@ def search_memories(
         return memories
 
     except Exception:
-        logger.warning("Mem0 search failed for user %s", user_id, exc_info=True)
+        logger.warning("Mem0 search failed for user %s (%.0fms)", user_id, (time.perf_counter() - _t0) * 1000, exc_info=True)
         return []
 
 
