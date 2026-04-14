@@ -15,7 +15,7 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 
@@ -51,12 +51,33 @@ class PromptAssemblyMiddleware(AgentMiddleware[PromptAssemblyState]):
 
         system_content = "\n\n---\n\n".join(blocks)
 
-        # Filter out any existing SystemMessages from the request messages
-        non_system = [m for m in request.messages if not isinstance(m, SystemMessage)]
+        # Filter out any existing SystemMessages from the request messages.
+        # Also detect and absorb the SummarizationMiddleware's HumanMessage
+        # into the system prompt so the model treats it as context — not as
+        # user input that it should echo back.
+        non_system: list = []
+        summary_block: str | None = None
+        for m in request.messages:
+            if isinstance(m, SystemMessage):
+                continue
+            if (
+                summary_block is None
+                and isinstance(m, HumanMessage)
+                and isinstance(m.content, str)
+                and m.content.startswith("Here is a summary of the conversation to date:")
+            ):
+                summary_block = m.content
+                continue
+            non_system.append(m)
 
         if not non_system:
             log_middleware("PromptAssembly", "ERROR: no non-system messages found", _t0)
             return None
+
+        # Append absorbed summary to the system prompt so it's treated as
+        # context rather than user speech.
+        if summary_block:
+            system_content += "\n\n---\n\n" + summary_block
 
         # Prepend the assembled system message
         assembled = [SystemMessage(content=system_content, id=self._SYSTEM_MSG_ID)] + non_system
