@@ -635,6 +635,55 @@ class TestVisualCategories:
         assert resp.status_code == 200
         assert resp.json()["count"] == 0
 
+# ---------------------------------------------------------------------------
+# Telegram Linking
+# ---------------------------------------------------------------------------
+
+class TestTelegramLinking:
+    def test_create_telegram_link_token(self, client):
+        store = MagicMock()
+        store.issue_link_token.return_value = {
+            "token": "token-abc",
+            "expires_at": "2026-04-14T12:00:00+00:00",
+            "context_mode": "work",
+        }
+        with (
+            patch("app.gateway.routers.sophia.get_telegram_link_store", return_value=store),
+            patch("app.gateway.routers.sophia._get_telegram_bot_username", return_value="sophia_bot"),
+        ):
+            resp = client.post(
+                "/api/sophia/test_user/telegram/link",
+                json={"context_mode": "work", "ttl_seconds": 600},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["token"] == "token-abc"
+        assert data["context_mode"] == "work"
+        assert data["deep_link"] == "https://t.me/sophia_bot?start=token-abc"
+
+    def test_get_telegram_link_status_unlinked(self, client):
+        store = MagicMock()
+        store.get_link_by_user.return_value = None
+        with patch("app.gateway.routers.sophia.get_telegram_link_store", return_value=store):
+            resp = client.get("/api/sophia/test_user/telegram/link")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["linked"] is False
+        assert data["user_id"] == "test_user"
+
+    def test_delete_telegram_link(self, client):
+        store = MagicMock()
+        store.unlink_user.return_value = True
+        with patch("app.gateway.routers.sophia.get_telegram_link_store", return_value=store):
+            resp = client.delete("/api/sophia/test_user/telegram/link")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["linked"] is False
+        assert data["removed"] is True
+
 
 # ---------------------------------------------------------------------------
 # Session End

@@ -145,11 +145,22 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+| `POST /api/sophia/{user_id}/telegram/link` | Create one-time Telegram deep-link token for Sophia account linking |
+| `GET /api/sophia/{user_id}/telegram/link` | Get Telegram link status for a Sophia user |
+| `DELETE /api/sophia/{user_id}/telegram/link` | Unlink Telegram from a Sophia user |
 
 ### IM Channels
+The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram use the final `runs.wait()` response path, while Feishu streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
 
-The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
+Telegram now supports Sophia account linking and media-first workflows:
+- Web app creates one-time `/api/sophia/{user_id}/telegram/link` tokens, redeemed in Telegram with `/start <token>` (private chat).
+- Unlinked chats are gated; linked chats can send normal text, `/build <task>`, and photo/document inputs.
+- Telegram media is downloaded by the channel, persisted into thread uploads, and injected into the run input via `<uploaded_files>` plus `additional_kwargs.files`.
 
+`ChannelManager` now also:
+- Enforces one active run per conversation key (`channel:chat:topic`) and sends a busy message for overlapping requests.
+- Polls queued builder handoff tasks and publishes asynchronous completion/failure follow-up messages (including artifact attachments when available).
+- Registers optional per-channel inbound file readers (used by Telegram) through `ChannelService`.
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
 
 ---

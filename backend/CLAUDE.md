@@ -216,6 +216,7 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
+| **Sophia** (`/api/sophia`) | Sophia memory/review/reflect endpoints, visual summaries, Telegram link endpoints (`POST/GET/DELETE /{user_id}/telegram/link`), and session finalization (`POST /{user_id}/end-session`) |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
@@ -300,25 +301,30 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
 - `store.py` - JSON-file persistence mapping `channel_name:chat_id[:topic_id]` → `thread_id` (keys are `channel:chat` for root conversations and `channel:chat:topic` for threaded conversations)
-- `manager.py` - Core dispatcher: creates threads via `client.threads.create()`, routes commands, keeps Slack/Telegram on `client.runs.wait()`, and uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates
-- `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
-- `service.py` - Manages lifecycle of all configured channels from `config.yaml`
-- `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place)
+- `telegram_linking.py` - Persistent Telegram↔Sophia link store with one-time token issuance/redeem/unlink and chat activity tracking
+- `session_resolver.py` - Dynamic Telegram run overrides that bind linked chats to `sophia_companion` with native memory backend and linked `context_mode`
+- `manager.py` - Core dispatcher: creates/reuses threads, enforces per-conversation concurrency locks, resolves dynamic session overrides, ingests channel-provided inbound files into uploads, keeps Slack/Telegram on `client.runs.wait()`, uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates, and publishes asynchronous builder completion notifications from handoff task IDs
+- `base.py` - Abstract `Channel` base class (start/stop/send lifecycle) plus optional inbound file reader hook (`get_inbound_file_reader`)
+- `service.py` - Manages lifecycle of all configured channels from `config.yaml` and registers channel inbound file readers with `ChannelManager`
+- `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram.py` handles `/start <token>` linking, `/build`, and media ingestion)
 
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
 2. `ChannelManager._dispatch_loop()` consumes from queue
-3. For chat: look up/create thread on LangGraph Server
-4. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
-5. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
-6. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
-7. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
-8. Outbound → channel callbacks → platform reply
+3. For chat: resolve a conversation key (`channel:chat:topic`), enforce single active run per key, then look up/create LangGraph thread
+4. Telegram-only: dynamic session resolver maps linked chats to Sophia companion runtime config/context
+5. ChannelManager reads inbound files through optional channel reader, stores them under thread uploads, and injects `<uploaded_files>` + `additional_kwargs.files` into the human run input
+6. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
+7. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
+8. If a `builder_handoff` task ID is returned, manager polls background task state and emits an async completion/failure follow-up outbound
+9. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
+10. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`) and Telegram `/build`: handle or forward appropriately
+11. Outbound → channel callbacks → platform reply
 
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
+- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token, optional `allowed_users`, optional session overrides, optional `bot_username` for deep-link generation)
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 

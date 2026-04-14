@@ -126,6 +126,9 @@ class ChannelService:
         try:
             channel = channel_cls(bus=self.bus, config=config)
             await channel.start()
+            inbound_file_reader = channel.get_inbound_file_reader()
+            if inbound_file_reader is not None:
+                self.manager.register_inbound_file_reader(name, inbound_file_reader)
             self._channels[name] = channel
             logger.info("Channel %s started", name)
             return True
