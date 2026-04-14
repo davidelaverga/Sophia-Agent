@@ -694,6 +694,61 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_handle_chat_releases_sandbox_after_inbound_file_sync(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            provider = MagicMock()
+            provider.acquire = MagicMock(return_value="sandbox-1")
+            provider.release = MagicMock()
+            provider.get = MagicMock(return_value=MagicMock())
+            monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: provider)
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "input.txt",
+                        "mime_type": "text/plain",
+                        "content": b"hello from telegram",
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="please inspect file",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            provider.acquire.assert_called_once_with("test-thread-123")
+            provider.release.assert_called_once_with("sandbox-1")
+
+        _run(go())
+
     def test_builder_notifier_publishes_follow_up_message(self, monkeypatch):
         from app.channels.manager import ChannelManager
 

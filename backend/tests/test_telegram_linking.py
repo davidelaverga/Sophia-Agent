@@ -88,6 +88,34 @@ def test_touch_and_unlink(tmp_path):
     assert store.get_link_by_user("user_123") is None
 
 
+def test_redeem_replaces_existing_chat_owner_reverse_mapping(tmp_path):
+    store = TelegramLinkStore(path=tmp_path / "telegram_links.json")
+    first = store.issue_link_token(sophia_user_id="user_111", context_mode="life")
+    second = store.issue_link_token(sophia_user_id="user_222", context_mode="work")
+
+    linked_first = store.redeem_link_token(
+        token=first["token"],
+        telegram_chat_id="777",
+        telegram_user_id="888",
+    )
+    assert linked_first is not None
+    assert store.get_link_by_user("user_111") is not None
+
+    linked_second = store.redeem_link_token(
+        token=second["token"],
+        telegram_chat_id="777",
+        telegram_user_id="999",
+    )
+    assert linked_second is not None
+    assert linked_second["user_id"] == "user_222"
+    assert store.get_link_by_user("user_111") is None
+    assert store.get_link_by_chat("777")["user_id"] == "user_222"  # type: ignore[index]
+
+    # Old owner should no longer be able to remove the active chat link.
+    assert store.unlink_user("user_111") is False
+    assert store.get_link_by_chat("777")["user_id"] == "user_222"  # type: ignore[index]
+
+
 def test_resolve_channel_session_uses_telegram_link(monkeypatch, tmp_path):
     store = TelegramLinkStore(path=tmp_path / "telegram_links.json")
     issued = store.issue_link_token(sophia_user_id="user_123", context_mode="gaming")

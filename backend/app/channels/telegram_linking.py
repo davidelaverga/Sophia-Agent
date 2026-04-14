@@ -193,6 +193,13 @@ class TelegramLinkStore:
                 previous_chat_id = existing_user_link.get("telegram_chat_id")
                 if isinstance(previous_chat_id, str) and previous_chat_id:
                     self._data["links_by_chat"].pop(previous_chat_id, None)
+            existing_chat_link = self._data["links_by_chat"].get(chat_id)
+            if isinstance(existing_chat_link, dict):
+                previous_user_id = existing_chat_link.get("user_id")
+                if isinstance(previous_user_id, str) and previous_user_id and previous_user_id != user_id:
+                    previous_user_link = self._data["links_by_user"].get(previous_user_id)
+                    if isinstance(previous_user_link, dict) and previous_user_link.get("telegram_chat_id") == chat_id:
+                        self._data["links_by_user"].pop(previous_user_id, None)
 
             link_record = {
                 "user_id": user_id,
