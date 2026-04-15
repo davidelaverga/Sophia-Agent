@@ -45,7 +45,7 @@ vi.mock('../../app/session/useSessionVoiceUiControls', () => ({
 }));
 
 vi.mock('../../app/lib/builder-workflow', async () => {
-  const actual = await vi.importActual<typeof import('../../app/lib/builder-workflow')>('../../app/lib/builder-workflow');
+  const actual = await vi.importActual<Record<string, unknown>>('../../app/lib/builder-workflow');
 
   return {
     ...actual,

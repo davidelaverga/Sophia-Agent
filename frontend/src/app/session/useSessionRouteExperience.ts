@@ -164,7 +164,7 @@ export function useSessionRouteExperience({
 
     const activeTaskId = builderTask.taskId;
     let cancelled = false;
-    let timeoutId: ReturnType<typeof window.setTimeout> | null = null;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
     const pollTaskStatus = async () => {
       try {
@@ -211,7 +211,7 @@ export function useSessionRouteExperience({
       }
 
       if (!cancelled) {
-        timeoutId = window.setTimeout(() => {
+        timeoutId = setTimeout(() => {
           void pollTaskStatus();
         }, 2000);
       }
@@ -222,7 +222,7 @@ export function useSessionRouteExperience({
     return () => {
       cancelled = true;
       if (timeoutId !== null) {
-        window.clearTimeout(timeoutId);
+        clearTimeout(timeoutId);
       }
     };
   }, [builderTask?.phase, builderTask?.taskId, setBuilderArtifactAndPersist]);

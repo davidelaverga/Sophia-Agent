@@ -1,8 +1,9 @@
+import type { BuilderTaskV1 } from "../types/builder-task"
+
 import type {
   SophiaCaptureMicrophoneSummary,
   SophiaCaptureSnapshot,
 } from "./session-capture"
-import type { BuilderTaskV1 } from "../types/builder-task"
 import type { VoiceStage } from "./voice-types"
 
 export type VoiceCaptureEvent = {

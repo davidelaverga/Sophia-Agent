@@ -1,7 +1,7 @@
-import { normalizeBuilderArtifactPayload } from './builder-artifacts';
-
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderShellCommandDebugV1, BuilderTaskDebugV1, BuilderTaskV1 } from '../types/builder-task';
+
+import { normalizeBuilderArtifactPayload } from './builder-artifacts';
 
 export const BUILDER_DISCOVERY_PROMPT =
   'I want to use Builder for this. Help me clarify the deliverable, gather the right specs, and switch to Builder when you have enough detail.';
@@ -10,6 +10,25 @@ type CancelBuilderTaskResponse = {
   task_id?: string;
   status?: string;
   detail?: string | null;
+};
+
+type BuilderTaskStatusShellCommandPayload = {
+  tool?: string;
+  description?: string;
+  status?: string;
+  command?: string;
+  requested_command?: string;
+  resolved_command?: string;
+  shell_executable?: string | null;
+  started_at?: string;
+  completed_at?: string;
+  duration_ms?: number;
+  timeout_seconds?: number;
+  exit_code?: number;
+  error?: string;
+  stdout_preview?: string;
+  stderr_preview?: string;
+  output_preview?: string;
 };
 
 export type BuilderTaskStatusResponse = {
@@ -48,49 +67,15 @@ export type BuilderTaskStatusResponse = {
     builder_result_present?: boolean;
     suspected_blocker?: string | null;
     suspected_blocker_detail?: string | null;
-    last_shell_command?: {
-      tool?: string;
-      description?: string;
-      status?: string;
-      command?: string;
-      requested_command?: string;
-      resolved_command?: string;
-      shell_executable?: string | null;
-      started_at?: string;
-      completed_at?: string;
-      duration_ms?: number;
-      timeout_seconds?: number;
-      exit_code?: number;
-      error?: string;
-      stdout_preview?: string;
-      stderr_preview?: string;
-      output_preview?: string;
-    } | null;
-    recent_shell_commands?: Array<BuilderTaskStatusResponse['debug'] extends infer _T ? {
-      tool?: string;
-      description?: string;
-      status?: string;
-      command?: string;
-      requested_command?: string;
-      resolved_command?: string;
-      shell_executable?: string | null;
-      started_at?: string;
-      completed_at?: string;
-      duration_ms?: number;
-      timeout_seconds?: number;
-      exit_code?: number;
-      error?: string;
-      stdout_preview?: string;
-      stderr_preview?: string;
-      output_preview?: string;
-    } : never>;
+    last_shell_command?: BuilderTaskStatusShellCommandPayload | null;
+    recent_shell_commands?: BuilderTaskStatusShellCommandPayload[];
   };
 };
 
 const TERMINAL_TASK_PHASES = new Set<BuilderTaskV1['phase']>(['completed', 'failed', 'timed_out', 'cancelled']);
 
 function normalizeShellCommandDebug(
-  payload: BuilderTaskStatusResponse['debug'] extends { last_shell_command?: infer T } ? T : never,
+  payload: BuilderTaskStatusShellCommandPayload | null | undefined,
 ): BuilderShellCommandDebugV1 | null {
   if (!payload) {
     return null;
