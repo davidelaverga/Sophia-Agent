@@ -164,8 +164,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         middleware=middlewares,
         state_schema=SophiaState,
     )
-    # Must stay in sync with _resolve_builder_limits() in switch_to_builder.
-    # Hard cutoff at 12 non-artifact turns (BuilderArtifactMiddleware).
-    # 80 ensures the hard cutoff always fires before the recursion limit.
+    # Keep a slightly roomier built-agent ceiling for direct invocations.
+    # The delegated Builder path still enforces its runtime budget through
+    # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
     return agent
