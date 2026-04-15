@@ -241,6 +241,7 @@ class TestVoiceConnect:
 
     def test_missing_stream_api_key_returns_503(self, monkeypatch):
         monkeypatch.delenv("STREAM_API_KEY", raising=False)
+        monkeypatch.setattr("app.gateway.routers.voice._get_voice_env_fallback", lambda: {})
         resp = client.post(
             "/api/sophia/user_123/voice/connect",
             json={"platform": "voice"},
@@ -250,12 +251,35 @@ class TestVoiceConnect:
 
     def test_missing_stream_api_secret_returns_503(self, monkeypatch):
         monkeypatch.delenv("STREAM_API_SECRET", raising=False)
+        monkeypatch.setattr("app.gateway.routers.voice._get_voice_env_fallback", lambda: {})
         resp = client.post(
             "/api/sophia/user_123/voice/connect",
             json={"platform": "voice"},
         )
         assert resp.status_code == 503
         assert "STREAM_API_SECRET" in resp.json()["detail"]
+
+    def test_falls_back_to_voice_env_for_stream_credentials(self, monkeypatch):
+        monkeypatch.delenv("STREAM_API_KEY", raising=False)
+        monkeypatch.delenv("STREAM_API_SECRET", raising=False)
+        monkeypatch.setattr(
+            "app.gateway.routers.voice._get_voice_env_fallback",
+            lambda: {
+                "STREAM_API_KEY": "voice-file-api-key",
+                "STREAM_API_SECRET": "voice-file-api-secret",
+            },
+        )
+
+        with _mock_dispatch_unavailable():
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["api_key"] == "voice-file-api-key"
+        assert len(data["token"]) > 0
 
     def test_voice_server_unavailable_returns_credentials_with_null_session(self):
         """When voice server is down, gateway still returns credentials.

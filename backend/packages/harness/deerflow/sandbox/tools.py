@@ -418,6 +418,81 @@ def get_thread_data(runtime: ToolRuntime[ContextT, ThreadState] | None) -> Threa
     return runtime.state.get("thread_data")
 
 
+def _truncate_shell_text(value: str | None, *, limit: int = 500) -> str | None:
+    if value is None:
+        return None
+    if len(value) <= limit:
+        return value
+    return f"{value[:limit]}..."
+
+
+def _mask_shell_telemetry_value(
+    value: object,
+    thread_data: ThreadDataState | None,
+) -> object:
+    if isinstance(value, str):
+        masked = mask_local_paths_in_output(value, thread_data)
+        return _truncate_shell_text(masked)
+    return value
+
+
+def _mask_shell_telemetry(
+    telemetry: dict[str, object],
+    thread_data: ThreadDataState | None,
+) -> dict[str, object]:
+    masked = {key: _mask_shell_telemetry_value(value, thread_data) for key, value in telemetry.items()}
+
+    command = masked.get("command")
+    if isinstance(command, str):
+        masked["command"] = _truncate_shell_text(command, limit=800)
+
+    requested_command = masked.get("requested_command")
+    if isinstance(requested_command, str):
+        masked["requested_command"] = _truncate_shell_text(requested_command, limit=800)
+
+    resolved_command = masked.get("resolved_command")
+    if isinstance(resolved_command, str):
+        masked["resolved_command"] = _truncate_shell_text(resolved_command, limit=800)
+
+    return masked
+
+
+def _record_shell_telemetry(
+    runtime: ToolRuntime[ContextT, ThreadState],
+    telemetry: dict[str, object],
+) -> None:
+    if runtime.state is None:
+        return
+
+    runtime.state["last_shell_command"] = telemetry
+
+    history = list(runtime.state.get("recent_shell_commands") or [])
+    history.append(telemetry)
+    runtime.state["recent_shell_commands"] = history[-3:]
+
+
+def _record_shell_tool_error(
+    runtime: ToolRuntime[ContextT, ThreadState],
+    *,
+    description: str,
+    command: str,
+    status: str,
+    error: str,
+) -> None:
+    thread_data = get_thread_data(runtime)
+    telemetry = _mask_shell_telemetry(
+        {
+            "tool": "bash",
+            "description": description,
+            "requested_command": command,
+            "status": status,
+            "error": error,
+        },
+        thread_data,
+    )
+    _record_shell_telemetry(runtime, telemetry)
+
+
 def is_local_sandbox(runtime: ToolRuntime[ContextT, ThreadState] | None) -> bool:
     """Check if the current sandbox is a local sandbox.
 
@@ -572,17 +647,72 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
         ensure_thread_directories_exist(runtime)
         thread_data = get_thread_data(runtime)
         if is_local_sandbox(runtime):
+            requested_command = command
             validate_local_bash_command_paths(command, thread_data)
             command = replace_virtual_paths_in_command(command, thread_data)
-            output = sandbox.execute_command(command)
+
+            output: str
+            telemetry: dict[str, object]
+            if hasattr(sandbox, "execute_command_with_metadata"):
+                output, telemetry = sandbox.execute_command_with_metadata(command)
+            else:
+                output = sandbox.execute_command(command)
+                telemetry = {
+                    "status": "completed_without_metadata",
+                    "command": command,
+                }
+
+            telemetry.update(
+                {
+                    "tool": "bash",
+                    "description": description,
+                    "requested_command": requested_command,
+                    "resolved_command": command,
+                }
+            )
+            masked_telemetry = _mask_shell_telemetry(telemetry, thread_data)
+            _record_shell_telemetry(runtime, masked_telemetry)
             return mask_local_paths_in_output(output, thread_data)
-        return sandbox.execute_command(command)
+
+        output = sandbox.execute_command(command)
+        _record_shell_telemetry(
+            runtime,
+            {
+                "tool": "bash",
+                "description": description,
+                "requested_command": command,
+                "status": "completed_without_metadata",
+            },
+        )
+        return output
     except SandboxError as e:
+        _record_shell_tool_error(
+            runtime,
+            description=description,
+            command=command,
+            status="tool_error",
+            error=str(e),
+        )
         return f"Error: {e}"
     except PermissionError as e:
+        _record_shell_tool_error(
+            runtime,
+            description=description,
+            command=command,
+            status="permission_error",
+            error=str(e),
+        )
         return f"Error: {e}"
     except Exception as e:
-        return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
+        sanitized_error = _sanitize_error(e, runtime)
+        _record_shell_tool_error(
+            runtime,
+            description=description,
+            command=command,
+            status="tool_error",
+            error=sanitized_error,
+        )
+        return f"Error: Unexpected error executing command: {sanitized_error}"
 
 
 @tool("ls", parse_docstring=True)

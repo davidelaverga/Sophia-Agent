@@ -226,4 +226,35 @@ describe('stream-transformers token sanitization', () => {
       },
     });
   });
+
+  it('emits builder task parts from nested values builder_task state', async () => {
+    const upstream = buildSseStream([
+      'event: values\ndata: {"values":{"builder_task":{"task_id":"task-builder-2","status":"queued","description":"Builder: voice transport brief"}}}\n\n',
+      'event: values\ndata: {"values":{"builder_task":{"task_id":"task-builder-2","status":"synthesized","description":"Builder: voice transport brief"},"builder_result":{"artifact_title":"Voice transport brief","artifact_type":"document","artifact_path":"outputs/voice-transport-brief.md","decisions_made":[]}}}\n\n',
+      'event: done\ndata: {"status":"complete"}\n\n',
+    ]);
+
+    const transformed = createSSEToUIMessageStream(upstream);
+    const rawDump = await readStreamAsString(transformed);
+    const objectEvents = parseDataEventsFromDump(rawDump).filter(
+      (event): event is Record<string, unknown> => typeof event === 'object' && event !== null,
+    );
+
+    const builderTaskEvents = objectEvents.filter((event) => event.type === 'data-builderTaskV1');
+    expect(builderTaskEvents).toHaveLength(2);
+    expect(builderTaskEvents[0]).toMatchObject({
+      data: {
+        phase: 'running',
+        taskId: 'task-builder-2',
+        label: 'Builder: voice transport brief',
+      },
+    });
+    expect(builderTaskEvents[1]).toMatchObject({
+      data: {
+        phase: 'completed',
+        taskId: 'task-builder-2',
+        label: 'Builder: voice transport brief',
+      },
+    });
+  });
 });

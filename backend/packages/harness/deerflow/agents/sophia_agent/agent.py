@@ -35,7 +35,7 @@ from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
-from deerflow.sophia.tools.switch_to_builder import switch_to_builder
+from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +153,7 @@ def make_sophia_agent(config: RunnableConfig):
     )
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
+    switch_to_builder = make_switch_to_builder_tool(user_id)
     tools = [emit_artifact, switch_to_builder, retrieve_memories]
 
     agent = create_agent(

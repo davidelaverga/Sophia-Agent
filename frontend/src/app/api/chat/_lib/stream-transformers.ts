@@ -57,6 +57,8 @@ type BuilderTaskAccumulator = {
   label?: string;
 };
 
+type BuilderTodoRecord = NonNullable<BuilderTaskV1['todos']>[number];
+
 const LEAK_LEAD_LABELS = [
   'USER MESSAGE:',
   'SYSTEM:',
@@ -393,11 +395,33 @@ function extractTaskMessageText(message: unknown): string | undefined {
 }
 
 function buildRunningTaskDetail(data: Record<string, unknown>): string | undefined {
+  const stuckReason = typeof data.stuck_reason === 'string'
+    ? data.stuck_reason
+    : typeof data.stuckReason === 'string'
+      ? data.stuckReason
+      : undefined;
+  if (stuckReason) return stuckReason;
+
   const messageText = extractTaskMessageText(data.message);
   if (messageText) return messageText;
 
+  const activeStepTitle = typeof data.active_step_title === 'string'
+    ? data.active_step_title
+    : typeof data.activeStepTitle === 'string'
+      ? data.activeStepTitle
+      : undefined;
+  if (activeStepTitle) {
+    return `Working on: ${activeStepTitle}.`;
+  }
+
   const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
   const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
+  const completedSteps = typeof data.completed_steps === 'number' ? data.completed_steps : undefined;
+  const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;
+
+  if (typeof completedSteps === 'number' && typeof totalSteps === 'number' && totalSteps > 0) {
+    return `Completed ${completedSteps} of ${totalSteps} builder steps.`;
+  }
 
   if (typeof messageIndex === 'number' && typeof totalMessages === 'number' && totalMessages > 0) {
     return `Working through step ${messageIndex} of ${totalMessages}.`;
@@ -410,6 +434,51 @@ function buildRunningTaskDetail(data: Record<string, unknown>): string | undefin
   return undefined;
 }
 
+function parseBuilderTodos(data: unknown): BuilderTaskV1['todos'] | undefined {
+  if (!Array.isArray(data)) {
+    return undefined;
+  }
+
+  const todos = data
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.title !== 'string') return null;
+      if (record.status !== 'not-started' && record.status !== 'in-progress' && record.status !== 'completed') {
+        return null;
+      }
+
+      return {
+        ...(typeof record.id === 'number' ? { id: record.id } : {}),
+        title: record.title,
+        status: record.status,
+      } satisfies BuilderTodoRecord;
+    })
+    .filter((todo): todo is BuilderTodoRecord => Boolean(todo));
+
+  return todos.length > 0 ? todos : undefined;
+}
+
+function mapBuilderTaskPhase(status: unknown): BuilderTaskV1['phase'] | null {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'started':
+      return 'running';
+    case 'completed':
+    case 'synthesized':
+      return 'completed';
+    case 'failed':
+      return 'failed';
+    case 'timed_out':
+      return 'timed_out';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return null;
+  }
+}
+
 function buildBuilderTaskEvent(
   phase: BuilderTaskV1['phase'],
   data: Record<string, unknown>,
@@ -419,6 +488,44 @@ function buildBuilderTaskEvent(
   const label = typeof data.description === 'string' ? data.description : accumulator?.label;
   const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
   const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
+  const progressPercent = typeof data.progress_percent === 'number'
+    ? data.progress_percent
+    : typeof data.progressPercent === 'number'
+      ? data.progressPercent
+      : undefined;
+  const progressSource = data.progress_source === 'todos' || data.progress_source === 'messages' || data.progress_source === 'none'
+    ? data.progress_source
+    : data.progressSource === 'todos' || data.progressSource === 'messages' || data.progressSource === 'none'
+      ? data.progressSource
+      : undefined;
+  const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;
+  const completedSteps = typeof data.completed_steps === 'number' ? data.completed_steps : undefined;
+  const inProgressSteps = typeof data.in_progress_steps === 'number' ? data.in_progress_steps : undefined;
+  const pendingSteps = typeof data.pending_steps === 'number' ? data.pending_steps : undefined;
+  const activeStepTitle = typeof data.active_step_title === 'string'
+    ? data.active_step_title
+    : typeof data.activeStepTitle === 'string'
+      ? data.activeStepTitle
+      : undefined;
+  const startedAt = typeof data.started_at === 'string' ? data.started_at : undefined;
+  const completedAt = typeof data.completed_at === 'string' ? data.completed_at : undefined;
+  const lastUpdateAt = typeof data.last_update_at === 'string' ? data.last_update_at : undefined;
+  const lastProgressAt = typeof data.last_progress_at === 'string' ? data.last_progress_at : undefined;
+  const heartbeatMs = typeof data.heartbeat_ms === 'number' ? data.heartbeat_ms : undefined;
+  const idleMs = typeof data.idle_ms === 'number' ? data.idle_ms : undefined;
+  const stuck = typeof data.is_stuck === 'boolean'
+    ? data.is_stuck
+    : typeof data.stuck === 'boolean'
+      ? data.stuck
+      : undefined;
+  const stuckReason = typeof data.stuck_reason === 'string'
+    ? data.stuck_reason
+    : typeof data.stuckReason === 'string'
+      ? data.stuckReason
+      : undefined;
+  const heartbeat = typeof data.heartbeat === 'boolean' ? data.heartbeat : undefined;
+  const pollCount = typeof data.poll_count === 'number' ? data.poll_count : undefined;
+  const todos = parseBuilderTodos(data.todos);
 
   let detail: string | undefined;
   switch (phase) {
@@ -450,7 +557,54 @@ function buildBuilderTaskEvent(
     ...(detail ? { detail } : {}),
     ...(typeof messageIndex === 'number' ? { messageIndex } : {}),
     ...(typeof totalMessages === 'number' ? { totalMessages } : {}),
+    ...(typeof progressPercent === 'number' ? { progressPercent } : {}),
+    ...(progressSource ? { progressSource } : {}),
+    ...(typeof totalSteps === 'number' ? { totalSteps } : {}),
+    ...(typeof completedSteps === 'number' ? { completedSteps } : {}),
+    ...(typeof inProgressSteps === 'number' ? { inProgressSteps } : {}),
+    ...(typeof pendingSteps === 'number' ? { pendingSteps } : {}),
+    ...(activeStepTitle ? { activeStepTitle } : {}),
+    ...(todos ? { todos } : {}),
+    ...(startedAt ? { startedAt } : {}),
+    ...(completedAt ? { completedAt } : {}),
+    ...(lastUpdateAt ? { lastUpdateAt } : {}),
+    ...(lastProgressAt ? { lastProgressAt } : {}),
+    ...(typeof heartbeatMs === 'number' ? { heartbeatMs } : {}),
+    ...(typeof idleMs === 'number' ? { idleMs } : {}),
+    ...(typeof stuck === 'boolean' ? { stuck } : {}),
+    ...(stuckReason ? { stuckReason } : {}),
+    ...(typeof heartbeat === 'boolean' ? { heartbeat } : {}),
+    ...(typeof pollCount === 'number' ? { pollCount } : {}),
   };
+}
+
+function extractValuesBuilderTask(data: unknown): BuilderTaskV1 | null {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+
+  const values = data as Record<string, unknown>;
+  const nestedValues = values.values && typeof values.values === 'object'
+    ? values.values as Record<string, unknown>
+    : null;
+  const rawBuilderTask = values.builder_task ?? values.builderTask ?? nestedValues?.builder_task ?? nestedValues?.builderTask;
+  if (!rawBuilderTask || typeof rawBuilderTask !== 'object') {
+    return null;
+  }
+
+  const builderTask = rawBuilderTask as Record<string, unknown>;
+  const phase = mapBuilderTaskPhase(builderTask.status);
+  if (!phase) {
+    return null;
+  }
+
+  const label = typeof builderTask.description === 'string'
+    ? builderTask.description
+    : typeof builderTask.label === 'string'
+      ? builderTask.label
+      : undefined;
+
+  return buildBuilderTaskEvent(phase, builderTask, label ? { label } : undefined);
 }
 
 export function createUIMessageStreamFromText(
@@ -811,6 +965,11 @@ export function createSSEToUIMessageStream(
                   break;
                 }
                 case 'values': {
+                  const builderTask = extractValuesBuilderTask(data);
+                  if (builderTask) {
+                    emitBuilderTask(builderTask);
+                  }
+
                   const builderArtifact = extractValuesBuilderArtifact(data);
                   if (builderArtifact !== null) {
                     const shouldEmitBuilderArtifact =

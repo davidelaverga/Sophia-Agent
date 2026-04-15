@@ -1056,6 +1056,15 @@ function SessionPageContent() {
               />
             </div>
           )}
+
+          {focusMode === 'text' && (
+            <div
+              className="mb-3 flex justify-center"
+              style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+            </div>
+          )}
           
           {/* Voice-First Composer */}
           <VoiceComposerErrorBoundary>
@@ -1075,14 +1084,16 @@ function SessionPageContent() {
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}
               textOnly={focusMode === 'text'}
-              slotBeforeText={
-                <div
-                  className="flex justify-center"
-                  style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
-                >
-                  <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
-                </div>
-              }
+              slotBeforeText={focusMode !== 'text'
+                ? (
+                    <div
+                      className="flex justify-center"
+                      style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+                    >
+                      <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                    </div>
+                  )
+                : undefined}
             />
           </VoiceComposerErrorBoundary>
         </div>

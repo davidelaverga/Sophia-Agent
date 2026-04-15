@@ -9,8 +9,15 @@ import { usePlatformSignal } from "../hooks/usePlatformSignal"
 import { useSessionPersistence } from "../hooks/useSessionPersistence"
 import type { StreamVoiceSessionReturn } from "../hooks/useStreamVoiceSession"
 import { useUsageMonitor } from "../hooks/useUsageMonitor"
-import { cancelBuilderTask as requestBuilderTaskCancellation } from "../lib/builder-workflow"
+import {
+  cancelBuilderTask as requestBuilderTaskCancellation,
+  getBuilderArtifactFromStatus,
+  getBuilderTaskPhaseFromStatus,
+  getBuilderTaskStatus,
+  mergeBuilderTaskStatus,
+} from "../lib/builder-workflow"
 import { logger } from "../lib/error-logger"
+import { recordSophiaCaptureEvent } from "../lib/session-capture"
 import {
   emitRecoveryTelemetry,
   recoverFromDisconnect,
@@ -171,6 +178,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
   const [builderArtifact, setBuilderArtifact] = useState<BuilderArtifactV1 | null>(recapArtifacts?.builderArtifact ?? null)
   const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null)
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false)
+  const lastBuilderCaptureSignatureRef = useRef<string | null>(null)
 
   const setEmotion = useEmotionStore((state) => state.setEmotion)
   const setCurrentContext = useMessageMetadataStore((state) => state.setCurrentContext)
@@ -262,7 +270,26 @@ export function useChatRouteExperience(): ChatRouteExperience {
     setBuilderArtifact(recapArtifacts?.builderArtifact ?? null)
     setBuilderTask(null)
     setIsCancellingBuilderTask(false)
+    lastBuilderCaptureSignatureRef.current = null
   }, [conversationId, recapArtifacts?.builderArtifact])
+
+  useEffect(() => {
+    if (!builderTask) {
+      return
+    }
+
+    const signature = JSON.stringify(builderTask)
+    if (signature === lastBuilderCaptureSignatureRef.current) {
+      return
+    }
+
+    lastBuilderCaptureSignatureRef.current = signature
+    recordSophiaCaptureEvent({
+      category: "builder",
+      name: `task-${builderTask.phase}`,
+      payload: builderTask,
+    })
+  }, [builderTask])
 
   const clearBuilderTask = useCallback(() => {
     setBuilderTask(null)
@@ -336,6 +363,76 @@ export function useChatRouteExperience(): ChatRouteExperience {
       status: previousArtifacts?.status || 'ready',
     })
   }, [activeThreadId])
+
+  useEffect(() => {
+    if (!builderTask?.taskId || builderTask.phase !== 'running') {
+      return
+    }
+
+    const activeTaskId = builderTask.taskId
+    let cancelled = false
+    let timeoutId: ReturnType<typeof window.setTimeout> | null = null
+
+    const pollTaskStatus = async () => {
+      try {
+        const status = await getBuilderTaskStatus(activeTaskId)
+        if (cancelled) {
+          return
+        }
+
+        const nextBuilderArtifact = getBuilderArtifactFromStatus(status)
+        if (nextBuilderArtifact) {
+          handleBuilderArtifact(nextBuilderArtifact)
+        }
+
+        setBuilderTask((currentTask) => {
+          if (currentTask?.taskId !== activeTaskId) {
+            return currentTask
+          }
+
+          return mergeBuilderTaskStatus(currentTask, status)
+        })
+
+        if (getBuilderTaskPhaseFromStatus(status.status) !== 'running') {
+          return
+        }
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+
+        if (error instanceof Error && error.message.includes('Task not found')) {
+          setBuilderTask((currentTask) => {
+            if (currentTask?.taskId !== activeTaskId || currentTask.phase !== 'running') {
+              return currentTask
+            }
+
+            return {
+              ...currentTask,
+              phase: 'failed',
+              detail: 'Builder task state disappeared before completion.',
+            }
+          })
+          return
+        }
+      }
+
+      if (!cancelled) {
+        timeoutId = window.setTimeout(() => {
+          void pollTaskStatus()
+        }, 2000)
+      }
+    }
+
+    void pollTaskStatus()
+
+    return () => {
+      cancelled = true
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId)
+      }
+    }
+  }, [builderTask?.phase, builderTask?.taskId, handleBuilderArtifact])
 
   const runtimeRefs = useRef<StreamRuntimeRefs>({
     handleDataPart: () => undefined,

@@ -371,12 +371,13 @@ class TestUserIdentityMiddleware:
             mw = UserIdentityMiddleware("test_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
             assert result is not None
+            assert result["user_id"] == "test_user"
             assert "Test User" in result["system_prompt_blocks"][0]
         finally:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir
 
-    def test_missing_identity_returns_none(self, tmp_path):
+    def test_missing_identity_still_caches_user_id(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
@@ -386,7 +387,7 @@ class TestUserIdentityMiddleware:
         try:
             mw = UserIdentityMiddleware("nonexistent_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
-            assert result is None
+            assert result == {"user_id": "nonexistent_user"}
         finally:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir

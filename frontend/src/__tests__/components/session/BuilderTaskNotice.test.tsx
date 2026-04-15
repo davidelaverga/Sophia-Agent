@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { BuilderTaskNotice } from '../../../app/components/session/BuilderTaskNotice';
@@ -10,16 +10,26 @@ describe('BuilderTaskNotice', () => {
         task={{
           phase: 'running',
           label: 'drafting launch brief',
-          messageIndex: 3,
-          totalMessages: 5,
+          progressPercent: 50,
+          totalSteps: 4,
+          completedSteps: 2,
+          inProgressSteps: 1,
+          activeStepTitle: 'Refine recommendation',
+          todos: [
+            { id: 1, title: 'Collect notes', status: 'completed' },
+            { id: 2, title: 'Shape outline', status: 'completed' },
+            { id: 3, title: 'Refine recommendation', status: 'in-progress' },
+          ],
         }}
       />,
     );
 
     const progressbar = screen.getByRole('progressbar', { name: 'Builder progress' });
-    expect(progressbar).toHaveAttribute('aria-valuenow', '60');
-    expect(screen.getByText('3 of 5 steps')).toBeInTheDocument();
-    expect(screen.getByText('60%')).toBeInTheDocument();
+    expect(progressbar).toHaveAttribute('aria-valuenow', '50');
+    expect(screen.getByText('2 of 4 steps | 1 active')).toBeInTheDocument();
+    expect(screen.getByText('50%')).toBeInTheDocument();
+    expect(screen.getByText('active: Refine recommendation')).toBeInTheDocument();
+    expect(screen.getAllByText('Refine recommendation').length).toBeGreaterThan(0);
   });
 
   it('shows a fully completed progress state when the deliverable is ready', () => {
@@ -62,5 +72,57 @@ describe('BuilderTaskNotice', () => {
       'href',
       '/api/threads/thread-1/artifacts/mnt/user-data/outputs/launch-brief.md?download=true',
     );
+  });
+
+  it('surfaces a stalled builder state explicitly', () => {
+    render(
+      <BuilderTaskNotice
+        task={{
+          phase: 'running',
+          progressPercent: 25,
+          totalSteps: 4,
+          completedSteps: 1,
+          stuck: true,
+          stuckReason: 'No visible builder progress for 60s. It may be blocked on a tool or looping without advancing the deliverable.',
+          idleMs: 60000,
+        }}
+      />,
+    );
+
+    expect(screen.getByText('stalled')).toBeInTheDocument();
+    expect(screen.getAllByText(/No visible builder progress for 60s/i).length).toBeGreaterThan(0);
+    expect(screen.getByText('25%')).toBeInTheDocument();
+  });
+
+  it('infers a stalled builder from stale timestamps even before a new payload arrives', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-04-15T04:43:54.399Z'));
+
+    try {
+      render(
+        <BuilderTaskNotice
+          task={{
+            phase: 'running',
+            label: 'Builder: one-page brief',
+            progressSource: 'none',
+            startedAt: '2026-04-15T04:43:30.559766Z',
+            lastUpdateAt: '2026-04-15T04:43:32.866153Z',
+            lastProgressAt: '2026-04-15T04:43:32.864136Z',
+            heartbeatMs: 21209,
+            idleMs: 21211,
+            stuck: false,
+          }}
+        />,
+      );
+
+      act(() => {
+        vi.advanceTimersByTime(45_000);
+      });
+
+      expect(screen.getByText('stalled')).toBeInTheDocument();
+      expect(screen.getAllByText(/No visible builder progress for 1m/i).length).toBeGreaterThan(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

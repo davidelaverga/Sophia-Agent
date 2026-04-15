@@ -3,6 +3,8 @@ import { type NextRequest, NextResponse } from 'next/server';
 import { getAuthenticatedUserId, getUserScopedAuthHeader } from '../../../../../lib/auth/server-auth';
 import { getPrimaryGatewayUrl } from '../../../../_lib/gateway-url';
 
+export const dynamic = 'force-dynamic';
+
 const BACKEND_URL = getPrimaryGatewayUrl();
 
 async function authorizeVoiceConnect(userId: string) {
@@ -22,20 +24,6 @@ async function authorizeVoiceConnect(userId: string) {
   }
 
   return { authHeader };
-}
-
-export async function GET(
-  _req: NextRequest,
-  { params }: { params: Promise<{ userId: string }> },
-) {
-  const { userId } = await params;
-  const auth = await authorizeVoiceConnect(userId);
-
-  if ('response' in auth) {
-    return auth.response;
-  }
-
-  return NextResponse.json({ ok: true, authReady: true, userId });
 }
 
 export async function POST(

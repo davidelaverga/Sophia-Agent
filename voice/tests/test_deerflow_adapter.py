@@ -882,10 +882,68 @@ async def test_stream_events_fail_active_builder_task_before_backend_error() -> 
     assert events[1].builder_task == {
         "type": "task_failed",
         "task_id": "builder-1",
+        "detail": "An internal error occurred",
         "error": "An internal error occurred",
     }
     assert events[2].stage == "backend-stream"
     assert events[2].message == "An internal error occurred"
+
+
+@pytest.mark.anyio
+async def test_stream_events_emit_builder_failure_from_values_state() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: task_started",
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
+                "event: values",
+                "data: " + json.dumps({
+                    "values": {
+                        "builder_task": {
+                            "task_id": "builder-1",
+                            "status": "failed",
+                            "description": "Builder: document about the dangers of war",
+                            "error": "Recursion limit of 50 reached without hitting a stop condition.",
+                            "progress_percent": 50,
+                            "total_steps": 4,
+                            "completed_steps": 2,
+                        }
+                    }
+                }),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["builder_task", "builder_task"]
+    assert events[0].builder_task == {
+        "type": "task_started",
+        "task_id": "builder-1",
+        "description": "Builder: document about the dangers of war",
+    }
+    assert events[1].builder_task == {
+        "type": "task_failed",
+        "task_id": "builder-1",
+        "description": "Builder: document about the dangers of war",
+        "detail": "Recursion limit of 50 reached without hitting a stop condition.",
+        "error": "Recursion limit of 50 reached without hitting a stop condition.",
+        "progress_percent": 50,
+        "total_steps": 4,
+        "completed_steps": 2,
+    }
 
 
 @pytest.mark.anyio

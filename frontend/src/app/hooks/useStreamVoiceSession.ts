@@ -163,19 +163,11 @@ async function fetchStreamCredentials(
 }
 
 async function prewarmStreamVoiceConnect(
-  userId: string,
-  signal?: AbortSignal,
+  _userId: string,
+  _signal?: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${TOKEN_ENDPOINT}/${userId}/voice/connect`, {
-    method: "GET",
-    signal,
-    cache: "no-store",
-  })
-
-  if (!res.ok) {
-    const body = await res.text().catch(() => "")
-    throw new Error(`Voice connect prewarm failed (${res.status}): ${body}`)
-  }
+  // Frontend auth prewarm is intentionally a no-op. The real warmup happens once
+  // we have prepared voice credentials and can call /voice/warmup with session data.
 }
 
 async function requestVoiceDisconnect(
@@ -422,6 +414,83 @@ export function useStreamVoiceSession(
     preparedVoiceCredentialsAtRef.current = 0
   }, [])
 
+  const scheduleBackendWarmup = useCallback((nextCredentials: StreamVoiceCredentials | null) => {
+    if (!userId || !nextCredentials?.sessionId) {
+      return
+    }
+
+    const warmupKey = `${userId}:${nextCredentials.callId}:${nextCredentials.sessionId}`
+    if (backendWarmupKeyRef.current === warmupKey) {
+      return
+    }
+
+    backendWarmupControllerRef.current?.abort()
+    backendWarmupKeyRef.current = warmupKey
+
+    const controller = new AbortController()
+    backendWarmupControllerRef.current = controller
+
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "backend-warmup-started",
+      payload: {
+        callId: nextCredentials.callId,
+        sessionId: sessionIdRef.current ?? null,
+        voiceAgentSessionId: nextCredentials.sessionId,
+      },
+    })
+
+    void requestVoiceWarmup(userId, nextCredentials, controller.signal)
+      .then(() => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (backendWarmupControllerRef.current === controller) {
+          backendWarmupControllerRef.current = null
+        }
+
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "backend-warmup-completed",
+          payload: {
+            callId: nextCredentials.callId,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: nextCredentials.sessionId,
+          },
+        })
+      })
+      .catch((err) => {
+        if (controller.signal.aborted) {
+          return
+        }
+
+        if (backendWarmupControllerRef.current === controller) {
+          backendWarmupControllerRef.current = null
+        }
+        if (backendWarmupKeyRef.current === warmupKey) {
+          backendWarmupKeyRef.current = null
+        }
+
+        logger.debug("StreamVoiceSession", "Voice backend warmup failed", {
+          userId,
+          callId: nextCredentials.callId,
+          voiceAgentSessionId: nextCredentials.sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "backend-warmup-failed",
+          payload: {
+            callId: nextCredentials.callId,
+            error: err instanceof Error ? err.message : String(err),
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: nextCredentials.sessionId,
+          },
+        })
+      })
+  }, [userId])
+
   const releasePreparedVoiceConnect = useCallback(async (options: { keepalive?: boolean } = {}) => {
     const preparedCredentials = preparedVoiceCredentialsRef.current
     const activeCredentials = credentialsRef.current
@@ -564,6 +633,7 @@ export function useStreamVoiceSession(
 
       preparedVoiceCredentialsRef.current = creds
       preparedVoiceCredentialsAtRef.current = Date.now()
+      scheduleBackendWarmup(creds)
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "preconnect-ready",
@@ -1183,77 +1253,24 @@ export function useStreamVoiceSession(
   const activeVoiceAgentSessionId = credentials?.sessionId ?? null
 
   useEffect(() => {
-    if (!userId || !activeCallId || !activeVoiceAgentSessionId) {
+    if (!credentials || !call || callingState !== CallingState.IDLE) {
       return
     }
 
-    const warmupKey = `${userId}:${activeCallId}:${activeVoiceAgentSessionId}`
-    if (backendWarmupKeyRef.current === warmupKey) {
-      return
-    }
-
-    backendWarmupControllerRef.current?.abort()
-    backendWarmupKeyRef.current = warmupKey
-
-    const controller = new AbortController()
-    backendWarmupControllerRef.current = controller
-    recordSophiaCaptureEvent({
-      category: "voice-session",
-      name: "backend-warmup-started",
-      payload: {
-        callId: activeCallId,
-        sessionId: sessionIdRef.current ?? null,
-        voiceAgentSessionId: activeVoiceAgentSessionId,
-      },
+    logger.debug("StreamVoiceSession", "Auto-joining Stream voice call", {
+      callId: credentials.callId,
+      voiceAgentSessionId: credentials.sessionId ?? null,
     })
+    void join()
+  }, [call, callingState, credentials, join])
 
-    void requestVoiceWarmup(userId, credentials, controller.signal)
-      .then(() => {
-        if (controller.signal.aborted) {
-          return
-        }
+  useEffect(() => {
+    if (!activeCallId || !activeVoiceAgentSessionId) {
+      return
+    }
 
-        if (backendWarmupControllerRef.current === controller) {
-          backendWarmupControllerRef.current = null
-        }
-
-        recordSophiaCaptureEvent({
-          category: "voice-session",
-          name: "backend-warmup-completed",
-          payload: {
-            callId: activeCallId,
-            sessionId: sessionIdRef.current ?? null,
-            voiceAgentSessionId: activeVoiceAgentSessionId,
-          },
-        })
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) {
-          return
-        }
-
-        if (backendWarmupControllerRef.current === controller) {
-          backendWarmupControllerRef.current = null
-        }
-
-        logger.debug("StreamVoiceSession", "Voice backend warmup failed", {
-          userId,
-          callId: activeCallId,
-          voiceAgentSessionId: activeVoiceAgentSessionId,
-          error: err instanceof Error ? err.message : String(err),
-        })
-        recordSophiaCaptureEvent({
-          category: "voice-session",
-          name: "backend-warmup-failed",
-          payload: {
-            callId: activeCallId,
-            error: err instanceof Error ? err.message : String(err),
-            sessionId: sessionIdRef.current ?? null,
-            voiceAgentSessionId: activeVoiceAgentSessionId,
-          },
-        })
-      })
-  }, [activeCallId, activeVoiceAgentSessionId, credentials, userId])
+    scheduleBackendWarmup(credentials)
+  }, [activeCallId, activeVoiceAgentSessionId, credentials, scheduleBackendWarmup])
 
   useEffect(() => {
     if (
@@ -1418,6 +1435,7 @@ export function useStreamVoiceSession(
       logger.debug("StreamVoiceSession", "Credentials received", {
         callId: creds.callId,
       })
+      scheduleBackendWarmup(creds)
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "credentials-received",
@@ -1428,7 +1446,6 @@ export function useStreamVoiceSession(
         },
       })
       setCredentials(creds)
-      // join() will be triggered by useStreamVoice once credentials cause client init
     } catch (err) {
       if (controller.signal.aborted) {
         return
@@ -1453,29 +1470,28 @@ export function useStreamVoiceSession(
       }
     }
   }, [
-    callingState,
     cancelPendingStartRequest,
     clearAutoPreconnectTimer,
     closeEventSource,
     clearStartupReadyTimeout,
-    contextMode,
     consumePreparedVoiceConnect,
+    contextMode,
+    leave,
+    clearThinking,
     failVoiceStartup,
     platform,
+    requestCurrentVoiceDisconnect,
+    releasePreparedVoiceConnect,
+    scheduleBackendWarmup,
     sessionId,
+    setListeningPresence,
+    setSpeakingPresence,
+    settlePresence,
     setVoiceFailed,
     threadId,
     userId,
     voiceRitual,
   ])
-
-  // Auto-join when credentials arrive and call is ready
-  useEffect(() => {
-    if (credentials && call && callingState === CallingState.IDLE) {
-      logger.debug("StreamVoiceSession", "Auto-join triggered")
-      void join()
-    }
-  }, [credentials, call, callingState, join])
 
   const stopTalking = useCallback(async () => {
     cancelPendingStartRequest()

@@ -72,14 +72,21 @@ def _create_builder_todo_middleware() -> TodoMiddleware:
         system_prompt="""
 <builder_todo_system>
 You are the Sophia builder. Keep a live todo list while executing delegated build tasks.
-- Create and maintain todos for non-trivial build execution.
+- Use `write_todos` only for genuinely multi-step work.
+- Create the initial todo list once near the start, then keep working.
+- Do NOT rewrite the todo list after every small tool call.
+- Update todos only when the plan materially changes, a major milestone finishes, or right before the final handoff.
 - Keep at least one item in progress until the task is finished.
-- Mark items completed immediately after you finish them.
+- Mark items completed as soon as a meaningful step is done.
 </builder_todo_system>
 """,
         tool_description=(
             "Use this tool to maintain your execution todo list while building. "
-            "Update task status continuously as work progresses."
+            "Create it once for multi-step work, then update it only at meaningful milestones."
+        ),
+        reminder_instruction=(
+            "Only call `write_todos` again if the plan materially changed, a major milestone finished, "
+            "or you are preparing the final handoff."
         ),
     )
 
@@ -146,8 +153,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         middleware=middlewares,
         state_schema=SophiaState,
     )
-    # Builder needs enough steps for multi-file creation.
-    # Each tool call = ~3 graph steps. 50 steps ≈ 16 tool turns.
-    # The 120s timeout in switch_to_builder is the real safety net.
-    agent.recursion_limit = 50
+    # Builder runs often spend multiple turns on todo bookkeeping before the
+    # final emit_builder_artifact call. Keep this aligned with the delegated
+    # task budget so real deliverables can terminate cleanly.
+    agent.recursion_limit = 100
     return agent

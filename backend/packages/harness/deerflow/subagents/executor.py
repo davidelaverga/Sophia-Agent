@@ -1,7 +1,9 @@
 """Subagent execution engine."""
 
 import asyncio
+import json
 import logging
+import re
 import threading
 import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
@@ -10,6 +12,7 @@ from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from langchain.agents import create_agent
@@ -22,6 +25,8 @@ from deerflow.models import create_chat_model
 from deerflow.subagents.config import SubagentConfig
 
 logger = logging.getLogger(__name__)
+
+_STUCK_IDLE_MS = 45000
 
 
 class SubagentStatus(Enum):
@@ -64,16 +69,505 @@ class SubagentResult:
     ai_messages: list[dict[str, Any]] | None = None
     final_state: dict[str, Any] | None = None
     owner_id: str | None = None
+    description: str | None = None
     cancel_requested: bool = False
     last_ai_message_summary: dict[str, Any] | None = None
     late_ai_message_summary: dict[str, Any] | None = None
     timeout_observed_during_stream: bool = False
     timed_out_at: datetime | None = None
+    live_state: dict[str, Any] | None = None
+    last_update_at: datetime | None = None
+    last_progress_at: datetime | None = None
+    _live_state_signature: str | None = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+
+
+def _normalize_todo_status(status: object) -> str:
+    raw_value = getattr(status, "value", status)
+    if not isinstance(raw_value, str):
+        return "not-started"
+
+    normalized = raw_value.strip().lower().replace("_", "-")
+    if normalized == "completed":
+        return "completed"
+    if normalized == "in-progress":
+        return "in-progress"
+    return "not-started"
+
+
+def _normalize_todos(todos: object) -> list[dict[str, Any]]:
+    if not isinstance(todos, list):
+        return []
+
+    normalized: list[dict[str, Any]] = []
+    for index, todo in enumerate(todos, start=1):
+        if not isinstance(todo, dict):
+            continue
+
+        title = todo.get("title")
+        if not isinstance(title, str) or not title.strip():
+            continue
+
+        normalized_todo: dict[str, Any] = {
+            "title": title.strip(),
+            "status": _normalize_todo_status(todo.get("status")),
+        }
+
+        todo_id = todo.get("id")
+        if isinstance(todo_id, int):
+            normalized_todo["id"] = todo_id
+        else:
+            normalized_todo["id"] = index
+
+        normalized.append(normalized_todo)
+
+    return normalized
+
+
+def _extract_live_state_snapshot(state: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(state, dict):
+        return None
+
+    snapshot: dict[str, Any] = {}
+
+    todos = _normalize_todos(state.get("todos"))
+    if todos:
+        snapshot["todos"] = todos
+
+    builder_task = state.get("builder_task")
+    if isinstance(builder_task, dict) and builder_task:
+        snapshot["builder_task"] = {
+            key: value
+            for key, value in builder_task.items()
+            if key in {"task_id", "status", "description", "detail", "error"}
+        }
+
+    last_shell_command = state.get("last_shell_command")
+    if isinstance(last_shell_command, dict) and last_shell_command:
+        snapshot["last_shell_command"] = dict(last_shell_command)
+
+    recent_shell_commands = state.get("recent_shell_commands")
+    if isinstance(recent_shell_commands, list) and recent_shell_commands:
+        snapshot["recent_shell_commands"] = [
+            dict(entry)
+            for entry in recent_shell_commands
+            if isinstance(entry, dict) and entry
+        ][-3:]
+
+    return snapshot or None
+
+
+def _snapshot_signature(snapshot: dict[str, Any] | None) -> str | None:
+    if not snapshot:
+        return None
+
+    try:
+        return json.dumps(snapshot, sort_keys=True, default=str)
+    except TypeError:
+        return repr(snapshot)
+
+
+def _iso_or_none(dt: datetime | None) -> str | None:
+    return dt.isoformat() if dt else None
+
+
+def build_subagent_progress_payload(
+    result: SubagentResult,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current_time = now or datetime.now()
+    live_state = result.live_state or {}
+    todos = _normalize_todos(live_state.get("todos"))
+
+    total_steps = len(todos)
+    completed_steps = sum(1 for todo in todos if todo.get("status") == "completed")
+    in_progress_steps = sum(1 for todo in todos if todo.get("status") == "in-progress")
+    pending_steps = max(total_steps - completed_steps - in_progress_steps, 0)
+
+    active_step_title = next(
+        (
+            str(todo.get("title"))
+            for todo in todos
+            if isinstance(todo, dict) and todo.get("status") == "in-progress"
+        ),
+        None,
+    )
+    if active_step_title is None:
+        active_step_title = next(
+            (
+                str(todo.get("title"))
+                for todo in todos
+                if isinstance(todo, dict) and todo.get("status") != "completed"
+            ),
+            None,
+        )
+
+    progress_percent: int | None = None
+    progress_source = "none"
+    if total_steps > 0:
+        progress_percent = round((completed_steps / total_steps) * 100)
+        progress_source = "todos"
+    elif result.status == SubagentStatus.COMPLETED:
+        progress_percent = 100
+
+    heartbeat_anchor = result.last_update_at or result.started_at
+    progress_anchor = result.last_progress_at or result.started_at
+
+    heartbeat_ms = None
+    if heartbeat_anchor is not None:
+        heartbeat_ms = max(int((current_time - heartbeat_anchor).total_seconds() * 1000), 0)
+
+    idle_ms = None
+    if progress_anchor is not None:
+        idle_ms = max(int((current_time - progress_anchor).total_seconds() * 1000), 0)
+
+    is_stuck = (
+        result.status == SubagentStatus.RUNNING
+        and idle_ms is not None
+        and idle_ms >= _STUCK_IDLE_MS
+    )
+    stuck_reason = None
+    if is_stuck and idle_ms is not None:
+        stuck_reason = (
+            f"No visible builder progress for {round(idle_ms / 1000)}s. "
+            "It may be blocked on a tool or looping without advancing the deliverable."
+        )
+
+    payload: dict[str, Any] = {
+        "started_at": _iso_or_none(result.started_at),
+        "completed_at": _iso_or_none(result.completed_at),
+        "last_update_at": _iso_or_none(result.last_update_at),
+        "last_progress_at": _iso_or_none(result.last_progress_at),
+        "heartbeat_ms": heartbeat_ms,
+        "idle_ms": idle_ms,
+        "is_stuck": is_stuck,
+        "stuck_reason": stuck_reason,
+        "progress_percent": progress_percent,
+        "progress_source": progress_source,
+        "active_step_title": active_step_title,
+    }
+
+    if todos:
+        payload["todos"] = todos
+        payload["total_steps"] = total_steps
+        payload["completed_steps"] = completed_steps
+        payload["in_progress_steps"] = in_progress_steps
+        payload["pending_steps"] = pending_steps
+
+    return payload
+
+
+_BACKGROUND_TASK_OWNER_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+_BACKGROUND_TASK_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,128}$")
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.parent
+_BACKGROUND_TASKS_DIR = _PROJECT_ROOT / "users"
+
+
+def _background_task_snapshot_path(owner_id: str, task_id: str) -> Path | None:
+    if not isinstance(owner_id, str) or not _BACKGROUND_TASK_OWNER_PATTERN.match(owner_id):
+        logger.warning("Skipping background task snapshot for invalid owner_id=%r task_id=%s", owner_id, task_id)
+        return None
+
+    if not isinstance(task_id, str) or not _BACKGROUND_TASK_ID_PATTERN.match(task_id):
+        logger.warning("Skipping background task snapshot for invalid task_id=%r", task_id)
+        return None
+
+    snapshot_path = _BACKGROUND_TASKS_DIR / owner_id / "builder_tasks" / f"{task_id}.json"
+    resolved = snapshot_path.resolve()
+    if not resolved.is_relative_to(_BACKGROUND_TASKS_DIR.resolve()):
+        logger.warning("Skipping background task snapshot outside users dir for task_id=%s", task_id)
+        return None
+
+    return snapshot_path
+
+
+def _extract_builder_result_from_task_result(result: SubagentResult) -> dict[str, Any] | None:
+    final_state = result.final_state
+    if isinstance(final_state, dict):
+        builder_result = final_state.get("builder_result")
+        if isinstance(builder_result, dict) and builder_result:
+            return builder_result
+
+    ai_messages = result.ai_messages or []
+    for message in reversed(ai_messages):
+        if not isinstance(message, dict):
+            continue
+
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+
+        for tool_call in reversed(tool_calls):
+            if not isinstance(tool_call, dict):
+                continue
+            if tool_call.get("name") != "emit_builder_artifact":
+                continue
+
+            args = tool_call.get("args")
+            if isinstance(args, dict) and args:
+                return args
+
+    return None
+
+
+def _task_summary_tool_names(summary: object) -> list[str]:
+    if not isinstance(summary, dict):
+        return []
+
+    tool_names = summary.get("tool_names")
+    if not isinstance(tool_names, list):
+        return []
+
+    return [tool_name for tool_name in tool_names if isinstance(tool_name, str) and tool_name]
+
+
+def _infer_task_blocker(
+    status_value: str,
+    *,
+    builder_result: dict[str, Any] | None,
+    last_summary: object,
+    late_summary: object,
+    message_count: int,
+) -> tuple[str | None, str | None]:
+    if status_value in {"completed", "cancelled"}:
+        return (None, None)
+
+    last_tool_names = _task_summary_tool_names(last_summary)
+    late_tool_names = _task_summary_tool_names(late_summary)
+    last_has_emit = bool(isinstance(last_summary, dict) and last_summary.get("has_emit_builder_artifact"))
+    late_has_emit = bool(isinstance(late_summary, dict) and late_summary.get("has_emit_builder_artifact"))
+
+    if status_value == "timed_out":
+        if late_has_emit:
+            return (
+                "final_artifact_emission",
+                "Builder only reached emit_builder_artifact after the timeout window closed.",
+            )
+        if last_tool_names:
+            return (
+                "tool_call",
+                f"Builder timed out after calling {', '.join(last_tool_names)} before emit_builder_artifact.",
+            )
+        return (
+            "background_agent",
+            "Builder timed out before a terminal artifact or result was captured.",
+        )
+
+    if status_value == "failed":
+        if last_has_emit:
+            return (
+                "final_artifact_emission",
+                "Builder failed after emit_builder_artifact was attempted.",
+            )
+        if last_tool_names:
+            return (
+                "tool_call",
+                f"Latest captured Builder activity called {', '.join(last_tool_names)} before failing.",
+            )
+        return (
+            "background_agent",
+            "Builder failed outside a captured tool call or final artifact emission step.",
+        )
+
+    if isinstance(builder_result, dict) and builder_result:
+        return (
+            "final_artifact_emission",
+            "Builder artifact exists, but the background task has not reported a terminal status yet.",
+        )
+
+    if late_has_emit or last_has_emit:
+        return (
+            "final_artifact_emission",
+            "Latest captured Builder step already called emit_builder_artifact, but task closure is still pending.",
+        )
+
+    if last_tool_names:
+        return (
+            "tool_call",
+            f"Latest captured Builder step called {', '.join(last_tool_names)} and has not reached emit_builder_artifact yet.",
+        )
+
+    if late_tool_names:
+        return (
+            "tool_call",
+            f"Late Builder activity was observed in {', '.join(late_tool_names)} without a final artifact.",
+        )
+
+    if message_count > 0:
+        return (
+            "background_agent",
+            "No recent Builder tool calls were captured; it may be waiting on the model loop or a hidden downstream dependency.",
+        )
+
+    return (
+        "background_agent",
+        "Builder task exists in memory but no AI/tool activity has been captured yet.",
+    )
+
+
+def build_background_task_status_payload(result: SubagentResult) -> dict[str, Any]:
+    status_value = getattr(result.status, "value", str(result.status))
+    progress_payload = build_subagent_progress_payload(result)
+    builder_result = _extract_builder_result_from_task_result(result)
+
+    description = result.description
+    if not isinstance(description, str) or not description.strip():
+        for state_name in ("live_state", "final_state"):
+            state = getattr(result, state_name, None)
+            if not isinstance(state, dict):
+                continue
+
+            builder_task = state.get("builder_task")
+            if isinstance(builder_task, dict):
+                candidate = builder_task.get("description")
+                if isinstance(candidate, str) and candidate.strip():
+                    description = candidate.strip()
+                    break
+
+    if (not isinstance(description, str) or not description.strip()) and isinstance(builder_result, dict):
+        artifact_title = builder_result.get("artifact_title")
+        if isinstance(artifact_title, str) and artifact_title.strip():
+            description = artifact_title.strip()
+
+    detail = None
+    if isinstance(result.error, str) and result.error.strip():
+        detail = result.error.strip()
+    else:
+        stuck_reason = progress_payload.get("stuck_reason")
+        if isinstance(stuck_reason, str) and stuck_reason.strip():
+            detail = stuck_reason.strip()
+        elif isinstance(builder_result, dict):
+            companion_summary = builder_result.get("companion_summary")
+            if isinstance(companion_summary, str) and companion_summary.strip():
+                detail = companion_summary.strip()
+        if detail is None and isinstance(result.result, str) and result.result.strip():
+            detail = result.result.strip()
+        if detail is None and isinstance(result.live_state, dict):
+            builder_task = result.live_state.get("builder_task")
+            if isinstance(builder_task, dict):
+                candidate = builder_task.get("detail")
+                if isinstance(candidate, str) and candidate.strip():
+                    detail = candidate.strip()
+        if detail is None and isinstance(result.live_state, dict):
+            last_shell_command = result.live_state.get("last_shell_command")
+            if isinstance(last_shell_command, dict):
+                shell_error = last_shell_command.get("error")
+                if isinstance(shell_error, str) and shell_error.strip():
+                    detail = shell_error.strip()
+
+    last_summary = result.last_ai_message_summary
+    late_summary = result.late_ai_message_summary
+    message_count = len(result.ai_messages or [])
+    suspected_blocker, blocker_detail = _infer_task_blocker(
+        status_value,
+        builder_result=builder_result,
+        last_summary=last_summary,
+        late_summary=late_summary,
+        message_count=message_count,
+    )
+
+    return {
+        "task_id": result.task_id,
+        "status": status_value,
+        "trace_id": result.trace_id,
+        "description": description.strip() if isinstance(description, str) and description.strip() else None,
+        "detail": detail,
+        "result": result.result,
+        "error": result.error,
+        "builder_result": builder_result,
+        "message_count": message_count,
+        "started_at": progress_payload.get("started_at"),
+        "completed_at": progress_payload.get("completed_at"),
+        "last_update_at": progress_payload.get("last_update_at"),
+        "last_progress_at": progress_payload.get("last_progress_at"),
+        "heartbeat_ms": progress_payload.get("heartbeat_ms"),
+        "idle_ms": progress_payload.get("idle_ms"),
+        "is_stuck": bool(progress_payload.get("is_stuck", False)),
+        "stuck_reason": progress_payload.get("stuck_reason"),
+        "progress_percent": progress_payload.get("progress_percent"),
+        "progress_source": progress_payload.get("progress_source"),
+        "total_steps": progress_payload.get("total_steps"),
+        "completed_steps": progress_payload.get("completed_steps"),
+        "in_progress_steps": progress_payload.get("in_progress_steps"),
+        "pending_steps": progress_payload.get("pending_steps"),
+        "active_step_title": progress_payload.get("active_step_title"),
+        "todos": progress_payload.get("todos") or [],
+        "debug": {
+            "last_tool_names": _task_summary_tool_names(last_summary),
+            "last_has_emit_builder_artifact": (
+                bool(last_summary.get("has_emit_builder_artifact"))
+                if isinstance(last_summary, dict) and "has_emit_builder_artifact" in last_summary
+                else None
+            ),
+            "late_tool_names": _task_summary_tool_names(late_summary),
+            "late_has_emit_builder_artifact": (
+                bool(late_summary.get("has_emit_builder_artifact"))
+                if isinstance(late_summary, dict) and "has_emit_builder_artifact" in late_summary
+                else None
+            ),
+            "timeout_observed_during_stream": bool(result.timeout_observed_during_stream),
+            "timed_out_at": result.timed_out_at.isoformat() if result.timed_out_at is not None else None,
+            "final_state_present": isinstance(result.final_state, dict),
+            "builder_result_present": isinstance(builder_result, dict) and bool(builder_result),
+            "suspected_blocker": suspected_blocker,
+            "suspected_blocker_detail": blocker_detail,
+            "last_shell_command": (
+                dict(result.live_state.get("last_shell_command"))
+                if isinstance(result.live_state, dict) and isinstance(result.live_state.get("last_shell_command"), dict)
+                else None
+            ),
+            "recent_shell_commands": (
+                [
+                    dict(entry)
+                    for entry in result.live_state.get("recent_shell_commands", [])
+                    if isinstance(entry, dict)
+                ]
+                if isinstance(result.live_state, dict)
+                else []
+            ),
+        },
+        "owner_id": result.owner_id,
+    }
+
+
+def persist_background_task_status_payload(result: SubagentResult) -> None:
+    if not result.owner_id:
+        return
+
+    snapshot_path = _background_task_snapshot_path(result.owner_id, result.task_id)
+    if snapshot_path is None:
+        return
+
+    try:
+        payload = build_background_task_status_payload(result)
+        snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path = snapshot_path.with_name(f"{snapshot_path.name}.tmp")
+        temp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+        temp_path.replace(snapshot_path)
+    except Exception:
+        logger.warning("Failed to persist background task snapshot for %s", result.task_id, exc_info=True)
+
+
+def read_background_task_status_payload(user_id: str, task_id: str) -> dict[str, Any] | None:
+    snapshot_path = _background_task_snapshot_path(user_id, task_id)
+    if snapshot_path is None or not snapshot_path.exists():
+        return None
+
+    try:
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.warning("Failed to read background task snapshot for %s", task_id, exc_info=True)
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+
+    return payload
 
 
 # Global storage for background task results
@@ -199,6 +693,9 @@ class SubagentExecutor:
 
         if not is_duplicate:
             result.ai_messages.append(message_dict)
+            now = datetime.now()
+            result.last_update_at = now
+            result.last_progress_at = now
 
     def _collect_ai_messages_from_state(
         self,
@@ -354,7 +851,15 @@ class SubagentExecutor:
                     if cancel_event and cancel_event.is_set():
                         raise SubagentCancelledError("Execution cancelled by user")
 
-                    final_state = chunk
+                    snapshot_updated_at = datetime.now()
+                    result.last_update_at = snapshot_updated_at
+                    live_snapshot = _extract_live_state_snapshot(chunk)
+                    if live_snapshot is not None:
+                        result.live_state = live_snapshot
+                        live_signature = _snapshot_signature(live_snapshot)
+                        if live_signature != result._live_state_signature:
+                            result._live_state_signature = live_signature
+                            result.last_progress_at = snapshot_updated_at
 
                     final_state = chunk
 
@@ -394,8 +899,18 @@ class SubagentExecutor:
                             logger.info(
                                 f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
                             )
+                    persist_background_task_status_payload(result)
             else:
                 final_state = await agent.ainvoke(state, config=run_config, context=context)  # type: ignore[arg-type]
+                snapshot_updated_at = datetime.now()
+                result.last_update_at = snapshot_updated_at
+                live_snapshot = _extract_live_state_snapshot(final_state)
+                if live_snapshot is not None:
+                    result.live_state = live_snapshot
+                    live_signature = _snapshot_signature(live_snapshot)
+                    if live_signature != result._live_state_signature:
+                        result._live_state_signature = live_signature
+                        result.last_progress_at = snapshot_updated_at
                 self._collect_ai_messages_from_state(final_state, result)
 
                 messages = final_state.get("messages", []) if isinstance(final_state, dict) else []
@@ -403,6 +918,7 @@ class SubagentExecutor:
                     if isinstance(msg, AIMessage):
                         result.last_ai_message_summary = self._summarize_ai_message(msg)
                         break
+                persist_background_task_status_payload(result)
 
             if cancel_event and cancel_event.is_set():
                 raise SubagentCancelledError("Execution cancelled by user")
@@ -414,6 +930,10 @@ class SubagentExecutor:
 
             # Store final state for callers that need structured data (e.g., builder_result)
             result.final_state = final_state
+            final_snapshot = _extract_live_state_snapshot(final_state)
+            if final_snapshot is not None:
+                result.live_state = final_snapshot
+                result._live_state_signature = _snapshot_signature(final_snapshot)
 
             if final_state is None:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} no final state")
@@ -461,13 +981,15 @@ class SubagentExecutor:
 
             result.status = SubagentStatus.COMPLETED
             result.completed_at = datetime.now()
+            result.last_update_at = result.completed_at
+            result.last_progress_at = result.completed_at
 
         except SubagentCancelledError as e:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled")
             result.status = SubagentStatus.CANCELLED
             result.error = str(e)
             result.completed_at = datetime.now()
-
+            result.last_update_at = result.completed_at
         except Exception as e:
             if _timed_out_externally():
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} raised after timeout; preserving TIMED_OUT state")
@@ -476,7 +998,9 @@ class SubagentExecutor:
             result.status = SubagentStatus.FAILED
             result.error = str(e)
             result.completed_at = datetime.now()
+            result.last_update_at = result.completed_at
 
+        persist_background_task_status_payload(result)
         return result
 
     def execute(
@@ -527,7 +1051,13 @@ class SubagentExecutor:
             result.completed_at = datetime.now()
             return result
 
-    def execute_async(self, task: str, task_id: str | None = None, owner_id: str | None = None) -> str:
+    def execute_async(
+        self,
+        task: str,
+        task_id: str | None = None,
+        owner_id: str | None = None,
+        description: str | None = None,
+    ) -> str:
         """Start a task execution in the background.
 
         Args:
@@ -547,6 +1077,7 @@ class SubagentExecutor:
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
             owner_id=owner_id,
+            description=description,
         )
         cancel_event = threading.Event()
 
@@ -555,6 +1086,7 @@ class SubagentExecutor:
         with _background_tasks_lock:
             _background_tasks[task_id] = result
             _background_task_cancel_events[task_id] = cancel_event
+        persist_background_task_status_payload(result)
 
         # Submit to scheduler pool
         def run_task():
@@ -565,6 +1097,7 @@ class SubagentExecutor:
                 current.status = SubagentStatus.RUNNING
                 current.started_at = datetime.now()
                 result_holder = current
+            persist_background_task_status_payload(result_holder)
 
             try:
                 # Submit execution to execution pool with timeout
@@ -598,6 +1131,7 @@ class SubagentExecutor:
                         task_state.late_ai_message_summary = exec_result.late_ai_message_summary
                         task_state.timeout_observed_during_stream = exec_result.timeout_observed_during_stream
                         task_state.timed_out_at = exec_result.timed_out_at
+                    persist_background_task_status_payload(task_state)
                 except FuturesTimeoutError:
                     logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
                     with _background_tasks_lock:
@@ -608,6 +1142,7 @@ class SubagentExecutor:
                         task_state.error = f"Execution timed out after {self.config.timeout_seconds} seconds"
                         task_state.completed_at = datetime.now()
                         task_state.timed_out_at = task_state.completed_at
+                    persist_background_task_status_payload(task_state)
                     # Cancel the future (best effort - may not stop the actual execution)
                     cancel_event.set()
                     execution_future.cancel()
@@ -619,6 +1154,7 @@ class SubagentExecutor:
                             current.status = SubagentStatus.CANCELLED
                             current.error = "Execution cancelled by user"
                             current.completed_at = datetime.now()
+                            persist_background_task_status_payload(current)
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
@@ -631,6 +1167,7 @@ class SubagentExecutor:
                     task_state.status = SubagentStatus.FAILED
                     task_state.error = str(e)
                     task_state.completed_at = datetime.now()
+                persist_background_task_status_payload(task_state)
             finally:
                 with _background_tasks_lock:
                     _background_task_futures.pop(task_id, None)
@@ -735,6 +1272,8 @@ def cancel_background_task(task_id: str, reason: str = "Execution cancelled by u
         result.completed_at = datetime.now()
         execution_future = _background_task_futures.get(task_id)
         cancel_event = _background_task_cancel_events.get(task_id)
+
+    persist_background_task_status_payload(result)
 
     if cancel_event is not None:
         cancel_event.set()

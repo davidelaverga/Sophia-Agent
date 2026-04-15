@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type MouseEventHandler } from 'react';
+import { useEffect, useMemo, useRef, useState, type MouseEventHandler } from 'react';
 
 import { cn } from '../../lib/utils';
 import type { BuilderTaskV1 } from '../../types/builder-task';
@@ -32,10 +32,90 @@ const PHASE_META: Record<BuilderTaskV1['phase'], {
 };
 
 const PROGRESSBAR_LABEL = 'Builder progress';
+const LOCAL_STUCK_IDLE_MS = 45_000;
+
+function parseTimestampMs(value: string | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function diffMs(startMs: number | null, endMs: number): number | null {
+  if (startMs === null) {
+    return null;
+  }
+
+  const delta = endMs - startMs;
+  return Number.isFinite(delta) && delta >= 0 ? delta : null;
+}
+
+function formatElapsed(valueMs: number | undefined): string | null {
+  if (typeof valueMs !== 'number' || !Number.isFinite(valueMs) || valueMs < 0) {
+    return null;
+  }
+
+  if (valueMs < 1000) {
+    return '<1s';
+  }
+
+  const totalSeconds = Math.round(valueMs / 1000);
+  if (totalSeconds < 60) {
+    return `${totalSeconds}s`;
+  }
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
+}
+
+function applyLiveTiming(task: BuilderTaskV1, nowMs: number, receivedAtMs: number): BuilderTaskV1 {
+  const eventAgeMs = Math.max(nowMs - receivedAtMs, 0);
+  const inferredHeartbeatMs = diffMs(parseTimestampMs(task.lastUpdateAt), nowMs);
+  const inferredIdleMs = diffMs(parseTimestampMs(task.lastProgressAt ?? task.lastUpdateAt), nowMs);
+  const heartbeatMs = typeof task.heartbeatMs === 'number' || typeof inferredHeartbeatMs === 'number'
+    ? Math.max((task.heartbeatMs ?? 0) + eventAgeMs, inferredHeartbeatMs ?? 0)
+    : undefined;
+  const idleMs = typeof task.idleMs === 'number' || typeof inferredIdleMs === 'number'
+    ? Math.max((task.idleMs ?? 0) + eventAgeMs, inferredIdleMs ?? 0)
+    : undefined;
+  const stuck = task.phase === 'running' && (Boolean(task.stuck) || (typeof idleMs === 'number' && idleMs >= LOCAL_STUCK_IDLE_MS));
+  const stuckReason = task.stuckReason
+    ?? (stuck && typeof idleMs === 'number'
+      ? `No visible builder progress for ${formatElapsed(idleMs) ?? 'a while'}. It may be blocked on a tool or looping without advancing the deliverable.`
+      : undefined);
+
+  return {
+    ...task,
+    heartbeatMs,
+    idleMs,
+    stuck,
+    stuckReason,
+  };
+}
+
+function getDisplayMeta(task: BuilderTaskV1): { label: string; accentVar: string } {
+  if (task.phase === 'running' && task.stuck) {
+    return { label: 'stalled', accentVar: 'var(--cosmic-amber)' };
+  }
+
+  return PHASE_META[task.phase];
+}
 
 function getDetail(task: BuilderTaskV1): string | null {
+  if (task.phase === 'running' && task.stuckReason) return task.stuckReason;
   if (task.detail && !/^working through step\s+/i.test(task.detail.trim())) return task.detail;
+  if (task.activeStepTitle) return `Active step: ${task.activeStepTitle}`;
   if (task.label) return task.label;
+  if (
+    typeof task.completedSteps === 'number' &&
+    typeof task.totalSteps === 'number' &&
+    task.totalSteps > 0
+  ) {
+    return `Completed ${task.completedSteps} of ${task.totalSteps} builder steps.`;
+  }
   if (
     task.phase === 'running' &&
     typeof task.messageIndex === 'number' &&
@@ -48,7 +128,19 @@ function getDetail(task: BuilderTaskV1): string | null {
 }
 
 function getProgressRatio(task: BuilderTaskV1): number | null {
-  if (task.phase !== 'running') {
+  if (typeof task.progressPercent === 'number') {
+    return Math.min(1, Math.max(0, task.progressPercent / 100));
+  }
+
+  if (
+    typeof task.completedSteps === 'number' &&
+    typeof task.totalSteps === 'number' &&
+    task.totalSteps > 0
+  ) {
+    return Math.min(1, Math.max(0, task.completedSteps / task.totalSteps));
+  }
+
+  if (task.phase === 'completed') {
     return 1;
   }
 
@@ -57,8 +149,7 @@ function getProgressRatio(task: BuilderTaskV1): number | null {
     typeof task.totalMessages === 'number' &&
     task.totalMessages > 0
   ) {
-    const rawRatio = task.messageIndex / task.totalMessages;
-    return Math.min(0.96, Math.max(0.12, rawRatio));
+    return Math.min(1, Math.max(0, task.messageIndex / task.totalMessages));
   }
 
   return null;
@@ -66,7 +157,25 @@ function getProgressRatio(task: BuilderTaskV1): number | null {
 
 function getProgressMeta(task: BuilderTaskV1): { leading: string; trailing: string } {
   const ratio = getProgressRatio(task);
-  const percentLabel = ratio === null ? 'in motion' : `${Math.round(ratio * 100)}%`;
+  const percentLabel = typeof task.progressPercent === 'number'
+    ? `${task.progressPercent}%`
+    : ratio === null
+      ? 'in motion'
+      : `${Math.round(ratio * 100)}%`;
+
+  if (
+    typeof task.completedSteps === 'number' &&
+    typeof task.totalSteps === 'number' &&
+    task.totalSteps > 0
+  ) {
+    const activeSegment = typeof task.inProgressSteps === 'number' && task.inProgressSteps > 0
+      ? ` | ${task.inProgressSteps} active`
+      : '';
+    return {
+      leading: `${task.completedSteps} of ${task.totalSteps} steps${activeSegment}`,
+      trailing: percentLabel,
+    };
+  }
 
   if (
     task.phase === 'running' &&
@@ -82,16 +191,34 @@ function getProgressMeta(task: BuilderTaskV1): { leading: string; trailing: stri
 
   switch (task.phase) {
     case 'running':
-      return { leading: 'assembling deliverable', trailing: percentLabel };
+      return {
+        leading: task.stuck ? 'no visible progress' : 'assembling deliverable',
+        trailing: percentLabel,
+      };
     case 'completed':
       return { leading: 'deliverable assembled', trailing: '100%' };
     case 'failed':
-      return { leading: 'build interrupted', trailing: '100%' };
+      return { leading: 'build interrupted', trailing: percentLabel };
     case 'timed_out':
-      return { leading: 'builder timed out', trailing: '100%' };
+      return { leading: 'builder timed out', trailing: percentLabel };
     case 'cancelled':
-      return { leading: 'build stopped', trailing: '100%' };
+      return { leading: 'build stopped', trailing: percentLabel };
   }
+}
+
+function getSecondaryMeta(task: BuilderTaskV1): string | null {
+  if (task.phase === 'running' && task.stuckReason) {
+    return task.stuckReason;
+  }
+
+  const activeStep = task.activeStepTitle ? `active: ${task.activeStepTitle}` : null;
+  const idle = formatElapsed(task.idleMs);
+
+  if (task.phase === 'running' && idle) {
+    return activeStep ? `${activeStep} | no progress for ${idle}` : `no progress for ${idle}`;
+  }
+
+  return activeStep;
 }
 
 /* ── Constellation spinner ── 3 tiny particles orbiting a breathing core */
@@ -186,8 +313,9 @@ function BuilderProgressTrack({
 }) {
   const ratio = getProgressRatio(task);
   const isDeterminate = ratio !== null;
-  const progressWidth = isDeterminate ? Math.max(10, Math.round(ratio * 100)) : 38;
+  const progressWidth = isDeterminate ? Math.round(ratio * 100) : 38;
   const progressMeta = getProgressMeta(task);
+  const secondaryMeta = getSecondaryMeta(task);
 
   return (
     <div className="space-y-1.5">
@@ -259,6 +387,60 @@ function BuilderProgressTrack({
         <span>{progressMeta.leading}</span>
         <span>{progressMeta.trailing}</span>
       </div>
+
+      {secondaryMeta && (
+        <p
+          className={cn(compact ? 'text-[9px] leading-4' : 'text-[10px] leading-4.5')}
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          {secondaryMeta}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function BuilderTodoPreview({
+  task,
+  compact,
+}: {
+  task: BuilderTaskV1;
+  compact?: boolean;
+}) {
+  if (!task.todos || task.todos.length === 0) {
+    return null;
+  }
+
+  return (
+    <div className={cn('space-y-1.5', compact ? 'mt-2' : 'mt-2.5')}>
+      {task.todos.slice(0, compact ? 2 : 3).map((todo, index) => {
+        const tone = todo.status === 'completed'
+          ? 'var(--cosmic-teal)'
+          : todo.status === 'in-progress'
+            ? 'var(--cosmic-amber)'
+            : 'var(--cosmic-text-faint)';
+
+        return (
+          <div
+            key={`${todo.id ?? index}-${todo.title}`}
+            className={cn('flex items-center gap-2 rounded-full border px-2.5 py-1.5', compact ? 'text-[9px]' : 'text-[10px]')}
+            style={{
+              borderColor: `color-mix(in srgb, ${tone} 18%, transparent)`,
+              background: `color-mix(in srgb, ${tone} 6%, transparent)`,
+              color: 'var(--cosmic-text-faint)',
+            }}
+          >
+            <span
+              className="h-1.5 w-1.5 rounded-full"
+              style={{ background: tone }}
+            />
+            <span className="min-w-0 truncate">{todo.title}</span>
+            <span className="ml-auto lowercase tracking-[0.08em]" style={{ color: tone }}>
+              {todo.status === 'in-progress' ? 'active' : todo.status === 'completed' ? 'done' : 'queued'}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -276,17 +458,38 @@ export function BuilderTaskNotice({
   className,
 }: BuilderTaskNoticeProps) {
   const [isFreshCompletion, setIsFreshCompletion] = useState(false);
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
   const previousTaskStateRef = useRef<{ phase: BuilderTaskV1['phase']; identity: string }>({
     phase: task.phase,
     identity: task.taskId ?? task.label ?? '__builder__',
   });
-  const meta = PHASE_META[task.phase];
-  const detail = getDetail(task);
+  const liveTask = useMemo(() => applyLiveTiming(task, nowMs, taskReceivedAtMs), [task, nowMs, taskReceivedAtMs]);
+  const meta = getDisplayMeta(liveTask);
+  const detail = getDetail(liveTask);
   const showDismiss = Boolean(onDismiss && task.phase !== 'running');
   const showCancel = Boolean(onCancel && task.phase === 'running');
-  const isRunning = task.phase === 'running';
+  const isRunning = liveTask.phase === 'running';
   const taskIdentity = task.taskId ?? task.label ?? '__builder__';
   const showReadyPill = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
+
+  useEffect(() => {
+    setTaskReceivedAtMs(Date.now());
+  }, [task]);
+
+  useEffect(() => {
+    if (task.phase !== 'running') {
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [task.phase]);
 
   useEffect(() => {
     const previousTaskState = previousTaskStateRef.current;
@@ -400,7 +603,8 @@ export function BuilderTaskNotice({
       </div>
 
       <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        <BuilderProgressTrack task={task} accentVar={meta.accentVar} compact={compact} />
+        <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} />
+        <BuilderTodoPreview task={liveTask} compact={compact} />
       </div>
 
       {(showCancel || showDismiss) && (

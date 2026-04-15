@@ -606,6 +606,52 @@ class TestSyncExecutionPath:
         assert result.status == SubagentStatus.COMPLETED
 
 
+class TestTaskStatusPayload:
+    def test_background_task_payload_includes_shell_telemetry(self, classes):
+        from deerflow.subagents.executor import build_background_task_status_payload
+
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        result = SubagentResult(
+            task_id="task-shell-1",
+            trace_id="trace-shell-1",
+            status=SubagentStatus.TIMED_OUT,
+            result=None,
+            error=None,
+            started_at=datetime.now(),
+            timed_out_at=datetime.now(),
+        )
+        result.live_state = {
+            "builder_task": {
+                "task_id": "task-shell-1",
+                "status": "running",
+                "description": "Builder: shell repro",
+            },
+            "last_shell_command": {
+                "tool": "bash",
+                "status": "shell_unavailable",
+                "requested_command": "ls /mnt/user-data/workspace",
+                "error": "No suitable shell executable found.",
+            },
+            "recent_shell_commands": [
+                {
+                    "tool": "bash",
+                    "status": "shell_unavailable",
+                    "requested_command": "ls /mnt/user-data/workspace",
+                    "error": "No suitable shell executable found.",
+                }
+            ],
+        }
+
+        payload = build_background_task_status_payload(result)
+
+        assert payload["debug"]["last_shell_command"]["status"] == "shell_unavailable"
+        assert payload["debug"]["last_shell_command"]["requested_command"] == "ls /mnt/user-data/workspace"
+        assert payload["debug"]["recent_shell_commands"][0]["error"] == "No suitable shell executable found."
+        assert payload["detail"] == "No suitable shell executable found."
+
+
 # -----------------------------------------------------------------------------
 # Async Tool Support Tests (MCP Tools)
 # -----------------------------------------------------------------------------

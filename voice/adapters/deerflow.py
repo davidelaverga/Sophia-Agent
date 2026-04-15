@@ -32,6 +32,15 @@ _BUILDER_TASK_EVENT_TYPES = {
     "task_timed_out",
     "task_cancelled",
 }
+_BUILDER_TASK_STATE_TO_EVENT_TYPE = {
+    "queued": "task_started",
+    "started": "task_started",
+    "running": "task_running",
+    "completed": "task_completed",
+    "failed": "task_failed",
+    "timed_out": "task_timed_out",
+    "cancelled": "task_cancelled",
+}
 _BUILDER_TASK_TERMINAL_EVENT_TYPES = {
     "task_completed",
     "task_failed",
@@ -234,6 +243,14 @@ class DeerFlowBackendAdapter(BackendAdapter):
                         continue
 
                     if current_event_type == "values":
+                        values_builder_task_event = self._extract_values_builder_task_event(
+                            data,
+                            active_builder_task_ids,
+                        )
+                        if values_builder_task_event is not None:
+                            saw_builder_task_event = True
+                            yield BackendEvent.builder_task_payload(values_builder_task_event)
+
                         values_artifact = self._extract_values_artifact(data)
                         values_builder_artifact = self._extract_values_builder_artifact(data)
                         if values_builder_artifact is not None:
@@ -690,6 +707,95 @@ class DeerFlowBackendAdapter(BackendAdapter):
 
         return payload
 
+    def _extract_values_builder_task_event(
+        self,
+        data: object,
+        active_builder_task_ids: set[str],
+    ) -> dict[str, object] | None:
+        if not isinstance(data, dict):
+            return None
+
+        builder_task = data.get("builder_task")
+        if not isinstance(builder_task, dict):
+            values = data.get("values")
+            if isinstance(values, dict):
+                builder_task = values.get("builder_task")
+
+        if not isinstance(builder_task, dict) or not builder_task:
+            return None
+
+        task_id = builder_task.get("task_id")
+        status = builder_task.get("status")
+        if not isinstance(task_id, str) or not task_id:
+            return None
+        if not isinstance(status, str) or not status:
+            return None
+
+        normalized_type = _BUILDER_TASK_STATE_TO_EVENT_TYPE.get(status)
+        if normalized_type is None:
+            return None
+
+        payload: dict[str, object] = {
+            "type": normalized_type,
+            "task_id": task_id,
+        }
+        for key in (
+            "description",
+            "detail",
+            "error",
+            "started_at",
+            "completed_at",
+            "last_update_at",
+            "last_progress_at",
+            "heartbeat_ms",
+            "idle_ms",
+            "is_stuck",
+            "stuck_reason",
+            "progress_percent",
+            "progress_source",
+            "total_steps",
+            "completed_steps",
+            "in_progress_steps",
+            "pending_steps",
+            "active_step_title",
+            "todos",
+        ):
+            value = builder_task.get(key)
+            if value is not None:
+                payload[key] = value
+
+        description = builder_task.get("description")
+        if isinstance(description, str) and description:
+            payload["description"] = description
+
+        detail = builder_task.get("detail")
+        if not isinstance(detail, str) or not detail.strip():
+            detail = builder_task.get("error")
+        if (not isinstance(detail, str) or not detail.strip()) and normalized_type == "task_completed":
+            builder_result = self._extract_values_builder_artifact(data)
+            if isinstance(builder_result, dict):
+                detail = builder_result.get("companion_summary") or builder_result.get("artifact_title")
+        if isinstance(detail, str) and detail.strip():
+            payload["detail"] = detail.strip()
+
+        if normalized_type == "task_started":
+            if task_id in active_builder_task_ids:
+                return None
+            if not self._is_builder_task_description(payload.get("description")):
+                return None
+            active_builder_task_ids.add(task_id)
+            return payload
+
+        if normalized_type == "task_running":
+            if task_id not in active_builder_task_ids:
+                if not self._is_builder_task_description(payload.get("description")):
+                    return None
+                active_builder_task_ids.add(task_id)
+            return payload
+
+        active_builder_task_ids.discard(task_id)
+        return payload
+
     @staticmethod
     def _is_builder_task_description(description: object) -> bool:
         return isinstance(description, str) and "builder" in description.lower()
@@ -713,6 +819,7 @@ class DeerFlowBackendAdapter(BackendAdapter):
             {
                 "type": failure_type,
                 "task_id": task_id,
+                "detail": error_message,
                 "error": error_message,
             }
             for task_id in active_builder_task_ids

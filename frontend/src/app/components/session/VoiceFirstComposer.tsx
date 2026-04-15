@@ -105,13 +105,6 @@ export function VoiceFirstComposer({
 
   // In textOnly mode, the text area is always expanded
   const effectiveTextExpanded = textOnly || isTextExpanded;
-  const textModeMicLabel = voiceStatus === 'listening'
-    ? 'stop voice'
-    : voiceStatus === 'speaking'
-      ? 'interrupt voice'
-      : voiceStatus === 'thinking' || isTyping
-        ? 'voice busy'
-        : 'tap mic to speak';
 
   const handleTouchStart = (e: React.TouchEvent) => {
     touchStartYRef.current = e.touches[0]?.clientY ?? null;
@@ -322,32 +315,6 @@ export function VoiceFirstComposer({
                 Recording… release to send
               </p>
             )}
-          </div>
-          )}
-
-          {/* Text-mode mic CTA lives under the mode toggle, inside the composer */}
-          {textOnly && (
-          <div className="flex justify-center">
-            <button
-              type="button"
-              onClick={handleMicClickInternal}
-              disabled={disabled || voiceStatus === 'thinking'}
-              aria-label={textModeMicLabel}
-              className={cn(
-                'inline-flex items-center gap-2 rounded-full border px-3.5 py-1.5 text-[11px] tracking-[0.08em] lowercase transition-all duration-300',
-                disabled || voiceStatus === 'thinking'
-                  ? 'cursor-not-allowed opacity-50'
-                  : 'hover:opacity-100'
-              )}
-              style={{
-                borderColor: 'var(--cosmic-border-soft)',
-                background: 'color-mix(in srgb, var(--cosmic-panel-soft) 78%, transparent)',
-                color: 'var(--cosmic-text-whisper)',
-              }}
-            >
-              <Mic className="h-3.5 w-3.5" />
-              <span>{textModeMicLabel}</span>
-            </button>
           </div>
           )}
 

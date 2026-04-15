@@ -5,8 +5,15 @@ import { useCompanionChatRuntime } from '../companion-runtime/chat-runtime';
 import { getCompanionRouteProfile } from '../companion-runtime/route-profiles';
 import { useCompanionStreamContract } from '../companion-runtime/stream-contract';
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
-import { cancelBuilderTask as requestBuilderTaskCancellation } from '../lib/builder-workflow';
+import {
+  cancelBuilderTask as requestBuilderTaskCancellation,
+  getBuilderArtifactFromStatus,
+  getBuilderTaskPhaseFromStatus,
+  getBuilderTaskStatus,
+  mergeBuilderTaskStatus,
+} from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
+import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
@@ -76,6 +83,7 @@ export function useSessionRouteExperience({
   const [builderArtifact, setBuilderArtifact] = useState<BuilderArtifactV1 | null>(storedBuilderArtifact ?? null);
   const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null);
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false);
+  const lastBuilderCaptureSignatureRef = useRef<string | null>(null);
 
   const setBuilderArtifactAndPersist = useCallback((nextBuilderArtifact: BuilderArtifactV1 | null) => {
     setBuilderArtifact(nextBuilderArtifact);
@@ -128,7 +136,96 @@ export function useSessionRouteExperience({
     setBuilderArtifact(storedBuilderArtifact ?? null);
     setBuilderTask(null);
     setIsCancellingBuilderTask(false);
+    lastBuilderCaptureSignatureRef.current = null;
   }, [activeSessionId, storedBuilderArtifact]);
+
+  useEffect(() => {
+    if (!builderTask) {
+      return;
+    }
+
+    const signature = JSON.stringify(builderTask);
+    if (signature === lastBuilderCaptureSignatureRef.current) {
+      return;
+    }
+
+    lastBuilderCaptureSignatureRef.current = signature;
+    recordSophiaCaptureEvent({
+      category: 'builder',
+      name: `task-${builderTask.phase}`,
+      payload: builderTask,
+    });
+  }, [builderTask]);
+
+  useEffect(() => {
+    if (!builderTask?.taskId || builderTask.phase !== 'running') {
+      return;
+    }
+
+    const activeTaskId = builderTask.taskId;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof window.setTimeout> | null = null;
+
+    const pollTaskStatus = async () => {
+      try {
+        const status = await getBuilderTaskStatus(activeTaskId);
+        if (cancelled) {
+          return;
+        }
+
+        const nextBuilderArtifact = getBuilderArtifactFromStatus(status);
+        if (nextBuilderArtifact) {
+          setBuilderArtifactAndPersist(nextBuilderArtifact);
+        }
+
+        setBuilderTask((currentTask) => {
+          if (currentTask?.taskId !== activeTaskId) {
+            return currentTask;
+          }
+
+          return mergeBuilderTaskStatus(currentTask, status);
+        });
+
+        if (getBuilderTaskPhaseFromStatus(status.status) !== 'running') {
+          return;
+        }
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof Error && error.message.includes('Task not found')) {
+          setBuilderTask((currentTask) => {
+            if (currentTask?.taskId !== activeTaskId || currentTask.phase !== 'running') {
+              return currentTask;
+            }
+
+            return {
+              ...currentTask,
+              phase: 'failed',
+              detail: 'Builder task state disappeared before completion.',
+            };
+          });
+          return;
+        }
+      }
+
+      if (!cancelled) {
+        timeoutId = window.setTimeout(() => {
+          void pollTaskStatus();
+        }, 2000);
+      }
+    };
+
+    void pollTaskStatus();
+
+    return () => {
+      cancelled = true;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+      }
+    };
+  }, [builderTask?.phase, builderTask?.taskId, setBuilderArtifactAndPersist]);
 
   useEffect(() => {
     if (!debugEnabled) return;

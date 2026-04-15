@@ -89,18 +89,36 @@ describe('stream-contract-adapters', () => {
       phase: 'running',
       task_id: 'task-builder-1',
       label: 'Builder: document about the dangers of war',
-      detail: 'Working through step 2 of 4.',
-      message_index: 2,
-      total_messages: 4,
+      detail: 'Working on: draft outline.',
+      progress_percent: 25,
+      total_steps: 4,
+      completed_steps: 1,
+      in_progress_steps: 1,
+      pending_steps: 2,
+      active_step_title: 'Draft outline',
+      idle_ms: 9000,
+      todos: [
+        { id: 1, title: 'Gather notes', status: 'completed' },
+        { id: 2, title: 'Draft outline', status: 'in-progress' },
+      ],
     });
 
     expect(payload).toEqual({
       phase: 'running',
       taskId: 'task-builder-1',
       label: 'Builder: document about the dangers of war',
-      detail: 'Working through step 2 of 4.',
-      messageIndex: 2,
-      totalMessages: 4,
+      detail: 'Working on: draft outline.',
+      progressPercent: 25,
+      totalSteps: 4,
+      completedSteps: 1,
+      inProgressSteps: 1,
+      pendingSteps: 2,
+      activeStepTitle: 'Draft outline',
+      idleMs: 9000,
+      todos: [
+        { id: 1, title: 'Gather notes', status: 'completed' },
+        { id: 2, title: 'Draft outline', status: 'in-progress' },
+      ],
     });
   });
 
@@ -128,6 +146,20 @@ describe('stream-contract-adapters', () => {
       phase: 'running',
       taskId: 'task-builder-1',
       detail: 'Builder is working on the deliverable.',
+    });
+  });
+
+  it('uses backend error text for failed builder task payloads', () => {
+    const payload = parseBuilderTaskPayload({
+      type: 'task_failed',
+      task_id: 'task-builder-1',
+      error: 'Recursion limit of 50 reached without hitting a stop condition.',
+    });
+
+    expect(payload).toEqual({
+      phase: 'failed',
+      taskId: 'task-builder-1',
+      detail: 'Recursion limit of 50 reached without hitting a stop condition.',
     });
   });
 

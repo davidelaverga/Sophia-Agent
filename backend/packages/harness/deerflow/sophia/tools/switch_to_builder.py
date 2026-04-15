@@ -130,7 +130,11 @@ def _resolve_memory_snippets(state: SophiaState) -> list[str]:
     return fallbacks
 
 
-def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: SophiaState) -> tuple[str, str, dict[str, bool]]:
+def _resolve_user_id(
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    state: SophiaState,
+    configured_user_id: str | None = None,
+) -> tuple[str, str, dict[str, bool]]:
     """Resolve user_id and return source diagnostics."""
     configurable_user_id: str | None = None
     context_user_id: str | None = None
@@ -153,6 +157,7 @@ def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: 
         state_user_id = candidate
 
     diagnostics = {
+        "configured_user_id_present": bool(configured_user_id),
         "config_user_id_present": bool(configurable_user_id),
         "context_user_id_present": bool(context_user_id),
         "state_user_id_present": bool(state_user_id),
@@ -164,6 +169,8 @@ def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: 
         return validate_user_id(context_user_id), "runtime.context.user_id", diagnostics
     if state_user_id:
         return validate_user_id(state_user_id), "state.user_id", diagnostics
+    if configured_user_id:
+        return validate_user_id(configured_user_id), "configured_builder_user_id", diagnostics
     return validate_user_id("default_user"), "default_user", diagnostics
 
 
@@ -218,12 +225,12 @@ def _build_duplicate_payload(existing_task: dict, task_type: str, trace_id: str)
     }
 
 
-@tool(args_schema=SwitchToBuilderInput)
-def switch_to_builder(
+def _switch_to_builder_impl(
     task: str,
     task_type: str,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    configured_user_id: str | None = None,
 ) -> str:
     """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
     something requiring file creation or multi-step execution.
@@ -248,7 +255,7 @@ def switch_to_builder(
         return json.dumps(_build_duplicate_payload(existing_task, task_type, trace_id))
 
     companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
-    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(runtime, state)
+    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(runtime, state, configured_user_id)
     handoff_resolution = {
         "user_id_source": user_id_source,
         "artifact_source": artifact_source,
@@ -354,7 +361,7 @@ def switch_to_builder(
 
     task_id = tool_call_id or str(uuid.uuid4())[:8]
     try:
-        executor.execute_async(task, task_id=task_id, owner_id=user_id)
+        executor.execute_async(task, task_id=task_id, owner_id=user_id, description=progress_description)
     except TypeError:
         executor.execute_async(task, task_id=task_id)
     logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
@@ -390,6 +397,54 @@ def switch_to_builder(
         "handoff_resolution": handoff_resolution,
     }
     return json.dumps(payload)
+
+
+@tool(args_schema=SwitchToBuilderInput)
+def switch_to_builder(
+    task: str,
+    task_type: str,
+    runtime: ToolRuntime[ContextT, SophiaState] | None = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> str:
+    """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
+    something requiring file creation or multi-step execution.
+    Do NOT call for emotional conversation, reflection, or memory tasks.
+    Before calling this, ensure you have complete specs — ask any clarifying
+    questions first, then delegate with the complete brief."""
+
+    return _switch_to_builder_impl(
+        task=task,
+        task_type=task_type,
+        runtime=runtime,
+        tool_call_id=tool_call_id,
+    )
+
+
+def make_switch_to_builder_tool(configured_user_id: str):
+    bound_user_id = validate_user_id(configured_user_id)
+
+    @tool("switch_to_builder", args_schema=SwitchToBuilderInput)
+    def configured_switch_to_builder(
+        task: str,
+        task_type: str,
+        runtime: ToolRuntime[ContextT, SophiaState] | None = None,
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    ) -> str:
+        """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
+        something requiring file creation or multi-step execution.
+        Do NOT call for emotional conversation, reflection, or memory tasks.
+        Before calling this, ensure you have complete specs — ask any clarifying
+        questions first, then delegate with the complete brief."""
+
+        return _switch_to_builder_impl(
+            task=task,
+            task_type=task_type,
+            runtime=runtime,
+            tool_call_id=tool_call_id,
+            configured_user_id=bound_user_id,
+        )
+
+    return configured_switch_to_builder
 
 
 def _normalize_builder_request(
@@ -513,4 +568,8 @@ def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int]:
     """Return recursion and timeout budgets for the delegated Builder task."""
     if demo_mode:
         return 16, 45
-    return 50, 120
+
+    # Real Builder runs often spend several turns updating todos before the
+    # final emit_builder_artifact call. The previous budget could exhaust the
+    # graph before the Builder had a chance to close cleanly.
+    return 100, 180
