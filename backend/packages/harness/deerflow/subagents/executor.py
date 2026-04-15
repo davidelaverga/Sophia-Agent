@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -62,6 +63,7 @@ class SubagentResult:
     task_id: str
     trace_id: str
     status: SubagentStatus
+    thread_id: str | None = None
     result: str | None = None
     error: str | None = None
     started_at: datetime | None = None
@@ -79,11 +81,19 @@ class SubagentResult:
     last_update_at: datetime | None = None
     last_progress_at: datetime | None = None
     _live_state_signature: str | None = None
+    # Execution telemetry – accumulated during _aexecute
+    error_type: str | None = None
+    iteration_count: int = 0
+    iteration_durations_ms: list[int] | None = None
+    slowest_iteration_ms: int = 0
+    total_stream_ms: int = 0
 
     def __post_init__(self):
         """Initialize mutable defaults."""
         if self.ai_messages is None:
             self.ai_messages = []
+        if self.iteration_durations_ms is None:
+            self.iteration_durations_ms = []
 
 
 def _normalize_todo_status(status: object) -> str:
@@ -530,6 +540,12 @@ def build_background_task_status_payload(result: SubagentResult) -> dict[str, An
                 if isinstance(result.live_state, dict)
                 else []
             ),
+            # Execution telemetry
+            "error_type": result.error_type,
+            "iteration_count": result.iteration_count,
+            "total_stream_ms": result.total_stream_ms,
+            "slowest_iteration_ms": result.slowest_iteration_ms,
+            "iteration_durations_ms": result.iteration_durations_ms or [],
         },
         "owner_id": result.owner_id,
     }
@@ -814,6 +830,7 @@ class SubagentExecutor:
                 task_id=task_id,
                 trace_id=self.trace_id,
                 status=SubagentStatus.RUNNING,
+                thread_id=self.thread_id,
                 started_at=datetime.now(),
             )
 
@@ -844,12 +861,28 @@ class SubagentExecutor:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
             final_state = None
+            stream_start_perf = time.perf_counter()
+            iteration_start_perf = stream_start_perf
             if self.stream_messages:
                 # Use stream mode when callers need progressive AI message updates
                 # (for example the generic task tool's task_running events).
                 async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                     if cancel_event and cancel_event.is_set():
                         raise SubagentCancelledError("Execution cancelled by user")
+
+                    # Track per-iteration wall time
+                    iter_now_perf = time.perf_counter()
+                    iter_ms = round((iter_now_perf - iteration_start_perf) * 1000)
+                    iteration_start_perf = iter_now_perf
+                    result.iteration_count += 1
+                    result.iteration_durations_ms.append(iter_ms)
+                    if iter_ms > result.slowest_iteration_ms:
+                        result.slowest_iteration_ms = iter_ms
+                    if iter_ms > 30_000:
+                        logger.warning(
+                            f"[trace={self.trace_id}] Subagent {self.config.name} iteration "
+                            f"#{result.iteration_count} took {iter_ms}ms (>30s)"
+                        )
 
                     snapshot_updated_at = datetime.now()
                     result.last_update_at = snapshot_updated_at
@@ -920,10 +953,16 @@ class SubagentExecutor:
                         break
                 persist_background_task_status_payload(result)
 
+            result.total_stream_ms = round((time.perf_counter() - stream_start_perf) * 1000)
+
             if cancel_event and cancel_event.is_set():
                 raise SubagentCancelledError("Execution cancelled by user")
 
-            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
+            logger.info(
+                f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution "
+                f"iterations={result.iteration_count} total_ms={result.total_stream_ms} "
+                f"slowest_iter_ms={result.slowest_iteration_ms}"
+            )
             if _timed_out_externally():
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} completed after timeout; ignoring completion write")
                 return result
@@ -988,15 +1027,21 @@ class SubagentExecutor:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled")
             result.status = SubagentStatus.CANCELLED
             result.error = str(e)
+            result.error_type = type(e).__qualname__
             result.completed_at = datetime.now()
             result.last_update_at = result.completed_at
         except Exception as e:
             if _timed_out_externally():
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} raised after timeout; preserving TIMED_OUT state")
+                result.error_type = type(e).__qualname__
                 return result
-            logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+            logger.exception(
+                f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed: "
+                f"{type(e).__qualname__}: {e}"
+            )
             result.status = SubagentStatus.FAILED
             result.error = str(e)
+            result.error_type = type(e).__qualname__
             result.completed_at = datetime.now()
             result.last_update_at = result.completed_at
 
@@ -1045,6 +1090,7 @@ class SubagentExecutor:
                     task_id=str(uuid.uuid4())[:8],
                     trace_id=self.trace_id,
                     status=SubagentStatus.FAILED,
+                    thread_id=self.thread_id,
                 )
             result.status = SubagentStatus.FAILED
             result.error = str(e)
@@ -1076,6 +1122,7 @@ class SubagentExecutor:
             task_id=task_id,
             trace_id=self.trace_id,
             status=SubagentStatus.PENDING,
+            thread_id=self.thread_id,
             owner_id=owner_id,
             description=description,
         )
@@ -1124,6 +1171,7 @@ class SubagentExecutor:
                         task_state.status = exec_result.status
                         task_state.result = exec_result.result
                         task_state.error = exec_result.error
+                        task_state.error_type = exec_result.error_type
                         task_state.completed_at = exec_result.completed_at or datetime.now()
                         task_state.ai_messages = exec_result.ai_messages
                         task_state.final_state = exec_result.final_state
@@ -1131,15 +1179,23 @@ class SubagentExecutor:
                         task_state.late_ai_message_summary = exec_result.late_ai_message_summary
                         task_state.timeout_observed_during_stream = exec_result.timeout_observed_during_stream
                         task_state.timed_out_at = exec_result.timed_out_at
+                        task_state.iteration_count = exec_result.iteration_count
+                        task_state.iteration_durations_ms = exec_result.iteration_durations_ms
+                        task_state.slowest_iteration_ms = exec_result.slowest_iteration_ms
+                        task_state.total_stream_ms = exec_result.total_stream_ms
                     persist_background_task_status_payload(task_state)
                 except FuturesTimeoutError:
-                    logger.error(f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s")
+                    logger.error(
+                        f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s "
+                        f"iterations={result_holder.iteration_count} slowest_iter_ms={result_holder.slowest_iteration_ms}"
+                    )
                     with _background_tasks_lock:
                         task_state = _background_tasks.get(task_id)
                         if task_state is None or task_state.status == SubagentStatus.CANCELLED:
                             return
                         task_state.status = SubagentStatus.TIMED_OUT
                         task_state.error = f"Execution timed out after {self.config.timeout_seconds} seconds"
+                        task_state.error_type = "FuturesTimeoutError"
                         task_state.completed_at = datetime.now()
                         task_state.timed_out_at = task_state.completed_at
                     persist_background_task_status_payload(task_state)
@@ -1156,7 +1212,10 @@ class SubagentExecutor:
                             current.completed_at = datetime.now()
                             persist_background_task_status_payload(current)
             except Exception as e:
-                logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
+                logger.exception(
+                    f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed: "
+                    f"{type(e).__qualname__}: {e}"
+                )
                 with _background_tasks_lock:
                     task_state = _background_tasks.get(task_id)
                     if task_state is None or task_state.status in {
@@ -1165,6 +1224,7 @@ class SubagentExecutor:
                     }:
                         return
                     task_state.status = SubagentStatus.FAILED
+                    task_state.error_type = type(e).__qualname__
                     task_state.error = str(e)
                     task_state.completed_at = datetime.now()
                 persist_background_task_status_payload(task_state)
@@ -1200,6 +1260,23 @@ def list_background_tasks() -> list[SubagentResult]:
     """
     with _background_tasks_lock:
         return list(_background_tasks.values())
+
+
+def get_latest_task_for_thread(thread_id: str) -> SubagentResult | None:
+    """Return the most recently started in-memory task for a given thread.
+
+    Searches all background tasks matching *thread_id* and returns the one
+    with the latest ``started_at`` timestamp.  Returns ``None`` when no
+    matching task is found.
+    """
+    with _background_tasks_lock:
+        candidates = [
+            t for t in _background_tasks.values()
+            if t.thread_id == thread_id
+        ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda t: t.started_at or datetime.min)
 
 
 def cleanup_background_task(task_id: str) -> None:

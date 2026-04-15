@@ -9,6 +9,7 @@ type VoiceStateControls = {
   startTalking: () => Promise<void>;
   stopTalking: () => Promise<void>;
   bargeIn: () => void;
+  softBargeIn: () => void;
   resetVoiceState: () => void;
 };
 
@@ -26,7 +27,7 @@ export function useSessionVoiceUiControls({
     }
 
     if (voiceState.stage === 'speaking') {
-      voiceState.bargeIn();
+      voiceState.softBargeIn();
       return;
     }
 

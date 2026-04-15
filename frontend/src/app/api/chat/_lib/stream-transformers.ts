@@ -1,5 +1,5 @@
 import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
-import type { BuilderTaskV1 } from '../../../types/builder-task';
+import type { BuilderActivityEntryV1, BuilderTaskV1 } from '../../../types/builder-task';
 
 import {
   IS_PRODUCTION,
@@ -55,9 +55,29 @@ type LangGraphToolAccumulator = {
 
 type BuilderTaskAccumulator = {
   label?: string;
+  activityLog: BuilderActivityEntryV1[];
+  lastActivitySignature?: string;
 };
 
 type BuilderTodoRecord = NonNullable<BuilderTaskV1['todos']>[number];
+
+const BUILDER_STREAM_ACTIVITY_LIMIT = 8;
+
+const BUILDER_TOOL_ACTIVITY_LABELS: Record<string, string> = {
+  bash: 'Running shell command',
+  shell: 'Running shell command',
+  write_file: 'Writing file',
+  create_file: 'Creating file',
+  edit_file: 'Editing file',
+  read_file: 'Reading file',
+  list_directory: 'Listing directory',
+  web_search: 'Searching the web',
+  web_browse: 'Browsing webpage',
+  crawl_tool: 'Crawling webpage',
+  python_repl: 'Running Python',
+  write_todos: 'Updating plan',
+  emit_builder_artifact: 'Finalizing deliverable',
+};
 
 const LEAK_LEAD_LABELS = [
   'USER MESSAGE:',
@@ -434,6 +454,201 @@ function buildRunningTaskDetail(data: Record<string, unknown>): string | undefin
   return undefined;
 }
 
+function getBuilderToolActivityTitle(toolName: string): string {
+  return BUILDER_TOOL_ACTIVITY_LABELS[toolName] ?? toolName.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function summarizeBuilderToolArgs(args: unknown, toolName: string): string | undefined {
+  if (!args || typeof args !== 'object') {
+    return undefined;
+  }
+
+  const record = args as Record<string, unknown>;
+
+  if (toolName === 'bash' || toolName === 'shell') {
+    const command = typeof record.command === 'string'
+      ? record.command
+      : typeof record.cmd === 'string'
+        ? record.cmd
+        : undefined;
+    return command?.trim() || undefined;
+  }
+
+  if (toolName === 'write_file' || toolName === 'create_file' || toolName === 'edit_file' || toolName === 'read_file') {
+    const path = typeof record.path === 'string'
+      ? record.path
+      : typeof record.file_path === 'string'
+        ? record.file_path
+        : typeof record.filename === 'string'
+          ? record.filename
+          : undefined;
+    return path?.trim() || undefined;
+  }
+
+  if (toolName === 'web_search' || toolName === 'crawl_tool') {
+    const query = typeof record.query === 'string'
+      ? record.query
+      : typeof record.search_query === 'string'
+        ? record.search_query
+        : undefined;
+    return query?.trim() || undefined;
+  }
+
+  if (toolName === 'web_browse' && typeof record.url === 'string') {
+    return record.url.trim() || undefined;
+  }
+
+  if (toolName === 'write_todos' && Array.isArray(record.todos)) {
+    return `${record.todos.length} items`;
+  }
+
+  if (toolName === 'emit_builder_artifact') {
+    const title = typeof record.artifact_title === 'string'
+      ? record.artifact_title
+      : typeof record.title === 'string'
+        ? record.title
+        : undefined;
+    return title?.trim() || undefined;
+  }
+
+  return undefined;
+}
+
+function extractBuilderToolActivityEntries(message: unknown): BuilderActivityEntryV1[] {
+  if (!message || typeof message !== 'object') {
+    return [];
+  }
+
+  const record = message as Record<string, unknown>;
+  if (!Array.isArray(record.tool_calls)) {
+    return [];
+  }
+
+  const entries: BuilderActivityEntryV1[] = [];
+  for (const rawToolCall of record.tool_calls) {
+    if (!rawToolCall || typeof rawToolCall !== 'object') {
+      continue;
+    }
+
+    const toolCall = rawToolCall as Record<string, unknown>;
+    const toolName = typeof toolCall.name === 'string' ? toolCall.name : '';
+    if (!toolName) {
+      continue;
+    }
+
+    const detail = summarizeBuilderToolArgs(toolCall.args, toolName);
+    entries.push({
+      type: 'tool_call',
+      title: getBuilderToolActivityTitle(toolName),
+      tool: toolName,
+      ...(detail ? { detail } : {}),
+      status: 'running',
+    });
+  }
+
+  return entries;
+}
+
+function buildRunningActivityEntries(data: Record<string, unknown>): BuilderActivityEntryV1[] {
+  if (data.heartbeat === true) {
+    return [];
+  }
+
+  const toolEntries = extractBuilderToolActivityEntries(data.message);
+  if (toolEntries.length > 0) {
+    return toolEntries;
+  }
+
+  const messageText = extractTaskMessageText(data.message);
+  if (messageText) {
+    return [{ type: 'thinking', title: messageText, status: 'running' } satisfies BuilderActivityEntryV1];
+  }
+
+  const activeStepTitle = typeof data.active_step_title === 'string'
+    ? data.active_step_title
+    : typeof data.activeStepTitle === 'string'
+      ? data.activeStepTitle
+      : undefined;
+  if (activeStepTitle) {
+    return [{ type: 'thinking', title: `Working on ${activeStepTitle}`, status: 'running' } satisfies BuilderActivityEntryV1];
+  }
+
+  const completedSteps = typeof data.completed_steps === 'number' ? data.completed_steps : undefined;
+  const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;
+  if (typeof completedSteps === 'number' && typeof totalSteps === 'number' && totalSteps > 0) {
+    return [{
+      type: 'thinking',
+      title: `Completed ${completedSteps} of ${totalSteps} steps`,
+      status: 'running',
+    } satisfies BuilderActivityEntryV1];
+  }
+
+  const description = typeof data.description === 'string' ? data.description.trim() : '';
+  return [{
+    type: 'thinking',
+    title: 'Builder started',
+    ...(description ? { detail: description } : {}),
+    status: 'running',
+  } satisfies BuilderActivityEntryV1];
+}
+
+function buildTaskActivityLog(
+  phase: BuilderTaskV1['phase'],
+  data: Record<string, unknown>,
+  accumulator?: BuilderTaskAccumulator,
+): BuilderActivityEntryV1[] | undefined {
+  const existingLog = accumulator?.activityLog ?? [];
+
+  if (phase !== 'running') {
+    if (existingLog.length === 0) {
+      return undefined;
+    }
+
+    const terminalStatus: BuilderActivityEntryV1['status'] = phase === 'completed' ? 'done' : 'error';
+    const finalizedLog: BuilderActivityEntryV1[] = existingLog.map((entry, index) => (
+      index === existingLog.length - 1 && entry.status === 'running'
+        ? { ...entry, status: terminalStatus }
+        : entry
+    ));
+
+    if (accumulator) {
+      accumulator.activityLog = finalizedLog;
+    }
+
+    return finalizedLog;
+  }
+
+  const newEntries = buildRunningActivityEntries(data);
+  if (newEntries.length === 0) {
+    return existingLog.length > 0 ? existingLog : undefined;
+  }
+
+  const nextLog: BuilderActivityEntryV1[] = existingLog.map((entry, index) => (
+    index === existingLog.length - 1 && entry.status === 'running'
+      ? { ...entry, status: 'done' as const }
+      : entry
+  ));
+
+  let lastActivitySignature = accumulator?.lastActivitySignature;
+  for (const entry of newEntries) {
+    const signature = JSON.stringify([entry.type, entry.tool ?? '', entry.title, entry.detail ?? '']);
+    if (signature === lastActivitySignature) {
+      continue;
+    }
+
+    nextLog.push(entry);
+    lastActivitySignature = signature;
+  }
+
+  const trimmedLog = nextLog.slice(-BUILDER_STREAM_ACTIVITY_LIMIT);
+  if (accumulator) {
+    accumulator.activityLog = trimmedLog;
+    accumulator.lastActivitySignature = lastActivitySignature;
+  }
+
+  return trimmedLog.length > 0 ? trimmedLog : undefined;
+}
+
 function parseBuilderTodos(data: unknown): BuilderTaskV1['todos'] | undefined {
   if (!Array.isArray(data)) {
     return undefined;
@@ -526,6 +741,7 @@ function buildBuilderTaskEvent(
   const heartbeat = typeof data.heartbeat === 'boolean' ? data.heartbeat : undefined;
   const pollCount = typeof data.poll_count === 'number' ? data.poll_count : undefined;
   const todos = parseBuilderTodos(data.todos);
+  const activityLog = buildTaskActivityLog(phase, data, accumulator);
 
   let detail: string | undefined;
   switch (phase) {
@@ -575,10 +791,11 @@ function buildBuilderTaskEvent(
     ...(stuckReason ? { stuckReason } : {}),
     ...(typeof heartbeat === 'boolean' ? { heartbeat } : {}),
     ...(typeof pollCount === 'number' ? { pollCount } : {}),
+    ...(activityLog ? { activityLog } : {}),
   };
 }
 
-function extractValuesBuilderTask(data: unknown): BuilderTaskV1 | null {
+function extractValuesBuilderTask(data: unknown, accumulator?: BuilderTaskAccumulator): BuilderTaskV1 | null {
   if (!data || typeof data !== 'object') {
     return null;
   }
@@ -604,7 +821,15 @@ function extractValuesBuilderTask(data: unknown): BuilderTaskV1 | null {
       ? builderTask.label
       : undefined;
 
-  return buildBuilderTaskEvent(phase, builderTask, label ? { label } : undefined);
+  if (accumulator && label) {
+    accumulator.label = label;
+  }
+
+  return buildBuilderTaskEvent(
+    phase,
+    builderTask,
+    accumulator ?? (label ? { label, activityLog: [] } : undefined),
+  );
 }
 
 export function createUIMessageStreamFromText(
@@ -965,9 +1190,43 @@ export function createSSEToUIMessageStream(
                   break;
                 }
                 case 'values': {
-                  const builderTask = extractValuesBuilderTask(data);
+                  let valuesBuilderAccumulator: BuilderTaskAccumulator | undefined;
+                  if (data && typeof data === 'object') {
+                    const valuesRecord = data as Record<string, unknown>;
+                    const nestedValues = valuesRecord.values && typeof valuesRecord.values === 'object'
+                      ? valuesRecord.values as Record<string, unknown>
+                      : null;
+                    const rawBuilderTask = valuesRecord.builder_task ?? valuesRecord.builderTask ?? nestedValues?.builder_task ?? nestedValues?.builderTask;
+                    if (rawBuilderTask && typeof rawBuilderTask === 'object') {
+                      const builderTaskRecord = rawBuilderTask as Record<string, unknown>;
+                      const valuesTaskId = typeof builderTaskRecord.task_id === 'string' ? builderTaskRecord.task_id : undefined;
+                      const valuesLabel = typeof builderTaskRecord.description === 'string'
+                        ? builderTaskRecord.description
+                        : typeof builderTaskRecord.label === 'string'
+                          ? builderTaskRecord.label
+                          : undefined;
+
+                      if (valuesTaskId) {
+                        valuesBuilderAccumulator = activeBuilderTasks.get(valuesTaskId);
+                        if (!valuesBuilderAccumulator) {
+                          valuesBuilderAccumulator = {
+                            ...(valuesLabel ? { label: valuesLabel } : {}),
+                            activityLog: [],
+                          };
+                          activeBuilderTasks.set(valuesTaskId, valuesBuilderAccumulator);
+                        } else if (valuesLabel) {
+                          valuesBuilderAccumulator.label = valuesLabel;
+                        }
+                      }
+                    }
+                  }
+
+                  const builderTask = extractValuesBuilderTask(data, valuesBuilderAccumulator);
                   if (builderTask) {
                     emitBuilderTask(builderTask);
+                    if (builderTask.taskId && builderTask.phase !== 'running') {
+                      activeBuilderTasks.delete(builderTask.taskId);
+                    }
                   }
 
                   const builderArtifact = extractValuesBuilderArtifact(data);
@@ -1032,10 +1291,10 @@ export function createSSEToUIMessageStream(
                   }
 
                   if (taskId) {
-                    activeBuilderTasks.set(taskId, { label: description });
+                    activeBuilderTasks.set(taskId, { label: description, activityLog: [] });
                   }
 
-                  emitBuilderTask(buildBuilderTaskEvent('running', taskData, { label: description }));
+                  emitBuilderTask(buildBuilderTaskEvent('running', taskData, taskId ? activeBuilderTasks.get(taskId) : { label: description, activityLog: [] }));
                   break;
                 }
                 case 'task_running': {

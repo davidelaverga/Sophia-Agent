@@ -7,6 +7,7 @@ import { useCompanionStreamContract } from '../companion-runtime/stream-contract
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
 import {
   cancelBuilderTask as requestBuilderTaskCancellation,
+  getActiveBuilderTask,
   getBuilderArtifactFromStatus,
   getBuilderTaskPhaseFromStatus,
   getBuilderTaskStatus,
@@ -84,23 +85,45 @@ export function useSessionRouteExperience({
   const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null);
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false);
   const lastBuilderCaptureSignatureRef = useRef<string | null>(null);
+  /** Task IDs dismissed after download — stale SSE events for these are rejected. */
+  const dismissedTaskIdsRef = useRef(new Set<string>());
 
   const setBuilderArtifactAndPersist = useCallback((nextBuilderArtifact: BuilderArtifactV1 | null) => {
     setBuilderArtifact(nextBuilderArtifact);
     if (nextBuilderArtifact) {
-      setBuilderTask((currentTask) => currentTask
-        ? {
-            ...currentTask,
-            phase: 'completed',
-            detail: currentTask.detail ?? 'Deliverable ready.',
-          }
-        : currentTask);
+      setBuilderTask((currentTask) => {
+        if (!currentTask) return currentTask;
+        // When a task is actively running with a taskId, polling is responsible
+        // for the running→completed transition. Forcing completion here would
+        // break the second builder request: the companion's artifact for turn N+1
+        // carries stale builder_result from turn N, which would prematurely kill
+        // the new running task.
+        if (currentTask.phase === 'running' && currentTask.taskId) {
+          return currentTask;
+        }
+        return {
+          ...currentTask,
+          phase: 'completed',
+          detail: currentTask.detail ?? 'Deliverable ready.',
+        };
+      });
     }
     storeBuilderArtifact(nextBuilderArtifact);
   }, [storeBuilderArtifact]);
 
   const clearBuilderTask = useCallback(() => {
-    setBuilderTask(null);
+    setBuilderTask((current) => {
+      if (current?.taskId) {
+        dismissedTaskIdsRef.current.add(current.taskId);
+      }
+      return null;
+    });
+  }, []);
+
+  /** Setter that rejects stale SSE events for tasks the user already dismissed. */
+  const guardedSetBuilderTask = useCallback((task: BuilderTaskV1 | null) => {
+    if (task?.taskId && dismissedTaskIdsRef.current.has(task.taskId)) return;
+    setBuilderTask(task);
   }, []);
 
   const { artifactStatus, ingestArtifacts, applyMemoryCandidates } = useCompanionArtifactsRuntime({
@@ -123,7 +146,7 @@ export function useSessionRouteExperience({
   const { handleDataPart, handleFinish, markStreamTurnStarted } = useCompanionStreamContract({
     ingestArtifacts,
     setBuilderArtifact: setBuilderArtifactAndPersist,
-    setBuilderTask,
+    setBuilderTask: guardedSetBuilderTask,
     setInterrupt: routeIncomingInterrupt,
     setCurrentContext,
     setMessageMetadata,
@@ -137,7 +160,48 @@ export function useSessionRouteExperience({
     setBuilderTask(null);
     setIsCancellingBuilderTask(false);
     lastBuilderCaptureSignatureRef.current = null;
+    dismissedTaskIdsRef.current.clear();
   }, [activeSessionId, storedBuilderArtifact]);
+
+  // Rehydrate builder task on reconnect — discovers tasks started while SSE was down
+  useEffect(() => {
+    if (!activeThreadId || builderTask) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const rehydrate = async () => {
+      try {
+        const active = await getActiveBuilderTask(activeThreadId);
+        if (cancelled || !active) return;
+
+        const rehydrated = mergeBuilderTaskStatus(null, active);
+        if (rehydrated) {
+          if (rehydrated.taskId && dismissedTaskIdsRef.current.has(rehydrated.taskId)) return;
+          recordSophiaCaptureEvent({
+            category: 'builder',
+            name: 'task-rehydrated',
+            payload: rehydrated,
+          });
+          setBuilderTask(rehydrated);
+
+          const artifact = getBuilderArtifactFromStatus(active);
+          if (artifact) {
+            setBuilderArtifactAndPersist(artifact);
+          }
+        }
+      } catch {
+        // Silent — rehydration is best-effort
+      }
+    };
+
+    void rehydrate();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeThreadId, builderTask, setBuilderArtifactAndPersist]);
 
   useEffect(() => {
     if (!builderTask) {
@@ -165,6 +229,16 @@ export function useSessionRouteExperience({
     const activeTaskId = builderTask.taskId;
     let cancelled = false;
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const pollStartedAt = Date.now();
+
+    /** Adaptive interval: fast at first to capture early activity log entries,
+     *  then slower as the task progresses to reduce load. */
+    const getPollInterval = (): number => {
+      const elapsed = Date.now() - pollStartedAt;
+      if (elapsed < 10_000) return 1000;   // first 10s: every 1s
+      if (elapsed < 30_000) return 2000;   // next 20s: every 2s
+      return 3000;                          // after 30s: every 3s
+    };
 
     const pollTaskStatus = async () => {
       try {
@@ -213,7 +287,7 @@ export function useSessionRouteExperience({
       if (!cancelled) {
         timeoutId = setTimeout(() => {
           void pollTaskStatus();
-        }, 2000);
+        }, getPollInterval());
       }
     };
 
@@ -338,7 +412,7 @@ export function useSessionRouteExperience({
     appendAssistantMessage: appendVoiceAssistantMessage,
     ingestArtifacts,
     setBuilderArtifact: setBuilderArtifactAndPersist,
-    setBuilderTask,
+    setBuilderTask: guardedSetBuilderTask,
     onRateLimitError: () => undefined,
     sendMessage,
     latestAssistantMessage,

@@ -569,7 +569,8 @@ def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int]:
     if demo_mode:
         return 16, 45
 
-    # Real Builder runs often spend several turns updating todos before the
-    # final emit_builder_artifact call. The previous budget could exhaust the
-    # graph before the Builder had a chance to close cleanly.
-    return 100, 180
+    # Each model turn uses 3-5 graph iterations depending on middleware.
+    # Hard cutoff lives in BuilderArtifactMiddleware at 12 non-artifact turns.
+    # Recursion limit must be above that: 6 setup + 12 turns × 5 iter = 66.
+    # Set to 80 for margin so the hard cutoff always fires first.
+    return 80, 180

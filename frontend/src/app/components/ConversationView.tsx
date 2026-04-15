@@ -271,6 +271,7 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
                 artifactTitle={builderArtifact?.artifactTitle}
                 onOpenArtifact={builderArtifact ? handleOpenBuilderArtifact : undefined}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                onDownload={builderArtifact ? () => { setTimeout(clearBuilderTask, 1500) } : undefined}
                 compact={true}
                 onDismiss={clearBuilderTask}
                 onCancel={cancelBuilderTask}
@@ -340,6 +341,7 @@ export function ConversationView({ routeExperience }: ConversationViewProps) {
                 artifactTitle={builderArtifact?.artifactTitle}
                 onOpenArtifact={builderArtifact ? handleOpenBuilderArtifact : undefined}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                onDownload={builderArtifact ? () => { setTimeout(clearBuilderTask, 1500) } : undefined}
                 onDismiss={clearBuilderTask}
                 onCancel={cancelBuilderTask}
                 isCancelling={isCancellingBuilderTask}

@@ -1,5 +1,10 @@
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
-import type { BuilderShellCommandDebugV1, BuilderTaskDebugV1, BuilderTaskV1 } from '../types/builder-task';
+import type {
+  BuilderActivityEntryV1,
+  BuilderShellCommandDebugV1,
+  BuilderTaskDebugV1,
+  BuilderTaskV1,
+} from '../types/builder-task';
 
 import { normalizeBuilderArtifactPayload } from './builder-artifacts';
 
@@ -70,9 +75,47 @@ export type BuilderTaskStatusResponse = {
     last_shell_command?: BuilderTaskStatusShellCommandPayload | null;
     recent_shell_commands?: BuilderTaskStatusShellCommandPayload[];
   };
+  activity_log?: Array<{
+    type?: string;
+    title?: string;
+    tool?: string;
+    detail?: string;
+    status?: string;
+  }>;
 };
 
 const TERMINAL_TASK_PHASES = new Set<BuilderTaskV1['phase']>(['completed', 'failed', 'timed_out', 'cancelled']);
+
+const ACTIVITY_ENTRY_TYPES = new Set(['tool_call', 'thinking']);
+const ACTIVITY_STATUS_VALUES = new Set(['running', 'done', 'error']);
+
+function normalizeActivityLog(
+  raw: BuilderTaskStatusResponse['activity_log'],
+): BuilderActivityEntryV1[] | undefined {
+  if (!Array.isArray(raw) || raw.length === 0) {
+    return undefined;
+  }
+
+  const entries: BuilderActivityEntryV1[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+
+    const type = ACTIVITY_ENTRY_TYPES.has(entry.type ?? '') ? entry.type as BuilderActivityEntryV1['type'] : 'tool_call';
+    const title = typeof entry.title === 'string' && entry.title ? entry.title : undefined;
+    if (!title) continue;
+
+    const normalized: BuilderActivityEntryV1 = { type, title };
+    if (typeof entry.tool === 'string' && entry.tool) normalized.tool = entry.tool;
+    if (typeof entry.detail === 'string' && entry.detail) normalized.detail = entry.detail;
+    if (ACTIVITY_STATUS_VALUES.has(entry.status ?? '')) {
+      normalized.status = entry.status as BuilderActivityEntryV1['status'];
+    }
+
+    entries.push(normalized);
+  }
+
+  return entries.length > 0 ? entries : undefined;
+}
 
 function normalizeShellCommandDebug(
   payload: BuilderTaskStatusShellCommandPayload | null | undefined,
@@ -203,6 +246,27 @@ export async function cancelBuilderTask(taskId: string): Promise<CancelBuilderTa
   return payload;
 }
 
+export async function getActiveBuilderTask(
+  threadId: string,
+): Promise<BuilderTaskStatusResponse | null> {
+  const params = new URLSearchParams({ thread_id: threadId });
+  const response = await fetch(
+    `/api/sophia/tasks/active?${params.toString()}`,
+    { method: 'GET', cache: 'no-store' },
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  const payload = await response.json().catch(() => null);
+  if (!payload?.task_id) {
+    return null;
+  }
+
+  return payload as BuilderTaskStatusResponse;
+}
+
 export async function getBuilderTaskStatus(taskId: string): Promise<BuilderTaskStatusResponse> {
   const response = await fetch(`/api/sophia/tasks/${encodeURIComponent(taskId)}`, {
     method: 'GET',
@@ -234,10 +298,16 @@ export function mergeBuilderTaskStatus(
   }
 
   if (currentTask && TERMINAL_TASK_PHASES.has(currentTask.phase) && nextPhase === 'running') {
-    return currentTask;
+    // Allow a genuinely new task to replace a completed one. Without this
+    // check, the second builder request's polling updates are silently
+    // discarded because the first task's completed state blocks them.
+    if (!statusPayload.task_id || statusPayload.task_id === currentTask.taskId) {
+      return currentTask;
+    }
   }
 
   const debug = normalizeBuilderTaskDebug(statusPayload.debug);
+  const activityLog = normalizeActivityLog(statusPayload.activity_log);
   const detail = statusPayload.detail
     || statusPayload.error
     || statusPayload.result
@@ -273,6 +343,7 @@ export function mergeBuilderTaskStatus(
     ...(typeof statusPayload.is_stuck === 'boolean' ? { stuck: statusPayload.is_stuck } : {}),
     ...(statusPayload.stuck_reason ? { stuckReason: statusPayload.stuck_reason } : {}),
     ...(debug ? { debug } : currentTask?.debug ? { debug: currentTask.debug } : {}),
+    ...(activityLog ? { activityLog } : currentTask?.activityLog ? { activityLog: currentTask.activityLog } : {}),
   };
 }
 

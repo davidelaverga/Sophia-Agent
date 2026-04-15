@@ -179,6 +179,8 @@ export function useChatRouteExperience(): ChatRouteExperience {
   const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null)
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false)
   const lastBuilderCaptureSignatureRef = useRef<string | null>(null)
+  /** Task IDs dismissed after download — stale SSE events for these are rejected. */
+  const dismissedTaskIdsRef = useRef(new Set<string>())
 
   const setEmotion = useEmotionStore((state) => state.setEmotion)
   const setCurrentContext = useMessageMetadataStore((state) => state.setCurrentContext)
@@ -271,6 +273,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
     setBuilderTask(null)
     setIsCancellingBuilderTask(false)
     lastBuilderCaptureSignatureRef.current = null
+    dismissedTaskIdsRef.current.clear()
   }, [conversationId, recapArtifacts?.builderArtifact])
 
   useEffect(() => {
@@ -292,7 +295,18 @@ export function useChatRouteExperience(): ChatRouteExperience {
   }, [builderTask])
 
   const clearBuilderTask = useCallback(() => {
-    setBuilderTask(null)
+    setBuilderTask((current) => {
+      if (current?.taskId) {
+        dismissedTaskIdsRef.current.add(current.taskId)
+      }
+      return null
+    })
+  }, [])
+
+  /** Setter that rejects stale SSE events for tasks the user already dismissed. */
+  const guardedSetBuilderTask = useCallback((task: BuilderTaskV1 | null) => {
+    if (task?.taskId && dismissedTaskIdsRef.current.has(task.taskId)) return
+    setBuilderTask(task)
   }, [])
 
   const cancelBuilderTask = useCallback(async () => {
@@ -334,13 +348,21 @@ export function useChatRouteExperience(): ChatRouteExperience {
   const handleBuilderArtifact = useCallback((nextBuilderArtifact: BuilderArtifactV1 | null) => {
     setBuilderArtifact(nextBuilderArtifact)
     if (nextBuilderArtifact) {
-      setBuilderTask((currentTask) => currentTask
-        ? {
-            ...currentTask,
-            phase: 'completed',
-            detail: currentTask.detail || 'Deliverable ready.',
-          }
-        : currentTask)
+      setBuilderTask((currentTask) => {
+        if (!currentTask) return currentTask
+        // When a task is actively running with a taskId, polling handles the
+        // running→completed transition. Forcing completion here would break
+        // successive builder requests (stale builder_result from turn N would
+        // prematurely complete the task started in turn N+1).
+        if (currentTask.phase === 'running' && currentTask.taskId) {
+          return currentTask
+        }
+        return {
+          ...currentTask,
+          phase: 'completed',
+          detail: currentTask.detail || 'Deliverable ready.',
+        }
+      })
     }
 
     const activeConversationId = useChatStore.getState().conversationId
@@ -372,6 +394,15 @@ export function useChatRouteExperience(): ChatRouteExperience {
     const activeTaskId = builderTask.taskId
     let cancelled = false
     let timeoutId: ReturnType<typeof setTimeout> | null = null
+    const pollStartedAt = Date.now()
+
+    /** Adaptive interval: fast initially to capture early activity log entries. */
+    const getPollInterval = (): number => {
+      const elapsed = Date.now() - pollStartedAt
+      if (elapsed < 10_000) return 1000
+      if (elapsed < 30_000) return 2000
+      return 3000
+    }
 
     const pollTaskStatus = async () => {
       try {
@@ -420,7 +451,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
       if (!cancelled) {
         timeoutId = setTimeout(() => {
           void pollTaskStatus()
-        }, 2000)
+        }, getPollInterval())
       }
     }
 
@@ -589,7 +620,7 @@ export function useChatRouteExperience(): ChatRouteExperience {
     stream: {
       ingestArtifacts: handleStreamArtifacts,
       setBuilderArtifact: handleBuilderArtifact,
-      setBuilderTask,
+      setBuilderTask: guardedSetBuilderTask,
       setInterrupt,
       setCurrentContext,
       setMessageMetadata,

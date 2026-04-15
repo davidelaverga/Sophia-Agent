@@ -52,6 +52,8 @@ export type StreamVoiceSessionReturn = {
   startTalking: () => Promise<void>
   stopTalking: () => Promise<void>
   bargeIn: () => void
+  /** Clears speaking UI state without tearing down transport (SSE/call/credentials stay alive). */
+  softBargeIn: () => void
   resetVoiceState: () => void
   /** Always false — Stream handles retries server-side */
   hasRetryableVoiceTurn: () => boolean
@@ -267,6 +269,7 @@ export function useStreamVoiceSession(
   const startupReadyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recentUserTranscriptIdsRef = useRef<string[]>([])
   const currentTurnUserTranscriptRef = useRef<string | null>(null)
+  const softBargeInActiveRef = useRef(false)
   const destroyedRef = useRef(false)
   const errorStageLockRef = useRef(false)
   const isSophiaReadyRef = useRef(false)
@@ -879,6 +882,10 @@ export function useStreamVoiceSession(
     }
 
     if (type === "sophia.transcript") {
+      // When a voice command was intercepted via softBargeIn, suppress the
+      // backend's response text/partial that was triggered by the command.
+      if (softBargeInActiveRef.current) return
+
       const text = typeof data?.text === "string" ? data.text : ""
       if (!text) return
 
@@ -941,18 +948,24 @@ export function useStreamVoiceSession(
             : null
 
       if (phase === "agent_started") {
+        if (softBargeInActiveRef.current) {
+          // Voice command intercepted this turn — don't transition to speaking.
+          return
+        }
         clearThinking()
         setStage("speaking")
         setListeningPresence(false)
         setSpeakingPresence(true)
         setMetaPresence("speaking")
       } else if (phase === "agent_ended") {
+        softBargeInActiveRef.current = false
         clearCurrentTurnUserTranscript()
         setStage("listening")
         setSpeakingPresence(false)
         setListeningPresence(true)
         setMetaPresence("listening")
       } else if (phase === "user_ended") {
+        softBargeInActiveRef.current = false
         setStage("thinking")
         setListeningPresence(false)
         setSpeakingPresence(false)
@@ -1535,6 +1548,35 @@ export function useStreamVoiceSession(
     settlePresence,
   ])
 
+  /**
+   * Soft barge-in: clears speaking/thinking UI state but keeps the transport
+   * alive (SSE, call, credentials).  The Voice Agent handles native speech
+   * interruption when it detects user audio, so we only need to update the
+   * visual stage.  Use this for voice-command interceptions (download,
+   * reflection, interrupt) that should NOT tear down the session.
+   */
+  const softBargeIn = useCallback(() => {
+    softBargeInActiveRef.current = true
+    clearThinking()
+    currentTurnUserTranscriptRef.current = null
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "soft-barge-in",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+      },
+    })
+    setStage("listening")
+    setSpeakingPresence(false)
+    setListeningPresence(true)
+    settlePresence()
+  }, [
+    clearThinking,
+    setListeningPresence,
+    setSpeakingPresence,
+    settlePresence,
+  ])
+
   const bargeIn = useCallback(() => {
     cancelPendingStartRequest()
     autoPreconnectEnabledRef.current = false
@@ -1651,6 +1693,7 @@ export function useStreamVoiceSession(
     startTalking,
     stopTalking,
     bargeIn,
+    softBargeIn,
     resetVoiceState,
     hasRetryableVoiceTurn: () => false,
     retryLastVoiceTurn: async () => false,

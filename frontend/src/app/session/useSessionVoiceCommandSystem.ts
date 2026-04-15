@@ -10,6 +10,7 @@ type ReflectionCandidate = {
 
 type VoiceStateLike = {
   bargeIn: () => void;
+  softBargeIn: () => void;
 };
 
 interface UseSessionVoiceCommandSystemParams {
@@ -101,21 +102,40 @@ export function useSessionVoiceCommandSystem({
       if (suppressVoiceAssistantResetTimerRef.current) {
         clearTimeout(suppressVoiceAssistantResetTimerRef.current);
       }
+      // Ensure remote audio is unmuted on cleanup
+      for (const el of document.querySelectorAll<HTMLAudioElement>('audio[data-sophia-remote]')) {
+        el.muted = false;
+      }
     };
   }, []);
 
-  const interceptVoiceAssistant = useCallback((resetAfterMs: number, logLabel: string) => {
+  const interceptVoiceAssistant = useCallback((resetAfterMs: number, logLabel: string, opts?: { hard?: boolean }) => {
     suppressVoiceAssistantFromCommandRef.current = true;
     if (suppressVoiceAssistantResetTimerRef.current) {
       clearTimeout(suppressVoiceAssistantResetTimerRef.current);
     }
+
+    // Mute remote audio elements so the backend's TTS response to the
+    // intercepted command doesn't play through the speakers.
+    const muteRemote = (muted: boolean) => {
+      for (const el of document.querySelectorAll<HTMLAudioElement>('audio[data-sophia-remote]')) {
+        el.muted = muted;
+      }
+    };
+    muteRemote(true);
+
     suppressVoiceAssistantResetTimerRef.current = setTimeout(() => {
       suppressVoiceAssistantFromCommandRef.current = false;
       suppressVoiceAssistantResetTimerRef.current = null;
+      muteRemote(false);
     }, resetAfterMs);
 
     try {
-      voiceState.bargeIn();
+      if (opts?.hard) {
+        voiceState.bargeIn();
+      } else {
+        voiceState.softBargeIn();
+      }
     } catch (error) {
       logger.logError(error, {
         component: 'SessionPage',
@@ -163,7 +183,7 @@ export function useSessionVoiceCommandSystem({
 
     if (!isGoBackCommand && !isEndSessionCommand) return false;
 
-    interceptVoiceAssistant(12000, 'session voice command');
+    interceptVoiceAssistant(12000, 'session voice command', { hard: true });
     void handleVoiceEndSession();
     showToast({
       message: 'Ending session by voice command.',

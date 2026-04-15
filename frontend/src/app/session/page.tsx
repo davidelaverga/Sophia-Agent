@@ -466,6 +466,7 @@ function SessionPageContent() {
     messages,
     artifacts,
     builderArtifact,
+    isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
     userOpenedArtifacts,
@@ -559,8 +560,13 @@ function SessionPageContent() {
       link.remove();
     }, 0);
 
+    // Auto-dismiss builder UI after download so new tasks can surface
+    window.setTimeout(() => {
+      clearBuilderTask();
+    }, 1500);
+
     return true;
-  }, [builderDownloadHref, builderPrimaryFile?.name]);
+  }, [builderDownloadHref, builderPrimaryFile?.name, clearBuilderTask]);
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -983,7 +989,7 @@ function SessionPageContent() {
               artifactTitle={builderArtifact?.artifactTitle}
               onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
               downloadHref={builderArtifact ? builderDownloadHref : undefined}
-              onDownload={builderArtifact ? () => haptic('medium') : undefined}
+              onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
               onDismiss={clearBuilderTask}
               onCancel={cancelBuilderTask}
               isCancelling={isCancellingBuilderTask}
@@ -1041,15 +1047,15 @@ function SessionPageContent() {
           {focusMode !== 'text' && showBuilderTaskNotice && builderTask && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-40"
-              style={{ bottom: '172px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
+              style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
             >
               <BuilderTaskNotice
                 task={builderTask}
                 artifactTitle={builderArtifact?.artifactTitle}
                 onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
-                onDownload={builderArtifact ? () => haptic('medium') : undefined}
-                compact={true}
+                onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
+                compact={false}
                 onDismiss={clearBuilderTask}
                 onCancel={cancelBuilderTask}
                 isCancelling={isCancellingBuilderTask}
