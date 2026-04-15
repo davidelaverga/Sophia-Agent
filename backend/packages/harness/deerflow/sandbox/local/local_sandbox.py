@@ -40,9 +40,21 @@ class LocalSandbox(Sandbox):
         """Detect available shell executable with fallback.
 
         Returns the first available shell in order of preference:
-        /bin/zsh → /bin/bash → /bin/sh → first `sh` found on PATH.
+        Unix: /bin/zsh → /bin/bash → /bin/sh → first `sh` found on PATH.
+        Windows: pwsh → powershell → cmd (PowerShell preferred for better
+        compatibility with Unix-style commands via built-in aliases).
         Raises a RuntimeError if no suitable shell is found.
         """
+        if os.name == "nt":
+            for name in ("pwsh", "powershell", "cmd"):
+                found = shutil.which(name)
+                if found is not None:
+                    return found
+            raise RuntimeError(
+                "No suitable shell executable found on Windows. "
+                "Tried pwsh, powershell, and cmd on PATH."
+            )
+
         for shell in ("/bin/zsh", "/bin/bash", "/bin/sh"):
             if os.path.isfile(shell) and os.access(shell, os.X_OK):
                 return shell
@@ -79,13 +91,26 @@ class LocalSandbox(Sandbox):
         telemetry["shell_executable"] = shell_executable
 
         try:
+            # On Windows, subprocess.run(shell=True, executable=...) doesn't work
+            # the same way as on Unix. Build the correct invocation per shell type.
+            shell_name = os.path.basename(shell_executable).lower().replace(".exe", "")
+            if os.name == "nt" and shell_name in ("powershell", "pwsh"):
+                run_args: list[str] | str = [shell_executable, "-NoProfile", "-Command", command]
+                run_kwargs = {"shell": False}
+            elif os.name == "nt" and shell_name == "cmd":
+                run_args = command
+                run_kwargs = {"shell": True}  # shell=True on Windows uses cmd.exe
+            else:
+                # Unix path — use the detected shell
+                run_args = command
+                run_kwargs = {"shell": True, "executable": shell_executable}
+
             result = subprocess.run(
-                command,
-                executable=shell_executable,
-                shell=True,
+                run_args,
                 capture_output=True,
                 text=True,
                 timeout=_COMMAND_TIMEOUT_SECONDS,
+                **run_kwargs,
             )
         except subprocess.TimeoutExpired as exc:
             completed_at = datetime.now(UTC)

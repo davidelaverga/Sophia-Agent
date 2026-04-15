@@ -3,6 +3,7 @@ import { asRecord, readNumber, readString } from '../lib/record-parsers';
 import { InterruptPayloadSchema } from '../lib/schemas/session-schemas';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type {
+  BuilderActivityEntryV1,
   BuilderShellCommandDebugV1,
   BuilderTaskDebugV1,
   BuilderTaskPhaseV1,
@@ -67,6 +68,43 @@ function parseBuilderTodos(data: unknown): BuilderTodoV1[] | undefined {
     .filter((todo): todo is BuilderTodoV1 => Boolean(todo));
 
   return todos.length > 0 ? todos : undefined;
+}
+
+const ACTIVITY_ENTRY_TYPES = new Set(['tool_call', 'thinking']);
+const ACTIVITY_STATUS_VALUES = new Set(['running', 'done', 'error']);
+
+function parseBuilderActivityLog(data: unknown): BuilderActivityEntryV1[] | undefined {
+  if (!Array.isArray(data) || data.length === 0) {
+    return undefined;
+  }
+
+  const entries: BuilderActivityEntryV1[] = [];
+  for (const raw of data) {
+    const entry = asRecord(raw);
+    if (!entry) continue;
+
+    const title = readString(entry, 'title');
+    if (!title) continue;
+
+    const rawType = readString(entry, 'type');
+    const type = ACTIVITY_ENTRY_TYPES.has(rawType ?? '')
+      ? (rawType as BuilderActivityEntryV1['type'])
+      : 'tool_call';
+
+    const normalized: BuilderActivityEntryV1 = { type, title };
+    const tool = readString(entry, 'tool');
+    if (tool) normalized.tool = tool;
+    const detail = readString(entry, 'detail');
+    if (detail) normalized.detail = detail;
+    const status = readString(entry, 'status');
+    if (ACTIVITY_STATUS_VALUES.has(status ?? '')) {
+      normalized.status = status as BuilderActivityEntryV1['status'];
+    }
+
+    entries.push(normalized);
+  }
+
+  return entries.length > 0 ? entries : undefined;
 }
 
 function parseBuilderShellCommandDebug(data: unknown): BuilderShellCommandDebugV1 | undefined {
@@ -232,6 +270,7 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
   const lastProgressAt = readString(record, 'lastProgressAt') ?? readString(record, 'last_progress_at');
   const stuckReason = readString(record, 'stuckReason') ?? readString(record, 'stuck_reason');
   const todos = parseBuilderTodos(record.todos);
+  const activityLog = parseBuilderActivityLog(record.activity_log ?? record.activityLog);
   const stuckValue = record.stuck ?? record.is_stuck;
   const heartbeatValue = record.heartbeat;
   const stuck = typeof stuckValue === 'boolean' ? stuckValue : undefined;
@@ -265,6 +304,7 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
     ...(debug ? { debug } : {}),
     ...(typeof heartbeat === 'boolean' ? { heartbeat } : {}),
     ...(typeof pollCount === 'number' ? { pollCount } : {}),
+    ...(activityLog ? { activityLog } : {}),
   };
 }
 

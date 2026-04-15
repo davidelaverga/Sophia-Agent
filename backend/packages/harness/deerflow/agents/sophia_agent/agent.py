@@ -98,6 +98,7 @@ def make_sophia_agent(config: RunnableConfig):
         model="claude-haiku-4-5-20251001",
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=512 if voice_mode else 4096,
+        timeout=60.0,
     )
 
     # Middleware chain — order is load-bearing.

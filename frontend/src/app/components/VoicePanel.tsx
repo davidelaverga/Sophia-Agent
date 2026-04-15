@@ -19,7 +19,7 @@ type VoicePanelProps = {
 export function VoicePanel({ voiceState }: VoicePanelProps) {
   const { t } = useTranslation()
 
-  const { stage, partialReply, finalReply, error, path, needsUnlock, stream, stopTalking, bargeIn, unlockAudio } =
+  const { stage, partialReply, finalReply, error, path, needsUnlock, stream, stopTalking, softBargeIn, unlockAudio } =
     voiceState
   
   // Use unified voice toggle hook (switch-mode behavior for panel)
@@ -100,7 +100,7 @@ export function VoicePanel({ voiceState }: VoicePanelProps) {
             className="flex items-center gap-2 rounded-full border border-sophia-surface-border px-3 py-1 text-xs font-medium text-sophia-text"
             onClick={() => {
               haptic('light')
-              bargeIn()
+              softBargeIn()
             }}
           >
             <Square className="h-3 w-3" />

@@ -11,6 +11,7 @@ interface UseSessionUiDerivedStateParams {
   messages: UIMessage[];
   artifacts: RitualArtifacts | null;
   builderArtifact?: BuilderArtifactV1 | null;
+  isBuilderRunning?: boolean;
   isStreaming: boolean;
   isReflectionVoiceFlowActive: boolean;
   userOpenedArtifacts: boolean;
@@ -25,6 +26,7 @@ export function useSessionUiDerivedState({
   messages,
   artifacts,
   builderArtifact,
+  isBuilderRunning = false,
   isStreaming,
   isReflectionVoiceFlowActive,
   userOpenedArtifacts,
@@ -74,11 +76,12 @@ export function useSessionUiDerivedState({
 
   const isSophiaResponding = useMemo(() => {
     return !isReflectionVoiceFlowActive && (
+      isBuilderRunning ||
       isStreaming ||
       voiceStatus === 'thinking' ||
       (voiceStatus === 'speaking' && !isReflectionTtsActive)
     );
-  }, [isReflectionVoiceFlowActive, isStreaming, voiceStatus, isReflectionTtsActive]);
+  }, [isBuilderRunning, isReflectionVoiceFlowActive, isStreaming, voiceStatus, isReflectionTtsActive]);
 
   const exitProtectionResponseMode = useMemo<'text' | 'voice'>(() => {
     if (isStreaming) return 'text';

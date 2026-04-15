@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState, type MouseEventHandler } from 're
 import { cn } from '../../lib/utils';
 import type { BuilderTaskV1 } from '../../types/builder-task';
 
+import { BuilderActivityLog } from './BuilderActivityLog';
 import { BuilderReadyPill } from './BuilderReadyPill';
 
 type BuilderTaskNoticeProps = {
@@ -104,7 +105,37 @@ function getDisplayMeta(task: BuilderTaskV1): { label: string; accentVar: string
   return PHASE_META[task.phase];
 }
 
-function getDetail(task: BuilderTaskV1): string | null {
+/* ── Early-stage phased messaging ──
+ * Before the builder has written todos or produced activity entries,
+ * cycle through descriptive labels so the user sees progress even
+ * during the initial planning/tool-spin-up window (first ~8-12s). */
+const EARLY_STAGES = [
+  { label: 'analyzing your request',   durationMs: 3000, pseudoPercent: 5  },
+  { label: 'planning the deliverable', durationMs: 4000, pseudoPercent: 12 },
+  { label: 'preparing workspace',      durationMs: 5000, pseudoPercent: 18 },
+  { label: 'assembling content',       durationMs: 0,    pseudoPercent: 22 },
+] as const;
+
+function getEarlyStageIndex(elapsedMs: number): number {
+  let accumulated = 0;
+  for (let i = 0; i < EARLY_STAGES.length - 1; i++) {
+    accumulated += EARLY_STAGES[i].durationMs;
+    if (elapsedMs < accumulated) return i;
+  }
+  return EARLY_STAGES.length - 1;
+}
+
+function hasRealProgressData(task: BuilderTaskV1): boolean {
+  if (typeof task.totalSteps === 'number' && task.totalSteps > 0) return true;
+  if (typeof task.progressPercent === 'number') return true;
+  if (task.activityLog && task.activityLog.length > 0) return true;
+  if (task.todos && task.todos.length > 0) return true;
+  if (typeof task.messageIndex === 'number' && typeof task.totalMessages === 'number' && task.totalMessages > 0) return true;
+  if (task.activeStepTitle) return true;
+  return false;
+}
+
+function getDetail(task: BuilderTaskV1, elapsedMs?: number): string | null {
   if (task.phase === 'running' && task.stuckReason) return task.stuckReason;
   if (task.detail && !/^working through step\s+/i.test(task.detail.trim())) return task.detail;
   if (task.activeStepTitle) return `Active step: ${task.activeStepTitle}`;
@@ -124,10 +155,15 @@ function getDetail(task: BuilderTaskV1): string | null {
   ) {
     return `step ${task.messageIndex} of ${task.totalMessages}`;
   }
+  // Early-stage fallback
+  if (task.phase === 'running' && typeof elapsedMs === 'number' && !hasRealProgressData(task)) {
+    const stage = EARLY_STAGES[getEarlyStageIndex(elapsedMs)];
+    return stage ? `${stage.label}…` : null;
+  }
   return null;
 }
 
-function getProgressRatio(task: BuilderTaskV1): number | null {
+function getProgressRatio(task: BuilderTaskV1, elapsedMs?: number): number | null {
   if (typeof task.progressPercent === 'number') {
     return Math.min(1, Math.max(0, task.progressPercent / 100));
   }
@@ -152,11 +188,17 @@ function getProgressRatio(task: BuilderTaskV1): number | null {
     return Math.min(1, Math.max(0, task.messageIndex / task.totalMessages));
   }
 
+  // Early-stage pseudo-progress
+  if (task.phase === 'running' && typeof elapsedMs === 'number' && !hasRealProgressData(task)) {
+    const stage = EARLY_STAGES[getEarlyStageIndex(elapsedMs)];
+    if (stage) return stage.pseudoPercent / 100;
+  }
+
   return null;
 }
 
-function getProgressMeta(task: BuilderTaskV1): { leading: string; trailing: string } {
-  const ratio = getProgressRatio(task);
+function getProgressMeta(task: BuilderTaskV1, elapsedMs?: number): { leading: string; trailing: string } {
+  const ratio = getProgressRatio(task, elapsedMs);
   const percentLabel = typeof task.progressPercent === 'number'
     ? `${task.progressPercent}%`
     : ratio === null
@@ -190,11 +232,14 @@ function getProgressMeta(task: BuilderTaskV1): { leading: string; trailing: stri
   }
 
   switch (task.phase) {
-    case 'running':
-      return {
-        leading: task.stuck ? 'no visible progress' : 'assembling deliverable',
-        trailing: percentLabel,
-      };
+    case 'running': {
+      let leading = task.stuck ? 'no visible progress' : 'assembling deliverable';
+      if (!task.stuck && typeof elapsedMs === 'number' && !hasRealProgressData(task)) {
+        const stage = EARLY_STAGES[getEarlyStageIndex(elapsedMs)];
+        if (stage) leading = stage.label;
+      }
+      return { leading, trailing: percentLabel };
+    }
     case 'completed':
       return { leading: 'deliverable assembled', trailing: '100%' };
     case 'failed':
@@ -306,15 +351,17 @@ function BuilderProgressTrack({
   task,
   accentVar,
   compact,
+  elapsedMs,
 }: {
   task: BuilderTaskV1;
   accentVar: string;
   compact?: boolean;
+  elapsedMs?: number;
 }) {
-  const ratio = getProgressRatio(task);
+  const ratio = getProgressRatio(task, elapsedMs);
   const isDeterminate = ratio !== null;
   const progressWidth = isDeterminate ? Math.round(ratio * 100) : 38;
-  const progressMeta = getProgressMeta(task);
+  const progressMeta = getProgressMeta(task, elapsedMs);
   const secondaryMeta = getSecondaryMeta(task);
 
   return (
@@ -460,13 +507,16 @@ export function BuilderTaskNotice({
   const [isFreshCompletion, setIsFreshCompletion] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
+  const taskFirstSeenMsRef = useRef(Date.now());
   const previousTaskStateRef = useRef<{ phase: BuilderTaskV1['phase']; identity: string }>({
     phase: task.phase,
     identity: task.taskId ?? task.label ?? '__builder__',
   });
   const liveTask = useMemo(() => applyLiveTiming(task, nowMs, taskReceivedAtMs), [task, nowMs, taskReceivedAtMs]);
+  const taskStartMs = parseTimestampMs(task.startedAt) ?? taskFirstSeenMsRef.current;
+  const elapsedMs = Math.max(nowMs - taskStartMs, 0);
   const meta = getDisplayMeta(liveTask);
-  const detail = getDetail(liveTask);
+  const detail = getDetail(liveTask, elapsedMs);
   const showDismiss = Boolean(onDismiss && task.phase !== 'running');
   const showCancel = Boolean(onCancel && task.phase === 'running');
   const isRunning = liveTask.phase === 'running';
@@ -493,9 +543,14 @@ export function BuilderTaskNotice({
 
   useEffect(() => {
     const previousTaskState = previousTaskStateRef.current;
+    const isNewTask = previousTaskState.identity !== taskIdentity;
     const justCompleted = task.phase === 'completed' && (
-      previousTaskState.phase !== 'completed' || previousTaskState.identity !== taskIdentity
+      previousTaskState.phase !== 'completed' || isNewTask
     );
+
+    if (isNewTask) {
+      taskFirstSeenMsRef.current = Date.now();
+    }
 
     let timerId: ReturnType<typeof setTimeout> | undefined;
     if (justCompleted) {
@@ -557,8 +612,8 @@ export function BuilderTaskNotice({
       aria-live={isRunning ? 'polite' : 'assertive'}
       className={cn(
         compact
-          ? 'w-[min(312px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
-          : 'w-[min(264px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
+          ? 'w-[min(340px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
+          : 'w-[min(340px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
         className,
       )}
       style={{
@@ -603,8 +658,11 @@ export function BuilderTaskNotice({
       </div>
 
       <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} />
+        <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
         <BuilderTodoPreview task={liveTask} compact={compact} />
+        {liveTask.activityLog && liveTask.activityLog.length > 0 && (
+          <BuilderActivityLog entries={liveTask.activityLog} compact={compact} />
+        )}
       </div>
 
       {(showCancel || showDismiss) && (

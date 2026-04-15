@@ -42,6 +42,14 @@ export type BuilderTaskDebugV1 = {
   recentShellCommands?: BuilderShellCommandDebugV1[];
 };
 
+export type BuilderActivityEntryV1 = {
+  type: 'tool_call' | 'thinking';
+  title: string;
+  tool?: string;
+  detail?: string;
+  status?: 'running' | 'done' | 'error';
+};
+
 export type BuilderTaskV1 = {
   phase: BuilderTaskPhaseV1;
   taskId?: string;
@@ -68,4 +76,5 @@ export type BuilderTaskV1 = {
   debug?: BuilderTaskDebugV1;
   heartbeat?: boolean;
   pollCount?: number;
+  activityLog?: BuilderActivityEntryV1[];
 };

@@ -113,6 +113,17 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         model=resolved_model,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
+        # streaming=True is critical: without it, the Anthropic SDK makes a
+        # synchronous HTTP request and waits for the ENTIRE response before
+        # returning any data.  For Sonnet generating large documents (5k+
+        # tokens) this routinely takes 45-90s of server-side generation,
+        # during which zero bytes flow over the wire — triggering the HTTP
+        # read timeout.  With streaming, tokens arrive incrementally (~100ms
+        # apart) keeping the connection alive regardless of total generation
+        # time.
+        streaming=True,
+        timeout=120.0,
+        max_retries=2,
     )
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     middlewares.extend(
@@ -153,8 +164,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         middleware=middlewares,
         state_schema=SophiaState,
     )
-    # Builder runs often spend multiple turns on todo bookkeeping before the
-    # final emit_builder_artifact call. Keep this aligned with the delegated
-    # task budget so real deliverables can terminate cleanly.
-    agent.recursion_limit = 100
+    # Keep a slightly roomier built-agent ceiling for direct invocations.
+    # The delegated Builder path still enforces its runtime budget through
+    # switch_to_builder -> SubagentExecutor.config.max_turns.
+    agent.recursion_limit = 80
     return agent

@@ -14,6 +14,7 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
   const handleVoiceEndSession = vi.fn(async () => {});
   const showToast = vi.fn();
   const bargeIn = vi.fn();
+  const softBargeIn = vi.fn();
 
   const pendingInterrupt: InterruptPayload = {
     kind: 'DEBRIEF_OFFER',
@@ -40,7 +41,7 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
     isEnding: false,
     isReadOnly: false,
     handleVoiceEndSession,
-    voiceState: { bargeIn },
+    voiceState: { bargeIn, softBargeIn },
     showToast,
     ...overrides,
   };
@@ -56,6 +57,7 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
     handleVoiceEndSession,
     showToast,
     bargeIn,
+    softBargeIn,
   };
 }
 
@@ -89,7 +91,7 @@ describe('useSessionVoiceCommandSystem', () => {
       params,
       onUserTranscript,
       handleInterruptSelectWithRetry,
-      bargeIn,
+      softBargeIn,
     } = buildParams();
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -100,7 +102,7 @@ describe('useSessionVoiceCommandSystem', () => {
 
     expect(handleInterruptSelectWithRetry).toHaveBeenCalledWith('accept');
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
   });
 
   it('routes reflection command and forwards candidate with voice-command source', () => {
@@ -109,7 +111,7 @@ describe('useSessionVoiceCommandSystem', () => {
       onUserTranscript,
       handleReflectionTap,
       showToast,
-      bargeIn,
+      softBargeIn,
     } = buildParams({ pendingInterrupt: null });
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -123,7 +125,7 @@ describe('useSessionVoiceCommandSystem', () => {
       'voice-command',
     );
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Reflection activated by voice command.', variant: 'info' }),
     );
@@ -135,7 +137,7 @@ describe('useSessionVoiceCommandSystem', () => {
       onUserTranscript,
       handleDownloadBuilderArtifact,
       showToast,
-      bargeIn,
+      softBargeIn,
     } = buildParams({
       pendingInterrupt: null,
       canDownloadBuilderArtifact: true,
@@ -149,7 +151,7 @@ describe('useSessionVoiceCommandSystem', () => {
 
     expect(handleDownloadBuilderArtifact).toHaveBeenCalledTimes(1);
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Downloading deliverable.', variant: 'success' }),
     );
@@ -162,6 +164,7 @@ describe('useSessionVoiceCommandSystem', () => {
       handleDownloadBuilderArtifact,
       showToast,
       bargeIn,
+      softBargeIn,
     } = buildParams({ pendingInterrupt: null });
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -173,6 +176,7 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(handleDownloadBuilderArtifact).not.toHaveBeenCalled();
     expect(onUserTranscript).not.toHaveBeenCalled();
     expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).not.toHaveBeenCalled();
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'No deliverable ready to download yet.', variant: 'warning' }),
     );
@@ -184,7 +188,7 @@ describe('useSessionVoiceCommandSystem', () => {
       onUserTranscript,
       handleReflectionTap,
       showToast,
-      bargeIn,
+      softBargeIn,
     } = buildParams();
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -198,7 +202,7 @@ describe('useSessionVoiceCommandSystem', () => {
       'voice-command',
     );
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Reflection activated by voice command.', variant: 'info' }),
     );
