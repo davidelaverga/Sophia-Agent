@@ -28,3 +28,15 @@ memory:
 
 summarization:
   enabled: false
+
+# IM channels (used by gateway ChannelService)
+# Note: config values with $VAR are resolved at app startup, so these env vars
+# must be available anywhere this config file is loaded.
+channels:
+  langgraph_url: $LANGGRAPH_URL
+  gateway_url: http://localhost:8001
+  telegram:
+    enabled: true
+    bot_token: $TELEGRAM_BOT_TOKEN
+    bot_username: $TELEGRAM_BOT_USERNAME
+    allowed_users: []
