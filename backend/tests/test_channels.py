@@ -61,6 +61,7 @@ class TestMessageBus:
 
         _run(go())
 
+
     def test_inbound_queue_is_fifo(self):
         bus = MessageBus()
 
@@ -561,6 +562,234 @@ class TestChannelManager:
             assert call_args[1]["context"]["thinking_enabled"] is True
             assert call_args[1]["context"]["subagent_enabled"] is True
             assert call_args[1]["context"]["is_plan_mode"] is True
+
+        _run(go())
+
+    def test_handle_chat_applies_dynamic_session_resolver(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                session_resolver=lambda _msg, _thread_id: {
+                    "assistant_id": "dynamic_agent",
+                    "config": {"recursion_limit": 13},
+                    "context": {"context_mode": "gaming"},
+                },
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[0][1] == "dynamic_agent"
+            assert call_args[1]["config"]["recursion_limit"] == 13
+            assert call_args[1]["context"]["context_mode"] == "gaming"
+
+        _run(go())
+
+    def test_handle_chat_sends_busy_message_for_concurrent_same_conversation(self):
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, max_concurrency=5)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            release_first_run = asyncio.Event()
+            first_run_started = asyncio.Event()
+
+            async def slow_wait(*_args, **_kwargs):
+                first_run_started.set()
+                await release_first_run.wait()
+                return {
+                    "messages": [
+                        {"type": "human", "content": "hello"},
+                        {"type": "ai", "content": "done"},
+                    ]
+                }
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.wait = AsyncMock(side_effect=slow_wait)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hello"))
+            await _wait_for(lambda: first_run_started.is_set())
+
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="second"))
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+
+            release_first_run.set()
+            await _wait_for(lambda: any(m.text == "done" for m in outbound_received))
+            await manager.stop()
+
+            assert mock_client.runs.wait.call_count == 1
+
+        _run(go())
+
+    def test_handle_chat_reads_and_injects_inbound_files(self, monkeypatch, tmp_path):
+
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "input.txt",
+                        "mime_type": "text/plain",
+                        "content": b"hello from telegram",
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="please inspect file",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            message_payload = call_args[1]["input"]["messages"][0]
+            assert "<uploaded_files>" in message_payload["content"]
+            assert message_payload["additional_kwargs"]["files"][0]["filename"] == "input.txt"
+
+        _run(go())
+
+    def test_handle_chat_releases_sandbox_after_inbound_file_sync(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            provider = MagicMock()
+            provider.acquire = MagicMock(return_value="sandbox-1")
+            provider.release = MagicMock()
+            provider.get = MagicMock(return_value=MagicMock())
+            monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: provider)
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "input.txt",
+                        "mime_type": "text/plain",
+                        "content": b"hello from telegram",
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="please inspect file",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            provider.acquire.assert_called_once_with("test-thread-123")
+            provider.release.assert_called_once_with("sandbox-1")
+
+        _run(go())
+
+    def test_builder_notifier_publishes_follow_up_message(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS", 0.01)
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_MAX_WAIT_SECONDS", 0.5)
+
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            handoff_payload = json.dumps({"type": "builder_handoff", "task_id": "task-123", "status": "queued"})
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "build this"},
+                        {"type": "tool", "name": "switch_to_builder", "content": handoff_payload},
+                        {"type": "ai", "content": "Builder task queued."},
+                    ]
+                }
+            )
+            manager._client = mock_client
+
+            class _TaskResult:
+                status = "completed"
+                error = None
+                final_state = {"builder_result": {"companion_summary": "Builder finished your request."}}
+                ai_messages = []
+
+            monkeypatch.setattr("app.channels.manager.get_background_task_result", lambda _task_id: _TaskResult())
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="build this"))
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
+
+            assert any(msg.metadata.get("builder_notification") for msg in outbound_received)
+            assert any("Builder finished your request." in msg.text for msg in outbound_received)
 
         _run(go())
 
@@ -1579,8 +1808,12 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
     update.effective_chat.type = chat_type
     update.effective_chat.id = 100
     update.effective_user.id = 42
+    update.effective_user.username = "tg-user"
+    update.effective_user.first_name = "TG"
+    update.effective_user.last_name = "User"
     update.message.text = text
     update.message.message_id = message_id
+    update.message.reply_text = AsyncMock()
     if reply_to_message_id is not None:
         reply_msg = MagicMock()
         reply_msg.message_id = reply_to_message_id
@@ -1593,6 +1826,11 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
 class TestTelegramPrivateChatThread:
     """Verify that private chats use topic_id=None (single thread per chat)."""
 
+    @staticmethod
+    def _configure_linked_channel(ch):
+        ch._resolve_link_for_chat = AsyncMock(return_value={"user_id": "linked-user"})  # type: ignore[method-assign]
+        ch._send_link_required_message = AsyncMock()  # type: ignore[method-assign]
+
     def test_private_chat_no_reply_uses_none_topic(self):
         from app.channels.telegram import TelegramChannel
 
@@ -1600,6 +1838,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("private", message_id=10)
             await ch._on_text(update, None)
@@ -1616,6 +1855,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
             await ch._on_text(update, None)
@@ -1632,6 +1872,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=20)
             await ch._on_text(update, None)
@@ -1648,6 +1889,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
             await ch._on_text(update, None)
@@ -1664,6 +1906,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("supergroup", message_id=25)
             await ch._on_text(update, None)
@@ -1680,6 +1923,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("private", message_id=30, text="/new")
             await ch._cmd_generic(update, None)
@@ -1697,6 +1941,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=31, text="/status")
             await ch._cmd_generic(update, None)
@@ -1714,6 +1959,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
             await ch._cmd_generic(update, None)
@@ -1724,6 +1970,74 @@ class TestTelegramPrivateChatThread:
 
         _run(go())
 
+
+class TestTelegramLinkingAndMedia:
+    def test_unlinked_text_prompts_for_link_and_skips_publish(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._resolve_link_for_chat = AsyncMock(return_value=None)  # type: ignore[method-assign]
+            ch._send_link_required_message = AsyncMock()  # type: ignore[method-assign]
+
+            update = _make_telegram_update("private", message_id=40, text="hello")
+            await ch._on_text(update, None)
+
+            ch._send_link_required_message.assert_awaited_once()
+            assert bus.inbound_queue.empty()
+
+        _run(go())
+
+    def test_start_with_token_redeems_link(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._link_store = MagicMock()
+            ch._link_store.redeem_link_token.return_value = {"context_mode": "work"}
+
+            update = _make_telegram_update("private", message_id=41, text="/start abc-token")
+            context = MagicMock()
+            context.args = ["abc-token"]
+            await ch._cmd_start(update, context)
+
+            ch._link_store.redeem_link_token.assert_called_once()
+            update.message.reply_text.assert_awaited_once()
+            assert "linked successfully" in update.message.reply_text.call_args.args[0]
+
+        _run(go())
+
+    def test_media_message_creates_chat_inbound_with_files(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._resolve_link_for_chat = AsyncMock(return_value={"user_id": "linked-user"})  # type: ignore[method-assign]
+            ch._send_link_required_message = AsyncMock()  # type: ignore[method-assign]
+
+            update = _make_telegram_update("private", message_id=42, text="")
+            update.message.caption = "analyze this"
+            photo = MagicMock()
+            photo.file_id = "photo-file-id"
+            photo.file_unique_id = "photo-unique-id"
+            update.message.photo = [photo]
+            update.message.document = None
+
+            await ch._on_media(update, None)
+
+            inbound = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert inbound.msg_type == InboundMessageType.CHAT
+            assert inbound.user_id == "linked-user"
+            assert inbound.topic_id is None
+            assert len(inbound.files) == 1
+            assert inbound.files[0]["file_id"] == "photo-file-id"
+
+        _run(go())
 
 # ---------------------------------------------------------------------------
 # Slack markdown-to-mrkdwn conversion tests (via markdown_to_mrkdwn library)
