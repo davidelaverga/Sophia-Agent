@@ -550,6 +550,14 @@ class ChannelManager:
             {"thread_id": thread_id},
         )
 
+        # LangGraph API ≥0.6 rejects requests containing both configurable
+        # and context.  When configurable is present, fold context into it so
+        # the caller can omit the separate context parameter.
+        if "configurable" in run_config:
+            for key, value in run_context.items():
+                run_config["configurable"].setdefault(key, value)
+            run_context = {}
+
         return assistant_id, run_config, run_context
 
     @staticmethod
@@ -911,12 +919,16 @@ class ChannelManager:
                 return
 
             logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+            run_kwargs: dict[str, Any] = {
+                "input": {"messages": [human_message_payload]},
+                "config": run_config,
+            }
+            if run_context:
+                run_kwargs["context"] = run_context
             result = await client.runs.wait(
                 thread_id,
                 assistant_id,
-                input={"messages": [human_message_payload]},
-                config=run_config,
-                context=run_context,
+                **run_kwargs,
             )
 
             response_text = _extract_response_text(result)
@@ -974,13 +986,17 @@ class ChannelManager:
         stream_error: BaseException | None = None
 
         try:
+            stream_kwargs: dict[str, Any] = {
+                "input": {"messages": [human_message_payload]},
+                "config": run_config,
+                "stream_mode": ["messages-tuple", "values"],
+            }
+            if run_context:
+                stream_kwargs["context"] = run_context
             async for chunk in client.runs.stream(
                 thread_id,
                 assistant_id,
-                input={"messages": [human_message_payload]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
+                **stream_kwargs,
             ):
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
