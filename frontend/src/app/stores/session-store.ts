@@ -9,8 +9,10 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
+import { invalidateActiveSessionCache } from '../hooks/useSessionStart';
 import {
   deleteSessionRecord,
+  endSession as endSessionAPI,
   getOpenSessions as fetchOpenSessions,
   isError,
   listSessions,
@@ -42,6 +44,9 @@ interface SessionState {
   recentSessions: SessionInfo[];
   isLoadingSessions: boolean;
   lastOpenSessionsFetchAt: number | null;
+  lastOpenSessionsUserId: string | null;
+  /** ID of the last session removed — used by dashboard to clear resume banner */
+  lastDeletedSessionId: string | null;
   
   // Loading states
   isInitializing: boolean;
@@ -53,8 +58,8 @@ interface SessionState {
   // Multi-session actions
   refreshOpenSessions: (userId?: string) => Promise<number>;
   refreshRecentSessions: (userId?: string) => Promise<void>;
-  setActiveSession: (sessionId: string) => void;
-  restoreOpenSession: (sessionInfo: SessionInfo, userId?: string) => void;
+  setActiveSession: (sessionId: string, userId?: string) => Promise<void>;
+  restoreOpenSession: (sessionInfo: SessionInfo, userId?: string) => Promise<void>;
   viewEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode) => void;
   removeOpenSession: (sessionId: string, userId?: string) => Promise<boolean>;
   recordOpenSessionActivity: (sessionId: string, activity: {
@@ -134,15 +139,29 @@ export const useSessionStore = create<SessionState>()(
       recentSessions: [],
       isLoadingSessions: false,
       lastOpenSessionsFetchAt: null,
+      lastOpenSessionsUserId: null,
+      lastDeletedSessionId: null,
       isInitializing: false,
       isEnding: false,
       error: null,
       
       // Multi-session: fetch open sessions from backend
-      refreshOpenSessions: async (userId = 'dev-user') => {
-        const { isLoadingSessions, lastOpenSessionsFetchAt, openSessions } = get();
+      refreshOpenSessions: async (userId) => {
+        const normalizedUserId = typeof userId === 'string' && userId.trim()
+          ? userId.trim()
+          : null;
+        const {
+          isLoadingSessions,
+          lastOpenSessionsFetchAt,
+          lastOpenSessionsUserId,
+          openSessions,
+        } = get();
         const now = Date.now();
-        const recentlyFetched = lastOpenSessionsFetchAt !== null && now - lastOpenSessionsFetchAt < 15000;
+        const recentlyFetched = (
+          lastOpenSessionsFetchAt !== null
+          && lastOpenSessionsUserId === normalizedUserId
+          && now - lastOpenSessionsFetchAt < 15000
+        );
 
         if (isLoadingSessions) {
           return openSessions.length;
@@ -154,11 +173,12 @@ export const useSessionStore = create<SessionState>()(
 
         set({ isLoadingSessions: true });
         try {
-          const result = await fetchOpenSessions(userId);
+          const result = await fetchOpenSessions(normalizedUserId ?? undefined);
           if (result.success) {
             set({
               openSessions: result.data.sessions,
               lastOpenSessionsFetchAt: now,
+              lastOpenSessionsUserId: normalizedUserId,
             });
             return result.data.sessions.length;
           } else {
@@ -173,9 +193,12 @@ export const useSessionStore = create<SessionState>()(
       },
       
       // Multi-session: fetch recent sessions (open + ended)
-      refreshRecentSessions: async (userId = 'dev-user') => {
+      refreshRecentSessions: async (userId) => {
         try {
-          const result = await listSessions(userId, { limit: 30 });
+          const normalizedUserId = typeof userId === 'string' && userId.trim()
+            ? userId.trim()
+            : undefined;
+          const result = await listSessions(normalizedUserId, { limit: 30 });
           if (result.success) {
             set({ recentSessions: result.data.sessions });
           }
@@ -258,7 +281,7 @@ export const useSessionStore = create<SessionState>()(
       },
       
       // Multi-session: mark a session as the active one in the UI
-      setActiveSession: (sessionId) => {
+      setActiveSession: async (sessionId, userId) => {
         const { session, openSessions } = get();
         if (session?.sessionId === sessionId) return;
         
@@ -268,11 +291,13 @@ export const useSessionStore = create<SessionState>()(
           return;
         }
         
+        const resolvedUserId = userId?.trim() || session?.userId || 'anonymous';
+
         // Create a minimal SessionClientStore from the backend SessionInfo
         const restored: SessionClientStore = {
           sessionId: target.session_id,
           threadId: target.thread_id,
-          userId: 'dev-user', // TODO: resolve from auth
+          userId: resolvedUserId,
           presetType: (target.session_type as PresetType) || 'open',
           contextMode: (target.preset_context as ContextMode) || 'life',
           status: 'active',
@@ -286,20 +311,20 @@ export const useSessionStore = create<SessionState>()(
         set({ session: restored, error: null });
         
         // Restore conversation history from the LangGraph thread
-        import('./chat-store')
-          .then(({ useChatStore }) =>
-            useChatStore.getState().loadSession(target.session_id),
-          )
-          .catch(() => {
-            logger.warn('SessionStore: Failed to restore messages for session', { sessionId });
-          });
+        try {
+          const { useChatStore } = await import('./chat-store');
+          await useChatStore.getState().loadSession(target.session_id, resolvedUserId);
+        } catch {
+          logger.warn('SessionStore: Failed to restore messages for session', { sessionId });
+        }
       },
 
-      restoreOpenSession: (sessionInfo, userId = 'dev-user') => {
+      restoreOpenSession: async (sessionInfo, userId) => {
+        const resolvedUserId = userId?.trim() || get().session?.userId || 'anonymous';
         const restored: SessionClientStore = {
           sessionId: sessionInfo.session_id,
           threadId: sessionInfo.thread_id,
-          userId,
+          userId: resolvedUserId,
           presetType: (sessionInfo.session_type as PresetType) || 'open',
           contextMode: (sessionInfo.preset_context as ContextMode) || 'life',
           status: sessionInfo.status === 'open' ? 'active' : 'ended',
@@ -327,15 +352,14 @@ export const useSessionStore = create<SessionState>()(
           };
         });
 
-        import('./chat-store')
-          .then(({ useChatStore }) =>
-            useChatStore.getState().loadSession(sessionInfo.session_id),
-          )
-          .catch(() => {
-            logger.warn('SessionStore: Failed to restore messages for resumed session', {
-              sessionId: sessionInfo.session_id,
-            });
+        try {
+          const { useChatStore } = await import('./chat-store');
+          await useChatStore.getState().loadSession(sessionInfo.session_id, resolvedUserId);
+        } catch {
+          logger.warn('SessionStore: Failed to restore messages for resumed session', {
+            sessionId: sessionInfo.session_id,
           });
+        }
       },
       
       // View an ended session as read-only transcript
@@ -347,7 +371,7 @@ export const useSessionStore = create<SessionState>()(
         const restored: SessionClientStore = {
           sessionId,
           threadId: sessionId,
-          userId: 'dev-user',
+          userId: session?.userId ?? 'anonymous',
           presetType,
           contextMode,
           status: 'ended',
@@ -362,7 +386,7 @@ export const useSessionStore = create<SessionState>()(
 
         import('./chat-store')
           .then(({ useChatStore }) =>
-            useChatStore.getState().loadSession(sessionId),
+            useChatStore.getState().loadSession(sessionId, session?.userId),
           )
           .catch(() => {
             logger.warn('SessionStore: Failed to load ended session messages', { sessionId });
@@ -371,10 +395,28 @@ export const useSessionStore = create<SessionState>()(
 
       removeOpenSession: async (sessionId, userId) => {
         const activeSession = get().session;
-        const resolvedUserId = userId ?? activeSession?.userId ?? 'dev-user';
+        const resolvedUserId = userId?.trim() || activeSession?.userId;
+
+        // End the session first so it's no longer "open" on the backend
+        // (prevents checkActiveSession from resurrecting it on refresh)
+        try {
+          await endSessionAPI({
+            session_id: sessionId,
+            user_id: resolvedUserId,
+            offer_debrief: false,
+          });
+        } catch (error) {
+          logger.warn('SessionStore: Failed to end session before deletion', {
+            sessionId,
+            userId: resolvedUserId,
+            error,
+          });
+        }
+
         const result = await deleteSessionRecord(sessionId, resolvedUserId);
 
-        if (isError(result)) {
+        // Treat 404 as success — session already gone from backend
+        if (isError(result) && result.status !== 404) {
           logger.warn('SessionStore: Failed to delete persisted session', {
             sessionId,
             userId: resolvedUserId,
@@ -389,6 +431,8 @@ export const useSessionStore = create<SessionState>()(
           openSessions: state.openSessions.filter((session) => session.session_id !== sessionId),
           recentSessions: state.recentSessions.filter((session) => session.session_id !== sessionId),
           lastOpenSessionsFetchAt: null,
+          lastOpenSessionsUserId: null,
+          lastDeletedSessionId: sessionId,
           ...(deletingActiveSession ? { session: null } : {}),
         }));
 
@@ -403,6 +447,10 @@ export const useSessionStore = create<SessionState>()(
             });
           }
         }
+
+        // Invalidate the active-session cache so dashboard bootstrap
+        // doesn't resurrect the session from stale cached data
+        invalidateActiveSessionCache();
 
         return true;
       },

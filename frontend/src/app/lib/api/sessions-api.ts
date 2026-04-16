@@ -251,9 +251,14 @@ export async function submitDebriefDecision(
  * }
  * ```
  */
-export async function getActiveSession(): Promise<ApiResponse<ActiveSessionResponse>> {
+export async function getActiveSession(userId?: string): Promise<ApiResponse<ActiveSessionResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<ActiveSessionResponse>(
-    `${SESSIONS_BASE}/active`,
+    `${SESSIONS_BASE}/active${params.size > 0 ? `?${params.toString()}` : ''}`,
     {
       method: 'GET',
     }
@@ -343,10 +348,15 @@ export async function getSessionDetails(
  * Get all open sessions for the current user
  */
 export async function getOpenSessions(
-  userId: string = 'dev-user'
+  userId?: string
 ): Promise<ApiResponse<OpenSessionsResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<OpenSessionsResponse>(
-    `${SESSIONS_BASE}/open?user_id=${encodeURIComponent(userId)}`,
+    `${SESSIONS_BASE}/open${params.size > 0 ? `?${params.toString()}` : ''}`,
     { method: 'GET' }
   );
 }
@@ -355,10 +365,13 @@ export async function getOpenSessions(
  * List recent sessions with optional status filter
  */
 export async function listSessions(
-  userId: string = 'dev-user',
+  userId?: string,
   options: { limit?: number; status?: 'open' | 'ended' } = {}
 ): Promise<ApiResponse<SessionListResponse>> {
-  const params = new URLSearchParams({ user_id: userId });
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
   if (options.limit) params.set('limit', String(options.limit));
   if (options.status) params.set('status', options.status);
   return fetchWithAuth<SessionListResponse>(
@@ -372,10 +385,15 @@ export async function listSessions(
  */
 export async function getSession(
   sessionId: string,
-  userId: string = 'dev-user'
+  userId?: string
 ): Promise<ApiResponse<SessionInfo>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<SessionInfo>(
-    `${SESSIONS_BASE}/${sessionId}?user_id=${encodeURIComponent(userId)}`,
+    `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
     { method: 'GET' }
   );
 }
@@ -386,10 +404,15 @@ export async function getSession(
 export async function updateSession(
   sessionId: string,
   updates: SessionUpdateRequest,
-  userId: string = 'dev-user'
+  userId?: string
 ): Promise<ApiResponse<SessionInfo>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<SessionInfo>(
-    `${SESSIONS_BASE}/${sessionId}?user_id=${encodeURIComponent(userId)}`,
+    `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
     {
       method: 'PATCH',
       body: JSON.stringify(updates),
@@ -403,10 +426,13 @@ export async function updateSession(
  */
 export async function touchSession(
   sessionId: string,
-  userId: string = 'dev-user',
+  userId?: string,
   messagePreview?: string
 ): Promise<ApiResponse<SessionInfo>> {
-  const params = new URLSearchParams({ user_id: userId });
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
   if (messagePreview) params.set('message_preview', messagePreview.slice(0, 200));
   return fetchWithAuth<SessionInfo>(
     `${SESSIONS_BASE}/${sessionId}/touch?${params.toString()}`,
@@ -420,10 +446,15 @@ export async function touchSession(
  */
 export async function getSessionMessages(
   sessionId: string,
-  userId: string = 'dev-user'
+  userId?: string
 ): Promise<ApiResponse<SessionMessagesResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<SessionMessagesResponse>(
-    `${SESSIONS_BASE}/${sessionId}/messages?user_id=${encodeURIComponent(userId)}`,
+    `${SESSIONS_BASE}/${sessionId}/messages${params.size > 0 ? `?${params.toString()}` : ''}`,
     { method: 'GET' }
   );
 }
@@ -433,10 +464,15 @@ export async function getSessionMessages(
  */
 export async function deleteSessionRecord(
   sessionId: string,
-  userId: string = 'dev-user'
+  userId?: string
 ): Promise<ApiResponse<SessionDeleteResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<SessionDeleteResponse>(
-    `${SESSIONS_BASE}/${sessionId}?user_id=${encodeURIComponent(userId)}`,
+    `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
     { method: 'DELETE' }
   );
 }

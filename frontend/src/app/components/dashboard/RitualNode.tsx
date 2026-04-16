@@ -24,6 +24,8 @@ interface RitualNodeProps {
   revealed?: boolean;
   /** Switching context — instant collapse */
   switching?: boolean;
+  /** Short glow pulse after context switch to signal that rituals changed */
+  contextPulse?: boolean;
   /** Stagger delay in seconds (0.6, 0.75, 0.9, 1.05 per prototype) */
   staggerDelay?: number;
 }
@@ -39,6 +41,7 @@ export function RitualNode({
   onSelect,
   revealed = true,
   switching = false,
+  contextPulse = false,
   staggerDelay = 0,
 }: RitualNodeProps) {
   const [isActive, setIsActive] = useState(false);
@@ -89,7 +92,8 @@ export function RitualNode({
       <span
         ref={sweepRef as React.RefObject<HTMLSpanElement>}
         className={cn(
-          'cosmic-surface-panel relative flex h-[50px] w-[50px] items-center justify-center rounded-full transition-all duration-300'
+          'cosmic-surface-panel relative flex h-[50px] w-[50px] items-center justify-center rounded-full transition-all duration-300',
+          contextPulse && !switching && 'ritual-context-pulse'
         )}
         style={{
           ...(isSelected ? { borderColor: 'var(--cosmic-border-strong)' } : {}),

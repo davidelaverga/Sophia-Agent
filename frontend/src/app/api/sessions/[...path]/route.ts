@@ -5,7 +5,11 @@
 
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getUserScopedAuthHeader, refreshUserScopedAuthHeader } from '../../../lib/auth/server-auth';
+import {
+  getAuthenticatedUserId,
+  getUserScopedAuthHeader,
+  refreshUserScopedAuthHeader,
+} from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
 import type { MicroBriefingIntent } from '../../../types/session';
 import { getPrimaryGatewayUrl } from '../../_lib/gateway-url';
@@ -47,9 +51,30 @@ function createFallbackMicroBriefingResponse(rawBody: string | undefined) {
   }, { status: 200 });
 }
 
+function scopeBodyToAuthenticatedUser(rawBody: string | undefined, authenticatedUserId: string | null): string | undefined {
+  if (!rawBody || !authenticatedUserId) {
+    return rawBody;
+  }
+
+  try {
+    const parsed = JSON.parse(rawBody) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return rawBody;
+    }
+
+    return JSON.stringify({
+      ...(parsed as Record<string, unknown>),
+      user_id: authenticatedUserId,
+    });
+  } catch {
+    return rawBody;
+  }
+}
+
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');
   const url = new URL(`${BACKEND_URL}/api/v1/sessions/${path}`);
+  const authenticatedUserId = await getAuthenticatedUserId();
   const authHeader = await getUserScopedAuthHeader();
 
   if (!authHeader) {
@@ -66,10 +91,14 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   req.nextUrl.searchParams.forEach((value, key) => {
     url.searchParams.set(key, value);
   });
+  if (authenticatedUserId) {
+    url.searchParams.set('user_id', authenticatedUserId);
+  }
 
   // 🔒 SECURITY: Read token from httpOnly cookie server-side
   const method = req.method.toUpperCase();
-  const body = method === 'GET' || method === 'HEAD' ? undefined : await req.text();
+  const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await req.text();
+  const body = scopeBodyToAuthenticatedUser(rawBody, authenticatedUserId);
 
   const execute = (authorization: string) => fetch(url.toString(), {
     method,
@@ -94,7 +123,7 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   }
 
   if (backendResponse.status === 404 && method === 'POST' && path === 'micro-briefing') {
-    return createFallbackMicroBriefingResponse(body);
+    return createFallbackMicroBriefingResponse(rawBody);
   }
 
   const responseText = await backendResponse.text();
