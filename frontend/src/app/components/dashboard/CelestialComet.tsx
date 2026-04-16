@@ -10,7 +10,7 @@
 
 import { useEffect, useRef } from 'react';
 
-import { useDeviceFidelity } from '../../hooks/useDeviceFidelity';
+import { useVisualTier } from '../../hooks/useVisualTier';
 import type { ContextMode } from '../../types/session';
 
 import { sweepLight } from './sweepLight';
@@ -270,7 +270,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const contextRef = useRef(contextMode);
   contextRef.current = contextMode;
-  const { reducedMotion, reducedFidelity } = useDeviceFidelity();
+  const { reducedMotion, reducedFidelity, tier } = useVisualTier();
 
   useEffect(() => {
     if (reducedMotion) return;
@@ -279,7 +279,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
     if (!canvas) return;
 
     // Higher resolution keeps rays crisp — low-end still gets 0.45
-    const RENDER_SCALE = reducedFidelity ? 0.45 : 0.75;
+    const RENDER_SCALE = tier === 1 ? 0.35 : tier === 2 ? 0.5 : 0.75;
 
     const gl = canvas.getContext('webgl', {
       alpha: true,
@@ -404,7 +404,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       gl.uniform3fv(uRayCol,  cur.rays);
       gl.uniform3fv(uCoreCol, cur.core);
       gl.uniform3fv(uAmbCol,  cur.ambient);
-      gl.uniform1f(uQuality, reducedFidelity ? 0.6 : 1.0);
+      gl.uniform1f(uQuality, tier === 1 ? 0.4 : tier === 2 ? 0.7 : 1.0);
 
       // Pass element positions as light occluders
       for (let i = 0; i < 8; i++) {
@@ -441,7 +441,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       gl.deleteProgram(prog);
       gl.deleteBuffer(buf);
     };
-  }, [reducedMotion, reducedFidelity]);
+  }, [reducedMotion, reducedFidelity, tier]);
 
   if (reducedMotion) return null;
 

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import { useDeviceFidelity } from '../../hooks/useDeviceFidelity';
+import { useVisualTier } from '../../hooks/useVisualTier';
 import type { ContextMode } from '../../types/session';
 
 import { sweepLight } from './sweepLight';
@@ -130,7 +130,7 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mouseRef = useRef({ x: 0.5, y: 0.5 });
   const [themeKind, setThemeKind] = useState<ThemeKind>('dark');
-  const { reducedFidelity, reducedMotion, dprCap } = useDeviceFidelity();
+  const { reducedFidelity, reducedMotion, dprCap } = useVisualTier();
 
   useEffect(() => {
     setThemeKind(readThemeKind());

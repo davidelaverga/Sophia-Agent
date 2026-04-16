@@ -6,6 +6,7 @@ import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
 import { authClient } from "@/server/better-auth/client"
 
 import { useCopy, useTranslation } from "../copy"
+import { useVisualTier } from "../hooks/useVisualTier"
 import { useAuth } from "../providers"
 
 type AuthState = "checking" | "unauthenticated" | "authenticated"
@@ -282,29 +283,6 @@ void main(){
 }
 `
 
-function usePrefersReducedMotion() {
-  const [prefersReducedMotion, setPrefersReducedMotion] = useState(false)
-
-  useEffect(() => {
-    const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)")
-    const updatePreference = () => {
-      setPrefersReducedMotion(mediaQuery.matches)
-    }
-
-    updatePreference()
-
-    if (typeof mediaQuery.addEventListener === "function") {
-      mediaQuery.addEventListener("change", updatePreference)
-      return () => mediaQuery.removeEventListener("change", updatePreference)
-    }
-
-    mediaQuery.addListener(updatePreference)
-    return () => mediaQuery.removeListener(updatePreference)
-  }, [])
-
-  return prefersReducedMotion
-}
-
 function compileShader(gl: WebGLRenderingContext, source: string, type: number) {
   const shader = gl.createShader(type)
   if (!shader) {
@@ -332,7 +310,7 @@ export function AuthGate({
 }) {
   const copy = useCopy()
   const { t } = useTranslation()
-  const prefersReducedMotion = usePrefersReducedMotion()
+  const { reducedMotion: prefersReducedMotion, tier, dprCap } = useVisualTier()
   const skyCanvasRef = useRef<HTMLCanvasElement>(null)
   const starsCanvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -475,7 +453,7 @@ export function AuthGate({
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0)
 
     const resize = () => {
-      const dpr = Math.min(window.devicePixelRatio, 2)
+      const dpr = Math.min(window.devicePixelRatio, dprCap)
       canvas.width = window.innerWidth * dpr
       canvas.height = window.innerHeight * dpr
       canvas.style.width = `${window.innerWidth}px`
@@ -504,7 +482,7 @@ export function AuthGate({
     resize()
     window.addEventListener("resize", resize)
 
-    if (prefersReducedMotion) {
+    if (prefersReducedMotion || tier === 1) {
       render(0)
     } else {
       animationFrameId = window.requestAnimationFrame(render)
@@ -520,7 +498,7 @@ export function AuthGate({
       gl.deleteShader(vertexShader)
       gl.deleteShader(fragmentShader)
     }
-  }, [authState, prefersReducedMotion])
+  }, [authState, prefersReducedMotion, tier, dprCap])
 
   useEffect(() => {
     if (authState !== "unauthenticated") {
@@ -538,7 +516,7 @@ export function AuthGate({
     let animationFrameId = 0
 
     const resize = () => {
-      const dpr = Math.min(window.devicePixelRatio, 2)
+      const dpr = Math.min(window.devicePixelRatio, dprCap)
       width = window.innerWidth
       height = window.innerHeight
       canvas.width = width * dpr
@@ -825,9 +803,11 @@ export function AuthGate({
       }
     }
 
-    const shootingStars = Array.from({ length: 6 }, () => new ShootingStar())
+    const shootingStarCount = tier === 1 ? 2 : tier === 2 ? 4 : 6
+    const dustCount = tier === 1 ? 20 : tier === 2 ? 40 : 80
+    const shootingStars = Array.from({ length: shootingStarCount }, () => new ShootingStar())
     const satellite = new Satellite()
-    const dust: DustMote[] = Array.from({ length: 80 }, () => ({
+    const dust: DustMote[] = Array.from({ length: dustCount }, () => ({
       x: Math.random() * 2 - 0.5,
       y: Math.random() * 2 - 0.5,
       vx: (Math.random() - 0.5) * 0.00008,
@@ -838,7 +818,7 @@ export function AuthGate({
       speed: 0.3 + Math.random() * 1.0,
       color: Math.random() < 0.4 ? [218, 197, 160] : Math.random() < 0.6 ? [184, 164, 232] : [200, 198, 210],
     }))
-    const nightFlyers = [new NightFlyer(), new NightFlyer()]
+    const nightFlyers = tier === 1 ? [] : [new NightFlyer(), new NightFlyer()]
 
     let windX = 0
     let windTargetX = 0
@@ -908,7 +888,7 @@ export function AuthGate({
     resize()
     window.addEventListener("resize", resize)
 
-    if (prefersReducedMotion) {
+    if (prefersReducedMotion || tier === 1) {
       drawFrame(0)
     } else {
       animationFrameId = window.requestAnimationFrame(drawFrame)
@@ -920,7 +900,7 @@ export function AuthGate({
       }
       window.removeEventListener("resize", resize)
     }
-  }, [authState, prefersReducedMotion])
+  }, [authState, prefersReducedMotion, tier, dprCap])
 
   const handleGoogleLogin = async () => {
     setIsLoggingIn(true)
@@ -987,7 +967,7 @@ export function AuthGate({
   }
 
   return (
-    <div className="midnightAtelierGate">
+    <div className="midnightAtelierGate" data-visual-tier={tier}>
       <canvas ref={skyCanvasRef} className="skyCanvas" aria-hidden="true" />
       <canvas ref={starsCanvasRef} className="starsCanvas" aria-hidden="true" />
 
@@ -1080,9 +1060,12 @@ export function AuthGate({
           inset: 0;
           z-index: 50;
           min-height: 100vh;
+          min-height: 100svh;
           background: #050508;
           color: var(--text);
-          overflow: hidden;
+          overflow-x: hidden;
+          overflow-y: auto;
+          -webkit-overflow-scrolling: touch;
           -webkit-font-smoothing: antialiased;
           font-family: var(--font-inter), system-ui, sans-serif;
         }
@@ -1108,6 +1091,9 @@ export function AuthGate({
           display: grid;
           grid-template-columns: 1fr 1fr;
           min-height: 100vh;
+          min-height: 100svh;
+          padding-top: env(safe-area-inset-top, 0px);
+          padding-bottom: env(safe-area-inset-bottom, 0px);
         }
 
         .left {
@@ -1116,6 +1102,7 @@ export function AuthGate({
           flex-direction: column;
           justify-content: center;
           padding: 64px 48px 64px 72px;
+          padding-left: max(72px, env(safe-area-inset-left, 72px));
         }
 
         .logo {
@@ -1403,12 +1390,14 @@ export function AuthGate({
         .cardFooter {
           margin-top: 28px;
           color: var(--text3);
-          font-size: 11px;
+          font-size: 12px;
           line-height: 1.7;
           text-align: center;
         }
 
         .cardFooter a {
+          display: inline-block;
+          padding: 4px 2px;
           color: var(--text2);
           text-decoration: none;
           border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -1445,15 +1434,42 @@ export function AuthGate({
           }
         }
 
+        /* ── Visual tier adaptations ── */
+
+        :global(.midnightAtelierGate[data-visual-tier="2"]) .card {
+          backdrop-filter: blur(24px);
+          -webkit-backdrop-filter: blur(24px);
+        }
+
+        :global(.midnightAtelierGate[data-visual-tier="2"]) .cap {
+          backdrop-filter: blur(16px);
+          -webkit-backdrop-filter: blur(16px);
+        }
+
+        :global(.midnightAtelierGate[data-visual-tier="1"]) .card {
+          backdrop-filter: none;
+          -webkit-backdrop-filter: none;
+          background: rgba(8, 10, 18, 0.96);
+        }
+
+        :global(.midnightAtelierGate[data-visual-tier="1"]) .cap {
+          backdrop-filter: none;
+          -webkit-backdrop-filter: none;
+          background: rgba(8, 10, 18, 0.92);
+        }
+
         @media (max-width: 960px) {
           .page {
             grid-template-columns: 1fr;
-            grid-template-rows: auto 1fr;
+            grid-template-rows: auto auto;
+            min-height: auto;
           }
 
           .left {
             align-items: center;
             padding: 48px 32px 24px;
+            padding-left: max(32px, env(safe-area-inset-left, 32px));
+            padding-right: max(32px, env(safe-area-inset-right, 32px));
             text-align: center;
           }
 
@@ -1476,36 +1492,35 @@ export function AuthGate({
           }
 
           .capabilities {
-            flex-wrap: wrap;
-            justify-content: center;
-          }
-
-          .cap {
-            max-width: 180px;
-          }
-
-          .right {
-            padding: 24px 24px 48px;
-          }
-        }
-
-        @media (max-width: 600px) {
-          .left {
-            padding: 36px 20px 16px;
-          }
-
-          .capabilities {
             flex-direction: column;
             align-items: center;
           }
 
           .cap {
             width: 100%;
+            max-width: 320px;
+          }
+
+          .right {
+            padding: 24px 24px 48px;
+            padding-bottom: max(48px, env(safe-area-inset-bottom, 48px));
+          }
+        }
+
+        @media (max-width: 600px) {
+          .left {
+            padding: 36px 20px 16px;
+            padding-left: max(20px, env(safe-area-inset-left, 20px));
+            padding-right: max(20px, env(safe-area-inset-right, 20px));
+          }
+
+          .cap {
             max-width: none;
           }
 
           .right {
             padding: 16px 16px 36px;
+            padding-bottom: max(36px, env(safe-area-inset-bottom, 36px));
           }
 
           .card {

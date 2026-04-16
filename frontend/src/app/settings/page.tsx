@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { EnhancedFieldBackground } from '../components/dashboard/EnhancedFieldBackground';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { PrivacyPanel } from '../components/settings/PrivacyPanel';
+import { VisualQualityPicker } from '../components/settings/VisualQualityPicker';
 import { ThemeToggle } from '../components/ThemeToggle';
 import { haptic } from '../hooks/useHaptics';
 import { authBypassConfiguredValue, authBypassEnabled, authBypassSource } from '../lib/auth/dev-bypass';
@@ -203,6 +204,8 @@ export default function SettingsPage() {
                   </button>
                 </section>
               )}
+
+              <VisualQualityPicker />
 
               <section className="cosmic-surface-panel-strong rounded-[1.8rem] p-5 sm:p-6">
                 <div>
