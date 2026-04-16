@@ -933,7 +933,7 @@ export function AuthGate({
             align-items: center;
             justify-content: center;
             gap: 16px;
-            background: #050508;
+            background: var(--bg, #050508);
             color: rgba(240, 237, 248, 0.75);
             font-family: var(--font-inter), sans-serif;
           }
@@ -1053,7 +1053,7 @@ export function AuthGate({
           --text2: rgba(240, 237, 248, 0.55);
           --text3: rgba(240, 237, 248, 0.32);
           --warm: #dac5a0;
-          --purple: #b8a4e8;
+          --purple: var(--sophia-purple, #b8a4e8);
           --border: rgba(255, 255, 255, 0.06);
 
           position: fixed;
@@ -1061,7 +1061,7 @@ export function AuthGate({
           z-index: 50;
           min-height: 100vh;
           min-height: 100svh;
-          background: #050508;
+          background: var(--bg, #050508);
           color: var(--text);
           overflow-x: hidden;
           overflow-y: auto;
@@ -1235,7 +1235,7 @@ export function AuthGate({
 
         .cap:nth-child(3) .capIcon {
           background: rgba(89, 190, 173, 0.15);
-          color: #59bead;
+          color: var(--cosmic-teal, #59bead);
         }
 
         .capTitle {

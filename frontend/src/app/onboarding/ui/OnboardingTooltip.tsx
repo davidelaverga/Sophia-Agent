@@ -49,8 +49,8 @@ function getArrowStyle(side: "top" | "bottom" | "left" | "right", offset: number
     width: 14,
     height: 14,
     transform: "rotate(45deg)",
-    background: "rgba(15, 10, 25, 0.92)",
-    borderColor: "rgba(124, 92, 170, 0.2)",
+    background: "var(--cosmic-tooltip-arrow-bg)",
+    borderColor: "var(--cosmic-tooltip-arrow-border)",
   }
 
   switch (side) {
@@ -258,9 +258,9 @@ export function OnboardingTooltip({
           minWidth: layout.isBottomSheet ? undefined : Math.min(TOOLTIP_MIN_WIDTH, Math.max(280, viewport.width - 32)),
           maxWidth: layout.maxWidth,
           maxHeight: Math.min(viewport.height - 32, layout.maxHeight),
-          background: "linear-gradient(180deg, rgba(18, 13, 30, 0.96) 0%, rgba(13, 10, 24, 0.94) 100%)",
-          borderColor: "rgba(156, 132, 205, 0.28)",
-          boxShadow: "0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(156, 132, 205, 0.12), inset 0 1px 0 rgba(255,255,255,0.04)",
+          background: "var(--cosmic-tooltip-bg)",
+          borderColor: "var(--cosmic-tooltip-border)",
+          boxShadow: "var(--cosmic-tooltip-shadow)",
           transition,
           transform: isReducedMotion ? "translate3d(0,0,0)" : initialTransform,
           opacity: 1,
