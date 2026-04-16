@@ -9,6 +9,7 @@ import { haptic } from '../../hooks/useHaptics';
 import { useSessionStart } from '../../hooks/useSessionStart';
 import { fetchBootstrapOpener, type BootstrapOpenerResponse } from '../../lib/api/bootstrap-api';
 import { endSession as endSessionAPI, isSuccess } from '../../lib/api/sessions-api';
+import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
 import { resolveDashboardBootstrapState } from '../../lib/dashboard-bootstrap-orchestration';
 import { debugLog, debugWarn } from '../../lib/debug-logger';
 import {
@@ -93,6 +94,7 @@ export function useDashboardEntryState() {
   const { resumeSession: resumeSessionAPI, startSessionEntry, checkActiveSession, isLoading: isStartingSession } = useSessionStart({
     navigateOnSuccess: true,
   });
+  const resolvedUserId = user?.id || activeSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   const normalizedBootstrapOpener = bootstrapOpener?.opener_text?.trim().toLowerCase() ?? '';
   const hasMeaningfulBootstrapOpener = Boolean(
@@ -119,7 +121,7 @@ export function useDashboardEntryState() {
 
       const hasRecentEndHint = Boolean(getRecentSessionEndHint());
 
-      if (!user) {
+      if (!resolvedUserId) {
         setBackendActiveSession(null);
         setBootstrapOpener(null);
         setShowResumeBanner(Boolean(hasActiveSession && sessionSummary));
@@ -132,7 +134,7 @@ export function useDashboardEntryState() {
         const state = await resolveDashboardBootstrapState({
           hasLocalActiveSession: Boolean(hasActiveSession && sessionSummary),
           hasRecentSessionEndHint: hasRecentEndHint,
-          checkActiveSession,
+          checkActiveSession: (force = false) => checkActiveSession(force, resolvedUserId),
           fetchBootstrapOpener,
         });
 
@@ -188,7 +190,7 @@ export function useDashboardEntryState() {
       isCancelled = true;
     };
   }, [
-    user,
+    resolvedUserId,
     hasActiveSession,
     sessionSummary,
     checkActiveSession,
@@ -196,6 +198,17 @@ export function useDashboardEntryState() {
     isLaunchingSession,
     isStartingSession,
   ]);
+
+  // Clear resume banner when the active session is removed from the store
+  // (e.g. user deletes it from the sessions sidebar)
+  const lastDeletedSessionId = useSessionStore((s) => s.lastDeletedSessionId);
+  useEffect(() => {
+    if (!lastDeletedSessionId || !backendActiveSession) return;
+    if (lastDeletedSessionId === backendActiveSession.session_id) {
+      setBackendActiveSession(null);
+      setShowResumeBanner(false);
+    }
+  }, [lastDeletedSessionId, backendActiveSession]);
 
   useEffect(() => {
     const timer = setTimeout(() => setIsVisible(true), 60);
@@ -218,7 +231,7 @@ export function useDashboardEntryState() {
   const handleStartSession = useCallback(
     async (voiceMode = false) => {
       const preset = selectedRitual;
-      const userId = user?.id || `demo-${Date.now()}`;
+      const userId = resolvedUserId || 'anonymous';
 
       if (hasActiveSession) {
         haptic('light');
@@ -248,7 +261,7 @@ export function useDashboardEntryState() {
         setIsLaunchingSession(false);
       }
     },
-    [selectedRitual, user?.id, hasActiveSession, contextMode, startSessionEntry, showToast]
+    [selectedRitual, resolvedUserId, hasActiveSession, contextMode, startSessionEntry, showToast]
   );
 
   const handleConfirmReplaceSession = useCallback(async () => {
@@ -358,7 +371,7 @@ export function useDashboardEntryState() {
     if (backendActiveSession) {
       setIsLaunchingSession(true);
       try {
-        await resumeSessionAPI(backendActiveSession, user?.id || 'dev-user');
+        await resumeSessionAPI(backendActiveSession, resolvedUserId || 'anonymous');
       } finally {
         setIsLaunchingSession(false);
       }
@@ -366,10 +379,10 @@ export function useDashboardEntryState() {
     }
 
     router.push('/session');
-  }, [backendActiveSession, resumeSessionAPI, user?.id, router]);
+  }, [backendActiveSession, resumeSessionAPI, resolvedUserId, router]);
 
   const buildFreshStartSeed = useCallback((): FreshStartSeed => ({
-    userId: user?.id || `demo-${Date.now()}`,
+    userId: resolvedUserId || 'anonymous',
     sessionId: backendActiveSession?.session_id || activeSession?.sessionId,
     presetType: (backendActiveSession?.session_type || activeSession?.presetType || 'open') as PresetType,
     contextMode: (backendActiveSession?.preset_context || activeSession?.contextMode || 'life') as ContextMode,
@@ -378,7 +391,7 @@ export function useDashboardEntryState() {
     intention: backendActiveSession?.intention || activeSession?.intention,
     focusCue: backendActiveSession?.focus_cue || activeSession?.focusCue,
     voiceMode: activeSession?.voiceMode ?? false,
-  }), [backendActiveSession, activeSession, user?.id]);
+  }), [backendActiveSession, activeSession, resolvedUserId]);
 
   const finalizeFreshStart = useCallback(async (): Promise<FreshStartSeed> => {
     const seed = buildFreshStartSeed();

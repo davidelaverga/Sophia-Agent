@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 const getOpenSessionsMock = vi.fn();
 const listSessionsMock = vi.fn();
 const deleteSessionRecordMock = vi.fn();
+const endSessionMock = vi.fn();
 const clearChatSessionMock = vi.fn();
 const loadSessionMock = vi.fn();
 
@@ -26,6 +27,7 @@ vi.mock('../../app/lib/api/sessions-api', () => ({
   getOpenSessions: (...args: unknown[]) => getOpenSessionsMock(...args),
   listSessions: (...args: unknown[]) => listSessionsMock(...args),
   deleteSessionRecord: (...args: unknown[]) => deleteSessionRecordMock(...args),
+  endSession: (...args: unknown[]) => endSessionMock(...args),
   isError: (result: { success: boolean }) => !result.success,
 }));
 
@@ -46,11 +48,14 @@ describe('Session Store', () => {
     getOpenSessionsMock.mockReset();
     listSessionsMock.mockReset();
     deleteSessionRecordMock.mockReset();
+    endSessionMock.mockReset();
     clearChatSessionMock.mockReset();
     loadSessionMock.mockReset();
     getOpenSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], count: 0 } });
     listSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], total: 0 } });
     deleteSessionRecordMock.mockResolvedValue({ success: true, data: { ok: true, session_id: 'sess-1' } });
+    endSessionMock.mockResolvedValue({ success: true, data: { ended_at: '2026-04-15T00:10:00.000Z', turn_count: 2 } });
+    loadSessionMock.mockResolvedValue(true);
 
     // Reset store state before each test
     const { clearSession, setError, setInitializing, setEnding } = useSessionStore.getState();
@@ -205,6 +210,11 @@ describe('Session Store', () => {
       const deleted = await removeOpenSession('sess-1');
 
       expect(deleted).toBe(true);
+      expect(endSessionMock).toHaveBeenCalledWith({
+        session_id: 'sess-1',
+        user_id: 'dev-user',
+        offer_debrief: false,
+      });
       expect(deleteSessionRecordMock).toHaveBeenCalledWith('sess-1', 'dev-user');
       expect(useSessionStore.getState().openSessions).toEqual([]);
       expect(useSessionStore.getState().recentSessions).toEqual([]);
@@ -248,7 +258,7 @@ describe('Session Store', () => {
     it('restores an existing backend session without inventing a new session id', async () => {
       const { restoreOpenSession } = useSessionStore.getState();
 
-      restoreOpenSession({
+      await restoreOpenSession({
         session_id: 'sess-existing',
         thread_id: 'thread-existing',
         session_type: 'prepare',
@@ -272,7 +282,7 @@ describe('Session Store', () => {
       expect(state.recentSessions[0]?.session_id).toBe('sess-existing');
 
       await waitFor(() => {
-        expect(loadSessionMock).toHaveBeenCalledWith('sess-existing');
+        expect(loadSessionMock).toHaveBeenCalledWith('sess-existing', 'dev-user');
       });
     });
   });

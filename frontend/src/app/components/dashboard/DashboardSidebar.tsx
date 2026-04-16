@@ -9,9 +9,7 @@
 'use client';
 
 import {
-  ChevronLeft,
   ChevronRight,
-  Clock,
   Loader2,
   Search,
   Sparkles,
@@ -22,8 +20,10 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState, type RefObject } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
+import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
 import { humanizeTime } from '../../lib/humanize-time';
 import { cn } from '../../lib/utils';
+import { useAuth } from '../../providers';
 import { useConversationStore } from '../../stores/conversation-store';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 import { useSessionStore, selectOpenSessions, selectIsLoadingSessions } from '../../stores/session-store';
@@ -304,6 +304,7 @@ export function RecentSessionsSidebar({
   onToggle,
   className,
 }: RecentSessionsSidebarProps) {
+  const { user } = useAuth();
   const router = useRouter();
   const endedSessions = useSessionHistoryStore((s) => s.sessions);
   const removeEndedSession = useSessionHistoryStore((s) => s.removeSession);
@@ -316,14 +317,15 @@ export function RecentSessionsSidebar({
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const { deletingKey, runDelete } = useDeleteFeedback();
+  const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   const panelSweepRef = useSweepGlow();
 
   const badgeCount = openSessions.length || endedSessions.filter((s) => !s.recapViewed).length;
 
   useEffect(() => {
-    if (isExpanded) void refreshOpenSessions();
-  }, [isExpanded, refreshOpenSessions]);
+    if (isExpanded) void refreshOpenSessions(resolvedUserId);
+  }, [isExpanded, refreshOpenSessions, resolvedUserId]);
 
   const rows = useMemo(() => {
     const list: Array<{
@@ -349,8 +351,13 @@ export function RecentSessionsSidebar({
         time: humanizeTime(s.updated_at),
         turns: s.turn_count,
         isActive: currentSession?.sessionId === s.session_id,
-        onClick: () => { setActiveSession(s.session_id); router.push('/session'); },
-        onDelete: async () => removeOpenSession(s.session_id),
+        onClick: () => {
+          void (async () => {
+            await setActiveSession(s.session_id, resolvedUserId);
+            router.push('/session');
+          })();
+        },
+        onDelete: async () => removeOpenSession(s.session_id, resolvedUserId),
       });
     }
 
@@ -373,7 +380,7 @@ export function RecentSessionsSidebar({
     }
 
     return list;
-  }, [openSessions, endedSessions, currentSession?.sessionId, setActiveSession, viewEndedSession, removeOpenSession, removeEndedSession, router]);
+  }, [openSessions, endedSessions, currentSession?.sessionId, setActiveSession, viewEndedSession, removeOpenSession, removeEndedSession, resolvedUserId, router]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return rows;
@@ -385,37 +392,10 @@ export function RecentSessionsSidebar({
 
   return (
     <div className={cn(
-      'hidden lg:flex flex-col transition-all duration-300 ease-out',
-      isExpanded ? 'w-[220px]' : 'w-[108px]',
+      'hidden lg:flex flex-col overflow-hidden transition-all duration-300 ease-out',
+      isExpanded ? 'w-[220px] opacity-100' : 'w-0 opacity-0 pointer-events-none',
       className,
     )}>
-      {/* Toggle */}
-      <button
-        onClick={() => { haptic('light'); onToggle(); }}
-        className={cn(
-          'cosmic-chrome-button cosmic-focus-ring relative mb-6 flex h-10 items-center gap-2 rounded-full px-3 transition-all duration-200 hover:scale-[1.02]',
-          isExpanded ? 'w-full' : 'w-[108px]',
-        )}
-        aria-label={isExpanded ? 'Collapse sessions' : 'Expand sessions'}
-        title={isExpanded ? 'Collapse sessions' : 'View sessions'}
-      >
-        <Clock className="h-4 w-4" />
-        <span className="text-[12px] font-medium" style={{ color: 'var(--cosmic-text)' }}>
-          Sessions
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          {badgeCount > 0 ? (
-            <span
-              className="flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold text-white"
-              style={{ background: 'var(--sophia-purple)' }}
-            >
-              {sessionsBadge}
-            </span>
-          ) : null}
-          {isExpanded ? <ChevronLeft className="h-4 w-4" /> : null}
-        </div>
-      </button>
-
       {/* Content */}
       {isExpanded && (
         <div
@@ -429,6 +409,32 @@ export function RecentSessionsSidebar({
             ].join(', '),
           }}
         >
+          <div className="mb-3 flex items-center justify-between px-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-medium" style={{ color: 'var(--cosmic-text)' }}>
+                Sessions
+              </span>
+              {badgeCount > 0 ? (
+                <span
+                  className="flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold text-white"
+                  style={{ background: 'var(--sophia-purple)' }}
+                >
+                  {sessionsBadge}
+                </span>
+              ) : null}
+            </div>
+            <button
+              type="button"
+              onClick={() => { haptic('light'); onToggle(); }}
+              aria-label="Collapse sessions"
+              title="Collapse sessions"
+              className="cosmic-focus-ring flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-200 hover:bg-white/[0.06]"
+              style={{ color: 'var(--cosmic-text-muted)' }}
+            >
+              <ChevronRight className="h-4 w-4" />
+            </button>
+          </div>
+
           {/* Search */}
           <div className="relative mb-3 px-2">
             <Search
@@ -639,6 +645,7 @@ export function MobileBottomSheet({ isOpen, onClose, title, icon, children }: Mo
 // =============================================================================
 
 export function MobileSessionsContent() {
+  const { user } = useAuth();
   const router = useRouter();
   const endedSessions = useSessionHistoryStore((s) => s.sessions);
   const removeEndedSession = useSessionHistoryStore((s) => s.removeSession);
@@ -649,6 +656,7 @@ export function MobileSessionsContent() {
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const { deletingKey, runDelete } = useDeleteFeedback();
+  const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   const rows = useMemo(() => {
     const list: Array<{
@@ -674,8 +682,13 @@ export function MobileSessionsContent() {
         time: humanizeTime(s.updated_at),
         turns: s.turn_count,
         isActive: currentSession?.sessionId === s.session_id,
-        onClick: () => { setActiveSession(s.session_id); router.push('/session'); },
-        onDelete: async () => removeOpenSession(s.session_id),
+        onClick: () => {
+          void (async () => {
+            await setActiveSession(s.session_id, resolvedUserId);
+            router.push('/session');
+          })();
+        },
+        onDelete: async () => removeOpenSession(s.session_id, resolvedUserId),
       });
     }
 
@@ -698,7 +711,7 @@ export function MobileSessionsContent() {
     }
 
     return list;
-  }, [openSessions, endedSessions, currentSession?.sessionId, setActiveSession, viewEndedSession, removeOpenSession, removeEndedSession, router]);
+  }, [openSessions, endedSessions, currentSession?.sessionId, setActiveSession, viewEndedSession, removeOpenSession, removeEndedSession, resolvedUserId, router]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return rows;

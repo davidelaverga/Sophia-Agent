@@ -94,6 +94,7 @@ export interface MemoryHighlight {
  * POST /api/v1/sessions/start - Request
  */
 export interface SessionStartRequest {
+  user_id?: string;
   session_type: PresetType;
   preset_context: ContextMode;
   intention?: string;

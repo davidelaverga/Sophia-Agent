@@ -153,6 +153,24 @@ def test_active_session_returns_empty_payload_when_no_open_sessions():
     assert response.json() == {"has_active_session": False, "session": None}
 
 
+def test_active_session_falls_back_to_legacy_dev_user_records(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="legacy-open-session",
+            thread_id="legacy-thread",
+            user_id="dev-user",
+            status="open",
+            updated_at="2026-04-15T22:00:00+00:00",
+        )
+    )
+
+    response = client.get("/api/v1/sessions/active?user_id=real-user-123")
+
+    assert response.status_code == 200
+    assert response.json()["has_active_session"] is True
+    assert response.json()["session"]["session_id"] == "legacy-open-session"
+
+
 def test_touch_session_updates_preview_and_generates_title(isolated_session_store):
     isolated_session_store.create(
         SessionRecord(
@@ -181,6 +199,117 @@ def test_touch_session_updates_preview_and_generates_title(isolated_session_stor
     assert record.message_count == 1
     assert record.last_message_preview == "i need to prepare for my investor meeting tomorrow"
     assert record.title == "Preparing for my investor meeting tomorrow"
+
+
+def test_touch_session_falls_back_to_legacy_dev_user_records(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="legacy-touch-session",
+            thread_id="legacy-thread",
+            user_id="dev-user",
+            status="open",
+            title=None,
+            message_count=0,
+        )
+    )
+
+    response = client.post(
+        "/api/v1/sessions/legacy-touch-session/touch?user_id=real-user-123&message_preview="
+        "can%20you%20help%20me%20debug%20this%20websocket%20reconnect%20issue",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["title"] == "Debugging this websocket reconnect issue"
+
+    record = isolated_session_store.get("dev-user", "legacy-touch-session")
+    assert record is not None
+    assert record.message_count == 1
+    assert record.title == "Debugging this websocket reconnect issue"
+
+
+def test_get_session_messages_strips_tool_use_metadata_from_ai_content(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-with-tool-blocks",
+            thread_id="thread-with-tool-blocks",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    request = httpx.Request("GET", "http://127.0.0.1:2024/threads/thread-with-tool-blocks/state")
+    mock_response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "values": {
+                "messages": [
+                    {
+                        "id": "human-1",
+                        "type": "human",
+                        "content": "I still miss him.",
+                    },
+                    {
+                        "id": "ai-1",
+                        "type": "ai",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Two years in, and you're still asking about it.",
+                            },
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_123",
+                                "name": "emit_artifact",
+                                "partial_json": '{"tone_estimate":2.0}',
+                            },
+                        ],
+                    },
+                    {
+                        "id": "ai-2",
+                        "type": "ai",
+                        "content": [
+                            {
+                                "type": "tool_use",
+                                "id": "toolu_456",
+                                "name": "emit_artifact",
+                                "partial_json": '{"tone_estimate":2.5}',
+                            }
+                        ],
+                    },
+                ]
+            }
+        },
+    )
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        response = client.get("/api/v1/sessions/session-with-tool-blocks/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "session_id": "session-with-tool-blocks",
+        "thread_id": "thread-with-tool-blocks",
+        "messages": [
+            {
+                "id": "human-1",
+                "role": "user",
+                "content": "I still miss him.",
+                "created_at": None,
+            },
+            {
+                "id": "ai-1",
+                "role": "sophia",
+                "content": "Two years in, and you're still asking about it.",
+                "created_at": None,
+            },
+        ],
+    }
 
 
 @pytest.mark.parametrize(

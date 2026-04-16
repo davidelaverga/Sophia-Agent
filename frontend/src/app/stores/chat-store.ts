@@ -70,7 +70,7 @@ type ChatStore = {
   addVoiceMessage: (content: string, audioUrl?: string) => void
   addUserVoiceMessage: (content: string) => void
   // Session persistence
-  loadSession: (sessionId: string) => Promise<boolean>
+  loadSession: (sessionId: string, userId?: string) => Promise<boolean>
   clearSession: () => void
   startNewSession: () => void
   bindRouteRuntime: (bridge: ChatRouteRuntimeBridge) => void
@@ -327,11 +327,11 @@ export const useChatStore = create<ChatStore>()(persist((set, get) => ({
   },
 
   // Session persistence methods
-  loadSession: async (sessionId: string) => {
+  loadSession: async (sessionId: string, userId?: string) => {
     set({ isLoadingHistory: true, lastError: undefined })
     try {
       const { getSessionMessages } = await import("../lib/api/sessions-api")
-      const result = await getSessionMessages(sessionId)
+      const result = await getSessionMessages(sessionId, userId)
       if (!result.success) {
         set({ isLoadingHistory: false, lastError: "error" in result ? result.error : "Unknown error" })
         return false
@@ -350,6 +350,21 @@ export const useChatStore = create<ChatStore>()(persist((set, get) => ({
         isLoadingHistory: false,
         lastError: undefined,
       })
+
+      const { useSessionStore } = await import("./session-store")
+      const sessionMessages = result.data.messages.map((message) => ({
+        id: message.id || createMessageId(),
+        role: message.role === "user" ? "user" as const : "assistant" as const,
+        content: message.content,
+        createdAt: message.created_at || new Date().toISOString(),
+      }))
+
+      useSessionStore.getState().updateMessages(sessionMessages)
+      useSessionStore.getState().updateSession({
+        threadId: result.data.thread_id,
+        ...(userId ? { userId } : {}),
+      })
+
       return true
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to load session"

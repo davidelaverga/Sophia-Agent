@@ -49,46 +49,56 @@ export function ContextTabs({ selected, onSelect }: ContextTabsProps) {
   );
 
   return (
-    <div
-      role="tablist"
-      aria-label="Context mode"
-      className="cosmic-surface-panel inline-flex items-center gap-1 rounded-full p-1.5"
-    >
-      {CONTEXTS.map((ctx, index) => {
-        const Icon = ctx.icon;
-        const isActive = selected === ctx.value;
-        
-        return (
-          <button
-            key={ctx.value}
-            ref={(el) => { tabsRef.current[index] = el; }}
-            data-onboarding={`preset-tab-${ctx.value}`}
-            role="tab"
-            aria-selected={isActive}
-            tabIndex={isActive ? 0 : -1}
-            onClick={() => {
-              haptic('light');
-              onSelect(ctx.value);
-            }}
-            onKeyDown={(e) => handleKeyDown(e, index)}
-            className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all duration-200',
-              'cosmic-focus-ring',
-              isActive ? 'shadow-md' : ''
-            )}
-            style={isActive ? {
-              background: 'color-mix(in srgb, var(--text) 6%, transparent)',
-              color: 'var(--cosmic-text-strong)',
-              boxShadow: '0 2px 12px color-mix(in srgb, var(--sophia-purple) 25%, transparent)',
-            } : {
-              color: 'var(--cosmic-text-muted)',
-            }}
-          >
-            <Icon className="w-4 h-4" />
-            {ctx.label}
-          </button>
-        );
-      })}
+    <div className="flex flex-col items-center gap-2">
+      <div
+        role="tablist"
+        aria-label="Context mode"
+        className="cosmic-surface-panel inline-flex items-center gap-1 rounded-full p-1.5"
+      >
+        {CONTEXTS.map((ctx, index) => {
+          const Icon = ctx.icon;
+          const isActive = selected === ctx.value;
+          
+          return (
+            <button
+              key={ctx.value}
+              ref={(el) => { tabsRef.current[index] = el; }}
+              data-onboarding={`preset-tab-${ctx.value}`}
+              role="tab"
+              aria-selected={isActive}
+              tabIndex={isActive ? 0 : -1}
+              onClick={() => {
+                haptic('light');
+                onSelect(ctx.value);
+              }}
+              onKeyDown={(e) => handleKeyDown(e, index)}
+              className={cn(
+                'flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all duration-200',
+                'cosmic-focus-ring',
+                isActive ? 'shadow-md' : ''
+              )}
+              style={isActive ? {
+                background: 'color-mix(in srgb, var(--text) 6%, transparent)',
+                color: 'var(--cosmic-text-strong)',
+                boxShadow: '0 2px 12px color-mix(in srgb, var(--sophia-purple) 25%, transparent)',
+              } : {
+                color: 'var(--cosmic-text-muted)',
+              }}
+            >
+              <Icon className="w-4 h-4" />
+              {ctx.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Context hint */}
+      <p
+        className="text-[10px] font-light tracking-[0.04em]"
+        style={{ color: 'var(--cosmic-text-faint)' }}
+      >
+        adapts rituals &amp; tone to your context
+      </p>
     </div>
   );
 }

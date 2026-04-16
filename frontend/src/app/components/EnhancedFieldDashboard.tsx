@@ -1,11 +1,11 @@
 'use client';
 
-import { BookOpen, Clock, Settings } from 'lucide-react';
-import { useRouter } from 'next/navigation';
+import { Clock } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { haptic } from '../hooks/useHaptics';
+import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
 import { cn } from '../lib/utils';
+import { useAuth } from '../providers';
 import { selectOpenSessionCount, useSessionStore } from '../stores/session-store';
 import type { ContextMode } from '../types/session';
 
@@ -13,6 +13,8 @@ import { CelestialComet } from './dashboard/CelestialComet';
 import { ContextTabs } from './dashboard/ContextTabs';
 import { RecentSessionsSidebar, MobileBottomSheet, MobileSessionsContent } from './dashboard/DashboardSidebar';
 import { EnhancedFieldBackground } from './dashboard/EnhancedFieldBackground';
+import { NavRail, MobileNavBar } from './dashboard/NavRail';
+import { OnboardingSpotlight } from './dashboard/OnboardingSpotlight';
 import { RitualOrbit } from './dashboard/RitualOrbit';
 import { RitualThread } from './dashboard/RitualThread';
 import { SettingsDrawer } from './dashboard/SettingsDrawer';
@@ -27,34 +29,8 @@ function getGreeting(contextValue: (typeof CONTEXTS)[number]) {
   return contextValue.greetings[part];
 }
 
-function FieldChromeButton({
-  onClick,
-  ariaLabel,
-  title,
-  children,
-}: {
-  onClick: () => void;
-  ariaLabel: string;
-  title?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={ariaLabel}
-      title={title ?? ariaLabel}
-      className={cn(
-        'cosmic-chrome-button flex h-10 w-10 items-center justify-center rounded-full transition-all duration-200'
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function EnhancedFieldDashboard() {
-  const router = useRouter();
+  const { user } = useAuth();
   const openSessionCount = useSessionStore(selectOpenSessionCount);
   const refreshOpenSessions = useSessionStore((state) => state.refreshOpenSessions);
   const {
@@ -109,11 +85,7 @@ export function EnhancedFieldDashboard() {
   const [tabsVisible, setTabsVisible] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(() => openSessionCount > 0);
   const [showMobileSessions, setShowMobileSessions] = useState(false);
-
-  const handleOpenMobileSessions = useCallback(() => {
-    haptic('light');
-    setShowMobileSessions(true);
-  }, []);
+  const resolvedUserId = user?.id || activeSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   useEffect(() => {
     const t1 = setTimeout(() => setTabsVisible(true), 100);
@@ -127,7 +99,11 @@ export function EnhancedFieldDashboard() {
     let cancelled = false;
 
     const primeSessionsSidebar = async () => {
-      const count = await refreshOpenSessions();
+      if (!resolvedUserId) {
+        return;
+      }
+
+      const count = await refreshOpenSessions(resolvedUserId);
       if (!cancelled && count > 0) {
         setSidebarExpanded(true);
       }
@@ -138,7 +114,7 @@ export function EnhancedFieldDashboard() {
     return () => {
       cancelled = true;
     };
-  }, [refreshOpenSessions]);
+  }, [refreshOpenSessions, resolvedUserId]);
 
   // ── Context-switch crossfade ────────────────────────────────
   // Greeting fades out → text updates → fades back in
@@ -146,6 +122,9 @@ export function EnhancedFieldDashboard() {
   // IMPORTANT: `revealed` stays true — only `switching` toggles, matching the prototype.
   const [orbitSwitching, setOrbitSwitching] = useState(false);
   const prevContextRef = useRef<ContextMode>(contextMode);
+
+  // Brief glow on ritual icons after a context switch — teaches that tabs transform rituals
+  const [contextPulse, setContextPulse] = useState(false);
 
   const handleContextSwitch = useCallback(
     (next: ContextMode) => {
@@ -157,14 +136,18 @@ export function EnhancedFieldDashboard() {
       // Collapse orbit — revealed stays true, switching overrides it
       setOrbitSwitching(true);
 
-      // After 300ms: update context labels, remove switching → nodes slide back in
+      // After 300ms: update context labels, remove switching → nodes slide back in with pulse
       setTimeout(() => {
         setContextMode(next);
         setOrbitSwitching(false);
+        setContextPulse(true);
       }, 300);
 
       // After 350ms: greeting fades back in with new text
       setTimeout(() => setGreetingVisible(true), 350);
+
+      // Clear pulse after the glow animation completes (~700ms)
+      setTimeout(() => setContextPulse(false), 1000);
     },
     [setContextMode],
   );
@@ -180,55 +163,20 @@ export function EnhancedFieldDashboard() {
       <CelestialComet contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
-      {/* Mobile sessions trigger — top-left, visible only below lg */}
-      <div className="pointer-events-none fixed left-4 top-4 z-30 lg:hidden sm:left-6">
-        <button
-          type="button"
-          onClick={handleOpenMobileSessions}
-          aria-label="View sessions"
-          title="Sessions"
-          className="pointer-events-auto cosmic-chrome-button flex h-10 items-center gap-2 rounded-full px-3 transition-all duration-200"
-        >
-          <Clock className="h-4 w-4" />
-          <span className="text-[12px] font-medium" style={{ color: 'var(--cosmic-text)' }}>
-            Sessions
-          </span>
-          {openSessionCount > 0 ? (
-            <span
-              className="flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold text-white"
-              style={{ background: 'var(--sophia-purple)' }}
-            >
-              {openSessionCount > 9 ? '9+' : openSessionCount}
-            </span>
-          ) : null}
-        </button>
-      </div>
+      {/* Desktop nav rail — left edge */}
+      <NavRail
+        onToggleSessions={() => setSidebarExpanded((v) => !v)}
+        sessionsExpanded={sidebarExpanded}
+        sessionCount={openSessionCount}
+        onOpenSettings={() => setShowSettingsDrawer(true)}
+      />
 
-      {/* Top-right chrome — always right-aligned */}
-      <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex items-start justify-end px-4 py-4 sm:px-6">
-        <div className="pointer-events-auto flex items-center gap-2">
-          <FieldChromeButton
-            ariaLabel="Open journal"
-            title="Journal"
-            onClick={() => {
-              haptic('light');
-              router.push('/journal');
-            }}
-          >
-            <BookOpen className="h-4 w-4" />
-          </FieldChromeButton>
-          <FieldChromeButton
-            ariaLabel="Open settings"
-            title="Settings"
-            onClick={() => {
-              haptic('light');
-              setShowSettingsDrawer(true);
-            }}
-          >
-            <Settings className="h-4 w-4" />
-          </FieldChromeButton>
-        </div>
-      </div>
+      {/* Mobile nav bar — bottom edge */}
+      <MobileNavBar
+        onOpenSessions={() => setShowMobileSessions(true)}
+        sessionCount={openSessionCount}
+        onOpenSettings={() => setShowSettingsDrawer(true)}
+      />
 
       {showReplaceSessionConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center px-6">
@@ -342,7 +290,7 @@ export function EnhancedFieldDashboard() {
         </div>
       )}
 
-      <div className="relative z-10 flex min-h-screen flex-col px-6 sm:px-8">
+      <div className="relative z-10 flex min-h-screen flex-col px-6 pb-16 sm:px-8 lg:pb-0">
         {/* Greeting — near top, matching prototype clamp(28px,6vh,48px) */}
         <div
           ref={greetingGlowRef as React.RefObject<HTMLDivElement>}
@@ -434,6 +382,7 @@ export function EnhancedFieldDashboard() {
             onContinueSession={handleContinueSession}
             revealed={orbitRevealed}
             switching={orbitSwitching}
+            contextPulse={contextPulse}
           />
         </div>
 
@@ -463,13 +412,15 @@ export function EnhancedFieldDashboard() {
         <MobileSessionsContent />
       </MobileBottomSheet>
 
-      {/* Sessions sidebar — left edge (desktop) */}
-      <div className="fixed left-4 top-4 bottom-4 z-20">
+      {/* Sessions sidebar — positioned after nav rail (desktop) */}
+      <div className="fixed left-[60px] top-4 bottom-4 z-20 hidden lg:block">
         <RecentSessionsSidebar
           isExpanded={sidebarExpanded}
           onToggle={() => setSidebarExpanded((v) => !v)}
         />
       </div>
+
+      <OnboardingSpotlight />
     </div>
   );
 }

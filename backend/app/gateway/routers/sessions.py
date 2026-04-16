@@ -22,6 +22,7 @@ MAX_OPEN_SESSIONS_PER_USER = 15
 
 # Singleton store — base path resolved relative to cwd (repo root).
 _store = SessionStore()
+_LEGACY_USER_ID = "dev-user"
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +232,66 @@ async def _create_langgraph_thread() -> str:
 
     return payload["thread_id"]
 
+
+def _normalize_user_id(user_id: str | None) -> str:
+    normalized = (user_id or "").strip()
+    return normalized or _LEGACY_USER_ID
+
+
+def _legacy_user_id_for(user_id: str) -> str | None:
+    return None if user_id == _LEGACY_USER_ID else _LEGACY_USER_ID
+
+
+def _unique_records(records: list[SessionRecord]) -> list[SessionRecord]:
+    deduped: dict[str, SessionRecord] = {}
+    for record in records:
+        deduped[record.session_id] = record
+    return sorted(deduped.values(), key=lambda record: record.updated_at, reverse=True)
+
+
+def _list_open_records(user_id: str) -> list[SessionRecord]:
+    records = list(_store.list_open(user_id))
+    if records:
+        return _unique_records(records)
+
+    legacy_user_id = _legacy_user_id_for(user_id)
+    if legacy_user_id:
+        records.extend(_store.list_open(legacy_user_id))
+    return _unique_records(records)
+
+
+def _list_recent_records(user_id: str, limit: int) -> list[SessionRecord]:
+    records = list(_store.list_recent(user_id, limit=limit))
+    if records:
+        return _unique_records(records)[:limit]
+
+    legacy_user_id = _legacy_user_id_for(user_id)
+    if legacy_user_id:
+        records.extend(_store.list_recent(legacy_user_id, limit=limit))
+    return _unique_records(records)[:limit]
+
+
+def _resolve_session_record(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
+    record = _store.get(user_id, session_id)
+    if record is not None:
+        return user_id, record
+
+    legacy_user_id = _legacy_user_id_for(user_id)
+    if legacy_user_id is None:
+        return user_id, None
+
+    legacy_record = _store.get(legacy_user_id, session_id)
+    if legacy_record is not None:
+        return legacy_user_id, legacy_record
+
+    return user_id, None
+
 @router.post("/start", response_model=SessionStartResponse)
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     """Create a new session with a real LangGraph thread and persist it."""
+    user_id = _normalize_user_id(body.user_id)
     # Enforce open-session limit
-    open_sessions = _store.list_open(body.user_id)
+    open_sessions = _store.list_open(user_id)
     if len(open_sessions) >= MAX_OPEN_SESSIONS_PER_USER:
         raise HTTPException(
             status_code=409,
@@ -252,7 +308,7 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     record = SessionRecord(
         session_id=session_id,
         thread_id=thread_id,
-        user_id=body.user_id,
+        user_id=user_id,
         status="open",
         preset_type=body.session_type,
         context_mode=body.preset_context,
@@ -284,7 +340,7 @@ async def get_active_session(
     user_id: str = Query(default="dev-user"),
 ) -> ActiveSessionResponse:
     """Return the most recently updated open session for compatibility callers."""
-    records = _store.list_open(user_id)
+    records = _list_open_records(_normalize_user_id(user_id))
     if not records:
         return ActiveSessionResponse(has_active_session=False, session=None)
     return ActiveSessionResponse(
@@ -298,7 +354,7 @@ async def get_open_sessions(
     user_id: str = Query(default="dev-user"),
 ) -> OpenSessionsResponse:
     """Return all open sessions for a user."""
-    records = _store.list_open(user_id)
+    records = _list_open_records(_normalize_user_id(user_id))
     sessions = [_record_to_info(r) for r in records]
     return OpenSessionsResponse(sessions=sessions, count=len(sessions))
 
@@ -310,7 +366,7 @@ async def list_sessions(
     status: str | None = Query(default=None),
 ) -> SessionListResponse:
     """Return recent sessions (all statuses) or filter by status."""
-    records = _store.list_recent(user_id, limit=limit)
+    records = _list_recent_records(_normalize_user_id(user_id), limit=limit)
     if status:
         records = [r for r in records if r.status == status]
     sessions = [_record_to_info(r) for r in records]
@@ -323,7 +379,7 @@ async def get_session(
     user_id: str = Query(default="dev-user"),
 ) -> SessionInfoResponse:
     """Get a single session by ID."""
-    record = _store.get(user_id, session_id)
+    _, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     return _record_to_info(record)
@@ -336,13 +392,15 @@ async def update_session(
     user_id: str = Query(default="dev-user"),
 ) -> SessionInfoResponse:
     """Update session metadata (e.g. title)."""
+    normalized_user_id = _normalize_user_id(user_id)
     updates = body.model_dump(exclude_none=True)
     if not updates:
-        record = _store.get(user_id, session_id)
+        _, record = _resolve_session_record(normalized_user_id, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Session not found.")
         return _record_to_info(record)
-    record = _store.update(user_id, session_id, **updates)
+    owner_user_id, _ = _resolve_session_record(normalized_user_id, session_id)
+    record = _store.update(owner_user_id, session_id, **updates)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     return _record_to_info(record)
@@ -354,7 +412,9 @@ async def delete_session(
     user_id: str = Query(default="dev-user"),
 ) -> SessionDeleteResponse:
     """Delete a persisted session record."""
-    deleted = _store.delete(user_id, session_id)
+    normalized_user_id = _normalize_user_id(user_id)
+    owner_user_id, _ = _resolve_session_record(normalized_user_id, session_id)
+    deleted = _store.delete(owner_user_id, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
     return SessionDeleteResponse(ok=True, session_id=session_id)
@@ -363,7 +423,9 @@ async def delete_session(
 @router.post("/end", response_model=SessionEndResponse)
 async def end_session(body: SessionEndRequest) -> SessionEndResponse:
     """End a session — marks it as ended and computes duration."""
-    record = _store.end(body.user_id, body.session_id)
+    normalized_user_id = _normalize_user_id(body.user_id)
+    owner_user_id, _ = _resolve_session_record(normalized_user_id, body.session_id)
+    record = _store.end(owner_user_id, body.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
@@ -407,7 +469,7 @@ async def get_session_messages(
     user_id: str = Query(default="dev-user"),
 ) -> SessionMessagesResponse:
     """Retrieve conversation history from the LangGraph thread state."""
-    record = _store.get(user_id, session_id)
+    _, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
@@ -463,13 +525,16 @@ async def get_session_messages(
                 role = "sophia"
             else:
                 continue  # skip system/tool messages
+            content_text = _extract_visible_message_text(content)
             # Skip empty AI messages (tool-only turns)
-            if role == "sophia" and not content:
+            if role == "sophia" and not content_text:
+                continue
+            if role == "user" and not content_text:
                 continue
             messages.append(SessionMessageResponse(
                 id=msg_id,
                 role=role,
-                content=content if isinstance(content, str) else str(content),
+                content=content_text,
                 created_at=None,
             ))
 
@@ -490,7 +555,8 @@ async def touch_session(
 
     Called by the chat handler after each user message.
     """
-    record = _store.get(user_id, session_id)
+    normalized_user_id = _normalize_user_id(user_id)
+    owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     updates: dict = {"message_count": record.message_count + 1}
@@ -499,7 +565,7 @@ async def touch_session(
         updates["last_message_preview"] = normalized_preview
         if not record.title or record.title.strip().lower() == "new session":
             updates["title"] = _build_session_title(normalized_preview)
-    updated_record = _store.update(user_id, session_id, **updates)
+    updated_record = _store.update(owner_user_id, session_id, **updates)
     if updated_record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     return _record_to_info(updated_record)
@@ -535,6 +601,24 @@ def _normalize_message_preview(message_preview: str | None) -> str | None:
     if not normalized:
         return None
     return normalized[:200]
+
+
+def _extract_visible_message_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, dict):
+        if content.get("type") != "text":
+            return ""
+        text = content.get("text")
+        return text if isinstance(text, str) else ""
+
+    if isinstance(content, list):
+        parts = [_extract_visible_message_text(block) for block in content]
+        visible_parts = [part for part in parts if part]
+        return "\n".join(visible_parts)
+
+    return ""
 
 
 def _build_session_title(message_preview: str) -> str:
