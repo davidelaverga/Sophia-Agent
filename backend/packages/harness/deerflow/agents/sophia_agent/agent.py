@@ -137,6 +137,12 @@ def make_sophia_agent(config: RunnableConfig):
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
+    # 17. Summary absorber — converts the SummarizationMiddleware's
+    #     HumanMessage into a system_prompt_block and removes it from
+    #     the conversation so the model doesn't echo it verbatim.
+    from deerflow.agents.sophia_agent.middlewares.summary_absorber import SummaryAbsorberMiddleware
+    middlewares.append(SummaryAbsorberMiddleware())
+
     # Post-chain: prompt assembly, then caching, then title
     from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
     middlewares.extend(
