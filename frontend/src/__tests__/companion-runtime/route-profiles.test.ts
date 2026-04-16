@@ -20,28 +20,15 @@ describe('companion route profiles', () => {
     );
   });
 
-  it('defines the chat profile for /chat with free-chat defaults enabled', () => {
-    expect(COMPANION_ROUTE_PROFILES.chat).toEqual(
-      expect.objectContaining({
-        id: 'chat',
-        routePath: '/chat',
-        includeSessionContext: false,
-        enableBootstrap: false,
-        enableDebrief: false,
-        freeChatDefaults: true,
-      })
-    );
-  });
-
   it('returns the same profile object when an explicit profile is provided', () => {
     const profile: CompanionRouteProfile = {
-      id: 'chat',
-      routePath: '/chat',
+      id: 'ritual',
+      routePath: '/session',
       description: 'custom profile',
-      includeSessionContext: false,
-      enableBootstrap: false,
-      enableDebrief: false,
-      freeChatDefaults: true,
+      includeSessionContext: true,
+      enableBootstrap: true,
+      enableDebrief: true,
+      freeChatDefaults: false,
     };
 
     expect(getCompanionRouteProfile(profile)).toBe(profile);

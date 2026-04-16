@@ -50,6 +50,8 @@ export function RitualNode({
   return (
     <button
       type="button"
+      data-onboarding={`ritual-card-${ritual.type}`}
+      data-onboarding-contextual={isSuggested ? 'ritual-card-suggested' : undefined}
       data-ritual={ritual.type}
       aria-pressed={isSelected}
       onClick={() => {

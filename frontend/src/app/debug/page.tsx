@@ -7,7 +7,6 @@ import { authBypassEnabled } from '@/app/lib/auth/dev-bypass'
 
 import { useTranslation } from '../copy'
 import { useAuth } from '../providers'
-import { useOnboardingStore } from '../stores/onboarding-store'
 
 // 🔒 SECURITY: Only allow debug page in development
 const IS_DEV = process.env.NODE_ENV === 'development'
@@ -17,7 +16,6 @@ export default function DebugPage() {
   const [debugInfo, setDebugInfo] = useState<Record<string, unknown>>({})
   const { user } = useAuth()
   const { t } = useTranslation()
-  const { hasCompletedOnboarding, resetOnboarding } = useOnboardingStore()
 
   // 🔒 SECURITY: Redirect to home if not in development
   useEffect(() => {
@@ -115,25 +113,6 @@ export default function DebugPage() {
           className="bg-purple-600 px-4 py-2 rounded hover:bg-purple-700"
         >
           {t("debugPage.backToMainApp")}
-        </button>
-      </div>
-
-      {/* Onboarding Debug Section */}
-      <div className="mt-8 bg-gray-800 p-6 rounded-lg">
-        <h2 className="text-xl font-semibold mb-4">🎓 Onboarding Debug</h2>
-        <p className="text-sm mb-4">
-          Status: <span className={hasCompletedOnboarding ? "text-green-400" : "text-yellow-400"}>
-            {hasCompletedOnboarding ? "Completed ✓" : "Not completed"}
-          </span>
-        </p>
-        <button
-          onClick={() => {
-            resetOnboarding()
-            router.push('/')
-          }}
-          className="bg-yellow-600 px-4 py-2 rounded hover:bg-yellow-700 mr-2"
-        >
-          Reset Onboarding & Test
         </button>
       </div>
     </div>

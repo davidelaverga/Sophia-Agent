@@ -39,6 +39,8 @@ export function MicCTA({
   const ritualLabel = selectedRitual
     ? RITUALS.find((r) => r.type === selectedRitual)?.labels[context].title
     : null;
+  const idlePrimaryLabel = ritualLabel ? `start ${ritualLabel.toLowerCase()}` : 'start open';
+  const idleSecondaryLabel = ritualLabel ? 'ritual selected' : 'or choose a ritual first';
 
   const isActive = micState !== 'idle' || isStartingSession;
   const sweepRef = useSweepGlow();
@@ -73,7 +75,7 @@ export function MicCTA({
                 ? 'Interrupt Sophia'
                 : selectedRitual
                   ? `Start ${ritualLabel?.toLowerCase() ?? 'session'}`
-                  : 'Talk to Sophia'
+                  : 'Start open session'
       }
     >
       {/* mic-outer — 88×88, contains rings + core */}
@@ -211,26 +213,32 @@ export function MicCTA({
       </div>
 
       {/* Label — prototype: .mic-label */}
-      <span
-        className={cn(
-          'min-h-[14px] text-center text-[10px] lowercase tracking-[0.12em] transition-colors duration-500',
-        )}
-        style={{ color: isActive ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-faint)' }}
-        role="status"
-        aria-live="polite"
-      >
-        {isStartingSession
-          ? 'connecting...'
-          : micState === 'listening'
-            ? 'listening...'
-            : micState === 'thinking'
-              ? 'processing...'
-              : micState === 'speaking'
-                ? 'sophia is here'
-                : ritualLabel
-                  ? `start ${ritualLabel.toLowerCase()}`
-                  : 'tap to talk'}
-      </span>
+      <div className="flex min-h-[28px] flex-col items-center gap-[2px] text-center" role="status" aria-live="polite">
+        <span
+          className={cn(
+            'text-[10px] lowercase tracking-[0.12em] transition-colors duration-500',
+          )}
+          style={{ color: isActive ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-faint)' }}
+        >
+          {isStartingSession
+            ? 'connecting...'
+            : micState === 'listening'
+              ? 'listening...'
+              : micState === 'thinking'
+                ? 'processing...'
+                : micState === 'speaking'
+                  ? 'sophia is here'
+                  : idlePrimaryLabel}
+        </span>
+        {!isActive ? (
+          <span
+            className="text-[9px] lowercase tracking-[0.08em] transition-colors duration-500"
+            style={{ color: 'var(--cosmic-text-whisper)' }}
+          >
+            {idleSecondaryLabel}
+          </span>
+        ) : null}
+      </div>
     </div>
   );
 }

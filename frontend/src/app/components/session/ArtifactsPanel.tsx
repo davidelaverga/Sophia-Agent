@@ -30,7 +30,6 @@ import {
 import type { RitualArtifacts, PresetType, ContextMode } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
 import type { BuilderArtifactV1 } from '../../types/builder-artifact';
-import { OnboardingTipGuard } from '../onboarding';
 
 function formatMemoryCategoryLabel(category: string): string {
   const cleaned = category
@@ -737,13 +736,6 @@ export function ArtifactsPanel({
   onMemoryReject,
   memoryInlineFeedback,
 }: ArtifactsPanelProps) {
-  const hasArtifacts = Boolean(
-    builderArtifact ||
-    artifacts?.takeaway?.trim() ||
-    artifacts?.reflection_candidate?.prompt?.trim() ||
-    artifacts?.memory_candidates?.length
-  );
-
   const placeholders = {
     takeaway: getPlaceholderCopy('takeaway', presetType),
     reflection: getPlaceholderCopy('reflection', presetType),
@@ -761,7 +753,6 @@ export function ArtifactsPanel({
   
   return (
     <div className={cn('flex flex-col h-full', className)} data-onboarding="artifacts-panel">
-      <OnboardingTipGuard tipId="tip-first-artifacts" isTriggered={hasArtifacts} />
       {/* Header — cosmic whisper */}
       <div className="flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: '1px solid var(--cosmic-border-soft)' }}>
         <span

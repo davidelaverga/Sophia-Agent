@@ -232,6 +232,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
   
   const router = useRouter();
   const createSession = useSessionStore((state) => state.createSession);
+  const restoreOpenSession = useSessionStore((state) => state.restoreOpenSession);
   const updateFromBackend = useSessionStore((state) => state.updateFromBackend);
   const updateSession = useSessionStore((state) => state.updateSession);
   const clearSession = useSessionStore((state) => state.clearSession);
@@ -454,7 +455,8 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
    * Resume an active session
    */
   const resumeSession = useCallback(async (
-    activeSession: ActiveSessionResponse['session']
+    activeSession: ActiveSessionResponse['session'],
+    userId: string = 'dev-user',
   ): Promise<StartSessionResult> => {
     if (!activeSession) {
       return {
@@ -463,18 +465,30 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
         code: 'VALIDATION_ERROR',
       };
     }
-    
-    // Call start with same params - backend returns is_resumed: true
-    return start(
-      'current-user', // userId comes from token
-      activeSession.session_type as PresetType,
-      activeSession.preset_context as ContextMode,
-      {
-        intention: activeSession.intention,
-        focusCue: activeSession.focus_cue,
-      }
-    );
-  }, [start]);
+
+    restoreOpenSession(activeSession, userId);
+
+    const successResult: SessionStartResult = {
+      success: true,
+      sessionId: activeSession.session_id,
+      threadId: activeSession.thread_id,
+      greetingMessage: '',
+      messageId: 'resume-existing-session',
+      memoryHighlights: [],
+      isResumed: true,
+      hasMemory: false,
+    };
+
+    setLastResult(successResult);
+    onSuccess?.(successResult);
+
+    if (navigateOnSuccess) {
+      haptic('medium');
+      router.push('/session');
+    }
+
+    return successResult;
+  }, [navigateOnSuccess, onSuccess, restoreOpenSession, router]);
   
   return {
     start,

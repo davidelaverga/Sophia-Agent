@@ -21,7 +21,6 @@ import {
   VoiceComposerErrorBoundary,
 } from '../components/error-boundaries';
 import { ModeToggle } from '../components/ModeToggle';
-import { OnboardingSessionExperience } from '../components/onboarding';
 import { PresenceField, type PresenceFieldHandle } from '../components/presence-field';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { 
@@ -51,8 +50,6 @@ import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
-import { getFirstRunStepById } from '../onboarding';
-import { useOnboardingStore } from '../stores/onboarding-store';
 import { useUiStore } from '../stores/ui-store';
 
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
@@ -80,23 +77,9 @@ import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 // ============================================================================
 
 export default function SessionPage() {
-  const firstRunStatus = useOnboardingStore((state) => state.firstRun.status);
-  const currentStepId = useOnboardingStore((state) => state.currentStepId);
-  const activeStep = getFirstRunStepById(currentStepId);
-  const showOnboardingSessionExperience = firstRunStatus === 'in_progress' && activeStep?.route === '/session';
-
   return (
     <ProtectedRoute>
-      {showOnboardingSessionExperience ? (
-        <div className="relative h-screen bg-[var(--bg)]">
-          <PresenceField />
-          <div className="relative z-10 h-full">
-            <OnboardingSessionExperience />
-          </div>
-        </div>
-      ) : (
-        <SessionPageContent />
-      )}
+      <SessionPageContent />
     </ProtectedRoute>
   );
 }

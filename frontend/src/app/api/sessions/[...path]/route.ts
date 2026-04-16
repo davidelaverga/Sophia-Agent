@@ -89,7 +89,7 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
     }
   }
 
-  if (backendResponse.status === 401 && method === 'GET' && path === 'active') {
+  if ((backendResponse.status === 401 || backendResponse.status === 404 || backendResponse.status === 405) && method === 'GET' && path === 'active') {
     return createAnonymousActiveSessionResponse();
   }
 
@@ -118,6 +118,11 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ path
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  const { path } = await params;
+  return proxyRequest(req, path || []);
+}
+
+export async function DELETE(req: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
   const { path } = await params;
   return proxyRequest(req, path || []);
 }

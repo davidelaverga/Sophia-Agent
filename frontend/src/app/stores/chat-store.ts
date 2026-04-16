@@ -327,13 +327,35 @@ export const useChatStore = create<ChatStore>()(persist((set, get) => ({
   },
 
   // Session persistence methods
-  // NOTE: Backend session loading endpoint not implemented yet
-  // This method is kept for future use but currently returns false
-  loadSession: async (_sessionId: string) => {
-    // Backend endpoint /api/v1/conversations/sessions/{id} is not implemented
-    // Return false to indicate session couldn't be loaded from backend
-    set({ isLoadingHistory: false, lastError: "Backend session loading not implemented" })
-    return false
+  loadSession: async (sessionId: string) => {
+    set({ isLoadingHistory: true, lastError: undefined })
+    try {
+      const { getSessionMessages } = await import("../lib/api/sessions-api")
+      const result = await getSessionMessages(sessionId)
+      if (!result.success) {
+        set({ isLoadingHistory: false, lastError: "error" in result ? result.error : "Unknown error" })
+        return false
+      }
+      const restored: ChatMessage[] = result.data.messages.map((m) => ({
+        id: m.id || createMessageId(),
+        role: m.role === "user" ? "user" : "sophia",
+        content: m.content,
+        createdAt: m.created_at ? new Date(m.created_at).getTime() : Date.now(),
+        status: "complete" as const,
+        source: "text" as const,
+      }))
+      set({
+        messages: restored,
+        conversationId: sessionId,
+        isLoadingHistory: false,
+        lastError: undefined,
+      })
+      return true
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Failed to load session"
+      set({ isLoadingHistory: false, lastError: msg })
+      return false
+    }
   },
   
   clearSession: () => {
