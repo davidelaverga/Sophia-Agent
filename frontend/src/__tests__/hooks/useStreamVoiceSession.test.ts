@@ -436,6 +436,30 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.stage).toBe("connecting")
   })
 
+  it("starts backend warmup as soon as prefetched credentials are ready", async () => {
+    vi.useFakeTimers()
+
+    renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+      await Promise.resolve()
+    })
+
+    expect(getFetchCalls("/api/sophia/user-1/voice/warmup", "POST")).toHaveLength(1)
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/warmup",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+        }),
+      }),
+    )
+  })
+
   it("disconnects an unused prefetched session on unmount", async () => {
     vi.useFakeTimers()
 
@@ -475,6 +499,39 @@ describe("useStreamVoiceSession", () => {
 
     expect(MockEventSource.latest?.url).toBe(
       "/api/sophia/user-1/voice/events?call_id=test-call-123&session_id=voice-session-123",
+    )
+  })
+
+  it("joins the Stream call automatically once credentials create the call instance", async () => {
+    mockCall = makeCallMock()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockJoin).toHaveBeenCalledTimes(1)
+  })
+
+  it("starts backend warmup immediately after a fresh voice connect", async () => {
+    mockCall = makeCallMock()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/warmup",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+        }),
+      }),
     )
   })
 

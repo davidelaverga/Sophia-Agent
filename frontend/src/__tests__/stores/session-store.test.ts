@@ -3,7 +3,15 @@
  * Critical: validates session lifecycle, persistence, and state management
  */
 
+import { waitFor } from '@testing-library/react';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+
+const getOpenSessionsMock = vi.fn();
+const listSessionsMock = vi.fn();
+const deleteSessionRecordMock = vi.fn();
+const endSessionMock = vi.fn();
+const clearChatSessionMock = vi.fn();
+const loadSessionMock = vi.fn();
 
 // Mock error-logger before importing store
 vi.mock('../../app/lib/error-logger', () => ({
@@ -15,17 +23,52 @@ vi.mock('../../app/lib/error-logger', () => ({
   },
 }));
 
+vi.mock('../../app/lib/api/sessions-api', () => ({
+  getOpenSessions: (...args: unknown[]) => getOpenSessionsMock(...args),
+  listSessions: (...args: unknown[]) => listSessionsMock(...args),
+  deleteSessionRecord: (...args: unknown[]) => deleteSessionRecordMock(...args),
+  endSession: (...args: unknown[]) => endSessionMock(...args),
+  isError: (result: { success: boolean }) => !result.success,
+}));
+
+vi.mock('../../app/stores/chat-store', () => ({
+  useChatStore: {
+    getState: () => ({
+      clearSession: clearChatSessionMock,
+      loadSession: loadSessionMock,
+    }),
+  },
+}));
+
 // Import after mocking
 import { useSessionStore } from '../../app/stores/session-store';
 
 describe('Session Store', () => {
   beforeEach(() => {
+    getOpenSessionsMock.mockReset();
+    listSessionsMock.mockReset();
+    deleteSessionRecordMock.mockReset();
+    endSessionMock.mockReset();
+    clearChatSessionMock.mockReset();
+    loadSessionMock.mockReset();
+    getOpenSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], count: 0 } });
+    listSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], total: 0 } });
+    deleteSessionRecordMock.mockResolvedValue({ success: true, data: { ok: true, session_id: 'sess-1' } });
+    endSessionMock.mockResolvedValue({ success: true, data: { ended_at: '2026-04-15T00:10:00.000Z', turn_count: 2 } });
+    loadSessionMock.mockResolvedValue(true);
+
     // Reset store state before each test
     const { clearSession, setError, setInitializing, setEnding } = useSessionStore.getState();
     clearSession();
     setError(null);
     setInitializing(false);
     setEnding(false);
+    useSessionStore.setState({
+      openSessions: [],
+      recentSessions: [],
+      isLoadingSessions: false,
+      lastOpenSessionsFetchAt: null,
+    });
     
     // Clear localStorage
     localStorage.clear();
@@ -130,6 +173,164 @@ describe('Session Store', () => {
     });
   });
 
+  describe('removeOpenSession', () => {
+    it('should delete the backend session record and clear local session state', async () => {
+      const { createSession, updateFromBackend, removeOpenSession } = useSessionStore.getState();
+
+      createSession('dev-user', 'prepare', 'gaming');
+      updateFromBackend('sess-1', 'thread-1');
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'prepare',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 2,
+          },
+        ],
+        recentSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'prepare',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 2,
+          },
+        ],
+        lastOpenSessionsFetchAt: Date.now(),
+      });
+
+      const deleted = await removeOpenSession('sess-1');
+
+      expect(deleted).toBe(true);
+      expect(endSessionMock).toHaveBeenCalledWith({
+        session_id: 'sess-1',
+        user_id: 'dev-user',
+        offer_debrief: false,
+      });
+      expect(deleteSessionRecordMock).toHaveBeenCalledWith('sess-1', 'dev-user');
+      expect(useSessionStore.getState().openSessions).toEqual([]);
+      expect(useSessionStore.getState().recentSessions).toEqual([]);
+      expect(useSessionStore.getState().session).toBeNull();
+      expect(useSessionStore.getState().lastOpenSessionsFetchAt).toBeNull();
+      expect(clearChatSessionMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('should preserve local state when backend deletion fails', async () => {
+      const { removeOpenSession } = useSessionStore.getState();
+      deleteSessionRecordMock.mockResolvedValue({
+        success: false,
+        error: 'boom',
+        code: 'SERVER_ERROR',
+      });
+
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'prepare',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 2,
+          },
+        ],
+      });
+
+      const deleted = await removeOpenSession('sess-1');
+
+      expect(deleted).toBe(false);
+      expect(useSessionStore.getState().openSessions).toHaveLength(1);
+      expect(clearChatSessionMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('restoreOpenSession', () => {
+    it('restores an existing backend session without inventing a new session id', async () => {
+      const { restoreOpenSession } = useSessionStore.getState();
+
+      await restoreOpenSession({
+        session_id: 'sess-existing',
+        thread_id: 'thread-existing',
+        session_type: 'prepare',
+        preset_context: 'gaming',
+        status: 'open',
+        started_at: '2026-04-15T00:00:00.000Z',
+        updated_at: '2026-04-15T00:05:00.000Z',
+        ended_at: null,
+        turn_count: 2,
+        title: 'Preparing for ranked tonight',
+        last_message_preview: 'I want to get ready for ranked tonight',
+        platform: 'text',
+        intention: 'Win two matches',
+        focus_cue: 'Stay calm',
+      }, 'dev-user');
+
+      const state = useSessionStore.getState();
+      expect(state.session?.sessionId).toBe('sess-existing');
+      expect(state.session?.threadId).toBe('thread-existing');
+      expect(state.openSessions[0]?.session_id).toBe('sess-existing');
+      expect(state.recentSessions[0]?.session_id).toBe('sess-existing');
+
+      await waitFor(() => {
+        expect(loadSessionMock).toHaveBeenCalledWith('sess-existing', 'dev-user');
+      });
+    });
+  });
+
+  describe('recordOpenSessionActivity', () => {
+    it('stores preview immediately and applies server title metadata when available', () => {
+      const { recordOpenSessionActivity } = useSessionStore.getState();
+
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'open',
+            preset_context: 'life',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:01:00.000Z',
+            turn_count: 0,
+            title: null,
+            last_message_preview: null,
+          },
+        ],
+      });
+
+      recordOpenSessionActivity('sess-1', {
+        messagePreview: 'i need to prepare for my investor meeting tomorrow',
+      });
+
+      let session = useSessionStore.getState().openSessions[0];
+      expect(session.last_message_preview).toBe('i need to prepare for my investor meeting tomorrow');
+      expect(session.title).toBeNull();
+      expect(session.turn_count).toBe(1);
+
+      recordOpenSessionActivity('sess-1', {
+        messagePreview: 'i need to prepare for my investor meeting tomorrow',
+        title: 'Preparing for my investor meeting tomorrow',
+        turnCount: 1,
+        updatedAt: '2026-04-15T00:02:00.000Z',
+      });
+
+      session = useSessionStore.getState().openSessions[0];
+      expect(session.last_message_preview).toBe('i need to prepare for my investor meeting tomorrow');
+      expect(session.title).toBe('Preparing for my investor meeting tomorrow');
+      expect(session.turn_count).toBe(1);
+    });
+  });
+
   describe('clearSession', () => {
     it('should completely remove session', () => {
       const { createSession, clearSession } = useSessionStore.getState();
@@ -158,6 +359,26 @@ describe('Session Store', () => {
       
       const state = useSessionStore.getState();
       expect(state.session?.artifacts?.takeaway).toBe('Great performance today');
+    });
+  });
+
+  describe('storeBuilderArtifact', () => {
+    it('should store builder artifacts in session state', () => {
+      const { createSession, storeBuilderArtifact } = useSessionStore.getState();
+
+      createSession('user-123', 'debrief', 'gaming');
+      storeBuilderArtifact({
+        artifactTitle: 'Postmortem draft',
+        artifactType: 'document',
+        artifactPath: 'mnt/user-data/outputs/postmortem.md',
+        decisionsMade: ['Removed the duplicate timeline'],
+      });
+
+      const state = useSessionStore.getState();
+      expect(state.session?.builderArtifact).toMatchObject({
+        artifactTitle: 'Postmortem draft',
+        artifactType: 'document',
+      });
     });
   });
 

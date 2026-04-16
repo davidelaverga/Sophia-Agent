@@ -13,9 +13,41 @@ from langgraph.typing import ContextT
 from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.agents.thread_state import ThreadState
 from deerflow.subagents import SubagentExecutor, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    build_subagent_progress_payload,
+    cleanup_background_task,
+    get_background_task_result,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_subagent_status(status: object) -> str:
+    """Return a lowercase status value for enum-like or string statuses."""
+    if isinstance(status, SubagentStatus):
+        return status.value.lower()
+
+    raw_value = getattr(status, "value", status)
+    if isinstance(raw_value, str):
+        return raw_value.lower()
+    return str(raw_value).lower()
+
+
+def _task_event_base(
+    *,
+    task_id: str,
+    description: str,
+    result,
+    poll_count: int,
+) -> dict:
+    return {
+        "task_id": task_id,
+        "description": description,
+        "status": _normalize_subagent_status(getattr(result, "status", None)),
+        "poll_count": poll_count,
+        **build_subagent_progress_payload(result),
+    }
 
 
 @tool("task", parse_docstring=True)
@@ -127,7 +159,19 @@ def task_tool(
 
     writer = get_stream_writer()
     # Send Task Started message'
-    writer({"type": "task_started", "task_id": task_id, "description": description})
+    started_result = get_background_task_result(task_id)
+    if started_result is not None:
+        writer({
+            "type": "task_started",
+            **_task_event_base(
+                task_id=task_id,
+                description=description,
+                result=started_result,
+                poll_count=poll_count,
+            ),
+        })
+    else:
+        writer({"type": "task_started", "task_id": task_id, "description": description})
 
     while True:
         result = get_background_task_result(task_id)
@@ -139,8 +183,16 @@ def task_tool(
             return f"Error: Task {task_id} disappeared from background tasks"
 
         # Log status changes for debugging
+        status_value = _normalize_subagent_status(result.status)
+        event_base = _task_event_base(
+            task_id=task_id,
+            description=description,
+            result=result,
+            poll_count=poll_count,
+        )
+
         if result.status != last_status:
-            logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
+            logger.info(f"[trace={trace_id}] Task {task_id} status: {status_value}")
             last_status = result.status
 
         # Check for new AI messages and send task_running events
@@ -152,28 +204,44 @@ def task_tool(
                 writer(
                     {
                         "type": "task_running",
-                        "task_id": task_id,
+                        **event_base,
                         "message": message,
                         "message_index": i + 1,  # 1-based index for display
                         "total_messages": current_message_count,
+                        "heartbeat": False,
                     }
                 )
                 logger.info(f"[trace={trace_id}] Task {task_id} sent message #{i + 1}/{current_message_count}")
             last_message_count = current_message_count
+        elif status_value in {"queued", "running", "pending"}:
+            writer(
+                {
+                    "type": "task_running",
+                    **event_base,
+                    "message_index": current_message_count,
+                    "total_messages": current_message_count,
+                    "heartbeat": True,
+                }
+            )
 
         # Check if task completed, failed, or timed out
-        if result.status == SubagentStatus.COMPLETED:
-            writer({"type": "task_completed", "task_id": task_id, "result": result.result})
+        if status_value == "completed":
+            writer({"type": "task_completed", **event_base, "result": result.result})
             logger.info(f"[trace={trace_id}] Task {task_id} completed after {poll_count} polls")
             cleanup_background_task(task_id)
             return f"Task Succeeded. Result: {result.result}"
-        elif result.status == SubagentStatus.FAILED:
-            writer({"type": "task_failed", "task_id": task_id, "error": result.error})
+        elif status_value == "cancelled":
+            writer({"type": "task_cancelled", **event_base, "error": result.error})
+            logger.info(f"[trace={trace_id}] Task {task_id} cancelled")
+            cleanup_background_task(task_id)
+            return f"Task cancelled. Reason: {result.error or 'Execution cancelled by user'}"
+        elif status_value == "failed":
+            writer({"type": "task_failed", **event_base, "error": result.error})
             logger.error(f"[trace={trace_id}] Task {task_id} failed: {result.error}")
             cleanup_background_task(task_id)
             return f"Task failed. Error: {result.error}"
-        elif result.status == SubagentStatus.TIMED_OUT:
-            writer({"type": "task_timed_out", "task_id": task_id, "error": result.error})
+        elif status_value == "timed_out":
+            writer({"type": "task_timed_out", **event_base, "error": result.error})
             logger.warning(f"[trace={trace_id}] Task {task_id} timed out: {result.error}")
             cleanup_background_task(task_id)
             return f"Task timed out. Error: {result.error}"
@@ -191,5 +259,5 @@ def task_tool(
         if poll_count > max_poll_count:
             timeout_minutes = config.timeout_seconds // 60
             logger.error(f"[trace={trace_id}] Task {task_id} polling timed out after {poll_count} polls (should have been caught by thread pool timeout)")
-            writer({"type": "task_timed_out", "task_id": task_id})
-            return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
+            writer({"type": "task_timed_out", **event_base, "error": result.error})
+            return f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {status_value}"

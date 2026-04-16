@@ -34,7 +34,6 @@ class SessionStateState(AgentState):
     turn_count: NotRequired[int]
     skip_expensive: NotRequired[bool]
     system_prompt_blocks: NotRequired[list[str]]
-    messages: NotRequired[list]
 
 
 class SessionStateMiddleware(AgentMiddleware[SessionStateState]):

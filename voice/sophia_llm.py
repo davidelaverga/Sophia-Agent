@@ -471,6 +471,10 @@ class SophiaLLM(LLM):
             self.settings.backend_mode,
         )
 
+    def note_backend_progress(self, user_id: str) -> None:
+        """Record meaningful backend progress that is not assistant text."""
+        return
+
     def note_backend_completed(self, user_id: str) -> None:
         backend_complete_ms = self._turn_diagnostics.note_backend_complete(
             user_id,
@@ -746,6 +750,8 @@ class SophiaLLM(LLM):
         first_token_ms: float | None = None
         artifact_seen = False
         backend_event_seen = False
+        progress_started = False
+        speech_started = False
 
         async for event in self._backend.stream_events(request):
             if not backend_event_seen:
@@ -779,7 +785,9 @@ class SophiaLLM(LLM):
                             time_to_first_token_ms=first_token_ms if sequence == 0 else None,
                         )
                     )
-                    if is_first_chunk:
+                    if is_first_chunk and not speech_started:
+                        speech_started = True
+                        progress_started = True
                         self._schedule_background_call_event(
                             self._emit_first_response_turn_events(request.user_id)
                         )
@@ -812,6 +820,21 @@ class SophiaLLM(LLM):
                     event_type="sophia.artifact",
                 )
                 artifact_seen = True
+                continue
+
+            if event.kind == "builder_task":
+                self.note_backend_progress(request.user_id)
+                if not progress_started:
+                    progress_started = True
+                    self._schedule_background_call_event(
+                        self.emit_pending_user_ended(request.user_id)
+                    )
+                    if self._call_emitter is not None:
+                        await asyncio.sleep(0)
+                await self._emit_call_event(
+                    {"type": "sophia.builder_task", "data": event.builder_task or {}},
+                    event_type="sophia.builder_task",
+                )
                 continue
 
             raise BackendStageError(

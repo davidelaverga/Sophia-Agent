@@ -13,7 +13,6 @@ import type {
 } from '../../types/session';
 import type { FeedbackType } from '../../types/sophia-ui-message';
 import { InterruptCardErrorBoundary } from '../error-boundaries';
-import { OnboardingTipGuard } from '../onboarding';
 import { StreamError } from '../ui';
 import { RetryAction } from '../ui/RetryAction';
 
@@ -246,7 +245,6 @@ export function SessionConversationPane({
 
             {pendingInterrupt && !isTyping && !isReadOnly && (
               <div className="animate-fadeIn">
-                <OnboardingTipGuard tipId="tip-first-interruption" isTriggered={Boolean(pendingInterrupt)} />
                 <InterruptCardErrorBoundary onDismiss={onInterruptDismiss}>
                   <InterruptCard
                     interrupt={pendingInterrupt}

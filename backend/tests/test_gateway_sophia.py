@@ -637,6 +637,228 @@ class TestVisualCategories:
 
 
 # ---------------------------------------------------------------------------
+# Background Task Control
+# ---------------------------------------------------------------------------
+
+class TestTaskStatus:
+    def test_returns_running_task_progress_and_diagnostics(self, client):
+        from types import SimpleNamespace
+
+        task_result = SimpleNamespace(
+            task_id="task-1",
+            trace_id="trace-1",
+            status=SimpleNamespace(value="running"),
+            started_at=None,
+            completed_at=None,
+            last_update_at=None,
+            last_progress_at=None,
+            result=None,
+            error=None,
+            ai_messages=[{"content": "working"}],
+            owner_id="test_user",
+            timeout_observed_during_stream=False,
+            timed_out_at=None,
+            final_state=None,
+            last_ai_message_summary={
+                "tool_names": ["search_web"],
+                "has_emit_builder_artifact": False,
+            },
+            late_ai_message_summary=None,
+        )
+        task_result.live_state = {
+            "todos": [
+                {"id": 1, "title": "Research sources", "status": "completed"},
+                {"id": 2, "title": "Draft the summary", "status": "in-progress"},
+            ],
+            "last_shell_command": {
+                "tool": "bash",
+                "status": "shell_unavailable",
+                "requested_command": "ls /mnt/user-data/workspace",
+                "error": "No suitable shell executable found.",
+            },
+            "recent_shell_commands": [
+                {
+                    "tool": "bash",
+                    "status": "shell_unavailable",
+                    "requested_command": "ls /mnt/user-data/workspace",
+                    "error": "No suitable shell executable found.",
+                }
+            ],
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=task_result),
+            patch(
+                "deerflow.subagents.executor.build_subagent_progress_payload",
+                return_value={
+                    "started_at": "2026-04-05T10:00:00+00:00",
+                    "completed_at": None,
+                    "last_update_at": "2026-04-05T10:00:28+00:00",
+                    "last_progress_at": "2026-04-05T10:00:27+00:00",
+                    "heartbeat_ms": 2000,
+                    "idle_ms": 3000,
+                    "is_stuck": False,
+                    "stuck_reason": None,
+                    "progress_percent": 50,
+                    "progress_source": "todos",
+                    "active_step_title": "Draft the summary",
+                    "todos": task_result.live_state["todos"],
+                    "total_steps": 2,
+                    "completed_steps": 1,
+                    "in_progress_steps": 1,
+                    "pending_steps": 0,
+                },
+            ),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-1"
+        assert data["status"] == "running"
+        assert data["progress_percent"] == 50
+        assert data["active_step_title"] == "Draft the summary"
+        assert data["debug"]["last_tool_names"] == ["search_web"]
+        assert data["debug"]["suspected_blocker"] == "tool_call"
+        assert data["debug"]["last_shell_command"]["status"] == "shell_unavailable"
+        assert data["debug"]["last_shell_command"]["requested_command"] == "ls /mnt/user-data/workspace"
+        assert data["debug"]["recent_shell_commands"][0]["error"] == "No suitable shell executable found."
+
+    def test_returns_completed_task_builder_result(self, client):
+        from types import SimpleNamespace
+
+        task_result = SimpleNamespace(
+            task_id="task-2",
+            trace_id="trace-2",
+            status=SimpleNamespace(value="completed"),
+            result="Deliverable ready.",
+            started_at=None,
+            completed_at=None,
+            last_update_at=None,
+            last_progress_at=None,
+            ai_messages=[{"content": "done"}],
+            owner_id="test_user",
+            error=None,
+            timeout_observed_during_stream=False,
+            timed_out_at=None,
+            live_state=None,
+            last_ai_message_summary=None,
+            late_ai_message_summary=None,
+        )
+        task_result.final_state = {
+            "builder_result": {
+                "artifact_title": "One-page brief",
+                "artifact_type": "brief",
+                "companion_summary": "Deliverable ready.",
+            },
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=task_result),
+            patch(
+                "deerflow.subagents.executor.build_subagent_progress_payload",
+                return_value={
+                    "started_at": "2026-04-05T10:00:00+00:00",
+                    "completed_at": "2026-04-05T10:00:44+00:00",
+                    "last_update_at": "2026-04-05T10:00:44+00:00",
+                    "last_progress_at": "2026-04-05T10:00:44+00:00",
+                    "heartbeat_ms": 0,
+                    "idle_ms": 0,
+                    "is_stuck": False,
+                    "stuck_reason": None,
+                    "progress_percent": 100,
+                    "progress_source": "todos",
+                    "active_step_title": None,
+                    "todos": [],
+                },
+            ),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-2")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "completed"
+        assert data["builder_result"]["artifact_title"] == "One-page brief"
+        assert data["detail"] == "Deliverable ready."
+        assert data["debug"]["builder_result_present"] is True
+        assert data["debug"]["suspected_blocker"] is None
+
+    def test_returns_persisted_task_snapshot_when_in_memory_state_is_unavailable(self, client):
+        persisted_payload = {
+            "task_id": "task-3",
+            "status": "running",
+            "trace_id": "trace-3",
+            "description": "Builder: concise draft document",
+            "detail": "Draft the summary",
+            "result": None,
+            "error": None,
+            "builder_result": None,
+            "message_count": 2,
+            "started_at": "2026-04-05T10:00:00+00:00",
+            "completed_at": None,
+            "last_update_at": "2026-04-05T10:00:28+00:00",
+            "last_progress_at": "2026-04-05T10:00:27+00:00",
+            "heartbeat_ms": 2000,
+            "idle_ms": 3000,
+            "is_stuck": False,
+            "stuck_reason": None,
+            "progress_percent": 50,
+            "progress_source": "todos",
+            "total_steps": 2,
+            "completed_steps": 1,
+            "in_progress_steps": 1,
+            "pending_steps": 0,
+            "active_step_title": "Draft the summary",
+            "todos": [
+                {"id": 1, "title": "Research sources", "status": "completed"},
+                {"id": 2, "title": "Draft the summary", "status": "in-progress"},
+            ],
+            "debug": {
+                "last_tool_names": ["write_todos"],
+                "last_has_emit_builder_artifact": False,
+                "late_tool_names": [],
+                "late_has_emit_builder_artifact": None,
+                "timeout_observed_during_stream": False,
+                "timed_out_at": None,
+                "final_state_present": False,
+                "builder_result_present": False,
+                "suspected_blocker": "tool_call",
+                "suspected_blocker_detail": "Latest captured Builder step called write_todos and has not reached emit_builder_artifact yet.",
+                "last_shell_command": {
+                    "tool": "bash",
+                    "status": "timed_out",
+                    "requested_command": "python /mnt/user-data/workspace/script.py",
+                    "error": "Command exceeded 600 seconds",
+                },
+                "recent_shell_commands": [
+                    {
+                        "tool": "bash",
+                        "status": "timed_out",
+                        "requested_command": "python /mnt/user-data/workspace/script.py",
+                        "error": "Command exceeded 600 seconds",
+                    }
+                ],
+            },
+            "owner_id": "test_user",
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=persisted_payload),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-3")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-3"
+        assert data["status"] == "running"
+        assert data["description"] == "Builder: concise draft document"
+        assert data["progress_percent"] == 50
+        assert data["debug"]["last_tool_names"] == ["write_todos"]
+        assert data["debug"]["last_shell_command"]["status"] == "timed_out"
+
+
+# ---------------------------------------------------------------------------
 # Session End
 # ---------------------------------------------------------------------------
 

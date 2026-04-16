@@ -13,6 +13,7 @@ export type VoiceStateProps = {
   startTalking?: () => Promise<void>
   stopTalking: () => Promise<void> | void
   bargeIn: () => void
+  softBargeIn: () => void
   unlockAudio?: () => void
   resetVoiceState?: () => void
 }

@@ -1,4 +1,6 @@
 import type { StreamArtifactsPayload } from '../session/stream-contract-adapters';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
 
@@ -21,6 +23,8 @@ export type UseCompanionChatRuntimeParams = {
 
 export type UseCompanionStreamContractParams = {
   ingestArtifacts: (incoming: StreamArtifactsPayload, source: CompanionArtifactSource) => void;
+  setBuilderArtifact: (artifact: BuilderArtifactV1 | null) => void;
+  setBuilderTask: (task: BuilderTaskV1 | null) => void;
   setInterrupt: (interrupt: InterruptPayload) => void;
   setCurrentContext: (threadId: string, sessionId: string, runId?: string) => void;
   setMessageMetadata: (messageId: string, metadata: Partial<SophiaMessageMetadata>) => void;
@@ -45,6 +49,8 @@ export type UseCompanionVoiceRuntimeOptions = {
   onUserTranscriptFallback: (text: string) => void;
   appendAssistantMessage: (text: string, suppressAssistantResponse: boolean) => void;
   ingestArtifacts: (artifacts: StreamArtifactsPayload, source: 'voice' | 'interrupt') => void;
+  setBuilderArtifact?: (artifact: BuilderArtifactV1 | null) => void;
+  setBuilderTask?: (task: BuilderTaskV1 | null) => void;
   onRateLimitError: (payload: {
     message: string;
     remaining?: number;

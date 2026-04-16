@@ -19,7 +19,6 @@ import {
   type MemoryDecision,
 } from '../../lib/recap-types';
 import { cn } from '../../lib/utils';
-import { OnboardingTipGuard } from '../onboarding';
 
 import {
   getOrbitCandidateBuckets,
@@ -2248,9 +2247,6 @@ export function RecapCosmicPoolOrbit({
 
   return (
     <div className={cn('relative min-h-screen overflow-hidden bg-[var(--bg)]', className)}>
-      <OnboardingTipGuard tipId="tip-first-recap" isTriggered={Boolean(takeaway || reflectionPrompt || normalizedCandidates.length > 0)} />
-      <OnboardingTipGuard tipId="tip-first-memory-candidate" isTriggered={normalizedCandidates.length > 0} />
-
       <AuroraBackground />
       <CosmicPool
         ripples={ripples}

@@ -16,7 +16,6 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 
 class TurnCountState(AgentState):
     turn_count: NotRequired[int]
-    messages: NotRequired[list]
 
 
 class TurnCountMiddleware(AgentMiddleware[TurnCountState]):

@@ -1,6 +1,6 @@
 "use client"
 
-import { Send, Loader2 } from "lucide-react"
+import { Loader2, Send } from "lucide-react"
 import { useCallback, useMemo, useState, useEffect, type RefObject, type KeyboardEventHandler, type ClipboardEventHandler } from "react"
 import { useShallow } from "zustand/react/shallow"
 
@@ -186,10 +186,12 @@ export function Composer({ textareaRef, onFocusChange }: ComposerProps) {
             </div>
           )}
 
-          <div className="flex items-center justify-between">
-            <p className="text-sm text-sophia-text2 transition-all duration-300">
-              {isModalOpen ? "Usage limit reached" : (presenceDetail ?? t(getPresenceCopyKey(presenceStatus)))}
-            </p>
+          <div className="flex flex-wrap items-end justify-between gap-3">
+            <div className="space-y-2">
+              <p className="text-sm text-sophia-text2 transition-all duration-300">
+                {isModalOpen ? "Usage limit reached" : (presenceDetail ?? t(getPresenceCopyKey(presenceStatus)))}
+              </p>
+            </div>
             <button
               type="button"
               onClick={handleSend}

@@ -9,10 +9,10 @@ vi.mock('../../app/lib/auth/server-auth', () => ({
   getUserScopedAuthHeader: (...args: unknown[]) => getUserScopedAuthHeaderMock(...args),
 }));
 
-import { GET as connectGET } from '../../app/api/sophia/[userId]/voice/connect/route';
 import { POST as connectPOST } from '../../app/api/sophia/[userId]/voice/connect/route';
 import { POST as disconnectPOST } from '../../app/api/sophia/[userId]/voice/disconnect/route';
 import { GET as eventsGET } from '../../app/api/sophia/[userId]/voice/events/route';
+import { POST as warmupPOST } from '../../app/api/sophia/[userId]/voice/warmup/route';
 
 describe('voice session proxy routes', () => {
   beforeEach(() => {
@@ -74,19 +74,27 @@ describe('voice session proxy routes', () => {
     expect(response.status).toBe(200);
   });
 
-  it('warms the voice connect route without proxying to the backend', async () => {
-    const fetchMock = vi.spyOn(global, 'fetch');
+  it('proxies voice warmup with the user-scoped bearer token for the matching user', async () => {
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(null, {
+        status: 204,
+      }),
+    );
 
-    const response = await connectGET(
+    const response = await warmupPOST(
       {
-        nextUrl: new URL('http://localhost:3000/api/sophia/user-1/voice/connect'),
+        nextUrl: new URL('http://localhost:3000/api/sophia/user-1/voice/warmup'),
+        text: async () => JSON.stringify({ call_id: 'call-123', session_id: 'session-456' }),
       } as unknown as NextRequest,
       { params: Promise.resolve({ userId: 'user-1' }) },
     );
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, authReady: true, userId: 'user-1' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/api/sophia/user-1/voice/warmup');
+    expect((options.headers as Record<string, string>).Authorization).toBe('Bearer scoped-token');
+    expect(options.body).toBe(JSON.stringify({ call_id: 'call-123', session_id: 'session-456' }));
+    expect(response.status).toBe(204);
   });
 
   it('proxies voice disconnect with the user-scoped bearer token for the matching user', async () => {

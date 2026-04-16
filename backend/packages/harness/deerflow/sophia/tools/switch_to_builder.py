@@ -5,15 +5,20 @@ structured handoff payload immediately. Completion is handled by companion-side
 state middleware that polls background task status.
 """
 
+from __future__ import annotations
+
 import datetime as dt
 import json
 import logging
+import re
+import time
 import uuid
 from dataclasses import replace
 from typing import Annotated, Any, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
 
@@ -25,10 +30,61 @@ from deerflow.sophia.builder_web_policy import (
     should_allow_builder_web_research,
 )
 from deerflow.subagents import SubagentExecutor, get_subagent_config
+from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "SubagentExecutor",
+    "SubagentStatus",
+    "cleanup_background_task",
+    "get_background_task_result",
+    "get_subagent_config",
+    "make_switch_to_builder_tool",
+    "switch_to_builder",
+    "time",
+]
+
 _NON_TERMINAL_TASK_STATUSES = {"queued", "running", "started"}
+
+_BUILDER_DEMO_MARKERS = (
+    "test builder",
+    "testing builder",
+    "builder flow",
+    "builder mode",
+    "builder functionality",
+    "builder working",
+    "show me builder",
+    "see builder work",
+    "see builder working",
+    "feature working",
+    "feature in action",
+    "sample project",
+    "demo builder",
+    "quick builder demo",
+    "test/exploration mode",
+)
+
+_BUILDER_GENERIC_DEMO_MARKERS = (
+    "quick draft",
+    "make anything",
+    "anything simple",
+    "just wanna see",
+    "just want to see",
+    "show me it working",
+    "show it working",
+)
+
+_PROGRESS_TOPIC_RE = re.compile(r"\bTopic:\s*(.+?)(?:\.\s|$)", re.IGNORECASE)
+_PROGRESS_ORIGINAL_REQUEST_RE = re.compile(r"\bOriginal request:\s*(.+?)(?:\s+Topic:|$)", re.IGNORECASE)
+_PROGRESS_COMMAND_RE = re.compile(
+    r"(?:create|make|draft|write|generate|build|research|prepare|design|produce)\s+(.+)",
+    re.IGNORECASE,
+)
+_PROGRESS_LEADING_ARTICLE_RE = re.compile(r"^(?:a|an|the)\s+", re.IGNORECASE)
+_PROGRESS_WHITESPACE_RE = re.compile(r"\s+")
+_PROGRESS_TRAILING_PUNCTUATION_RE = re.compile(r"[\s.:;,-]+$")
+_PROGRESS_MAX_LENGTH = 88
 
 
 class SwitchToBuilderInput(BaseModel):
@@ -88,7 +144,11 @@ def _resolve_memory_snippets(state: SophiaState) -> list[str]:
     return fallbacks
 
 
-def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: SophiaState) -> tuple[str, str, dict[str, bool]]:
+def _resolve_user_id(
+    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    state: SophiaState,
+    configured_user_id: str | None = None,
+) -> tuple[str, str, dict[str, bool]]:
     """Resolve user_id and return source diagnostics."""
     configurable_user_id: str | None = None
     context_user_id: str | None = None
@@ -111,6 +171,7 @@ def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: 
         state_user_id = candidate
 
     diagnostics = {
+        "configured_user_id_present": bool(configured_user_id),
         "config_user_id_present": bool(configurable_user_id),
         "context_user_id_present": bool(context_user_id),
         "state_user_id_present": bool(state_user_id),
@@ -122,6 +183,8 @@ def _resolve_user_id(runtime: ToolRuntime[ContextT, SophiaState] | None, state: 
         return validate_user_id(context_user_id), "runtime.context.user_id", diagnostics
     if state_user_id:
         return validate_user_id(state_user_id), "state.user_id", diagnostics
+    if configured_user_id:
+        return validate_user_id(configured_user_id), "configured_builder_user_id", diagnostics
     return validate_user_id("default_user"), "default_user", diagnostics
 
 
@@ -176,13 +239,154 @@ def _build_duplicate_payload(existing_task: dict, task_type: str, trace_id: str)
     }
 
 
-@tool(args_schema=SwitchToBuilderInput)
-def switch_to_builder(
+def _normalize_background_status(status: Any) -> str:
+    value = getattr(status, "value", status)
+    return value.lower() if isinstance(value, str) else "unknown"
+
+
+def _extract_builder_result(result: Any) -> dict[str, Any]:
+    final_state = getattr(result, "final_state", None)
+    if isinstance(final_state, dict):
+        builder_result = final_state.get("builder_result")
+        if isinstance(builder_result, dict) and builder_result:
+            return builder_result
+
+    for message in reversed(getattr(result, "ai_messages", []) or []):
+        tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
+        for tool_call in reversed(tool_calls):
+            if tool_call.get("name") != "emit_builder_artifact":
+                continue
+            args = tool_call.get("args")
+            if isinstance(args, dict) and args:
+                return args
+
+    return {
+        "artifact_path": None,
+        "artifact_type": "unknown",
+        "artifact_title": "Build task completed",
+        "steps_completed": 0,
+        "decisions_made": [],
+        "companion_summary": getattr(result, "result", None) or "The build task was completed.",
+        "companion_tone_hint": "Neutral",
+        "user_next_action": None,
+        "confidence": 0.3,
+    }
+
+
+def _build_terminal_tool_message(status: str, builder_result: dict[str, Any] | None, error: str | None) -> str:
+    if status == "completed":
+        title = builder_result.get("artifact_title") if isinstance(builder_result, dict) else None
+        payload = json.dumps(builder_result or {}, ensure_ascii=True, sort_keys=True)
+        lines = ["Builder completed successfully."]
+        if title:
+            lines.append(f"Artifact title: {title}")
+        lines.append(f"Artifact payload: {payload}")
+        return "\n".join(lines)
+
+    if status == "timed_out":
+        return f"Builder timed out. {error or 'The delegated task exceeded its time budget.'}"
+
+    if status == "cancelled":
+        return f"Builder was cancelled. {error or 'The delegated task did not complete.'}"
+
+    return f"Builder failed. {error or 'The delegated task did not complete successfully.'}"
+
+
+def _build_terminal_command(
+    *,
+    task_id: str,
+    tool_call_id: str,
+    task_type: str,
+    progress_description: str,
+    trace_id: str,
+    delegated_at: str,
+    delegation_context: dict[str, Any],
+    handoff_resolution: dict[str, Any],
+    result: Any,
+) -> Command:
+    status = _normalize_background_status(getattr(result, "status", None))
+    builder_result = _extract_builder_result(result) if status == "completed" else None
+    builder_task = {
+        "task_id": task_id,
+        "description": progress_description,
+        "task_type": task_type,
+        "delegated_at": delegated_at,
+        "status": status,
+        "trace_id": trace_id,
+        "handoff_resolution": handoff_resolution,
+    }
+    completed_at = getattr(result, "completed_at", None)
+    if completed_at is not None:
+        builder_task["completed_at"] = completed_at.isoformat()
+
+    error = getattr(result, "error", None)
+    if error:
+        builder_task["error"] = error
+
+    return Command(
+        update={
+            "builder_task": builder_task,
+            "builder_result": builder_result,
+            "delegation_context": delegation_context,
+            "active_mode": "companion",
+            "messages": [
+                ToolMessage(
+                    content=_build_terminal_tool_message(status, builder_result, error),
+                    tool_call_id=tool_call_id or task_id,
+                    name="switch_to_builder",
+                )
+            ],
+        }
+    )
+
+
+def _maybe_return_terminal_command(
+    *,
+    task_id: str,
+    tool_call_id: str,
+    task_type: str,
+    progress_description: str,
+    trace_id: str,
+    delegated_at: str,
+    delegation_context: dict[str, Any],
+    handoff_resolution: dict[str, Any],
+) -> Command | None:
+    result = get_background_task_result(task_id)
+    if result is None:
+        return None
+
+    raw_status = getattr(result, "status", None)
+    known_statuses = {
+        getattr(SubagentStatus, "COMPLETED", None): "completed",
+        getattr(SubagentStatus, "FAILED", None): "failed",
+        getattr(SubagentStatus, "TIMED_OUT", None): "timed_out",
+        getattr(SubagentStatus, "CANCELLED", None): "cancelled",
+    }
+    status = known_statuses.get(raw_status) or _normalize_background_status(raw_status)
+    if status not in {"completed", "failed", "timed_out", "cancelled"}:
+        return None
+
+    cleanup_background_task(task_id)
+    return _build_terminal_command(
+        task_id=task_id,
+        tool_call_id=tool_call_id,
+        task_type=task_type,
+        progress_description=progress_description,
+        trace_id=trace_id,
+        delegated_at=delegated_at,
+        delegation_context=delegation_context,
+        handoff_resolution=handoff_resolution,
+        result=result,
+    )
+
+
+def _switch_to_builder_impl(
     task: str,
     task_type: str,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
-) -> str:
+    configured_user_id: str | None = None,
+) -> str | Command:
     """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
     something requiring file creation or multi-step execution.
     Do NOT call for emotional conversation, reflection, or memory tasks.
@@ -206,7 +410,7 @@ def switch_to_builder(
         return json.dumps(_build_duplicate_payload(existing_task, task_type, trace_id))
 
     companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
-    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(runtime, state)
+    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(runtime, state, configured_user_id)
     handoff_resolution = {
         "user_id_source": user_id_source,
         "artifact_source": artifact_source,
@@ -216,6 +420,15 @@ def switch_to_builder(
     active_ritual = state.get("active_ritual")
     ritual_phase = state.get("ritual_phase")
     memory_snippets = _resolve_memory_snippets(state)
+    task, task_type, demo_mode = _normalize_builder_request(
+        task=task,
+        task_type=task_type,
+        companion_artifact=companion_artifact,
+    )
+    progress_description = _build_builder_progress_description(task, task_type, demo_mode)
+    if demo_mode:
+        logger.info("[Builder] normalized generic demo request to deterministic document flow")
+
     allow_web_research = should_allow_builder_web_research(task_type, task)
     explicit_user_urls = extract_explicit_user_urls(task)
     builder_web_budget = make_builder_web_budget(task_type)
@@ -246,7 +459,6 @@ def switch_to_builder(
         handoff_resolution["current_artifact_present"],
         handoff_resolution["previous_artifact_present"],
     )
-
     delegation_context = {
         "task": task,
         "task_type": task_type,
@@ -282,7 +494,13 @@ def switch_to_builder(
         )
 
     # Builder execution guardrails
-    config = replace(config, max_turns=50, timeout_seconds=120, name="sophia_builder")
+    max_turns, timeout_seconds = _resolve_builder_limits(demo_mode)
+    config = replace(
+        config,
+        max_turns=max_turns,
+        timeout_seconds=timeout_seconds,
+        name="sophia_builder",
+    )
 
     executor = SubagentExecutor(
         config=config,
@@ -297,21 +515,42 @@ def switch_to_builder(
     )
 
     task_id = tool_call_id or str(uuid.uuid4())[:8]
-    executor.execute_async(task, task_id=task_id)
+    delegated_at = _utcnow_iso()
+    try:
+        executor.execute_async(task, task_id=task_id, owner_id=user_id, description=progress_description)
+    except TypeError:
+        try:
+            executor.execute_async(task, task_id=task_id, owner_id=user_id)
+        except TypeError:
+            executor.execute_async(task, task_id=task_id)
+    logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
 
     try:
         from langgraph.config import get_stream_writer
 
         writer = get_stream_writer()
-        writer({"type": "task_started", "task_id": task_id, "description": f"Builder: {task_type}"})
+        writer({"type": "task_started", "task_id": task_id, "description": progress_description})
     except Exception:
         pass
 
+    terminal_command = _maybe_return_terminal_command(
+        task_id=task_id,
+        tool_call_id=tool_call_id,
+        task_type=task_type,
+        progress_description=progress_description,
+        trace_id=trace_id,
+        delegated_at=delegated_at,
+        delegation_context=delegation_context,
+        handoff_resolution=handoff_resolution,
+    )
+    if terminal_command is not None:
+        return terminal_command
+
     builder_task = {
         "task_id": task_id,
-        "description": task,
+        "description": progress_description,
         "task_type": task_type,
-        "delegated_at": _utcnow_iso(),
+        "delegated_at": delegated_at,
         "status": "queued",
         "trace_id": trace_id,
         "handoff_resolution": handoff_resolution,
@@ -330,3 +569,176 @@ def switch_to_builder(
         "handoff_resolution": handoff_resolution,
     }
     return json.dumps(payload)
+
+
+@tool(args_schema=SwitchToBuilderInput)
+def switch_to_builder(
+    task: str,
+    task_type: str,
+    runtime: ToolRuntime[ContextT, SophiaState] | None = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> str | Command:
+    """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
+    something requiring file creation or multi-step execution.
+    Do NOT call for emotional conversation, reflection, or memory tasks.
+    Before calling this, ensure you have complete specs — ask any clarifying
+    questions first, then delegate with the complete brief."""
+
+    return _switch_to_builder_impl(
+        task=task,
+        task_type=task_type,
+        runtime=runtime,
+        tool_call_id=tool_call_id,
+    )
+
+
+def make_switch_to_builder_tool(configured_user_id: str):
+    bound_user_id = validate_user_id(configured_user_id)
+
+    @tool("switch_to_builder", args_schema=SwitchToBuilderInput)
+    def configured_switch_to_builder(
+        task: str,
+        task_type: str,
+        runtime: ToolRuntime[ContextT, SophiaState] | None = None,
+        tool_call_id: Annotated[str, InjectedToolCallId] = "",
+    ) -> str | Command:
+        """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
+        something requiring file creation or multi-step execution.
+        Do NOT call for emotional conversation, reflection, or memory tasks.
+        Before calling this, ensure you have complete specs — ask any clarifying
+        questions first, then delegate with the complete brief."""
+
+        return _switch_to_builder_impl(
+            task=task,
+            task_type=task_type,
+            runtime=runtime,
+            tool_call_id=tool_call_id,
+            configured_user_id=bound_user_id,
+        )
+
+    return configured_switch_to_builder
+
+
+def _normalize_builder_request(
+    task: str,
+    task_type: str,
+    companion_artifact: dict,
+) -> tuple[str, str, bool]:
+    """Coerce underspecified Builder demo requests into a small deterministic task."""
+    if not _should_use_demo_builder_task(task, task_type, companion_artifact):
+        return task, task_type, False
+
+    return _build_demo_builder_task(), "document", True
+
+
+def _build_builder_progress_description(task: str, task_type: str, demo_mode: bool) -> str:
+    """Return a short user-facing description for Builder lifecycle events."""
+    if demo_mode:
+        return "Builder: demo document deliverable"
+
+    summary = _extract_progress_summary(task, task_type)
+    if not summary:
+        summary = task_type.replace("_", " ")
+
+    return f"Builder: {_truncate_progress_summary(summary)}"
+
+
+def _extract_progress_summary(task: str, task_type: str) -> str:
+    normalized_task = _PROGRESS_WHITESPACE_RE.sub(" ", task).strip()
+    if not normalized_task:
+        return ""
+
+    if task_type == "document":
+        topic_match = _PROGRESS_TOPIC_RE.search(normalized_task)
+        if topic_match:
+            topic = _clean_progress_text(topic_match.group(1))
+            if topic:
+                return f"document about {topic}"
+
+    original_request_match = _PROGRESS_ORIGINAL_REQUEST_RE.search(normalized_task)
+    if original_request_match:
+        summary = _summarize_progress_request(original_request_match.group(1))
+        if summary:
+            return summary
+
+    summary = _summarize_progress_request(normalized_task)
+    if summary:
+        return summary
+
+    return task_type.replace("_", " ")
+
+
+def _summarize_progress_request(text: str) -> str:
+    cleaned = _clean_progress_text(text)
+    if not cleaned:
+        return ""
+
+    command_match = _PROGRESS_COMMAND_RE.search(cleaned)
+    if command_match:
+        cleaned = command_match.group(1)
+
+    cleaned = _PROGRESS_LEADING_ARTICLE_RE.sub("", cleaned).strip()
+    return _clean_progress_text(cleaned)
+
+
+def _clean_progress_text(text: str) -> str:
+    cleaned = _PROGRESS_WHITESPACE_RE.sub(" ", text).strip(" \t\r\n\"'")
+    cleaned = _PROGRESS_TRAILING_PUNCTUATION_RE.sub("", cleaned)
+    return cleaned.strip()
+
+
+def _truncate_progress_summary(text: str) -> str:
+    if len(text) <= _PROGRESS_MAX_LENGTH:
+        return text
+
+    truncated = text[: _PROGRESS_MAX_LENGTH - 3].rsplit(" ", 1)[0].strip()
+    if not truncated:
+        truncated = text[: _PROGRESS_MAX_LENGTH - 3].strip()
+    return f"{truncated}..."
+
+
+def _should_use_demo_builder_task(
+    task: str,
+    task_type: str,
+    companion_artifact: dict,
+) -> bool:
+    """Detect explicit Builder smoke-test turns that should avoid open-ended work."""
+    if task_type not in {"frontend", "research", "document"}:
+        return False
+
+    artifact_text = " ".join(
+        str(companion_artifact.get(field, ""))
+        for field in ("session_goal", "active_goal", "takeaway")
+    )
+    combined = f"{task} {artifact_text}".lower()
+
+    if any(marker in combined for marker in _BUILDER_DEMO_MARKERS):
+        return True
+
+    return "builder" in combined and any(
+        marker in combined for marker in _BUILDER_GENERIC_DEMO_MARKERS
+    )
+
+
+def _build_demo_builder_task() -> str:
+    """Return a small Builder task that proves the end-to-end flow quickly."""
+    return (
+        "Create exactly one markdown file named builder-demo.md in the outputs directory. "
+        "Keep it under 180 words and do not ask clarifying questions. "
+        "Use default placeholder content that demonstrates Builder completed a task successfully. "
+        "Use this structure: '# Builder Demo', '## What Sophia generated', '## Assumptions used', and '## Next step'. "
+        "After writing the file, call emit_builder_artifact as your final action with artifact_path='outputs/builder-demo.md', "
+        "artifact_type='document', artifact_title='Builder Demo Deliverable', steps_completed=3, "
+        "decisions_made=['Used a minimal markdown deliverable', 'Filled missing specs with defaults'], "
+        "companion_summary='Created a quick demo deliverable from defaults so the Builder flow can be verified.', "
+        "companion_tone_hint='Confident', user_next_action='Open or download the file, then ask for a real deliverable next.', "
+        "confidence=0.82. Create no other files and do not run extra commands."
+    )
+
+
+def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int]:
+    """Return recursion and timeout budgets for the delegated Builder task."""
+    if demo_mode:
+        return 16, 45
+
+    return 50, 120

@@ -37,7 +37,7 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
     stream, 
     startTalking, 
     stopTalking, 
-    bargeIn 
+    softBargeIn 
   } = voiceState
   
   // Use unified voice toggle hook (start-recording behavior for focus view)
@@ -107,7 +107,7 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
             <button
               type="button"
               className="flex items-center gap-2 rounded-full border border-sophia-surface-border px-3 py-1.5 text-xs font-medium text-sophia-text hover:bg-sophia-purple/10 transition-colors duration-200"
-              onClick={bargeIn}
+              onClick={softBargeIn}
             >
               <Square className="h-3 w-3" />
               {t("voicePanel.interrupt")}

@@ -6,7 +6,7 @@ import { getSessionGreetingMessage } from '../lib/time-greetings';
 import { isUuid } from '../lib/utils';
 import { useChatStore } from '../stores/chat-store';
 import { useMessageMetadataStore } from '../stores/message-metadata-store';
-import { useSessionStore, selectSession, selectArtifacts, selectMessages } from '../stores/session-store';
+import { useSessionStore, selectSession, selectArtifacts, selectBuilderArtifact, selectMessages } from '../stores/session-store';
 import type { MemoryHighlight } from '../types/session';
 
 interface UseSessionPageContextParams {
@@ -22,10 +22,12 @@ export function useSessionPageContext({
 }: UseSessionPageContextParams) {
   const session = useSessionStore(selectSession);
   const artifacts = useSessionStore(selectArtifacts);
+  const builderArtifact = useSessionStore(selectBuilderArtifact);
   const storedMessages = useSessionStore(selectMessages);
   const updateMessages = useSessionStore((state) => state.updateMessages);
   const updateSession = useSessionStore((state) => state.updateSession);
   const storeArtifacts = useSessionStore((state) => state.storeArtifacts);
+  const storeBuilderArtifact = useSessionStore((state) => state.storeBuilderArtifact);
   const endSession = useSessionStore((state) => state.endSession);
   const clearSession = useSessionStore((state) => state.clearSession);
   const pauseSession = useSessionStore((state) => state.pauseSession);
@@ -94,10 +96,12 @@ export function useSessionPageContext({
   return {
     session,
     artifacts,
+    builderArtifact,
     storedMessages,
     updateMessages,
     updateSession,
     storeArtifacts,
+    storeBuilderArtifact,
     endSession,
     clearSession,
     pauseSession,

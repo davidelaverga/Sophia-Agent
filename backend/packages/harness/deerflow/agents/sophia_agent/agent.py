@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
@@ -34,7 +35,7 @@ from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
-from deerflow.sophia.tools.switch_to_builder import switch_to_builder
+from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,7 @@ def make_sophia_agent(config: RunnableConfig):
         model="claude-haiku-4-5-20251001",
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=512 if voice_mode else 4096,
+        timeout=60.0,
     )
 
     # Middleware chain — order is load-bearing.
@@ -130,6 +132,8 @@ def make_sophia_agent(config: RunnableConfig):
         BuilderSessionMiddleware(),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
+        # 15. Deterministic Builder command routing for explicit document requests
+        BuilderCommandMiddleware(),
     ]
 
     # 16. Summarization (config-driven trigger/keep policy)
@@ -156,6 +160,7 @@ def make_sophia_agent(config: RunnableConfig):
     )
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
+    switch_to_builder = make_switch_to_builder_tool(user_id)
     tools = [emit_artifact, switch_to_builder, retrieve_memories]
 
     agent = create_agent(

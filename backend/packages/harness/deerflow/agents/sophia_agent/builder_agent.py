@@ -12,8 +12,8 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
@@ -72,14 +72,21 @@ def _create_builder_todo_middleware() -> TodoMiddleware:
         system_prompt="""
 <builder_todo_system>
 You are the Sophia builder. Keep a live todo list while executing delegated build tasks.
-- Create and maintain todos for non-trivial build execution.
+- Use `write_todos` only for genuinely multi-step work.
+- Create the initial todo list once near the start, then keep working.
+- Do NOT rewrite the todo list after every small tool call.
+- Update todos only when the plan materially changes, a major milestone finishes, or right before the final handoff.
 - Keep at least one item in progress until the task is finished.
-- Mark items completed immediately after you finish them.
+- Mark items completed as soon as a meaningful step is done.
 </builder_todo_system>
 """,
         tool_description=(
             "Use this tool to maintain your execution todo list while building. "
-            "Update task status continuously as work progresses."
+            "Create it once for multi-step work, then update it only at meaningful milestones."
+        ),
+        reminder_instruction=(
+            "Only call `write_todos` again if the plan materially changed, a major milestone finished, "
+            "or you are preparing the final handoff."
         ),
     )
 
@@ -106,6 +113,17 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         model=resolved_model,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
+        # streaming=True is critical: without it, the Anthropic SDK makes a
+        # synchronous HTTP request and waits for the ENTIRE response before
+        # returning any data.  For Sonnet generating large documents (5k+
+        # tokens) this routinely takes 45-90s of server-side generation,
+        # during which zero bytes flow over the wire — triggering the HTTP
+        # read timeout.  With streaming, tokens arrive incrementally (~100ms
+        # apart) keeping the connection alive regardless of total generation
+        # time.
+        streaming=True,
+        timeout=120.0,
+        max_retries=2,
     )
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     middlewares.extend(
@@ -146,8 +164,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         middleware=middlewares,
         state_schema=SophiaState,
     )
-    # Builder needs enough steps for multi-file creation.
-    # Each tool call = ~3 graph steps. 50 steps ≈ 16 tool turns.
-    # The 120s timeout in switch_to_builder is the real safety net.
-    agent.recursion_limit = 50
+    # Keep a slightly roomier built-agent ceiling for direct invocations.
+    # The delegated Builder path still enforces its runtime budget through
+    # switch_to_builder -> SubagentExecutor.config.max_turns.
+    agent.recursion_limit = 80
     return agent

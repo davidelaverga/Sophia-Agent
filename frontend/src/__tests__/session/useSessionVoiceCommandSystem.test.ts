@@ -7,12 +7,14 @@ import { useSessionVoiceCommandSystem } from '../../app/session/useSessionVoiceC
 function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommandSystem>[0]> = {}) {
   const onUserTranscript = vi.fn();
   const handleReflectionTap = vi.fn();
+  const handleDownloadBuilderArtifact = vi.fn(() => true);
   const handleInterruptSelectWithRetry = vi.fn(async () => {});
   const handleInterruptDismiss = vi.fn();
   const handleInterruptSnooze = vi.fn();
   const handleVoiceEndSession = vi.fn(async () => {});
   const showToast = vi.fn();
   const bargeIn = vi.fn();
+  const softBargeIn = vi.fn();
 
   const pendingInterrupt: InterruptPayload = {
     kind: 'DEBRIEF_OFFER',
@@ -29,6 +31,8 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
     onUserTranscript,
     reflectionCandidate: { prompt: 'What did you learn?', why: 'growth' },
     handleReflectionTap,
+    canDownloadBuilderArtifact: false,
+    handleDownloadBuilderArtifact,
     pendingInterrupt,
     isResuming: false,
     handleInterruptSelectWithRetry,
@@ -37,7 +41,7 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
     isEnding: false,
     isReadOnly: false,
     handleVoiceEndSession,
-    voiceState: { bargeIn },
+    voiceState: { bargeIn, softBargeIn },
     showToast,
     ...overrides,
   };
@@ -46,12 +50,14 @@ function buildParams(overrides: Partial<Parameters<typeof useSessionVoiceCommand
     params,
     onUserTranscript,
     handleReflectionTap,
+    handleDownloadBuilderArtifact,
     handleInterruptSelectWithRetry,
     handleInterruptDismiss,
     handleInterruptSnooze,
     handleVoiceEndSession,
     showToast,
     bargeIn,
+    softBargeIn,
   };
 }
 
@@ -85,7 +91,7 @@ describe('useSessionVoiceCommandSystem', () => {
       params,
       onUserTranscript,
       handleInterruptSelectWithRetry,
-      bargeIn,
+      softBargeIn,
     } = buildParams();
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -96,7 +102,7 @@ describe('useSessionVoiceCommandSystem', () => {
 
     expect(handleInterruptSelectWithRetry).toHaveBeenCalledWith('accept');
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
   });
 
   it('routes reflection command and forwards candidate with voice-command source', () => {
@@ -105,7 +111,7 @@ describe('useSessionVoiceCommandSystem', () => {
       onUserTranscript,
       handleReflectionTap,
       showToast,
-      bargeIn,
+      softBargeIn,
     } = buildParams({ pendingInterrupt: null });
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -119,9 +125,60 @@ describe('useSessionVoiceCommandSystem', () => {
       'voice-command',
     );
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Reflection activated by voice command.', variant: 'info' }),
+    );
+  });
+
+  it('routes bare download command when a builder deliverable is ready', () => {
+    const {
+      params,
+      onUserTranscript,
+      handleDownloadBuilderArtifact,
+      showToast,
+      softBargeIn,
+    } = buildParams({
+      pendingInterrupt: null,
+      canDownloadBuilderArtifact: true,
+    });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('download now');
+    });
+
+    expect(handleDownloadBuilderArtifact).toHaveBeenCalledTimes(1);
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Downloading deliverable.', variant: 'success' }),
+    );
+  });
+
+  it('warns for wake-word download command when no builder deliverable is ready', () => {
+    const {
+      params,
+      onUserTranscript,
+      handleDownloadBuilderArtifact,
+      showToast,
+      bargeIn,
+      softBargeIn,
+    } = buildParams({ pendingInterrupt: null });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('Sophia download now');
+    });
+
+    expect(handleDownloadBuilderArtifact).not.toHaveBeenCalled();
+    expect(onUserTranscript).not.toHaveBeenCalled();
+    expect(bargeIn).not.toHaveBeenCalled();
+    expect(softBargeIn).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'No deliverable ready to download yet.', variant: 'warning' }),
     );
   });
 
@@ -131,7 +188,7 @@ describe('useSessionVoiceCommandSystem', () => {
       onUserTranscript,
       handleReflectionTap,
       showToast,
-      bargeIn,
+      softBargeIn,
     } = buildParams();
 
     const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
@@ -145,7 +202,7 @@ describe('useSessionVoiceCommandSystem', () => {
       'voice-command',
     );
     expect(onUserTranscript).not.toHaveBeenCalled();
-    expect(bargeIn).toHaveBeenCalledTimes(1);
+    expect(softBargeIn).toHaveBeenCalledTimes(1);
     expect(showToast).toHaveBeenCalledWith(
       expect.objectContaining({ message: 'Reflection activated by voice command.', variant: 'info' }),
     );
@@ -170,5 +227,22 @@ describe('useSessionVoiceCommandSystem', () => {
     expect(handleVoiceEndSession).not.toHaveBeenCalled();
     expect(handleInterruptSelectWithRetry).not.toHaveBeenCalled();
     expect(handleReflectionTap).not.toHaveBeenCalled();
+  });
+
+  it('falls through for bare download phrase when no deliverable is ready', () => {
+    const {
+      params,
+      onUserTranscript,
+      handleDownloadBuilderArtifact,
+    } = buildParams({ pendingInterrupt: null });
+
+    const { result } = renderHook(() => useSessionVoiceCommandSystem(params));
+
+    act(() => {
+      result.current.handleVoiceTranscript('download now');
+    });
+
+    expect(onUserTranscript).toHaveBeenCalledWith('download now');
+    expect(handleDownloadBuilderArtifact).not.toHaveBeenCalled();
   });
 });

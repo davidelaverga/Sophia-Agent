@@ -33,4 +33,21 @@ describe('RitualNode', () => {
     fireEvent.focus(button);
     expect(description).toHaveAttribute('data-visible', 'true');
   });
+
+  it('exposes stable onboarding hooks for first-run and suggestion guidance', () => {
+    render(
+      <RitualNode
+        ritual={RITUALS[0]}
+        context="gaming"
+        isSelected={false}
+        isSuggested={true}
+        onSelect={() => {}}
+      />
+    );
+
+    const button = screen.getByRole('button', { name: /pre-game/i });
+
+    expect(button).toHaveAttribute('data-onboarding', 'ritual-card-prepare');
+    expect(button).toHaveAttribute('data-onboarding-contextual', 'ritual-card-suggested');
+  });
 });

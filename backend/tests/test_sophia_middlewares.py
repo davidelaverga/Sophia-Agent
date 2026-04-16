@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
+from typing import get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
@@ -91,6 +92,21 @@ class TestExtractLastMessageText:
     def test_empty_messages(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
         assert extract_last_message_text([]) == ""
+
+
+class TestSophiaStateSchemas:
+    def test_state_schemas_do_not_redeclare_messages_channel(self):
+        from langchain.agents import AgentState
+
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactState
+        from deerflow.agents.sophia_agent.middlewares.session_state import SessionStateState
+        from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountState
+
+        agent_messages = get_type_hints(AgentState, include_extras=True)["messages"]
+
+        assert get_type_hints(BuilderArtifactState, include_extras=True)["messages"] == agent_messages
+        assert get_type_hints(SessionStateState, include_extras=True)["messages"] == agent_messages
+        assert get_type_hints(TurnCountState, include_extras=True)["messages"] == agent_messages
 
 # --- Helpers ---
 
@@ -355,12 +371,13 @@ class TestUserIdentityMiddleware:
             mw = UserIdentityMiddleware("test_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
             assert result is not None
+            assert result["user_id"] == "test_user"
             assert "Test User" in result["system_prompt_blocks"][0]
         finally:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir
 
-    def test_missing_identity_returns_none(self, tmp_path):
+    def test_missing_identity_still_caches_user_id(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
@@ -370,7 +387,7 @@ class TestUserIdentityMiddleware:
         try:
             mw = UserIdentityMiddleware("nonexistent_user")
             result = mw.before_agent({"messages": []}, _make_runtime())
-            assert result is None
+            assert result == {"user_id": "nonexistent_user"}
         finally:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir
@@ -1099,6 +1116,7 @@ class TestArtifactMiddleware:
         result = mw.after_model({"messages": [ai_msg]}, _make_runtime())
         assert result is not None
         assert result["current_artifact"]["session_goal"] == "Explore stress"
+        assert result["jump_to"] == "end"
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
@@ -1135,6 +1153,7 @@ class TestArtifactMiddleware:
         assert result is not None
         assert result["current_artifact"]["session_goal"] == "Discuss project"
         assert result["current_artifact"]["tone_estimate"] == 2.5
+        assert result["jump_to"] == "end"
 
     def test_previous_artifact_rotation(self, tmp_path):
         """previous_artifact is set to the old current_artifact when a new one is captured."""
@@ -1160,6 +1179,74 @@ class TestArtifactMiddleware:
         assert result is not None
         assert result["previous_artifact"] == old_artifact
         assert result["current_artifact"]["session_goal"] == "New goal"
+        assert result["jump_to"] == "end"
+
+    def test_after_model_persists_builder_handoff_from_tool_message(self, tmp_path):
+        from langchain_core.messages import ToolMessage
+
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        builder_result = {
+            "artifact_path": "outputs/the-dangers-of-war.md",
+            "artifact_type": "document",
+            "artifact_title": "One-Page Document: The Dangers of War",
+            "steps_completed": 3,
+            "decisions_made": ["Used default audience and tone"],
+            "companion_summary": "Created the requested one-page document about the dangers of war.",
+            "companion_tone_hint": "Confident",
+            "confidence": 0.86,
+            "user_next_action": "Open or download the document and tell me what to revise next.",
+        }
+        tool_msg = ToolMessage(
+            content=(
+                "Builder completed successfully.\n"
+                "Title: One-Page Document: The Dangers of War\n"
+                "Summary: Created the requested one-page document about the dangers of war.\n"
+                f"Full result: {json.dumps(builder_result)}"
+            ),
+            tool_call_id="builder-direct-test",
+            name="switch_to_builder",
+            status="success",
+        )
+        ai_msg = _make_ai_message_with_tool_call(
+            "emit_artifact",
+            {
+                "session_goal": "Create a document about the dangers of war",
+                "tone_estimate": 3.2,
+                "tone_target": 3.5,
+                "active_tone_band": "engagement",
+                "skill_loaded": "builder_handoff",
+            },
+        )
+
+        result = mw.after_model({"messages": [tool_msg, ai_msg]}, _make_runtime())
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "outputs/the-dangers-of-war.md"
+        assert result["builder_task"]["status"] == "synthesized"
+        assert result["current_artifact"]["session_goal"] == "Create a document about the dangers of war"
+        assert result["jump_to"] == "end"
+
+    def test_after_model_does_not_end_on_mixed_tool_calls(self, tmp_path):
+        """after_model leaves the loop alone when emit_artifact is mixed with other tools."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        ai_msg = MagicMock()
+        ai_msg.type = "ai"
+        ai_msg.content = "Some response"
+        ai_msg.tool_calls = [
+            {"name": "emit_artifact", "args": {"session_goal": "Goal", "tone_estimate": 2.0}},
+            {"name": "retrieve_memories", "args": {"query": "goal"}},
+        ]
+
+        result = mw.after_model({"messages": [ai_msg]}, _make_runtime())
+        assert result is None
 
     def test_after_model_returns_none_without_emit_artifact(self, tmp_path):
         """after_model returns None when no emit_artifact tool_call exists."""
@@ -1183,18 +1270,18 @@ class TestArtifactMiddleware:
 class TestPromptAssemblyMiddleware:
     def _make_model_request(self, messages, state):
         """Create a mock ModelRequest for wrap_model_call testing."""
-        request = MagicMock()
-        request.messages = messages
-        request.state = state
-
-        def _override(**kwargs):
+        def _build_request(current_messages):
             new_req = MagicMock()
-            new_req.messages = kwargs.get("messages", messages)
+            new_req.messages = current_messages
             new_req.state = state
+
+            def _override(**kwargs):
+                return _build_request(kwargs.get("messages", current_messages))
+
+            new_req.override = _override
             return new_req
 
-        request.override = _override
-        return request
+        return _build_request(messages)
 
     def test_assembles_blocks_into_system_message(self):
         from langchain_core.messages import HumanMessage, SystemMessage
@@ -1276,6 +1363,79 @@ class TestPromptAssemblyMiddleware:
         assert "New block" in msgs[0].content
         assert "old system" not in msgs[0].content
         assert msgs[1].content == "hello"
+
+    def test_patches_interrupted_switch_to_builder_call_before_model(self):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+        mw = PromptAssemblyMiddleware()
+
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "switch_to_builder",
+                "id": "builder-direct-1",
+                "args": {"task": "Create a document", "task_type": "document"},
+            }],
+        )
+        human_msg = HumanMessage(content="Actually, summarize it instead.")
+        state = {
+            "messages": [ai_msg, human_msg],
+            "system_prompt_blocks": ["Block 1"],
+        }
+        request = self._make_model_request([ai_msg, human_msg], state)
+
+        captured = {}
+
+        def handler(req):
+            captured["messages"] = req.messages
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        msgs = captured["messages"]
+        assert isinstance(msgs[0], SystemMessage)
+        assert msgs[1] is ai_msg
+        assert isinstance(msgs[2], ToolMessage)
+        assert msgs[2].tool_call_id == "builder-direct-1"
+        assert msgs[2].status == "error"
+        assert "interrupted" in msgs[2].content
+        assert msgs[3] is human_msg
+
+    def test_patches_dangling_tool_calls_even_without_blocks(self):
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+        mw = PromptAssemblyMiddleware()
+
+        ai_msg = AIMessage(
+            content="",
+            tool_calls=[{
+                "name": "switch_to_builder",
+                "id": "builder-direct-2",
+                "args": {"task": "Create a document", "task_type": "document"},
+            }],
+        )
+        human_msg = HumanMessage(content="Please keep going.")
+        state = {
+            "messages": [ai_msg, human_msg],
+            "system_prompt_blocks": [],
+        }
+        request = self._make_model_request([ai_msg, human_msg], state)
+
+        captured = {}
+
+        def handler(req):
+            captured["messages"] = req.messages
+            return MagicMock()
+
+        mw.wrap_model_call(request, handler)
+
+        msgs = captured["messages"]
+        assert msgs[0] is ai_msg
+        assert isinstance(msgs[1], ToolMessage)
+        assert msgs[1].tool_call_id == "builder-direct-2"
+        assert msgs[2] is human_msg
 
 
 # --- emit_artifact tool ---
@@ -1957,6 +2117,7 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_result"]["artifact_type"] == "document"
         assert result["builder_result"]["confidence"] == 0.9
+        assert result["jump_to"] == "end"
 
     def test_fallback_on_no_tool_call(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -1996,6 +2157,19 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_non_artifact_turns"] == 0
         assert result["builder_result"]["artifact_type"] == "document"
+
+    def test_does_not_end_on_mixed_builder_tool_calls(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {"name": "emit_builder_artifact", "args": {"artifact_type": "document", "confidence": 0.9}},
+            {"name": "bash", "args": {"command": "ls"}},
+        ]
+        state = {"messages": [msg]}
+        result = mw.after_model(state, _make_runtime())
+        assert result is None
 
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---
@@ -2047,4 +2221,83 @@ class TestArtifactMiddlewareSynthesis:
         # Should NOT inject synthesis (status is already "synthesized")
         blocks_text = "\n".join(result["system_prompt_blocks"])
         assert "<builder_completed>" not in blocks_text
+        os.unlink(f.name)
+
+    def test_synthesizes_when_builder_result_lacks_task_status(self):
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Test")
+            f.flush()
+            mw = ArtifactMiddleware(Path(f.name))
+
+        state = {
+            "system_prompt_blocks": [],
+            "builder_result": {
+                "companion_summary": "Created the requested one-page document about the dangers of war.",
+                "artifact_title": "One-Page Document: the dangers of war",
+                "artifact_type": "document",
+                "artifact_path": "outputs/the-dangers-of-war.md",
+                "decisions_made": ["Used default audience and tone"],
+                "companion_tone_hint": "Confident",
+            },
+            "builder_task": {},
+            "active_tone_band": "engagement",
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "outputs/the-dangers-of-war.md"
+        assert result["builder_task"]["status"] == "synthesized"
+        blocks_text = "\n".join(result["system_prompt_blocks"])
+        assert "<builder_completed>" in blocks_text
+        os.unlink(f.name)
+
+    def test_recovers_builder_result_from_switch_to_builder_tool_message(self):
+        from langchain_core.messages import ToolMessage
+
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
+            f.write("# Test")
+            f.flush()
+            mw = ArtifactMiddleware(Path(f.name))
+
+        builder_result = {
+            "artifact_path": "outputs/dangers_of_war.md",
+            "artifact_type": "document",
+            "artifact_title": "The Dangers of War: A Personal Reflection",
+            "steps_completed": 4,
+            "decisions_made": ["Kept it reflective"],
+            "companion_summary": "Created the document.",
+            "companion_tone_hint": "Direct and serious.",
+            "user_next_action": "Download it.",
+            "confidence": 0.92,
+        }
+        tool_message = ToolMessage(
+            content=(
+                "Builder completed successfully.\n"
+                "Title: The Dangers of War: A Personal Reflection\n"
+                "Summary: Created the document.\n"
+                f"Full result: {json.dumps(builder_result)}"
+            ),
+            tool_call_id="toolu_builder",
+            name="switch_to_builder",
+            status="success",
+        )
+
+        state = {
+            "messages": [tool_message],
+            "system_prompt_blocks": [],
+            "active_tone_band": "engagement",
+        }
+        result = mw.before_agent(state, _make_runtime())
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "outputs/dangers_of_war.md"
+        assert result["builder_task"]["status"] == "synthesized"
+        blocks_text = "\n".join(result["system_prompt_blocks"])
+        assert "<builder_completed>" in blocks_text
+        assert "Created the document." in blocks_text
         os.unlink(f.name)

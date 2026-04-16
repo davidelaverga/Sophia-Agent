@@ -235,6 +235,12 @@ describe('useSessionExitFlow', () => {
             },
           ],
         },
+        currentBuilderArtifact: {
+          artifactTitle: 'Investor memo',
+          artifactType: 'document',
+          artifactPath: 'mnt/user-data/outputs/investor-memo.md',
+          decisionsMade: ['Removed the weak appendix'],
+        },
       })
     );
 
@@ -254,8 +260,76 @@ describe('useSessionExitFlow', () => {
       'session-3',
       expect.objectContaining({
         takeaway: 'You settled into the truth instead of pushing past it.',
+        threadId: 'session-3',
+        builderArtifact: expect.objectContaining({
+          artifactTitle: 'Investor memo',
+        }),
         reflectionCandidate: expect.objectContaining({
           prompt: 'What changed once you stopped forcing the outcome?',
+        }),
+      }),
+    );
+  });
+
+  it('persists builder-only recap data when no ritual artifacts were captured', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-builder-only',
+        ended_at: '2026-03-03T20:00:00.000Z',
+        duration_minutes: 8,
+        turn_count: 4,
+        offer_debrief: false,
+        debrief_prompt: undefined,
+        recap_artifacts: undefined,
+      },
+    });
+
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const { result } = renderHook(() =>
+      useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        setEnding: vi.fn(),
+        sessionId: 'session-builder-only',
+        sessionStartedAt: '2026-03-03T19:46:00.000Z',
+        sessionPresetType: 'open',
+        sessionContextMode: 'life',
+        messageCount: 4,
+        endSessionStore: vi.fn(),
+        clearSessionStore: vi.fn(),
+        clearBootstrap: vi.fn(),
+        navigateTo: vi.fn(),
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+        currentBuilderArtifact: {
+          artifactTitle: 'Decision memo',
+          artifactType: 'document',
+          artifactPath: 'mnt/user-data/outputs/decision-memo.md',
+          decisionsMade: ['Tightened the recommendation'],
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
+      recap_artifacts: expect.objectContaining({
+        builder_artifact: expect.objectContaining({
+          artifactTitle: 'Decision memo',
+        }),
+      }),
+    }));
+
+    expect(setRecapArtifactsMock).toHaveBeenCalledWith(
+      'session-builder-only',
+      expect.objectContaining({
+        builderArtifact: expect.objectContaining({
+          artifactTitle: 'Decision memo',
         }),
       }),
     );

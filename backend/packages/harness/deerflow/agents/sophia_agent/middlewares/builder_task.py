@@ -122,10 +122,20 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             ]
             sections.append("<tracked_sources>\n" + "\n".join(source_lines) + "\n</tracked_sources>")
 
-        # Completion instruction
+        # Completion instruction — always present, includes budget so the model
+        # plans from turn 0 instead of discovering the limit mid-loop.
+        _HARD_CEILING = 12
+        remaining = max(_HARD_CEILING - non_artifact_turns, 0)
+
         sections.append(
             "<completion_instruction>\n"
-            "When your work is done, you MUST call emit_builder_artifact as your final action.\n"
+            f"You have a STRICT budget of {_HARD_CEILING} tool-call turns total. "
+            f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
+            "Plan your work to fit within this budget:\n"
+            "- Turn 1: Create the output file with complete content in a single write_file call.\n"
+            "- Turns 2-3: Make targeted edits only if critical fixes are needed.\n"
+            "- Final turn: Call emit_builder_artifact. This is MANDATORY — without it your work is lost.\n"
+            "Do NOT iterate endlessly to perfect the output. Ship a complete first draft, then finalize.\n"
             "</completion_instruction>"
         )
 
@@ -133,17 +143,29 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             joined_tools = ", ".join(recent_tool_names) if recent_tool_names else "unknown"
             escalation = (
                 "<builder_endgame>\n"
-                f"You already produced {non_artifact_turns} tool-call turn(s) without emit_builder_artifact.\n"
+                f"Turn budget: {non_artifact_turns}/{_HARD_CEILING} used. "
+                f"{remaining} turn(s) remaining before forced termination.\n"
                 f"Most recent tool calls: {joined_tools}.\n"
-                "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
-                "Do not end with plain text and do not call any tools after emit_builder_artifact.\n"
             )
-            if non_artifact_turns >= 2:
+            if remaining <= 3:
                 escalation += (
-                    "Only call another build tool if a critical output file is still missing. "
-                    "Otherwise finalize now with emit_builder_artifact.\n"
+                    "CRITICAL: You are about to be terminated. "
+                    "Your NEXT action MUST be emit_builder_artifact. "
+                    "Ship what you have NOW.\n"
                 )
-            escalation += "</builder_endgame>"
+            elif remaining <= 6:
+                escalation += (
+                    "WARNING: Running low on turns. Wrap up edits and call "
+                    "emit_builder_artifact within the next 1-2 turns.\n"
+                )
+            else:
+                escalation += (
+                    "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
+                )
+            escalation += (
+                "Do not end with plain text and do not call any tools after emit_builder_artifact.\n"
+                "</builder_endgame>"
+            )
             sections.append(escalation)
 
         briefing = "<builder_briefing>\n" + "\n\n".join(sections) + "\n</builder_briefing>"

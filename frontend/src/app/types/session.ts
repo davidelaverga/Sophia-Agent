@@ -1,3 +1,5 @@
+import type { BuilderArtifactV1 } from './builder-artifact';
+
 /**
  * Session Types for Sophia V2
  * Sprint 1+ Phase 3
@@ -92,6 +94,7 @@ export interface MemoryHighlight {
  * POST /api/v1/sessions/start - Request
  */
 export interface SessionStartRequest {
+  user_id?: string;
   session_type: PresetType;
   preset_context: ContextMode;
   intention?: string;
@@ -168,6 +171,7 @@ export interface SessionEndRequest {
       reason?: string;
       source?: string;
     }>;
+    builder_artifact?: BuilderArtifactV1;
     memories_created?: number;
     status?: string;
   };
@@ -210,6 +214,7 @@ export interface SessionEndResponse {
       reason?: string;
       source?: string;
     }>;
+    builder_artifact?: BuilderArtifactV1;
     memories_created?: number;
     status?: string;
   };
@@ -245,18 +250,65 @@ export interface ActiveSessionResponse {
 }
 
 /**
- * Session info returned from active session check
+ * Session info returned from session endpoints
  */
 export interface SessionInfo {
   session_id: string;
   thread_id: string;
   session_type: string;
   preset_context: string;
-  status: SessionStatus;
+  status: string;
   started_at: string;
+  updated_at: string;
+  ended_at?: string | null;
   turn_count: number;
+  title?: string | null;
+  last_message_preview?: string | null;
+  platform?: string;
   intention?: string;
   focus_cue?: string;
+}
+
+/**
+ * GET /api/v1/sessions/open - Response
+ */
+export interface OpenSessionsResponse {
+  sessions: SessionInfo[];
+  count: number;
+}
+
+/**
+ * GET /api/v1/sessions/list - Response
+ */
+export interface SessionListResponse {
+  sessions: SessionInfo[];
+  total: number;
+}
+
+/**
+ * PATCH /api/v1/sessions/{id} - Request
+ */
+export interface SessionUpdateRequest {
+  title?: string;
+}
+
+/**
+ * GET /api/v1/sessions/{id}/messages - Response message
+ */
+export interface SessionMessageItem {
+  id: string;
+  role: 'user' | 'sophia';
+  content: string;
+  created_at: string | null;
+}
+
+/**
+ * GET /api/v1/sessions/{id}/messages - Response
+ */
+export interface SessionMessagesResponse {
+  session_id: string;
+  thread_id: string;
+  messages: SessionMessageItem[];
 }
 
 /**
@@ -347,6 +399,7 @@ export interface SessionClientStore {
   
   // Artifacts (populated on session end)
   artifacts?: RitualArtifacts;
+  builderArtifact?: BuilderArtifactV1;
   summary?: string;
 }
 

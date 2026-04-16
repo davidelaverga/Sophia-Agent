@@ -11,7 +11,6 @@ import { useState } from 'react';
 
 import { EnhancedFieldBackground } from '../components/dashboard/EnhancedFieldBackground';
 import { ProtectedRoute } from '../components/ProtectedRoute';
-import { OnboardingSettingsPanel } from '../components/settings/OnboardingSettingsPanel';
 import { PrivacyPanel } from '../components/settings/PrivacyPanel';
 import { ThemeToggle } from '../components/ThemeToggle';
 import { haptic } from '../hooks/useHaptics';
@@ -130,13 +129,13 @@ export default function SettingsPage() {
                 <div className="relative flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
                   <div className="max-w-2xl">
                     <p className="text-[11px] uppercase tracking-[0.18em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-                      Account, privacy, and onboarding
+                      Account and privacy
                     </p>
                     <h2 className="mt-2 font-cormorant text-[2rem] font-light leading-[1.02] sm:text-[2.4rem]" style={{ color: 'var(--cosmic-text-strong)' }}>
                       A quieter control room for everything around your sessions.
                     </h2>
                     <p className="mt-3 max-w-xl text-sm leading-6" style={{ color: 'var(--cosmic-text-muted)' }}>
-                      Manage how Sophia behaves on this device, review privacy options, and control the onboarding surfaces without dropping back into the old settings chrome.
+                      Manage how Sophia behaves on this device and review privacy options without dropping back into the old settings chrome.
                     </p>
                   </div>
 
@@ -159,7 +158,6 @@ export default function SettingsPage() {
               </div>
 
               <PrivacyPanel />
-              <OnboardingSettingsPanel />
             </section>
 
             <aside className="space-y-6">

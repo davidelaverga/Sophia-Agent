@@ -255,6 +255,137 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.timeline.at(-1)?.label).toBe('Turn diagnostic');
   });
 
+  it('includes builder progress and stall diagnostics in telemetry', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:20.000Z',
+        category: 'builder',
+        name: 'task-running',
+        payload: {
+          phase: 'running',
+          taskId: 'builder-1',
+          detail: 'Still drafting the deliverable.',
+          progressPercent: 25,
+          totalSteps: 4,
+          completedSteps: 1,
+          activeStepTitle: 'Draft outline',
+          idleMs: 60000,
+          stuck: true,
+          stuckReason: 'No visible builder progress for 60s. It may be blocked on a tool or looping without advancing the deliverable.',
+          lastUpdateAt: '2026-04-07T12:00:20.000Z',
+          lastProgressAt: '2026-04-07T11:59:20.000Z',
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'thinking',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:01:20.000Z'),
+    });
+
+    expect(metrics.builder.phase).toBe('running');
+    expect(metrics.builder.progressPercent).toBe(25);
+    expect(metrics.builder.stuck).toBe(true);
+    expect(metrics.events.builder).toBe(1);
+    expect(metrics.counts.builderEvents).toBe(1);
+    expect(metrics.regressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'builder-stall', level: 'bad' }),
+      ]),
+    );
+    expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(true);
+    expect(metrics.health.title).toBe('Builder appears stalled');
+  });
+
+  it('ages a stale builder snapshot into a stall even when the last payload said running', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-15T04:43:54.399Z',
+        category: 'voice-sse',
+        name: 'sophia.builder_task',
+        payload: {
+          data: {
+            type: 'task_running',
+            task_id: 'ede8eb7f',
+            description: "Builder: one-page brief document about Liu Cixin's Three Body Problem sci-fi book series....",
+            started_at: '2026-04-15T04:43:30.559766Z',
+            last_update_at: '2026-04-15T04:43:32.866153Z',
+            last_progress_at: '2026-04-15T04:43:32.864136Z',
+            heartbeat_ms: 21209,
+            idle_ms: 21211,
+            is_stuck: false,
+            progress_source: 'none',
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-15T04:44:38.597Z'),
+    });
+
+    expect(metrics.builder.phase).toBe('running');
+    expect(metrics.builder.stuck).toBe(true);
+    expect(metrics.builder.idleMs).toBeGreaterThanOrEqual(65000);
+    expect(metrics.builder.stuckReason).toMatch(/No visible builder progress for \d+s/i);
+    expect(metrics.events.builder).toBe(1);
+    expect(metrics.counts.builderEvents).toBe(1);
+    expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(true);
+    expect(metrics.health.title).toBe('Builder appears stalled');
+  });
+
+  it('uses builder debug blocker detail when the payload omits detail text', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-15T04:43:54.399Z',
+        category: 'voice-sse',
+        name: 'sophia.builder_task',
+        payload: {
+          data: {
+            type: 'task_timed_out',
+            task_id: 'builder-debug-1',
+            progress_percent: 50,
+            debug: {
+              suspected_blocker_detail: 'Builder timed out after calling bash before emit_builder_artifact.',
+              last_shell_command: {
+                status: 'shell_unavailable',
+                requested_command: 'ls /mnt/user-data/workspace',
+                error: 'No suitable shell executable found.',
+              },
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'thinking',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-15T04:44:38.597Z'),
+    });
+
+    expect(metrics.builder.phase).toBe('timed_out');
+    expect(metrics.builder.detail).toBe('Builder timed out after calling bash before emit_builder_artifact.');
+    expect(metrics.health.detail).toContain('Builder timed out after calling bash before emit_builder_artifact.');
+    expect(metrics.timeline.some((item) => item.detail.includes('Builder timed out after calling bash before emit_builder_artifact.'))).toBe(true);
+  });
+
   it('flags sessions where the mic has signal but no transcript arrives', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

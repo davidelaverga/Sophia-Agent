@@ -147,6 +147,31 @@ describe('SessionEndResponseSchema', () => {
     const result = SessionEndResponseSchema.safeParse(responseWithNull);
     expect(result.success).toBe(true);
   });
+
+  it('should parse builder artifacts inside recap_artifacts', () => {
+    const responseWithBuilderArtifact = {
+      session_id: '123e4567-e89b-12d3-a456-426614174000',
+      ended_at: '2024-01-15T11:30:00Z',
+      duration_minutes: 22,
+      turn_count: 9,
+      recap_artifacts: {
+        takeaway: 'You finished with a concrete deliverable.',
+        builder_artifact: {
+          artifactTitle: 'Investor memo',
+          artifactType: 'document',
+          artifactPath: 'mnt/user-data/outputs/investor-memo.md',
+          decisionsMade: ['Cut the pricing appendix'],
+        },
+      },
+    };
+
+    const result = SessionEndResponseSchema.safeParse(responseWithBuilderArtifact);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.recap_artifacts?.builder_artifact?.artifactTitle).toBe('Investor memo');
+      expect(result.data.recap_artifacts?.builder_artifact?.decisionsMade).toEqual(['Cut the pricing appendix']);
+    }
+  });
 });
 
 describe('ActiveSessionResponseSchema', () => {

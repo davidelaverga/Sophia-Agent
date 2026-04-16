@@ -30,9 +30,17 @@ import { haptic } from './useHaptics';
 // Cache to prevent duplicate checkActiveSession calls
 const activeSessionCache = {
   data: null as Awaited<ReturnType<typeof getActiveSession>> | null,
+  userId: null as string | null,
   timestamp: 0,
   TTL_MS: 30_000, // 30 seconds cache
 };
+
+/** Invalidate the active-session cache so the next check hits the backend. */
+export function invalidateActiveSessionCache(): void {
+  activeSessionCache.data = null;
+  activeSessionCache.userId = null;
+  activeSessionCache.timestamp = 0;
+}
 
 // Backend session start circuit-breaker (client-side)
 const SESSION_START_DISABLED_KEY = 'sophia.disableSessionStart';
@@ -232,6 +240,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
   
   const router = useRouter();
   const createSession = useSessionStore((state) => state.createSession);
+  const restoreOpenSession = useSessionStore((state) => state.restoreOpenSession);
   const updateFromBackend = useSessionStore((state) => state.updateFromBackend);
   const updateSession = useSessionStore((state) => state.updateSession);
   const clearSession = useSessionStore((state) => state.clearSession);
@@ -294,6 +303,7 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
       }
 
       const result = await startSession({
+        user_id: userId,
         session_type: mapPresetToSessionType(presetType),
         preset_context: mapContextMode(contextMode),
         intention: options?.intention,
@@ -428,19 +438,31 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
    * Check for active session (for "Continue last session")
    * Cached to prevent duplicate backend calls
    */
-  const checkActiveSession = useCallback(async (force = false): Promise<ActiveSessionResponse | null> => {
+  const checkActiveSession = useCallback(async (
+    force = false,
+    userId?: string,
+  ): Promise<ActiveSessionResponse | null> => {
     const now = Date.now();
+    const normalizedUserId = typeof userId === 'string' && userId.trim()
+      ? userId.trim()
+      : null;
     
     // Return cached result if fresh (unless forced)
-    if (!force && activeSessionCache.data && (now - activeSessionCache.timestamp) < activeSessionCache.TTL_MS) {
+    if (
+      !force
+      && activeSessionCache.data
+      && activeSessionCache.userId === normalizedUserId
+      && (now - activeSessionCache.timestamp) < activeSessionCache.TTL_MS
+    ) {
       const cached = activeSessionCache.data;
       return isSuccess(cached) ? cached.data : null;
     }
     
-    const result = await getActiveSession();
+    const result = await getActiveSession(normalizedUserId ?? undefined);
     
     // Cache the result
     activeSessionCache.data = result;
+    activeSessionCache.userId = normalizedUserId;
     activeSessionCache.timestamp = now;
     
     if (isSuccess(result)) {
@@ -454,7 +476,8 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
    * Resume an active session
    */
   const resumeSession = useCallback(async (
-    activeSession: ActiveSessionResponse['session']
+    activeSession: ActiveSessionResponse['session'],
+    userId: string = 'anonymous',
   ): Promise<StartSessionResult> => {
     if (!activeSession) {
       return {
@@ -463,18 +486,30 @@ export function useSessionStart(options: UseSessionStartOptions = {}) {
         code: 'VALIDATION_ERROR',
       };
     }
-    
-    // Call start with same params - backend returns is_resumed: true
-    return start(
-      'current-user', // userId comes from token
-      activeSession.session_type as PresetType,
-      activeSession.preset_context as ContextMode,
-      {
-        intention: activeSession.intention,
-        focusCue: activeSession.focus_cue,
-      }
-    );
-  }, [start]);
+
+    await restoreOpenSession(activeSession, userId);
+
+    const successResult: SessionStartResult = {
+      success: true,
+      sessionId: activeSession.session_id,
+      threadId: activeSession.thread_id,
+      greetingMessage: '',
+      messageId: 'resume-existing-session',
+      memoryHighlights: [],
+      isResumed: true,
+      hasMemory: false,
+    };
+
+    setLastResult(successResult);
+    onSuccess?.(successResult);
+
+    if (navigateOnSuccess) {
+      haptic('medium');
+      router.push('/session');
+    }
+
+    return successResult;
+  }, [navigateOnSuccess, onSuccess, restoreOpenSession, router]);
   
   return {
     start,

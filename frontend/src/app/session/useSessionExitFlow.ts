@@ -16,7 +16,8 @@ import { teardownSessionClientState } from '../lib/session-teardown';
 import { useRecapStore } from '../stores/recap-store';
 import { useSessionHistoryStore } from '../stores/session-history-store';
 import { useUiStore as useUiToastStore } from '../stores/ui-store';
-import type { ContextMode, PresetType, RitualArtifacts, SessionEndRequest } from '../types/session';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
+import type { SessionEndRequest, PresetType, ContextMode, RitualArtifacts } from '../types/session';
 
 interface DebriefData {
   prompt: string;
@@ -37,32 +38,37 @@ function mapLiveArtifactsToRecapV1({
   endedAt,
   presetType,
   contextMode,
+  threadId,
   currentArtifacts,
+  currentBuilderArtifact,
 }: {
   sessionId: string;
   startedAt: string;
   endedAt: string;
   presetType: PresetType;
   contextMode: ContextMode;
+  threadId?: string;
   currentArtifacts?: RitualArtifacts | null;
+  currentBuilderArtifact?: BuilderArtifactV1 | null;
 }) {
-  if (!currentArtifacts) {
+  if (!currentArtifacts && !currentBuilderArtifact) {
     return null;
   }
 
-  const hasTakeaway = typeof currentArtifacts.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
-  const hasReflection = typeof currentArtifacts.reflection_candidate?.prompt === 'string'
+  const hasTakeaway = typeof currentArtifacts?.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
+  const hasReflection = typeof currentArtifacts?.reflection_candidate?.prompt === 'string'
     && currentArtifacts.reflection_candidate.prompt.trim().length > 0;
-  const hasMemories = Array.isArray(currentArtifacts.memory_candidates)
+  const hasMemories = Array.isArray(currentArtifacts?.memory_candidates)
     && currentArtifacts.memory_candidates.length > 0;
 
-  if (!hasTakeaway && !hasReflection && !hasMemories) {
+  if (!hasTakeaway && !hasReflection && !hasMemories && !currentBuilderArtifact) {
     return null;
   }
 
   return mapBackendArtifactsToRecapV1(
     {
       session_id: sessionId,
+      thread_id: threadId,
       session_type: presetType,
       context_mode: contextMode,
       started_at: startedAt,
@@ -85,6 +91,7 @@ function mapLiveArtifactsToRecapV1({
             ...(candidate.reason ? { reason: candidate.reason } : {}),
           }))
         : undefined,
+      ...(currentBuilderArtifact ? { builder_artifact: currentBuilderArtifact } : {}),
     },
     sessionId,
   );
@@ -92,18 +99,19 @@ function mapLiveArtifactsToRecapV1({
 
 function serializeLiveArtifactsForSessionEnd(
   currentArtifacts?: RitualArtifacts | null,
+  currentBuilderArtifact?: BuilderArtifactV1 | null,
 ): NonNullable<SessionEndRequest['recap_artifacts']> | undefined {
-  if (!currentArtifacts) {
+  if (!currentArtifacts && !currentBuilderArtifact) {
     return undefined;
   }
 
-  const hasTakeaway = typeof currentArtifacts.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
-  const hasReflection = typeof currentArtifacts.reflection_candidate?.prompt === 'string'
+  const hasTakeaway = typeof currentArtifacts?.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
+  const hasReflection = typeof currentArtifacts?.reflection_candidate?.prompt === 'string'
     && currentArtifacts.reflection_candidate.prompt.trim().length > 0;
-  const hasMemories = Array.isArray(currentArtifacts.memory_candidates)
+  const hasMemories = Array.isArray(currentArtifacts?.memory_candidates)
     && currentArtifacts.memory_candidates.length > 0;
 
-  if (!hasTakeaway && !hasReflection && !hasMemories) {
+  if (!hasTakeaway && !hasReflection && !hasMemories && !currentBuilderArtifact) {
     return undefined;
   }
 
@@ -126,6 +134,7 @@ function serializeLiveArtifactsForSessionEnd(
           ...(candidate.reason ? { reason: candidate.reason } : {}),
         }))
       : undefined,
+    ...(currentBuilderArtifact ? { builder_artifact: currentBuilderArtifact } : {}),
     status: 'ready',
   };
 }
@@ -144,6 +153,7 @@ function mergeRecapArtifacts(
 
   return {
     ...primary,
+    threadId: primary.threadId ?? fallback.threadId,
     startedAt: primary.startedAt ?? fallback.startedAt,
     endedAt: primary.endedAt ?? fallback.endedAt,
     takeaway: primary.takeaway ?? fallback.takeaway,
@@ -151,6 +161,7 @@ function mergeRecapArtifacts(
     memoryCandidates: primary.memoryCandidates?.length
       ? primary.memoryCandidates
       : fallback.memoryCandidates,
+    builderArtifact: primary.builderArtifact ?? fallback.builderArtifact,
     status: primary.status === 'ready' || fallback.status === 'ready'
       ? 'ready'
       : primary.status,
@@ -188,6 +199,7 @@ interface UseSessionExitFlowParams {
   promoteToDebriefMode: () => void;
   startDebriefWithLLM: (debriefData: DebriefData) => void;
   currentArtifacts?: RitualArtifacts | null;
+  currentBuilderArtifact?: BuilderArtifactV1 | null;
   userId?: string;
   threadId?: string;
   messages?: ExitSessionMessage[];
@@ -210,6 +222,7 @@ export function useSessionExitFlow({
   promoteToDebriefMode,
   startDebriefWithLLM,
   currentArtifacts,
+  currentBuilderArtifact,
   userId,
   threadId,
   messages,
@@ -263,18 +276,19 @@ export function useSessionExitFlow({
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     const recapSessionId = sessionId;
+    const recapThreadId = threadId || recapSessionId;
     const startedAt = sessionStartedAt || new Date().toISOString();
     const presetType = sessionPresetType || 'open';
     const contextMode = sessionContextMode || 'life';
     // Session exit should always continue into the recap flow.
     const shouldOfferDebrief = false;
     const serializedMessages = serializeSessionMessages(messages);
-    const serializedArtifacts = serializeLiveArtifactsForSessionEnd(currentArtifacts);
+    const serializedArtifacts = serializeLiveArtifactsForSessionEnd(currentArtifacts, currentBuilderArtifact);
 
     try {
       const result = await endSessionAPI({
         session_id: recapSessionId,
-        thread_id: threadId || recapSessionId,
+        thread_id: recapThreadId,
         user_id: userId,
         offer_debrief: shouldOfferDebrief,
         session_type: presetType,
@@ -291,6 +305,7 @@ export function useSessionExitFlow({
               {
                 ...result.data.recap_artifacts,
                 session_id: recapSessionId,
+                thread_id: recapThreadId,
                 session_type: presetType,
                 context_mode: contextMode,
                 started_at: startedAt,
@@ -306,7 +321,9 @@ export function useSessionExitFlow({
           endedAt: result.data.ended_at,
           presetType,
           contextMode,
+          threadId: recapThreadId,
           currentArtifacts,
+          currentBuilderArtifact,
         });
 
         const resolvedRecapArtifacts = mergeRecapArtifacts(
@@ -358,7 +375,9 @@ export function useSessionExitFlow({
           endedAt: localEndedAt,
           presetType,
           contextMode,
+          threadId: recapThreadId,
           currentArtifacts,
+          currentBuilderArtifact,
         });
 
         useSessionHistoryStore.getState().addSession({
@@ -388,7 +407,9 @@ export function useSessionExitFlow({
         endedAt: localEndedAt,
         presetType,
         contextMode,
+        threadId: recapThreadId,
         currentArtifacts,
+        currentBuilderArtifact,
       });
 
       useSessionHistoryStore.getState().addSession({
@@ -419,6 +440,7 @@ export function useSessionExitFlow({
     sessionContextMode,
     messageCount,
     currentArtifacts,
+    currentBuilderArtifact,
     userId,
     threadId,
     messages,

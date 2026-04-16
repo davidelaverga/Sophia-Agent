@@ -2,8 +2,10 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { FormEvent } from 'react';
 
 import { haptic } from '../hooks/useHaptics';
+import { isError, touchSession } from '../lib/api/sessions-api';
 import { debugLog } from '../lib/debug-logger';
 import { chatSanitizer } from '../lib/sanitize';
+import { useSessionStore } from '../stores/session-store';
 
 import { shouldBlockOutboundDuplicate, shouldBlockSubmitDuplicate } from './send-gate';
 
@@ -66,6 +68,41 @@ export function useSessionOutboundSend({
   const chatStatusForSendRef = useRef(chatStatus);
   const lastOutboundRef = useRef<{ text: string; at: number } | null>(null);
 
+  const syncSessionDescriptor = useCallback(async (messageText: string) => {
+    const bodySessionId = typeof chatRequestBody?.session_id === 'string' ? chatRequestBody.session_id.trim() : '';
+    if (!bodySessionId) return;
+
+    const messagePreview = messageText.trim().replace(/\s+/g, ' ').slice(0, 200);
+    if (!messagePreview) return;
+
+    useSessionStore.getState().recordOpenSessionActivity(bodySessionId, {
+      messagePreview,
+    });
+
+    const bodyUserId = typeof chatRequestBody?.user_id === 'string'
+      ? chatRequestBody.user_id.trim()
+      : useSessionStore.getState().session?.userId?.trim() ?? '';
+
+    if (!bodyUserId) return;
+
+    const result = await touchSession(bodySessionId, bodyUserId, messagePreview);
+    if (isError(result)) {
+      debugLog('SessionSend', 'touch session failed', {
+        session_id: bodySessionId,
+        code: result.code,
+        status: result.status,
+      });
+      return;
+    }
+
+    useSessionStore.getState().recordOpenSessionActivity(bodySessionId, {
+      messagePreview: result.data.last_message_preview ?? messagePreview,
+      title: result.data.title,
+      turnCount: result.data.turn_count,
+      updatedAt: result.data.updated_at,
+    });
+  }, [chatRequestBody]);
+
   useEffect(() => {
     chatStatusForSendRef.current = chatStatus;
   }, [chatStatus]);
@@ -108,12 +145,14 @@ export function useSessionOutboundSend({
       : undefined;
 
     await sendChatMessage({ text: normalizedText }, requestOptions);
+    await syncSessionDescriptor(normalizedText);
   }, [
     chatRequestBody,
     debugEnabled,
     hasValidBackendSessionId,
     markStreamTurnStarted,
     sendChatMessage,
+    syncSessionDescriptor,
     showToast,
   ]);
 }

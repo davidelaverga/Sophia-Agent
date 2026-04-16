@@ -21,7 +21,6 @@ import {
   VoiceComposerErrorBoundary,
 } from '../components/error-boundaries';
 import { ModeToggle } from '../components/ModeToggle';
-import { OnboardingSessionExperience } from '../components/onboarding';
 import { PresenceField, type PresenceFieldHandle } from '../components/presence-field';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { 
@@ -29,6 +28,7 @@ import {
   VoiceFirstComposer,
   VoiceCaption,
   VoiceMetricsPanel,
+  BuilderReadyPill,
   PresenceArtifactPanel,
   ArtifactToggleIcon,
   WhisperIndicator,
@@ -37,6 +37,7 @@ import {
   DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
+import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
 import { UsageLimitModal } from '../components/UsageLimitModal';
@@ -45,11 +46,10 @@ import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
 import { useSessionPersistence } from '../hooks/useSessionPersistence';
+import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
-import { getFirstRunStepById } from '../onboarding';
-import { useOnboardingStore } from '../stores/onboarding-store';
 import { useUiStore } from '../stores/ui-store';
 
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
@@ -77,23 +77,9 @@ import { useSessionVoiceCommandSystem } from './useSessionVoiceCommandSystem';
 // ============================================================================
 
 export default function SessionPage() {
-  const firstRunStatus = useOnboardingStore((state) => state.firstRun.status);
-  const currentStepId = useOnboardingStore((state) => state.currentStepId);
-  const activeStep = getFirstRunStepById(currentStepId);
-  const showOnboardingSessionExperience = firstRunStatus === 'in_progress' && activeStep?.route === '/session';
-
   return (
     <ProtectedRoute>
-      {showOnboardingSessionExperience ? (
-        <div className="relative h-screen bg-[var(--bg)]">
-          <PresenceField />
-          <div className="relative z-10 h-full">
-            <OnboardingSessionExperience />
-          </div>
-        </div>
-      ) : (
-        <SessionPageContent />
-      )}
+      <SessionPageContent />
     </ProtectedRoute>
   );
 }
@@ -160,10 +146,12 @@ function SessionPageContent() {
   const {
     session,
     artifacts,
+    builderArtifact: storedBuilderArtifact,
     storedMessages,
     updateMessages,
     updateSession,
     storeArtifacts,
+    storeBuilderArtifact,
     endSession,
     clearSession,
     setEnding,
@@ -242,6 +230,11 @@ function SessionPageContent() {
 
   const {
     artifactStatus,
+    builderArtifact,
+    builderTask,
+    clearBuilderTask,
+    cancelBuilderTask,
+    isCancellingBuilderTask,
     ingestArtifacts,
     applyMemoryCandidates,
     chatMessages,
@@ -276,7 +269,9 @@ function SessionPageContent() {
     backendSessionId,
     userId,
     artifacts,
+    storedBuilderArtifact,
     storeArtifacts,
+    storeBuilderArtifact,
     updateSession,
     showUsageLimitModal,
     recordConnectivityFailure,
@@ -453,6 +448,8 @@ function SessionPageContent() {
     isTyping,
     messages,
     artifacts,
+    builderArtifact,
+    isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
     userOpenedArtifacts,
@@ -469,17 +466,18 @@ function SessionPageContent() {
   const previousArtifactSignatureRef = useRef('');
 
   const artifactContentCount = useMemo(() => {
+    const hasBuilderArtifact = Boolean(builderArtifact);
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
-    return (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts]);
+    return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
+  }, [artifacts, builderArtifact]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length;
-  }, [artifactStatus]);
+    ).length + (builderArtifact ? 1 : 0);
+  }, [artifactStatus, builderArtifact]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -496,6 +494,13 @@ function SessionPageContent() {
   }, [artifactStatus]);
 
   const artifactSignature = useMemo(() => {
+    const builder = builderArtifact
+      ? [
+          builderArtifact.artifactTitle,
+          builderArtifact.artifactPath ?? '',
+          (builderArtifact.supportingFiles ?? []).join('|'),
+        ].join('::')
+      : '';
     const takeaway = artifacts?.takeaway?.trim() ?? '';
     const reflection = artifacts?.reflection_candidate?.prompt?.trim() ?? '';
     const memories = (artifacts?.memory_candidates ?? [])
@@ -503,10 +508,48 @@ function SessionPageContent() {
       .filter((memory) => memory.length > 0)
       .join('|');
 
-    return `${takeaway}::${reflection}::${memories}`;
-  }, [artifacts]);
+    return `${builder}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
+  const showBuilderTaskNotice = Boolean(builderTask);
+  const builderPrimaryFile = useMemo(
+    () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
+    [builderArtifact],
+  );
+  const builderDownloadHref = useMemo(
+    () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
+    [builderPrimaryFile?.path, resolvedThreadId],
+  );
+  const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
+  const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.88);
+
+  const handleVoiceDownloadBuilderArtifact = useCallback(() => {
+    if (!builderDownloadHref || typeof document === 'undefined') {
+      return false;
+    }
+
+    const link = document.createElement('a');
+    link.href = builderDownloadHref;
+    link.style.display = 'none';
+    link.rel = 'noopener';
+    if (builderPrimaryFile?.name) {
+      link.download = builderPrimaryFile.name;
+    }
+    document.body.appendChild(link);
+    link.click();
+
+    window.setTimeout(() => {
+      link.remove();
+    }, 0);
+
+    // Auto-dismiss builder UI after download so new tasks can surface
+    window.setTimeout(() => {
+      clearBuilderTask();
+    }, 1500);
+
+    return true;
+  }, [builderDownloadHref, builderPrimaryFile?.name, clearBuilderTask]);
 
   useEffect(() => {
     const previousCount = previousArtifactCountRef.current;
@@ -640,6 +683,7 @@ function SessionPageContent() {
       setTimeout(() => removeInternalDebriefTriggerBubble(debriefTrigger), 180);
     },
     currentArtifacts: artifacts,
+    currentBuilderArtifact: builderArtifact,
     userId,
     threadId: resolvedThreadId,
     persistedSessionId: session?.sessionId,
@@ -653,6 +697,8 @@ function SessionPageContent() {
     onUserTranscript: appendVoiceUserMessage,
     reflectionCandidate: artifacts?.reflection_candidate,
     handleReflectionTap,
+    canDownloadBuilderArtifact: Boolean(builderDownloadHref),
+    handleDownloadBuilderArtifact: handleVoiceDownloadBuilderArtifact,
     pendingInterrupt,
     isResuming,
     handleInterruptSelectWithRetry,
@@ -905,23 +951,12 @@ function SessionPageContent() {
             />
           )}
           
-          {/* Mode Toggle — whisper-style voice/text switcher */}
-          <div
-            className={cn(
-              'flex justify-center',
-              focusMode !== 'text'
-                ? 'fixed bottom-[100px] left-1/2 -translate-x-1/2 z-30'
-                : 'pt-2'
-            )}
-            style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
-          >
-            <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
-          </div>
-          
           {/* Inline Artifact Panel — text mode: above composer */}
           {focusMode === 'text' && showArtifacts && showArtifactsUi && (
             <PresenceArtifactPanel
               artifacts={artifacts}
+              builderArtifact={builderArtifact}
+              threadId={resolvedThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
               isVoiceMode={false}
@@ -931,28 +966,92 @@ function SessionPageContent() {
             />
           )}
 
+          {focusMode === 'text' && showBuilderTaskNotice && builderTask && (
+            <BuilderTaskNotice
+              task={builderTask}
+              artifactTitle={builderArtifact?.artifactTitle}
+              onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+              downloadHref={builderArtifact ? builderDownloadHref : undefined}
+              onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
+              onDismiss={clearBuilderTask}
+              onCancel={cancelBuilderTask}
+              isCancelling={isCancellingBuilderTask}
+            />
+          )}
+
           {/* Artifact toggle pill — text mode: inline above composer */}
           {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
-            <div className="flex justify-center mb-2">
-              <ArtifactToggleIcon
-                hasArtifacts={!!(artifacts?.takeaway)}
-                onClick={handleOpenArtifactsPanel}
-                isNew={hasNewArtifacts}
+            builderArtifact && !builderTask ? (
+              <div className="mb-2 flex justify-center">
+                <BuilderReadyPill
+                  title={builderArtifact.artifactTitle}
+                  onOpen={handleOpenArtifactsPanel}
+                  downloadHref={builderDownloadHref}
+                  onDownload={() => haptic('medium')}
+                  isNew={hasNewArtifacts}
+                />
+              </div>
+            ) : (
+              <div className="flex justify-center mb-2">
+                <ArtifactToggleIcon
+                  hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
+                  onClick={handleOpenArtifactsPanel}
+                  isNew={hasNewArtifacts}
+                />
+              </div>
+            )
+          )}
+
+          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && (
+            <div
+              className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
+              style={{ bottom: '136px', opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              {builderArtifact && !builderTask ? (
+                <BuilderReadyPill
+                  title={builderArtifact.artifactTitle}
+                  onOpen={handleOpenArtifactsPanel}
+                  downloadHref={builderDownloadHref}
+                  onDownload={() => haptic('medium')}
+                  isNew={hasNewArtifacts}
+                  compact={true}
+                />
+              ) : (
+                <ArtifactToggleIcon
+                  hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
+                  onClick={handleOpenArtifactsPanel}
+                  isNew={hasNewArtifacts}
+                />
+              )}
+            </div>
+          )}
+
+          {focusMode !== 'text' && showBuilderTaskNotice && builderTask && (
+            <div
+              className="fixed left-1/2 -translate-x-1/2 z-40"
+              style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <BuilderTaskNotice
+                task={builderTask}
+                artifactTitle={builderArtifact?.artifactTitle}
+                onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+                downloadHref={builderArtifact ? builderDownloadHref : undefined}
+                onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
+                compact={false}
+                onDismiss={clearBuilderTask}
+                onCancel={cancelBuilderTask}
+                isCancelling={isCancellingBuilderTask}
               />
             </div>
           )}
 
-          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && (
+          {focusMode === 'text' && (
             <div
-              className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: '136px', opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+              className="mb-3 flex justify-center"
+              style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
             >
-              <ArtifactToggleIcon
-                hasArtifacts={!!(artifacts?.takeaway)}
-                onClick={handleOpenArtifactsPanel}
-                isNew={hasNewArtifacts}
-              />
+              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
             </div>
           )}
           
@@ -974,6 +1073,16 @@ function SessionPageContent() {
               isConnecting={connectivityStatus === 'checking'}
               focusRequestToken={composerFocusToken}
               textOnly={focusMode === 'text'}
+              slotBeforeText={focusMode !== 'text'
+                ? (
+                    <div
+                      className="flex justify-center"
+                      style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
+                    >
+                      <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                    </div>
+                  )
+                : undefined}
             />
           </VoiceComposerErrorBoundary>
         </div>
@@ -982,6 +1091,8 @@ function SessionPageContent() {
         {focusMode !== 'text' && (
           <PresenceArtifactPanel
             artifacts={artifacts}
+            builderArtifact={builderArtifact}
+            threadId={resolvedThreadId}
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}
             isVoiceMode={true}

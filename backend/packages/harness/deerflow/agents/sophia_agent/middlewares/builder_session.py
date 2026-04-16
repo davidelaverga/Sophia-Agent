@@ -16,7 +16,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    build_subagent_progress_payload,
+    cleanup_background_task,
+    get_background_task_result,
+)
 
 _NON_TERMINAL_STATUSES = {"queued", "running", "started"}
 _TERMINAL_STATUSES = {"completed", "synthesized", "failed", "timed_out"}
@@ -142,7 +147,9 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
             f"Latest builder task ended with status={task.get('status')}.\n"
             f"error={task.get('error') or 'unknown'}\n"
             f"{suffix}\n"
-            "Acknowledge the failure once and offer a retry path.\n"
+            "You MUST NOT describe the builder as still running, queued, or in progress.\n"
+            "If the user asks about the builder, explicitly say it failed and briefly explain why.\n"
+            "Offer a retry path.\n"
             "Do NOT automatically re-run switch_to_builder without user direction.\n"
             "</builder_task_status>"
         )
@@ -325,8 +332,9 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                 blocks.append(self._failure_block(failed_task))
             else:
                 mapped_status = self._status_from_result(result)
+                progress_payload = build_subagent_progress_payload(result)
                 if mapped_status in {"queued", "running"}:
-                    running_task = {**current_task, "status": mapped_status}
+                    running_task = {**current_task, "status": mapped_status, **progress_payload}
                     updates["builder_task"] = running_task
                     updates["active_mode"] = "builder"
                     blocks.append(self._in_progress_block(running_task))
@@ -335,6 +343,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                         **current_task,
                         "status": "completed",
                         "completed_at": self._iso_or_none(getattr(result, "completed_at", None)),
+                        **progress_payload,
                     }
                     debug = self._build_task_debug(result)
                     if debug:
@@ -349,6 +358,7 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                         "status": mapped_status,
                         "completed_at": self._iso_or_none(getattr(result, "completed_at", None)),
                         "error": getattr(result, "error", None),
+                        **progress_payload,
                     }
                     debug = self._build_task_debug(result)
                     if debug:
