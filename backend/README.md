@@ -137,7 +137,8 @@ Telegram now supports Sophia account linking and media-first workflows:
 - Web app creates one-time `/api/sophia/{user_id}/telegram/link` tokens, redeemed in Telegram with `/start <token>` (private chat).
 - Re-linking a Telegram chat to a different Sophia user clears the previous user reverse mapping to keep status/unlink behavior consistent.
 - Unlinked chats are gated; linked chats can send normal text, `/build <task>`, and photo/document inputs.
-- Telegram media is downloaded by the channel, persisted into thread uploads, and injected into the run input via `<uploaded_files>` plus `additional_kwargs.files`.
+- Telegram media is downloaded by the channel and persisted into thread uploads, but supported attachments are sent to Sophia inline so runs do not depend on gateway-local upload paths being visible to LangGraph.
+- Supported Telegram photos become native Anthropic `image` blocks; PDFs, converted office docs, and text-like files become native `document` blocks with truncation or fallback notes when needed.
 
 `ChannelManager` now also:
 - Enforces one active run per conversation key (`channel:chat:topic`) and sends a busy message for overlapping requests.

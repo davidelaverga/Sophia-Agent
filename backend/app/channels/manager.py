@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import mimetypes
@@ -17,6 +18,7 @@ from app.channels.session_resolver import resolve_channel_session
 from app.channels.store import ChannelStore
 from deerflow.config.paths import get_paths
 from deerflow.subagents.executor import get_background_task_result
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,50 @@ THREAD_BUSY_MESSAGE = "I’m still working on your previous message in this chat
 BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS = 2.0
 BUILDER_NOTIFIER_MAX_WAIT_SECONDS = 20 * 60
 _UPLOADS_VIRTUAL_PREFIX = "/mnt/user-data/uploads/"
+_TELEGRAM_INLINE_IMAGE_MIME_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+_TELEGRAM_TEXT_LIKE_MIME_TYPES = {
+    "application/csv",
+    "application/javascript",
+    "application/json",
+    "application/sql",
+    "application/xml",
+    "application/x-javascript",
+    "application/x-yaml",
+    "application/yaml",
+    "image/svg+xml",
+}
+_TELEGRAM_TEXT_LIKE_EXTENSIONS = {
+    ".cjs",
+    ".css",
+    ".csv",
+    ".html",
+    ".htm",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".markdown",
+    ".mjs",
+    ".py",
+    ".sql",
+    ".svg",
+    ".ts",
+    ".tsx",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+_TELEGRAM_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+_TELEGRAM_INLINE_PDF_MAX_BYTES = 10 * 1024 * 1024
+_TELEGRAM_INLINE_TEXT_MAX_CHARS = 60_000
 
 _TERMINAL_BUILDER_STATUSES = {"completed", "failed", "timed_out"}
 
@@ -553,7 +599,8 @@ class ChannelManager:
         # LangGraph API ≥0.6 rejects requests containing both configurable
         # and context.  When configurable is present, fold context into it so
         # the caller can omit the separate context parameter.
-        if "configurable" in run_config:
+        if isinstance(run_config.get("configurable"), Mapping):
+            run_config["configurable"] = dict(run_config["configurable"])
             for key, value in run_context.items():
                 run_config["configurable"].setdefault(key, value)
             run_context = {}
@@ -586,8 +633,165 @@ class ChannelManager:
             if isinstance(file_info, dict)
         ]
 
-    def _build_human_message_payload(self, text: str, uploaded_files: list[dict[str, Any]]) -> dict[str, Any]:
-        content = _compose_inbound_content(text, uploaded_files)
+    @staticmethod
+    def _is_text_like_telegram_attachment(filename: str, mime_type: str) -> bool:
+        lower_mime = mime_type.lower()
+        if lower_mime.startswith("text/") or lower_mime in _TELEGRAM_TEXT_LIKE_MIME_TYPES:
+            return True
+        return Path(filename).suffix.lower() in _TELEGRAM_TEXT_LIKE_EXTENSIONS
+
+    @staticmethod
+    def _truncate_telegram_document_text(text: str) -> str:
+        normalized = text.strip()
+        if len(normalized) <= _TELEGRAM_INLINE_TEXT_MAX_CHARS:
+            return normalized
+        truncated = normalized[:_TELEGRAM_INLINE_TEXT_MAX_CHARS].rstrip()
+        return f"{truncated}\n\n[Truncated after {_TELEGRAM_INLINE_TEXT_MAX_CHARS} characters for inline Telegram delivery.]"
+
+    @staticmethod
+    def _build_telegram_text_document_block(*, filename: str, text: str) -> dict[str, Any]:
+        return {
+            "type": "document",
+            "title": filename,
+            "source": {
+                "type": "text",
+                "media_type": "text/plain",
+                "data": text,
+            },
+        }
+
+    @staticmethod
+    def _build_telegram_pdf_document_block(*, filename: str, content: bytes) -> dict[str, Any]:
+        return {
+            "type": "document",
+            "title": filename,
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(content).decode("ascii"),
+            },
+        }
+
+    @staticmethod
+    def _build_telegram_image_block(*, mime_type: str, content: bytes) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": base64.b64encode(content).decode("ascii"),
+            },
+        }
+
+    @classmethod
+    def _build_telegram_attachment_note_block(cls, *, filename: str, mime_type: str, note: str) -> dict[str, Any]:
+        return cls._build_telegram_text_document_block(
+            filename=filename,
+            text=(
+                f"Telegram attachment: {filename}\n"
+                f"MIME type: {mime_type}\n\n"
+                f"{note}"
+            ),
+        )
+
+    async def _build_telegram_attachment_blocks(
+        self,
+        *,
+        filename: str,
+        mime_type: str,
+        content: bytes,
+        target_path: Path,
+    ) -> list[dict[str, Any]]:
+        lower_mime = mime_type.lower()
+
+        if lower_mime in _TELEGRAM_INLINE_IMAGE_MIME_TYPES:
+            if len(content) <= _TELEGRAM_INLINE_IMAGE_MAX_BYTES:
+                return [self._build_telegram_image_block(mime_type=lower_mime, content=content)]
+            return [
+                self._build_telegram_attachment_note_block(
+                    filename=filename,
+                    mime_type=mime_type,
+                    note=(
+                        "This image was too large to transport inline from Telegram. "
+                        "Ask the user for a smaller image if direct inspection is required."
+                    ),
+                )
+            ]
+
+        if lower_mime == "application/pdf" or target_path.suffix.lower() == ".pdf":
+            if len(content) <= _TELEGRAM_INLINE_PDF_MAX_BYTES:
+                return [self._build_telegram_pdf_document_block(filename=filename, content=content)]
+
+            md_path = await convert_file_to_markdown(target_path)
+            if md_path is not None:
+                try:
+                    markdown_text = md_path.read_text(encoding="utf-8")
+                except OSError:
+                    logger.warning("[Manager] failed reading converted Telegram PDF markdown: %s", md_path, exc_info=True)
+                else:
+                    normalized = self._truncate_telegram_document_text(markdown_text)
+                    if normalized:
+                        return [self._build_telegram_text_document_block(filename=filename, text=normalized)]
+
+            return [
+                self._build_telegram_attachment_note_block(
+                    filename=filename,
+                    mime_type=mime_type,
+                    note=(
+                        "This PDF was too large to transport inline from Telegram and could not be converted "
+                        "to text for this request."
+                    ),
+                )
+            ]
+
+        if target_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+            md_path = await convert_file_to_markdown(target_path)
+            if md_path is not None:
+                try:
+                    markdown_text = md_path.read_text(encoding="utf-8")
+                except OSError:
+                    logger.warning("[Manager] failed reading converted Telegram attachment markdown: %s", md_path, exc_info=True)
+                else:
+                    normalized = self._truncate_telegram_document_text(markdown_text)
+                    if normalized:
+                        return [self._build_telegram_text_document_block(filename=filename, text=normalized)]
+
+            return [
+                self._build_telegram_attachment_note_block(
+                    filename=filename,
+                    mime_type=mime_type,
+                    note="This document could not be converted to inline text for this request.",
+                )
+            ]
+
+        if self._is_text_like_telegram_attachment(filename, lower_mime):
+            decoded_text = self._truncate_telegram_document_text(content.decode("utf-8", errors="replace"))
+            if decoded_text:
+                return [self._build_telegram_text_document_block(filename=filename, text=decoded_text)]
+
+        return [
+            self._build_telegram_attachment_note_block(
+                filename=filename,
+                mime_type=mime_type,
+                note=(
+                    "This binary attachment could not be transported inline from Telegram. "
+                    "Ask the user for a text-exportable version if direct inspection is required."
+                ),
+            )
+        ]
+
+    def _build_telegram_human_message_payload(self, text: str, uploaded_files: list[dict[str, Any]]) -> dict[str, Any]:
+        content_blocks: list[dict[str, Any]] = [{"type": "text", "text": text or "Please process the attached file."}]
+        for file_info in uploaded_files:
+            blocks = file_info.get("telegram_blocks")
+            if isinstance(blocks, list):
+                content_blocks.extend(block for block in blocks if isinstance(block, Mapping))
+        return {"role": "human", "content": content_blocks}
+
+    def _build_human_message_payload(self, msg: InboundMessage, uploaded_files: list[dict[str, Any]]) -> dict[str, Any]:
+        if msg.channel_name == "telegram" and uploaded_files:
+            return self._build_telegram_human_message_payload(msg.text, uploaded_files)
+        content = _compose_inbound_content(msg.text, uploaded_files)
         payload: dict[str, Any] = {"role": "human", "content": content}
         if uploaded_files:
             payload["additional_kwargs"] = {
@@ -698,6 +902,7 @@ class ChannelManager:
         )
         logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
+
     @staticmethod
     def _make_safe_upload_filename(filename: str, fallback_index: int) -> str:
         safe = Path(filename).name.strip()
@@ -792,6 +997,13 @@ class ChannelManager:
                         "status": "uploaded",
                     }
                 )
+                if msg.channel_name == "telegram":
+                    stored_files[-1]["telegram_blocks"] = await self._build_telegram_attachment_blocks(
+                        filename=target_path.name,
+                        mime_type=mime_type,
+                        content=content,
+                        target_path=target_path,
+                    )
         finally:
             if sandbox_provider is not None and isinstance(sandbox_id, str) and sandbox_id:
                 try:
@@ -904,7 +1116,7 @@ class ChannelManager:
                 thread_id = await self._create_thread(client, msg)
 
             uploaded_files = await self._read_and_store_inbound_files(msg, thread_id)
-            human_message_payload = self._build_human_message_payload(msg.text, uploaded_files)
+            human_message_payload = self._build_human_message_payload(msg, uploaded_files)
             assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
             if msg.channel_name == "feishu":
                 await self._handle_streaming_chat(

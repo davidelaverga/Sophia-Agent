@@ -15,6 +15,9 @@ models:
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+# In Render production this sandbox only sees the langgraph service's local
+# DEER_FLOW_HOME. Channel-originated Telegram attachments therefore need inline
+# transport instead of gateway-local /mnt/user-data/uploads references.
 
 skills:
   path: ../skills
@@ -32,6 +35,8 @@ summarization:
 # IM channels (used by gateway ChannelService)
 # Note: config values with $VAR are resolved at app startup, so these env vars
 # must be available anywhere this config file is loaded.
+# Telegram media delivery in this topology relies on inline image/document
+# blocks for supported attachments rather than shared local upload paths.
 channels:
   langgraph_url: $LANGGRAPH_URL
   gateway_url: http://localhost:8001

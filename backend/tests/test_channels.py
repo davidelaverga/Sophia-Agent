@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import tempfile
 from pathlib import Path
@@ -599,6 +600,32 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_resolve_run_params_clones_configurable_before_merging_context(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        shared_configurable = {"model_name": "claude-haiku-4-5-20251001"}
+        manager = ChannelManager(
+            bus=bus,
+            store=store,
+            default_session={"config": {"configurable": shared_configurable}},
+        )
+
+        msg1 = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi")
+        _assistant1, run_config1, run_context1 = manager._resolve_run_params(msg1, "thread-1")
+
+        msg2 = InboundMessage(channel_name="telegram", chat_id="chat2", user_id="user2", text="hi again")
+        _assistant2, run_config2, run_context2 = manager._resolve_run_params(msg2, "thread-2")
+
+        assert run_context1 == {}
+        assert run_context2 == {}
+        assert run_config1["configurable"]["thread_id"] == "thread-1"
+        assert run_config2["configurable"]["thread_id"] == "thread-2"
+        assert run_config1["configurable"] is not shared_configurable
+        assert run_config2["configurable"] is not shared_configurable
+        assert shared_configurable == {"model_name": "claude-haiku-4-5-20251001"}
+
     def test_handle_chat_sends_busy_message_for_concurrent_same_conversation(self):
         from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
 
@@ -642,7 +669,7 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_handle_chat_reads_and_injects_inbound_files(self, monkeypatch, tmp_path):
+    def test_handle_chat_inlines_telegram_pdf_attachments(self, monkeypatch, tmp_path):
 
         from app.channels.manager import ChannelManager
         from deerflow.config.paths import Paths
@@ -653,12 +680,14 @@ class TestChannelManager:
             bus = MessageBus()
             store = ChannelStore(path=tmp_path / "store.json")
 
+            pdf_bytes = b"%PDF-1.4 fake telegram pdf"
+
             async def fake_reader(_msg):
                 return [
                     {
-                        "filename": "input.txt",
-                        "mime_type": "text/plain",
-                        "content": b"hello from telegram",
+                        "filename": "brief.pdf",
+                        "mime_type": "application/pdf",
+                        "content": pdf_bytes,
                     }
                 ]
 
@@ -689,8 +718,143 @@ class TestChannelManager:
 
             call_args = mock_client.runs.wait.call_args
             message_payload = call_args[1]["input"]["messages"][0]
-            assert "<uploaded_files>" in message_payload["content"]
-            assert message_payload["additional_kwargs"]["files"][0]["filename"] == "input.txt"
+            assert "additional_kwargs" not in message_payload
+            assert message_payload["content"][0] == {"type": "text", "text": "please inspect file"}
+            assert message_payload["content"][1] == {
+                "type": "document",
+                "title": "brief.pdf",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.b64encode(pdf_bytes).decode("ascii"),
+                },
+            }
+
+        _run(go())
+
+    def test_handle_chat_inlines_telegram_images_as_native_image_blocks(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            image_bytes = b"\x89PNG\r\n\x1a\nfake-image"
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "photo.png",
+                        "mime_type": "image/png",
+                        "content": image_bytes,
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="what's in this image?",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            message_payload = call_args[1]["input"]["messages"][0]
+            assert message_payload["content"][0] == {"type": "text", "text": "what's in this image?"}
+            assert message_payload["content"][1] == {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                },
+            }
+
+        _run(go())
+
+    def test_handle_chat_converts_telegram_documents_to_inline_text_documents(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            async def fake_convert(path: Path) -> Path:
+                md_path = path.with_suffix(".md")
+                md_path.write_text("# Converted brief\n\nImportant points.", encoding="utf-8")
+                return md_path
+
+            monkeypatch.setattr("app.channels.manager.convert_file_to_markdown", fake_convert)
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "brief.docx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "content": b"fake-docx-content",
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="summarize the attached brief",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            message_payload = call_args[1]["input"]["messages"][0]
+            assert message_payload["content"][0] == {"type": "text", "text": "summarize the attached brief"}
+            assert message_payload["content"][1] == {
+                "type": "document",
+                "title": "brief.docx",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": "# Converted brief\n\nImportant points.",
+                },
+            }
 
         _run(go())
 
