@@ -1269,3 +1269,49 @@
     font-size: 13px;
   }
 }
+
+/* ── Visual tier 2: reduced blur ── */
+:global(html[data-visual-tier="2"]) .searchBar {
+  backdrop-filter: blur(10px);
+}
+:global(html[data-visual-tier="2"]) .periodButton {
+  backdrop-filter: blur(8px);
+}
+:global(html[data-visual-tier="2"]) .periodDropdown {
+  backdrop-filter: blur(16px);
+}
+:global(html[data-visual-tier="2"]) .hoverLabel {
+  backdrop-filter: blur(12px);
+}
+:global(html[data-visual-tier="2"]) .detailPanel {
+  backdrop-filter: blur(20px) saturate(1.3);
+}
+:global(html[data-visual-tier="2"]) .listPanel {
+  backdrop-filter: blur(16px);
+}
+
+/* ── Visual tier 1: no blur, opaque fallbacks ── */
+:global(html[data-visual-tier="1"]) .searchBar {
+  background: rgba(14, 12, 24, 0.92);
+  backdrop-filter: none;
+}
+:global(html[data-visual-tier="1"]) .periodButton {
+  background: rgba(14, 12, 24, 0.88);
+  backdrop-filter: none;
+}
+:global(html[data-visual-tier="1"]) .periodDropdown {
+  background: rgba(16, 12, 28, 0.96);
+  backdrop-filter: none;
+}
+:global(html[data-visual-tier="1"]) .hoverLabel {
+  background: rgba(16, 12, 28, 0.95);
+  backdrop-filter: none;
+}
+:global(html[data-visual-tier="1"]) .detailPanel {
+  background: rgba(16, 12, 28, 0.96);
+  backdrop-filter: none;
+}
+:global(html[data-visual-tier="1"]) .listPanel {
+  background: rgba(12, 10, 20, 0.94);
+  backdrop-filter: none;
+}
