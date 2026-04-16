@@ -14,6 +14,7 @@
 
 // Session management
 export { useSessionStore } from './session-store'
+export { selectOpenSessions, selectRecentSessions, selectOpenSessionCount, selectIsLoadingSessions } from './session-store'
 export { useSessionHistoryStore } from './session-history-store'
 export { 
   useConversationStore,

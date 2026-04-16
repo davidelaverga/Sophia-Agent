@@ -5,9 +5,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+import app.gateway.routers.sessions as sessions_router
 from app.gateway.auth import require_authorized_user_scope
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.sophia.session_store import SessionStore
 
 
 @pytest.fixture(autouse=True)
@@ -22,8 +24,10 @@ def _gateway_test_app_config():
     reset_app_config()
 
 
-def test_gateway_app_mounts_sessions_and_bootstrap_routes():
+def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch):
     from app.gateway.app import create_app
+
+    monkeypatch.setattr(sessions_router, "_store", SessionStore(tmp_path / "users"))
 
     app = create_app()
     with TestClient(app) as client:

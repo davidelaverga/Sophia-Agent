@@ -9,6 +9,12 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
+import {
+  deleteSessionRecord,
+  getOpenSessions as fetchOpenSessions,
+  isError,
+  listSessions,
+} from '../lib/api/sessions-api';
 import { logger } from '../lib/error-logger';
 import type {
   SessionClientStore,
@@ -18,6 +24,7 @@ import type {
   CompanionSessionContext,
   InvokeType,
   SessionMessage,
+  SessionInfo,
 } from '../lib/session-types';
 import { generateLocalId } from '../lib/utils';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
@@ -27,8 +34,14 @@ import type { BuilderArtifactV1 } from '../types/builder-artifact';
 // ============================================================================
 
 interface SessionState {
-  // Current session data
+  // Current session data (the one being displayed/interacted with)
   session: SessionClientStore | null;
+  
+  // Multi-session: all open sessions from backend
+  openSessions: SessionInfo[];
+  recentSessions: SessionInfo[];
+  isLoadingSessions: boolean;
+  lastOpenSessionsFetchAt: number | null;
   
   // Loading states
   isInitializing: boolean;
@@ -36,6 +49,20 @@ interface SessionState {
   
   // Error state
   error: string | null;
+  
+  // Multi-session actions
+  refreshOpenSessions: (userId?: string) => Promise<number>;
+  refreshRecentSessions: (userId?: string) => Promise<void>;
+  setActiveSession: (sessionId: string) => void;
+  restoreOpenSession: (sessionInfo: SessionInfo, userId?: string) => void;
+  viewEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode) => void;
+  removeOpenSession: (sessionId: string, userId?: string) => Promise<boolean>;
+  recordOpenSessionActivity: (sessionId: string, activity: {
+    messagePreview?: string;
+    title?: string | null;
+    turnCount?: number;
+    updatedAt?: string;
+  }) => void;
   
   // Actions
   createSession: (
@@ -88,15 +115,298 @@ interface SessionState {
 // STORE IMPLEMENTATION
 // ============================================================================
 
+function normalizeSessionPreview(messagePreview: string): string {
+  return messagePreview.trim().replace(/\s+/g, ' ').slice(0, 200);
+}
+
+function sortSessionsByUpdatedAt(sessions: SessionInfo[]): SessionInfo[] {
+  return [...sessions].sort((left, right) => (
+    new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()
+  ));
+}
+
 export const useSessionStore = create<SessionState>()(
   persist(
     (set, get) => ({
       // Initial state
       session: null,
+      openSessions: [],
+      recentSessions: [],
+      isLoadingSessions: false,
+      lastOpenSessionsFetchAt: null,
       isInitializing: false,
       isEnding: false,
       error: null,
       
+      // Multi-session: fetch open sessions from backend
+      refreshOpenSessions: async (userId = 'dev-user') => {
+        const { isLoadingSessions, lastOpenSessionsFetchAt, openSessions } = get();
+        const now = Date.now();
+        const recentlyFetched = lastOpenSessionsFetchAt !== null && now - lastOpenSessionsFetchAt < 15000;
+
+        if (isLoadingSessions) {
+          return openSessions.length;
+        }
+
+        if (recentlyFetched) {
+          return openSessions.length;
+        }
+
+        set({ isLoadingSessions: true });
+        try {
+          const result = await fetchOpenSessions(userId);
+          if (result.success) {
+            set({
+              openSessions: result.data.sessions,
+              lastOpenSessionsFetchAt: now,
+            });
+            return result.data.sessions.length;
+          } else {
+            logger.warn('SessionStore: Failed to load open sessions');
+          }
+        } catch (err) {
+          logger.warn('SessionStore: Error fetching open sessions', { error: err });
+        } finally {
+          set({ isLoadingSessions: false });
+        }
+        return get().openSessions.length;
+      },
+      
+      // Multi-session: fetch recent sessions (open + ended)
+      refreshRecentSessions: async (userId = 'dev-user') => {
+        try {
+          const result = await listSessions(userId, { limit: 30 });
+          if (result.success) {
+            set({ recentSessions: result.data.sessions });
+          }
+        } catch (err) {
+          logger.warn('SessionStore: Error fetching recent sessions', { error: err });
+        }
+      },
+
+      recordOpenSessionActivity: (sessionId, activity) => {
+        const normalizedPreview = activity.messagePreview
+          ? normalizeSessionPreview(activity.messagePreview)
+          : undefined;
+        const nextUpdatedAt = activity.updatedAt ?? new Date().toISOString();
+
+        if (!normalizedPreview && activity.title === undefined && activity.turnCount === undefined) {
+          return;
+        }
+
+        set((state) => {
+          const applyUpdate = (entry: SessionInfo): SessionInfo => ({
+            ...entry,
+            updated_at: nextUpdatedAt,
+            turn_count: typeof activity.turnCount === 'number' ? activity.turnCount : entry.turn_count + 1,
+            last_message_preview: normalizedPreview ?? entry.last_message_preview,
+            title: activity.title !== undefined ? activity.title : entry.title,
+          });
+
+          const buildFromActiveSession = (): SessionInfo | null => {
+            if (state.session?.sessionId !== sessionId) return null;
+            return {
+              session_id: sessionId,
+              thread_id: state.session.threadId,
+              session_type: state.session.presetType,
+              preset_context: state.session.contextMode,
+              status: 'open',
+              started_at: state.session.startedAt,
+              updated_at: nextUpdatedAt,
+              turn_count: typeof activity.turnCount === 'number' ? activity.turnCount : 1,
+              title: activity.title,
+              last_message_preview: normalizedPreview ?? null,
+              platform: state.session.voiceMode ? 'voice' : 'text',
+              intention: state.session.intention,
+              focus_cue: state.session.focusCue,
+            };
+          };
+
+          const nextOpenSessions = (() => {
+            let found = false;
+            const updated = state.openSessions.map((entry) => {
+              if (entry.session_id !== sessionId) return entry;
+              found = true;
+              return applyUpdate(entry);
+            });
+            if (!found) {
+              const synthesized = buildFromActiveSession();
+              if (synthesized) updated.unshift(synthesized);
+            }
+            return sortSessionsByUpdatedAt(updated);
+          })();
+
+          const nextRecentSessions = (() => {
+            let found = false;
+            const updated = state.recentSessions.map((entry) => {
+              if (entry.session_id !== sessionId) return entry;
+              found = true;
+              return applyUpdate(entry);
+            });
+            if (!found) {
+              const synthesized = buildFromActiveSession();
+              if (synthesized) updated.unshift(synthesized);
+            }
+            return sortSessionsByUpdatedAt(updated);
+          })();
+
+          return {
+            openSessions: nextOpenSessions,
+            recentSessions: nextRecentSessions,
+          };
+        });
+      },
+      
+      // Multi-session: mark a session as the active one in the UI
+      setActiveSession: (sessionId) => {
+        const { session, openSessions } = get();
+        if (session?.sessionId === sessionId) return;
+        
+        const target = openSessions.find(s => s.session_id === sessionId);
+        if (!target) {
+          logger.warn('SessionStore: Cannot switch to unknown session', { sessionId });
+          return;
+        }
+        
+        // Create a minimal SessionClientStore from the backend SessionInfo
+        const restored: SessionClientStore = {
+          sessionId: target.session_id,
+          threadId: target.thread_id,
+          userId: 'dev-user', // TODO: resolve from auth
+          presetType: (target.session_type as PresetType) || 'open',
+          contextMode: (target.preset_context as ContextMode) || 'life',
+          status: 'active',
+          voiceMode: target.platform === 'voice' || target.platform === 'ios_voice',
+          startedAt: target.started_at,
+          lastActivityAt: target.updated_at,
+          isActive: true,
+          companionInvokesCount: 0,
+        };
+        
+        set({ session: restored, error: null });
+        
+        // Restore conversation history from the LangGraph thread
+        import('./chat-store')
+          .then(({ useChatStore }) =>
+            useChatStore.getState().loadSession(target.session_id),
+          )
+          .catch(() => {
+            logger.warn('SessionStore: Failed to restore messages for session', { sessionId });
+          });
+      },
+
+      restoreOpenSession: (sessionInfo, userId = 'dev-user') => {
+        const restored: SessionClientStore = {
+          sessionId: sessionInfo.session_id,
+          threadId: sessionInfo.thread_id,
+          userId,
+          presetType: (sessionInfo.session_type as PresetType) || 'open',
+          contextMode: (sessionInfo.preset_context as ContextMode) || 'life',
+          status: sessionInfo.status === 'open' ? 'active' : 'ended',
+          voiceMode: sessionInfo.platform === 'voice' || sessionInfo.platform === 'ios_voice',
+          startedAt: sessionInfo.started_at,
+          lastActivityAt: sessionInfo.updated_at,
+          endedAt: sessionInfo.ended_at ?? undefined,
+          intention: sessionInfo.intention ?? undefined,
+          focusCue: sessionInfo.focus_cue ?? undefined,
+          isActive: sessionInfo.status === 'open',
+          companionInvokesCount: 0,
+        };
+
+        set((state) => {
+          const upsertSessions = (sessions: SessionInfo[]) => sortSessionsByUpdatedAt([
+            sessionInfo,
+            ...sessions.filter((entry) => entry.session_id !== sessionInfo.session_id),
+          ]);
+
+          return {
+            session: restored,
+            openSessions: upsertSessions(state.openSessions),
+            recentSessions: upsertSessions(state.recentSessions),
+            error: null,
+          };
+        });
+
+        import('./chat-store')
+          .then(({ useChatStore }) =>
+            useChatStore.getState().loadSession(sessionInfo.session_id),
+          )
+          .catch(() => {
+            logger.warn('SessionStore: Failed to restore messages for resumed session', {
+              sessionId: sessionInfo.session_id,
+            });
+          });
+      },
+      
+      // View an ended session as read-only transcript
+      viewEndedSession: (sessionId, presetType, contextMode) => {
+        const { session } = get();
+        if (session?.sessionId === sessionId) return;
+
+        const now = new Date().toISOString();
+        const restored: SessionClientStore = {
+          sessionId,
+          threadId: sessionId,
+          userId: 'dev-user',
+          presetType,
+          contextMode,
+          status: 'ended',
+          voiceMode: false,
+          startedAt: now,
+          lastActivityAt: now,
+          isActive: false,
+          companionInvokesCount: 0,
+        };
+
+        set({ session: restored, error: null });
+
+        import('./chat-store')
+          .then(({ useChatStore }) =>
+            useChatStore.getState().loadSession(sessionId),
+          )
+          .catch(() => {
+            logger.warn('SessionStore: Failed to load ended session messages', { sessionId });
+          });
+      },
+
+      removeOpenSession: async (sessionId, userId) => {
+        const activeSession = get().session;
+        const resolvedUserId = userId ?? activeSession?.userId ?? 'dev-user';
+        const result = await deleteSessionRecord(sessionId, resolvedUserId);
+
+        if (isError(result)) {
+          logger.warn('SessionStore: Failed to delete persisted session', {
+            sessionId,
+            userId: resolvedUserId,
+            code: result.code,
+            error: result.error,
+          });
+          return false;
+        }
+
+        const deletingActiveSession = get().session?.sessionId === sessionId;
+        set((state) => ({
+          openSessions: state.openSessions.filter((session) => session.session_id !== sessionId),
+          recentSessions: state.recentSessions.filter((session) => session.session_id !== sessionId),
+          lastOpenSessionsFetchAt: null,
+          ...(deletingActiveSession ? { session: null } : {}),
+        }));
+
+        if (deletingActiveSession) {
+          try {
+            const { useChatStore } = await import('./chat-store');
+            useChatStore.getState().clearSession();
+          } catch (error) {
+            logger.warn('SessionStore: Failed to clear chat state after session deletion', {
+              sessionId,
+              error,
+            });
+          }
+        }
+
+        return true;
+      },
+
       // Create a new session (Week 1: local IDs, Week 2: backend IDs)
       // TODO Week 2: Replace with POST /sessions/start API call
       // - Send: { user_id, preset_type, context_mode, game_name?, intention?, focus_cue? }
@@ -337,9 +647,11 @@ export const useSessionStore = create<SessionState>()(
       name: 'sophia-session-store',
       storage: createJSONStorage(() => localStorage),
       
-      // Only persist session data, not loading states
+      // Only persist session data and open sessions, not loading states
       partialize: (state) => ({
         session: state.session,
+        openSessions: state.openSessions,
+        recentSessions: state.recentSessions,
       }),
     }
   )
@@ -357,6 +669,12 @@ export const selectContextMode = (state: SessionState) => state.session?.context
 export const selectArtifacts = (state: SessionState) => state.session?.artifacts ?? null;
 export const selectBuilderArtifact = (state: SessionState) => state.session?.builderArtifact ?? null;
 export const selectMessages = (state: SessionState) => state.session?.messages ?? [];
+
+// Multi-session selectors
+export const selectOpenSessions = (state: SessionState) => state.openSessions;
+export const selectRecentSessions = (state: SessionState) => state.recentSessions;
+export const selectIsLoadingSessions = (state: SessionState) => state.isLoadingSessions;
+export const selectOpenSessionCount = (state: SessionState) => state.openSessions.length;
 
 // Session summary for ResumeBanner (unified approach - Week 4)
 export const selectSessionSummary = (state: SessionState) => {

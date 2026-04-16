@@ -1,15 +1,17 @@
 'use client';
 
-import { BookOpen, Settings } from 'lucide-react';
+import { BookOpen, Clock, Settings } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { haptic } from '../hooks/useHaptics';
 import { cn } from '../lib/utils';
+import { selectOpenSessionCount, useSessionStore } from '../stores/session-store';
 import type { ContextMode } from '../types/session';
 
 import { CelestialComet } from './dashboard/CelestialComet';
 import { ContextTabs } from './dashboard/ContextTabs';
+import { RecentSessionsSidebar, MobileBottomSheet, MobileSessionsContent } from './dashboard/DashboardSidebar';
 import { EnhancedFieldBackground } from './dashboard/EnhancedFieldBackground';
 import { RitualOrbit } from './dashboard/RitualOrbit';
 import { RitualThread } from './dashboard/RitualThread';
@@ -18,7 +20,6 @@ import { useSweepGlow } from './dashboard/sweepLight';
 import { CONTEXTS } from './dashboard/types';
 import { useDashboardEntryState } from './dashboard/useDashboardEntryState';
 import { ResumeBanner } from './session/ResumeBanner';
-import { ThemeToggle } from './ThemeToggle';
 
 function getGreeting(contextValue: (typeof CONTEXTS)[number]) {
   const hour = new Date().getHours();
@@ -29,10 +30,12 @@ function getGreeting(contextValue: (typeof CONTEXTS)[number]) {
 function FieldChromeButton({
   onClick,
   ariaLabel,
+  title,
   children,
 }: {
   onClick: () => void;
   ariaLabel: string;
+  title?: string;
   children: React.ReactNode;
 }) {
   return (
@@ -40,6 +43,7 @@ function FieldChromeButton({
       type="button"
       onClick={onClick}
       aria-label={ariaLabel}
+      title={title ?? ariaLabel}
       className={cn(
         'cosmic-chrome-button flex h-10 w-10 items-center justify-center rounded-full transition-all duration-200'
       )}
@@ -51,6 +55,8 @@ function FieldChromeButton({
 
 export function EnhancedFieldDashboard() {
   const router = useRouter();
+  const openSessionCount = useSessionStore(selectOpenSessionCount);
+  const refreshOpenSessions = useSessionStore((state) => state.refreshOpenSessions);
   const {
     currentContext,
     contextMode,
@@ -101,6 +107,13 @@ export function EnhancedFieldDashboard() {
   const [micVisible, setMicVisible] = useState(false);
   const [orbitRevealed, setOrbitRevealed] = useState(false);
   const [tabsVisible, setTabsVisible] = useState(false);
+  const [sidebarExpanded, setSidebarExpanded] = useState(() => openSessionCount > 0);
+  const [showMobileSessions, setShowMobileSessions] = useState(false);
+
+  const handleOpenMobileSessions = useCallback(() => {
+    haptic('light');
+    setShowMobileSessions(true);
+  }, []);
 
   useEffect(() => {
     const t1 = setTimeout(() => setTabsVisible(true), 100);
@@ -109,6 +122,23 @@ export function EnhancedFieldDashboard() {
     const t4 = setTimeout(() => setOrbitRevealed(true), 700);
     return () => { clearTimeout(t1); clearTimeout(t2); clearTimeout(t3); clearTimeout(t4); };
   }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const primeSessionsSidebar = async () => {
+      const count = await refreshOpenSessions();
+      if (!cancelled && count > 0) {
+        setSidebarExpanded(true);
+      }
+    };
+
+    void primeSessionsSidebar();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [refreshOpenSessions]);
 
   // ── Context-switch crossfade ────────────────────────────────
   // Greeting fades out → text updates → fades back in
@@ -150,11 +180,36 @@ export function EnhancedFieldDashboard() {
       <CelestialComet contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
+      {/* Mobile sessions trigger — top-left, visible only below lg */}
+      <div className="pointer-events-none fixed left-4 top-4 z-30 lg:hidden sm:left-6">
+        <button
+          type="button"
+          onClick={handleOpenMobileSessions}
+          aria-label="View sessions"
+          title="Sessions"
+          className="pointer-events-auto cosmic-chrome-button flex h-10 items-center gap-2 rounded-full px-3 transition-all duration-200"
+        >
+          <Clock className="h-4 w-4" />
+          <span className="text-[12px] font-medium" style={{ color: 'var(--cosmic-text)' }}>
+            Sessions
+          </span>
+          {openSessionCount > 0 ? (
+            <span
+              className="flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold text-white"
+              style={{ background: 'var(--sophia-purple)' }}
+            >
+              {openSessionCount > 9 ? '9+' : openSessionCount}
+            </span>
+          ) : null}
+        </button>
+      </div>
+
+      {/* Top-right chrome — always right-aligned */}
       <div className="pointer-events-none fixed inset-x-0 top-0 z-30 flex items-start justify-end px-4 py-4 sm:px-6">
         <div className="pointer-events-auto flex items-center gap-2">
-          <ThemeToggle />
           <FieldChromeButton
             ariaLabel="Open journal"
+            title="Journal"
             onClick={() => {
               haptic('light');
               router.push('/journal');
@@ -164,6 +219,7 @@ export function EnhancedFieldDashboard() {
           </FieldChromeButton>
           <FieldChromeButton
             ariaLabel="Open settings"
+            title="Settings"
             onClick={() => {
               haptic('light');
               setShowSettingsDrawer(true);
@@ -396,6 +452,24 @@ export function EnhancedFieldDashboard() {
         isOpen={showSettingsDrawer}
         onClose={() => setShowSettingsDrawer(false)}
       />
+
+      {/* Mobile sessions bottom sheet */}
+      <MobileBottomSheet
+        isOpen={showMobileSessions}
+        onClose={() => setShowMobileSessions(false)}
+        title="Sessions"
+        icon={<Clock className="h-5 w-5" style={{ color: 'var(--cosmic-text-muted)' }} />}
+      >
+        <MobileSessionsContent />
+      </MobileBottomSheet>
+
+      {/* Sessions sidebar — left edge (desktop) */}
+      <div className="fixed left-4 top-4 bottom-4 z-20">
+        <RecentSessionsSidebar
+          isExpanded={sidebarExpanded}
+          onToggle={() => setSidebarExpanded((v) => !v)}
+        />
+      </div>
     </div>
   );
 }

@@ -9,7 +9,7 @@ vi.mock('../../app/lib/auth/server-auth', () => ({
   refreshUserScopedAuthHeader: () => refreshUserScopedAuthHeaderMock(),
 }));
 
-import { GET, POST } from '../../app/api/sessions/[...path]/route';
+import { DELETE, GET, POST } from '../../app/api/sessions/[...path]/route';
 
 describe('/api/sessions/[...path] proxy', () => {
   beforeEach(() => {
@@ -108,6 +108,27 @@ describe('/api/sessions/[...path] proxy', () => {
     expect(data).toEqual({ has_active_session: false });
   });
 
+  it('normalizes backend 404 from active-session lookup into an empty payload', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const req = {
+      method: 'GET',
+      nextUrl: new URL('http://localhost:3000/api/sessions/active'),
+      text: async () => '',
+    } as unknown as NextRequest;
+
+    const response = await GET(req, { params: Promise.resolve({ path: ['active'] }) });
+
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data).toEqual({ has_active_session: false });
+  });
+
   it('retries a protected POST once with a refreshed auth header after backend 401', async () => {
     refreshUserScopedAuthHeaderMock.mockReturnValue('Bearer refreshed-token');
 
@@ -165,5 +186,30 @@ describe('/api/sessions/[...path] proxy', () => {
       has_memory: false,
     });
     expect(data.assistant_text).toContain('check-in');
+  });
+
+  it('forwards DELETE requests through the sessions proxy', async () => {
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true, session_id: 'sess-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const req = {
+      method: 'DELETE',
+      nextUrl: new URL('http://localhost:3000/api/sessions/sess-1?user_id=dev-user'),
+      text: async () => '',
+    } as unknown as NextRequest;
+
+    const response = await DELETE(req, { params: Promise.resolve({ path: ['sess-1'] }) });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/api/v1/sessions/sess-1');
+    expect(url).toContain('user_id=dev-user');
+    expect(options.method).toBe('DELETE');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, session_id: 'sess-1' });
   });
 });

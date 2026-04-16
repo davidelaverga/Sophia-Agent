@@ -42,6 +42,9 @@ const nextConfig = {
   // Turbopack (default in Next 16) — webpack config below is kept for --webpack fallback
   turbopack: {},
 
+  // Hide the Next.js dev indicator (floating badge) in development
+  devIndicators: false,
+
   // ==========================================================================
   // SECURITY HEADERS
   // ==========================================================================

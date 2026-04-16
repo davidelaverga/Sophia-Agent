@@ -29,7 +29,7 @@ import {
   selectSessionSummary,
 } from '../../stores/session-store';
 import { useUiStore } from '../../stores/ui-store';
-import type { ContextMode, PresetType } from '../../types/session';
+import type { ContextMode, PresetType, SessionInfo } from '../../types/session';
 
 type MicState = 'idle' | 'listening' | 'thinking' | 'speaking';
 
@@ -87,18 +87,10 @@ export function useDashboardEntryState() {
   const [isLaunchingSession, setIsLaunchingSession] = useState(false);
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const [showResumeBanner, setShowResumeBanner] = useState(false);
-  const [backendActiveSession, setBackendActiveSession] = useState<{
-    session_id: string;
-    session_type: string;
-    preset_context: string;
-    started_at: string;
-    turn_count: number;
-    intention?: string;
-    focus_cue?: string;
-  } | null>(null);
+  const [backendActiveSession, setBackendActiveSession] = useState<SessionInfo | null>(null);
   const [bootstrapOpener, setBootstrapOpener] = useState<BootstrapOpenerResponse | null>(null);
 
-  const { start: startSessionAPI, startSessionEntry, checkActiveSession, isLoading: isStartingSession } = useSessionStart({
+  const { resumeSession: resumeSessionAPI, startSessionEntry, checkActiveSession, isLoading: isStartingSession } = useSessionStart({
     navigateOnSuccess: true,
   });
 
@@ -366,14 +358,7 @@ export function useDashboardEntryState() {
     if (backendActiveSession) {
       setIsLaunchingSession(true);
       try {
-        await startSessionAPI(
-          user?.id || `demo-${Date.now()}`,
-          backendActiveSession.session_type as PresetType,
-          backendActiveSession.preset_context as ContextMode,
-          {
-            intention: backendActiveSession.intention,
-          }
-        );
+        await resumeSessionAPI(backendActiveSession, user?.id || 'dev-user');
       } finally {
         setIsLaunchingSession(false);
       }
@@ -381,7 +366,7 @@ export function useDashboardEntryState() {
     }
 
     router.push('/session');
-  }, [backendActiveSession, startSessionAPI, user?.id, router]);
+  }, [backendActiveSession, resumeSessionAPI, user?.id, router]);
 
   const buildFreshStartSeed = useCallback((): FreshStartSeed => ({
     userId: user?.id || `demo-${Date.now()}`,
