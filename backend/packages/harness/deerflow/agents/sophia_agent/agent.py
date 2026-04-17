@@ -7,7 +7,6 @@ import logging
 import os
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
@@ -40,8 +39,10 @@ from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 logger = logging.getLogger(__name__)
 
 
-def _create_summarization_middleware() -> SummarizationMiddleware | None:
-    """Create a SummarizationMiddleware instance from app config."""
+def _create_summarization_middleware():
+    """Create a SophiaSummarizationMiddleware instance from app config."""
+    from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
+
     config = get_summarization_config()
     if not config.enabled:
         return None
@@ -65,7 +66,7 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    return SummarizationMiddleware(**kwargs)
+    return SophiaSummarizationMiddleware(**kwargs)
 
 
 def make_sophia_agent(config: RunnableConfig):
@@ -136,16 +137,13 @@ def make_sophia_agent(config: RunnableConfig):
         BuilderCommandMiddleware(),
     ]
 
-    # 16. Summarization (config-driven trigger/keep policy)
+    # 16. Summarization — Sophia-specific: injects summary as
+    #     system_prompt_block (not HumanMessage) with emotional arc.
+    #     No SummaryAbsorberMiddleware needed — this middleware handles
+    #     everything in one step.
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
-
-    # 17. Summary absorber — converts the SummarizationMiddleware's
-    #     HumanMessage into a system_prompt_block and removes it from
-    #     the conversation so the model doesn't echo it verbatim.
-    from deerflow.agents.sophia_agent.middlewares.summary_absorber import SummaryAbsorberMiddleware
-    middlewares.append(SummaryAbsorberMiddleware())
 
     # Post-chain: prompt assembly, then caching, then title
     from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
