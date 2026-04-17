@@ -8,7 +8,7 @@
 
 'use client';
 
-import { ArrowLeft, Settings, WifiOff } from 'lucide-react';
+import { ArrowLeft, LogOut, Settings, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { type ReactNode, useState, useEffect, type RefObject } from 'react';
 
@@ -35,6 +35,41 @@ interface SessionLayoutProps {
   presenceRef?: RefObject<PresenceFieldHandle | null>;
 }
 
+function SessionHeaderTooltip({
+  label,
+  align = 'center',
+}: {
+  label: string;
+  align?: 'left' | 'center' | 'right';
+}) {
+  const positionClass = align === 'left'
+    ? 'left-0'
+    : align === 'right'
+      ? 'right-0'
+      : 'left-1/2 -translate-x-1/2';
+
+  return (
+    <div
+      className={cn(
+        'pointer-events-none absolute top-full mt-2 whitespace-nowrap rounded-lg px-2.5 py-1.5',
+        'text-[11px] font-medium tracking-wide',
+        'opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-within:opacity-100',
+        positionClass,
+      )}
+      style={{
+        background: 'var(--cosmic-panel-strong)',
+        color: 'var(--cosmic-text-strong)',
+        border: '1px solid var(--cosmic-border-soft)',
+        boxShadow: 'var(--cosmic-shadow-md)',
+        backdropFilter: 'blur(12px)',
+        WebkitBackdropFilter: 'blur(12px)',
+      }}
+    >
+      {label}
+    </div>
+  );
+}
+
 export function SessionLayout({
   store: _store,
   children,
@@ -52,8 +87,20 @@ export function SessionLayout({
   
   // Chrome fade during active voice
   const { chromeFaded, chromeOpacity } = useChromeFade();
+  const navChromeOpacity = Math.max(chromeOpacity, chromeFaded ? 0.58 : 0.92);
+
+  const sessionIconButtonClass = cn(
+    'cosmic-chrome-button cosmic-focus-ring pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full',
+    'text-[color:var(--cosmic-text-strong)] shadow-[var(--cosmic-shadow-sm)] transition-all duration-300 hover:scale-[1.03] hover:text-[var(--cosmic-text-strong)]',
+  );
+
+  const sessionEndIconButtonClass = cn(
+    sessionIconButtonClass,
+    'border-[color:color-mix(in_srgb,var(--sophia-error)_28%,var(--cosmic-border-soft))] text-[color:color-mix(in_srgb,var(--sophia-error)_68%,white_12%)] hover:border-[color:color-mix(in_srgb,var(--sophia-error)_40%,var(--cosmic-border))] hover:bg-[color:color-mix(in_srgb,var(--sophia-error)_9%,var(--cosmic-panel))] hover:text-[color:color-mix(in_srgb,var(--sophia-error)_78%,white_12%)]',
+  );
   
   // Focus traps for modal dialogs
+  const { containerRef: endConfirmRef } = useFocusTrap(showConfirm);
   const { containerRef: backConfirmRef } = useFocusTrap(showBackConfirm);
   const { containerRef: offlineWarningRef } = useFocusTrap(showOfflineWarning);
   
@@ -124,16 +171,17 @@ export function SessionLayout({
 
   // Escape key dismisses open modals
   useEffect(() => {
-    if (!showBackConfirm && !showOfflineWarning) return;
+    if (!showConfirm && !showBackConfirm && !showOfflineWarning) return;
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (showConfirm) setShowConfirm(false);
         if (showBackConfirm) setShowBackConfirm(false);
         if (showOfflineWarning) setShowOfflineWarning(false);
       }
     };
     document.addEventListener('keydown', handleEsc);
     return () => document.removeEventListener('keydown', handleEsc);
-  }, [showBackConfirm, showOfflineWarning]);
+  }, [showConfirm, showBackConfirm, showOfflineWarning]);
   
   return (
     <div
@@ -153,63 +201,56 @@ export function SessionLayout({
           'transition-all duration-500',
           isVisible ? 'translate-y-0 opacity-100' : '-translate-y-4 opacity-0'
         )}
-        style={{ opacity: chromeOpacity, transition: 'opacity 500ms ease' }}
+        style={{ opacity: navChromeOpacity, transition: 'opacity 500ms ease' }}
       >
         {/* Left: Back */}
-        <button
-          onClick={handleBackClick}
-          aria-label="Back to home"
-          className="cosmic-whisper-button cosmic-focus-ring pointer-events-auto rounded-full px-3 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300"
-        >
-          <ArrowLeft className="w-4 h-4" />
-        </button>
+        <div className="group pointer-events-auto relative flex">
+          <button
+            onClick={handleBackClick}
+            aria-label="Back to home"
+            className={sessionIconButtonClass}
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <SessionHeaderTooltip label="Back" align="left" />
+        </div>
 
         {/* Right: End + Settings */}
         <div className="flex items-center gap-1 pointer-events-auto">
-          {!showConfirm && !isReadOnly ? (
-            <button
-              onClick={handleEndClick}
-              disabled={isEnding}
-              title={isOffline ? 'Cannot end session while offline' : 'End session'}
-              className={cn(
-                'cosmic-focus-ring rounded-full px-3 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300',
-                isOffline
-                  ? 'cursor-not-allowed text-[var(--cosmic-text-faint)]'
-                  : 'cosmic-whisper-button',
-                isEnding && 'opacity-50 cursor-not-allowed'
-              )}
-            >
-              {isOffline ? 'offline' : 'end'}
-            </button>
-          ) : showConfirm ? (
-            <div className="flex items-center gap-1 animate-fadeIn">
+          {!isReadOnly ? (
+            <div className="group relative flex">
               <button
-                onClick={handleCancelEnd}
-                className="cosmic-whisper-button cosmic-focus-ring rounded-full px-2.5 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300"
+                onClick={handleEndClick}
+                disabled={isEnding}
+                aria-label={isOffline ? 'Session end unavailable while offline' : 'End session'}
+                className={cn(
+                  sessionEndIconButtonClass,
+                  isOffline
+                    ? 'cursor-not-allowed border-[color:var(--cosmic-border-soft)] bg-[color:var(--cosmic-panel-soft)] text-[color:var(--cosmic-text-muted)] opacity-75'
+                    : undefined,
+                  isEnding && 'cursor-not-allowed opacity-50'
+                )}
               >
-                cancel
+                {isOffline ? <WifiOff className="h-4 w-4" /> : <LogOut className="h-4 w-4" />}
               </button>
-              <button
-                onClick={handleConfirmEnd}
-                className="cosmic-focus-ring rounded-full px-2.5 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300 hover:bg-[color-mix(in_srgb,var(--sophia-error)_10%,transparent)]"
-                style={{ color: 'color-mix(in srgb, var(--sophia-error) 70%, white 10%)' }}
-              >
-                end session
-              </button>
+              <SessionHeaderTooltip label={isOffline ? 'Offline' : 'End'} />
             </div>
           ) : null}
 
-          <button
-            onClick={() => {
-              haptic('light');
-              router.push('/settings');
-            }}
-            data-onboarding="header-settings"
-            aria-label="Open settings"
-            className="cosmic-whisper-button cosmic-focus-ring rounded-full px-3 py-1.5 text-[10px] tracking-[0.14em] lowercase transition-colors duration-300"
-          >
-            <Settings className="w-4 h-4" />
-          </button>
+          <div className="group relative flex">
+            <button
+              onClick={() => {
+                haptic('light');
+                router.push('/settings');
+              }}
+              data-onboarding="header-settings"
+              aria-label="Open settings"
+              className={sessionIconButtonClass}
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+            <SessionHeaderTooltip label="Settings" align="right" />
+          </div>
         </div>
       </nav>
       
@@ -217,6 +258,65 @@ export function SessionLayout({
       <main className="flex-1 overflow-hidden">
         {children}
       </main>
+
+      {/* End Confirmation Modal */}
+      {showConfirm && (
+        <div
+          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
+          onClick={handleCancelEnd}
+        >
+          <div
+            ref={endConfirmRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="end-confirm-title"
+            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex flex-col items-center gap-4 text-center">
+              <div
+                className="flex h-12 w-12 items-center justify-center rounded-full"
+                style={{ background: 'color-mix(in srgb, var(--sophia-error) 12%, transparent)' }}
+              >
+                <LogOut
+                  className="h-6 w-6"
+                  style={{ color: 'color-mix(in srgb, var(--sophia-error) 78%, white 12%)' }}
+                />
+              </div>
+
+              <div className="space-y-2">
+                <h3 id="end-confirm-title" className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
+                  End session?
+                </h3>
+                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
+                  This will close the current session and move it to your session history.
+                </p>
+              </div>
+
+              <div className="mt-2 flex w-full gap-3">
+                <button
+                  onClick={handleCancelEnd}
+                  className="cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
+                >
+                  Stay
+                </button>
+                <button
+                  onClick={handleConfirmEnd}
+                  className="cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
+                  style={{
+                    color: 'color-mix(in srgb, var(--sophia-error) 78%, white 12%)',
+                    border: '1px solid color-mix(in srgb, var(--sophia-error) 28%, var(--cosmic-border-soft))',
+                    background: 'color-mix(in srgb, var(--cosmic-panel-strong) 82%, transparent)',
+                    boxShadow: 'var(--cosmic-shadow-sm)',
+                  }}
+                >
+                  End session
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
       
       {/* Back Confirmation Modal - when Sophia is responding */}
       {showBackConfirm && (

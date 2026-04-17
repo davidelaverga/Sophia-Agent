@@ -161,6 +161,52 @@ button, a, [role="button"] {
   --life-bloom-layer-opacity: 0.5;
   --life-vignette: rgba(200, 170, 235, 0.04);
   --life-vignette-edge: rgba(185, 150, 225, 0.08);
+
+  /* Danger tokens — light theme overrides */
+  --cosmic-danger: #b44060;
+  --cosmic-danger-text: #7a2040;
+  --cosmic-danger-muted: #9a6878;
+  --cosmic-danger-border: rgba(180, 64, 96, 0.18);
+  --cosmic-danger-bg: rgba(180, 64, 96, 0.10);
+
+  /* Journal category tokens — light theme (darker for contrast on white) */
+  --journal-decision: #3a8a7a;
+  --journal-decision-bg: rgba(58,138,122,0.10);
+  --journal-pattern: #6a5ea8;
+  --journal-pattern-bg: rgba(106,94,168,0.10);
+  --journal-lesson: #a07840;
+  --journal-lesson-bg: rgba(160,120,64,0.10);
+  --journal-feeling: #a85878;
+  --journal-feeling-bg: rgba(168,88,120,0.10);
+  --journal-relationship: #5878a8;
+  --journal-relationship-bg: rgba(88,120,168,0.10);
+  --journal-commitment: #48a080;
+  --journal-commitment-bg: rgba(72,160,128,0.10);
+  --journal-preference: #7868a0;
+  --journal-preference-bg: rgba(120,104,160,0.10);
+  --journal-fact: #6880a0;
+  --journal-fact-bg: rgba(104,128,160,0.10);
+  --journal-ritual: #7a6890;
+  --journal-ritual-bg: rgba(122,104,144,0.10);
+  --journal-default: #8070b8;
+  --journal-default-bg: rgba(128,112,184,0.10);
+
+  /* Journal importance tokens — light theme */
+  --journal-structural: #c08030;
+  --journal-structural-glow: rgba(192,128,48,0.32);
+  --journal-potential: #3a9888;
+  --journal-potential-glow: rgba(58,152,136,0.30);
+  --journal-contextual: #686488;
+  --journal-contextual-glow: rgba(104,100,136,0.22);
+
+  /* Overlay & tooltip tokens — light theme */
+  --cosmic-tooltip-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 246, 252, 0.97) 100%);
+  --cosmic-tooltip-border: rgba(120, 100, 180, 0.18);
+  --cosmic-tooltip-shadow: 0 18px 48px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(120, 100, 180, 0.08);
+  --cosmic-tooltip-arrow-bg: rgba(255, 255, 255, 0.98);
+  --cosmic-tooltip-arrow-border: rgba(120, 100, 180, 0.18);
+  --cosmic-overlay-scrim: rgba(30, 20, 50, 0.50);
+  --cosmic-overlay-wash: rgba(30, 20, 50, 0.06);
 }
 
 /* 🌙 Dark Mode – Proposal 1: Accessible Indigo */
@@ -558,6 +604,66 @@ button, a, [role="button"] {
   --cosmic-reading-corridor: radial-gradient(ellipse 65% 80% at 50% 50%, color-mix(in srgb, var(--bg) 94%, transparent) 0%, color-mix(in srgb, var(--bg) 78%, transparent) 55%, color-mix(in srgb, var(--bg) 30%, transparent) 100%);
   --cosmic-modal-backdrop: color-mix(in srgb, var(--bg) 55%, transparent);
   --cosmic-bottom-bar-bg: color-mix(in srgb, var(--bg) 82%, transparent);
+
+  /* Interaction states */
+  --cosmic-hover-bg: color-mix(in srgb, var(--sophia-purple) 6%, transparent);
+  --cosmic-active-bg: color-mix(in srgb, var(--sophia-purple) 9%, transparent);
+  --cosmic-border-faint: color-mix(in srgb, var(--sophia-purple) 6%, transparent);
+  --cosmic-focus-ring: color-mix(in srgb, var(--sophia-purple) 55%, transparent);
+
+  /* Teal action tokens */
+  --cosmic-teal-bg: color-mix(in srgb, var(--cosmic-teal) 16%, transparent);
+  --cosmic-teal-border: color-mix(in srgb, var(--cosmic-teal) 22%, transparent);
+
+  /* Danger / destructive tokens */
+  --cosmic-danger: #df95a8;
+  --cosmic-danger-text: #f3dbe3;
+  --cosmic-danger-muted: #b59db0;
+  --cosmic-danger-border: rgba(214, 123, 145, 0.20);
+  --cosmic-danger-bg: rgba(118, 42, 67, 0.28);
+
+  /* Elevations */
+  --cosmic-shadow-heavy: 0 12px 40px color-mix(in srgb, var(--bg) 70%, transparent);
+  --cosmic-divider: linear-gradient(90deg, transparent, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent);
+
+  /* Journal category tokens */
+  --journal-decision: #59bead;
+  --journal-decision-bg: rgba(89,190,173,0.10);
+  --journal-pattern: #8b7ec8;
+  --journal-pattern-bg: rgba(139,126,200,0.12);
+  --journal-lesson: #d4b088;
+  --journal-lesson-bg: rgba(200,165,120,0.10);
+  --journal-feeling: #d490b0;
+  --journal-feeling-bg: rgba(200,120,160,0.10);
+  --journal-relationship: #88aad0;
+  --journal-relationship-bg: rgba(120,155,200,0.10);
+  --journal-commitment: #88d0b0;
+  --journal-commitment-bg: rgba(120,200,165,0.10);
+  --journal-preference: #b0a0c8;
+  --journal-preference-bg: rgba(180,160,200,0.10);
+  --journal-fact: #a0b4c8;
+  --journal-fact-bg: rgba(170,185,200,0.10);
+  --journal-ritual: #af9bbe;
+  --journal-ritual-bg: rgba(175,155,190,0.10);
+  --journal-default: #b8a8e8;
+  --journal-default-bg: rgba(184,164,232,0.10);
+
+  /* Journal importance tokens */
+  --journal-structural: #f0b97a;
+  --journal-structural-glow: rgba(240,185,122,0.42);
+  --journal-potential: #7fd3c6;
+  --journal-potential-glow: rgba(127,211,198,0.40);
+  --journal-contextual: #8c87a6;
+  --journal-contextual-glow: rgba(140,135,166,0.28);
+
+  /* Overlay & tooltip tokens */
+  --cosmic-tooltip-bg: linear-gradient(180deg, rgba(18, 13, 30, 0.96) 0%, rgba(13, 10, 24, 0.94) 100%);
+  --cosmic-tooltip-border: rgba(156, 132, 205, 0.28);
+  --cosmic-tooltip-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(156, 132, 205, 0.12), inset 0 1px 0 rgba(255,255,255,0.04);
+  --cosmic-tooltip-arrow-bg: rgba(15, 10, 25, 0.92);
+  --cosmic-tooltip-arrow-border: rgba(124, 92, 170, 0.2);
+  --cosmic-overlay-scrim: rgba(6, 4, 12, 0.60);
+  --cosmic-overlay-wash: rgba(8, 5, 16, 0.10);
 }
 
 /* WebKit/Blink */

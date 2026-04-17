@@ -7,6 +7,14 @@ import { useEffect, useState } from 'react'
 
 import { logger } from '../lib/error-logger'
 
+/** Read the current --bg CSS custom property value, with a dark-mode fallback. */
+function getThemeBgColor(isDark: boolean): string {
+  const computed = globalThis.document
+    ? getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
+    : ''
+  return computed || (isDark ? '#0a0a0f' : '#ffffff')
+}
+
 /**
  * useCapacitor - Initialize Capacitor plugins and provide platform info
  * 
@@ -40,7 +48,7 @@ export function useCapacitor() {
         // On Android, set status bar background color
         if (platform === 'android') {
           await StatusBar.setBackgroundColor({ 
-            color: isDarkMode ? '#0a0a0f' : '#ffffff' 
+            color: getThemeBgColor(isDarkMode),
           })
         }
       } catch (error) {
@@ -70,7 +78,7 @@ export function useCapacitor() {
 
         if (platform === 'android') {
           await StatusBar.setBackgroundColor({ 
-            color: e.matches ? '#0a0a0f' : '#ffffff' 
+            color: getThemeBgColor(e.matches),
           })
         }
       } catch (error) {
@@ -112,7 +120,7 @@ export async function setStatusBarStyle(isDark: boolean): Promise<void> {
 
     if (Capacitor.getPlatform() === 'android') {
       await StatusBar.setBackgroundColor({ 
-        color: isDark ? '#0a0a0f' : '#ffffff' 
+        color: getThemeBgColor(isDark),
       })
     }
   } catch (error) {

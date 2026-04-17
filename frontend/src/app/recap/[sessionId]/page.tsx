@@ -17,7 +17,6 @@
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useMemo } from 'react';
 
-import { DevDiagnosticsPanel } from '../../components/DevDiagnosticsPanel';
 import {
   RecapMemoryOrbit,
   RecapEmptyState,
@@ -101,13 +100,6 @@ export default function RecapPage() {
     },
   });
   
-  // Handle reflection action
-  const handleReflect = useCallback(() => {
-    haptic('light');
-    // Navigate to new session with reflection context
-    router.push(`/session?mode=reflection&from=${sessionId}`);
-  }, [router, sessionId]);
-  
   // Handle retry
   const handleRetry = useCallback(() => {
     reload();
@@ -125,7 +117,6 @@ export default function RecapPage() {
           decisions={{}}
           onDecisionChange={() => {}}
         />
-        <DevDiagnosticsPanel />
       </div>
     );
   }
@@ -153,7 +144,6 @@ export default function RecapPage() {
             onDismiss={() => router.push('/journal')}
           />
         </main>
-        <DevDiagnosticsPanel />
       </div>
     );
   }
@@ -190,9 +180,6 @@ export default function RecapPage() {
         candidates={artifacts.memoryCandidates}
         decisions={decisionsMap}
         onDecisionChange={handleDecisionChange}
-        reflectionPrompt={artifacts.reflectionCandidate?.prompt}
-        reflectionTag={artifacts.reflectionCandidate?.tag}
-        onReflect={handleReflect}
         disabled={isSaving}
       />
       
@@ -210,7 +197,6 @@ export default function RecapPage() {
       />
       
       {saveSuccess && <RecapSaveSuccessOverlay count={saveSuccess.count} />}
-      <DevDiagnosticsPanel />
     </div>
   );
 }

@@ -1,7 +1,9 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 import { usePlatformSignal } from '../hooks/usePlatformSignal';
+import { isError, updateSession as updatePersistedSession } from '../lib/api/sessions-api';
 import { authBypassEnabled, authBypassUserId } from '../lib/auth/dev-bypass';
+import { logger } from '../lib/error-logger';
 import { getSessionGreetingMessage } from '../lib/time-greetings';
 import { isUuid } from '../lib/utils';
 import { useChatStore } from '../stores/chat-store';
@@ -21,6 +23,7 @@ export function useSessionPageContext({
   bootstrapMemoryHighlights,
 }: UseSessionPageContextParams) {
   const session = useSessionStore(selectSession);
+  const latestSessionRef = useRef(session);
   const artifacts = useSessionStore(selectArtifacts);
   const builderArtifact = useSessionStore(selectBuilderArtifact);
   const storedMessages = useSessionStore(selectMessages);
@@ -46,10 +49,15 @@ export function useSessionPageContext({
   const userId = session?.userId || (authBypassEnabled ? authBypassUserId : 'anonymous');
   const sessionPresetType = session?.presetType;
   const sessionContextMode = session?.contextMode;
-  const isReadOnly = !!session && (session.status === 'ended' || session.isActive === false);
+  const isReadOnly = session?.status === 'ended';
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
-  const resolvedThreadId = safeSessionId && currentMetadataSessionId === safeSessionId
-    ? currentThreadId || session?.threadId
+  const hasMatchingMetadataThreadId = safeSessionId && currentMetadataSessionId === safeSessionId;
+  const metadataThreadCollidesWithSessionId = hasMatchingMetadataThreadId
+    && currentThreadId === safeSessionId
+    && Boolean(session?.threadId)
+    && session.threadId !== safeSessionId;
+  const resolvedThreadId = hasMatchingMetadataThreadId && currentThreadId && !metadataThreadCollidesWithSessionId
+    ? currentThreadId
     : session?.threadId;
   const fallbackGreeting = sessionPresetType && sessionContextMode
     ? getSessionGreetingMessage(sessionPresetType, sessionContextMode)
@@ -70,6 +78,10 @@ export function useSessionPageContext({
     : undefined;
 
   useEffect(() => {
+    latestSessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
     if (!session?.sessionId || !resolvedThreadId || resolvedThreadId === session.threadId) {
       return;
     }
@@ -82,16 +94,61 @@ export function useSessionPageContext({
   }, [currentMetadataSessionId, resolvedThreadId, session?.sessionId, session?.threadId, updateSession]);
 
   useEffect(() => {
-    if (!session?.sessionId || !session.isActive || session.status === 'ended') return;
+    if (!session?.sessionId || !session.isActive || session.status !== 'paused') return;
 
     resumeSession();
 
+    if (safeSessionId) {
+      void (async () => {
+        const result = await updatePersistedSession(safeSessionId, { status: 'open' }, userId);
+        if (isError(result)) {
+          logger.warn('SessionPageContext: Failed to resume paused session on backend', {
+            sessionId: safeSessionId,
+            userId,
+            code: result.code,
+            error: result.error,
+          });
+          return;
+        }
+
+        useSessionStore.getState().recordOpenSessionActivity(safeSessionId, {
+          updatedAt: result.data.updated_at,
+          status: result.data.status,
+          endedAt: result.data.ended_at ?? null,
+        });
+      })();
+    }
+  }, [resumeSession, safeSessionId, session?.isActive, session?.sessionId, session?.status, userId]);
+
+  useEffect(() => {
     return () => {
-      const current = useSessionStore.getState().session;
+      const current = latestSessionRef.current;
       if (!current?.isActive || current.status !== 'active') return;
+
       pauseSession();
+
+      if (!isUuid(current.sessionId)) return;
+
+      void (async () => {
+        const result = await updatePersistedSession(current.sessionId, { status: 'paused' }, current.userId);
+        if (isError(result)) {
+          logger.warn('SessionPageContext: Failed to persist paused session on backend', {
+            sessionId: current.sessionId,
+            userId: current.userId,
+            code: result.code,
+            error: result.error,
+          });
+          return;
+        }
+
+        useSessionStore.getState().recordOpenSessionActivity(current.sessionId, {
+          updatedAt: result.data.updated_at,
+          status: result.data.status,
+          endedAt: result.data.ended_at ?? null,
+        });
+      })();
     };
-  }, [session?.sessionId, pauseSession, resumeSession, session?.isActive, session?.status]);
+  }, [pauseSession]);
 
   return {
     session,

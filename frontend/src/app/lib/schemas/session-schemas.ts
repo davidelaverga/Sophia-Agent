@@ -28,7 +28,7 @@ export const SessionTypeSchema = z.enum(['prepare', 'debrief', 'reset', 'vent', 
 
 export const ContextModeSchema = z.enum(['gaming', 'work', 'life']);
 
-export const SessionStatusSchema = z.enum(['active', 'ended', 'paused', 'pending_debrief']);
+export const SessionStatusSchema = z.enum(['open', 'ended', 'paused', 'pending_debrief']);
 
 // =============================================================================
 // MEMORY HIGHLIGHT

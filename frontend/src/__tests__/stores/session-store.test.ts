@@ -8,10 +8,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 const getOpenSessionsMock = vi.fn();
 const listSessionsMock = vi.fn();
+const getSessionMock = vi.fn();
 const deleteSessionRecordMock = vi.fn();
 const endSessionMock = vi.fn();
 const clearChatSessionMock = vi.fn();
 const loadSessionMock = vi.fn();
+const invalidateActiveSessionCacheMock = vi.fn();
 
 // Mock error-logger before importing store
 vi.mock('../../app/lib/error-logger', () => ({
@@ -26,6 +28,7 @@ vi.mock('../../app/lib/error-logger', () => ({
 vi.mock('../../app/lib/api/sessions-api', () => ({
   getOpenSessions: (...args: unknown[]) => getOpenSessionsMock(...args),
   listSessions: (...args: unknown[]) => listSessionsMock(...args),
+  getSession: (...args: unknown[]) => getSessionMock(...args),
   deleteSessionRecord: (...args: unknown[]) => deleteSessionRecordMock(...args),
   endSession: (...args: unknown[]) => endSessionMock(...args),
   isError: (result: { success: boolean }) => !result.success,
@@ -40,6 +43,10 @@ vi.mock('../../app/stores/chat-store', () => ({
   },
 }));
 
+vi.mock('../../app/hooks/useSessionStart', () => ({
+  invalidateActiveSessionCache: () => invalidateActiveSessionCacheMock(),
+}));
+
 // Import after mocking
 import { useSessionStore } from '../../app/stores/session-store';
 
@@ -47,12 +54,15 @@ describe('Session Store', () => {
   beforeEach(() => {
     getOpenSessionsMock.mockReset();
     listSessionsMock.mockReset();
+    getSessionMock.mockReset();
     deleteSessionRecordMock.mockReset();
     endSessionMock.mockReset();
     clearChatSessionMock.mockReset();
     loadSessionMock.mockReset();
+    invalidateActiveSessionCacheMock.mockReset();
     getOpenSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], count: 0 } });
     listSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], total: 0 } });
+    getSessionMock.mockResolvedValue({ success: false, error: 'missing', code: 'NOT_FOUND' });
     deleteSessionRecordMock.mockResolvedValue({ success: true, data: { ok: true, session_id: 'sess-1' } });
     endSessionMock.mockResolvedValue({ success: true, data: { ended_at: '2026-04-15T00:10:00.000Z', turn_count: 2 } });
     loadSessionMock.mockResolvedValue(true);
@@ -171,6 +181,71 @@ describe('Session Store', () => {
       expect(state.session?.isActive).toBe(false);
       expect(state.session?.endedAt).toBeDefined();
     });
+
+    it('removes the session from open lists and keeps an ended entry in recent sessions', () => {
+      const { createSession, updateFromBackend, endSession } = useSessionStore.getState();
+
+      createSession('dev-user', 'prepare', 'work');
+      updateFromBackend('sess-ended', 'thread-ended');
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'prepare',
+            preset_context: 'work',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 3,
+            title: 'Prep session',
+            last_message_preview: 'Need a tight plan',
+            platform: 'text',
+            intention: 'Get ready',
+            focus_cue: 'Stay sharp',
+          },
+        ],
+        recentSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'prepare',
+            preset_context: 'work',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 3,
+            title: 'Prep session',
+            last_message_preview: 'Need a tight plan',
+            platform: 'text',
+            intention: 'Get ready',
+            focus_cue: 'Stay sharp',
+          },
+        ],
+        lastOpenSessionsFetchAt: Date.now(),
+        lastOpenSessionsUserId: 'dev-user',
+      });
+
+      endSession();
+
+      const state = useSessionStore.getState();
+      expect(state.session).toMatchObject({
+        sessionId: 'sess-ended',
+        status: 'ended',
+        isActive: false,
+      });
+      expect(state.openSessions).toEqual([]);
+      expect(state.recentSessions[0]).toMatchObject({
+        session_id: 'sess-ended',
+        status: 'ended',
+        title: 'Prep session',
+        last_message_preview: 'Need a tight plan',
+      });
+      expect(state.recentSessions[0]?.ended_at).toBeTruthy();
+      expect(state.lastOpenSessionsFetchAt).toBeNull();
+      expect(state.lastOpenSessionsUserId).toBeNull();
+      expect(invalidateActiveSessionCacheMock).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('removeOpenSession', () => {
@@ -254,6 +329,42 @@ describe('Session Store', () => {
     });
   });
 
+  describe('removeRecentSession', () => {
+    it('should delete an ended backend session record and clear local session state', async () => {
+      const { createSession, updateFromBackend, removeRecentSession } = useSessionStore.getState();
+
+      createSession('dev-user', 'debrief', 'life');
+      updateFromBackend('sess-ended', 'thread-ended');
+      useSessionStore.setState({
+        openSessions: [],
+        recentSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'debrief',
+            preset_context: 'life',
+            status: 'ended',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:10:00.000Z',
+            ended_at: '2026-04-15T00:10:00.000Z',
+            turn_count: 4,
+          },
+        ],
+        lastOpenSessionsFetchAt: Date.now(),
+      });
+
+      const deleted = await removeRecentSession('sess-ended');
+
+      expect(deleted).toBe(true);
+      expect(deleteSessionRecordMock).toHaveBeenCalledWith('sess-ended', 'dev-user');
+      expect(useSessionStore.getState().recentSessions).toEqual([]);
+      expect(useSessionStore.getState().session).toBeNull();
+      expect(useSessionStore.getState().lastOpenSessionsFetchAt).toBeNull();
+      expect(clearChatSessionMock).toHaveBeenCalledTimes(1);
+      expect(endSessionMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe('restoreOpenSession', () => {
     it('restores an existing backend session without inventing a new session id', async () => {
       const { restoreOpenSession } = useSessionStore.getState();
@@ -283,6 +394,146 @@ describe('Session Store', () => {
 
       await waitFor(() => {
         expect(loadSessionMock).toHaveBeenCalledWith('sess-existing', 'dev-user');
+      });
+    });
+
+    it('revalidates stale persisted open sessions and restores ended sessions as read-only', async () => {
+      const { restoreOpenSession } = useSessionStore.getState();
+
+      getSessionMock.mockResolvedValue({
+        success: true,
+        data: {
+          session_id: 'sess-stale',
+          thread_id: 'thread-stale',
+          session_type: 'vent',
+          preset_context: 'gaming',
+          status: 'ended',
+          started_at: '2026-04-15T00:00:00.000Z',
+          updated_at: '2026-04-15T00:10:00.000Z',
+          ended_at: '2026-04-15T00:10:00.000Z',
+          turn_count: 4,
+          title: 'War between countries',
+          last_message_preview: 'WW3',
+          platform: 'text',
+          intention: null,
+          focus_cue: null,
+        },
+      });
+
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-stale',
+            thread_id: 'thread-stale',
+            session_type: 'vent',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            ended_at: null,
+            turn_count: 2,
+            title: 'Stale open session',
+            last_message_preview: 'Escalation',
+            platform: 'text',
+            intention: null,
+            focus_cue: null,
+          },
+        ],
+      });
+
+      await restoreOpenSession({
+        session_id: 'sess-stale',
+        thread_id: 'thread-stale',
+        session_type: 'vent',
+        preset_context: 'gaming',
+        status: 'open',
+        started_at: '2026-04-15T00:00:00.000Z',
+        updated_at: '2026-04-15T00:05:00.000Z',
+        ended_at: null,
+        turn_count: 2,
+        title: 'Stale open session',
+        last_message_preview: 'Escalation',
+        platform: 'text',
+        intention: null,
+        focus_cue: null,
+      }, 'dev-user');
+
+      const state = useSessionStore.getState();
+      expect(getSessionMock).toHaveBeenCalledWith('sess-stale', 'dev-user');
+      expect(state.session).toMatchObject({
+        sessionId: 'sess-stale',
+        status: 'ended',
+        isActive: false,
+        endedAt: '2026-04-15T00:10:00.000Z',
+      });
+      expect(state.openSessions).toEqual([]);
+      expect(state.recentSessions[0]).toMatchObject({
+        session_id: 'sess-stale',
+        status: 'ended',
+      });
+
+      await waitFor(() => {
+        expect(loadSessionMock).toHaveBeenCalledWith('sess-stale', 'dev-user');
+      });
+    });
+
+    it('restores paused backend sessions as resumable instead of archived', async () => {
+      const { restoreOpenSession } = useSessionStore.getState();
+
+      getSessionMock.mockResolvedValue({
+        success: true,
+        data: {
+          session_id: 'sess-paused',
+          thread_id: 'thread-paused',
+          session_type: 'prepare',
+          preset_context: 'work',
+          status: 'paused',
+          started_at: '2026-04-15T00:00:00.000Z',
+          updated_at: '2026-04-15T00:08:00.000Z',
+          ended_at: null,
+          turn_count: 3,
+          title: 'Investor prep',
+          last_message_preview: 'Need to tighten the narrative',
+          platform: 'text',
+          intention: 'Get the pitch sharp',
+          focus_cue: 'Keep it crisp',
+        },
+      });
+
+      await restoreOpenSession({
+        session_id: 'sess-paused',
+        thread_id: 'thread-paused',
+        session_type: 'prepare',
+        preset_context: 'work',
+        status: 'paused',
+        started_at: '2026-04-15T00:00:00.000Z',
+        updated_at: '2026-04-15T00:08:00.000Z',
+        ended_at: null,
+        turn_count: 3,
+        title: 'Investor prep',
+        last_message_preview: 'Need to tighten the narrative',
+        platform: 'text',
+        intention: 'Get the pitch sharp',
+        focus_cue: 'Keep it crisp',
+      }, 'dev-user');
+
+      const state = useSessionStore.getState();
+      expect(state.session).toMatchObject({
+        sessionId: 'sess-paused',
+        status: 'paused',
+        isActive: true,
+      });
+      expect(state.openSessions[0]).toMatchObject({
+        session_id: 'sess-paused',
+        status: 'paused',
+      });
+      expect(state.recentSessions[0]).toMatchObject({
+        session_id: 'sess-paused',
+        status: 'paused',
+      });
+
+      await waitFor(() => {
+        expect(loadSessionMock).toHaveBeenCalledWith('sess-paused', 'dev-user');
       });
     });
   });
@@ -328,6 +579,75 @@ describe('Session Store', () => {
       expect(session.last_message_preview).toBe('i need to prepare for my investor meeting tomorrow');
       expect(session.title).toBe('Preparing for my investor meeting tomorrow');
       expect(session.turn_count).toBe(1);
+    });
+
+    it('reconciles ended status from the backend and removes the session from open sessions', () => {
+      const { createSession, updateFromBackend, recordOpenSessionActivity } = useSessionStore.getState();
+
+      createSession('dev-user', 'vent', 'gaming');
+      updateFromBackend('sess-ended', 'thread-ended');
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'vent',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            ended_at: null,
+            turn_count: 2,
+            title: 'Escalation',
+            last_message_preview: 'Afraid',
+            platform: 'text',
+            intention: null,
+            focus_cue: null,
+          },
+        ],
+        recentSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'vent',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            ended_at: null,
+            turn_count: 2,
+            title: 'Escalation',
+            last_message_preview: 'Afraid',
+            platform: 'text',
+            intention: null,
+            focus_cue: null,
+          },
+        ],
+      });
+
+      recordOpenSessionActivity('sess-ended', {
+        messagePreview: 'WW3',
+        title: 'War between countries',
+        turnCount: 6,
+        updatedAt: '2026-04-15T00:11:27.000Z',
+        status: 'ended',
+        endedAt: '2026-04-15T00:10:00.000Z',
+      });
+
+      const state = useSessionStore.getState();
+      expect(state.openSessions).toEqual([]);
+      expect(state.recentSessions[0]).toMatchObject({
+        session_id: 'sess-ended',
+        status: 'ended',
+        ended_at: '2026-04-15T00:10:00.000Z',
+        turn_count: 6,
+      });
+      expect(state.session).toMatchObject({
+        sessionId: 'sess-ended',
+        status: 'ended',
+        isActive: false,
+        endedAt: '2026-04-15T00:10:00.000Z',
+      });
     });
   });
 

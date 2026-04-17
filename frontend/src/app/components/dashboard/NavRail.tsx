@@ -66,24 +66,26 @@ function NavRailItem({ icon: Icon, label, active, badge, onClick }: NavRailItemP
       </button>
 
       {/* Tooltip — appears to the right on hover */}
-      <div
-        className={cn(
-          'pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-3',
-          'whitespace-nowrap rounded-lg px-2.5 py-1.5',
-          'text-[11px] font-medium tracking-wide',
-          'opacity-0 transition-opacity duration-200 group-hover:opacity-100',
-        )}
-        style={{
-          background: 'var(--cosmic-panel-strong)',
-          color: 'var(--cosmic-text-strong)',
-          border: '1px solid var(--cosmic-border-soft)',
-          boxShadow: 'var(--cosmic-shadow-md)',
-          backdropFilter: 'blur(12px)',
-          WebkitBackdropFilter: 'blur(12px)',
-        }}
-      >
-        {label}
-      </div>
+      {!active && (
+        <div
+          className={cn(
+            'pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-3',
+            'whitespace-nowrap rounded-lg px-2.5 py-1.5',
+            'text-[11px] font-medium tracking-wide',
+            'opacity-0 transition-opacity duration-200 group-hover:opacity-100',
+          )}
+          style={{
+            background: 'var(--cosmic-panel-strong)',
+            color: 'var(--cosmic-text-strong)',
+            border: '1px solid var(--cosmic-border-soft)',
+            boxShadow: 'var(--cosmic-shadow-md)',
+            backdropFilter: 'blur(12px)',
+            WebkitBackdropFilter: 'blur(12px)',
+          }}
+        >
+          {label}
+        </div>
+      )}
     </div>
   );
 }
