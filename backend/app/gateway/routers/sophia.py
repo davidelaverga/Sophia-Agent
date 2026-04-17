@@ -21,6 +21,7 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
+from deerflow.sophia.session_store import SessionRecord, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,8 @@ router = APIRouter(
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
+_session_store = SessionStore()
+_LEGACY_SESSION_USER_ID = "dev-user"
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +60,22 @@ def _get_mem0_client():
         return MemoryClient(api_key=api_key)
     except ImportError:
         raise HTTPException(status_code=503, detail="mem0 package not installed")
+
+
+def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
+    """Resolve the persisted session owner, including the legacy dev-user fallback."""
+    record = _session_store.get(user_id, session_id)
+    if record is not None:
+        return user_id, record
+
+    if user_id == _LEGACY_SESSION_USER_ID:
+        return user_id, None
+
+    legacy_record = _session_store.get(_LEGACY_SESSION_USER_ID, session_id)
+    if legacy_record is not None:
+        return _LEGACY_SESSION_USER_ID, legacy_record
+
+    return user_id, None
 
 
 # ---------------------------------------------------------------------------
@@ -1542,6 +1561,21 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         )
     except OSError as e:
         logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
+
+    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
+    if record is not None and record.status != "ended":
+        ended_record = _session_store.update(
+            owner_user_id,
+            body.session_id,
+            status="ended",
+            ended_at=ended_at,
+        )
+        if ended_record is None:
+            logger.warning(
+                "session.finalization failed_to_persist_session_end user_id=%s session_id=%s",
+                owner_user_id,
+                body.session_id,
+            )
 
     # Remove from inactivity tracking — session explicitly ended
     try:

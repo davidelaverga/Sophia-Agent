@@ -278,30 +278,15 @@ export function SessionConversationPane({
 
             {showScaffold && messages.length === 1 && sessionPresetType && sessionContextMode && <></>}
 
-            {showThinkingIndicator && (
+            {showThinkingIndicator && isVoiceThinking && (
               <div className="px-4 py-3">
-                {isVoiceThinking ? (
-                  /* Voice mode: nebula handles thinking visual, just show cancel */
-                  <button
-                    onClick={onCancelThinking}
-                    className="cosmic-whisper-button text-[10px] tracking-[0.18em] lowercase transition-colors duration-300"
-                  >
-                    stop
-                  </button>
-                ) : (
-                  /* Text mode: whisper-style reflecting indicator */
-                  <div className="flex items-center gap-3">
-                    <span className="text-[10px] tracking-[0.18em] lowercase transition-colors duration-1000" style={{ color: 'var(--cosmic-text-muted)' }}>
-                      sophia is reflecting...
-                    </span>
-                    <button
-                      onClick={onCancelThinking}
-                      className="cosmic-whisper-button text-[10px] tracking-[0.18em] lowercase transition-colors duration-300"
-                    >
-                      cancel
-                    </button>
-                  </div>
-                )}
+                {/* Voice mode: nebula handles thinking visual, just show cancel */}
+                <button
+                  onClick={onCancelThinking}
+                  className="cosmic-whisper-button text-[10px] tracking-[0.18em] lowercase transition-colors duration-300"
+                >
+                  stop
+                </button>
               </div>
             )}
 

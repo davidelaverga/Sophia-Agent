@@ -234,6 +234,64 @@ describe('useRecapArtifactsLoader', () => {
     expect(result.current.status).toBe('ready');
   });
 
+  it('marks the recap as reviewed when no pending candidates remain but approved memories exist in the journal', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: 'sess-reviewed',
+          started_at: '2026-03-03T19:46:00.000Z',
+          ended_at: '2026-03-03T20:00:00.000Z',
+          takeaway: 'The important part already landed.',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [],
+          count: 0,
+          fallbackApplied: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [
+            {
+              id: 'approved-memory-1',
+              text: 'User already saved the key memory from this session.',
+              category: 'lesson',
+              created_at: '2026-03-03T20:02:00.000Z',
+            },
+          ],
+          count: 1,
+          fallbackApplied: false,
+        }),
+      );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-reviewed',
+        artifacts: null,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/memory/recent?status=approved&session_id=sess-reviewed&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'sess-reviewed',
+      expect.objectContaining({ takeaway: 'The important part already landed.' }),
+    );
+    expect(result.current.status).toBe('reviewed');
+  });
+
   it('hydrates stored recap artifacts that were persisted before memories arrived', async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       jsonResponse({

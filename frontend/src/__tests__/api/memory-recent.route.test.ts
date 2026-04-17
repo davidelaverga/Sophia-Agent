@@ -122,6 +122,41 @@ describe('memory recent route', () => {
     expect(payload.memories).toEqual([]);
   });
 
+  it('scopes approved memories to the requested session when recap checks for reviewed entries', async () => {
+    fetchSophiaApiMock.mockResolvedValue(
+      new Response(JSON.stringify({
+        memories: [
+          {
+            id: 'approved-target',
+            memory: 'Already reviewed for this session',
+            metadata: { session_id: 'sess-target', status: 'approved' },
+          },
+          {
+            id: 'approved-other',
+            memory: 'Reviewed for a different session',
+            metadata: { session_id: 'sess-other', status: 'approved' },
+          },
+        ],
+        count: 2,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memory/recent?status=approved&session_id=sess-target'),
+    } as unknown as NextRequest;
+
+    const response = await recentMemoriesGET(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.fallbackApplied).toBe(false);
+    expect(payload.memories).toHaveLength(1);
+    expect(payload.memories[0]).toMatchObject({ id: 'approved-target' });
+  });
+
   it('returns an empty pending-review payload when the user-scoped gateway call is unavailable', async () => {
     fetchSophiaApiMock.mockResolvedValue(
       new Response(JSON.stringify({ error: 'Forbidden' }), {

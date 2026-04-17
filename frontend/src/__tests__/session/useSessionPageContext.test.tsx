@@ -169,4 +169,36 @@ describe('useSessionPageContext', () => {
       isActive: true,
     });
   });
+
+  it('does not mark paused sessions as read-only even if isActive was persisted false', async () => {
+    useSessionStore.setState({
+      session: {
+        sessionId: '550e8400-e29b-41d4-a716-446655440002',
+        threadId: 'thread-paused-stale',
+        userId: 'dev-user',
+        presetType: 'prepare',
+        contextMode: 'life',
+        status: 'paused',
+        voiceMode: false,
+        startedAt: '2026-03-03T19:46:00.000Z',
+        lastActivityAt: '2026-03-03T19:46:00.000Z',
+        activeElapsedSeconds: 0,
+        isActive: false,
+        companionInvokesCount: 0,
+      },
+      isInitializing: false,
+      isEnding: false,
+      error: null,
+    });
+
+    const { result } = renderHook(() =>
+      useSessionPageContext({
+        bootstrapSessionId: undefined,
+        bootstrapMessageId: undefined,
+        bootstrapMemoryHighlights: undefined,
+      }),
+    );
+
+    expect(result.current.isReadOnly).toBe(false);
+  });
 });

@@ -39,6 +39,17 @@ function isLegacyCandidateId(candidateId: string): boolean {
   return candidateId.startsWith('candidate-') || /^mem_\d+$/.test(candidateId);
 }
 
+function buildDiscardMetadata(category?: string): { status: 'discarded'; category?: string } {
+  if (category) {
+    return {
+      status: 'discarded',
+      category,
+    };
+  }
+
+  return { status: 'discarded' };
+}
+
 export function useRecapMemoryActions({
   artifacts,
   decisions,
@@ -92,7 +103,13 @@ export function useRecapMemoryActions({
 
     try {
       const response = await fetch(`/api/memories/${encodeURIComponent(candidateId)}`, {
-        method: 'DELETE',
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          metadata: buildDiscardMetadata(candidate.category),
+        }),
       });
 
       if (!response.ok) {

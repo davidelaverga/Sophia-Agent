@@ -34,9 +34,46 @@ export function useSessionUiInteractions({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [composerFocusToken, setComposerFocusToken] = useState(0);
+  const previousScrollSnapshotRef = useRef<{
+    count: number;
+    lastMessageId: string | null;
+    lastMessageContent: string | null;
+  } | null>(null);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const latestMessage = messages[messages.length - 1];
+    const nextSnapshot = {
+      count: messages.length,
+      lastMessageId: latestMessage?.id ?? null,
+      lastMessageContent: latestMessage?.content ?? null,
+    };
+    const previousSnapshot = previousScrollSnapshotRef.current;
+    previousScrollSnapshotRef.current = nextSnapshot;
+
+    if (!latestMessage) {
+      return;
+    }
+
+    const isNewMessage =
+      previousSnapshot?.count !== nextSnapshot.count
+      || previousSnapshot?.lastMessageId !== nextSnapshot.lastMessageId;
+    const isStreamingUpdate =
+      isTyping
+      && previousSnapshot?.lastMessageId === nextSnapshot.lastMessageId
+      && previousSnapshot?.lastMessageContent !== nextSnapshot.lastMessageContent;
+
+    if (!isNewMessage && !isStreamingUpdate) {
+      return;
+    }
+
+    const frame = requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({
+        behavior: isTyping ? 'auto' : 'smooth',
+        block: 'end',
+      });
+    });
+
+    return () => cancelAnimationFrame(frame);
   }, [messages, isTyping]);
 
   useEffect(() => {

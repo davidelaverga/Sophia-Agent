@@ -523,6 +523,7 @@ function SessionPageContent() {
   );
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
   const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.88);
+  const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
 
   const handleVoiceDownloadBuilderArtifact = useCallback(() => {
     if (!builderDownloadHref || typeof document === 'undefined') {
@@ -1006,7 +1007,7 @@ function SessionPageContent() {
           {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: '136px', opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+              style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
             >
               {builderArtifact && !builderTask ? (
                 <BuilderReadyPill
