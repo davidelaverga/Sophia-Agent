@@ -45,10 +45,7 @@ interface SessionHistoryState {
   
   /** Get a session by ID */
   getSession: (sessionId: string) => SessionHistoryEntry | undefined;
-  
-  /** Get recent sessions (limit) */
-  getRecentSessions: (limit?: number) => SessionHistoryEntry[];
-  
+
   /** Remove a single session from history */
   removeSession: (sessionId: string) => void;
 
@@ -108,11 +105,7 @@ export const useSessionHistoryStore = create<SessionHistoryState>()(
       getSession: (sessionId) => {
         return get().sessions.find(s => s.sessionId === sessionId);
       },
-      
-      getRecentSessions: (limit = 5) => {
-        return get().sessions.slice(0, limit);
-      },
-      
+
       removeSession: (sessionId) => {
         set((state) => ({
           sessions: state.sessions.filter(s => s.sessionId !== sessionId),
@@ -129,13 +122,3 @@ export const useSessionHistoryStore = create<SessionHistoryState>()(
     }
   )
 );
-
-// =============================================================================
-// SELECTORS
-// =============================================================================
-
-export const selectRecentSessions = (limit: number) => 
-  (state: SessionHistoryState) => state.sessions.slice(0, limit);
-
-export const selectHasHistory = (state: SessionHistoryState) => 
-  state.sessions.length > 0;

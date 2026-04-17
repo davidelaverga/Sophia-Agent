@@ -58,10 +58,10 @@ interface SessionState {
   // Multi-session actions
   refreshOpenSessions: (userId?: string) => Promise<number>;
   refreshRecentSessions: (userId?: string) => Promise<void>;
-  setActiveSession: (sessionId: string, userId?: string) => Promise<void>;
   restoreOpenSession: (sessionInfo: SessionInfo, userId?: string) => Promise<void>;
   viewEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode) => void;
   removeOpenSession: (sessionId: string, userId?: string) => Promise<boolean>;
+  removeRecentSession: (sessionId: string, userId?: string) => Promise<boolean>;
   recordOpenSessionActivity: (sessionId: string, activity: {
     messagePreview?: string;
     title?: string | null;
@@ -279,45 +279,6 @@ export const useSessionStore = create<SessionState>()(
           };
         });
       },
-      
-      // Multi-session: mark a session as the active one in the UI
-      setActiveSession: async (sessionId, userId) => {
-        const { session, openSessions } = get();
-        if (session?.sessionId === sessionId) return;
-        
-        const target = openSessions.find(s => s.session_id === sessionId);
-        if (!target) {
-          logger.warn('SessionStore: Cannot switch to unknown session', { sessionId });
-          return;
-        }
-        
-        const resolvedUserId = userId?.trim() || session?.userId || 'anonymous';
-
-        // Create a minimal SessionClientStore from the backend SessionInfo
-        const restored: SessionClientStore = {
-          sessionId: target.session_id,
-          threadId: target.thread_id,
-          userId: resolvedUserId,
-          presetType: (target.session_type as PresetType) || 'open',
-          contextMode: (target.preset_context as ContextMode) || 'life',
-          status: 'active',
-          voiceMode: target.platform === 'voice' || target.platform === 'ios_voice',
-          startedAt: target.started_at,
-          lastActivityAt: target.updated_at,
-          isActive: true,
-          companionInvokesCount: 0,
-        };
-        
-        set({ session: restored, error: null });
-        
-        // Restore conversation history from the LangGraph thread
-        try {
-          const { useChatStore } = await import('./chat-store');
-          await useChatStore.getState().loadSession(target.session_id, resolvedUserId);
-        } catch {
-          logger.warn('SessionStore: Failed to restore messages for session', { sessionId });
-        }
-      },
 
       restoreOpenSession: async (sessionInfo, userId) => {
         const resolvedUserId = userId?.trim() || get().session?.userId || 'anonymous';
@@ -450,6 +411,48 @@ export const useSessionStore = create<SessionState>()(
 
         // Invalidate the active-session cache so dashboard bootstrap
         // doesn't resurrect the session from stale cached data
+        invalidateActiveSessionCache();
+
+        return true;
+      },
+
+      removeRecentSession: async (sessionId, userId) => {
+        const activeSession = get().session;
+        const resolvedUserId = userId?.trim() || activeSession?.userId;
+        const result = await deleteSessionRecord(sessionId, resolvedUserId);
+
+        if (isError(result) && result.status !== 404) {
+          logger.warn('SessionStore: Failed to delete persisted recent session', {
+            sessionId,
+            userId: resolvedUserId,
+            code: result.code,
+            error: result.error,
+          });
+          return false;
+        }
+
+        const deletingActiveSession = get().session?.sessionId === sessionId;
+        set((state) => ({
+          openSessions: state.openSessions.filter((session) => session.session_id !== sessionId),
+          recentSessions: state.recentSessions.filter((session) => session.session_id !== sessionId),
+          lastOpenSessionsFetchAt: null,
+          lastOpenSessionsUserId: null,
+          lastDeletedSessionId: sessionId,
+          ...(deletingActiveSession ? { session: null } : {}),
+        }));
+
+        if (deletingActiveSession) {
+          try {
+            const { useChatStore } = await import('./chat-store');
+            useChatStore.getState().clearSession();
+          } catch (error) {
+            logger.warn('SessionStore: Failed to clear chat state after recent session deletion', {
+              sessionId,
+              error,
+            });
+          }
+        }
+
         invalidateActiveSessionCache();
 
         return true;
@@ -719,7 +722,6 @@ export const selectBuilderArtifact = (state: SessionState) => state.session?.bui
 export const selectMessages = (state: SessionState) => state.session?.messages ?? [];
 
 // Multi-session selectors
-export const selectOpenSessions = (state: SessionState) => state.openSessions;
 export const selectRecentSessions = (state: SessionState) => state.recentSessions;
 export const selectIsLoadingSessions = (state: SessionState) => state.isLoadingSessions;
 export const selectOpenSessionCount = (state: SessionState) => state.openSessions.length;

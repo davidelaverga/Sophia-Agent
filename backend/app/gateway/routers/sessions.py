@@ -320,6 +320,10 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     )
     _store.create(record)
 
+    from app.gateway.inactivity_watcher import register_activity
+
+    register_activity(thread_id, user_id, session_id, body.preset_context)
+
     return SessionStartResponse(
         session_id=session_id,
         thread_id=thread_id,
@@ -428,6 +432,10 @@ async def end_session(body: SessionEndRequest) -> SessionEndResponse:
     record = _store.end(owner_user_id, body.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    from app.gateway.inactivity_watcher import unregister_thread
+
+    unregister_thread(record.thread_id)
 
     # Compute duration
     duration_minutes = 0
@@ -568,6 +576,15 @@ async def touch_session(
     updated_record = _store.update(owner_user_id, session_id, **updates)
     if updated_record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    from app.gateway.inactivity_watcher import register_activity
+
+    register_activity(
+        updated_record.thread_id,
+        owner_user_id,
+        updated_record.session_id,
+        updated_record.context_mode,
+    )
     return _record_to_info(updated_record)
 
 

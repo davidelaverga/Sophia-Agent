@@ -14,6 +14,8 @@ import asyncio
 import logging
 import time
 
+from deerflow.sophia.session_store import SessionStore
+
 logger = logging.getLogger(__name__)
 
 # Configurable thresholds
@@ -23,6 +25,7 @@ CHECK_INTERVAL = 60  # Check every 60 seconds
 # In-memory thread tracking
 _active_threads: dict[str, dict] = {}
 _watcher_task: asyncio.Task | None = None
+_store = SessionStore()
 
 
 def register_activity(
@@ -56,6 +59,17 @@ def get_active_thread_count() -> int:
     return len(_active_threads)
 
 
+def _end_tracked_session(user_id: str, session_id: str) -> None:
+    """Persist the session as ended once inactivity finalization begins."""
+    record = _store.end(user_id, session_id)
+    if record is None:
+        logger.debug(
+            "No persisted session record found while finalizing idle session user=%s session=%s",
+            user_id,
+            session_id,
+        )
+
+
 async def _check_inactive_threads() -> None:
     """Check for idle threads and fire the offline pipeline for each."""
     now = time.time()
@@ -87,6 +101,12 @@ async def _check_inactive_threads() -> None:
                 "Offline pipeline failed for idle thread %s", thread_id, exc_info=True,
             )
         finally:
+            try:
+                _end_tracked_session(user_id, session_id)
+            except Exception:
+                logger.warning(
+                    "Failed to persist ended status for idle thread %s", thread_id, exc_info=True,
+                )
             _active_threads.pop(thread_id, None)
 
 

@@ -63,24 +63,36 @@ class TestCheckInactiveThreads:
         register_activity("t1", "user1", "sess1", "work")
         _active_threads["t1"]["last_active"] = time.time() - INACTIVITY_TIMEOUT - 60
 
-        with patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline:
+        with (
+            patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline,
+            patch("app.gateway.inactivity_watcher._store.end") as mock_end,
+        ):
             asyncio.run(_check_inactive_threads())
             mock_pipeline.assert_called_once_with("user1", "sess1", "t1", None)
+            mock_end.assert_called_once_with("user1", "sess1")
 
         assert "t1" not in _active_threads
 
     def test_does_not_fire_for_active_thread(self):
         register_activity("t1", "user1", "sess1")
 
-        with patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline:
+        with (
+            patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline,
+            patch("app.gateway.inactivity_watcher._store.end") as mock_end,
+        ):
             asyncio.run(_check_inactive_threads())
             mock_pipeline.assert_not_called()
+            mock_end.assert_not_called()
 
     def test_pipeline_failure_still_removes_thread(self):
         register_activity("t1", "user1", "sess1")
         _active_threads["t1"]["last_active"] = time.time() - INACTIVITY_TIMEOUT - 60
 
-        with patch("deerflow.sophia.offline_pipeline.run_offline_pipeline", side_effect=Exception("fail")):
+        with (
+            patch("deerflow.sophia.offline_pipeline.run_offline_pipeline", side_effect=Exception("fail")),
+            patch("app.gateway.inactivity_watcher._store.end") as mock_end,
+        ):
             asyncio.run(_check_inactive_threads())
+            mock_end.assert_called_once_with("user1", "sess1")
 
         assert "t1" not in _active_threads

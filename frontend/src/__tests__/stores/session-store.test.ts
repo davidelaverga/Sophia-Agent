@@ -254,6 +254,42 @@ describe('Session Store', () => {
     });
   });
 
+  describe('removeRecentSession', () => {
+    it('should delete an ended backend session record and clear local session state', async () => {
+      const { createSession, updateFromBackend, removeRecentSession } = useSessionStore.getState();
+
+      createSession('dev-user', 'debrief', 'life');
+      updateFromBackend('sess-ended', 'thread-ended');
+      useSessionStore.setState({
+        openSessions: [],
+        recentSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'debrief',
+            preset_context: 'life',
+            status: 'ended',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:10:00.000Z',
+            ended_at: '2026-04-15T00:10:00.000Z',
+            turn_count: 4,
+          },
+        ],
+        lastOpenSessionsFetchAt: Date.now(),
+      });
+
+      const deleted = await removeRecentSession('sess-ended');
+
+      expect(deleted).toBe(true);
+      expect(deleteSessionRecordMock).toHaveBeenCalledWith('sess-ended', 'dev-user');
+      expect(useSessionStore.getState().recentSessions).toEqual([]);
+      expect(useSessionStore.getState().session).toBeNull();
+      expect(useSessionStore.getState().lastOpenSessionsFetchAt).toBeNull();
+      expect(clearChatSessionMock).toHaveBeenCalledTimes(1);
+      expect(endSessionMock).not.toHaveBeenCalled();
+    });
+  });
+
   describe('restoreOpenSession', () => {
     it('restores an existing backend session without inventing a new session id', async () => {
       const { restoreOpenSession } = useSessionStore.getState();

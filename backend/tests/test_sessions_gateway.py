@@ -28,7 +28,10 @@ def test_start_session_creates_a_real_langgraph_thread(monkeypatch):
     request = httpx.Request("POST", "http://127.0.0.1:2024/threads")
     mock_response = httpx.Response(200, request=request, json={"thread_id": "thread-live-123"})
 
-    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+    with (
+        patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls,
+        patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity,
+    ):
         mock_client = AsyncMock()
         mock_client.post = AsyncMock(return_value=mock_response)
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -45,6 +48,7 @@ def test_start_session_creates_a_real_langgraph_thread(monkeypatch):
     assert payload["thread_id"] == "thread-live-123"
     assert payload["session_type"] == "chat"
     assert payload["preset_context"] == "gaming"
+    mock_register_activity.assert_called_once()
     mock_client.post.assert_awaited_once_with(
         "http://127.0.0.1:2024/threads",
         json={},
@@ -183,22 +187,49 @@ def test_touch_session_updates_preview_and_generates_title(isolated_session_stor
         )
     )
 
-    response = client.post(
-        "/api/v1/sessions/session-to-touch/touch?user_id=dev-user&message_preview="
-        "i%20need%20to%20prepare%20for%20my%20investor%20meeting%20tomorrow",
-    )
+    with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
+        response = client.post(
+            "/api/v1/sessions/session-to-touch/touch?user_id=dev-user&message_preview="
+            "i%20need%20to%20prepare%20for%20my%20investor%20meeting%20tomorrow",
+        )
 
     assert response.status_code == 200
     assert response.json()["session_id"] == "session-to-touch"
     assert response.json()["last_message_preview"] == "i need to prepare for my investor meeting tomorrow"
     assert response.json()["title"] == "Preparing for my investor meeting tomorrow"
     assert response.json()["turn_count"] == 1
+    mock_register_activity.assert_called_once_with("thread-to-touch", "dev-user", "session-to-touch", "life")
 
     record = isolated_session_store.get("dev-user", "session-to-touch")
     assert record is not None
     assert record.message_count == 1
     assert record.last_message_preview == "i need to prepare for my investor meeting tomorrow"
     assert record.title == "Preparing for my investor meeting tomorrow"
+
+
+def test_end_session_unregisters_thread(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-to-end",
+            thread_id="thread-to-end",
+            user_id="dev-user",
+            status="open",
+            created_at="2026-04-15T00:00:00+00:00",
+            updated_at="2026-04-15T00:05:00+00:00",
+            message_count=3,
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister_thread:
+        response = client.post(
+            "/api/v1/sessions/end",
+            json={"session_id": "session-to-end", "user_id": "dev-user", "offer_debrief": False},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["session_id"] == "session-to-end"
+    assert response.json()["turn_count"] == 3
+    mock_unregister_thread.assert_called_once_with("thread-to-end")
 
 
 def test_touch_session_falls_back_to_legacy_dev_user_records(isolated_session_store):

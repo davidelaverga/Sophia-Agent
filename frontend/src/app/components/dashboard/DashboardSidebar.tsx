@@ -22,11 +22,12 @@ import { useCallback, useEffect, useMemo, useState, type RefObject } from 'react
 import { haptic } from '../../hooks/useHaptics';
 import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
 import { humanizeTime } from '../../lib/humanize-time';
+import type { SessionInfo } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
 import { useAuth } from '../../providers';
 import { useConversationStore } from '../../stores/conversation-store';
-import { useSessionHistoryStore } from '../../stores/session-history-store';
-import { useSessionStore, selectOpenSessions, selectIsLoadingSessions } from '../../stores/session-store';
+import { useSessionHistoryStore, type SessionHistoryEntry } from '../../stores/session-history-store';
+import { useSessionStore, selectRecentSessions, selectIsLoadingSessions } from '../../stores/session-store';
 import { useUiStore } from '../../stores/ui-store';
 
 import { useSweepGlow } from './sweepLight';
@@ -49,6 +50,106 @@ function formatDeleteLabel(text: string) {
   const normalized = text.trim();
   if (!normalized) return 'session';
   return truncatePreview(normalized, 38);
+}
+
+function parseSessionTimestamp(value: string | null | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function normalizeSessionStatus(status: string | null | undefined): 'open' | 'ended' {
+  return status === 'open' ? 'open' : 'ended';
+}
+
+function resolveSessionDescription(session: SessionInfo | null, historyEntry: SessionHistoryEntry | undefined): string {
+  const description = [
+    historyEntry?.takeawayPreview?.trim(),
+    session?.title?.trim(),
+    session?.last_message_preview?.trim(),
+    session?.focus_cue?.trim(),
+    session?.intention?.trim(),
+  ].find((value) => Boolean(value));
+
+  const fallback = normalizeSessionStatus(session?.status) === 'open' ? 'New session' : 'Session ended';
+  return truncatePreview(description || fallback, 120);
+}
+
+interface SessionListRow {
+  key: string;
+  sessionId: string;
+  description: string;
+  time: ReturnType<typeof humanizeTime>;
+  turns: number;
+  isActive: boolean;
+  statusText: string;
+  onClick: () => void;
+  onDelete: () => boolean | Promise<boolean>;
+  sortAt: number;
+}
+
+interface BuildSessionRowsOptions {
+  recentSessions: SessionInfo[];
+  historySessions: SessionHistoryEntry[];
+  currentSessionId?: string;
+  onOpenBackendSession: (session: SessionInfo) => void;
+  onOpenLocalSession: (session: SessionHistoryEntry) => void;
+  onDeleteBackendSession: (session: SessionInfo) => Promise<boolean>;
+  onDeleteLocalSession: (session: SessionHistoryEntry) => boolean | Promise<boolean>;
+}
+
+function buildSessionRows({
+  recentSessions,
+  historySessions,
+  currentSessionId,
+  onOpenBackendSession,
+  onOpenLocalSession,
+  onDeleteBackendSession,
+  onDeleteLocalSession,
+}: BuildSessionRowsOptions): SessionListRow[] {
+  const historyById = new Map(historySessions.map((session) => [session.sessionId, session]));
+  const backendSessionIds = new Set(recentSessions.map((session) => session.session_id));
+  const rows: SessionListRow[] = recentSessions.map((session) => {
+    const historyEntry = historyById.get(session.session_id);
+    const status = normalizeSessionStatus(session.status);
+    const timeSource = status === 'open'
+      ? session.updated_at
+      : historyEntry?.endedAt || session.ended_at || session.updated_at;
+
+    return {
+      key: `backend-${session.session_id}`,
+      sessionId: session.session_id,
+      description: resolveSessionDescription(session, historyEntry),
+      time: humanizeTime(timeSource),
+      turns: historyEntry?.messageCount ?? session.turn_count,
+      isActive: currentSessionId === session.session_id,
+      statusText: status === 'open' ? 'Active' : 'Archived',
+      onClick: () => onOpenBackendSession(session),
+      onDelete: () => onDeleteBackendSession(session),
+      sortAt: parseSessionTimestamp(timeSource),
+    };
+  });
+
+  for (const session of historySessions) {
+    if (backendSessionIds.has(session.sessionId)) {
+      continue;
+    }
+
+    rows.push({
+      key: `local-${session.sessionId}`,
+      sessionId: session.sessionId,
+      description: truncatePreview(session.takeawayPreview?.trim() || 'Session ended', 120),
+      time: humanizeTime(session.endedAt),
+      turns: session.messageCount,
+      isActive: currentSessionId === session.sessionId,
+      statusText: 'Archived',
+      onClick: () => onOpenLocalSession(session),
+      onDelete: () => onDeleteLocalSession(session),
+      sortAt: parseSessionTimestamp(session.endedAt),
+    });
+  }
+
+  return rows.sort((left, right) => right.sortAt - left.sortAt);
 }
 
 // =============================================================================
@@ -90,6 +191,7 @@ interface SessionRowProps {
   timeText: string;
   timeTooltip: string;
   turns: number;
+  statusText: string;
   isActive: boolean;
   query: string;
   isDeleting: boolean;
@@ -103,6 +205,7 @@ function SessionRow({
   timeText,
   timeTooltip,
   turns,
+  statusText,
   isActive,
   query,
   isDeleting,
@@ -226,6 +329,15 @@ function SessionRow({
             </span>
           </>
         )}
+        <>
+          <span style={{ color: 'var(--cosmic-text-faint)' }}>&middot;</span>
+          <span
+            className="text-[10px]"
+            style={{ color: isActive ? 'var(--sophia-purple)' : 'var(--cosmic-text-whisper)' }}
+          >
+            {statusText}
+          </span>
+        </>
         {isDeleting && (
           <>
             <span style={{ color: 'var(--cosmic-text-faint)' }}>&middot;</span>
@@ -306,14 +418,15 @@ export function RecentSessionsSidebar({
 }: RecentSessionsSidebarProps) {
   const { user } = useAuth();
   const router = useRouter();
-  const endedSessions = useSessionHistoryStore((s) => s.sessions);
-  const removeEndedSession = useSessionHistoryStore((s) => s.removeSession);
-  const openSessions = useSessionStore(selectOpenSessions);
+  const historySessions = useSessionHistoryStore((s) => s.sessions);
+  const removeHistorySession = useSessionHistoryStore((s) => s.removeSession);
+  const recentSessions = useSessionStore(selectRecentSessions);
   const isLoadingSessions = useSessionStore(selectIsLoadingSessions);
-  const refreshOpenSessions = useSessionStore((s) => s.refreshOpenSessions);
-  const setActiveSession = useSessionStore((s) => s.setActiveSession);
+  const refreshRecentSessions = useSessionStore((s) => s.refreshRecentSessions);
+  const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
   const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
   const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const { deletingKey, runDelete } = useDeleteFeedback();
@@ -321,66 +434,42 @@ export function RecentSessionsSidebar({
 
   const panelSweepRef = useSweepGlow();
 
-  const badgeCount = openSessions.length || endedSessions.filter((s) => !s.recapViewed).length;
-
   useEffect(() => {
-    if (isExpanded) void refreshOpenSessions(resolvedUserId);
-  }, [isExpanded, refreshOpenSessions, resolvedUserId]);
+    if (isExpanded) void refreshRecentSessions(resolvedUserId);
+  }, [isExpanded, refreshRecentSessions, resolvedUserId]);
 
   const rows = useMemo(() => {
-    const list: Array<{
-      key: string;
-      description: string;
-      time: ReturnType<typeof humanizeTime>;
-      turns: number;
-      isActive: boolean;
-      onClick: () => void;
-      onDelete: () => boolean | Promise<boolean>;
-    }> = [];
+    return buildSessionRows({
+      recentSessions,
+      historySessions,
+      currentSessionId: currentSession?.sessionId,
+      onOpenBackendSession: (session) => {
+        void (async () => {
+          await restoreOpenSession(session, resolvedUserId);
+          router.push('/session');
+        })();
+      },
+      onOpenLocalSession: (session) => {
+        viewEndedSession(session.sessionId, session.presetType, session.contextMode);
+        router.push('/session');
+      },
+      onDeleteBackendSession: async (session) => {
+        const deleted = normalizeSessionStatus(session.status) === 'open'
+          ? await removeOpenSession(session.session_id, resolvedUserId)
+          : await removeRecentSession(session.session_id, resolvedUserId);
+        if (deleted) {
+          removeHistorySession(session.session_id);
+        }
+        return deleted;
+      },
+      onDeleteLocalSession: async (session) => {
+        removeHistorySession(session.sessionId);
+        return true;
+      },
+    });
+  }, [recentSessions, historySessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, router, viewEndedSession, removeOpenSession, removeRecentSession, removeHistorySession]);
 
-    for (const s of openSessions) {
-      const desc =
-        s.title?.trim()
-        || s.last_message_preview?.trim()
-        || s.focus_cue?.trim()
-        || s.intention?.trim()
-        || 'New session';
-      list.push({
-        key: `open-${s.session_id}`,
-        description: truncatePreview(desc, 120),
-        time: humanizeTime(s.updated_at),
-        turns: s.turn_count,
-        isActive: currentSession?.sessionId === s.session_id,
-        onClick: () => {
-          void (async () => {
-            await setActiveSession(s.session_id, resolvedUserId);
-            router.push('/session');
-          })();
-        },
-        onDelete: async () => removeOpenSession(s.session_id, resolvedUserId),
-      });
-    }
-
-    for (const s of endedSessions) {
-      const desc =
-        s.takeawayPreview?.trim()
-        || 'Session ended';
-      list.push({
-        key: `ended-${s.sessionId}`,
-        description: truncatePreview(desc, 120),
-        time: humanizeTime(s.endedAt),
-        turns: s.messageCount,
-        isActive: currentSession?.sessionId === s.sessionId,
-        onClick: () => { viewEndedSession(s.sessionId, s.presetType, s.contextMode); router.push('/session'); },
-        onDelete: async () => {
-          removeEndedSession(s.sessionId);
-          return true;
-        },
-      });
-    }
-
-    return list;
-  }, [openSessions, endedSessions, currentSession?.sessionId, setActiveSession, viewEndedSession, removeOpenSession, removeEndedSession, resolvedUserId, router]);
+  const badgeCount = rows.length;
 
   const filtered = useMemo(() => {
     if (!query.trim()) return rows;
@@ -479,6 +568,7 @@ export function RecentSessionsSidebar({
                 timeText={r.time.text}
                 timeTooltip={r.time.tooltip}
                 turns={r.turns}
+                statusText={r.statusText}
                 isActive={r.isActive}
                 query={query}
                 isDeleting={deletingKey === r.key}
@@ -647,71 +737,53 @@ export function MobileBottomSheet({ isOpen, onClose, title, icon, children }: Mo
 export function MobileSessionsContent() {
   const { user } = useAuth();
   const router = useRouter();
-  const endedSessions = useSessionHistoryStore((s) => s.sessions);
-  const removeEndedSession = useSessionHistoryStore((s) => s.removeSession);
-  const openSessions = useSessionStore(selectOpenSessions);
-  const setActiveSession = useSessionStore((s) => s.setActiveSession);
+  const historySessions = useSessionHistoryStore((s) => s.sessions);
+  const removeHistorySession = useSessionHistoryStore((s) => s.removeSession);
+  const recentSessions = useSessionStore(selectRecentSessions);
+  const refreshRecentSessions = useSessionStore((s) => s.refreshRecentSessions);
+  const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
   const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
   const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const { deletingKey, runDelete } = useDeleteFeedback();
   const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
+  useEffect(() => {
+    void refreshRecentSessions(resolvedUserId);
+  }, [refreshRecentSessions, resolvedUserId]);
+
   const rows = useMemo(() => {
-    const list: Array<{
-      key: string;
-      description: string;
-      time: ReturnType<typeof humanizeTime>;
-      turns: number;
-      isActive: boolean;
-      onClick: () => void;
-      onDelete: () => boolean | Promise<boolean>;
-    }> = [];
-
-    for (const s of openSessions) {
-      const desc =
-        s.title?.trim()
-        || s.last_message_preview?.trim()
-        || s.focus_cue?.trim()
-        || s.intention?.trim()
-        || 'New session';
-      list.push({
-        key: `open-${s.session_id}`,
-        description: truncatePreview(desc, 120),
-        time: humanizeTime(s.updated_at),
-        turns: s.turn_count,
-        isActive: currentSession?.sessionId === s.session_id,
-        onClick: () => {
-          void (async () => {
-            await setActiveSession(s.session_id, resolvedUserId);
-            router.push('/session');
-          })();
-        },
-        onDelete: async () => removeOpenSession(s.session_id, resolvedUserId),
-      });
-    }
-
-    for (const s of endedSessions) {
-      const desc =
-        s.takeawayPreview?.trim()
-        || 'Session ended';
-      list.push({
-        key: `ended-${s.sessionId}`,
-        description: truncatePreview(desc, 120),
-        time: humanizeTime(s.endedAt),
-        turns: s.messageCount,
-        isActive: currentSession?.sessionId === s.sessionId,
-        onClick: () => { viewEndedSession(s.sessionId, s.presetType, s.contextMode); router.push('/session'); },
-        onDelete: async () => {
-          removeEndedSession(s.sessionId);
-          return true;
-        },
-      });
-    }
-
-    return list;
-  }, [openSessions, endedSessions, currentSession?.sessionId, setActiveSession, viewEndedSession, removeOpenSession, removeEndedSession, resolvedUserId, router]);
+    return buildSessionRows({
+      recentSessions,
+      historySessions,
+      currentSessionId: currentSession?.sessionId,
+      onOpenBackendSession: (session) => {
+        void (async () => {
+          await restoreOpenSession(session, resolvedUserId);
+          router.push('/session');
+        })();
+      },
+      onOpenLocalSession: (session) => {
+        viewEndedSession(session.sessionId, session.presetType, session.contextMode);
+        router.push('/session');
+      },
+      onDeleteBackendSession: async (session) => {
+        const deleted = normalizeSessionStatus(session.status) === 'open'
+          ? await removeOpenSession(session.session_id, resolvedUserId)
+          : await removeRecentSession(session.session_id, resolvedUserId);
+        if (deleted) {
+          removeHistorySession(session.session_id);
+        }
+        return deleted;
+      },
+      onDeleteLocalSession: async (session) => {
+        removeHistorySession(session.sessionId);
+        return true;
+      },
+    });
+  }, [recentSessions, historySessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, router, viewEndedSession, removeOpenSession, removeRecentSession, removeHistorySession]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return rows;
@@ -759,6 +831,7 @@ export function MobileSessionsContent() {
             timeText={r.time.text}
             timeTooltip={r.time.tooltip}
             turns={r.turns}
+            statusText={r.statusText}
             isActive={r.isActive}
             query={query}
             isDeleting={deletingKey === r.key}
