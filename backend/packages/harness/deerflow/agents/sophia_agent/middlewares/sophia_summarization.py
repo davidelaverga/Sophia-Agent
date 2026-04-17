@@ -20,8 +20,26 @@ from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AIMessage, AnyMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+# Legacy summary prefix used by LangChain's default SummarizationMiddleware.
+# Older checkpointer state may contain HumanMessages with this prefix that
+# we need to clean up to prevent the model from echoing them.
+_LEGACY_SUMMARY_PREFIXES = (
+    "Here is a summary of the conversation to date:",
+    "EXTRACTED CONTEXT:",
+    "Earlier in this conversation:",
+)
+
+
+def _is_legacy_summary_message(msg: AnyMessage) -> bool:
+    if not isinstance(msg, HumanMessage):
+        return False
+    if not isinstance(msg.content, str):
+        return False
+    content = msg.content.lstrip()
+    return any(content.startswith(p) for p in _LEGACY_SUMMARY_PREFIXES)
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 
@@ -57,6 +75,20 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         _t0 = time.perf_counter()
         messages = state["messages"]
         self._ensure_message_ids(messages)
+
+        # --- Legacy cleanup ---
+        # If previous runs left summary HumanMessages in the checkpointer
+        # (created by the default LangChain SummarizationMiddleware), remove
+        # them now so the model doesn't echo them.
+        legacy_removals = [m for m in messages if _is_legacy_summary_message(m)]
+        if legacy_removals:
+            logger.warning(
+                "[SophiaSummarization] cleaning up %d legacy summary HumanMessage(s) from state",
+                len(legacy_removals),
+            )
+            return {
+                "messages": [RemoveMessage(id=m.id) for m in legacy_removals if m.id is not None],
+            }
 
         total_tokens = self.token_counter(messages)
         total_messages = len(messages)
