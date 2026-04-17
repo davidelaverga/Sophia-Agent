@@ -20,7 +20,7 @@ const STEPS: TourStep[] = [
     placement: 'top',
   },
   {
-    target: '[data-onboarding="ritual-card-prepare"]',
+    target: '[data-onboarding^="ritual-card-"]',
     text: 'Choose a ritual to focus the conversation',
     placement: 'bottom',
   },
@@ -30,6 +30,32 @@ const STEPS: TourStep[] = [
     placement: 'bottom',
   },
 ];
+
+/** Compute the union bounding box across all elements matching a selector. */
+function getUnionRect(selector: string, pad: number): Rect | null {
+  const els = document.querySelectorAll(selector);
+  if (els.length === 0) return null;
+
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+
+  els.forEach((el) => {
+    const r = el.getBoundingClientRect();
+    if (r.left < minX) minX = r.left;
+    if (r.top < minY) minY = r.top;
+    if (r.right > maxX) maxX = r.right;
+    if (r.bottom > maxY) maxY = r.bottom;
+  });
+
+  return {
+    x: minX - pad,
+    y: minY - pad,
+    width: maxX - minX + pad * 2,
+    height: maxY - minY + pad * 2,
+  };
+}
 
 interface Rect {
   x: number;
@@ -95,16 +121,10 @@ export function OnboardingSpotlight() {
 
     // Small delay to let previous transition finish
     const id = setTimeout(() => {
-      const el = document.querySelector(target);
-      if (!el) return;
-      const r = el.getBoundingClientRect();
-      const pad = 10;
-      setTargetRect({
-        x: r.left - pad,
-        y: r.top - pad,
-        width: r.width + pad * 2,
-        height: r.height + pad * 2,
-      });
+      const pad = 6;
+      const rect = getUnionRect(target, pad);
+      if (!rect) return;
+      setTargetRect(rect);
       // Fade tooltip in after spotlight moves
       setTimeout(() => setTooltipVisible(true), 300);
     }, 80);

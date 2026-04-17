@@ -58,7 +58,7 @@ export function SpotlightOverlay({
       <div
         className="absolute inset-0"
         style={{
-          background: "rgba(8, 5, 16, 0.10)",
+          background: "var(--cosmic-overlay-wash)",
           transition: isReducedMotion ? "opacity 0ms linear" : "opacity 400ms ease-out",
           opacity: 1,
         }}
@@ -110,7 +110,7 @@ export function SpotlightOverlay({
           y="0"
           width={viewport.width}
           height={viewport.height}
-          fill="rgba(6, 4, 12, 0.60)"
+          fill="var(--cosmic-overlay-scrim)"
           mask={`url(#${maskId})`}
           style={{
             transition: isReducedMotion ? "opacity 0ms linear" : "opacity 400ms ease-out",

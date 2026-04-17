@@ -159,7 +159,7 @@ function SessionRow({
             'text-[10px] font-medium transition-all duration-150',
             'bg-red-500/15',
           )}
-          style={{ color: 'rgb(248 113 113)' }}
+          style={{ color: 'var(--error)' }}
         >
           <Loader2 className="h-2.5 w-2.5 animate-spin" />
           Deleting...
@@ -176,7 +176,7 @@ function SessionRow({
             'text-[10px] font-medium transition-all duration-150',
             'bg-red-500/15 hover:bg-red-500/25',
           )}
-          style={{ color: 'rgb(248 113 113)' }}
+          style={{ color: 'var(--error)' }}
         >
           <Trash2 className="h-2.5 w-2.5" />
           Delete?
@@ -229,7 +229,7 @@ function SessionRow({
         {isDeleting && (
           <>
             <span style={{ color: 'var(--cosmic-text-faint)' }}>&middot;</span>
-            <span className="text-[10px] font-medium" style={{ color: 'rgb(248 113 113)' }}>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--error)' }}>
               Removing
             </span>
           </>
