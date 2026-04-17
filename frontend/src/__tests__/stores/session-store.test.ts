@@ -13,6 +13,7 @@ const deleteSessionRecordMock = vi.fn();
 const endSessionMock = vi.fn();
 const clearChatSessionMock = vi.fn();
 const loadSessionMock = vi.fn();
+const invalidateActiveSessionCacheMock = vi.fn();
 
 // Mock error-logger before importing store
 vi.mock('../../app/lib/error-logger', () => ({
@@ -42,6 +43,10 @@ vi.mock('../../app/stores/chat-store', () => ({
   },
 }));
 
+vi.mock('../../app/hooks/useSessionStart', () => ({
+  invalidateActiveSessionCache: () => invalidateActiveSessionCacheMock(),
+}));
+
 // Import after mocking
 import { useSessionStore } from '../../app/stores/session-store';
 
@@ -54,6 +59,7 @@ describe('Session Store', () => {
     endSessionMock.mockReset();
     clearChatSessionMock.mockReset();
     loadSessionMock.mockReset();
+    invalidateActiveSessionCacheMock.mockReset();
     getOpenSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], count: 0 } });
     listSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], total: 0 } });
     getSessionMock.mockResolvedValue({ success: false, error: 'missing', code: 'NOT_FOUND' });
@@ -174,6 +180,71 @@ describe('Session Store', () => {
       const state = useSessionStore.getState();
       expect(state.session?.isActive).toBe(false);
       expect(state.session?.endedAt).toBeDefined();
+    });
+
+    it('removes the session from open lists and keeps an ended entry in recent sessions', () => {
+      const { createSession, updateFromBackend, endSession } = useSessionStore.getState();
+
+      createSession('dev-user', 'prepare', 'work');
+      updateFromBackend('sess-ended', 'thread-ended');
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'prepare',
+            preset_context: 'work',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 3,
+            title: 'Prep session',
+            last_message_preview: 'Need a tight plan',
+            platform: 'text',
+            intention: 'Get ready',
+            focus_cue: 'Stay sharp',
+          },
+        ],
+        recentSessions: [
+          {
+            session_id: 'sess-ended',
+            thread_id: 'thread-ended',
+            session_type: 'prepare',
+            preset_context: 'work',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 3,
+            title: 'Prep session',
+            last_message_preview: 'Need a tight plan',
+            platform: 'text',
+            intention: 'Get ready',
+            focus_cue: 'Stay sharp',
+          },
+        ],
+        lastOpenSessionsFetchAt: Date.now(),
+        lastOpenSessionsUserId: 'dev-user',
+      });
+
+      endSession();
+
+      const state = useSessionStore.getState();
+      expect(state.session).toMatchObject({
+        sessionId: 'sess-ended',
+        status: 'ended',
+        isActive: false,
+      });
+      expect(state.openSessions).toEqual([]);
+      expect(state.recentSessions[0]).toMatchObject({
+        session_id: 'sess-ended',
+        status: 'ended',
+        title: 'Prep session',
+        last_message_preview: 'Need a tight plan',
+      });
+      expect(state.recentSessions[0]?.ended_at).toBeTruthy();
+      expect(state.lastOpenSessionsFetchAt).toBeNull();
+      expect(state.lastOpenSessionsUserId).toBeNull();
+      expect(invalidateActiveSessionCacheMock).toHaveBeenCalledTimes(1);
     });
   });
 

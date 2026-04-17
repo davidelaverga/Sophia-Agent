@@ -59,12 +59,12 @@ def get_active_thread_count() -> int:
     return len(_active_threads)
 
 
-def _end_tracked_session(user_id: str, session_id: str) -> None:
-    """Persist the session as ended once inactivity finalization begins."""
-    record = _store.end(user_id, session_id)
+def _pause_tracked_session(user_id: str, session_id: str) -> None:
+    """Persist the session as paused once inactivity finalization begins."""
+    record = _store.pause(user_id, session_id)
     if record is None:
         logger.debug(
-            "No persisted session record found while finalizing idle session user=%s session=%s",
+            "No persisted session record found while pausing idle session user=%s session=%s",
             user_id,
             session_id,
         )
@@ -102,10 +102,10 @@ async def _check_inactive_threads() -> None:
             )
         finally:
             try:
-                _end_tracked_session(user_id, session_id)
+                _pause_tracked_session(user_id, session_id)
             except Exception:
                 logger.warning(
-                    "Failed to persist ended status for idle thread %s", thread_id, exc_info=True,
+                    "Failed to persist paused status for idle thread %s", thread_id, exc_info=True,
                 )
             _active_threads.pop(thread_id, None)
 

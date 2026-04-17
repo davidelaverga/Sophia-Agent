@@ -184,7 +184,7 @@ describe('Memory Candidates v2 smoke', () => {
     expect(emptyRender.container.textContent).toContain('No new memories from this session.');
   });
 
-  it('discard calls DELETE once for real id, skips network for legacy candidate-* id, and shows retry UI on failure', async () => {
+  it('discard persists review status for real ids, skips network for legacy candidate-* id, and shows retry UI on failure', async () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -207,11 +207,11 @@ describe('Memory Candidates v2 smoke', () => {
         );
       }
 
-      if (url.endsWith('/api/memories/mem-real') && method === 'DELETE') {
+      if (url.endsWith('/api/memories/mem-real') && method === 'PUT') {
         return new Response(JSON.stringify({ status: 'deleted' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
       }
 
-      if (url.endsWith('/api/memories/mem-fail') && method === 'DELETE') {
+      if (url.endsWith('/api/memories/mem-fail') && method === 'PUT') {
         return new Response(JSON.stringify({ error: 'failed' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
       }
 
@@ -231,18 +231,30 @@ describe('Memory Candidates v2 smoke', () => {
     await waitForText(renderState.container, 'Legacy candidate');
     expect(renderState.container.textContent).not.toContain('Real memory candidate');
 
-    const firstDeleteCalls = fetchMock.mock.calls.filter(([request, init]) =>
-      String(request).endsWith('/api/memories/mem-real') && (init?.method || 'GET') === 'DELETE'
+    const firstDiscardCalls = fetchMock.mock.calls.filter(([request, init]) =>
+      String(request).endsWith('/api/memories/mem-real') && (init?.method || 'GET') === 'PUT'
     );
-    expect(firstDeleteCalls).toHaveLength(1);
+    expect(firstDiscardCalls).toHaveLength(1);
+    expect(firstDiscardCalls[0]?.[1]).toMatchObject({
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+    });
+    expect(JSON.parse(String(firstDiscardCalls[0]?.[1]?.body))).toEqual({
+      metadata: {
+        status: 'discarded',
+        category: 'identity',
+      },
+    });
 
     await clickButton(findButtonByAria(renderState.container, 'Let this memory go'));
     await advanceTimers(700);
 
-    const legacyDeleteCalls = fetchMock.mock.calls.filter(([request, init]) =>
-      String(request).includes('/api/memories/candidate-legacy-1') && (init?.method || 'GET') === 'DELETE'
+    const legacyDiscardCalls = fetchMock.mock.calls.filter(([request, init]) =>
+      String(request).includes('/api/memories/candidate-legacy-1') && (init?.method || 'GET') === 'PUT'
     );
-    expect(legacyDeleteCalls).toHaveLength(0);
+    expect(legacyDiscardCalls).toHaveLength(0);
 
     await waitForText(renderState.container, 'Will fail to delete');
     await clickButton(findButtonByAria(renderState.container, 'Let this memory go'));

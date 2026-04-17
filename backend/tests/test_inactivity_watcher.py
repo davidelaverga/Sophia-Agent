@@ -65,11 +65,11 @@ class TestCheckInactiveThreads:
 
         with (
             patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline,
-            patch("app.gateway.inactivity_watcher._store.end") as mock_end,
+            patch("app.gateway.inactivity_watcher._store.pause") as mock_pause,
         ):
             asyncio.run(_check_inactive_threads())
             mock_pipeline.assert_called_once_with("user1", "sess1", "t1", None)
-            mock_end.assert_called_once_with("user1", "sess1")
+            mock_pause.assert_called_once_with("user1", "sess1")
 
         assert "t1" not in _active_threads
 
@@ -78,11 +78,11 @@ class TestCheckInactiveThreads:
 
         with (
             patch("deerflow.sophia.offline_pipeline.run_offline_pipeline") as mock_pipeline,
-            patch("app.gateway.inactivity_watcher._store.end") as mock_end,
+            patch("app.gateway.inactivity_watcher._store.pause") as mock_pause,
         ):
             asyncio.run(_check_inactive_threads())
             mock_pipeline.assert_not_called()
-            mock_end.assert_not_called()
+            mock_pause.assert_not_called()
 
     def test_pipeline_failure_still_removes_thread(self):
         register_activity("t1", "user1", "sess1")
@@ -90,9 +90,9 @@ class TestCheckInactiveThreads:
 
         with (
             patch("deerflow.sophia.offline_pipeline.run_offline_pipeline", side_effect=Exception("fail")),
-            patch("app.gateway.inactivity_watcher._store.end") as mock_end,
+            patch("app.gateway.inactivity_watcher._store.pause") as mock_pause,
         ):
             asyncio.run(_check_inactive_threads())
-            mock_end.assert_called_once_with("user1", "sess1")
+            mock_pause.assert_called_once_with("user1", "sess1")
 
         assert "t1" not in _active_threads

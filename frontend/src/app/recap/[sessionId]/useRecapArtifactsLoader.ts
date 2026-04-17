@@ -11,7 +11,9 @@ const RECENT_END_RETRY_DELAY_MS = 1500;
 const RECENT_END_MAX_RETRIES = 6;
 const RECENT_END_CONTEXT_WINDOW_MS = 2 * 60 * 1000;
 
-export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'unavailable' | 'not_found';
+type RecentMemoryStatus = 'pending_review' | 'approved';
+
+export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'reviewed' | 'unavailable' | 'not_found';
 
 interface UseRecapArtifactsLoaderParams {
   sessionId: string;
@@ -33,6 +35,65 @@ interface RecentMemoriesResponse {
     confidence?: number;
     reason?: string;
   }>;
+}
+
+function buildRecentMemoriesSearchParams(
+  payload: Record<string, unknown>,
+  sessionId: string,
+  status: RecentMemoryStatus,
+): URLSearchParams {
+  const params = new URLSearchParams({
+    status,
+    session_id: sessionId,
+  });
+
+  if (typeof payload.started_at === 'string') {
+    params.set('started_at', payload.started_at);
+  }
+
+  if (typeof payload.ended_at === 'string') {
+    params.set('ended_at', payload.ended_at);
+  }
+
+  return params;
+}
+
+async function fetchSessionRecentMemories(
+  payload: Record<string, unknown> | null,
+  sessionId: string,
+  status: RecentMemoryStatus,
+): Promise<NonNullable<RecentMemoriesResponse['memories']>> {
+  if (!payload) {
+    return [];
+  }
+
+  const params = buildRecentMemoriesSearchParams(payload, sessionId, status);
+
+  try {
+    const response = await fetch(`/api/memory/recent?${params.toString()}`, {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const recentMemories = await response.json() as RecentMemoriesResponse;
+    return Array.isArray(recentMemories.memories)
+      ? recentMemories.memories
+      : [];
+  } catch (error) {
+    logger.logError(error, {
+      component: 'Recap',
+      action: 'fetch_recent_memories',
+      memoryStatus: status,
+    });
+    return [];
+  }
 }
 
 function wasEndedRecently(value: string | null | undefined): boolean {
@@ -104,55 +165,30 @@ async function hydratePayloadWithRecentMemories(
     return payload;
   }
 
-  const params = new URLSearchParams({
-    status: 'pending_review',
-    session_id: sessionId,
-  });
-
-  if (typeof payload.started_at === 'string') {
-    params.set('started_at', payload.started_at);
-  }
-
-  if (typeof payload.ended_at === 'string') {
-    params.set('ended_at', payload.ended_at);
-  }
-
-  try {
-    const response = await fetch(`/api/memory/recent?${params.toString()}`, {
-      method: 'GET',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-
-    if (!response.ok) {
-      return payload;
-    }
-
-    const recentMemories = await response.json() as RecentMemoriesResponse;
-    if (!Array.isArray(recentMemories.memories) || recentMemories.memories.length === 0) {
-      return payload;
-    }
-
-    return {
-      ...payload,
-      memory_candidates: recentMemories.memories.map((memory) => ({
-        ...(memory.id ? { id: memory.id } : {}),
-        text: memory.text,
-        category: memory.category,
-        ...(memory.created_at ? { created_at: memory.created_at } : {}),
-        ...(typeof memory.confidence === 'number' ? { confidence: memory.confidence } : {}),
-        ...(memory.reason ? { reason: memory.reason } : {}),
-      })),
-    };
-  } catch (error) {
-    logger.logError(error, {
-      component: 'Recap',
-      action: 'fetch_recent_memories',
-    });
+  const recentMemories = await fetchSessionRecentMemories(payload, sessionId, 'pending_review');
+  if (recentMemories.length === 0) {
     return payload;
   }
+
+  return {
+    ...payload,
+    memory_candidates: recentMemories.map((memory) => ({
+      ...(memory.id ? { id: memory.id } : {}),
+      text: memory.text,
+      category: memory.category,
+      ...(memory.created_at ? { created_at: memory.created_at } : {}),
+      ...(typeof memory.confidence === 'number' ? { confidence: memory.confidence } : {}),
+      ...(memory.reason ? { reason: memory.reason } : {}),
+    })),
+  };
+}
+
+async function sessionHasReviewedMemories(
+  payload: Record<string, unknown> | null,
+  sessionId: string,
+): Promise<boolean> {
+  const reviewedMemories = await fetchSessionRecentMemories(payload, sessionId, 'approved');
+  return reviewedMemories.length > 0;
 }
 
 export function useRecapArtifactsLoader({
@@ -210,6 +246,11 @@ export function useRecapArtifactsLoader({
         const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
         const shouldRetryStoredMemories = shouldRetryMemories(artifacts.endedAt || historyEntry?.endedAt);
         const hasStoredMemories = Array.isArray(artifacts.memoryCandidates) && artifacts.memoryCandidates.length > 0;
+        const storedPayload = {
+          ...buildArtifactsPayloadFromStore(artifacts, sessionId),
+          started_at: artifacts.startedAt || historyEntry?.startedAt,
+          ended_at: artifacts.endedAt || historyEntry?.endedAt,
+        };
 
         if (!hasStoredMemories) {
           const hydratedStoredArtifacts = await hydrateStoredArtifactsWithRecentMemories(
@@ -223,6 +264,13 @@ export function useRecapArtifactsLoader({
               clearRecentSessionEndHint();
             }
             setArtifacts(sessionId, hydratedStoredArtifacts);
+          } else if (await sessionHasReviewedMemories(storedPayload, sessionId)) {
+            if (hasRecentEndHint) {
+              clearRecentSessionEndHint();
+            }
+            useSessionHistoryStore.getState().markRecapViewed(sessionId);
+            setStatus('reviewed');
+            return;
           } else if (scheduleMemoryRetry(shouldRetryStoredMemories)) {
             return;
           } else if (hasRecentEndHint) {
@@ -287,11 +335,29 @@ export function useRecapArtifactsLoader({
             const shouldRetryFetchedMemories = shouldRetryMemories(mapped.endedAt || (typeof data?.ended_at === 'string' ? data.ended_at : null));
 
             if (!hasMappedMemories && shouldRetryFetchedMemories) {
+              if (await sessionHasReviewedMemories(artifactsPayload, sessionId)) {
+                if (hasRecentEndHint) {
+                  clearRecentSessionEndHint();
+                }
+                setArtifacts(sessionId, mapped);
+                useSessionHistoryStore.getState().markRecapViewed(sessionId);
+                setStatus('reviewed');
+                return;
+              }
+
               setArtifacts(sessionId, mapped);
 
               if (scheduleMemoryRetry(shouldRetryFetchedMemories)) {
                 return;
               }
+            } else if (!hasMappedMemories && await sessionHasReviewedMemories(artifactsPayload, sessionId)) {
+              if (hasRecentEndHint) {
+                clearRecentSessionEndHint();
+              }
+              setArtifacts(sessionId, mapped);
+              useSessionHistoryStore.getState().markRecapViewed(sessionId);
+              setStatus('reviewed');
+              return;
             }
 
             if (hasRecentEndHint) {

@@ -10,6 +10,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from deerflow.sophia.session_store import SessionRecord, SessionStore
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -864,8 +866,19 @@ class TestTaskStatus:
 
 class TestSessionEnd:
     def test_returns_202(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-001",
+                thread_id="thread-001",
+                user_id="test_user",
+                status="open",
+            )
+        )
+
         with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
-             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path):
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
             resp = client.post(
                 "/api/sophia/test_user/end-session",
                 json={
@@ -898,6 +911,10 @@ class TestSessionEnd:
         saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-001.json").read_text(encoding="utf-8"))
         assert saved["status"] == "ready"
         assert saved["recap_artifacts"]["takeaway"] == "You stayed with it."
+        record = store.get("test_user", "sess-001")
+        assert record is not None
+        assert record.status == "ended"
+        assert record.ended_at == "2026-04-05T10:00:00+00:00"
         mock_queue.assert_called_once()
         queued_state = mock_queue.call_args.args[3]
         assert queued_state is not None

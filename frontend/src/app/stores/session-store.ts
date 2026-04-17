@@ -664,22 +664,56 @@ export const useSessionStore = create<SessionState>()(
         if (!session) return;
 
         const now = Date.now();
+        const endedAt = session.endedAt ?? new Date(now).toISOString();
         const segmentStart = session.status === 'active' && session.activeSegmentStartedAt
           ? new Date(session.activeSegmentStartedAt).getTime()
           : null;
         const elapsedInSegment = segmentStart ? Math.max(0, Math.floor((now - segmentStart) / 1000)) : 0;
         const accumulated = (session.activeElapsedSeconds ?? 0) + elapsedInSegment;
-        
-        set({
-          session: {
-            ...session,
+
+        set((state) => {
+          const existingSessionInfo = state.recentSessions.find((entry) => entry.session_id === session.sessionId)
+            ?? state.openSessions.find((entry) => entry.session_id === session.sessionId);
+          const nextTurnCount = existingSessionInfo?.turn_count
+            ?? (Array.isArray(session.messages) ? session.messages.length : 0);
+
+          const endedSessionInfo: SessionInfo = {
+            session_id: session.sessionId,
+            thread_id: existingSessionInfo?.thread_id ?? session.threadId,
+            session_type: existingSessionInfo?.session_type ?? session.presetType,
+            preset_context: existingSessionInfo?.preset_context ?? session.contextMode,
             status: 'ended',
-            isActive: false,
-            activeElapsedSeconds: accumulated,
-            activeSegmentStartedAt: undefined,
-            endedAt: new Date().toISOString(),
-          },
+            started_at: session.startedAt,
+            updated_at: endedAt,
+            ended_at: endedAt,
+            turn_count: nextTurnCount,
+            title: existingSessionInfo?.title ?? null,
+            last_message_preview: existingSessionInfo?.last_message_preview ?? null,
+            platform: existingSessionInfo?.platform ?? (session.voiceMode ? 'voice' : 'text'),
+            intention: existingSessionInfo?.intention ?? session.intention ?? null,
+            focus_cue: existingSessionInfo?.focus_cue ?? session.focusCue ?? null,
+          };
+
+          return {
+            session: {
+              ...session,
+              status: 'ended',
+              isActive: false,
+              activeElapsedSeconds: accumulated,
+              activeSegmentStartedAt: undefined,
+              endedAt,
+            },
+            openSessions: state.openSessions.filter((entry) => entry.session_id !== session.sessionId),
+            recentSessions: sortSessionsByUpdatedAt([
+              endedSessionInfo,
+              ...state.recentSessions.filter((entry) => entry.session_id !== session.sessionId),
+            ]),
+            lastOpenSessionsFetchAt: null,
+            lastOpenSessionsUserId: null,
+          };
         });
+
+        invalidateActiveSessionCache();
       },
       
       // Clear session completely

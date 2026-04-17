@@ -49,7 +49,7 @@ export function useSessionPageContext({
   const userId = session?.userId || (authBypassEnabled ? authBypassUserId : 'anonymous');
   const sessionPresetType = session?.presetType;
   const sessionContextMode = session?.contextMode;
-  const isReadOnly = !!session && (session.status === 'ended' || session.isActive === false);
+  const isReadOnly = session?.status === 'ended';
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
   const resolvedThreadId = safeSessionId && currentMetadataSessionId === safeSessionId
     ? currentThreadId || session?.threadId
