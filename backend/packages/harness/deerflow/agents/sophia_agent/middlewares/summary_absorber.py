@@ -68,28 +68,20 @@ class SummaryAbsorberMiddleware(AgentMiddleware[SummaryAbsorberState]):
             log_middleware("SummaryAbsorber", "no summary found", _t0)
             return None
 
-        # Extract the summary content (strip the LangChain wrapper prefix)
-        cleaned = summary_msg.content.replace(
-            _SUMMARY_PREFIX + "\n\n", ""
-        ).strip()
-
-        # Build the system_prompt_block
-        block = (
-            "<prior_context_state>\n"
-            + cleaned
-            + "\n</prior_context_state>"
-        )
-
-        blocks = list(state.get("system_prompt_blocks", []))
-        blocks.append(block)
+        # Remove the summary HumanMessage from state.  We intentionally
+        # do NOT re-inject it into system_prompt_blocks because Haiku
+        # echoes any narrative text from the system prompt verbatim.
+        # The SummarizationMiddleware already compressed the old messages;
+        # Mem0 memories + the 16 preserved messages provide sufficient
+        # context without the summary text.
+        summary_len = len(summary_msg.content)
 
         log_middleware(
             "SummaryAbsorber",
-            f"absorbed summary ({len(cleaned)} chars) into system_prompt_blocks",
+            f"removed summary HumanMessage ({summary_len} chars) from state",
             _t0,
         )
 
         return {
             "messages": [RemoveMessage(id=summary_msg.id)],
-            "system_prompt_blocks": blocks,
         }
