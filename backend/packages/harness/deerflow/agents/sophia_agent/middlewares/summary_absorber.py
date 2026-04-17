@@ -3,8 +3,12 @@
 Runs AFTER SummarizationMiddleware to convert its HumanMessage summary
 into a system_prompt_block and remove it from the conversation messages.
 
-Without this, the summary HumanMessage persists in the checkpointer and
-the model echoes it verbatim in its spoken response.
+Uses before_model (not before_agent) because the SummarizationMiddleware
+also uses before_model.  before_agent runs BEFORE before_model, so it
+would never see the summary HumanMessage.  By using before_model and
+being positioned after SummarizationMiddleware in the chain, this
+middleware sees the state after summarization has already injected the
+HumanMessage.
 """
 
 import time
@@ -31,16 +35,18 @@ class SummaryAbsorberMiddleware(AgentMiddleware[SummaryAbsorberState]):
     2. Removes it from state via RemoveMessage (so it's not persisted)
     3. Adds the summary content as a system_prompt_block (so PromptAssembly
        includes it in the SystemMessage where the model won't echo it)
+
+    Uses before_model to run after SummarizationMiddleware.before_model.
     """
 
     state_schema = SummaryAbsorberState
 
     @override
-    def before_agent(self, state: SummaryAbsorberState) -> dict | None:
+    def before_model(self, state: SummaryAbsorberState) -> dict | None:
         return self._absorb(state)
 
     @override
-    async def abefore_agent(self, state: SummaryAbsorberState) -> dict | None:
+    async def abefore_model(self, state: SummaryAbsorberState) -> dict | None:
         return self._absorb(state)
 
     def _absorb(self, state: SummaryAbsorberState) -> dict | None:
