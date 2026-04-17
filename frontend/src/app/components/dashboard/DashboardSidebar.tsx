@@ -58,8 +58,12 @@ function parseSessionTimestamp(value: string | null | undefined): number {
   return Number.isNaN(parsed) ? 0 : parsed;
 }
 
-function normalizeSessionStatus(status: string | null | undefined): 'open' | 'ended' {
-  return status === 'open' ? 'open' : 'ended';
+function normalizeSessionStatus(status: string | null | undefined): 'open' | 'paused' | 'ended' {
+  if (status === 'open' || status === 'paused') {
+    return status;
+  }
+
+  return 'ended';
 }
 
 function resolveSessionDescription(session: SessionInfo | null, historyEntry: SessionHistoryEntry | undefined): string {
@@ -71,7 +75,12 @@ function resolveSessionDescription(session: SessionInfo | null, historyEntry: Se
     session?.intention?.trim(),
   ].find((value) => Boolean(value));
 
-  const fallback = normalizeSessionStatus(session?.status) === 'open' ? 'New session' : 'Session ended';
+  const normalizedStatus = normalizeSessionStatus(session?.status);
+  const fallback = normalizedStatus === 'ended'
+    ? 'Session ended'
+    : normalizedStatus === 'paused'
+      ? 'Paused session'
+      : 'New session';
   return truncatePreview(description || fallback, 120);
 }
 
@@ -112,9 +121,15 @@ function buildSessionRows({
   const rows: SessionListRow[] = recentSessions.map((session) => {
     const historyEntry = historyById.get(session.session_id);
     const status = normalizeSessionStatus(session.status);
-    const timeSource = status === 'open'
-      ? session.updated_at
-      : historyEntry?.endedAt || session.ended_at || session.updated_at;
+    const timeSource = status === 'ended'
+      ? historyEntry?.endedAt || session.ended_at || session.updated_at
+      : session.updated_at;
+
+    const statusText = status === 'open'
+      ? 'Active'
+      : status === 'paused'
+        ? 'Paused'
+        : 'Archived';
 
     return {
       key: `backend-${session.session_id}`,
@@ -123,7 +138,7 @@ function buildSessionRows({
       time: humanizeTime(timeSource),
       turns: historyEntry?.messageCount ?? session.turn_count,
       isActive: currentSessionId === session.session_id,
-      statusText: status === 'open' ? 'Active' : 'Archived',
+      statusText,
       onClick: () => onOpenBackendSession(session),
       onDelete: () => onDeleteBackendSession(session),
       sortAt: parseSessionTimestamp(timeSource),
@@ -454,7 +469,7 @@ export function RecentSessionsSidebar({
         router.push('/session');
       },
       onDeleteBackendSession: async (session) => {
-        const deleted = normalizeSessionStatus(session.status) === 'open'
+        const deleted = normalizeSessionStatus(session.status) !== 'ended'
           ? await removeOpenSession(session.session_id, resolvedUserId)
           : await removeRecentSession(session.session_id, resolvedUserId);
         if (deleted) {
@@ -770,7 +785,7 @@ export function MobileSessionsContent() {
         router.push('/session');
       },
       onDeleteBackendSession: async (session) => {
-        const deleted = normalizeSessionStatus(session.status) === 'open'
+        const deleted = normalizeSessionStatus(session.status) !== 'ended'
           ? await removeOpenSession(session.session_id, resolvedUserId)
           : await removeRecentSession(session.session_id, resolvedUserId);
         if (deleted) {

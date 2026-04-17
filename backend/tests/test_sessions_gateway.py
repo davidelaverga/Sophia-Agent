@@ -232,6 +232,92 @@ def test_end_session_unregisters_thread(isolated_session_store):
     mock_unregister_thread.assert_called_once_with("thread-to-end")
 
 
+def test_update_session_can_pause_and_resume_resumable_sessions(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-to-pause",
+            thread_id="thread-to-pause",
+            user_id="dev-user",
+            status="open",
+            context_mode="gaming",
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister_thread:
+        paused_response = client.patch(
+            "/api/v1/sessions/session-to-pause?user_id=dev-user",
+            json={"status": "paused"},
+        )
+
+    assert paused_response.status_code == 200
+    assert paused_response.json()["status"] == "paused"
+    mock_unregister_thread.assert_called_once_with("thread-to-pause")
+
+    record = isolated_session_store.get("dev-user", "session-to-pause")
+    assert record is not None
+    assert record.status == "paused"
+    assert record.ended_at is None
+
+    with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
+        resumed_response = client.patch(
+            "/api/v1/sessions/session-to-pause?user_id=dev-user",
+            json={"status": "open"},
+        )
+
+    assert resumed_response.status_code == 200
+    assert resumed_response.json()["status"] == "open"
+    mock_register_activity.assert_called_once_with(
+        "thread-to-pause",
+        "dev-user",
+        "session-to-pause",
+        "gaming",
+    )
+
+
+def test_update_session_rejects_reopening_ended_sessions(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-ended",
+            thread_id="thread-ended",
+            user_id="dev-user",
+            status="ended",
+            ended_at="2026-04-15T00:10:00+00:00",
+        )
+    )
+
+    response = client.patch(
+        "/api/v1/sessions/session-ended?user_id=dev-user",
+        json={"status": "open"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Ended sessions cannot change status."
+
+
+def test_touch_session_resumes_paused_session(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="paused-session",
+            thread_id="thread-paused",
+            user_id="dev-user",
+            status="paused",
+            context_mode="work",
+            message_count=2,
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
+        response = client.post(
+            "/api/v1/sessions/paused-session/touch?user_id=dev-user&message_preview="
+            "back%20to%20the%20pitch%20deck",
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "open"
+    assert response.json()["turn_count"] == 3
+    mock_register_activity.assert_called_once_with("thread-paused", "dev-user", "paused-session", "work")
+
+
 def test_touch_session_falls_back_to_legacy_dev_user_records(isolated_session_store):
     isolated_session_store.create(
         SessionRecord(

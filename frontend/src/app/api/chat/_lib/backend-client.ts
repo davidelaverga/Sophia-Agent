@@ -210,7 +210,7 @@ export async function fetchBackendStreamWithBootstrap(
   let threadId = backendPayload.thread_id || await createThreadWithFallback();
   let upstream = await runStreamWithFallback(threadId);
 
-  if (shouldRetryWithFreshThread(upstream, await upstream.clone().text(), !!backendPayload.thread_id)) {
+  if (!upstream.ok && shouldRetryWithFreshThread(upstream, await upstream.clone().text(), !!backendPayload.thread_id)) {
     const staleThreadId = threadId;
     threadId = await createThreadWithFallback();
     upstream = await runStreamWithFallback(threadId);

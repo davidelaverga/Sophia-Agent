@@ -366,7 +366,7 @@ export async function getOpenSessions(
  */
 export async function listSessions(
   userId?: string,
-  options: { limit?: number; status?: 'open' | 'ended' } = {}
+  options: { limit?: number; status?: 'open' | 'paused' | 'ended' } = {}
 ): Promise<ApiResponse<SessionListResponse>> {
   const params = new URLSearchParams();
   if (typeof userId === 'string' && userId.trim()) {

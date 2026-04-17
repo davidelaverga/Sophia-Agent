@@ -52,6 +52,8 @@ export function useSessionVoiceMessages({
           title: result.data.title,
           turnCount: result.data.turn_count,
           updatedAt: result.data.updated_at,
+          status: result.data.status,
+          endedAt: result.data.ended_at ?? null,
         });
       })();
     }, 1200); // Wait 1.2s after last transcript chunk

@@ -14,6 +14,7 @@ import {
   deleteSessionRecord,
   endSession as endSessionAPI,
   getOpenSessions as fetchOpenSessions,
+  getSession,
   isError,
   listSessions,
 } from '../lib/api/sessions-api';
@@ -67,6 +68,8 @@ interface SessionState {
     title?: string | null;
     turnCount?: number;
     updatedAt?: string;
+    status?: string | null;
+    endedAt?: string | null;
   }) => void;
   
   // Actions
@@ -128,6 +131,26 @@ function sortSessionsByUpdatedAt(sessions: SessionInfo[]): SessionInfo[] {
   return [...sessions].sort((left, right) => (
     new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime()
   ));
+}
+
+function normalizeBackendSessionStatus(status: string | null | undefined): SessionInfo['status'] {
+  if (status === 'open' || status === 'paused') {
+    return status;
+  }
+
+  return 'ended';
+}
+
+function mapBackendStatusToClient(status: SessionInfo['status']): SessionClientStore['status'] {
+  if (status === 'paused') {
+    return 'paused';
+  }
+
+  if (status === 'ended') {
+    return 'ended';
+  }
+
+  return 'active';
 }
 
 export const useSessionStore = create<SessionState>()(
@@ -212,8 +235,18 @@ export const useSessionStore = create<SessionState>()(
           ? normalizeSessionPreview(activity.messagePreview)
           : undefined;
         const nextUpdatedAt = activity.updatedAt ?? new Date().toISOString();
+        const normalizedStatus = typeof activity.status === 'string'
+          ? normalizeBackendSessionStatus(activity.status)
+          : undefined;
+        const nextEndedAt = activity.endedAt;
 
-        if (!normalizedPreview && activity.title === undefined && activity.turnCount === undefined) {
+        if (
+          !normalizedPreview
+          && activity.title === undefined
+          && activity.turnCount === undefined
+          && normalizedStatus === undefined
+          && nextEndedAt === undefined
+        ) {
           return;
         }
 
@@ -224,18 +257,26 @@ export const useSessionStore = create<SessionState>()(
             turn_count: typeof activity.turnCount === 'number' ? activity.turnCount : entry.turn_count + 1,
             last_message_preview: normalizedPreview ?? entry.last_message_preview,
             title: activity.title !== undefined ? activity.title : entry.title,
+            status: normalizedStatus ?? entry.status,
+            ended_at: normalizedStatus === undefined
+              ? entry.ended_at
+              : normalizedStatus === 'ended'
+                ? (nextEndedAt ?? entry.ended_at ?? nextUpdatedAt)
+                : null,
           });
 
           const buildFromActiveSession = (): SessionInfo | null => {
             if (state.session?.sessionId !== sessionId) return null;
+            const synthesizedStatus: SessionInfo['status'] = normalizedStatus ?? 'open';
             return {
               session_id: sessionId,
               thread_id: state.session.threadId,
               session_type: state.session.presetType,
               preset_context: state.session.contextMode,
-              status: 'open',
+              status: synthesizedStatus,
               started_at: state.session.startedAt,
               updated_at: nextUpdatedAt,
+              ended_at: synthesizedStatus === 'ended' ? (nextEndedAt ?? nextUpdatedAt) : null,
               turn_count: typeof activity.turnCount === 'number' ? activity.turnCount : 1,
               title: activity.title,
               last_message_preview: normalizedPreview ?? null,
@@ -252,9 +293,12 @@ export const useSessionStore = create<SessionState>()(
               found = true;
               return applyUpdate(entry);
             });
+            if (normalizedStatus === 'ended') {
+              return sortSessionsByUpdatedAt(updated.filter((entry) => entry.session_id !== sessionId));
+            }
             if (!found) {
               const synthesized = buildFromActiveSession();
-              if (synthesized) updated.unshift(synthesized);
+              if (synthesized?.status !== 'ended') updated.unshift(synthesized);
             }
             return sortSessionsByUpdatedAt(updated);
           })();
@@ -273,7 +317,37 @@ export const useSessionStore = create<SessionState>()(
             return sortSessionsByUpdatedAt(updated);
           })();
 
+          const nextSession = state.session?.sessionId === sessionId
+            ? {
+                ...state.session,
+                lastActivityAt: nextUpdatedAt,
+                ...(normalizedStatus === 'ended'
+                  ? {
+                      status: 'ended' as const,
+                      isActive: false,
+                      endedAt: nextEndedAt ?? nextUpdatedAt,
+                      activeSegmentStartedAt: undefined,
+                    }
+                  : normalizedStatus === 'paused'
+                    ? {
+                        status: 'paused' as const,
+                        isActive: true,
+                        endedAt: undefined,
+                        activeSegmentStartedAt: undefined,
+                      }
+                    : normalizedStatus === 'open'
+                      ? {
+                          status: 'active' as const,
+                          isActive: true,
+                          endedAt: undefined,
+                          activeSegmentStartedAt: state.session.activeSegmentStartedAt ?? nextUpdatedAt,
+                        }
+                      : {}),
+              }
+            : state.session;
+
           return {
+            session: nextSession,
             openSessions: nextOpenSessions,
             recentSessions: nextRecentSessions,
           };
@@ -282,32 +356,43 @@ export const useSessionStore = create<SessionState>()(
 
       restoreOpenSession: async (sessionInfo, userId) => {
         const resolvedUserId = userId?.trim() || get().session?.userId || 'anonymous';
+        let resolvedSessionInfo = sessionInfo;
+
+        const latestSession = await getSession(sessionInfo.session_id, resolvedUserId);
+        if (!isError(latestSession)) {
+          resolvedSessionInfo = latestSession.data;
+        }
+
+        const resolvedStatus = normalizeBackendSessionStatus(resolvedSessionInfo.status);
+        const resolvedIsInteractive = resolvedStatus !== 'ended';
         const restored: SessionClientStore = {
-          sessionId: sessionInfo.session_id,
-          threadId: sessionInfo.thread_id,
+          sessionId: resolvedSessionInfo.session_id,
+          threadId: resolvedSessionInfo.thread_id,
           userId: resolvedUserId,
-          presetType: (sessionInfo.session_type as PresetType) || 'open',
-          contextMode: (sessionInfo.preset_context as ContextMode) || 'life',
-          status: sessionInfo.status === 'open' ? 'active' : 'ended',
-          voiceMode: sessionInfo.platform === 'voice' || sessionInfo.platform === 'ios_voice',
-          startedAt: sessionInfo.started_at,
-          lastActivityAt: sessionInfo.updated_at,
-          endedAt: sessionInfo.ended_at ?? undefined,
-          intention: sessionInfo.intention ?? undefined,
-          focusCue: sessionInfo.focus_cue ?? undefined,
-          isActive: sessionInfo.status === 'open',
+          presetType: (resolvedSessionInfo.session_type as PresetType) || 'open',
+          contextMode: (resolvedSessionInfo.preset_context as ContextMode) || 'life',
+          status: mapBackendStatusToClient(resolvedStatus),
+          voiceMode: resolvedSessionInfo.platform === 'voice' || resolvedSessionInfo.platform === 'ios_voice',
+          startedAt: resolvedSessionInfo.started_at,
+          lastActivityAt: resolvedSessionInfo.updated_at,
+          endedAt: resolvedStatus === 'ended' ? resolvedSessionInfo.ended_at ?? undefined : undefined,
+          intention: resolvedSessionInfo.intention ?? undefined,
+          focusCue: resolvedSessionInfo.focus_cue ?? undefined,
+          isActive: resolvedIsInteractive,
           companionInvokesCount: 0,
         };
 
         set((state) => {
           const upsertSessions = (sessions: SessionInfo[]) => sortSessionsByUpdatedAt([
-            sessionInfo,
-            ...sessions.filter((entry) => entry.session_id !== sessionInfo.session_id),
+            resolvedSessionInfo,
+            ...sessions.filter((entry) => entry.session_id !== resolvedSessionInfo.session_id),
           ]);
 
           return {
             session: restored,
-            openSessions: upsertSessions(state.openSessions),
+            openSessions: resolvedIsInteractive
+              ? upsertSessions(state.openSessions)
+              : state.openSessions.filter((entry) => entry.session_id !== resolvedSessionInfo.session_id),
             recentSessions: upsertSessions(state.recentSessions),
             error: null,
           };
@@ -315,10 +400,10 @@ export const useSessionStore = create<SessionState>()(
 
         try {
           const { useChatStore } = await import('./chat-store');
-          await useChatStore.getState().loadSession(sessionInfo.session_id, resolvedUserId);
+          await useChatStore.getState().loadSession(resolvedSessionInfo.session_id, resolvedUserId);
         } catch {
           logger.warn('SessionStore: Failed to restore messages for resumed session', {
-            sessionId: sessionInfo.session_id,
+            sessionId: resolvedSessionInfo.session_id,
           });
         }
       },

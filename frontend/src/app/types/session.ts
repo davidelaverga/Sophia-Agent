@@ -257,7 +257,7 @@ export interface SessionInfo {
   thread_id: string;
   session_type: string;
   preset_context: string;
-  status: string;
+  status: 'open' | 'paused' | 'ended';
   started_at: string;
   updated_at: string;
   ended_at?: string | null;
@@ -290,6 +290,7 @@ export interface SessionListResponse {
  */
 export interface SessionUpdateRequest {
   title?: string;
+  status?: 'open' | 'paused';
 }
 
 /**
