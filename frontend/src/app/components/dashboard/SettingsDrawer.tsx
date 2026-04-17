@@ -1,7 +1,7 @@
 /**
  * SettingsDrawer Component
  * Bottom-sheet drawer behind the Sophia logo tap
- * Contains: settings link, history link, theme toggle
+ * Contains: settings link and quick access to device preferences
  */
 
 'use client';
@@ -12,7 +12,6 @@ import { useCallback, useEffect, useState } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { cn } from '../../lib/utils';
-import { ThemeToggle } from '../ThemeToggle';
 
 interface SettingsDrawerProps {
   isOpen: boolean;
@@ -158,27 +157,8 @@ export function SettingsDrawer({ isOpen, onClose }: SettingsDrawerProps) {
             </div>
           </button>
 
-          <div className="cosmic-surface-panel rounded-[1.4rem] p-4">
-            <div className="flex items-start gap-3">
-              <div className="cosmic-surface-soft flex h-9 w-9 shrink-0 items-center justify-center rounded-xl" style={{ color: 'var(--cosmic-text-muted)' }}>
-                <Sparkles className="h-4 w-4" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <span className="block text-sm font-medium" style={{ color: 'var(--cosmic-text-strong)' }}>Theme</span>
-                    <p className="mt-1 text-[12px]" style={{ color: 'var(--cosmic-text-muted)' }}>
-                      Cosmic Sophia is the default field. You can still switch to a brighter surface when needed.
-                    </p>
-                  </div>
-                  <ThemeToggle />
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div className="px-1 pt-1 text-[11px] tracking-[0.04em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-            These controls stay close so the field feels like one continuous surface.
+            Visual quality and device performance controls live inside full settings.
           </div>
         </div>
       </div>

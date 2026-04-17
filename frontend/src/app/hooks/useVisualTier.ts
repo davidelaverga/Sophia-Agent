@@ -63,11 +63,25 @@ interface StaticSignals {
   dpr: number
 }
 
+let _cachedGpuTier: StaticSignals['gpuTier'] | null = null
+
 function detectGpuTier(): 'low' | 'mid' | 'high' | 'unknown' {
+  if (_cachedGpuTier != null) return _cachedGpuTier
   if (typeof document === 'undefined') return 'unknown'
+
+  let gl: WebGLRenderingContext | null = null
+
   try {
     const canvas = document.createElement('canvas')
-    const gl = canvas.getContext('webgl') ?? canvas.getContext('experimental-webgl')
+    canvas.width = 1
+    canvas.height = 1
+    gl = (canvas.getContext('webgl', {
+      alpha: false,
+      antialias: false,
+      depth: false,
+      preserveDrawingBuffer: false,
+      stencil: false,
+    }) ?? canvas.getContext('experimental-webgl')) as WebGLRenderingContext | null
     if (!gl || !(gl instanceof WebGLRenderingContext)) return 'unknown'
     const ext = gl.getExtension('WEBGL_debug_renderer_info')
     if (!ext) return 'unknown'
@@ -75,13 +89,27 @@ function detectGpuTier(): 'low' | 'mid' | 'high' | 'unknown' {
     const lower = renderer.toLowerCase()
 
     // Known low-end indicators
-    if (/swiftshader|llvmpipe|softpipe|mesa/.test(lower)) return 'low'
-    if (/intel.*hd|intel.*uhd|intel.*iris|mali-[gt]|adreno\s?[1-5]\d\d/i.test(lower)) return 'mid'
-    if (/nvidia|radeon|geforce|apple\s?gpu|apple\s?m[1-9]/i.test(lower)) return 'high'
+    if (/swiftshader|llvmpipe|softpipe|mesa/.test(lower)) {
+      _cachedGpuTier = 'low'
+      return _cachedGpuTier
+    }
+    if (/intel.*hd|intel.*uhd|intel.*iris|mali-[gt]|adreno\s?[1-5]\d\d/i.test(lower)) {
+      _cachedGpuTier = 'mid'
+      return _cachedGpuTier
+    }
+    if (/nvidia|radeon|geforce|apple\s?gpu|apple\s?m[1-9]/i.test(lower)) {
+      _cachedGpuTier = 'high'
+      return _cachedGpuTier
+    }
 
-    return 'mid'
+    _cachedGpuTier = 'mid'
+    return _cachedGpuTier
   } catch {
-    return 'unknown'
+    _cachedGpuTier = 'unknown'
+    return _cachedGpuTier
+  } finally {
+    const loseContext = gl?.getExtension('WEBGL_lose_context') as { loseContext?: () => void } | null
+    loseContext?.loseContext()
   }
 }
 
