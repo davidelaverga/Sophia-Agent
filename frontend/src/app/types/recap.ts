@@ -6,6 +6,7 @@
  * All fields optional except IDs for graceful rendering.
  */
 
+import type { BuilderArtifactV1 } from './builder-artifact';
 import type { PresetType, ContextMode, CanonicalMemoryCategory } from './session';
 
 // =============================================================================
@@ -15,6 +16,9 @@ import type { PresetType, ContextMode, CanonicalMemoryCategory } from './session
 export interface RecapArtifactsV1 {
   /** Session identifier */
   sessionId: string;
+
+  /** Thread identifier for artifact downloads */
+  threadId?: string;
   
   /** Type of session */
   sessionType: PresetType;
@@ -39,6 +43,9 @@ export interface RecapArtifactsV1 {
   
   /** Memory candidates for user approval (max 3) */
   memoryCandidates?: MemoryCandidateV1[];
+
+  /** Builder deliverable emitted during the session */
+  builderArtifact?: BuilderArtifactV1;
   
   /** Processing status */
   status: 'processing' | 'ready' | 'unavailable';
@@ -100,6 +107,7 @@ export interface MemoryDecisionState {
 /** Raw artifacts from backend (may have different shape) */
 export interface BackendArtifactsPayload {
   session_id?: string;
+  thread_id?: string;
   session_type?: string;
   preset?: string;
   context_mode?: string;
@@ -129,6 +137,9 @@ export interface BackendArtifactsPayload {
   signals?: {
     top_emotions?: string[];
   };
+  builder_artifact?: BuilderArtifactV1;
+  builderArtifact?: BuilderArtifactV1;
+  builder_result?: BuilderArtifactV1;
   status?: string;
 }
 

@@ -14,7 +14,7 @@ describe('VoiceCaption', () => {
 
   it('reports visibility so overlapping voice chrome can hide while captions are on screen', () => {
     const onVisibilityChange = vi.fn();
-    const now = Date.now();
+    const now = new Date().toISOString();
 
     const { rerender } = render(
       <VoiceCaption

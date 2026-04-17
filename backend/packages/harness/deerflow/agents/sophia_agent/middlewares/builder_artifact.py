@@ -11,6 +11,7 @@ from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import hook_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 
 class BuilderArtifactState(AgentState):
-    messages: NotRequired[list]
     builder_result: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
@@ -45,7 +45,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         history = list(state.get("builder_tool_turn_summaries", []) or [])
         history.append(summary)
         return history[-12:]
-
+    @hook_config(can_jump_to=["end"])
     @override
     def after_model(self, state: BuilderArtifactState, runtime: Runtime) -> dict | None:
         """Capture emit_builder_artifact tool call result from latest messages."""
@@ -63,34 +63,40 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if getattr(msg, "type", None) != "ai":
                 continue
 
-            tool_calls = getattr(msg, "tool_calls", [])
+            tool_calls = getattr(msg, "tool_calls", []) or []
 
             # AI message has tool calls -- look for emit_builder_artifact
             if tool_calls:
+                artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
-                for tc in tool_calls:
-                    if tc.get("name") == "emit_builder_artifact":
-                        args = tc.get("args", {})
-                        history = self._append_turn_summary(
-                            state,
-                            {
-                                "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
-                                "tool_names": tool_names,
-                                "has_emit_builder_artifact": True,
-                            },
-                        )
-                        log_middleware(
-                            "BuilderArtifact",
-                            f"builder artifact captured: type={args.get('artifact_type')}, "
-                            f"confidence={args.get('confidence')}",
-                            _t0,
-                        )
-                        return {
-                            "builder_result": args,
-                            "builder_non_artifact_turns": 0,
-                            "builder_last_tool_names": tool_names,
-                            "builder_tool_turn_summaries": history,
-                        }
+
+                if artifact_calls and len(artifact_calls) == len(tool_calls):
+                    args = artifact_calls[-1].get("args", {})
+                    history = self._append_turn_summary(
+                        state,
+                        {
+                            "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                            "tool_names": tool_names,
+                            "has_emit_builder_artifact": True,
+                        },
+                    )
+                    log_middleware(
+                        "BuilderArtifact",
+                        f"builder artifact captured: type={args.get('artifact_type')}, "
+                        f"confidence={args.get('confidence')}",
+                        _t0,
+                    )
+                    return {
+                        "builder_result": args,
+                        "builder_non_artifact_turns": 0,
+                        "builder_last_tool_names": tool_names,
+                        "builder_tool_turn_summaries": history,
+                        "jump_to": "end",
+                    }
+
+                if artifact_calls:
+                    log_middleware("BuilderArtifact", "mixed tool calls with builder artifact; loop continues", _t0)
+                    return None
 
                 # Has tool calls but none are emit_builder_artifact -- agent loop continues
                 non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
@@ -103,6 +109,37 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     },
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"
+
+                # Hard ceiling: force end before hitting the recursion limit
+                _HARD_CEILING = 12
+                if non_artifact_turns >= _HARD_CEILING:
+                    logger.warning(
+                        "BuilderArtifact: hard ceiling reached at turn=%d, tools=%s — forcing end with fallback",
+                        non_artifact_turns,
+                        joined_names,
+                    )
+                    fallback = {
+                        "artifact_path": None,
+                        "artifact_type": "unknown",
+                        "artifact_title": "Build task force-stopped",
+                        "steps_completed": non_artifact_turns,
+                        "decisions_made": [],
+                        "companion_summary": (
+                            f"The builder made {non_artifact_turns} edits but didn't finish cleanly. "
+                            "The work-in-progress files may still be useful."
+                        ),
+                        "companion_tone_hint": "Apologetic — builder ran out of budget.",
+                        "user_next_action": "Check the output files and let me know what to fix.",
+                        "confidence": 0.2,
+                    }
+                    return {
+                        "builder_result": fallback,
+                        "builder_non_artifact_turns": 0,
+                        "builder_last_tool_names": tool_names,
+                        "builder_tool_turn_summaries": history,
+                        "jump_to": "end",
+                    }
+
                 log_middleware(
                     "BuilderArtifact",
                     f"tool calls present but no builder artifact: turn={non_artifact_turns}, tools={joined_names}",

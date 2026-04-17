@@ -53,6 +53,16 @@ class TodoMiddleware(TodoListMiddleware):
     and injects a reminder message so the model can continue tracking progress.
     """
 
+    def __init__(
+        self,
+        *,
+        system_prompt: str,
+        tool_description: str,
+        reminder_instruction: str | None = None,
+    ) -> None:
+        super().__init__(system_prompt=system_prompt, tool_description=tool_description)
+        self.reminder_instruction = reminder_instruction or "Call `write_todos` whenever the status of any item changes."
+
     @override
     def before_model(
         self,
@@ -84,7 +94,7 @@ class TodoMiddleware(TodoListMiddleware):
                 "but it is still active. Here is the current state:\n\n"
                 f"{formatted}\n\n"
                 "Continue tracking and updating this todo list as you work. "
-                "Call `write_todos` whenever the status of any item changes.\n"
+                f"{self.reminder_instruction}\n"
                 "</system_reminder>"
             ),
         )

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 class UserIdentityState(AgentState):
     skip_expensive: NotRequired[bool]
     system_prompt_blocks: NotRequired[list[str]]
+    user_id: NotRequired[str]
 
 
 class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
@@ -39,14 +40,24 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
             log_middleware("UserIdentity", "skipped (crisis)", _t0)
             return None
 
+        updates: dict[str, object] = {}
+        if state.get("user_id") != self._user_id:
+            updates["user_id"] = self._user_id
+
         try:
             identity_path = safe_user_path(USERS_DIR, self._user_id, "identity.md")
         except ValueError:
             logger.warning("Invalid user_id for identity lookup: %s", self._user_id)
+            if updates:
+                log_middleware("UserIdentity", "user id cached (invalid identity path)", _t0)
+                return updates
             log_middleware("UserIdentity", "no identity file", _t0)
             return None
 
         if not identity_path.exists():
+            if updates:
+                log_middleware("UserIdentity", "user id cached (no identity file)", _t0)
+                return updates
             log_middleware("UserIdentity", "no identity file", _t0)
             return None
 
@@ -55,10 +66,14 @@ class UserIdentityMiddleware(AgentMiddleware[UserIdentityState]):
             if content.strip():
                 blocks = list(state.get("system_prompt_blocks", []))
                 blocks.append(f"<user_identity>\n{content}\n</user_identity>")
+                updates["system_prompt_blocks"] = blocks
                 log_middleware("UserIdentity", f"identity loaded ({len(content)} chars)", _t0)
-                return {"system_prompt_blocks": blocks}
+                return updates
         except Exception:
             logger.warning("Failed to read identity file for user %s", self._user_id, exc_info=True)
 
+        if updates:
+            log_middleware("UserIdentity", "user id cached (identity read failed)", _t0)
+            return updates
         log_middleware("UserIdentity", "no identity file", _t0)
         return None

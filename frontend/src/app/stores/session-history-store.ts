@@ -49,6 +49,9 @@ interface SessionHistoryState {
   /** Get recent sessions (limit) */
   getRecentSessions: (limit?: number) => SessionHistoryEntry[];
   
+  /** Remove a single session from history */
+  removeSession: (sessionId: string) => void;
+
   /** Clear all history */
   clearHistory: () => void;
 }
@@ -110,6 +113,12 @@ export const useSessionHistoryStore = create<SessionHistoryState>()(
         return get().sessions.slice(0, limit);
       },
       
+      removeSession: (sessionId) => {
+        set((state) => ({
+          sessions: state.sessions.filter(s => s.sessionId !== sessionId),
+        }));
+      },
+
       clearHistory: () => {
         set({ sessions: [] });
       },

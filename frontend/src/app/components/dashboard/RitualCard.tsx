@@ -16,7 +16,6 @@ import { Check, Sparkles } from 'lucide-react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { cn } from '../../lib/utils';
-import { OnboardingTipGuard } from '../onboarding';
 
 import type { RitualConfig, ContextConfig } from './types';
 
@@ -109,7 +108,6 @@ export function RitualCard({ ritual, context, isSelected, hasSelection, onSelect
         ...layoutStyle,
       }}
     >
-      {isSuggested && <OnboardingTipGuard tipId="tip-first-ritual-suggestion" isTriggered />}
       {/* Hover lift wrapper */}
       <div className={cn(
         'transition-all duration-300',

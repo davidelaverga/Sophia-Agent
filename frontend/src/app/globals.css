@@ -969,6 +969,92 @@ a {
   background-size: 200% 100%;
 }
 
+/* Builder constellation orbit — particles trace an elliptical path */
+@keyframes builder-orbit {
+  0%   { transform: rotate(0deg)   translateX(var(--orbit-r)) rotate(0deg);   opacity: 0.18; }
+  25%  { opacity: 0.55; }
+  50%  { transform: rotate(180deg) translateX(var(--orbit-r)) rotate(-180deg); opacity: 0.18; }
+  75%  { opacity: 0.55; }
+  100% { transform: rotate(360deg) translateX(var(--orbit-r)) rotate(-360deg); opacity: 0.18; }
+}
+
+@keyframes builder-core-breath {
+  0%, 100% { transform: scale(1);   box-shadow: 0 0 12px color-mix(in srgb, var(--sophia-purple) 25%, transparent); }
+  50%      { transform: scale(1.15); box-shadow: 0 0 22px color-mix(in srgb, var(--sophia-purple) 45%, transparent); }
+}
+
+@keyframes builder-reveal {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)  scale(1); }
+}
+
+@keyframes builder-progress-sheen {
+  0% { transform: translateX(-140%); opacity: 0; }
+  20% { opacity: 0.38; }
+  100% { transform: translateX(280%); opacity: 0; }
+}
+
+@keyframes builder-progress-indeterminate {
+  0% { transform: translateX(-130%) scaleX(0.84); opacity: 0.4; }
+  50% { transform: translateX(90%) scaleX(1); opacity: 0.8; }
+  100% { transform: translateX(245%) scaleX(0.84); opacity: 0.4; }
+}
+
+@keyframes builder-complete-surge {
+  0% { filter: saturate(1) brightness(1); }
+  45% { filter: saturate(1.28) brightness(1.08); }
+  100% { filter: saturate(1) brightness(1); }
+}
+
+@keyframes builder-progress-spark {
+  0% { transform: translateX(-28%); opacity: 0; }
+  25% { opacity: 0.34; }
+  100% { transform: translateX(128%); opacity: 0; }
+}
+
+@keyframes builder-pill-fill {
+  0% { transform: scaleX(0.08); filter: saturate(0.88) brightness(0.92); }
+  100% { transform: scaleX(1); filter: saturate(1) brightness(1); }
+}
+
+@keyframes builder-ready-pill-enter {
+  0% { opacity: 0; transform: translateY(10px) scale(0.96); }
+  60% { opacity: 1; transform: translateY(-1px) scale(1.01); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes builder-ready-dot {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 10px color-mix(in srgb, var(--cosmic-teal) 32%, transparent); }
+  50% { transform: scale(1.3); box-shadow: 0 0 18px color-mix(in srgb, var(--cosmic-teal) 46%, transparent); }
+}
+
+/* ── Context-switch discovery pulse ── */
+@keyframes ritual-context-pulse-ring {
+  0%   { opacity: 0.7; transform: translate(-50%, -50%) scale(0.95); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
+}
+.ritual-context-pulse {
+  position: relative;
+}
+.ritual-context-pulse::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1.5px solid var(--sophia-purple);
+  transform: translate(-50%, -50%) scale(0.95);
+  animation: ritual-context-pulse-ring 0.7s ease-out forwards;
+  pointer-events: none;
+}
+
+@keyframes builder-ready-aura {
+  0%, 100% { transform: scale(0.92); opacity: 0.42; }
+  50% { transform: scale(1.08); opacity: 0.78; }
+}
+
 /* Skeleton shimmer effect for loading states */
 .skeleton-shimmer {
   background: linear-gradient(
@@ -1589,6 +1675,163 @@ a {
 /* ============================================================================
    Context-world particle animations
    ============================================================================ */
+
+/* ============================================================================
+   Visual Fidelity Tiers — CSS-only adaptations
+   Driven by data-visual-tier="1|2|3" on <html>, set by useVisualTier().
+
+   Tier 3 (full):   No overrides — default rendering.
+   Tier 2 (medium): Reduced blur, fewer concurrent animations.
+   Tier 1 (low):    No backdrop-filter, static borders, minimal animations.
+   ============================================================================ */
+
+/* --- Tier 2: Medium fidelity -------------------------------------------- */
+
+html[data-visual-tier="2"] .cosmic-chrome-button {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+html[data-visual-tier="2"] .cosmic-surface-panel {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+html[data-visual-tier="2"] .cosmic-surface-panel-strong {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+html[data-visual-tier="2"] .cosmic-bottom-bar {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Embrace: keep glow + border only, skip pulse/breathe/extend */
+html[data-visual-tier="2"] .animate-embrace-pulse,
+html[data-visual-tier="2"] .animate-embrace-breathe,
+html[data-visual-tier="2"] .animate-embrace-extend,
+html[data-visual-tier="2"] .animate-embrace-extend-delayed {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: translateY(-50%) scaleX(1) !important;
+}
+
+/* borderStreak: slow it down */
+html[data-visual-tier="2"] .animate-borderStreak {
+  animation-duration: 3s;
+}
+
+/* --- Tier 1: Low fidelity ----------------------------------------------- */
+
+/* Remove ALL backdrop-filter on cosmic surfaces → opaque fallback */
+html[data-visual-tier="1"] .cosmic-chrome-button,
+html[data-visual-tier="1"] .cosmic-surface-panel,
+html[data-visual-tier="1"] .cosmic-surface-panel-strong,
+html[data-visual-tier="1"] .cosmic-bottom-bar,
+html[data-visual-tier="1"] .cosmic-modal-backdrop {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Opaque panel fallbacks when backdrop-filter is removed */
+html[data-visual-tier="1"] .cosmic-surface-panel {
+  background: var(--cosmic-panel-strong);
+}
+
+html[data-visual-tier="1"] .cosmic-surface-panel-strong {
+  background: color-mix(in srgb, var(--cosmic-panel-strong) 96%, var(--bg));
+}
+
+/* Kill animated box-shadows (mic rings, embrace, badges) */
+html[data-visual-tier="1"] .animate-mic-breathe,
+html[data-visual-tier="1"] .animate-mic-active-breathe {
+  animation: none !important;
+}
+
+/* Embrace: all animations off */
+html[data-visual-tier="1"] .animate-embrace-glow,
+html[data-visual-tier="1"] .animate-embrace-pulse,
+html[data-visual-tier="1"] .animate-embrace-border,
+html[data-visual-tier="1"] .animate-embrace-breathe,
+html[data-visual-tier="1"] .animate-embrace-extend,
+html[data-visual-tier="1"] .animate-embrace-extend-delayed {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: translateY(-50%) scaleX(1) !important;
+}
+
+/* borderStreak: static border */
+html[data-visual-tier="1"] .animate-borderStreak {
+  animation: none !important;
+}
+
+/* Resonance pulse: static */
+html[data-visual-tier="1"] .animate-resonance {
+  animation: none !important;
+  opacity: 0.2 !important;
+}
+
+/* Breathe animations: static */
+html[data-visual-tier="1"] .animate-breathe,
+html[data-visual-tier="1"] .animate-breatheSlow,
+html[data-visual-tier="1"] .animate-breathe-subtle {
+  animation: none !important;
+}
+
+/* Bloom/drift: static */
+html[data-visual-tier="1"] .animate-bloomBreathe,
+html[data-visual-tier="1"] .animate-bloomDrift,
+html[data-visual-tier="1"] .animate-bloomDriftReverse {
+  animation: none !important;
+}
+
+/* Float: static */
+html[data-visual-tier="1"] .animate-float,
+html[data-visual-tier="1"] .animate-float-subtle {
+  animation: none !important;
+}
+
+/* Slow infinite animations: keep but reduce to single iteration */
+html[data-visual-tier="1"] .animate-pulseSoft,
+html[data-visual-tier="1"] .animate-glowBreathe,
+html[data-visual-tier="1"] .animate-pulse-gentle {
+  animation-iteration-count: 1 !important;
+}
+
+/* Reduce all remaining animation durations on tier 1 */
+html[data-visual-tier="1"] *:not(.animate-spin):not(.animate-pulse) {
+  animation-duration: 0.3s !important;
+  transition-duration: 0.15s !important;
+}
+
+/* --- Message bubble fidelity adaptations -------------------------------- */
+
+/* Tier 2: reduce blur values */
+html[data-visual-tier="2"] .sophia-bubble-user {
+  backdrop-filter: blur(6px) saturate(1.05) !important;
+  -webkit-backdrop-filter: blur(6px) saturate(1.05) !important;
+}
+
+html[data-visual-tier="2"] .sophia-bubble-assistant {
+  backdrop-filter: blur(8px) saturate(1.08) !important;
+  -webkit-backdrop-filter: blur(8px) saturate(1.08) !important;
+}
+
+/* Tier 1: no backdrop-filter at all — opaque backgrounds */
+html[data-visual-tier="1"] .sophia-bubble-user,
+html[data-visual-tier="1"] .sophia-bubble-assistant {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-visual-tier="1"] .sophia-bubble-user {
+  background: color-mix(in srgb, var(--user-bubble) 94%, var(--bg)) !important;
+}
+
+html[data-visual-tier="1"] .sophia-bubble-assistant {
+  background: color-mix(in srgb, var(--sophia-bubble) 94%, var(--bg)) !important;
+}
 
 @keyframes bokehFloat {
   0%, 100% {

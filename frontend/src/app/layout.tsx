@@ -13,6 +13,7 @@ import {
   SOPHIA_THEME_STORAGE_KEY,
 } from "./theme"
 import { ThemeBootstrap } from "./ThemeBootstrap"
+import { VisualTierBootstrap } from "./VisualTierBootstrap"
 
 export async function generateMetadata() {
   const locale = await getRequestLocale()
@@ -97,6 +98,7 @@ export default async function RootLayout({
         <LocaleProvider initialLocale={locale}>
           <Providers>
             <ThemeBootstrap />
+            <VisualTierBootstrap />
             <CapacitorInit />
             <SessionCaptureBridge />
             <UiToast />

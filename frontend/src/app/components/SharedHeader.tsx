@@ -5,15 +5,14 @@
  * "Una app, dos experiencias" - consistent branding across all routes
  * 
  * Variants:
- * - dashboard: Logo + Chat button + Theme + Settings
+ * - dashboard: Logo + Theme + Settings
  * - session: Back + Preset label + Timer + Theme + Settings  
- * - chat: Logo + History + Home + Theme + Settings
- * - recap: Logo + Chat button + Theme + Settings
+ * - recap: Logo + Theme + Settings
  */
 
 'use client';
 
-import { Settings, Home, MessageCircle, ArrowLeft, Clock } from 'lucide-react';
+import { Settings, ArrowLeft, Clock } from 'lucide-react';
 import { useRouter, usePathname } from 'next/navigation';
 import { useState } from 'react';
 
@@ -26,7 +25,7 @@ import { ThemeToggle } from './ThemeToggle';
 // TYPES
 // ============================================================================
 
-type HeaderVariant = 'dashboard' | 'session' | 'chat' | 'recap';
+type HeaderVariant = 'dashboard' | 'session' | 'recap';
 
 interface SharedHeaderProps {
   /** Override auto-detected variant */
@@ -138,7 +137,6 @@ export function SharedHeader({
   // Auto-detect variant based on pathname
   const variant: HeaderVariant = variantOverride ?? (
     pathname === '/session' ? 'session' :
-    pathname === '/chat' ? 'chat' :
     pathname === '/recap' ? 'recap' :
     'dashboard'
   );
@@ -194,7 +192,7 @@ export function SharedHeader({
   }
   
   // ============================================================================
-  // RENDER: STANDARD VARIANTS (dashboard, chat, recap)
+  // RENDER: STANDARD VARIANTS (dashboard, recap)
   // ============================================================================
   
   return (
@@ -215,34 +213,13 @@ export function SharedHeader({
               Sophia
             </p>
             <p className="text-xs text-sophia-text2 truncate">
-              {variant === 'chat' ? 'Free Chat' : variant === 'recap' ? 'Session Complete' : 'Your companion'}
+              {variant === 'recap' ? 'Session Complete' : 'Your companion'}
             </p>
           </div>
         </button>
         
         {/* Right: Contextual Actions */}
         <div className="flex items-center gap-2 sm:gap-3 flex-shrink-0">
-          
-          {/* Dashboard & Recap: Chat button */}
-          {(variant === 'dashboard' || variant === 'recap') && (
-            <HeaderButton
-              onClick={() => router.push('/chat')}
-              icon={<MessageCircle className="h-5 w-5 text-sophia-text2 group-hover/btn:text-sophia-purple transition-colors" />}
-              label="Free Chat"
-              tooltip="Free Chat"
-            />
-          )}
-          
-          {/* Chat-specific: Home button */}
-          {variant === 'chat' && (
-            <HeaderButton
-              onClick={() => router.push('/')}
-              icon={<Home className="h-5 w-5 text-sophia-text2 group-hover/btn:text-sophia-purple transition-colors" />}
-              label="Dashboard"
-              tooltip="Dashboard"
-            />
-          )}
-          
           <ThemeToggle />
           
           <HeaderButton

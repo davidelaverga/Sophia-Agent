@@ -34,6 +34,8 @@ export interface ContextConfig {
   icon: typeof Gamepad2;
   title: string;
   subtitle: string;
+  /** Short tagline shown below the context tabs to explain this mode */
+  tagline: string;
   greetings: {
     morning: string;
     afternoon: string;
@@ -100,6 +102,7 @@ export const CONTEXTS: ContextConfig[] = [
     icon: Gamepad2,
     title: "Let's lock in.",
     subtitle: "Pick a ritual or just talk — no pressure.",
+    tagline: 'Rituals tuned for your gaming sessions',
     greetings: {
       morning: 'Morning grind?',
       afternoon: "Let's lock in.",
@@ -118,6 +121,7 @@ export const CONTEXTS: ContextConfig[] = [
     icon: Briefcase,
     title: "Let's get clear.",
     subtitle: 'Set your focus or just talk.',
+    tagline: 'Rituals tuned for your work day',
     greetings: {
       morning: 'Good morning.',
       afternoon: "Let's get clear.",
@@ -136,6 +140,7 @@ export const CONTEXTS: ContextConfig[] = [
     icon: Heart,
     title: "I'm here.",
     subtitle: 'Talk to me — whatever it is.',
+    tagline: 'Rituals tuned for everyday life',
     greetings: {
       morning: 'Good morning.',
       afternoon: "I'm here.",

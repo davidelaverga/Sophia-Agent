@@ -25,6 +25,60 @@ from langchain_core.messages import ToolMessage
 logger = logging.getLogger(__name__)
 
 
+def patch_dangling_tool_call_messages(messages: list) -> list | None:
+    """Insert placeholder ToolMessages for AI tool calls that never completed.
+
+    Returns a patched copy of the message list, preserving chronological order,
+    or None when the history is already well formed.
+    """
+    # Collect IDs of all existing ToolMessages
+    existing_tool_msg_ids: set[str] = set()
+    for msg in messages:
+        if isinstance(msg, ToolMessage):
+            existing_tool_msg_ids.add(msg.tool_call_id)
+
+    # Check if any patching is needed
+    needs_patch = False
+    for msg in messages:
+        if getattr(msg, "type", None) != "ai":
+            continue
+        for tc in getattr(msg, "tool_calls", None) or []:
+            tc_id = tc.get("id")
+            if tc_id and tc_id not in existing_tool_msg_ids:
+                needs_patch = True
+                break
+        if needs_patch:
+            break
+
+    if not needs_patch:
+        return None
+
+    # Build new list with patches inserted right after each dangling AIMessage
+    patched: list = []
+    patched_ids: set[str] = set()
+    patch_count = 0
+    for msg in messages:
+        patched.append(msg)
+        if getattr(msg, "type", None) != "ai":
+            continue
+        for tc in getattr(msg, "tool_calls", None) or []:
+            tc_id = tc.get("id")
+            if tc_id and tc_id not in existing_tool_msg_ids and tc_id not in patched_ids:
+                patched.append(
+                    ToolMessage(
+                        content="[Tool call was interrupted and did not return a result.]",
+                        tool_call_id=tc_id,
+                        name=tc.get("name", "unknown"),
+                        status="error",
+                    )
+                )
+                patched_ids.add(tc_id)
+                patch_count += 1
+
+    logger.warning("Injecting %s placeholder ToolMessage(s) for dangling tool calls", patch_count)
+    return patched
+
+
 class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
     """Inserts placeholder ToolMessages for dangling tool calls before model invocation.
 
@@ -40,52 +94,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         a synthetic ToolMessage is inserted immediately after that AIMessage.
         Returns None if no patches are needed.
         """
-        # Collect IDs of all existing ToolMessages
-        existing_tool_msg_ids: set[str] = set()
-        for msg in messages:
-            if isinstance(msg, ToolMessage):
-                existing_tool_msg_ids.add(msg.tool_call_id)
-
-        # Check if any patching is needed
-        needs_patch = False
-        for msg in messages:
-            if getattr(msg, "type", None) != "ai":
-                continue
-            for tc in getattr(msg, "tool_calls", None) or []:
-                tc_id = tc.get("id")
-                if tc_id and tc_id not in existing_tool_msg_ids:
-                    needs_patch = True
-                    break
-            if needs_patch:
-                break
-
-        if not needs_patch:
-            return None
-
-        # Build new list with patches inserted right after each dangling AIMessage
-        patched: list = []
-        patched_ids: set[str] = set()
-        patch_count = 0
-        for msg in messages:
-            patched.append(msg)
-            if getattr(msg, "type", None) != "ai":
-                continue
-            for tc in getattr(msg, "tool_calls", None) or []:
-                tc_id = tc.get("id")
-                if tc_id and tc_id not in existing_tool_msg_ids and tc_id not in patched_ids:
-                    patched.append(
-                        ToolMessage(
-                            content="[Tool call was interrupted and did not return a result.]",
-                            tool_call_id=tc_id,
-                            name=tc.get("name", "unknown"),
-                            status="error",
-                        )
-                    )
-                    patched_ids.add(tc_id)
-                    patch_count += 1
-
-        logger.warning(f"Injecting {patch_count} placeholder ToolMessage(s) for dangling tool calls")
-        return patched
+        return patch_dangling_tool_call_messages(messages)
 
     @override
     def wrap_model_call(

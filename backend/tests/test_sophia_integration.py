@@ -4,11 +4,19 @@ Tests the chain end-to-end by running middlewares in order against
 realistic state, verifying ordering constraints and crisis fast-path.
 """
 
+import asyncio
 import json
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from langchain.agents import create_agent
+from langchain.chat_models.base import BaseChatModel
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.tools import BaseTool
 
 
 def _make_runtime(**context_kwargs):
@@ -22,6 +30,32 @@ def _make_message(content: str, msg_type: str = "human"):
     msg.content = content
     msg.type = msg_type
     return msg
+
+
+class _SingleToolCallModel(BaseChatModel):
+    def __init__(self, tool_name: str, tool_args: dict[str, Any], content: str = ""):
+        super().__init__()
+        self._tool_name = tool_name
+        self._tool_args = tool_args
+        self._content = content
+
+    @property
+    def _llm_type(self) -> str:
+        return "single-tool-call"
+
+    def bind_tools(self, tools: Sequence[dict[str, Any] | type | BaseTool], *args, **kwargs):
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        message = AIMessage(
+            content=self._content,
+            tool_calls=[{
+                "name": self._tool_name,
+                "id": f"call-{self._tool_name}",
+                "args": self._tool_args,
+            }],
+        )
+        return ChatResult(generations=[ChatGeneration(message=message)])
 
 
 class TestMiddlewareChainOrdering:
@@ -264,3 +298,84 @@ class TestMiddlewareChainOrdering:
         assert "sophia_companion" in config["graphs"]
         assert "sophia_builder" in config["graphs"]
         assert "deerflow.agents.sophia_agent:make_sophia_agent" in config["graphs"]["sophia_companion"]
+
+
+class TestArtifactCompletionLoopTermination:
+    def test_companion_artifact_tool_call_ends_loop(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware, ArtifactState
+        from deerflow.sophia.tools.emit_artifact import emit_artifact
+
+        instructions = tmp_path / "artifact_instructions.md"
+        instructions.write_text("Instructions", encoding="utf-8")
+
+        agent = create_agent(
+            model=_SingleToolCallModel(
+                "emit_artifact",
+                {
+                    "session_goal": "Check in",
+                    "active_goal": "Reflect",
+                    "next_step": "Keep talking",
+                    "takeaway": "User feels heard",
+                    "reflection": None,
+                    "tone_estimate": 2.4,
+                    "tone_target": 2.9,
+                    "active_tone_band": "engagement",
+                    "skill_loaded": "active_listening",
+                    "ritual_phase": "freeform.topic",
+                    "voice_emotion_primary": "curious",
+                    "voice_emotion_secondary": "calm",
+                    "voice_speed": "normal",
+                },
+                content="I hear you.",
+            ),
+            tools=[emit_artifact],
+            middleware=[ArtifactMiddleware(instructions)],
+            state_schema=ArtifactState,
+        )
+
+        result = asyncio.run(
+            agent.ainvoke(
+                {"messages": [HumanMessage(content="Hi Sophia")], "platform": "voice"},
+                context={"platform": "voice", "thread_id": "test-thread"},
+            )
+        )
+
+        assert result["current_artifact"]["session_goal"] == "Check in"
+        assert result["current_artifact"]["tone_estimate"] == 2.4
+
+    def test_builder_artifact_tool_call_ends_loop(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+            BuilderArtifactState,
+        )
+        from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
+
+        agent = create_agent(
+            model=_SingleToolCallModel(
+                "emit_builder_artifact",
+                {
+                    "artifact_path": "outputs/doc.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Doc",
+                    "steps_completed": 1,
+                    "decisions_made": ["Kept it concise"],
+                    "companion_summary": "Created the document.",
+                    "companion_tone_hint": "Confident",
+                    "user_next_action": "Open it.",
+                    "confidence": 0.9,
+                },
+            ),
+            tools=[emit_builder_artifact],
+            middleware=[BuilderArtifactMiddleware()],
+            state_schema=BuilderArtifactState,
+        )
+
+        result = asyncio.run(
+            agent.ainvoke(
+                {"messages": [HumanMessage(content="Build it")]},
+                context={"thread_id": "test-thread"},
+            )
+        )
+
+        assert result["builder_result"]["artifact_path"] == "outputs/doc.md"
+        assert result["builder_result"]["confidence"] == 0.9

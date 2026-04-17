@@ -54,6 +54,7 @@ function buildArtifactsPayloadFromStore(
 ): Record<string, unknown> {
   return {
     session_id: artifacts.sessionId || sessionId,
+    thread_id: artifacts.threadId,
     session_type: artifacts.sessionType,
     context_mode: artifacts.contextMode,
     started_at: artifacts.startedAt,
@@ -69,6 +70,7 @@ function buildArtifactsPayloadFromStore(
       confidence: candidate.confidence,
       reason: candidate.reason,
     })),
+    builder_artifact: artifacts.builderArtifact,
     status: artifacts.status,
   };
 }

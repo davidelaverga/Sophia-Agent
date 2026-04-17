@@ -193,6 +193,69 @@ def test_switch_to_builder_prefers_runtime_config_user_id(monkeypatch):
     assert handoff_resolution["state_user_id_present"] is False
 
 
+def test_make_switch_to_builder_tool_uses_bound_user_id_when_runtime_sources_missing(monkeypatch):
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            captured["task"] = task
+            captured["task_id"] = task_id
+            captured["owner_id"] = owner_id
+            captured["description"] = description
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: captured.setdefault("builder_agent", {"user_id": user_id, "model_name": model_name}),
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            "current_artifact": {"tone_estimate": 2.1, "active_tone_band": "anger_antagonism"},
+        }
+    )
+    bound_tool = switch_module.make_switch_to_builder_tool("bound_user")
+    response = bound_tool.func(
+        runtime=runtime,
+        task="Build a test doc.",
+        task_type="document",
+        tool_call_id="tc-builder-bound-user-id",
+    )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert captured["builder_agent"]["user_id"] == "bound_user"
+    assert captured["owner_id"] == "bound_user"
+    assert handoff_resolution["user_id_source"] == "configured_builder_user_id"
+    assert handoff_resolution["configured_user_id_present"] is True
+    assert handoff_resolution["config_user_id_present"] is False
+    assert handoff_resolution["state_user_id_present"] is False
+
+
 def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
     captured = {}

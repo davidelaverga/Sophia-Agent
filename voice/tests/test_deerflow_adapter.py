@@ -255,7 +255,7 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
                     "thread_id": "thread-123",
                 }
             },
-            "stream_mode": ["messages-tuple", "values"],
+            "stream_mode": ["messages-tuple", "values", "custom"],
             "on_disconnect": "cancel",
             "multitask_strategy": "rollback",
         }
@@ -348,7 +348,7 @@ async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() 
                     "thread_id": "thread-explicit",
                 }
             },
-            "stream_mode": ["messages-tuple", "values"],
+            "stream_mode": ["messages-tuple", "values", "custom"],
             "on_disconnect": "cancel",
             "multitask_strategy": "rollback",
         }
@@ -797,6 +797,253 @@ async def test_stream_events_recover_artifact_from_final_values_after_partial_to
     assert [event.kind for event in events] == ["text", "artifact"]
     assert events[0].text == "Hello "
     assert events[1].artifact == artifact
+
+
+@pytest.mark.anyio
+async def test_stream_events_forward_builder_task_events() -> None:
+    artifact = _valid_artifact()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: task_started",
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
+                "event: task_running",
+                "data: " + json.dumps({"task_id": "builder-1", "message_index": 1, "total_messages": 3}),
+                "event: messages",
+                "data: " + json.dumps([
+                    {
+                        "type": "AIMessageChunk",
+                        "content": [{"text": "Hello", "type": "text", "index": 0}],
+                        "tool_calls": [
+                            {"name": "emit_artifact", "args": artifact, "id": "call-1", "type": "tool_call"},
+                        ],
+                    },
+                    {"id": "meta-1"},
+                ]),
+                "event: task_completed",
+                "data: " + json.dumps({"task_id": "builder-1", "result": "done"}),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["builder_task", "builder_task", "text", "builder_task", "artifact"]
+    assert events[0].builder_task == {"type": "task_started", "task_id": "builder-1", "description": "Builder: document about the dangers of war"}
+    assert events[1].builder_task == {"type": "task_running", "task_id": "builder-1", "message_index": 1, "total_messages": 3}
+    assert events[3].builder_task == {"type": "task_completed", "task_id": "builder-1", "result": "done"}
+
+
+@pytest.mark.anyio
+async def test_stream_events_fail_active_builder_task_before_backend_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: task_started",
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
+                "event: error",
+                "data: " + json.dumps({"message": "An internal error occurred"}),
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["builder_task", "builder_task", "error"]
+    assert events[0].builder_task == {
+        "type": "task_started",
+        "task_id": "builder-1",
+        "description": "Builder: document about the dangers of war",
+    }
+    assert events[1].builder_task == {
+        "type": "task_failed",
+        "task_id": "builder-1",
+        "detail": "An internal error occurred",
+        "error": "An internal error occurred",
+    }
+    assert events[2].stage == "backend-stream"
+    assert events[2].message == "An internal error occurred"
+
+
+@pytest.mark.anyio
+async def test_stream_events_emit_builder_failure_from_values_state() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: task_started",
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
+                "event: values",
+                "data: " + json.dumps({
+                    "values": {
+                        "builder_task": {
+                            "task_id": "builder-1",
+                            "status": "failed",
+                            "description": "Builder: document about the dangers of war",
+                            "error": "Recursion limit of 50 reached without hitting a stop condition.",
+                            "progress_percent": 50,
+                            "total_steps": 4,
+                            "completed_steps": 2,
+                        }
+                    }
+                }),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["builder_task", "builder_task"]
+    assert events[0].builder_task == {
+        "type": "task_started",
+        "task_id": "builder-1",
+        "description": "Builder: document about the dangers of war",
+    }
+    assert events[1].builder_task == {
+        "type": "task_failed",
+        "task_id": "builder-1",
+        "description": "Builder: document about the dangers of war",
+        "detail": "Recursion limit of 50 reached without hitting a stop condition.",
+        "error": "Recursion limit of 50 reached without hitting a stop condition.",
+        "progress_percent": 50,
+        "total_steps": 4,
+        "completed_steps": 2,
+    }
+
+
+@pytest.mark.anyio
+async def test_stream_events_merge_builder_result_into_final_values_artifact() -> None:
+    artifact = _valid_artifact()
+    builder_result = {
+        "artifact_title": "Sophia launch brief",
+        "artifact_type": "document",
+        "artifact_path": "outputs/sophia-launch-brief.md",
+        "companion_summary": "Built the launch brief.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: messages",
+                "data: " + json.dumps([
+                    {
+                        "type": "AIMessageChunk",
+                        "content": [{"text": "Done", "type": "text", "index": 0}],
+                        "tool_calls": [
+                            {"name": "emit_artifact", "args": artifact, "id": "call-1", "type": "tool_call"},
+                        ],
+                    },
+                    {"id": "meta-1"},
+                ]),
+                "event: values",
+                "data: " + json.dumps({"values": {"current_artifact": artifact, "builder_result": builder_result}}),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["text", "artifact"]
+    assert events[1].artifact == {**artifact, "builder_result": builder_result}
+
+
+@pytest.mark.anyio
+async def test_stream_events_merge_builder_result_from_final_values_into_streamed_artifact_after_builder_progress() -> None:
+    artifact = _valid_artifact()
+    builder_result = {
+        "artifact_title": "Sophia launch brief",
+        "artifact_type": "document",
+        "artifact_path": "outputs/sophia-launch-brief.md",
+        "companion_summary": "Built the launch brief.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/threads":
+            return httpx.Response(200, json={"thread_id": "thread-123"})
+        if request.url.path == "/threads/thread-123/runs/stream":
+            return _sse_response(
+                "event: task_started",
+                "data: " + json.dumps({"task_id": "builder-1", "description": "Builder: document about the dangers of war"}),
+                "event: task_completed",
+                "data: " + json.dumps({"task_id": "builder-1", "result": "done"}),
+                "event: messages",
+                "data: " + json.dumps([
+                    {
+                        "type": "AIMessageChunk",
+                        "content": [{"text": "Done", "type": "text", "index": 0}],
+                        "tool_calls": [
+                            {"name": "emit_artifact", "args": artifact, "id": "call-1", "type": "tool_call"},
+                        ],
+                    },
+                    {"id": "meta-1"},
+                ]),
+                "event: values",
+                "data: " + json.dumps({"values": {"builder_result": builder_result}}),
+                "data: [DONE]",
+            )
+        raise AssertionError(f"Unexpected request path: {request.url.path}")
+
+    transport = httpx.MockTransport(handler)
+
+    async with httpx.AsyncClient(
+        base_url="http://testserver",
+        transport=transport,
+    ) as client:
+        adapter = DeerFlowBackendAdapter(
+            make_settings(backend_mode="deerflow"),
+            client=client,
+        )
+        events = [event async for event in adapter.stream_events(_make_request())]
+
+    assert [event.kind for event in events] == ["builder_task", "builder_task", "text", "artifact"]
+    assert events[3].artifact == {**artifact, "builder_result": builder_result}
 
 
 @pytest.mark.anyio

@@ -5,6 +5,8 @@ import {
   extractStreamMetadata,
   normalizeStreamDataPart,
   parseArtifactsPayload,
+  parseBuilderArtifactPayload,
+  parseBuilderTaskPayload,
   parseInterruptPayload,
 } from '../session/stream-contract-adapters';
 import type { SophiaMessageMetadata } from '../types/sophia-ui-message';
@@ -13,6 +15,8 @@ import type { UseCompanionStreamContractParams } from './types';
 
 export function useCompanionStreamContract({
   ingestArtifacts,
+  setBuilderArtifact,
+  setBuilderTask,
   setInterrupt,
   setCurrentContext,
   setMessageMetadata,
@@ -37,6 +41,18 @@ export function useCompanionStreamContract({
       return;
     }
 
+    if (normalized.type === 'builderArtifactV1') {
+      const builderArtifactPayload = parseBuilderArtifactPayload(normalized.data);
+      if (builderArtifactPayload) setBuilderArtifact(builderArtifactPayload);
+      return;
+    }
+
+    if (normalized.type === 'builderTaskV1') {
+      const builderTaskPayload = parseBuilderTaskPayload(normalized.data);
+      if (builderTaskPayload) setBuilderTask(builderTaskPayload);
+      return;
+    }
+
     if (normalized.type === 'interrupt') {
       const interruptPayload = parseInterruptPayload(normalized.data);
       if (interruptPayload) setInterrupt(interruptPayload);
@@ -54,7 +70,14 @@ export function useCompanionStreamContract({
         );
       }
     }
-  }, [activeSessionId, ingestArtifacts, setCurrentContext, setInterrupt]);
+  }, [
+    activeSessionId,
+    ingestArtifacts,
+    setBuilderArtifact,
+    setBuilderTask,
+    setCurrentContext,
+    setInterrupt,
+  ]);
 
   const handleFinish = useCallback((options: { message: { id: string } }) => {
     const messageId = options.message.id;

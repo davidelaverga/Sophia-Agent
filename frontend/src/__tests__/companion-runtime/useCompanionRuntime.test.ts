@@ -59,8 +59,8 @@ describe('useCompanionRuntime', () => {
 
   it('accepts an explicit route profile object without re-mapping it', () => {
     const profile = {
-      ...COMPANION_ROUTE_PROFILES.chat,
-      description: 'test chat profile',
+      ...COMPANION_ROUTE_PROFILES.ritual,
+      description: 'test ritual profile',
     };
 
     const { result } = renderHook(() =>

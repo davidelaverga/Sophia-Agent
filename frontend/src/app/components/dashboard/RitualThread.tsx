@@ -8,7 +8,7 @@
 
 import { useEffect, useRef } from 'react';
 
-import { useDeviceFidelity } from '../../hooks/useDeviceFidelity';
+import { useVisualTier } from '../../hooks/useVisualTier';
 
 interface RitualThreadProps {
   /** data-ritual attribute value of the selected node, or null */
@@ -33,7 +33,7 @@ const PALETTE = {
 
 export function RitualThread({ selectedRitual, isActive }: RitualThreadProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { reducedMotion, dprCap } = useDeviceFidelity();
+  const { reducedMotion, dprCap } = useVisualTier();
 
   useEffect(() => {
     const canvas = canvasRef.current;

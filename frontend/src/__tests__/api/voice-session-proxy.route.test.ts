@@ -1,24 +1,23 @@
 import type { NextRequest } from 'next/server';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const getAuthenticatedUserIdMock = vi.fn();
-const getUserScopedAuthHeaderMock = vi.fn();
+const resolveSophiaUserIdMock = vi.fn();
+const fetchSophiaApiMock = vi.fn();
 
-vi.mock('../../app/lib/auth/server-auth', () => ({
-  getAuthenticatedUserId: (...args: unknown[]) => getAuthenticatedUserIdMock(...args),
-  getUserScopedAuthHeader: (...args: unknown[]) => getUserScopedAuthHeaderMock(...args),
+vi.mock('../../app/api/_lib/sophia', () => ({
+  resolveSophiaUserId: (...args: unknown[]) => resolveSophiaUserIdMock(...args),
+  fetchSophiaApi: (...args: unknown[]) => fetchSophiaApiMock(...args),
 }));
 
-import { GET as connectGET } from '../../app/api/sophia/[userId]/voice/connect/route';
 import { POST as connectPOST } from '../../app/api/sophia/[userId]/voice/connect/route';
 import { POST as disconnectPOST } from '../../app/api/sophia/[userId]/voice/disconnect/route';
 import { GET as eventsGET } from '../../app/api/sophia/[userId]/voice/events/route';
+import { POST as warmupPOST } from '../../app/api/sophia/[userId]/voice/warmup/route';
 
 describe('voice session proxy routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    getAuthenticatedUserIdMock.mockResolvedValue('user-1');
-    getUserScopedAuthHeaderMock.mockResolvedValue('Bearer scoped-token');
+    resolveSophiaUserIdMock.mockResolvedValue('user-1');
   });
 
   it('rejects voice connect when the Better Auth user does not match the URL userId', async () => {
@@ -35,7 +34,7 @@ describe('voice session proxy routes', () => {
   });
 
   it('rejects voice disconnect when there is no authenticated Better Auth user', async () => {
-    getAuthenticatedUserIdMock.mockResolvedValue(null);
+    resolveSophiaUserIdMock.mockResolvedValue(null);
 
     const response = await disconnectPOST(
       {
@@ -50,7 +49,7 @@ describe('voice session proxy routes', () => {
   });
 
   it('proxies voice connect with the user-scoped bearer token for the matching user', async () => {
-    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+    fetchSophiaApiMock.mockResolvedValueOnce(
       new Response(JSON.stringify({ ok: true, session_id: 'voice-session-1' }), {
         status: 200,
         headers: { 'Content-Type': 'application/json' },
@@ -65,32 +64,39 @@ describe('voice session proxy routes', () => {
       { params: Promise.resolve({ userId: 'user-1' }) },
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('/api/sophia/user-1/voice/connect');
-    expect(url).toContain('source=ui');
-    expect((options.headers as Record<string, string>).Authorization).toBe('Bearer scoped-token');
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+    const [path, options] = fetchSophiaApiMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/sophia/user-1/voice/connect?source=ui');
+    expect(options.method).toBe('POST');
     expect(options.body).toBe(JSON.stringify({ platform: 'voice' }));
     expect(response.status).toBe(200);
   });
 
-  it('warms the voice connect route without proxying to the backend', async () => {
-    const fetchMock = vi.spyOn(global, 'fetch');
+  it('proxies voice warmup with the user-scoped bearer token for the matching user', async () => {
+    fetchSophiaApiMock.mockResolvedValueOnce(
+      new Response(null, {
+        status: 204,
+      }),
+    );
 
-    const response = await connectGET(
+    const response = await warmupPOST(
       {
-        nextUrl: new URL('http://localhost:3000/api/sophia/user-1/voice/connect'),
+        nextUrl: new URL('http://localhost:3000/api/sophia/user-1/voice/warmup'),
+        text: async () => JSON.stringify({ call_id: 'call-123', session_id: 'session-456' }),
       } as unknown as NextRequest,
       { params: Promise.resolve({ userId: 'user-1' }) },
     );
 
-    expect(fetchMock).not.toHaveBeenCalled();
-    expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toEqual({ ok: true, authReady: true, userId: 'user-1' });
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+    const [path, options] = fetchSophiaApiMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/sophia/user-1/voice/warmup');
+    expect(options.method).toBe('POST');
+    expect(options.body).toBe(JSON.stringify({ call_id: 'call-123', session_id: 'session-456' }));
+    expect(response.status).toBe(204);
   });
 
   it('proxies voice disconnect with the user-scoped bearer token for the matching user', async () => {
-    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+    fetchSophiaApiMock.mockResolvedValueOnce(
       new Response(null, {
         status: 204,
       }),
@@ -104,10 +110,11 @@ describe('voice session proxy routes', () => {
       { params: Promise.resolve({ userId: 'user-1' }) },
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('/api/sophia/user-1/voice/disconnect');
-    expect((options.headers as Record<string, string>).Authorization).toBe('Bearer scoped-token');
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+    const [path, options] = fetchSophiaApiMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/sophia/user-1/voice/disconnect');
+    expect(options.method).toBe('POST');
+    expect(options.keepalive).toBe(true);
     expect(options.body).toBe(JSON.stringify({ call_id: 'call-123' }));
     expect(response.status).toBe(204);
   });
@@ -124,7 +131,7 @@ describe('voice session proxy routes', () => {
       },
     });
 
-    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+    fetchSophiaApiMock.mockResolvedValueOnce(
       new Response(stream, {
         status: 200,
         headers: { 'Content-Type': 'text/event-stream' },
@@ -138,12 +145,10 @@ describe('voice session proxy routes', () => {
       { params: Promise.resolve({ userId: 'user-1' }) },
     );
 
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toContain('/api/sophia/user-1/voice/events');
-    expect(url).toContain('call_id=call-123');
-    expect(url).toContain('session_id=session-456');
-    expect((options.headers as Record<string, string>).Authorization).toBe('Bearer scoped-token');
+    expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
+    const [path, options] = fetchSophiaApiMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/sophia/user-1/voice/events?call_id=call-123&session_id=session-456');
+    expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Accept).toBe('text/event-stream');
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/event-stream');

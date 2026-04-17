@@ -8,9 +8,12 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+from dotenv import dotenv_values
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -28,6 +31,8 @@ SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
 SUPPORTED_CONTEXT_MODES = {"work", "gaming", "life"}
 VOICE_SERVER_DISPATCH_TIMEOUT = 10.0
 VOICE_SERVER_WARMUP_TIMEOUT = 5.0
+BACKEND_DIR = Path(__file__).resolve().parents[3]
+REPO_ROOT = BACKEND_DIR.parent
 
 
 @dataclass(frozen=True)
@@ -105,15 +110,42 @@ class VoiceWarmupRequest(BaseModel):
     session_id: str = Field(..., description="The session_id returned from /voice/connect")
 
 
+@lru_cache(maxsize=1)
+def _get_voice_env_fallback() -> dict[str, str]:
+    values: dict[str, str] = {}
+
+    for env_file in (REPO_ROOT / "voice" / ".env", BACKEND_DIR / ".env", REPO_ROOT / ".env"):
+        if not env_file.exists():
+            continue
+
+        for key, value in dotenv_values(env_file).items():
+            if key in values or value is None:
+                continue
+
+            stripped = value.strip()
+            if stripped:
+                values[key] = stripped
+
+    return values
+
+
+def _get_configured_env(name: str) -> str:
+    direct_value = os.getenv(name, "").strip()
+    if direct_value:
+        return direct_value
+
+    return _get_voice_env_fallback().get(name, "")
+
+
 def _get_stream_api_key() -> str:
-    key = os.getenv("STREAM_API_KEY", "").strip()
+    key = _get_configured_env("STREAM_API_KEY")
     if not key:
         raise HTTPException(status_code=503, detail="STREAM_API_KEY not configured")
     return key
 
 
 def _get_stream_api_secret() -> str:
-    secret = os.getenv("STREAM_API_SECRET", "").strip()
+    secret = _get_configured_env("STREAM_API_SECRET")
     if not secret:
         raise HTTPException(status_code=503, detail="STREAM_API_SECRET not configured")
     return secret

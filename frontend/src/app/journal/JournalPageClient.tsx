@@ -23,6 +23,7 @@ import {
 } from 'react'
 
 import { haptic } from '../hooks/useHaptics'
+import { useVisualTier } from '../hooks/useVisualTier'
 import { logger } from '../lib/error-logger'
 import {
   buildHighlightSet,
@@ -419,6 +420,12 @@ export function JournalPageClient() {
   const poolCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const hitCanvasRef = useRef<HTMLCanvasElement>(null)
+
+  const { tier: visualTier, dprCap, reducedMotion: prefersReducedMotion } = useVisualTier()
+  const tierRef = useRef(visualTier)
+  const dprCapRef = useRef(dprCap)
+  tierRef.current = visualTier
+  dprCapRef.current = dprCap
 
   const positionsRef = useRef<Record<string, ScreenPosition>>({})
   const sceneEntriesRef = useRef<SceneEntry[]>([])
@@ -876,8 +883,12 @@ export function JournalPageClient() {
     function resetParticles(width: number, height: number) {
       particles.length = 0
       const aspect = width / Math.max(height, 1)
+      const t = tierRef.current
 
-      for (let index = 0; index < 110; index += 1) {
+      if (t === 1) return
+
+      const layer0Count = t === 2 ? 50 : 110
+      for (let index = 0; index < layer0Count; index += 1) {
         const angle = Math.random() * Math.PI * 2
         const radius = Math.pow(Math.random(), 0.42) * 0.55
         particles.push({
@@ -895,7 +906,8 @@ export function JournalPageClient() {
         })
       }
 
-      for (let index = 0; index < 160; index += 1) {
+      const layer1Count = t === 2 ? 80 : 160
+      for (let index = 0; index < layer1Count; index += 1) {
         const angle = Math.random() * Math.PI * 2
         const radius = Math.pow(Math.random(), 0.35) * 0.70
         particles.push({
@@ -913,7 +925,8 @@ export function JournalPageClient() {
         })
       }
 
-      for (let index = 0; index < 130; index += 1) {
+      const layer2Count = t === 2 ? 60 : 130
+      for (let index = 0; index < layer2Count; index += 1) {
         particles.push({
           x: Math.random(),
           y: Math.random() * 0.60 + 0.15,
@@ -931,7 +944,7 @@ export function JournalPageClient() {
     }
 
     function resize() {
-      const dpr = window.devicePixelRatio || 1
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCapRef.current)
       viewportWidth = window.innerWidth
       viewportHeight = window.innerHeight
 
@@ -1492,6 +1505,8 @@ export function JournalPageClient() {
       }
     }
 
+    let staticMode = false
+
     function renderFrame(now: number) {
       const time = now / 1000
       smoothPointerX += (pointerX - smoothPointerX) * 0.025
@@ -1500,7 +1515,8 @@ export function JournalPageClient() {
       const deltaSeconds = Math.min(0.05, lastFrameTime > 0 ? (now - lastFrameTime) * 0.001 : 0.016)
       lastFrameTime = now
       nextCometSpawn -= deltaSeconds
-      if (nextCometSpawn <= 0) {
+      const maxCometsForTier = tierRef.current === 1 ? 0 : tierRef.current === 2 ? 2 : MAX_COMETS
+      if (nextCometSpawn <= 0 && comets.length < maxCometsForTier) {
         spawnComet()
         nextCometSpawn = 2.5 + Math.random() * 5
       }
@@ -1524,7 +1540,9 @@ export function JournalPageClient() {
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
       drawOverlay(time)
-      animationFrame = window.requestAnimationFrame(renderFrame)
+      if (!staticMode) {
+        animationFrame = window.requestAnimationFrame(renderFrame)
+      }
     }
 
     function handlePointerMove(event: PointerEvent) {
@@ -1533,7 +1551,14 @@ export function JournalPageClient() {
     }
 
     resize()
-    animationFrame = window.requestAnimationFrame(renderFrame)
+
+    if (prefersReducedMotion || tierRef.current === 1) {
+      staticMode = true
+      renderFrame(performance.now())
+    } else {
+      animationFrame = window.requestAnimationFrame(renderFrame)
+    }
+
     window.addEventListener('resize', resize)
     window.addEventListener('pointermove', handlePointerMove)
 
@@ -1545,7 +1570,7 @@ export function JournalPageClient() {
       gl.deleteBuffer(quadBuffer)
       gl.deleteProgram(program)
     }
-  }, [showInteractiveScene])
+  }, [showInteractiveScene, prefersReducedMotion])
 
   useEffect(() => {
     if (!showInteractiveScene) {

@@ -13,15 +13,23 @@
 import { 
   Sparkles,
   Check,
+  Download,
+  ExternalLink,
+  FileText,
   Loader2
 } from 'lucide-react';
 import { useState } from 'react';
 import React from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
+import {
+  buildThreadArtifactHref,
+  formatBuilderArtifactTypeLabel,
+  getBuilderArtifactFiles,
+} from '../../lib/builder-artifacts';
 import type { RitualArtifacts, PresetType, ContextMode } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
-import { OnboardingTipGuard } from '../onboarding';
+import type { BuilderArtifactV1 } from '../../types/builder-artifact';
 
 function formatMemoryCategoryLabel(category: string): string {
   const cleaned = category
@@ -59,6 +67,7 @@ type ArtifactStatus = 'waiting' | 'capturing' | 'ready';
 
 interface ArtifactsPanelProps {
   artifacts?: RitualArtifacts | null;
+  builderArtifact?: BuilderArtifactV1 | null;
   presetType?: PresetType;
   contextMode?: ContextMode;
   sessionId?: string;
@@ -485,15 +494,240 @@ function MemoryCard({ memory, category, inlineFeedback, onApprove, onReject }: M
   );
 }
 
+export function BuilderDeliverableCard({
+  builderArtifact,
+  threadId,
+}: {
+  builderArtifact: BuilderArtifactV1;
+  threadId?: string;
+}) {
+  const files = getBuilderArtifactFiles(builderArtifact);
+  const decisions = builderArtifact.decisionsMade?.filter(Boolean) ?? [];
+  const sources = builderArtifact.sourcesUsed?.filter(Boolean) ?? [];
+  const confidence = builderArtifact.confidence;
+  const hasDetails = decisions.length > 0 || sources.length > 0;
+
+  return (
+    <div
+      className="relative overflow-hidden rounded-2xl border transition-all duration-700"
+      style={{
+        animation: 'builder-reveal 0.8s cubic-bezier(0.22,1,0.36,1) forwards',
+        background: 'var(--cosmic-panel)',
+        borderColor: 'var(--cosmic-border-soft)',
+      }}
+    >
+      {/* Top accent line — sophia purple gradient */}
+      <div
+        className="h-px w-full"
+        style={{
+          background: 'linear-gradient(90deg, transparent, var(--sophia-purple), transparent)',
+          opacity: 0.5,
+        }}
+      />
+
+      <div className="px-5 pt-4 pb-5">
+        {/* Header: type badge + confidence */}
+        <div className="flex items-center justify-between mb-3">
+          <span
+            className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] tracking-[0.16em] uppercase"
+            style={{
+              borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+              color: 'var(--sophia-purple)',
+              background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+            }}
+          >
+            <Sparkles className="h-3 w-3" />
+            {formatBuilderArtifactTypeLabel(builderArtifact.artifactType)}
+          </span>
+
+          {typeof confidence === 'number' && (
+            <span
+              className="text-[9px] tracking-[0.12em] lowercase tabular-nums"
+              style={{ color: 'var(--cosmic-text-faint)' }}
+            >
+              {Math.round(confidence * 100)}% confidence
+            </span>
+          )}
+        </div>
+
+        {/* Title — prominent */}
+        <h3
+          className="font-cormorant text-[22px] leading-[1.3] font-light"
+          style={{ color: 'var(--cosmic-text-strong)' }}
+        >
+          {builderArtifact.artifactTitle}
+        </h3>
+
+        {/* Summary */}
+        {builderArtifact.companionSummary && (
+          <p
+            className="mt-2.5 font-cormorant text-[15px] leading-[1.7] font-light"
+            style={{ color: 'var(--cosmic-text-whisper)' }}
+          >
+            {builderArtifact.companionSummary}
+          </p>
+        )}
+
+        {/* Decisions + Sources — expandable detail */}
+        {hasDetails && (
+          <div
+            className="mt-4 rounded-xl border px-3.5 py-3 space-y-3"
+            style={{
+              borderColor: 'var(--cosmic-border-soft)',
+              background: 'color-mix(in srgb, var(--cosmic-panel-soft) 60%, transparent)',
+            }}
+          >
+            {decisions.length > 0 && (
+              <div>
+                <p
+                  className="text-[9px] tracking-[0.16em] lowercase mb-1.5"
+                  style={{ color: 'var(--cosmic-text-faint)' }}
+                >
+                  decisions made
+                </p>
+                <ul className="space-y-1">
+                  {decisions.map((d, i) => (
+                    <li key={i} className="flex items-start gap-2">
+                      <span
+                        className="mt-[6px] h-1 w-1 shrink-0 rounded-full"
+                        style={{ background: 'var(--sophia-purple)', opacity: 0.5 }}
+                      />
+                      <span
+                        className="text-[12px] leading-relaxed"
+                        style={{ color: 'var(--cosmic-text)' }}
+                      >
+                        {d}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {sources.length > 0 && (
+              <div>
+                <p
+                  className="text-[9px] tracking-[0.16em] lowercase mb-1.5"
+                  style={{ color: 'var(--cosmic-text-faint)' }}
+                >
+                  sources
+                </p>
+                <div className="flex flex-wrap gap-1.5">
+                  {sources.map((s, i) => (
+                    <span
+                      key={i}
+                      className="inline-block rounded-full border px-2 py-0.5 text-[10px] lowercase"
+                      style={{
+                        borderColor: 'var(--cosmic-border-soft)',
+                        color: 'var(--cosmic-text-whisper)',
+                      }}
+                    >
+                      {s}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Next action */}
+        {builderArtifact.userNextAction && (
+          <p
+            className="mt-3.5 text-[11px] leading-relaxed"
+            style={{ color: 'var(--cosmic-text-muted)' }}
+          >
+            <span style={{ color: 'var(--cosmic-text-faint)' }}>Next → </span>
+            {builderArtifact.userNextAction}
+          </p>
+        )}
+
+        {/* File actions — properly sized tap targets */}
+        {files.length > 0 && (
+          <div className="mt-4 space-y-2">
+            {files.map((file) => {
+              const openHref = buildThreadArtifactHref(threadId, file.path);
+              const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true });
+
+              return (
+                <div
+                  key={file.path}
+                  className="flex items-center gap-3 rounded-xl border px-3.5 py-2.5 transition-all duration-300"
+                  style={{
+                    borderColor: 'var(--cosmic-border-soft)',
+                    background: 'color-mix(in srgb, var(--cosmic-panel-soft) 40%, transparent)',
+                  }}
+                >
+                  <FileText className="h-4 w-4 shrink-0" style={{ color: 'var(--cosmic-text-faint)' }} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-[12px]" style={{ color: 'var(--cosmic-text)' }}>
+                      {file.label}
+                    </p>
+                    <p className="text-[9px] tracking-[0.12em] lowercase" style={{ color: 'var(--cosmic-text-faint)' }}>
+                      {file.isPrimary ? 'primary' : 'supporting'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {openHref && (
+                      <a
+                        href={openHref}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label={`Open ${file.label}`}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
+                        style={{
+                          borderColor: 'var(--cosmic-border-soft)',
+                          color: 'var(--cosmic-text-whisper)',
+                        }}
+                        onClick={() => haptic('light')}
+                      >
+                        <ExternalLink className="h-3.5 w-3.5" />
+                        Open
+                      </a>
+                    )}
+                    {downloadHref && (
+                      <a
+                        href={downloadHref}
+                        aria-label={`Download ${file.label}`}
+                        className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
+                        style={{
+                          borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                          color: 'var(--sophia-purple)',
+                          background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+                        }}
+                        onClick={() => haptic('medium')}
+                      >
+                        <Download className="h-3.5 w-3.5" />
+                        Download
+                      </a>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {!files.length && !threadId && builderArtifact.artifactPath && (
+          <p className="mt-3.5 text-[11px] italic" style={{ color: 'var(--cosmic-text-faint)' }}>
+            Files will appear once the thread sync completes.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ============================================================================
 // MAIN ARTIFACTS PANEL
 // ============================================================================
 
 export function ArtifactsPanel({
   artifacts,
+  builderArtifact,
   presetType,
   sessionId: _sessionId,
-  threadId: _threadId,
+  threadId,
   isCollapsed = false,
   className,
   artifactStatus = { takeaway: 'waiting', reflection: 'waiting', memories: 'waiting' },
@@ -502,12 +736,6 @@ export function ArtifactsPanel({
   onMemoryReject,
   memoryInlineFeedback,
 }: ArtifactsPanelProps) {
-  const hasArtifacts = Boolean(
-    artifacts?.takeaway?.trim() ||
-    artifacts?.reflection_candidate?.prompt?.trim() ||
-    artifacts?.memory_candidates?.length
-  );
-
   const placeholders = {
     takeaway: getPlaceholderCopy('takeaway', presetType),
     reflection: getPlaceholderCopy('reflection', presetType),
@@ -525,7 +753,6 @@ export function ArtifactsPanel({
   
   return (
     <div className={cn('flex flex-col h-full', className)} data-onboarding="artifacts-panel">
-      <OnboardingTipGuard tipId="tip-first-artifacts" isTriggered={hasArtifacts} />
       {/* Header — cosmic whisper */}
       <div className="flex items-center gap-2.5 px-4 py-3" style={{ borderBottom: '1px solid var(--cosmic-border-soft)' }}>
         <span
@@ -559,6 +786,10 @@ export function ArtifactsPanel({
       {/* Sections */}
       {!isCollapsed && (
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
+          {builderArtifact && (
+            <BuilderDeliverableCard builderArtifact={builderArtifact} threadId={threadId} />
+          )}
+
           <ArtifactSection
             title="Takeaway"
             content={artifacts?.takeaway}
