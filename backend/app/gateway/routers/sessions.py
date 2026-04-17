@@ -8,6 +8,7 @@ import os
 import re
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
@@ -108,6 +109,7 @@ class SessionEndResponse(BaseModel):
 
 class SessionUpdateRequest(BaseModel):
     title: str | None = None
+    status: Literal["open", "paused"] | None = None
 
 
 class SessionDeleteResponse(BaseModel):
@@ -290,7 +292,7 @@ def _resolve_session_record(user_id: str, session_id: str) -> tuple[str, Session
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     """Create a new session with a real LangGraph thread and persist it."""
     user_id = _normalize_user_id(body.user_id)
-    # Enforce open-session limit
+    # Enforce resumable-session limit
     open_sessions = _store.list_open(user_id)
     if len(open_sessions) >= MAX_OPEN_SESSIONS_PER_USER:
         raise HTTPException(
@@ -320,6 +322,10 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     )
     _store.create(record)
 
+    from app.gateway.inactivity_watcher import register_activity
+
+    register_activity(thread_id, user_id, session_id, body.preset_context)
+
     return SessionStartResponse(
         session_id=session_id,
         thread_id=thread_id,
@@ -339,7 +345,7 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
 async def get_active_session(
     user_id: str = Query(default="dev-user"),
 ) -> ActiveSessionResponse:
-    """Return the most recently updated open session for compatibility callers."""
+    """Return the most recently updated resumable session for compatibility callers."""
     records = _list_open_records(_normalize_user_id(user_id))
     if not records:
         return ActiveSessionResponse(has_active_session=False, session=None)
@@ -353,7 +359,7 @@ async def get_active_session(
 async def get_open_sessions(
     user_id: str = Query(default="dev-user"),
 ) -> OpenSessionsResponse:
-    """Return all open sessions for a user."""
+    """Return all resumable sessions for a user."""
     records = _list_open_records(_normalize_user_id(user_id))
     sessions = [_record_to_info(r) for r in records]
     return OpenSessionsResponse(sessions=sessions, count=len(sessions))
@@ -391,18 +397,47 @@ async def update_session(
     body: SessionUpdateRequest,
     user_id: str = Query(default="dev-user"),
 ) -> SessionInfoResponse:
-    """Update session metadata (e.g. title)."""
+    """Update session metadata or resumable status."""
     normalized_user_id = _normalize_user_id(user_id)
     updates = body.model_dump(exclude_none=True)
-    if not updates:
-        _, record = _resolve_session_record(normalized_user_id, session_id)
-        if record is None:
-            raise HTTPException(status_code=404, detail="Session not found.")
-        return _record_to_info(record)
-    owner_user_id, _ = _resolve_session_record(normalized_user_id, session_id)
-    record = _store.update(owner_user_id, session_id, **updates)
+    requested_status = updates.pop("status", None)
+
+    owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    if not updates:
+        if requested_status is None:
+            return _record_to_info(record)
+
+    if requested_status is not None and record.status == "ended":
+        raise HTTPException(status_code=409, detail="Ended sessions cannot change status.")
+
+    if updates:
+        record = _store.update(owner_user_id, session_id, **updates)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+
+    if requested_status == "paused":
+        from app.gateway.inactivity_watcher import unregister_thread
+
+        record = _store.pause(owner_user_id, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        unregister_thread(record.thread_id)
+    elif requested_status == "open":
+        from app.gateway.inactivity_watcher import register_activity
+
+        record = _store.resume(owner_user_id, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Session not found.")
+        register_activity(
+            record.thread_id,
+            owner_user_id,
+            record.session_id,
+            record.context_mode,
+        )
+
     return _record_to_info(record)
 
 
@@ -428,6 +463,10 @@ async def end_session(body: SessionEndRequest) -> SessionEndResponse:
     record = _store.end(owner_user_id, body.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    from app.gateway.inactivity_watcher import unregister_thread
+
+    unregister_thread(record.thread_id)
 
     # Compute duration
     duration_minutes = 0
@@ -560,6 +599,9 @@ async def touch_session(
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
     updates: dict = {"message_count": record.message_count + 1}
+    if record.status == "paused":
+        updates["status"] = "open"
+        updates["ended_at"] = None
     normalized_preview = _normalize_message_preview(message_preview)
     if normalized_preview:
         updates["last_message_preview"] = normalized_preview
@@ -568,6 +610,15 @@ async def touch_session(
     updated_record = _store.update(owner_user_id, session_id, **updates)
     if updated_record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    from app.gateway.inactivity_watcher import register_activity
+
+    register_activity(
+        updated_record.thread_id,
+        owner_user_id,
+        updated_record.session_id,
+        updated_record.context_mode,
+    )
     return _record_to_info(updated_record)
 
 

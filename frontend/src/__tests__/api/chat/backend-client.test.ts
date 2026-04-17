@@ -106,4 +106,76 @@ describe('fetchBackendStreamWithBootstrap', () => {
     expect(result.threadId).toBe('thread-existing-123');
     expect(result.upstream.status).toBe(200);
   });
+
+  it('does not pre-read successful SSE responses for existing threads', async () => {
+    const cloneTextMock = vi.fn().mockResolvedValue('event: message\ndata: ok\n\n');
+    const upstreamResponse = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'text/event-stream' }),
+      clone: vi.fn(() => ({ text: cloneTextMock })),
+    } as unknown as Response;
+
+    const fetchMock = vi.fn().mockResolvedValueOnce(upstreamResponse);
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchBackendStreamWithBootstrap(
+      'http://localhost:2026/api/langgraph/threads',
+      {
+        ...basePayload,
+        thread_id: 'thread-existing-456',
+      },
+    );
+
+    expect(result.threadId).toBe('thread-existing-456');
+    expect(result.upstream).toBe(upstreamResponse);
+    expect(upstreamResponse.clone).not.toHaveBeenCalled();
+    expect(cloneTextMock).not.toHaveBeenCalled();
+  });
+
+  it('still retries stale 404 thread responses by reading the error body', async () => {
+    const staleThreadCloneTextMock = vi.fn().mockResolvedValue('Thread or assistant not found');
+    const staleThreadResponse = {
+      ok: false,
+      status: 404,
+      headers: new Headers({ 'Content-Type': 'application/json' }),
+      clone: vi.fn(() => ({ text: staleThreadCloneTextMock })),
+    } as unknown as Response;
+
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(staleThreadResponse)
+      .mockResolvedValueOnce(new Response(JSON.stringify({ thread_id: 'thread-fresh-789' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response('event: message\ndata: ok\n\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      }));
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const result = await fetchBackendStreamWithBootstrap(
+      'http://localhost:2026/api/langgraph/threads',
+      {
+        ...basePayload,
+        thread_id: 'thread-stale-123',
+      },
+    );
+
+    expect(staleThreadResponse.clone).toHaveBeenCalledTimes(1);
+    expect(staleThreadCloneTextMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      'http://localhost:2026/api/langgraph/threads',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      'http://localhost:2026/api/langgraph/threads/thread-fresh-789/runs/stream',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(result.threadId).toBe('thread-fresh-789');
+    expect(result.upstream.status).toBe(200);
+  });
 });

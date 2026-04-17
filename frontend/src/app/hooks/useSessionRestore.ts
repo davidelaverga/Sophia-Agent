@@ -144,7 +144,7 @@ export function useSessionRestore(
       contextMode: session.contextMode,
       startedAt: session.startedAt,
       lastActivityAt: new Date().toISOString(),
-      status: session.isActive ? 'active' : 'ended',
+      status: session.status === 'paused' ? 'paused' : session.isActive ? 'active' : 'ended',
       messageCount,
     };
     
@@ -200,7 +200,7 @@ export function useSessionRestore(
   return {
     snapshot,
     isRestoring,
-    hasActiveSession: snapshot !== null && snapshot.status === 'active',
+    hasActiveSession: snapshot !== null && snapshot.status !== 'ended',
     saveSnapshot,
     clearSnapshot,
     checkForSession,
@@ -238,5 +238,5 @@ export function getSessionSnapshot(): SessionSnapshot | null {
  */
 export function hasActiveSessionSnapshot(): boolean {
   const snapshot = getSessionSnapshot();
-  return snapshot !== null && snapshot.status === 'active';
+  return snapshot !== null && snapshot.status !== 'ended';
 }

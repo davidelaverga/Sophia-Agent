@@ -1854,7 +1854,7 @@ export function JournalPageClient() {
         <div className={styles.patternsBar}>
           <span className={styles.patternsLabel}>Emerging patterns</span>
           {patterns.slice(0, 4).map((pattern, index) => (
-            <span key={pattern} className={styles.patternPill} style={{ ['--pattern-accent' as string]: ['#8b7ec8', '#59b4aa', '#c88ca0', '#c8a578'][index % 4] }}>
+            <span key={pattern} className={styles.patternPill} style={{ ['--pattern-accent' as string]: [`var(--sophia-purple)`, `var(--cosmic-teal)`, `var(--cosmic-danger)`, `var(--cosmic-amber)`][index % 4] }}>
               <span className={styles.patternDot} />
               {pattern}
             </span>

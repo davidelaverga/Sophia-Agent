@@ -5,25 +5,27 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const pushMock = vi.fn();
 const hapticMock = vi.fn();
 const showToastMock = vi.fn();
-const refreshOpenSessionsMock = vi.fn();
-const setActiveSessionMock = vi.fn();
+const refreshRecentSessionsMock = vi.fn();
+const restoreOpenSessionMock = vi.fn();
 const viewEndedSessionMock = vi.fn();
 const removeOpenSessionMock = vi.fn();
-const removeEndedSessionMock = vi.fn();
+const removeRecentSessionMock = vi.fn();
+const removeHistorySessionMock = vi.fn();
 
 const sessionStoreState = {
-  openSessions: [],
+  recentSessions: [],
   isLoadingSessions: false,
-  refreshOpenSessions: refreshOpenSessionsMock,
-  setActiveSession: setActiveSessionMock,
+  refreshRecentSessions: refreshRecentSessionsMock,
+  restoreOpenSession: restoreOpenSessionMock,
   viewEndedSession: viewEndedSessionMock,
   removeOpenSession: removeOpenSessionMock,
+  removeRecentSession: removeRecentSessionMock,
   session: null,
 };
 
 const historyStoreState = {
   sessions: [],
-  removeSession: removeEndedSessionMock,
+  removeSession: removeHistorySessionMock,
 };
 
 vi.mock('next/navigation', () => ({
@@ -39,7 +41,7 @@ vi.mock('../../app/stores/ui-store', () => ({
 }));
 
 vi.mock('../../app/stores/session-store', () => ({
-  selectOpenSessions: (state: typeof sessionStoreState) => state.openSessions,
+  selectRecentSessions: (state: typeof sessionStoreState) => state.recentSessions,
   selectIsLoadingSessions: (state: typeof sessionStoreState) => state.isLoadingSessions,
   useSessionStore: (selector: (state: typeof sessionStoreState) => unknown) => selector(sessionStoreState),
 }));
@@ -59,13 +61,14 @@ describe('DashboardSidebar delete feedback', () => {
     pushMock.mockReset();
     hapticMock.mockReset();
     showToastMock.mockReset();
-    refreshOpenSessionsMock.mockReset();
-    setActiveSessionMock.mockReset();
+    refreshRecentSessionsMock.mockReset();
+    restoreOpenSessionMock.mockReset();
     viewEndedSessionMock.mockReset();
     removeOpenSessionMock.mockReset();
-    removeEndedSessionMock.mockReset();
+    removeRecentSessionMock.mockReset();
+    removeHistorySessionMock.mockReset();
 
-    sessionStoreState.openSessions = [
+    sessionStoreState.recentSessions = [
       {
         session_id: 'sess-1',
         thread_id: 'thread-1',
@@ -100,7 +103,7 @@ describe('DashboardSidebar delete feedback', () => {
     expect(screen.getByText('Deleting...')).toBeInTheDocument();
 
     await waitFor(() => {
-      expect(removeOpenSessionMock).toHaveBeenCalledWith('sess-1');
+      expect(removeOpenSessionMock).toHaveBeenCalledWith('sess-1', undefined);
     });
 
     expect(showToastMock).toHaveBeenCalledWith(expect.objectContaining({

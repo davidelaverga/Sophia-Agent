@@ -122,6 +122,41 @@ describe('memory recent route', () => {
     expect(payload.memories).toEqual([]);
   });
 
+  it('scopes approved memories to the requested session when recap checks for reviewed entries', async () => {
+    fetchSophiaApiMock.mockResolvedValue(
+      new Response(JSON.stringify({
+        memories: [
+          {
+            id: 'approved-target',
+            memory: 'Already reviewed for this session',
+            metadata: { session_id: 'sess-target', status: 'approved' },
+          },
+          {
+            id: 'approved-other',
+            memory: 'Reviewed for a different session',
+            metadata: { session_id: 'sess-other', status: 'approved' },
+          },
+        ],
+        count: 2,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memory/recent?status=approved&session_id=sess-target'),
+    } as unknown as NextRequest;
+
+    const response = await recentMemoriesGET(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.fallbackApplied).toBe(false);
+    expect(payload.memories).toHaveLength(1);
+    expect(payload.memories[0]).toMatchObject({ id: 'approved-target' });
+  });
+
   it('returns an empty pending-review payload when the user-scoped gateway call is unavailable', async () => {
     fetchSophiaApiMock.mockResolvedValue(
       new Response(JSON.stringify({ error: 'Forbidden' }), {
@@ -144,5 +179,44 @@ describe('memory recent route', () => {
       fallbackApplied: true,
       unavailable: true,
     });
+  });
+
+  it('matches recap memories by top-level session_id and updated_at when local overlay entries omit metadata session linkage', async () => {
+    fetchSophiaApiMock.mockResolvedValue(
+      new Response(JSON.stringify({
+        memories: [
+          {
+            id: 'local-latest',
+            session_id: 'sess-target',
+            memory: 'Fresh local overlay memory for this recap.',
+            metadata: { status: 'pending_review', category: 'lesson' },
+            updated_at: '2026-03-03T20:02:00.000Z',
+          },
+          {
+            id: 'local-other',
+            session_id: 'sess-other',
+            memory: 'Pending local overlay memory for another recap.',
+            metadata: { status: 'pending_review', category: 'lesson' },
+            updated_at: '2026-03-03T20:02:00.000Z',
+          },
+        ],
+        count: 2,
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    const request = {
+      nextUrl: new URL('http://localhost:3000/api/memory/recent?status=pending_review&session_id=sess-target&started_at=2026-03-03T19:46:00.000Z&ended_at=2026-03-03T20:00:00.000Z'),
+    } as unknown as NextRequest;
+
+    const response = await recentMemoriesGET(request);
+    const payload = await response.json();
+
+    expect(response.status).toBe(200);
+    expect(payload.fallbackApplied).toBe(false);
+    expect(payload.memories).toHaveLength(1);
+    expect(payload.memories[0]).toMatchObject({ id: 'local-latest' });
   });
 });

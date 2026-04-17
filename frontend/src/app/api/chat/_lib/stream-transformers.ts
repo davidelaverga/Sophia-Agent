@@ -844,7 +844,7 @@ export function createUIMessageStreamFromText(
   let started = false;
 
   return new ReadableStream({
-    async start(controller) {
+    start(controller) {
       const emit = (payload: unknown) => controller.enqueue(encodeSseData(encoder, payload));
 
       const ensureStart = () => {
@@ -914,12 +914,13 @@ export function createSSEToUIMessageStream(
   let initialValuesArtifact: Record<string, unknown> | null = null;
   let initialValuesBuilderArtifact = null;
   const activeBuilderTasks = new Map<string, BuilderTaskAccumulator>();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   const meta: StreamMeta = { ...(initialMeta || {}) };
 
   return new ReadableStream({
-    async start(controller) {
-      const reader = upstream.getReader();
+    start(controller) {
+      reader = upstream.getReader();
       let lastArtifactsSignature: string | null = null;
       let lastBuilderArtifactSignature: string | null = null;
       let lastBuilderTaskSignature: string | null = null;
@@ -998,9 +999,18 @@ export function createSSEToUIMessageStream(
         }
       };
 
-      try {
+      const pump = async () => {
+        const activeReader = reader;
+        if (!activeReader) {
+          ensureTextEnd();
+          emit({ type: 'finish' });
+          safeClose();
+          return;
+        }
+
+        try {
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await activeReader.read();
 
           if (done) {
             ensureTextEnd();
@@ -1527,12 +1537,27 @@ export function createSSEToUIMessageStream(
             }
           }
         }
-      } catch {
-        ensureTextEnd();
-        emit({ type: 'finish' });
-        safeClose();
-      } finally {
-        reader.releaseLock();
+        } catch {
+          ensureTextEnd();
+          emit({ type: 'finish' });
+          safeClose();
+        } finally {
+          activeReader.releaseLock();
+          if (reader === activeReader) {
+            reader = null;
+          }
+        }
+      };
+
+      void pump();
+    },
+
+    cancel() {
+      isClosed = true;
+      if (reader) {
+        void reader.cancel().catch(() => {
+          // ignore
+        });
       }
     },
   });

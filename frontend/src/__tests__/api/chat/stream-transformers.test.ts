@@ -18,6 +18,31 @@ function buildSseStream(chunks: string[]): ReadableStream<Uint8Array> {
   });
 }
 
+function buildControlledSseStream() {
+  const encoder = new TextEncoder();
+  let controllerRef: ReadableStreamDefaultController<Uint8Array> | null = null;
+
+  return {
+    stream: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controllerRef = controller;
+      },
+    }),
+
+    enqueue(chunk: string) {
+      if (!controllerRef) {
+        throw new Error('controlled SSE stream not initialized');
+      }
+
+      controllerRef.enqueue(encoder.encode(chunk));
+    },
+
+    close() {
+      controllerRef?.close();
+    },
+  };
+}
+
 async function readStreamAsString(stream: ReadableStream<Uint8Array>): Promise<string> {
   const decoder = new TextDecoder();
   const reader = stream.getReader();
@@ -146,6 +171,55 @@ describe('stream-transformers token sanitization', () => {
 
     const extracted = extractTextFromUiMessageStreamDump(rawDump);
     expect(extracted).toContain('Hello world');
+  });
+
+  it('emits transformed text chunks before the upstream stream closes', async () => {
+    const controlled = buildControlledSseStream();
+    const transformed = createSSEToUIMessageStream(controlled.stream);
+    const reader = transformed.getReader();
+    const decoder = new TextDecoder();
+
+    const firstChunkPromise = reader.read();
+
+    controlled.enqueue(
+      'event: messages\ndata: [{"type":"AIMessageChunk","content":[{"type":"text","text":"Hello"}]},{}]\n\n',
+    );
+
+    const readChunkWithTimeout = () => Promise.race([
+      reader.read(),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('timed out waiting for transformed chunk')), 250);
+      }),
+    ]);
+
+    const firstChunk = await Promise.race([
+      firstChunkPromise,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error('timed out waiting for first transformed chunk')), 250);
+      }),
+    ]);
+
+    expect(firstChunk.done).toBe(false);
+    const secondChunk = await readChunkWithTimeout();
+    const thirdChunk = await readChunkWithTimeout();
+    const earlyDump = [firstChunk, secondChunk, thirdChunk]
+      .filter((chunk): chunk is ReadableStreamReadResult<Uint8Array> & { done: false } => !chunk.done)
+      .map((chunk) => decoder.decode(chunk.value, { stream: true }))
+      .join('');
+
+    expect(earlyDump).toContain('"type":"start"');
+    expect(earlyDump).toContain('"type":"text-start"');
+    expect(earlyDump).toContain('"type":"text-delta"');
+
+    controlled.enqueue('event: done\ndata: {"status":"complete"}\n\n');
+    controlled.close();
+
+    while (true) {
+      const { done } = await reader.read();
+      if (done) {
+        break;
+      }
+    }
   });
 
   it('emits canonical envelope and metadata for synthetic text stream fallback', async () => {

@@ -169,6 +169,64 @@ class TestGetCheckpointer:
         mock_saver_cls.from_conn_string.assert_called_once_with("postgresql://localhost/db")
         mock_saver_instance.setup.assert_called_once()
 
+    def test_sqlite_persists_checkpoint_across_reset(self, tmp_path):
+        """SQLite-backed checkpoints remain available after recreating the saver."""
+        pytest.importorskip("langgraph.checkpoint.sqlite")
+
+        from langgraph.checkpoint.base import empty_checkpoint
+
+        from deerflow.agents.checkpointer.provider import checkpointer_context
+
+        db_path = tmp_path / "resume-after-restart.db"
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": str(db_path)})
+
+        resume_config = {
+            "configurable": {
+                "thread_id": "resume-thread",
+                "checkpoint_ns": "",
+            }
+        }
+        checkpoint = empty_checkpoint()
+
+        with checkpointer_context() as checkpointer:
+            saved_config = checkpointer.put(
+                resume_config,
+                checkpoint,
+                {"source": "input", "step": 1},
+                {},
+            )
+            initial_rows = list(checkpointer.list(resume_config))
+
+        initial_matches = [
+            row
+            for row in initial_rows
+            if row.config["configurable"].get("checkpoint_id")
+            == saved_config["configurable"]["checkpoint_id"]
+        ]
+
+        assert len(initial_matches) == 1
+        assert initial_matches[0].config["configurable"]["thread_id"] == "resume-thread"
+
+        reset_checkpointer()
+
+        with checkpointer_context() as restarted_checkpointer:
+            resumed_rows = list(restarted_checkpointer.list(resume_config))
+            restored_tuple = restarted_checkpointer.get_tuple(saved_config)
+
+        resumed_matches = [
+            row
+            for row in resumed_rows
+            if row.config["configurable"].get("checkpoint_id")
+            == saved_config["configurable"]["checkpoint_id"]
+        ]
+
+        assert len(resumed_matches) == 1
+        assert resumed_matches[0].config["configurable"]["thread_id"] == "resume-thread"
+        assert restored_tuple is not None
+        assert restored_tuple.config["configurable"]["thread_id"] == "resume-thread"
+        assert restored_tuple.checkpoint["id"] == checkpoint["id"]
+        assert restored_tuple.metadata == {"source": "input", "step": 1}
+
 
 # ---------------------------------------------------------------------------
 # app_config.py integration

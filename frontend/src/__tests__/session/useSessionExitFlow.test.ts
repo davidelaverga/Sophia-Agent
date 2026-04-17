@@ -271,6 +271,64 @@ describe('useSessionExitFlow', () => {
     );
   });
 
+  it('ends resumed sessions with the persisted backend thread id', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-resumed',
+        ended_at: '2026-03-03T20:00:00.000Z',
+        duration_minutes: 14,
+        turn_count: 6,
+        offer_debrief: false,
+        debrief_prompt: undefined,
+        recap_artifacts: undefined,
+      },
+    });
+
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const { result } = renderHook(() =>
+      useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        setEnding: vi.fn(),
+        sessionId: 'session-resumed',
+        sessionStartedAt: '2026-03-03T19:46:00.000Z',
+        sessionPresetType: 'open',
+        sessionContextMode: 'life',
+        messageCount: 6,
+        endSessionStore: vi.fn(),
+        clearSessionStore: vi.fn(),
+        clearBootstrap: vi.fn(),
+        navigateTo: vi.fn(),
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+        currentArtifacts: {
+          takeaway: 'The real thread survived the resume.',
+        },
+        persistedThreadId: 'thread-persisted-123',
+        threadId: 'session-resumed',
+      })
+    );
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
+      session_id: 'session-resumed',
+      thread_id: 'thread-persisted-123',
+    }));
+
+    expect(setRecapArtifactsMock).toHaveBeenCalledWith(
+      'session-resumed',
+      expect.objectContaining({
+        threadId: 'thread-persisted-123',
+      }),
+    );
+  });
+
   it('persists builder-only recap data when no ritual artifacts were captured', async () => {
     endSessionApiMock.mockResolvedValue({
       success: true,

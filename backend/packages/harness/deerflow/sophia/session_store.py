@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Model
 # ---------------------------------------------------------------------------
 
-SessionStatus = Literal["open", "ended"]
+SessionStatus = Literal["open", "paused", "ended"]
 
 
 class SessionRecord(BaseModel):
@@ -113,6 +113,14 @@ class SessionStore:
         now = datetime.now(UTC).isoformat()
         return self.update(user_id, session_id, status="ended", ended_at=now)
 
+    def pause(self, user_id: str, session_id: str) -> SessionRecord | None:
+        """Mark a session as paused but still resumable."""
+        return self.update(user_id, session_id, status="paused", ended_at=None)
+
+    def resume(self, user_id: str, session_id: str) -> SessionRecord | None:
+        """Mark a paused session as active again."""
+        return self.update(user_id, session_id, status="open", ended_at=None)
+
     def delete(self, user_id: str, session_id: str) -> bool:
         """Delete a session record from disk."""
         path = self._session_path(user_id, session_id)
@@ -122,9 +130,9 @@ class SessionStore:
         return True
 
     def list_open(self, user_id: str) -> list[SessionRecord]:
-        """Return all open sessions for a user, newest first."""
+        """Return all resumable sessions for a user, newest first."""
         return [
-            r for r in self._list_all(user_id) if r.status == "open"
+            r for r in self._list_all(user_id) if r.status in {"open", "paused"}
         ]
 
     def list_recent(self, user_id: str, limit: int = 30) -> list[SessionRecord]:

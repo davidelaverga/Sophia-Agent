@@ -100,6 +100,8 @@ export function useSessionOutboundSend({
       title: result.data.title,
       turnCount: result.data.turn_count,
       updatedAt: result.data.updated_at,
+      status: result.data.status,
+      endedAt: result.data.ended_at ?? null,
     });
   }, [chatRequestBody]);
 
