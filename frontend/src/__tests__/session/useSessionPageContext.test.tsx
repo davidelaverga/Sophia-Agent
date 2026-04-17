@@ -112,7 +112,7 @@ describe('useSessionPageContext', () => {
     expect(useSessionStore.getState().session?.threadId).toBe('thread-fresh');
   });
 
-  it('syncs paused sessions back to open on mount and persists paused status on cleanup', async () => {
+  it('syncs paused sessions back to open without overwriting the persisted backend thread id', async () => {
     useSessionStore.setState({
       session: {
         sessionId: '550e8400-e29b-41d4-a716-446655440001',
@@ -133,7 +133,15 @@ describe('useSessionPageContext', () => {
       error: null,
     });
 
-    const { unmount } = renderHook(() =>
+    useMessageMetadataStore.setState({
+      metadataByMessage: {},
+      currentThreadId: '550e8400-e29b-41d4-a716-446655440001',
+      currentSessionId: '550e8400-e29b-41d4-a716-446655440001',
+      currentRunId: null,
+      emotionalWeather: null,
+    });
+
+    const { result, unmount } = renderHook(() =>
       useSessionPageContext({
         bootstrapSessionId: undefined,
         bootstrapMessageId: undefined,
@@ -149,6 +157,9 @@ describe('useSessionPageContext', () => {
       );
     });
 
+    expect(result.current.resolvedThreadId).toBe('thread-paused');
+    expect(useSessionStore.getState().session?.threadId).toBe('thread-paused');
+
     expect(useSessionStore.getState().session).toMatchObject({
       status: 'active',
       isActive: true,
@@ -163,6 +174,8 @@ describe('useSessionPageContext', () => {
         'dev-user',
       );
     });
+
+    expect(useSessionStore.getState().session?.threadId).toBe('thread-paused');
 
     expect(useSessionStore.getState().session).toMatchObject({
       status: 'paused',

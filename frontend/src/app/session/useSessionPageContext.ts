@@ -51,8 +51,13 @@ export function useSessionPageContext({
   const sessionContextMode = session?.contextMode;
   const isReadOnly = session?.status === 'ended';
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
-  const resolvedThreadId = safeSessionId && currentMetadataSessionId === safeSessionId
-    ? currentThreadId || session?.threadId
+  const hasMatchingMetadataThreadId = safeSessionId && currentMetadataSessionId === safeSessionId;
+  const metadataThreadCollidesWithSessionId = hasMatchingMetadataThreadId
+    && currentThreadId === safeSessionId
+    && Boolean(session?.threadId)
+    && session.threadId !== safeSessionId;
+  const resolvedThreadId = hasMatchingMetadataThreadId && currentThreadId && !metadataThreadCollidesWithSessionId
+    ? currentThreadId
     : session?.threadId;
   const fallbackGreeting = sessionPresetType && sessionContextMode
     ? getSessionGreetingMessage(sessionPresetType, sessionContextMode)

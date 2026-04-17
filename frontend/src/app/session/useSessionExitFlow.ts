@@ -201,6 +201,7 @@ interface UseSessionExitFlowParams {
   currentArtifacts?: RitualArtifacts | null;
   currentBuilderArtifact?: BuilderArtifactV1 | null;
   userId?: string;
+  persistedThreadId?: string;
   threadId?: string;
   messages?: ExitSessionMessage[];
 }
@@ -224,6 +225,7 @@ export function useSessionExitFlow({
   currentArtifacts,
   currentBuilderArtifact,
   userId,
+  persistedThreadId,
   threadId,
   messages,
 }: UseSessionExitFlowParams) {
@@ -276,7 +278,7 @@ export function useSessionExitFlow({
     await new Promise((resolve) => setTimeout(resolve, 300));
 
     const recapSessionId = sessionId;
-    const recapThreadId = threadId || recapSessionId;
+    const recapThreadId = persistedThreadId || threadId || recapSessionId;
     const startedAt = sessionStartedAt || new Date().toISOString();
     const presetType = sessionPresetType || 'open';
     const contextMode = sessionContextMode || 'life';
@@ -442,6 +444,7 @@ export function useSessionExitFlow({
     currentArtifacts,
     currentBuilderArtifact,
     userId,
+    persistedThreadId,
     threadId,
     messages,
   ]);

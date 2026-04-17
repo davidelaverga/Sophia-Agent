@@ -15,7 +15,6 @@ import { useVisualTier } from '../../hooks/useVisualTier';
 import { logger } from '../../lib/error-logger';
 import {
   getRecapCategoryPresentation,
-  TAG_LABELS,
   type MemoryCandidateV1,
   type MemoryDecision,
 } from '../../lib/recap-types';
@@ -33,9 +32,6 @@ interface RecapMemoryOrbitProps {
   candidates?: MemoryCandidateV1[];
   decisions: Record<string, { decision: MemoryDecision; editedText?: string }>;
   onDecisionChange: (candidateId: string, decision: MemoryDecision, editedText?: string) => void;
-  reflectionPrompt?: string;
-  reflectionTag?: string;
-  onReflect?: () => void;
   isLoading?: boolean;
   disabled?: boolean;
   className?: string;
@@ -1883,57 +1879,6 @@ function MemoryOrb({
   );
 }
 
-function ReflectionCard({
-  prompt,
-  tag,
-  onReflect,
-  visible,
-}: {
-  prompt?: string;
-  tag?: string;
-  onReflect?: () => void;
-  visible: boolean;
-}) {
-  if (!prompt) {
-    return null;
-  }
-
-  return (
-    <div
-      className={cn(
-        'mt-10 flex max-w-xl flex-col items-center text-center transition-all duration-[1200ms] ease-out',
-        visible ? 'translate-y-0 opacity-100' : 'translate-y-6 opacity-0'
-      )}
-      style={{ transitionDelay: '700ms' }}
-    >
-      <div
-        className="relative w-full overflow-hidden rounded-2xl px-6 py-5 backdrop-blur-xl"
-        style={{
-          background: 'var(--cosmic-panel)',
-          border: '1px solid var(--cosmic-border-soft)',
-          boxShadow: 'var(--cosmic-shadow-lg)',
-        }}
-      >
-        <div className="mb-3 flex items-center gap-2">
-          <span className="text-base">💭</span>
-          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
-            {tag ? TAG_LABELS[tag] ?? 'Something to reflect on' : 'Something to reflect on'}
-          </p>
-        </div>
-        <p className="text-left font-cormorant text-[17px] leading-relaxed" style={{ color: 'var(--cosmic-text)' }}>{prompt}</p>
-        {onReflect && (
-          <button
-            onClick={onReflect}
-            className="cosmic-accent-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
-          >
-            Sit with this for a moment →
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function LoadingState() {
   return (
     <div className="relative min-h-screen overflow-hidden bg-[var(--bg)]">
@@ -1980,16 +1925,10 @@ function EmptyState() {
 
 function CompletedState({
   approvedCount,
-  reflectionPrompt,
-  reflectionTag,
-  onReflect,
   showEntrance,
 }: {
   approvedCount: number;
   approvedMemories: ApprovedMemoryRow[];
-  reflectionPrompt?: string;
-  reflectionTag?: string;
-  onReflect?: () => void;
   showEntrance: boolean;
 }) {
   return (
@@ -2041,13 +1980,6 @@ function CompletedState({
           </div>
         </div>
       </div>
-
-      <ReflectionCard
-        prompt={reflectionPrompt}
-        tag={reflectionTag}
-        onReflect={onReflect}
-        visible={showEntrance}
-      />
     </>
   );
 }
@@ -2057,9 +1989,6 @@ export function RecapCosmicPoolOrbit({
   candidates,
   decisions,
   onDecisionChange,
-  reflectionPrompt,
-  reflectionTag,
-  onReflect,
   isLoading,
   disabled,
   className,
@@ -2385,19 +2314,7 @@ export function RecapCosmicPoolOrbit({
           <CompletedState
             approvedCount={approvedCount}
             approvedMemories={approvedMemories}
-            reflectionPrompt={reflectionPrompt}
-            reflectionTag={reflectionTag}
-            onReflect={onReflect}
             showEntrance={showEntrance}
-          />
-        )}
-
-        {!allDone && (
-          <ReflectionCard
-            prompt={reflectionPrompt}
-            tag={reflectionTag}
-            onReflect={onReflect}
-            visible={showEntrance}
           />
         )}
       </div>

@@ -39,6 +39,7 @@ type UseSessionExitOrchestrationParams = {
   currentArtifacts?: RitualArtifacts | null;
   currentBuilderArtifact?: BuilderArtifactV1 | null;
   userId?: string;
+  persistedThreadId?: string;
   threadId?: string;
   persistedSessionId?: string;
   responseMode: 'text' | 'voice';
@@ -66,6 +67,7 @@ export function useSessionExitOrchestration({
   currentArtifacts,
   currentBuilderArtifact,
   userId,
+  persistedThreadId,
   threadId,
   persistedSessionId,
   responseMode,
@@ -106,6 +108,7 @@ export function useSessionExitOrchestration({
     currentArtifacts,
     currentBuilderArtifact,
     userId,
+    persistedThreadId,
     threadId,
     messages,
   });

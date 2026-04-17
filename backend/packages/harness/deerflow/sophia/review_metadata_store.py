@@ -400,6 +400,9 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
                     if not merged_memory.get("categories"):
                         merged_memory["categories"] = [category]
 
+            if entry.get("session_id"):
+                merged_memory["session_id"] = entry.get("session_id")
+
         overlaid_memories.append(merged_memory)
 
     for entry in entries:
@@ -413,6 +416,7 @@ def apply_review_metadata_overlays(user_id: str, memories: list[dict]) -> list[d
 
         local_memory = {
             "id": local_memory_id,
+            "session_id": entry.get("session_id"),
             "memory": entry.get("content", ""),
             "category": category,
             "categories": [category] if category else [],

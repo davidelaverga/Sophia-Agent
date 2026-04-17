@@ -214,6 +214,7 @@ describe('useRecapArtifactsLoader', () => {
 
     await flushEffects();
 
+    expect(AbortSignal.timeout).toHaveBeenCalledWith(15000);
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       '/api/memory/recent?status=pending_review&session_id=sess-memory-review&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',

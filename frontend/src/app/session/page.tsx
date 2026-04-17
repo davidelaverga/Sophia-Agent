@@ -686,6 +686,7 @@ function SessionPageContent() {
     currentArtifacts: artifacts,
     currentBuilderArtifact: builderArtifact,
     userId,
+    persistedThreadId: session?.threadId,
     threadId: resolvedThreadId,
     persistedSessionId: session?.sessionId,
     responseMode: exitProtectionResponseMode,

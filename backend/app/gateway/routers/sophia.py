@@ -86,6 +86,7 @@ class MemoryItem(BaseModel):
     id: str = Field(..., description="Memory ID")
     content: str = Field(default="", description="Memory content text")
     category: str | None = Field(default=None, description="Memory category")
+    session_id: str | None = Field(default=None, description="Source session identifier")
     metadata: dict | None = Field(default=None, description="Memory metadata")
     created_at: str | None = Field(default=None, description="Creation timestamp")
     updated_at: str | None = Field(default=None, description="Last update timestamp")
@@ -333,11 +334,13 @@ def _get_primary_category(mem: dict) -> str | None:
     return category if isinstance(category, str) and category else None
 
 def _to_memory_item(mem: dict) -> MemoryItem:
+    metadata = mem.get("metadata") if isinstance(mem, dict) else None
     return MemoryItem(
         id=mem.get("id", ""),
         content=mem.get("memory", mem.get("content", "")),
         category=_get_primary_category(mem),
-        metadata=mem.get("metadata"),
+        session_id=mem.get("session_id") or (metadata.get("session_id") if isinstance(metadata, dict) else None),
+        metadata=metadata,
         created_at=mem.get("created_at"),
         updated_at=mem.get("updated_at"),
     )

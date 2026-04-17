@@ -10,6 +10,7 @@ import { useSessionHistoryStore } from '../../stores/session-history-store';
 const RECENT_END_RETRY_DELAY_MS = 1500;
 const RECENT_END_MAX_RETRIES = 6;
 const RECENT_END_CONTEXT_WINDOW_MS = 2 * 60 * 1000;
+const RECENT_MEMORIES_FETCH_TIMEOUT_MS = 15000;
 
 type RecentMemoryStatus = 'pending_review' | 'approved';
 
@@ -75,7 +76,7 @@ async function fetchSessionRecentMemories(
       headers: {
         'Content-Type': 'application/json',
       },
-      signal: AbortSignal.timeout(5000),
+      signal: AbortSignal.timeout(RECENT_MEMORIES_FETCH_TIMEOUT_MS),
     });
 
     if (!response.ok) {
