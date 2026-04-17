@@ -1,9 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../../../lib/auth/server-auth';
-import { getPrimaryGatewayUrl } from '../../../_lib/gateway-url';
-
-const BACKEND_URL = getPrimaryGatewayUrl();
+import { fetchSophiaApi, resolveSophiaUserId } from '../../../_lib/sophia';
 
 export async function GET(request: NextRequest) {
   const threadId = request.nextUrl.searchParams.get('thread_id');
@@ -12,22 +9,18 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(null);
   }
 
-  const [userId, apiKey] = await Promise.all([
-    getAuthenticatedUserId(),
-    getUserScopedAuthToken(),
-  ]);
+  const userId = await resolveSophiaUserId();
 
-  if (!userId || !apiKey) {
+  if (!userId) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
   try {
     const params = new URLSearchParams({ thread_id: threadId });
-    const response = await fetch(
-      `${BACKEND_URL}/api/sophia/${userId}/tasks/active?${params.toString()}`,
+    const response = await fetchSophiaApi(
+      `/api/sophia/${encodeURIComponent(userId)}/tasks/active?${params.toString()}`,
       {
         method: 'GET',
-        headers: { Authorization: `Bearer ${apiKey}` },
         cache: 'no-store',
       },
     );

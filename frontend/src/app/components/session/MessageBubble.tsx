@@ -124,11 +124,11 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           'max-w-[85%] sm:max-w-[75%] p-4 rounded-2xl relative group min-w-0',
           isUser
             ? cn(
-                'border',
+                'border sophia-bubble-user',
                 isQueued && 'border-dashed opacity-70'
               )
             : cn(
-                'border font-light'
+                'border font-light sophia-bubble-assistant'
               ),
           // Subtle glow for assistant's latest message
           !isUser && isLatest && 'shadow-[0_0_24px_var(--cosmic-border-soft)]',
