@@ -58,25 +58,56 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         self._ensure_message_ids(messages)
 
         total_tokens = self.token_counter(messages)
+        total_messages = len(messages)
+
         if not self._should_summarize(messages, total_tokens):
+            logger.info(
+                "[SophiaSummarization] skip: %d messages, ~%d tokens (below threshold)",
+                total_messages,
+                total_tokens,
+            )
             return None
 
         cutoff_index = self._determine_cutoff_index(messages)
         if cutoff_index <= 0:
+            logger.info(
+                "[SophiaSummarization] skip: cutoff_index=%d (nothing to compress)",
+                cutoff_index,
+            )
             return None
 
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
 
+        logger.info(
+            "[SophiaSummarization] TRIGGERED | total_messages=%d | total_tokens≈%d | "
+            "compressing=%d | keeping=%d",
+            total_messages,
+            total_tokens,
+            len(messages_to_summarize),
+            len(preserved_messages),
+        )
+
         # Extract emotional arc BEFORE compression (per spec §16)
         emotional_arc = _extract_emotional_arc(messages_to_summarize)
+        if emotional_arc:
+            logger.info(
+                "[SophiaSummarization] emotional_arc extracted: %s",
+                emotional_arc.replace("\n", " | "),
+            )
+        else:
+            logger.info("[SophiaSummarization] no emit_artifact tool results found for arc")
 
         # Generate the text summary
-        if sync:
-            summary_text = self._create_summary(messages_to_summarize)
-        else:
-            # For async path, we need to call synchronously since this method
-            # isn't itself async.  The parent's _create_summary is sync.
-            summary_text = self._create_summary(messages_to_summarize)
+        summary_start = time.perf_counter()
+        summary_text = self._create_summary(messages_to_summarize)
+        summary_ms = (time.perf_counter() - summary_start) * 1000
+
+        logger.info(
+            "[SophiaSummarization] summary generated | chars=%d | llm_ms=%.0f | preview=%.100s",
+            len(summary_text),
+            summary_ms,
+            summary_text.replace("\n", " "),
+        )
 
         # Build the system_prompt_block with summary + emotional arc
         summary_block = _build_summary_block(summary_text, emotional_arc)
@@ -84,12 +115,14 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         blocks = list(state.get("system_prompt_blocks", []))
         blocks.append(summary_block)
 
+        total_ms = (time.perf_counter() - _t0) * 1000
         log_middleware(
             "SophiaSummarization",
-            f"compressed {len(messages_to_summarize)} messages, "
-            f"kept {len(preserved_messages)}, "
-            f"arc={'yes' if emotional_arc else 'no'} "
-            f"({(time.perf_counter() - _t0) * 1000:.0f}ms)",
+            f"compressed {len(messages_to_summarize)} msgs → {len(summary_text)} chars summary, "
+            f"kept {len(preserved_messages)} msgs, "
+            f"arc={'yes' if emotional_arc else 'no'}, "
+            f"block_chars={len(summary_block)} "
+            f"({total_ms:.0f}ms)",
             _t0,
         )
 
