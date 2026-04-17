@@ -293,6 +293,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `telegram_linking.py` - Persistent Telegram↔Sophia link store with one-time token issuance/redeem/unlink, reverse-map-safe chat relinking, and chat activity tracking
 - `session_resolver.py` - Dynamic Telegram run overrides that bind linked chats to `sophia_companion` with native memory backend and linked `context_mode`
 - `manager.py` - Core dispatcher: creates/reuses threads, enforces per-conversation concurrency locks, resolves dynamic session overrides, ingests channel-provided inbound files into uploads (with sandbox acquire/release around sync), builds Telegram-specific inline multimodal payloads for supported attachments, keeps Slack/Telegram on `client.runs.wait()`, uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates, and publishes asynchronous builder completion notifications from handoff task IDs
+- `manager.py` also materializes Sophia `builder_delivery` payloads into gateway-local outputs before outbound uploads, which is what lets synchronous builder results and explicit resend requests reach Telegram in split Render deployments where LangGraph and Gateway do not share a disk
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle) plus optional inbound file reader hook (`get_inbound_file_reader`)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml` and registers channel inbound file readers with `ChannelManager`
 - `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram.py` handles `/start <token>` linking, `/build`, and media ingestion)
@@ -306,14 +307,17 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 6. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
 7. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
 8. If a `builder_handoff` task ID is returned, manager polls background task state and emits an async completion/failure follow-up outbound
-9. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
-10. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`) and Telegram `/build`: handle or forward appropriately
-11. Outbound → channel callbacks → platform reply
+9. If a synchronous Sophia turn returns top-level `builder_delivery`, manager writes those bytes into its own outputs tree and uploads them directly through the channel implementation
+10. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
+11. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`) and Telegram `/build`: handle or forward appropriately
+12. Outbound → channel callbacks → platform reply
 
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token, optional `allowed_users`, optional session overrides, optional `bot_username` for deep-link generation)
+
+Sophia companion/builder custom agents do not use the lead-agent tool loader automatically. To expose DeerFlow-native browsing in Sophia, keep `web_search` / `web_fetch` defined in the active config file (for Render, `config.production.yaml`) and provide `TAVILY_API_KEY` plus `JINA_API_KEY` anywhere that config is loaded.
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 

@@ -18,8 +18,10 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMid
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+from deerflow.agents.sophia_agent.middlewares.web_research import WebResearchGuidanceMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.tools.builtins import present_file_tool
@@ -57,6 +59,7 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
     )
+    web_tools = load_sophia_web_tools()
 
     # 6-middleware chain per spec §6 (adapted for Phase 1)
     # SandboxMiddleware skipped — builder inherits sandbox_state from parent via initial state
@@ -72,9 +75,11 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         BuilderTaskMiddleware(),
         # 5. Builder artifact capture — after-model reads emit_builder_artifact
         BuilderArtifactMiddleware(),
-        # 6. Prompt assembly — assembles system_prompt_blocks into system message
+        # 6. Prompt assembly
         PromptAssemblyMiddleware(),
     ]
+    if web_tools:
+        middlewares.insert(-1, WebResearchGuidanceMiddleware())
 
     # Sandbox tools (bash, file ops) + present_files + emit_builder_artifact
     tools = [
@@ -85,6 +90,7 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         str_replace_tool,
         present_file_tool,
         emit_builder_artifact,
+        *web_tools,
     ]
 
     agent = create_agent(

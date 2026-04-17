@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import mimetypes
@@ -17,6 +18,7 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.session_resolver import resolve_channel_session
 from app.channels.store import ChannelStore
 from deerflow.config.paths import get_paths
+from deerflow.sophia.tools.builder_delivery import extract_builder_artifact_paths
 from deerflow.subagents.executor import get_background_task_result
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
@@ -390,50 +392,33 @@ def _extract_builder_result_payload(task_result: Any) -> dict[str, Any] | None:
     return None
 
 
-def _normalize_builder_artifact_path(path: str) -> str | None:
-    raw = str(path).strip()
-    if not raw:
-        return None
-    if raw.startswith(_OUTPUTS_VIRTUAL_PREFIX):
-        return raw
-    if raw.startswith("/mnt/user-data/outputs"):
-        suffix = raw.removeprefix("/mnt/user-data/outputs").lstrip("/")
-        return f"{_OUTPUTS_VIRTUAL_PREFIX}{suffix}" if suffix else None
-    if raw.startswith("outputs/"):
-        return f"{_OUTPUTS_VIRTUAL_PREFIX}{raw.removeprefix('outputs/')}"
-    if raw.startswith("./outputs/"):
-        return f"{_OUTPUTS_VIRTUAL_PREFIX}{raw.removeprefix('./outputs/')}"
-    if raw.startswith("/mnt/user-data/"):
-        return None
-
-    normalized = raw.replace("\\", "/")
-    if "/outputs/" in normalized:
-        return f"{_OUTPUTS_VIRTUAL_PREFIX}{normalized.rsplit('/outputs/', 1)[1].lstrip('/')}"
-
-    filename = Path(normalized).name.strip()
-    if not filename or filename in {".", ".."}:
-        return None
-    return f"{_OUTPUTS_VIRTUAL_PREFIX}{filename}"
-
 
 def _extract_builder_artifacts(builder_result: dict[str, Any]) -> list[str]:
-    candidates: list[str] = []
-    primary = builder_result.get("artifact_path")
-    if isinstance(primary, str):
-        candidates.append(primary)
-    supporting = builder_result.get("supporting_files")
-    if isinstance(supporting, list):
-        candidates.extend(path for path in supporting if isinstance(path, str))
+    return extract_builder_artifact_paths(builder_result)
 
-    normalized: list[str] = []
+
+def _extract_builder_delivery(result: dict | list) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    builder_delivery = result.get("builder_delivery")
+    return builder_delivery if isinstance(builder_delivery, dict) else None
+
+
+def _extract_builder_delivery_artifacts(builder_delivery: dict[str, Any]) -> list[str]:
+    attachments = builder_delivery.get("attachments")
+    if not isinstance(attachments, list):
+        return []
+    artifacts: list[str] = []
     seen: set[str] = set()
-    for candidate in candidates:
-        normalized_path = _normalize_builder_artifact_path(candidate)
-        if not normalized_path or normalized_path in seen:
+    for attachment in attachments:
+        if not isinstance(attachment, Mapping):
             continue
-        seen.add(normalized_path)
-        normalized.append(normalized_path)
-    return normalized
+        virtual_path = attachment.get("virtual_path")
+        if not isinstance(virtual_path, str) or not virtual_path or virtual_path in seen:
+            continue
+        seen.add(virtual_path)
+        artifacts.append(virtual_path)
+    return artifacts
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
@@ -488,18 +473,93 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
     return attachments
 
 
+def _materialize_builder_delivery(thread_id: str, builder_delivery: dict[str, Any]) -> list[ResolvedAttachment]:
+    attachments_payload = builder_delivery.get("attachments")
+    if not isinstance(attachments_payload, list):
+        return []
+
+    paths = get_paths()
+    paths.ensure_thread_dirs(thread_id)
+    outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
+    attachments: list[ResolvedAttachment] = []
+
+    for index, payload in enumerate(attachments_payload, start=1):
+        if not isinstance(payload, Mapping):
+            continue
+
+        content_base64 = payload.get("content_base64")
+        if not isinstance(content_base64, str) or not content_base64:
+            continue
+
+        try:
+            content = base64.b64decode(content_base64.encode("ascii"), validate=True)
+        except (ValueError, binascii.Error):
+            logger.warning("[Manager] invalid builder delivery payload for thread=%s", thread_id, exc_info=True)
+            continue
+
+        raw_virtual_path = payload.get("virtual_path")
+        virtual_path = raw_virtual_path if isinstance(raw_virtual_path, str) and raw_virtual_path else None
+
+        filename = payload.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            filename = Path(virtual_path).name if virtual_path else f"builder_output_{index}"
+
+        mime_type = payload.get("mime_type")
+        if not isinstance(mime_type, str) or not mime_type:
+            mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+        is_image = payload.get("is_image")
+        if not isinstance(is_image, bool):
+            is_image = mime_type.startswith("image/")
+
+        try:
+            if virtual_path and virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+                actual_path = paths.resolve_virtual_path(thread_id, virtual_path)
+                actual_path.resolve().relative_to(outputs_dir)
+            else:
+                safe_filename = ChannelManager._make_safe_upload_filename(filename, index)
+                actual_path = ChannelManager._reserve_upload_path(outputs_dir, safe_filename)
+                virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{actual_path.name}"
+        except ValueError:
+            safe_filename = ChannelManager._make_safe_upload_filename(filename, index)
+            actual_path = ChannelManager._reserve_upload_path(outputs_dir, safe_filename)
+            virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{actual_path.name}"
+
+        actual_path.parent.mkdir(parents=True, exist_ok=True)
+        actual_path.write_bytes(content)
+
+        attachments.append(
+            ResolvedAttachment(
+                virtual_path=virtual_path,
+                actual_path=actual_path,
+                filename=filename,
+                mime_type=mime_type,
+                size=len(content),
+                is_image=is_image,
+            )
+        )
+    return attachments
+
+
 def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    builder_delivery: dict[str, Any] | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
-    if not artifacts:
+    if builder_delivery:
+        attachments.extend(_materialize_builder_delivery(thread_id, builder_delivery))
+    if not artifacts and not attachments:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
+    unresolved_artifacts = [path for path in artifacts if path not in resolved_virtuals]
+    if unresolved_artifacts:
+        attachments.extend(_resolve_attachments(thread_id, unresolved_artifacts))
+        resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
     if unresolved:
@@ -1145,6 +1205,11 @@ class ChannelManager:
 
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
+            builder_delivery = _extract_builder_delivery(result)
+            if builder_delivery is not None:
+                for artifact in _extract_builder_delivery_artifacts(builder_delivery):
+                    if artifact not in artifacts:
+                        artifacts.append(artifact)
             builder_task_id, _builder_status = _extract_builder_handoff_task(result)
 
             logger.info(
@@ -1154,7 +1219,12 @@ class ChannelManager:
                 len(artifacts),
             )
 
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            response_text, attachments = _prepare_artifact_delivery(
+                thread_id,
+                response_text,
+                artifacts,
+                builder_delivery=builder_delivery,
+            )
 
             if not response_text:
                 if attachments:
@@ -1249,7 +1319,17 @@ class ChannelManager:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            builder_delivery = _extract_builder_delivery(result)
+            if builder_delivery is not None:
+                for artifact in _extract_builder_delivery_artifacts(builder_delivery):
+                    if artifact not in artifacts:
+                        artifacts.append(artifact)
+            response_text, attachments = _prepare_artifact_delivery(
+                thread_id,
+                response_text,
+                artifacts,
+                builder_delivery=builder_delivery,
+            )
 
             if not response_text:
                 if attachments:

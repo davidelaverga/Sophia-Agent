@@ -62,6 +62,58 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_handle_chat_materializes_builder_delivery_payload(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            run_result = {
+                "messages": [
+                    {"type": "human", "content": "build this"},
+                    {"type": "ai", "content": "Your document is ready."},
+                ],
+                "builder_delivery": {
+                    "attachments": [
+                        {
+                            "virtual_path": "/mnt/user-data/outputs/report.txt",
+                            "filename": "report.txt",
+                            "mime_type": "text/plain",
+                            "is_image": False,
+                            "content_base64": base64.b64encode(b"hello from builder").decode("ascii"),
+                        }
+                    ]
+                },
+            }
+            mock_client = _make_mock_langgraph_client(run_result=run_result)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="build this"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert len(outbound_received[0].attachments) == 1
+            attachment = outbound_received[0].attachments[0]
+            assert attachment.virtual_path == "/mnt/user-data/outputs/report.txt"
+            assert attachment.actual_path.read_bytes() == b"hello from builder"
+            assert "Created File: 📎 report.txt" in outbound_received[0].text
+
+        _run(go())
+
 
     def test_inbound_queue_is_fifo(self):
         bus = MessageBus()

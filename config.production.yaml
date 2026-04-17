@@ -19,6 +19,20 @@ sandbox:
 # DEER_FLOW_HOME. Channel-originated Telegram attachments therefore need inline
 # transport instead of gateway-local /mnt/user-data/uploads references.
 
+tool_groups:
+  - name: web
+
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.tavily.tools:web_search_tool
+    max_results: 5
+
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+
 skills:
   path: ../skills
   container_path: /mnt/skills

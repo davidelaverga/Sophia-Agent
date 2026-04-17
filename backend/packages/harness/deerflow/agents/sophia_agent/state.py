@@ -42,6 +42,7 @@ class SophiaState(AgentState):
     # Builder
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
+    builder_delivery: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
 
     # Prompt assembly — accumulated manually by before_agent middlewares for the current turn

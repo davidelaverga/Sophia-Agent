@@ -1,12 +1,11 @@
 """switch_to_builder tool.
 
 Delegates a task to the sophia_builder agent after the companion has
-gathered all clarifying information.  Uses SubagentExecutor with a
+gathered all clarifying information. Uses SubagentExecutor with a
 pre-built builder agent and passes delegation_context through configurable
 so BuilderTaskMiddleware can inject tone/ritual guidance.
 """
 
-import json
 import logging
 import time
 import uuid
@@ -14,12 +13,19 @@ from dataclasses import replace
 from typing import Annotated, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
 
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
 from deerflow.subagents import SubagentExecutor, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.subagents.executor import (
+    SubagentStatus,
+    cleanup_background_task,
+    get_background_task_result,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +47,7 @@ def switch_to_builder(
     task_type: str,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
-) -> str:
+) -> Command | str:
     """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
     something requiring file creation or multi-step execution.
     Do NOT call for emotional conversation, reflection, or memory tasks.
@@ -185,7 +191,29 @@ def switch_to_builder(
 
             # Extract builder_result from final state
             builder_result = _extract_builder_result(result)
-            return _format_success(builder_result)
+            builder_delivery = build_builder_delivery_payload(
+                thread_id=thread_id,
+                builder_result=builder_result,
+            )
+            title = builder_result.get("artifact_title") or "the deliverable"
+            tool_message = (
+                f"Builder completed successfully. {title} is ready, and this reply can attach it for delivery."
+                if builder_delivery is not None
+                else f"Builder completed successfully. {title} is ready. Present it naturally to the user."
+            )
+            return Command(
+                update={
+                    "builder_result": builder_result,
+                    "builder_task": {
+                        "task": task,
+                        "task_type": task_type,
+                        "task_id": task_id,
+                        "status": "completed",
+                    },
+                    "builder_delivery": builder_delivery,
+                    "messages": [ToolMessage(tool_message, tool_call_id=tool_call_id)],
+                }
+            )
 
         elif result.status == SubagentStatus.FAILED:
             logger.error("[Builder] Task %s failed: %s", task_id, result.error)
@@ -238,21 +266,6 @@ def _extract_builder_result(result) -> dict:
         "user_next_action": None,
         "confidence": 0.3,
     }
-
-
-def _format_success(builder_result: dict) -> str:
-    """Format the builder result for the companion's synthesis turn."""
-    summary = builder_result.get("companion_summary", "Build task completed.")
-    artifact_title = builder_result.get("artifact_title", "")
-    # Return structured JSON so companion can parse if needed,
-    # with a human-readable prefix
-    return (
-        f"Builder completed successfully.\n"
-        f"Title: {artifact_title}\n"
-        f"Summary: {summary}\n"
-        f"Full result: {json.dumps(builder_result)}"
-    )
-
 
 def _format_error(error: str) -> str:
     """Format a builder error for the companion."""

@@ -12,6 +12,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_delivery import BuilderDeliveryMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -25,11 +26,14 @@ from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+from deerflow.agents.sophia_agent.middlewares.web_research import WebResearchGuidanceMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+from deerflow.sophia.tools.share_builder_artifact import share_builder_artifact
 from deerflow.sophia.tools.switch_to_builder import switch_to_builder
 
 logger = logging.getLogger(__name__)
@@ -63,6 +67,7 @@ def make_sophia_agent(config: RunnableConfig):
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=4096,
     )
+    web_tools = load_sophia_web_tools()
 
     # Middleware chain — order is load-bearing.
     middlewares = [
@@ -80,27 +85,31 @@ def make_sophia_agent(config: RunnableConfig):
         PlatformContextMiddleware(),
         # 5. Derive prior completed turns before first-turn-only middleware runs.
         TurnCountMiddleware(),
-        # 6-7. User context
+        # 6. Clear transient builder delivery payloads before each new turn.
+        BuilderDeliveryMiddleware(),
+        # 7-8. User context
         UserIdentityMiddleware(user_id),
         SessionStateMiddleware(user_id),
-        # 8-10. Calibration (order matters: tone -> context -> ritual -> skill)
+        # 9-11. Calibration (order matters: tone -> context -> ritual -> skill)
         ToneGuidanceMiddleware(SKILLS_PATH / "tone_guidance.md"),
         ContextAdaptationMiddleware(SKILLS_PATH / "context", context_mode),
         RitualMiddleware(SKILLS_PATH / "rituals", ritual),
-        # 11. Skill routing (reads tone band + ritual from state)
+        # 12. Skill routing (reads tone band + ritual from state)
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
-        # 12. Memory (after ritual+skill set — retrieval biased by both)
+        # 13. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
-        # 13. Artifact system
+        # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
         # Post-chain: prompt assembly, title
         PromptAssemblyMiddleware(),
         SophiaTitleMiddleware(),
         # Note: summarization middleware will be wired during DeerFlow integration (Unit 14)
     ]
+    if web_tools:
+        middlewares.insert(-2, WebResearchGuidanceMiddleware())
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
-    tools = [emit_artifact, switch_to_builder, retrieve_memories]
+    tools = [emit_artifact, switch_to_builder, share_builder_artifact, retrieve_memories, *web_tools]
 
     agent = create_agent(
         model=model,
