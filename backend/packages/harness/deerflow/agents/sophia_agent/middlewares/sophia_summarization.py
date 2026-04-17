@@ -20,8 +20,26 @@ from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AIMessage, AnyMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+# Legacy summary prefix used by LangChain's default SummarizationMiddleware.
+# Older checkpointer state may contain HumanMessages with this prefix that
+# we need to clean up to prevent the model from echoing them.
+_LEGACY_SUMMARY_PREFIXES = (
+    "Here is a summary of the conversation to date:",
+    "EXTRACTED CONTEXT:",
+    "Earlier in this conversation:",
+)
+
+
+def _is_legacy_summary_message(msg: AnyMessage) -> bool:
+    if not isinstance(msg, HumanMessage):
+        return False
+    if not isinstance(msg.content, str):
+        return False
+    content = msg.content.lstrip()
+    return any(content.startswith(p) for p in _LEGACY_SUMMARY_PREFIXES)
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 
@@ -58,6 +76,20 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         messages = state["messages"]
         self._ensure_message_ids(messages)
 
+        # --- Legacy cleanup ---
+        # If previous runs left summary HumanMessages in the checkpointer
+        # (created by the default LangChain SummarizationMiddleware), remove
+        # them now so the model doesn't echo them.
+        legacy_removals = [m for m in messages if _is_legacy_summary_message(m)]
+        if legacy_removals:
+            logger.warning(
+                "[SophiaSummarization] cleaning up %d legacy summary HumanMessage(s) from state",
+                len(legacy_removals),
+            )
+            return {
+                "messages": [RemoveMessage(id=m.id) for m in legacy_removals if m.id is not None],
+            }
+
         total_tokens = self.token_counter(messages)
         total_messages = len(messages)
 
@@ -89,6 +121,10 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         )
 
         # Extract emotional arc BEFORE compression (per spec §16)
+        # We keep ONLY the emotional arc — never the full narrative summary —
+        # because Haiku echoes narrative text from the system prompt regardless
+        # of XML tags or guard instructions.  The arc is structured key=value
+        # data that the model treats as state, not speakable content.
         emotional_arc = _extract_emotional_arc(messages_to_summarize)
         if emotional_arc:
             logger.info(
@@ -98,31 +134,22 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
         else:
             logger.info("[SophiaSummarization] no emit_artifact tool results found for arc")
 
-        # Generate the text summary
-        summary_start = time.perf_counter()
-        summary_text = self._create_summary(messages_to_summarize)
-        summary_ms = (time.perf_counter() - summary_start) * 1000
-
-        logger.info(
-            "[SophiaSummarization] summary generated | chars=%d | llm_ms=%.0f | preview=%.100s",
-            len(summary_text),
-            summary_ms,
-            summary_text.replace("\n", " "),
-        )
-
-        # Build the system_prompt_block with summary + emotional arc
-        summary_block = _build_summary_block(summary_text, emotional_arc)
-
+        # Build system_prompt_block from emotional arc ONLY (no narrative text).
+        # Context continuity comes from Mem0 memories + preserved recent messages.
         blocks = list(state.get("system_prompt_blocks", []))
-        blocks.append(summary_block)
+        if emotional_arc:
+            blocks.append(
+                "<prior_context_state>\n"
+                + emotional_arc
+                + "\n</prior_context_state>"
+            )
 
         total_ms = (time.perf_counter() - _t0) * 1000
         log_middleware(
             "SophiaSummarization",
-            f"compressed {len(messages_to_summarize)} msgs → {len(summary_text)} chars summary, "
+            f"compressed {len(messages_to_summarize)} msgs (dropped narrative), "
             f"kept {len(preserved_messages)} msgs, "
-            f"arc={'yes' if emotional_arc else 'no'}, "
-            f"block_chars={len(summary_block)} "
+            f"arc={'yes' if emotional_arc else 'no'} "
             f"({total_ms:.0f}ms)",
             _t0,
         )
