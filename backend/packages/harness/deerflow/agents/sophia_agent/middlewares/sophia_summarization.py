@@ -21,6 +21,7 @@ from typing import Any, NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_core.messages import AIMessage, AnyMessage, RemoveMessage, ToolMessage
+from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 
@@ -138,8 +139,6 @@ class SophiaSummarizationMiddleware(SummarizationMiddleware):
 # ---------------------------------------------------------------------------
 # Artifact arc extraction (per spec §04_backend_integration §16)
 # ---------------------------------------------------------------------------
-
-REMOVE_ALL_MESSAGES = "00000000-0000-0000-0000-000000000000"
 
 
 def _extract_emotional_arc(messages: list[AnyMessage]) -> str:
