@@ -29,3 +29,11 @@ export interface BuilderArtifactFileV1 {
   label: string;
   isPrimary: boolean;
 }
+
+export interface BuilderArtifactLibraryItemV1 {
+  path: string;
+  name: string;
+  sizeBytes?: number;
+  mimeType?: string;
+  modifiedAt?: string;
+}
