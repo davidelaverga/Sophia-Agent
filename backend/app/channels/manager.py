@@ -13,6 +13,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import httpx
+
 from app.channels.base import InboundFileReader
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.session_resolver import resolve_channel_session
@@ -85,6 +87,43 @@ _TELEGRAM_INLINE_PDF_MAX_BYTES = 10 * 1024 * 1024
 _TELEGRAM_INLINE_TEXT_MAX_CHARS = 60_000
 
 _TERMINAL_BUILDER_STATUSES = {"completed", "failed", "timed_out"}
+
+_THREAD_MISSING_HINTS = ("thread", "assistant")
+
+
+def _is_thread_missing_error(exc: httpx.HTTPStatusError) -> bool:
+    """Return True when a LangGraph SDK error reports a missing thread/assistant.
+
+    The LangGraph server returns a 404 with a JSON body like
+    ``{"detail": "Thread or assistant not found."}`` after its thread store is
+    wiped (e.g. after a redeploy that uses the in-memory runtime). We guard the
+    self-heal behind the exact shape so we never retry legitimate 404s.
+    """
+    response = getattr(exc, "response", None)
+    if response is None or response.status_code != 404:
+        return False
+
+    detail: str | None = None
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, Mapping):
+        raw_detail = payload.get("detail")
+        if isinstance(raw_detail, str):
+            detail = raw_detail
+
+    if detail is None:
+        try:
+            detail = response.text
+        except Exception:
+            detail = None
+
+    if not isinstance(detail, str) or not detail:
+        return False
+
+    detail_lower = detail.lower()
+    return "not found" in detail_lower and any(hint in detail_lower for hint in _THREAD_MISSING_HINTS)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -963,6 +1002,30 @@ class ChannelManager:
         logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
+    async def _heal_stale_thread(
+        self,
+        client,
+        msg: InboundMessage,
+        stale_thread_id: str,
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+        """Drop a stale LangGraph mapping and provision a fresh thread.
+
+        Returns the new ``(thread_id, assistant_id, run_config, run_context)``
+        tuple so the caller can rebuild the run kwargs before retrying.
+        """
+        logger.warning(
+            "[Manager] LangGraph reported thread missing; clearing stale mapping and retrying once "
+            "(event=langgraph_thread_self_heal channel=%s chat_id=%s topic_id=%s stale_thread_id=%s)",
+            msg.channel_name,
+            msg.chat_id,
+            msg.topic_id,
+            stale_thread_id,
+        )
+        self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        new_thread_id = await self._create_thread(client, msg)
+        new_assistant_id, new_run_config, new_run_context = self._resolve_run_params(msg, new_thread_id)
+        return new_thread_id, new_assistant_id, new_run_config, new_run_context
+
     @staticmethod
     def _make_safe_upload_filename(filename: str, fallback_index: int) -> str:
         safe = Path(filename).name.strip()
@@ -1197,11 +1260,32 @@ class ChannelManager:
             }
             if run_context:
                 run_kwargs["context"] = run_context
-            result = await client.runs.wait(
-                thread_id,
-                assistant_id,
-                **run_kwargs,
-            )
+            try:
+                result = await client.runs.wait(
+                    thread_id,
+                    assistant_id,
+                    **run_kwargs,
+                )
+            except httpx.HTTPStatusError as exc:
+                if not _is_thread_missing_error(exc):
+                    raise
+                (
+                    thread_id,
+                    assistant_id,
+                    run_config,
+                    run_context,
+                ) = await self._heal_stale_thread(client, msg, thread_id)
+                run_kwargs = {
+                    "input": {"messages": [human_message_payload]},
+                    "config": run_config,
+                }
+                if run_context:
+                    run_kwargs["context"] = run_context
+                result = await client.runs.wait(
+                    thread_id,
+                    assistant_id,
+                    **run_kwargs,
+                )
 
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
@@ -1266,20 +1350,23 @@ class ChannelManager:
         last_published_text = ""
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        chunks_received = 0
 
-        try:
-            stream_kwargs: dict[str, Any] = {
+        def _build_stream_kwargs() -> dict[str, Any]:
+            payload: dict[str, Any] = {
                 "input": {"messages": [human_message_payload]},
                 "config": run_config,
                 "stream_mode": ["messages-tuple", "values"],
             }
             if run_context:
-                stream_kwargs["context"] = run_context
-            async for chunk in client.runs.stream(
-                thread_id,
-                assistant_id,
-                **stream_kwargs,
-            ):
+                payload["context"] = run_context
+            return payload
+
+        async def _iterate_stream(stream_iter) -> None:
+            nonlocal last_values, current_message_id, latest_text
+            nonlocal last_published_text, last_publish_at, chunks_received
+            async for chunk in stream_iter:
+                chunks_received += 1
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
@@ -1312,6 +1399,22 @@ class ChannelManager:
                 )
                 last_published_text = latest_text
                 last_publish_at = now
+
+        try:
+            stream_kwargs = _build_stream_kwargs()
+            try:
+                await _iterate_stream(client.runs.stream(thread_id, assistant_id, **stream_kwargs))
+            except httpx.HTTPStatusError as exc:
+                if chunks_received or not _is_thread_missing_error(exc):
+                    raise
+                (
+                    thread_id,
+                    assistant_id,
+                    run_config,
+                    run_context,
+                ) = await self._heal_stale_thread(client, msg, thread_id)
+                stream_kwargs = _build_stream_kwargs()
+                await _iterate_stream(client.runs.stream(thread_id, assistant_id, **stream_kwargs))
         except Exception as exc:
             stream_error = exc
             logger.exception("[Manager] streaming error: thread_id=%s", thread_id)

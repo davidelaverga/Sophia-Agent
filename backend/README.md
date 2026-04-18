@@ -147,6 +147,7 @@ Telegram now supports Sophia account linking and media-first workflows:
 - Enforces one active run per conversation key (`channel:chat:topic`) and sends a busy message for overlapping requests.
 - Polls queued builder handoff tasks and publishes asynchronous completion/failure follow-up messages (including artifact attachments when available).
 - Relies on retained terminal subagent results plus `GET /api/sophia/{user_id}/tasks/{task_id}` so async pollers can still resolve builder outcomes after executor cleanup.
+- Self-heals stale LangGraph thread mappings: on a `404 {"detail": "Thread or assistant not found."}` from `runs.wait`/`runs.stream`, the manager clears the stored `channel:chat` mapping, creates a fresh LangGraph thread, and retries the run once. This keeps Telegram/Slack chats alive across LangGraph redeploys that use the in-memory runtime.
 - Registers optional per-channel inbound file readers (used by Telegram) through `ChannelService`.
 - Releases temporary sandbox acquisitions made for inbound file syncing after each ingestion run.
 - Materializes Sophia's transient top-level `builder_delivery` payload into the gateway service's own outputs directory before outbound upload, so synchronous builder completions and later resend requests can deliver files back to Telegram even when LangGraph and Gateway are on separate Render disks.

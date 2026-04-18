@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from app.channels.base import Channel
@@ -1669,6 +1670,164 @@ class TestHandleChatWithArtifacts:
             assert outbound_received[1].artifacts == ["/mnt/user-data/outputs/chart.png"]
 
         _run(go())
+
+    def test_handle_chat_heals_stale_langgraph_thread(self):
+        """A 404 'Thread or assistant not found.' on runs.wait triggers a one-shot self-heal."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            # Pre-seed a stale mapping that still survives from before a LangGraph redeploy.
+            store.set_thread_id("telegram", "chat-stale", "stale-thread-xyz", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/stale-thread-xyz/runs/wait",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Thread or assistant not found."},
+            )
+            thread_missing_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+            successful_result = {
+                "messages": [
+                    {"type": "human", "content": "hello"},
+                    {"type": "ai", "content": "Back online."},
+                ]
+            }
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread-123")
+            mock_client.runs.wait = AsyncMock(side_effect=[thread_missing_error, successful_result])
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat-stale",
+                    user_id="user-1",
+                    text="hello",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # The stale mapping is replaced with the new thread.
+            assert store.get_thread_id("telegram", "chat-stale") == "fresh-thread-123"
+
+            # threads.create was called exactly once (self-heal path).
+            mock_client.threads.create.assert_called_once()
+
+            # runs.wait was retried exactly once after healing.
+            assert mock_client.runs.wait.call_count == 2
+            first_call_thread_id = mock_client.runs.wait.call_args_list[0][0][0]
+            second_call_thread_id = mock_client.runs.wait.call_args_list[1][0][0]
+            assert first_call_thread_id == "stale-thread-xyz"
+            assert second_call_thread_id == "fresh-thread-123"
+
+            # The user received the real response, not the generic error reply.
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == "Back online."
+            assert outbound_received[0].thread_id == "fresh-thread-123"
+
+        _run(go())
+
+    def test_handle_chat_does_not_heal_on_unrelated_404(self):
+        """A 404 with an unrelated body must not trigger a thread rebuild."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            store.set_thread_id("telegram", "chat-stable", "persistent-thread", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/persistent-thread/runs/wait",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Run not found."},
+            )
+            unrelated_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.wait = AsyncMock(side_effect=unrelated_error)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat-stable",
+                    user_id="user-1",
+                    text="hello",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # runs.wait was NOT retried.
+            assert mock_client.runs.wait.call_count == 1
+
+            # The stale mapping is preserved since we did not heal.
+            assert store.get_thread_id("telegram", "chat-stable") == "persistent-thread"
+
+            # threads.create was NOT called.
+            mock_client.threads.create.assert_not_called()
+
+            # The outer error handler reported a generic internal-error message.
+            assert len(outbound_received) == 1
+            assert "internal error" in outbound_received[0].text.lower()
+
+        _run(go())
+
+    def test_is_thread_missing_error_matches_live_langgraph_payload(self):
+        from app.channels.manager import _is_thread_missing_error
+
+        request = httpx.Request("POST", "http://langgraph.test/threads/x/runs/wait")
+        thread_missing = httpx.HTTPStatusError(
+            "404 Not Found",
+            request=request,
+            response=httpx.Response(404, request=request, json={"detail": "Thread or assistant not found."}),
+        )
+        other_404 = httpx.HTTPStatusError(
+            "404 Not Found",
+            request=request,
+            response=httpx.Response(404, request=request, json={"detail": "Run not found."}),
+        )
+        server_error = httpx.HTTPStatusError(
+            "500 Internal Server Error",
+            request=request,
+            response=httpx.Response(500, request=request, json={"detail": "Thread or assistant not found."}),
+        )
+
+        assert _is_thread_missing_error(thread_missing) is True
+        assert _is_thread_missing_error(other_404) is False
+        assert _is_thread_missing_error(server_error) is False
 
 
 class TestFeishuChannel:
