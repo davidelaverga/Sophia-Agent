@@ -191,6 +191,28 @@ export function buildThreadArtifactHref(
   return options?.download ? `${baseHref}?download=true` : baseHref;
 }
 
+export function formatBuilderArtifactFileSize(bytes: number | null | undefined): string {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
+    return '';
+  }
+
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let value = bytes / 1024;
+  let unitIndex = 0;
+
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = value >= 10 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
 export function formatBuilderArtifactTypeLabel(type: string | undefined): string {
   if (!type) {
     return 'Deliverable';

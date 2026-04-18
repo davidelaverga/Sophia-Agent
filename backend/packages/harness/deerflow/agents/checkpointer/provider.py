@@ -111,6 +111,24 @@ _checkpointer: Checkpointer | None = None
 _checkpointer_ctx = None  # open context manager keeping the connection alive
 
 
+def _get_active_checkpointer_config() -> CheckpointerConfig | None:
+    """Return the effective checkpointer config without requiring config.yaml.
+
+    This keeps sync and async checkpointer helpers usable in tests that set the
+    global checkpointer config directly and run without a repository config file.
+    """
+    from deerflow.config.app_config import _app_config
+    from deerflow.config.checkpointer_config import get_checkpointer_config, is_checkpointer_config_initialized
+
+    if _app_config is None and not is_checkpointer_config_initialized():
+        try:
+            get_app_config()
+        except FileNotFoundError:
+            logger.debug("Checkpointer: config.yaml not found; using in-memory/default checkpointer state")
+
+    return get_checkpointer_config()
+
+
 def get_checkpointer() -> Checkpointer:
     """Return the global sync checkpointer singleton, creating it on first call.
 
@@ -125,23 +143,7 @@ def get_checkpointer() -> Checkpointer:
     if _checkpointer is not None:
         return _checkpointer
 
-    # Ensure app config is loaded before checking checkpointer config
-    # This prevents returning InMemorySaver when config.yaml actually has a checkpointer section
-    # but hasn't been loaded yet
-    from deerflow.config.app_config import _app_config
-    from deerflow.config.checkpointer_config import get_checkpointer_config, is_checkpointer_config_initialized
-
-    if _app_config is None and not is_checkpointer_config_initialized():
-        # Only load config if it hasn't been initialized yet
-        # In tests, config may be set directly via set_checkpointer_config()
-        try:
-            get_app_config()
-        except FileNotFoundError:
-            # In test environments without config.yaml, this is expected
-            # Tests will set config directly via set_checkpointer_config()
-            pass
-
-    config = get_checkpointer_config()
+    config = _get_active_checkpointer_config()
     if config is None:
         from langgraph.checkpoint.memory import InMemorySaver
 
@@ -190,12 +192,12 @@ def checkpointer_context() -> Iterator[Checkpointer]:
     Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
-    config = get_app_config()
-    if config.checkpointer is None:
+    config = _get_active_checkpointer_config()
+    if config is None:
         from langgraph.checkpoint.memory import InMemorySaver
 
         yield InMemorySaver()
         return
 
-    with _sync_checkpointer_cm(config.checkpointer) as saver:
+    with _sync_checkpointer_cm(config) as saver:
         yield saver

@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from deerflow.agents.checkpointer import get_checkpointer, reset_checkpointer
+from deerflow.config.app_config import reset_app_config
 from deerflow.config.checkpointer_config import (
     CheckpointerConfig,
     get_checkpointer_config,
@@ -17,9 +18,11 @@ from deerflow.config.checkpointer_config import (
 @pytest.fixture(autouse=True)
 def reset_state():
     """Reset singleton state before each test."""
+    reset_app_config()
     set_checkpointer_config(None)
     reset_checkpointer()
     yield
+    reset_app_config()
     set_checkpointer_config(None)
     reset_checkpointer()
 
@@ -226,6 +229,26 @@ class TestGetCheckpointer:
         assert restored_tuple.config["configurable"]["thread_id"] == "resume-thread"
         assert restored_tuple.checkpoint["id"] == checkpoint["id"]
         assert restored_tuple.metadata == {"source": "input", "step": 1}
+
+    def test_checkpointer_context_uses_explicit_config_without_config_file(self, tmp_path):
+        """Explicit checkpointer config should work even when config.yaml is unavailable."""
+        pytest.importorskip("langgraph.checkpoint.sqlite")
+
+        from deerflow.agents.checkpointer.provider import checkpointer_context
+
+        db_path = tmp_path / "explicit-config.db"
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": str(db_path)})
+
+        with patch("deerflow.agents.checkpointer.provider.get_app_config", side_effect=FileNotFoundError):
+            with checkpointer_context() as checkpointer:
+                saved_config = checkpointer.put(
+                    {"configurable": {"thread_id": "explicit-thread", "checkpoint_ns": ""}},
+                    {"v": 1, "id": "checkpoint-1", "ts": "2026-04-17T00:00:00Z", "channel_values": {}, "channel_versions": {}, "versions_seen": {}, "pending_sends": []},
+                    {"source": "input", "step": 1},
+                    {},
+                )
+
+        assert saved_config["configurable"]["thread_id"] == "explicit-thread"
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,7 @@ import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
 
+import { useSessionBuilderArtifactLibrary } from './useSessionBuilderArtifactLibrary';
 import { useSessionCompanionIntegration } from './useSessionCompanionIntegration';
 import { useSessionConversationArchive } from './useSessionConversationArchive';
 import { useSessionExitOrchestration } from './useSessionExitOrchestration';
@@ -436,6 +437,21 @@ function SessionPageContent() {
     showToast,
   });
 
+  const builderArtifactRefreshToken = useMemo(() => [
+    builderArtifact?.artifactTitle ?? '',
+    builderArtifact?.artifactPath ?? '',
+    (builderArtifact?.supportingFiles ?? []).join('|'),
+  ].join('::'), [builderArtifact]);
+
+  const {
+    items: builderArtifactLibrary,
+  } = useSessionBuilderArtifactLibrary({
+    threadId: resolvedThreadId,
+    refreshToken: builderArtifactRefreshToken,
+  });
+
+  const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
+
   const {
     showArtifactsUi,
     isSophiaResponding,
@@ -449,6 +465,7 @@ function SessionPageContent() {
     messages,
     artifacts,
     builderArtifact,
+    hasBuilderArtifactLibrary,
     isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
@@ -466,18 +483,18 @@ function SessionPageContent() {
   const previousArtifactSignatureRef = useRef('');
 
   const artifactContentCount = useMemo(() => {
-    const hasBuilderArtifact = Boolean(builderArtifact);
+    const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary;
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
     return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts, builderArtifact]);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length + (builderArtifact ? 1 : 0);
-  }, [artifactStatus, builderArtifact]);
+    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0);
+  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -507,9 +524,10 @@ function SessionPageContent() {
       .map((candidate) => candidate?.memory?.trim() ?? '')
       .filter((memory) => memory.length > 0)
       .join('|');
+    const library = builderArtifactLibrary.map((item) => item.path).join('|');
 
-    return `${builder}::${takeaway}::${reflection}::${memories}`;
-  }, [artifacts, builderArtifact]);
+    return `${builder}::${library}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact, builderArtifactLibrary]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
   const showBuilderTaskNotice = Boolean(builderTask);
@@ -958,6 +976,7 @@ function SessionPageContent() {
             <PresenceArtifactPanel
               artifacts={artifacts}
               builderArtifact={builderArtifact}
+              builderArtifactLibrary={builderArtifactLibrary}
               threadId={resolvedThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
@@ -996,7 +1015,7 @@ function SessionPageContent() {
             ) : (
               <div className="flex justify-center mb-2">
                 <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
+                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
                   onClick={handleOpenArtifactsPanel}
                   isNew={hasNewArtifacts}
                 />
@@ -1021,7 +1040,7 @@ function SessionPageContent() {
                 />
               ) : (
                 <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
+                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
                   onClick={handleOpenArtifactsPanel}
                   isNew={hasNewArtifacts}
                 />
@@ -1094,6 +1113,7 @@ function SessionPageContent() {
           <PresenceArtifactPanel
             artifacts={artifacts}
             builderArtifact={builderArtifact}
+            builderArtifactLibrary={builderArtifactLibrary}
             threadId={resolvedThreadId}
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}
