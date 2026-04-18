@@ -100,6 +100,7 @@ Notable regression tests:
 - `tests/test_sessions_gateway.py` (session start plus compatibility `/api/v1/sessions/{session_id}/touch` activity pings)
 - `tests/test_gateway_sophia.py` (Sophia gateway routes, including builder task polling via `/api/sophia/{user_id}/tasks/{task_id}`)
 - `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, native web tool loading, `present_files` fallback extraction, and default builder model resolution)
+- `tests/test_dangling_tool_call_middleware.py` (repairs Anthropic `tool_use`/`tool_result` pairing on the Sophia companion and builder chains)
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`

@@ -12,6 +12,7 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
@@ -96,6 +97,10 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         BuilderArtifactMiddleware(),
         # 6. Prompt assembly
         PromptAssemblyMiddleware(),
+        # 7. Tool-message integrity — patch dangling tool_use blocks so a
+        # failed/interrupted tool call (bash, write_file, web_search, etc.)
+        # never leaves the Anthropic contract in an invalid state.
+        DanglingToolCallMiddleware(),
     ]
     if web_tools:
         middlewares.insert(-1, WebResearchGuidanceMiddleware())

@@ -156,6 +156,7 @@ Telegram now supports Sophia account linking and media-first workflows:
 Sophia's custom companion/builder agents also inherit DeerFlow-native `web_search` and `web_fetch` tools from config, so Render needs those tool definitions plus `TAVILY_API_KEY` / `JINA_API_KEY` on the services that load `config.production.yaml`.
 The companion-side resend path for prior builder artifacts now uses an explicit empty input schema so Anthropic/OpenAI tool binding can succeed even though the tool only depends on injected runtime state.
 Builder runs now default to `claude-sonnet-4-6` unless `SOPHIA_BUILDER_MODEL` is set, and the handoff path can synthesize a builder artifact from `present_files` output when files exist but `emit_builder_artifact` was never called.
+Both the Sophia companion and builder chains run `DanglingToolCallMiddleware`, which injects a synthetic `ToolMessage` for any `tool_use` id that lacks a matching `tool_result`. This keeps `web_search`, `switch_to_builder`, and other tool-heavy turns alive after transient tool failures, interrupted subagent runs, or mid-turn cancellations, where Anthropic would otherwise reject the next call with a `400 tool_use ids were found without tool_result blocks` error.
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
 
 ---

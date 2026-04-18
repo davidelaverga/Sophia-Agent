@@ -10,6 +10,7 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_delivery import BuilderDeliveryMiddleware
@@ -102,6 +103,11 @@ def make_sophia_agent(config: RunnableConfig):
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
         # Post-chain: prompt assembly, title
         PromptAssemblyMiddleware(),
+        # 15. Tool-message integrity — patch dangling tool_use blocks before the
+        # model call so Anthropic does not 400 when a prior tool execution was
+        # interrupted, failed, or produced no ToolMessage (e.g. web_search
+        # network errors or builder handoff interruptions).
+        DanglingToolCallMiddleware(),
         SophiaTitleMiddleware(),
         # Note: summarization middleware will be wired during DeerFlow integration (Unit 14)
     ]
