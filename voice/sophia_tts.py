@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Iterator
 
 from vision_agents.core.tts.events import TTSAudioEvent, TTSErrorEvent
@@ -116,6 +117,13 @@ class SophiaTTS(CartesiaTTS):
         self._echo_guard: SophiaTurnDetection | None = None
         self._warmup_task: asyncio.Task[None] | None = None
         self._warmup_completed = False
+        # Track the most recent Cartesia response so interrupts can close the
+        # underlying HTTP stream instead of letting bytes keep flowing upstream.
+        self._active_response: Any = None
+        # Synthesis call counter — useful to correlate with TTS latency logs
+        # and detect whether the underlying Cartesia HTTP client is being
+        # reused across turns (counter >1 = reuse working).
+        self._synthesis_count: int = 0
 
         @self.events.subscribe
         async def _on_tts_audio(event: TTSAudioEvent) -> None:
@@ -346,7 +354,20 @@ class SophiaTTS(CartesiaTTS):
         if self._echo_guard is not None:
             self._echo_guard.note_agent_will_speak()
 
+        self._synthesis_count += 1
+        generate_started = time.perf_counter()
         response = await self.client.tts.generate(**kwargs)
+        generate_ms = (time.perf_counter() - generate_started) * 1000
+        logger.info(
+            "[VOICE:TTS] GENERATE_RETURNED | synthesis=%d | generate_ms=%.0f | "
+            "emotion=%s | speed=%s | user_id=%s",
+            self._synthesis_count, generate_ms, emotion, delivery.speed_label,
+            self._active_response_user_id,
+        )
+        # Remember the response so stop_audio() can abort its HTTP stream if
+        # the user barges in mid-synthesis. The parent epoch bump already
+        # halts chunk emission; closing the response stops upstream bytes too.
+        self._active_response = response
 
         result = PcmData.from_response(
             response.iter_bytes(),
@@ -373,3 +394,31 @@ class SophiaTTS(CartesiaTTS):
         self._hint_transcript = None
 
         return result
+
+    async def stop_audio(self) -> None:
+        """Abort the active Cartesia stream and start the echo cooldown.
+
+        The parent ``TTS.interrupt`` bumps ``self._epoch`` which halts further
+        chunk emission, but the underlying HTTP response can keep buffering
+        bytes upstream. Closing it here prevents ghost audio and lets the echo
+        guard start its cooldown window immediately so barge-in is clean.
+        """
+        response = self._active_response
+        self._active_response = None
+        if response is not None:
+            closer = (
+                getattr(response, "aclose", None)
+                or getattr(response, "close", None)
+            )
+            if callable(closer):
+                try:
+                    result = closer()
+                    if asyncio.iscoroutine(result):
+                        await result
+                except Exception:  # pragma: no cover - best-effort abort
+                    logger.debug("voice.tts_stop close_failed", exc_info=True)
+
+        if self._echo_guard is not None:
+            self._echo_guard.note_agent_interrupted()
+
+        logger.info("[VOICE:TTS] STOP | aborted_active_response=%s", response is not None)

@@ -21,6 +21,18 @@ REQUIRED_ARTIFACT_FIELDS = {
     "voice_speed",
 }
 
+# Defaults for voice-delivery fields. Claude occasionally omits these when
+# emitting emit_artifact — the rest of the artifact is usually correct. Rather
+# than failing the entire turn (which cuts off TTS mid-response and hides the
+# transcript from the UI), we fill safe neutrals here. `_normalize_artifact`
+# later re-derives these from the user/response family when signals warrant it,
+# so these defaults are only used when the backend truly has no signal.
+ARTIFACT_VOICE_DELIVERY_DEFAULTS: dict[str, str] = {
+    "voice_emotion_primary": "content",
+    "voice_emotion_secondary": "calm",
+    "voice_speed": "normal",
+}
+
 
 @dataclass(frozen=True)
 class BackendRequest:

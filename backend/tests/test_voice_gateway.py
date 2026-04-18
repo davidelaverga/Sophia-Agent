@@ -234,7 +234,10 @@ class TestVoiceConnect:
 
         assert first.status_code == 200
         assert second.status_code == 200
-        disconnect_voice_session.assert_awaited_once_with(
+        # Preflight disconnect is fire-and-forget (background task) so the
+        # new /voice/connect isn't blocked on the previous session teardown.
+        # We assert the call was made, not that it was awaited synchronously.
+        disconnect_voice_session.assert_called_once_with(
             first.json()["call_id"],
             "session-1",
         )

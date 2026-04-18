@@ -1,17 +1,33 @@
 import logging
 import mimetypes
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
+_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
+
+
+class ThreadArtifactListItem(BaseModel):
+    path: str
+    name: str
+    size_bytes: int
+    modified_at: str
+    mime_type: str | None = None
+
+
+class ThreadArtifactListResponse(BaseModel):
+    thread_id: str
+    artifacts: list[ThreadArtifactListItem] = Field(default_factory=list)
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -56,6 +72,43 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
             return None
     except (zipfile.BadZipFile, KeyError):
         return None
+
+
+@router.get(
+    "/threads/{thread_id}/artifacts",
+    response_model=ThreadArtifactListResponse,
+    summary="List Thread Artifacts",
+    description="List files generated under the thread's outputs directory.",
+)
+async def list_artifacts(thread_id: str) -> ThreadArtifactListResponse:
+    outputs_path = resolve_thread_virtual_path(thread_id, _OUTPUTS_VIRTUAL_PATH)
+
+    if not outputs_path.exists():
+        return ThreadArtifactListResponse(thread_id=thread_id, artifacts=[])
+
+    if not outputs_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {_OUTPUTS_VIRTUAL_PATH}")
+
+    files_with_stat = [
+        (candidate, candidate.stat())
+        for candidate in outputs_path.rglob("*")
+        if candidate.is_file()
+    ]
+    files_with_stat.sort(key=lambda item: item[1].st_mtime, reverse=True)
+
+    artifacts: list[ThreadArtifactListItem] = []
+    for file_path, stat_result in files_with_stat:
+        relative_path = file_path.relative_to(outputs_path).as_posix()
+        mime_type, _ = mimetypes.guess_type(file_path.name)
+        artifacts.append(ThreadArtifactListItem(
+            path=f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}",
+            name=file_path.name,
+            size_bytes=stat_result.st_size,
+            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+            mime_type=mime_type,
+        ))
+
+    return ThreadArtifactListResponse(thread_id=thread_id, artifacts=artifacts)
 
 
 @router.get(

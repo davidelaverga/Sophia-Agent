@@ -101,6 +101,43 @@ def test_tracker_can_finalize_from_final_text_when_tts_events_never_arrive() -> 
     assert diagnostic.first_audio_ms is None
 
 
+def test_tracker_reanchors_clock_on_cancel_and_merge() -> None:
+    """A second backend_request_start on the same active turn (cancel-and-merge)
+    must reset the clock so telemetry measures only the final merged request."""
+    tracker = TurnDiagnosticsTracker()
+
+    tracker.note_user_ended("user-1", 100.0)
+    # First backend attempt (gets cancelled).
+    first_start = tracker.note_backend_request_start("user-1", 100.05)
+    assert first_start is not None
+    assert first_start == pytest.approx(50.0)
+    tracker.note_agent_phase("user-1", "agent_started")
+    tracker.note_backend_first_event("user-1", 100.10)
+    tracker.note_first_text("user-1", 100.12)
+
+    # Simulate cancel-and-merge: user kept talking for 5s, then final request fires.
+    second_start = tracker.note_backend_request_start("user-1", 105.0)
+    assert second_start == 0.0, "Second call must re-anchor to zero"
+
+    # Downstream metrics must be cleared so they re-measure from the new anchor.
+    active = tracker._turns["user-1"]
+    assert active.backend_first_event_ms is None
+    assert active.first_text_ms is None
+    assert active.backend_complete_ms is None
+    assert active.first_audio_ms is None
+    assert active.agent_started_emitted is False
+    assert active.agent_ended_emitted is False
+    assert active.audio_cycle_open is False
+    assert active.agent_cycle_count == 0
+
+    # The merged request takes 1.2s to respond — telemetry should report exactly that.
+    first_event_ms = tracker.note_backend_first_event("user-1", 106.2)
+    assert first_event_ms == pytest.approx(1200.0)
+
+    # raw_false_end_count is preserved across merges (it's a separate signal).
+    assert active.raw_false_end_count == 1
+
+
 @pytest.mark.anyio
 async def test_llm_emits_turn_diagnostic_and_suppresses_duplicate_agent_phases() -> None:
     emitted: list[dict[str, object]] = []

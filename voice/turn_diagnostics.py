@@ -135,8 +135,29 @@ class TurnDiagnosticsTracker:
         now: float,
     ) -> float | None:
         current = self._turns.get(user_id)
-        if current is None or current.backend_request_start_ms is not None:
+        if current is None:
             return None
+
+        if current.backend_request_start_ms is not None:
+            # Cancel-and-merge: a second backend request for the same active turn
+            # means the previous attempt was cancelled because the user kept talking.
+            # Re-anchor the clock to "now" so all downstream metrics measure the
+            # latency of the final merged request, not the cumulative user-speech
+            # time.  Reset every per-request timestamp and cycle flag that the
+            # cancelled request may have populated.
+            current.speech_ended_at = now
+            current.backend_first_event_ms = None
+            current.first_text_ms = None
+            current.backend_complete_ms = None
+            current.first_audio_ms = None
+            current.agent_started_emitted = False
+            current.agent_ended_emitted = False
+            current.audio_cycle_open = False
+            current.agent_cycle_count = 0
+            current.completed_audio_cycles = 0
+            current.final_text_emitted = False
+            current.backend_request_start_ms = 0.0
+            return current.backend_request_start_ms
 
         current.backend_request_start_ms = (now - current.speech_ended_at) * 1000
         return current.backend_request_start_ms
