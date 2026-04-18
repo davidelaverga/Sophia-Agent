@@ -148,6 +148,7 @@ Telegram now supports Sophia account linking and media-first workflows:
 - Materializes Sophia's transient top-level `builder_delivery` payload into the gateway service's own outputs directory before outbound upload, so synchronous builder completions and later resend requests can deliver files back to Telegram even when LangGraph and Gateway are on separate Render disks.
 
 Sophia's custom companion/builder agents also inherit DeerFlow-native `web_search` and `web_fetch` tools from config, so Render needs those tool definitions plus `TAVILY_API_KEY` / `JINA_API_KEY` on the services that load `config.production.yaml`.
+The companion-side resend path for prior builder artifacts now uses an explicit empty input schema so Anthropic/OpenAI tool binding can succeed even though the tool only depends on injected runtime state.
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
 
 ---

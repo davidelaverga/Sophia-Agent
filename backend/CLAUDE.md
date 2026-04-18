@@ -96,6 +96,7 @@ make format     # Format code with ruff
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+- `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, and native web tool loading)
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`

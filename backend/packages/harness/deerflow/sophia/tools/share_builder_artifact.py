@@ -3,18 +3,24 @@
 Re-attaches the most recent builder deliverable for the current Sophia thread.
 """
 
-from typing import Annotated
+from typing import Annotated, Any
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
+from pydantic import BaseModel
 
-from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
 
 
-def _extract_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
+class ShareBuilderArtifactInput(BaseModel):
+    """Explicit empty schema so tool binding stays JSON-serializable."""
+
+    pass
+
+
+def _extract_thread_id(runtime: ToolRuntime[ContextT, dict[str, Any]] | None) -> str | None:
     if runtime is None:
         return None
     if runtime.context:
@@ -28,9 +34,9 @@ def _extract_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> st
     return None
 
 
-@tool
+@tool(args_schema=ShareBuilderArtifactInput)
 def share_builder_artifact(
-    runtime: ToolRuntime[ContextT, SophiaState] | None = None,
+    runtime: ToolRuntime[ContextT, dict[str, Any]] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
     """Attach the latest builder-created file to the current reply.
