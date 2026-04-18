@@ -141,15 +141,17 @@ def make_sophia_agent(config: RunnableConfig):
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # Post-chain: prompt assembly (with targeted cache_control) then title
+    # Post-chain: prompt assembly (cache-ready but currently disabled) then title
     middlewares.extend(
         [
-            # PromptAssembly emits a structured SystemMessage with cache_control
-            # placed exactly after the immutable prefix (soul + voice + techniques).
-            # This gives us real cache hits on ~2.8k tokens per turn instead of
-            # the generic AnthropicPromptCachingMiddleware which put the cache
-            # breakpoint at the tail (invalidated every turn by dynamic blocks).
-            PromptAssemblyMiddleware(enable_prompt_caching=True, cache_ttl="5m"),
+            # Prompt caching is wired up (PromptAssemblyMiddleware can emit a
+            # structured SystemMessage with cache_control on the stable prefix),
+            # but disabled today because Anthropic prompt caching is not active
+            # on this account/model (verified with direct SDK calls: both
+            # cache_read and cache_creation stay at 0 regardless of prefix size
+            # or cache_control placement). When it flips on, set
+            # enable_prompt_caching=True and watch for [PromptCache] HIT lines.
+            PromptAssemblyMiddleware(enable_prompt_caching=False, cache_ttl="5m"),
             SophiaTitleMiddleware(),
         ]
     )

@@ -181,24 +181,19 @@ def _log_cache_usage(result) -> None:
     Anthropic returns cache_read_input_tokens / cache_creation_input_tokens in
     usage_metadata.input_token_details. We surface it so the perf scripts can
     confirm cache hit rate without scraping the raw HTTP bodies.
+
+    ModelResponse.result is a list[BaseMessage]; we look at the last AI message.
     """
     try:
         ai_msg = None
-        # langchain middleware result exposes a .result or a .messages list; handle both.
-        for candidate in (getattr(result, "result", None), result):
-            if candidate is None:
-                continue
-            if hasattr(candidate, "usage_metadata"):
-                ai_msg = candidate
-                break
-            msgs = getattr(candidate, "messages", None)
-            if msgs:
-                for m in reversed(msgs):
-                    if getattr(m, "type", None) == "ai" and getattr(m, "usage_metadata", None):
-                        ai_msg = m
-                        break
-            if ai_msg:
-                break
+        result_list = getattr(result, "result", None)
+        if isinstance(result_list, list):
+            for m in reversed(result_list):
+                if getattr(m, "type", None) == "ai" and getattr(m, "usage_metadata", None):
+                    ai_msg = m
+                    break
+        if ai_msg is None and hasattr(result, "usage_metadata"):
+            ai_msg = result
         if ai_msg is None:
             return
         usage = ai_msg.usage_metadata or {}
@@ -206,13 +201,13 @@ def _log_cache_usage(result) -> None:
         cache_read = details.get("cache_read", 0) or 0
         cache_creation = details.get("cache_creation", 0) or 0
         input_tokens = usage.get("input_tokens", 0) or 0
-        if cache_read or cache_creation:
-            status = "HIT" if cache_read > 0 else "MISS"
-            # Reuse the middleware log format so the existing analyzers can pick it up.
-            log_middleware(
-                "PromptCache",
-                f"{status} read={cache_read} write={cache_creation} input={input_tokens}",
-                time.perf_counter(),
+        # Always log, even on clean MISS (cache_read=0, cache_creation=0) so we
+        # can confirm caching is broken vs just cold.
+        status = "HIT" if cache_read > 0 else ("WRITE" if cache_creation > 0 else "MISS")
+        log_middleware(
+            "PromptCache",
+            f"{status} read={cache_read} write={cache_creation} input={input_tokens}",
+            time.perf_counter(),
             )
     except Exception:  # noqa: BLE001 — telemetry must never break the turn
         pass
