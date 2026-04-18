@@ -45,6 +45,31 @@ _active_voice_sessions: dict[str, ActiveVoiceSession] = {}
 _active_voice_session_locks: dict[str, asyncio.Lock] = {}
 _active_voice_session_locks_guard = asyncio.Lock()
 
+# Background tasks for fire-and-forget preflight disconnects.
+# Held in a module-level set so asyncio doesn't GC them mid-flight.
+_background_disconnect_tasks: set[asyncio.Task] = set()
+
+
+def _schedule_background_disconnect(call_id: str, session_id: str) -> None:
+    """Fire-and-forget disconnect of a previous voice session.
+
+    Avoids blocking /voice/connect on the voice server's DELETE response.
+    Progressive latency accumulation (1-3s → 5s → 8s → 10s) observed by
+    users is caused by awaiting this disconnect while the previous session's
+    Cartesia/Deepgram/Stream resources are still tearing down.
+    """
+    try:
+        task = asyncio.create_task(_disconnect_voice_session(call_id, session_id))
+    except RuntimeError:
+        # No running event loop — nothing to do (shouldn't happen in FastAPI path).
+        logger.warning(
+            "voice.connect: cannot schedule background disconnect (no loop) call_id=%s",
+            call_id,
+        )
+        return
+    _background_disconnect_tasks.add(task)
+    task.add_done_callback(_background_disconnect_tasks.discard)
+
 
 def _get_voice_server_url() -> str:
     return os.getenv("VOICE_SERVER_URL", "http://localhost:8000").rstrip("/")
@@ -234,12 +259,15 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
         previous_session = _active_voice_sessions.get(user_id)
         if previous_session is not None:
             logger.info(
-                "voice.connect closing previous session user_id=%s call_id=%s session_id=%s",
+                "voice.connect closing previous session (background) user_id=%s call_id=%s session_id=%s",
                 user_id,
                 previous_session.call_id,
                 previous_session.session_id,
             )
-            await _disconnect_voice_session(
+            # Fire-and-forget: don't block the new connect on the previous
+            # session's teardown. The previous call_id is independent of the
+            # new one (Stream SFU routes by call_id), so there's no race.
+            _schedule_background_disconnect(
                 previous_session.call_id,
                 previous_session.session_id,
             )

@@ -1723,6 +1723,16 @@ class TestMem0CategorySelection:
 
 
 class TestMem0MemoryMiddleware:
+    @pytest.fixture(autouse=True)
+    def _reset_voice_fastcache(self):
+        """Clear the module-level voice fastcache between tests so one test's
+        stored entries don't leak into the next."""
+        from deerflow.agents.sophia_agent.middlewares import mem0_memory
+
+        mem0_memory._VOICE_FASTCACHE.clear()
+        yield
+        mem0_memory._VOICE_FASTCACHE.clear()
+
     def test_voice_uses_smaller_limit(self):
         from unittest.mock import patch
 
