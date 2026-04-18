@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.supabase_storage import get_supabase_storage
 
 logger = logging.getLogger(__name__)
 
@@ -90,22 +91,33 @@ def _resolve_artifact_path(thread_id: str, path: str) -> Path:
         return actual_path
 
     relative_output_path = _relative_output_artifact_path(path)
-    if relative_output_path is None:
-        return actual_path
+    if relative_output_path is not None:
+        fallback_virtual_path = _WORKSPACE_OUTPUTS_VIRTUAL_PATH
+        if relative_output_path:
+            fallback_virtual_path = f"{fallback_virtual_path}/{relative_output_path}"
 
-    fallback_virtual_path = _WORKSPACE_OUTPUTS_VIRTUAL_PATH
-    if relative_output_path:
-        fallback_virtual_path = f"{fallback_virtual_path}/{relative_output_path}"
+        fallback_path = resolve_thread_virtual_path(thread_id, fallback_virtual_path)
+        if fallback_path.exists():
+            logger.warning(
+                "Artifact missing under outputs, serving workspace/outputs fallback: thread_id=%s requested_path=%s fallback_path=%s",
+                thread_id,
+                path,
+                fallback_path,
+            )
+            return fallback_path
 
-    fallback_path = resolve_thread_virtual_path(thread_id, fallback_virtual_path)
-    if fallback_path.exists():
-        logger.warning(
-            "Artifact missing under outputs, serving workspace/outputs fallback: thread_id=%s requested_path=%s fallback_path=%s",
-            thread_id,
-            path,
-            fallback_path,
-        )
-        return fallback_path
+    # Cloud fallback: try to hydrate from Supabase Storage.  This covers the
+    # case where the file was generated in a previous deployment (Render's
+    # ephemeral disk lost it) but still lives in the bucket.
+    storage = get_supabase_storage()
+    if storage.enabled:
+        if storage.download_file(thread_id, path, actual_path):
+            logger.info(
+                "Artifact hydrated from Supabase: thread_id=%s path=%s",
+                thread_id,
+                path,
+            )
+            return actual_path
 
     return actual_path
 
@@ -118,31 +130,60 @@ def _resolve_artifact_path(thread_id: str, path: str) -> Path:
 )
 async def list_artifacts(thread_id: str) -> ThreadArtifactListResponse:
     outputs_path = resolve_thread_virtual_path(thread_id, _OUTPUTS_VIRTUAL_PATH)
-
-    if not outputs_path.exists():
-        return ThreadArtifactListResponse(thread_id=thread_id, artifacts=[])
-
-    if not outputs_path.is_dir():
-        raise HTTPException(status_code=400, detail=f"Path is not a directory: {_OUTPUTS_VIRTUAL_PATH}")
-
-    files_with_stat = [
-        (candidate, candidate.stat())
-        for candidate in outputs_path.rglob("*")
-        if candidate.is_file()
-    ]
-    files_with_stat.sort(key=lambda item: item[1].st_mtime, reverse=True)
-
     artifacts: list[ThreadArtifactListItem] = []
-    for file_path, stat_result in files_with_stat:
-        relative_path = file_path.relative_to(outputs_path).as_posix()
-        mime_type, _ = mimetypes.guess_type(file_path.name)
-        artifacts.append(ThreadArtifactListItem(
-            path=f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}",
-            name=file_path.name,
-            size_bytes=stat_result.st_size,
-            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
-            mime_type=mime_type,
-        ))
+    seen_paths: set[str] = set()
+
+    storage = get_supabase_storage()
+
+    if outputs_path.exists() and outputs_path.is_dir():
+        files_with_stat = [
+            (candidate, candidate.stat())
+            for candidate in outputs_path.rglob("*")
+            if candidate.is_file()
+        ]
+        files_with_stat.sort(key=lambda item: item[1].st_mtime, reverse=True)
+
+        for file_path, stat_result in files_with_stat:
+            relative_path = file_path.relative_to(outputs_path).as_posix()
+            virtual_path = f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}"
+            if virtual_path in seen_paths:
+                continue
+            seen_paths.add(virtual_path)
+            mime_type, _ = mimetypes.guess_type(file_path.name)
+            artifacts.append(ThreadArtifactListItem(
+                path=virtual_path,
+                name=file_path.name,
+                size_bytes=stat_result.st_size,
+                modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+                mime_type=mime_type,
+            ))
+            # Lazy persistence: mirror local files to Supabase so they
+            # survive server restarts / ephemeral disks.
+            if storage.enabled:
+                storage.upload_file(thread_id, virtual_path, file_path)
+
+    # Merge in artifacts from Supabase Storage (surviving cross-deployment).
+    storage = get_supabase_storage()
+    if storage.enabled:
+        for item in storage.list_artifacts(thread_id):
+            virtual_path = item["path"].lstrip("/")
+            if virtual_path in seen_paths:
+                continue
+            # Only expose files that live under the outputs virtual path
+            if not (
+                virtual_path == _OUTPUTS_VIRTUAL_PATH
+                or virtual_path.startswith(_OUTPUTS_VIRTUAL_PATH + "/")
+            ):
+                continue
+            seen_paths.add(virtual_path)
+            mime_type = item.get("mime_type") or mimetypes.guess_type(item["name"])[0]
+            artifacts.append(ThreadArtifactListItem(
+                path=virtual_path,
+                name=item["name"],
+                size_bytes=int(item.get("size_bytes") or 0),
+                modified_at=item.get("modified_at") or datetime.now(tz=UTC).isoformat(),
+                mime_type=mime_type,
+            ))
 
     return ThreadArtifactListResponse(thread_id=thread_id, artifacts=artifacts)
 
@@ -225,6 +266,12 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
 
     if not actual_path.is_file():
         raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
+
+    # Lazy persistence: ensure the file is mirrored to Supabase before
+    # serving, so future requests survive server restarts.
+    storage = get_supabase_storage()
+    if storage.enabled:
+        storage.upload_file(thread_id, path, actual_path)
 
     mime_type, _ = mimetypes.guess_type(actual_path)
 
