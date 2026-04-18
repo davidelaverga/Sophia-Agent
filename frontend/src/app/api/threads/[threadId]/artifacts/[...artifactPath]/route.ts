@@ -28,6 +28,30 @@ function copyResponseHeaders(source: Headers): Headers {
   return headers;
 }
 
+function resolveArtifactRelativePath(
+  req: NextRequest,
+  threadId: string,
+  artifactPathSegments: string[],
+): string {
+  // Prefer the raw pathname so we do not depend on Next.js segment parsing,
+  // which on some deployments can drop or mangle the final file extension
+  // (e.g. ".md") when it looks like a static asset. The authoritative source
+  // is the incoming URL exactly as requested by the client.
+  const pathname = req.nextUrl.pathname;
+  const prefix = `/api/threads/${threadId}/artifacts/`;
+  if (pathname.startsWith(prefix)) {
+    const remainder = pathname.slice(prefix.length);
+    if (remainder.length > 0) {
+      // The pathname is already URL-encoded — forward it verbatim.
+      return remainder;
+    }
+  }
+
+  return artifactPathSegments
+    .map((segment) => encodeURIComponent(segment))
+    .join('/');
+}
+
 async function proxyArtifactRequest(
   req: NextRequest,
   threadId: string,
@@ -38,9 +62,7 @@ async function proxyArtifactRequest(
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
-  const encodedPath = artifactPathSegments
-    .map((segment) => encodeURIComponent(segment))
-    .join('/');
+  const encodedPath = resolveArtifactRelativePath(req, threadId, artifactPathSegments);
   const url = new URL(`${BACKEND_URL}/api/threads/${encodeURIComponent(threadId)}/artifacts/${encodedPath}`);
 
   req.nextUrl.searchParams.forEach((value, key) => {
