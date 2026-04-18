@@ -49,6 +49,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
             # AI message has tool calls -- look for emit_builder_artifact
             if tool_calls:
+                tool_names = [
+                    tc.get("name")
+                    for tc in tool_calls
+                    if isinstance(tc, dict) and isinstance(tc.get("name"), str)
+                ]
                 for tc in tool_calls:
                     if tc.get("name") == "emit_builder_artifact":
                         args = tc.get("args", {})
@@ -61,7 +66,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         return {"builder_result": args}
 
                 # Has tool calls but none are emit_builder_artifact -- agent loop continues
-                log_middleware("BuilderArtifact", "tool calls present but no builder artifact (loop continues)", _t0)
+                tool_summary = ", ".join(tool_names[:4]) if tool_names else "unknown"
+                log_middleware(
+                    "BuilderArtifact",
+                    f"tool calls present but no builder artifact (loop continues; tools={tool_summary})",
+                    _t0,
+                )
                 return None
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback

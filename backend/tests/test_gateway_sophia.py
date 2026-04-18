@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -683,6 +685,53 @@ class TestTelegramLinking:
         data = resp.json()
         assert data["linked"] is False
         assert data["removed"] is True
+
+
+class TestBuilderTaskStatus:
+    def test_returns_retained_terminal_status(self, client):
+        started_at = datetime(2026, 4, 18, 20, 0, tzinfo=UTC)
+        completed_at = datetime(2026, 4, 18, 20, 1, tzinfo=UTC)
+        task_result = SimpleNamespace(
+            task_id="toolu_123",
+            trace_id="trace-1",
+            status=SimpleNamespace(value="completed"),
+            result="Draft ready.",
+            error=None,
+            started_at=started_at,
+            completed_at=completed_at,
+            final_state=None,
+            ai_messages=[
+                {
+                    "tool_calls": [
+                        {
+                            "name": "present_files",
+                            "args": {"filepaths": ["outputs/brief.md"]},
+                        }
+                    ]
+                }
+            ],
+        )
+
+        with patch("app.gateway.routers.sophia.get_background_task_result", return_value=task_result):
+            resp = client.get("/api/sophia/test_user/tasks/toolu_123")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "toolu_123"
+        assert data["status"] == "completed"
+        assert data["terminal"] is True
+        assert data["trace_id"] == "trace-1"
+        assert data["started_at"] == started_at.isoformat()
+        assert data["completed_at"] == completed_at.isoformat()
+        assert data["builder_result"]["artifact_path"] == "outputs/brief.md"
+        assert data["builder_result"]["artifact_title"] == "brief.md"
+
+    def test_returns_404_for_unknown_builder_task(self, client):
+        with patch("app.gateway.routers.sophia.get_background_task_result", return_value=None):
+            resp = client.get("/api/sophia/test_user/tasks/missing-task")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Builder task not found"
 
 
 # ---------------------------------------------------------------------------

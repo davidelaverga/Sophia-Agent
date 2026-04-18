@@ -25,6 +25,8 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
+from deerflow.sophia.tools.switch_to_builder import extract_builder_result_from_subagent_result
+from deerflow.subagents.executor import get_background_task_result
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,17 @@ def _validate_user(user_id: str) -> str:
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+
+def _serialize_optional_datetime(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
+
+
+def _task_status_value(value: object) -> str:
+    status_value = getattr(value, "value", value)
+    return str(status_value).strip().lower()
 
 
 def _get_mem0_client():
@@ -249,6 +262,18 @@ class SessionEndResponse(BaseModel):
     recap_artifacts: dict | None = Field(default=None)
     offer_debrief: bool = Field(default=False)
     debrief_prompt: str | None = Field(default=None)
+
+
+class BuilderTaskStatusResponse(BaseModel):
+    task_id: str = Field(..., description="Builder task identifier")
+    status: str = Field(..., description="Current background task status")
+    terminal: bool = Field(default=False, description="Whether the task is in a terminal state")
+    trace_id: str | None = Field(default=None, description="Trace identifier for correlated logs")
+    result: str | None = Field(default=None, description="Best-effort text result from the builder task")
+    error: str | None = Field(default=None, description="Terminal failure detail if available")
+    started_at: str | None = Field(default=None, description="Task start timestamp")
+    completed_at: str | None = Field(default=None, description="Task completion timestamp")
+    builder_result: dict | None = Field(default=None, description="Structured builder artifact summary when available")
 
 class TelegramLinkCreateRequest(BaseModel):
     context_mode: Literal["work", "gaming", "life"] = Field(
@@ -1056,6 +1081,34 @@ async def remove_telegram_link(user_id: str) -> TelegramLinkRemoveResponse:
     store = get_telegram_link_store()
     removed = store.unlink_user(user_id)
     return TelegramLinkRemoveResponse(linked=False, removed=removed)
+
+
+@router.get(
+    "/{user_id}/tasks/{task_id}",
+    response_model=BuilderTaskStatusResponse,
+    summary="Get retained status for a Sophia builder task",
+)
+async def get_builder_task_status(user_id: str, task_id: str) -> BuilderTaskStatusResponse:
+    _validate_user(user_id)
+
+    task_result = get_background_task_result(task_id)
+    if task_result is None:
+        raise HTTPException(status_code=404, detail="Builder task not found")
+
+    status = _task_status_value(task_result.status)
+    terminal = status in {"completed", "failed", "timed_out"}
+    builder_result = extract_builder_result_from_subagent_result(task_result) if terminal else None
+    return BuilderTaskStatusResponse(
+        task_id=task_id,
+        status=status,
+        terminal=terminal,
+        trace_id=getattr(task_result, "trace_id", None),
+        result=getattr(task_result, "result", None),
+        error=getattr(task_result, "error", None),
+        started_at=_serialize_optional_datetime(getattr(task_result, "started_at", None)),
+        completed_at=_serialize_optional_datetime(getattr(task_result, "completed_at", None)),
+        builder_result=builder_result,
+    )
 
 
 # ---------------------------------------------------------------------------

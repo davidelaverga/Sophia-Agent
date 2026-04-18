@@ -9,7 +9,9 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 from deerflow.config.paths import Paths
 from deerflow.config.tool_config import ToolConfig
 
+builder_agent_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
 share_builder_artifact_module = importlib.import_module("deerflow.sophia.tools.share_builder_artifact")
+switch_to_builder_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
 
 
 def _make_runtime(*, state: dict | None = None, thread_id: str = "thread-123") -> SimpleNamespace:
@@ -115,3 +117,38 @@ def test_load_sophia_web_tools_only_returns_native_web_tools(monkeypatch):
     tools = load_sophia_web_tools()
 
     assert [tool.name for tool in tools] == ["web_search", "web_fetch"]
+
+
+def test_extract_builder_result_uses_present_files_fallback():
+    result = SimpleNamespace(
+        task_id="toolu_fallback",
+        final_state=None,
+        ai_messages=[
+            {
+                "tool_calls": [
+                    {
+                        "name": "present_files",
+                        "args": {"filepaths": ["outputs/brief.md", "outputs/appendix.md"]},
+                    }
+                ]
+            }
+        ],
+        result="Draft deliverable is ready.",
+    )
+
+    builder_result = switch_to_builder_module.extract_builder_result_from_subagent_result(result)
+
+    assert builder_result["artifact_path"] == "outputs/brief.md"
+    assert builder_result["supporting_files"] == ["outputs/appendix.md"]
+    assert builder_result["artifact_title"] == "brief.md"
+    assert builder_result["artifact_type"] == "document"
+    assert builder_result["companion_summary"] == "Draft deliverable is ready."
+
+
+def test_builder_agent_defaults_to_stronger_model(monkeypatch):
+    monkeypatch.delenv("SOPHIA_BUILDER_MODEL", raising=False)
+
+    model_name, source = builder_agent_module._resolve_builder_model_name()
+
+    assert model_name == "claude-sonnet-4-6"
+    assert source == "default"

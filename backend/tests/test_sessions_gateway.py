@@ -60,3 +60,29 @@ def test_start_session_returns_503_when_langgraph_is_unavailable():
 
     assert response.status_code == 503
     assert response.json()["detail"] == "LangGraph is unavailable for session start."
+
+
+def test_touch_session_registers_activity_and_defaults_thread_id():
+    with patch("app.gateway.routers.sessions.register_activity") as mock_register_activity:
+        response = client.post(
+            "/api/v1/sessions/sess-123/touch",
+            params={"user_id": "test_user", "message_preview": "still working"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == "sess-123"
+    assert payload["thread_id"] == "sess-123"
+    assert payload["user_id"] == "test_user"
+    assert payload["status"] == "active"
+    mock_register_activity.assert_called_once_with("sess-123", "test_user", "sess-123", "life")
+
+
+def test_touch_session_rejects_invalid_user_id():
+    response = client.post(
+        "/api/v1/sessions/sess-123/touch",
+        params={"user_id": "user with spaces"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid user_id format"

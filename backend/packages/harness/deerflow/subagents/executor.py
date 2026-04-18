@@ -6,8 +6,9 @@ import threading
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
+from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from enum import Enum
 from typing import Any
 
@@ -63,10 +64,20 @@ class SubagentResult:
         if self.ai_messages is None:
             self.ai_messages = []
 
+@dataclass
+class _RetainedTaskEntry:
+    """Terminal task state retained briefly for polling clients."""
+
+    result: SubagentResult
+    expires_at: datetime
+
+
 
 # Global storage for background task results
 _background_tasks: dict[str, SubagentResult] = {}
+_retained_background_tasks: dict[str, _RetainedTaskEntry] = {}
 _background_tasks_lock = threading.Lock()
+BACKGROUND_TASK_RETENTION_SECONDS = 15 * 60
 
 # Thread pool for background task scheduling and orchestration
 _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
@@ -74,6 +85,43 @@ _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 # Thread pool for actual subagent execution (with timeout support)
 # Larger pool to avoid blocking when scheduler submits execution tasks
 _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+def _clone_subagent_result(result: SubagentResult) -> SubagentResult:
+    return SubagentResult(
+        task_id=result.task_id,
+        trace_id=result.trace_id,
+        status=result.status,
+        result=result.result,
+        error=result.error,
+        started_at=result.started_at,
+        completed_at=result.completed_at,
+        ai_messages=deepcopy(result.ai_messages),
+        final_state=deepcopy(result.final_state),
+    )
+
+
+def _prune_retained_background_tasks_locked(now: datetime | None = None) -> None:
+    current_time = now or _utcnow()
+    expired_task_ids = [
+        task_id
+        for task_id, entry in _retained_background_tasks.items()
+        if entry.expires_at <= current_time
+    ]
+    for task_id in expired_task_ids:
+        del _retained_background_tasks[task_id]
+
+
+def _retain_background_task_locked(task_id: str, result: SubagentResult) -> None:
+    _prune_retained_background_tasks_locked()
+    _retained_background_tasks[task_id] = _RetainedTaskEntry(
+        result=_clone_subagent_result(result),
+        expires_at=_utcnow() + timedelta(seconds=BACKGROUND_TASK_RETENTION_SECONDS),
+    )
 
 
 def _filter_tools(
@@ -404,6 +452,8 @@ class SubagentExecutor:
         logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
 
         with _background_tasks_lock:
+            _prune_retained_background_tasks_locked()
+            _retained_background_tasks.pop(task_id, None)
             _background_tasks[task_id] = result
 
         # Submit to scheduler pool
@@ -459,7 +509,12 @@ def get_background_task_result(task_id: str) -> SubagentResult | None:
         SubagentResult if found, None otherwise.
     """
     with _background_tasks_lock:
-        return _background_tasks.get(task_id)
+        _prune_retained_background_tasks_locked()
+        active_result = _background_tasks.get(task_id)
+        if active_result is not None:
+            return active_result
+        retained = _retained_background_tasks.get(task_id)
+        return retained.result if retained is not None else None
 
 
 def list_background_tasks() -> list[SubagentResult]:
@@ -469,7 +524,10 @@ def list_background_tasks() -> list[SubagentResult]:
         List of all SubagentResult instances.
     """
     with _background_tasks_lock:
-        return list(_background_tasks.values())
+        _prune_retained_background_tasks_locked()
+        return list(_background_tasks.values()) + [
+            entry.result for entry in _retained_background_tasks.values()
+        ]
 
 
 def cleanup_background_task(task_id: str) -> None:
@@ -499,6 +557,7 @@ def cleanup_background_task(task_id: str) -> None:
             SubagentStatus.TIMED_OUT,
         }
         if is_terminal_status or result.completed_at is not None:
+            _retain_background_task_locked(task_id, result)
             del _background_tasks[task_id]
             logger.debug("Cleaned up background task: %s", task_id)
         else:

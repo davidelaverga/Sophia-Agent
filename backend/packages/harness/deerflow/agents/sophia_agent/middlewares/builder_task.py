@@ -86,7 +86,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # Completion instruction
         sections.append(
             "<completion_instruction>\n"
-            "When your work is done, you MUST call emit_builder_artifact as your final action.\n"
+            "You are not done until the companion has everything needed to share the deliverable.\n"
+            "When the user-facing files are ready, call present_files for every final output in /mnt/user-data/outputs.\n"
+            "Immediately after present_files, call emit_builder_artifact exactly once as your final action.\n"
+            "Do not call bash, read_file, write_file, str_replace, web_search, web_fetch, or any other tool after emit_builder_artifact.\n"
+            "If the files already exist and you know the summary, stop iterating and finish with emit_builder_artifact now.\n"
             "</completion_instruction>"
         )
 

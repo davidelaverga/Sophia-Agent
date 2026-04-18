@@ -27,6 +27,19 @@ from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.tools.builtins import present_file_tool
 
 logger = logging.getLogger(__name__)
+DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
+
+
+def _resolve_builder_model_name(model_name: str | None = None) -> tuple[str, str]:
+    explicit_model = model_name.strip() if isinstance(model_name, str) else ""
+    if explicit_model:
+        return explicit_model, "explicit"
+
+    env_model = (os.getenv("SOPHIA_BUILDER_MODEL") or "").strip()
+    if env_model:
+        return env_model, "env:SOPHIA_BUILDER_MODEL"
+
+    return DEFAULT_BUILDER_MODEL, "default"
 
 
 def make_sophia_builder(config: RunnableConfig):
@@ -49,13 +62,19 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
 
     Args:
         user_id: User identifier for identity loading.
-        model_name: Model name to use. Defaults to claude-haiku-4-5-20251001
-                    (inherits from companion; production should use claude-sonnet-4-6).
+        model_name: Explicit model name to use. When omitted, falls back to
+                    SOPHIA_BUILDER_MODEL or the stronger Sonnet default.
     """
-    logger.info("Creating Sophia builder agent: user_id=%s, model=%s", user_id, model_name)
+    resolved_model_name, model_source = _resolve_builder_model_name(model_name)
+    logger.info(
+        "Creating Sophia builder agent: user_id=%s, model=%s, source=%s",
+        user_id,
+        resolved_model_name,
+        model_source,
+    )
 
     model = ChatAnthropic(
-        model=model_name or "claude-haiku-4-5-20251001",
+        model=resolved_model_name,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
     )

@@ -14,7 +14,7 @@ the real implementation in isolation.
 
 import asyncio
 import sys
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -665,6 +665,49 @@ class TestCleanupBackgroundTask:
         executor_module.cleanup_background_task(task_id)
 
         assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_retains_terminal_task_for_status_queries(self, executor_module, classes):
+        """Terminal tasks stay queryable after cleanup via the retained store."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-retained-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.COMPLETED,
+            result="done",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+
+        executor_module.cleanup_background_task(task_id)
+
+        retained_result = executor_module.get_background_task_result(task_id)
+        assert task_id not in executor_module._background_tasks
+        assert retained_result is not None
+        assert retained_result.result == "done"
+
+    def test_get_background_task_result_prunes_expired_retained_task(self, executor_module, classes):
+        """Expired retained terminal states are dropped on read."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "expired-retained-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.COMPLETED,
+            result="done",
+            completed_at=datetime.now(),
+        )
+        executor_module._retained_background_tasks[task_id] = executor_module._RetainedTaskEntry(
+            result=result,
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+
+        assert executor_module.get_background_task_result(task_id) is None
+        assert task_id not in executor_module._retained_background_tasks
 
     def test_cleanup_removes_terminal_failed_task(self, executor_module, classes):
         """Test that cleanup removes a FAILED task."""

@@ -5,15 +5,21 @@ These keep the frontend contract stable while still bootstrapping
 real LangGraph threads for live continuity.
 """
 
+import logging
 import os
 import uuid
 from datetime import UTC, datetime
+from typing import Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from app.gateway.inactivity_watcher import register_activity
+from deerflow.agents.sophia_agent.utils import validate_user_id
+
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
+logger = logging.getLogger(__name__)
 
 LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS = 5.0
 
@@ -81,6 +87,15 @@ class SessionEndResponse(BaseModel):
     debrief_prompt: str | None = None
 
 
+class SessionTouchResponse(BaseModel):
+    session_id: str
+    thread_id: str
+    user_id: str
+    context_mode: Literal["work", "gaming", "life"]
+    status: Literal["active"] = "active"
+    touched_at: str
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -91,6 +106,13 @@ def _get_langgraph_base_url() -> str:
         or os.getenv("SOPHIA_BACKEND_BASE_URL")
         or "http://127.0.0.1:2024"
     ).strip().rstrip("/")
+
+
+def _validate_user_id(user_id: str) -> str:
+    try:
+        return validate_user_id(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id format") from exc
 
 
 async def _create_langgraph_thread() -> str:
@@ -161,6 +183,52 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
 async def get_active_session() -> ActiveSessionResponse:
     """Check for an active session (dev stub — always returns none)."""
     return ActiveSessionResponse(has_active_session=False, session=None)
+
+@router.post("/{session_id}/touch", response_model=SessionTouchResponse)
+async def touch_session(
+    session_id: str,
+    user_id: str = Query(..., description="Sophia user identifier for this live session"),
+    thread_id: str | None = Query(
+        default=None,
+        description="Optional canonical LangGraph thread ID. Falls back to the session_id when omitted.",
+    ),
+    context_mode: Literal["work", "gaming", "life"] = Query(
+        default="life",
+        description="Context mode to keep alive in inactivity tracking",
+    ),
+    message_preview: str | None = Query(
+        default=None,
+        description="Best-effort transcript preview for logs only",
+    ),
+) -> SessionTouchResponse:
+    """Refresh inactivity tracking for an active Sophia session."""
+
+    validated_user_id = _validate_user_id(user_id)
+    resolved_thread_id = (thread_id or session_id).strip()
+    if not resolved_thread_id:
+        raise HTTPException(status_code=422, detail="thread_id could not be resolved")
+
+    register_activity(
+        resolved_thread_id,
+        validated_user_id,
+        session_id,
+        context_mode,
+    )
+    logger.info(
+        "session.touch session_id=%s thread_id=%s user_id=%s context_mode=%s preview_chars=%d",
+        session_id,
+        resolved_thread_id,
+        validated_user_id,
+        context_mode,
+        len(message_preview or ""),
+    )
+    return SessionTouchResponse(
+        session_id=session_id,
+        thread_id=resolved_thread_id,
+        user_id=validated_user_id,
+        context_mode=context_mode,
+        touched_at=datetime.now(UTC).isoformat(),
+    )
 
 
 @router.post("/end", response_model=SessionEndResponse)

@@ -10,6 +10,7 @@ import logging
 import time
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from typing import Annotated, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
@@ -131,8 +132,7 @@ def switch_to_builder(
     # 3. Create builder agent
     # ------------------------------------------------------------------
     from deerflow.agents.sophia_agent.builder_agent import _create_builder_agent
-
-    builder_agent = _create_builder_agent(user_id=user_id, model_name=parent_model)
+    builder_agent = _create_builder_agent(user_id=user_id)
 
     # ------------------------------------------------------------------
     # 4. Create executor with pre-built agent
@@ -187,15 +187,15 @@ def switch_to_builder(
             logger.info("[Builder] Task %s completed after %d polls", task_id, poll_count)
             if writer:
                 writer({"type": "task_completed", "task_id": task_id, "result": result.result})
-            cleanup_background_task(task_id)
 
             # Extract builder_result from final state
-            builder_result = _extract_builder_result(result)
+            builder_result = extract_builder_result_from_subagent_result(result)
             builder_delivery = build_builder_delivery_payload(
                 thread_id=thread_id,
                 builder_result=builder_result,
             )
             title = builder_result.get("artifact_title") or "the deliverable"
+            cleanup_background_task(task_id)
             tool_message = (
                 f"Builder completed successfully. {title} is ready, and this reply can attach it for delivery."
                 if builder_delivery is not None
@@ -219,14 +219,38 @@ def switch_to_builder(
             logger.error("[Builder] Task %s failed: %s", task_id, result.error)
             if writer:
                 writer({"type": "task_failed", "task_id": task_id, "error": result.error})
+            partial_update = _build_partial_builder_update(
+                result=result,
+                task=task,
+                task_type=task_type,
+                task_id=task_id,
+                status="failed",
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                failure_reason=result.error or "Unknown error",
+            )
             cleanup_background_task(task_id)
+            if partial_update is not None:
+                return partial_update
             return _format_error(result.error or "Unknown error")
 
         elif result.status == SubagentStatus.TIMED_OUT:
             logger.warning("[Builder] Task %s timed out", task_id)
             if writer:
                 writer({"type": "task_timed_out", "task_id": task_id})
+            partial_update = _build_partial_builder_update(
+                result=result,
+                task=task,
+                task_type=task_type,
+                task_id=task_id,
+                status="timed_out",
+                thread_id=thread_id,
+                tool_call_id=tool_call_id,
+                failure_reason=f"Timed out after {config.timeout_seconds}s",
+            )
             cleanup_background_task(task_id)
+            if partial_update is not None:
+                return partial_update
             return _format_error(f"Timed out after {config.timeout_seconds}s")
 
         time.sleep(5)
@@ -242,8 +266,8 @@ def switch_to_builder(
 # Helpers
 # ------------------------------------------------------------------
 
-def _extract_builder_result(result) -> dict:
-    """Extract builder_result from SubagentResult.final_state or ai_messages."""
+def extract_builder_result_from_subagent_result(result) -> dict:
+    """Extract builder_result from terminal subagent state or tool-call fallbacks."""
     # Primary path: BuilderArtifactMiddleware stored it in final state
     if result.final_state and result.final_state.get("builder_result"):
         return result.final_state["builder_result"]
@@ -253,19 +277,140 @@ def _extract_builder_result(result) -> dict:
         for tc in msg_dict.get("tool_calls", []):
             if tc.get("name") == "emit_builder_artifact":
                 return tc.get("args", {})
+    presented_artifacts = _extract_presented_artifact_paths(result)
+    primary_artifact_path = presented_artifacts[0] if presented_artifacts else None
+    supporting_files = presented_artifacts[1:] or None
+    if primary_artifact_path:
+        logger.warning(
+            "[Builder] recoverable builder fallback: present_files emitted without emit_builder_artifact task_id=%s artifact=%s",
+            getattr(result, "task_id", None),
+            primary_artifact_path,
+        )
 
     # Last resort: wrap the text result
     return {
-        "artifact_path": None,
-        "artifact_type": "unknown",
-        "artifact_title": "Build task completed",
+        "artifact_path": primary_artifact_path,
+        "artifact_type": _infer_builder_artifact_type(primary_artifact_path),
+        "artifact_title": Path(primary_artifact_path).name if primary_artifact_path else "Build task completed",
+        "supporting_files": supporting_files,
         "steps_completed": 0,
         "decisions_made": [],
         "companion_summary": result.result or "The build task was completed.",
-        "companion_tone_hint": "Neutral",
+        "companion_tone_hint": (
+            "Share this as a draft because the builder finished without its final packaging step."
+            if primary_artifact_path
+            else "Neutral"
+        ),
         "user_next_action": None,
         "confidence": 0.3,
     }
+
+
+def _extract_presented_artifact_paths(result) -> list[str]:
+    candidates: list[str] = []
+    final_state = getattr(result, "final_state", None)
+    if isinstance(final_state, dict):
+        final_artifacts = final_state.get("artifacts")
+        if isinstance(final_artifacts, list):
+            candidates.extend(path for path in final_artifacts if isinstance(path, str))
+
+    for msg_dict in reversed(getattr(result, "ai_messages", None) or []):
+        if not isinstance(msg_dict, dict):
+            continue
+        tool_calls = msg_dict.get("tool_calls", [])
+        if not isinstance(tool_calls, list):
+            continue
+        for tc in reversed(tool_calls):
+            if not isinstance(tc, dict) or tc.get("name") != "present_files":
+                continue
+            args = tc.get("args", {})
+            if not isinstance(args, dict):
+                continue
+            filepaths = args.get("filepaths", [])
+            if isinstance(filepaths, list):
+                candidates.extend(path for path in filepaths if isinstance(path, str))
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        normalized.append(candidate)
+    return normalized
+
+
+def _infer_builder_artifact_type(path: str | None) -> str:
+    if not path:
+        return "unknown"
+
+    suffix = Path(path).suffix.lower()
+    if suffix in {".ppt", ".pptx", ".key"}:
+        return "presentation"
+    if suffix in {".html", ".htm"}:
+        return "webpage"
+    if suffix in {".csv", ".json", ".xlsx"}:
+        return "data_analysis"
+    if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}:
+        return "code"
+    return "document"
+
+
+def _build_partial_builder_update(
+    *,
+    result,
+    task: str,
+    task_type: str,
+    task_id: str,
+    status: str,
+    thread_id: str | None,
+    tool_call_id: str,
+    failure_reason: str,
+) -> Command | None:
+    builder_result = extract_builder_result_from_subagent_result(result)
+    artifact_path = builder_result.get("artifact_path")
+    supporting_files = builder_result.get("supporting_files")
+    has_recoverable_output = (
+        isinstance(artifact_path, str) and bool(artifact_path.strip())
+    ) or (
+        isinstance(supporting_files, list) and any(isinstance(path, str) and path.strip() for path in supporting_files)
+    )
+    if not has_recoverable_output:
+        return None
+
+    builder_delivery = build_builder_delivery_payload(
+        thread_id=thread_id,
+        builder_result=builder_result,
+    )
+    title = builder_result.get("artifact_title") or "the draft deliverable"
+    failure_label = "timed out" if status == "timed_out" else "hit an error"
+    tool_message = (
+        f"Builder {failure_label} before finishing cleanly, but {title} is attached for this reply. "
+        f"Tell the user it is a draft or partial result and briefly mention this limitation: {failure_reason}"
+        if builder_delivery is not None
+        else f"Builder {failure_label} before finishing cleanly, but it produced a partial result for {title}. "
+        f"Tell the user it is incomplete and briefly mention this limitation: {failure_reason}"
+    )
+    logger.warning(
+        "[Builder] returning partial builder result after %s task_id=%s artifact=%s",
+        status,
+        task_id,
+        artifact_path,
+    )
+    return Command(
+        update={
+            "builder_result": builder_result,
+            "builder_task": {
+                "task": task,
+                "task_type": task_type,
+                "task_id": task_id,
+                "status": status,
+                "error": failure_reason,
+            },
+            "builder_delivery": builder_delivery,
+            "messages": [ToolMessage(tool_message, tool_call_id=tool_call_id)],
+        }
+    )
 
 def _format_error(error: str) -> str:
     """Format a builder error for the companion."""

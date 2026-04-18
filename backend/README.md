@@ -87,6 +87,7 @@ Async task delegation with concurrent execution:
 - **Built-in agents**: `general-purpose` (full toolset) and `bash` (command specialist)
 - **Concurrency**: Max 3 subagents per turn, 15-minute timeout
 - **Execution**: Background thread pools with status tracking and SSE events
+- **Retention**: Terminal task states remain queryable for 15 minutes after cleanup so channel pollers and gateway status routes can still resolve final outcomes
 - **Flow**: Agent calls `task()` tool → executor runs subagent in background → polls for completion → returns result
 
 ### Memory System
@@ -126,9 +127,11 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+| `POST /api/v1/sessions/{session_id}/touch` | Compatibility activity ping for external session pollers; missing `thread_id` defaults to `session_id` |
 | `POST /api/sophia/{user_id}/telegram/link` | Create one-time Telegram deep-link token for Sophia account linking |
 | `GET /api/sophia/{user_id}/telegram/link` | Get Telegram link status for a Sophia user |
 | `DELETE /api/sophia/{user_id}/telegram/link` | Unlink Telegram from a Sophia user |
+| `GET /api/sophia/{user_id}/tasks/{task_id}` | Inspect active or recently completed builder task state, including derived artifact metadata |
 
 ### IM Channels
 The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram use the final `runs.wait()` response path, while Feishu streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
@@ -143,12 +146,15 @@ Telegram now supports Sophia account linking and media-first workflows:
 `ChannelManager` now also:
 - Enforces one active run per conversation key (`channel:chat:topic`) and sends a busy message for overlapping requests.
 - Polls queued builder handoff tasks and publishes asynchronous completion/failure follow-up messages (including artifact attachments when available).
+- Relies on retained terminal subagent results plus `GET /api/sophia/{user_id}/tasks/{task_id}` so async pollers can still resolve builder outcomes after executor cleanup.
 - Registers optional per-channel inbound file readers (used by Telegram) through `ChannelService`.
 - Releases temporary sandbox acquisitions made for inbound file syncing after each ingestion run.
 - Materializes Sophia's transient top-level `builder_delivery` payload into the gateway service's own outputs directory before outbound upload, so synchronous builder completions and later resend requests can deliver files back to Telegram even when LangGraph and Gateway are on separate Render disks.
+- Accepts external activity pings through `POST /api/v1/sessions/{session_id}/touch`, defaulting a missing `thread_id` to `session_id` for legacy voice/getaway callers.
 
 Sophia's custom companion/builder agents also inherit DeerFlow-native `web_search` and `web_fetch` tools from config, so Render needs those tool definitions plus `TAVILY_API_KEY` / `JINA_API_KEY` on the services that load `config.production.yaml`.
 The companion-side resend path for prior builder artifacts now uses an explicit empty input schema so Anthropic/OpenAI tool binding can succeed even though the tool only depends on injected runtime state.
+Builder runs now default to `claude-sonnet-4-6` unless `SOPHIA_BUILDER_MODEL` is set, and the handoff path can synthesize a builder artifact from `present_files` output when files exist but `emit_builder_artifact` was never called.
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
 
 ---

@@ -93,10 +93,13 @@ make lint       # Lint with ruff
 make format     # Format code with ruff
 ```
 
-Regression tests related to Docker/provisioner behavior:
+Notable regression tests:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
-- `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, and native web tool loading)
+- `tests/test_subagent_executor.py` (subagent async execution plus retained terminal task visibility after cleanup)
+- `tests/test_sessions_gateway.py` (session start plus compatibility `/api/v1/sessions/{session_id}/touch` activity pings)
+- `tests/test_gateway_sophia.py` (Sophia gateway routes, including builder task polling via `/api/sophia/{user_id}/tasks/{task_id}`)
+- `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, native web tool loading, `present_files` fallback extraction, and default builder model resolution)
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
@@ -205,8 +208,9 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
+| **Sessions** (`/api/v1/sessions`) | `POST /start` - create LangGraph-backed sessions; `POST /{session_id}/touch` - compatibility activity ping for external pollers (defaults missing `thread_id` to `session_id`) |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
-| **Sophia** (`/api/sophia`) | Sophia memory/review/reflect endpoints, visual summaries, Telegram link endpoints (`POST/GET/DELETE /{user_id}/telegram/link`), and session finalization (`POST /{user_id}/end-session`) |
+| **Sophia** (`/api/sophia`) | Sophia memory/review/reflect endpoints, visual summaries, Telegram link endpoints (`POST/GET/DELETE /{user_id}/telegram/link`), builder task polling (`GET /{user_id}/tasks/{task_id}`), and session finalization (`POST /{user_id}/end-session`) |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
@@ -236,6 +240,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
+**Retention**: Terminal task results are retained for 15 minutes after cleanup so gateway/channel pollers can still read final state through `get_background_task_result()`
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
 
