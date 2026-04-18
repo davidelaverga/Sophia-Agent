@@ -1,0 +1,17 @@
+{
+  "session_id": "b872422b-eeb2-49ab-8008-9d78f000b834",
+  "thread_id": "064e1afc-87f8-4557-97ec-7bf369e36aa5",
+  "user_id": "jorge_test",
+  "status": "open",
+  "title": null,
+  "preset_type": "chat",
+  "context_mode": "gaming",
+  "platform": "text",
+  "message_count": 0,
+  "last_message_preview": null,
+  "created_at": "2026-04-17T00:39:10.150029+00:00",
+  "updated_at": "2026-04-17T00:39:10.150029+00:00",
+  "ended_at": null,
+  "intention": null,
+  "focus_cue": null
+}
