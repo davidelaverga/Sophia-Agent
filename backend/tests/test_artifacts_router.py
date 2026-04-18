@@ -76,3 +76,115 @@ def test_get_artifact_falls_back_to_workspace_outputs_when_primary_output_is_mis
 
     assert bytes(response.body).decode("utf-8") == "workspace copy"
     assert response.media_type == "text/markdown"
+
+
+def test_get_artifact_resolves_outputs_and_workspace_fallback_with_requested_thread_id(tmp_path, monkeypatch) -> None:
+    thread_a_user_data = tmp_path / "thread-a" / "user-data"
+    thread_b_user_data = tmp_path / "thread-b" / "user-data"
+
+    thread_a_outputs = thread_a_user_data / "outputs"
+    thread_b_workspace_outputs = thread_b_user_data / "workspace" / "outputs"
+    thread_a_outputs.mkdir(parents=True)
+    thread_b_workspace_outputs.mkdir(parents=True)
+
+    thread_a_artifact = thread_a_outputs / "report.md"
+    thread_b_workspace_artifact = thread_b_workspace_outputs / "report.md"
+    thread_a_artifact.write_text("thread-a primary", encoding="utf-8")
+    thread_b_workspace_artifact.write_text("thread-b fallback", encoding="utf-8")
+
+    thread_roots = {
+        "thread-a": thread_a_user_data,
+        "thread-b": thread_b_user_data,
+    }
+    resolve_calls: list[tuple[str, str]] = []
+
+    def resolve_path(thread_id: str, virtual_path: str) -> Path:
+        resolve_calls.append((thread_id, virtual_path))
+        normalized = virtual_path.lstrip("/")
+        prefix = "mnt/user-data/"
+        if not normalized.startswith(prefix):
+            raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+        return thread_roots[thread_id] / normalized[len(prefix) :]
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+
+    response_a = asyncio.run(artifacts_router.get_artifact("thread-a", "mnt/user-data/outputs/report.md", request))
+    response_b = asyncio.run(artifacts_router.get_artifact("thread-b", "mnt/user-data/outputs/report.md", request))
+
+    assert bytes(response_a.body).decode("utf-8") == "thread-a primary"
+    assert bytes(response_b.body).decode("utf-8") == "thread-b fallback"
+    assert resolve_calls == [
+        ("thread-a", "mnt/user-data/outputs/report.md"),
+        ("thread-b", "mnt/user-data/outputs/report.md"),
+        ("thread-b", "mnt/user-data/workspace/outputs/report.md"),
+    ]
+
+
+def test_get_artifact_falls_back_to_supabase_when_local_and_workspace_copies_missing(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    workspace_outputs_dir = tmp_path / "workspace" / "outputs"
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        if virtual_path == "mnt/user-data/outputs/report.md":
+            return outputs_dir / "report.md"
+        if virtual_path == "mnt/user-data/workspace/outputs/report.md":
+            return workspace_outputs_dir / "report.md"
+        raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+
+    download_calls: list[dict[str, str]] = []
+
+    def fake_download(*, thread_id: str, filename: str):
+        download_calls.append({"thread_id": thread_id, "filename": filename})
+        return (b"supabase copy", "text/markdown")
+
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        fake_download,
+    )
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(
+        artifacts_router.get_artifact("thread-z", "mnt/user-data/outputs/report.md", request)
+    )
+
+    assert bytes(response.body).decode("utf-8") == "supabase copy"
+    assert response.media_type == "text/markdown"
+    assert download_calls == [{"thread_id": "thread-z", "filename": "report.md"}]
+
+
+def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    workspace_outputs_dir = tmp_path / "workspace" / "outputs"
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        if virtual_path == "mnt/user-data/outputs/report.md":
+            return outputs_dir / "report.md"
+        if virtual_path == "mnt/user-data/workspace/outputs/report.md":
+            return workspace_outputs_dir / "report.md"
+        raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "download_artifact",
+        lambda *, thread_id, filename: None,
+    )
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+
+    import fastapi
+
+    try:
+        asyncio.run(
+            artifacts_router.get_artifact("thread-z", "mnt/user-data/outputs/report.md", request)
+        )
+    except fastapi.HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("Expected 404 when both local and Supabase copies are missing")
+

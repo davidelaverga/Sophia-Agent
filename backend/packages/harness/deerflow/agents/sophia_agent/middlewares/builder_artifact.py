@@ -7,6 +7,7 @@ minimal result when the builder ends with plain text (no tool call).
 
 import logging
 import time
+from pathlib import Path
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
@@ -15,8 +16,91 @@ from langchain.agents.middleware.types import hook_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.storage import supabase_artifact_store
 
 logger = logging.getLogger(__name__)
+
+
+_OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+
+
+def _extract_output_relative_path(artifact_path: str | None) -> str | None:
+    """Return the path relative to ``/mnt/user-data/outputs/`` when applicable."""
+    if not isinstance(artifact_path, str) or not artifact_path:
+        return None
+    normalized = artifact_path.strip()
+    if not normalized.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+        return None
+    relative = normalized[len(_OUTPUTS_VIRTUAL_PREFIX):].lstrip("/")
+    return relative or None
+
+
+def _upload_builder_outputs_to_supabase(
+    thread_id: str | None,
+    outputs_host_path: str | None,
+    artifact_args: dict[str, Any],
+) -> None:
+    """Best-effort upload of the builder's outputs to Supabase Storage.
+
+    Silently no-ops when Supabase is not configured, when thread_id or the
+    outputs host path are missing, or when individual files cannot be read.
+    Any failure is logged and swallowed so builder flow never regresses.
+    """
+    if not supabase_artifact_store.is_configured():
+        return
+    if not thread_id or not outputs_host_path:
+        logger.debug(
+            "Skipping Supabase upload; missing thread_id=%s outputs_host_path=%s",
+            thread_id,
+            outputs_host_path,
+        )
+        return
+
+    candidates: list[str] = []
+    primary = artifact_args.get("artifact_path")
+    if isinstance(primary, str):
+        candidates.append(primary)
+    supporting = artifact_args.get("supporting_files")
+    if isinstance(supporting, list):
+        candidates.extend(path for path in supporting if isinstance(path, str))
+
+    outputs_root = Path(outputs_host_path)
+    for candidate in candidates:
+        relative = _extract_output_relative_path(candidate)
+        if relative is None:
+            continue
+        host_file = outputs_root / relative
+        try:
+            content = host_file.read_bytes()
+        except FileNotFoundError:
+            logger.warning(
+                "Supabase upload skipped; local file missing thread_id=%s path=%s",
+                thread_id,
+                host_file,
+            )
+            continue
+        except OSError as exc:
+            logger.warning(
+                "Supabase upload skipped; read error thread_id=%s path=%s error=%s",
+                thread_id,
+                host_file,
+                exc,
+            )
+            continue
+
+        try:
+            supabase_artifact_store.upload_artifact(
+                thread_id=thread_id,
+                filename=relative,
+                content=content,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort upload
+            logger.warning(
+                "Supabase upload failed; continuing without remote copy thread_id=%s path=%s error=%s",
+                thread_id,
+                relative,
+                exc,
+            )
 
 
 class BuilderArtifactState(AgentState):
@@ -79,6 +163,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "tool_names": tool_names,
                             "has_emit_builder_artifact": True,
                         },
+                    )
+                    thread_data = state.get("thread_data") or {}
+                    outputs_host_path = (
+                        thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+                    )
+                    thread_id = runtime.context.get("thread_id") if runtime.context else None
+                    _upload_builder_outputs_to_supabase(
+                        thread_id=thread_id,
+                        outputs_host_path=outputs_host_path,
+                        artifact_args=args,
                     )
                     log_middleware(
                         "BuilderArtifact",

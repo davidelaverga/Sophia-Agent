@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.sophia.storage import supabase_artifact_store
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,70 @@ def _resolve_artifact_path(thread_id: str, path: str) -> Path:
         return fallback_path
 
     return actual_path
+
+
+def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Response | None:
+    """Serve the artifact from the ``sophia_builder`` Supabase bucket when missing locally.
+
+    Layout: ``sophia_builder/{thread_id}/{relative_output_path}``. Returns
+    ``None`` when Supabase is not configured, the path is not under the
+    outputs virtual prefix, or the object is missing. Raises ``HTTPException``
+    with 502 only when Supabase responds with an unexpected transport error.
+    """
+    relative = _relative_output_artifact_path(path)
+    if relative is None or relative == "":
+        return None
+    try:
+        result = supabase_artifact_store.download_artifact(
+            thread_id=thread_id,
+            filename=relative,
+        )
+    except Exception:  # noqa: BLE001 — network/transport failure
+        logger.exception(
+            "Supabase download failed: thread_id=%s requested_path=%s", thread_id, path
+        )
+        return None
+    if result is None:
+        return None
+
+    content, supabase_mime = result
+    filename = Path(relative).name
+    mime_type = supabase_mime or mimetypes.guess_type(filename)[0]
+    encoded_filename = quote(filename)
+
+    logger.info(
+        "Serving artifact from Supabase bucket: thread_id=%s requested_path=%s bytes=%d",
+        thread_id,
+        path,
+        len(content),
+    )
+
+    if request.query_params.get("download"):
+        return Response(
+            content=content,
+            media_type=mime_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            },
+        )
+
+    if mime_type == "text/html":
+        return HTMLResponse(content=content.decode("utf-8", errors="replace"))
+    if mime_type and mime_type.startswith("text/"):
+        return PlainTextResponse(
+            content=content.decode("utf-8", errors="replace"),
+            media_type=mime_type,
+        )
+
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return Response(
+            content=content,
+            media_type=mime_type or "application/octet-stream",
+            headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"},
+        )
+    return PlainTextResponse(content=text, media_type=mime_type or "text/plain")
 
 
 @router.get(
@@ -221,6 +286,9 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
     if not actual_path.exists():
+        supabase_response = _try_serve_from_supabase(thread_id, path, request)
+        if supabase_response is not None:
+            return supabase_response
         raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
 
     if not actual_path.is_file():
