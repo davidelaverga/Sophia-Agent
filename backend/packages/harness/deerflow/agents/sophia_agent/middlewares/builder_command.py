@@ -126,7 +126,7 @@ def _build_direct_document_task(user_text: str) -> str | None:
     if not topic:
         return None
 
-    artifact_path = f"outputs/{_slugify(topic)}.md"
+    artifact_path = f"/mnt/user-data/outputs/{_slugify(topic)}.md"
     artifact_title = f"One-Page Document: {topic}"
     companion_summary = f"Created the requested one-page document about {topic}."
     simplicity_note = (
@@ -144,6 +144,7 @@ def _build_direct_document_task(user_text: str) -> str | None:
         "Audience: a general reader. "
         "Tone: clear, direct, and neutral. "
         "Structure: a descriptive title, a short introduction, 3 headed sections, and a brief conclusion. "
+        "Write the deliverable directly to /mnt/user-data/outputs using that absolute path. "
         f"{simplicity_note}"
         "Create no other files unless strictly necessary. "
         "After writing the file, call emit_builder_artifact as your final action with "

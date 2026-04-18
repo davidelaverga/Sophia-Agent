@@ -81,11 +81,12 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     assert tool_call["args"]["task_type"] == "document"
     assert "dangers of war" in tool_call["args"]["task"]
     assert "emit_builder_artifact" in tool_call["args"]["task"]
+    assert "/mnt/user-data/outputs/the-dangers-of-war.md" in tool_call["args"]["task"]
 
     captured: dict = {}
     cleaned_task_ids: list[str] = []
     expected_result = {
-        "artifact_path": "outputs/dangers-of-war.md",
+        "artifact_path": "/mnt/user-data/outputs/the-dangers-of-war.md",
         "artifact_type": "document",
         "artifact_title": "One-Page Document: the dangers of war",
         "steps_completed": 3,
@@ -156,7 +157,7 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     assert tool_message.tool_call_id == tool_call["id"]
     assert "Builder completed successfully." in tool_message.content
     assert "One-Page Document: the dangers of war" in tool_message.content
-    assert '"artifact_path": "outputs/dangers-of-war.md"' in tool_message.content
+    assert '"artifact_path": "/mnt/user-data/outputs/the-dangers-of-war.md"' in tool_message.content
     assert captured["prompt"] == tool_call["args"]["task"]
     assert captured["task_id"] == tool_call["id"]
     assert captured["owner_id"] == "builder-user"

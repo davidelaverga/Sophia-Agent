@@ -53,3 +53,26 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     assert response.artifacts[0].size_bytes == len("second")
     assert response.artifacts[0].mime_type == "text/plain"
     assert response.artifacts[1].name == "first.md"
+
+
+def test_get_artifact_falls_back_to_workspace_outputs_when_primary_output_is_missing(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    workspace_outputs_dir = tmp_path / "workspace" / "outputs"
+    workspace_outputs_dir.mkdir(parents=True)
+    artifact_path = workspace_outputs_dir / "report.md"
+    artifact_path.write_text("workspace copy", encoding="utf-8")
+
+    def resolve_path(_thread_id: str, virtual_path: str) -> Path:
+        if virtual_path == "mnt/user-data/outputs/report.md":
+            return outputs_dir / "report.md"
+        if virtual_path == "mnt/user-data/workspace/outputs/report.md":
+            return artifact_path
+        raise AssertionError(f"Unexpected virtual path: {virtual_path}")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", resolve_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/report.md", request))
+
+    assert bytes(response.body).decode("utf-8") == "workspace copy"
+    assert response.media_type == "text/markdown"

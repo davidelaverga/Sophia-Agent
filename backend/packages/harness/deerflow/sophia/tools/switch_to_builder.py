@@ -723,11 +723,12 @@ def _should_use_demo_builder_task(
 def _build_demo_builder_task() -> str:
     """Return a small Builder task that proves the end-to-end flow quickly."""
     return (
-        "Create exactly one markdown file named builder-demo.md in the outputs directory. "
+        "Create exactly one markdown file at /mnt/user-data/outputs/builder-demo.md. "
         "Keep it under 180 words and do not ask clarifying questions. "
         "Use default placeholder content that demonstrates Builder completed a task successfully. "
         "Use this structure: '# Builder Demo', '## What Sophia generated', '## Assumptions used', and '## Next step'. "
-        "After writing the file, call emit_builder_artifact as your final action with artifact_path='outputs/builder-demo.md', "
+        "Write the deliverable directly to /mnt/user-data/outputs using that absolute path. "
+        "After writing the file, call emit_builder_artifact as your final action with artifact_path='/mnt/user-data/outputs/builder-demo.md', "
         "artifact_type='document', artifact_title='Builder Demo Deliverable', steps_completed=3, "
         "decisions_made=['Used a minimal markdown deliverable', 'Filled missing specs with defaults'], "
         "companion_summary='Created a quick demo deliverable from defaults so the Builder flow can be verified.', "
