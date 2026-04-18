@@ -14,6 +14,7 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import hook_config
+from langchain_core.messages import ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -172,7 +173,25 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
                 artifact_data = artifact_calls[-1].get("args", {})
                 builder_result = state.get("builder_result") or self._extract_builder_result_from_messages(messages)
+                # Close the emit_artifact tool_call(s) with synthetic ToolMessages.
+                # Without this, each turn leaves a dangling tool_call in the thread
+                # state that accumulates across turns (and especially across resumed
+                # sessions), bloating the prompt and triggering the dangling-tool-call
+                # patch on every model invocation. emit_artifact is a signal-only
+                # tool — the LLM never re-consumes these messages because we also
+                # jump_to "end", so closing the loop here is purely hygiene for
+                # message-history integrity.
+                tool_messages = [
+                    ToolMessage(
+                        content="Artifact recorded.",
+                        tool_call_id=tc["id"],
+                        name="emit_artifact",
+                    )
+                    for tc in artifact_calls
+                    if tc.get("id")
+                ]
                 updates = {
+                    "messages": tool_messages,
                     "previous_artifact": state.get("current_artifact"),
                     "current_artifact": artifact_data,
                     "jump_to": "end",

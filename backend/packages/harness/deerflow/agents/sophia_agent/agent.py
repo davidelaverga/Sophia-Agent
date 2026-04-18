@@ -141,14 +141,15 @@ def make_sophia_agent(config: RunnableConfig):
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # Post-chain: prompt assembly, then caching, then title
-    from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+    # Post-chain: prompt assembly (with targeted cache_control) then title
     middlewares.extend(
         [
-            PromptAssemblyMiddleware(),
-            # Prompt caching AFTER assembly — adds cache_control to the assembled
-            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
-            AnthropicPromptCachingMiddleware(ttl="5m"),
+            # PromptAssembly emits a structured SystemMessage with cache_control
+            # placed exactly after the immutable prefix (soul + voice + techniques).
+            # This gives us real cache hits on ~2.8k tokens per turn instead of
+            # the generic AnthropicPromptCachingMiddleware which put the cache
+            # breakpoint at the tail (invalidated every turn by dynamic blocks).
+            PromptAssemblyMiddleware(enable_prompt_caching=True, cache_ttl="5m"),
             SophiaTitleMiddleware(),
         ]
     )
