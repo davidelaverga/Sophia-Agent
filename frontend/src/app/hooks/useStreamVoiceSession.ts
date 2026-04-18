@@ -51,6 +51,15 @@ export type StreamVoiceSessionReturn = {
   error: string | undefined
   startTalking: () => Promise<void>
   stopTalking: () => Promise<void>
+  /** Mute the microphone while keeping the call + agent alive. Cheap toggle (~0ms).
+   *  Use instead of stopTalking when the user is still in-session and only wants to pause mic. */
+  muteMic: () => Promise<void>
+  /** Unmute the microphone. If no live call exists, falls back to startTalking (full connect). */
+  unmuteMic: () => Promise<void>
+  /** True when the mic is currently muted via muteMic. */
+  isMuted: boolean
+  /** True when the WebRTC call is JOINED (agent session alive on server). */
+  hasLiveCall: boolean
   bargeIn: () => void
   /** Clears speaking UI state without tearing down transport (SSE/call/credentials stay alive). */
   softBargeIn: () => void
@@ -261,6 +270,7 @@ export function useStreamVoiceSession(
   const [error, setError] = useState<string | undefined>(undefined)
   const [credentials, setCredentials] = useState<StreamVoiceCredentials | null>(null)
   const [isSophiaReady, setIsSophiaReady] = useState(false)
+  const [isMuted, setIsMuted] = useState(false)
 
   // --- Refs (mutable, non-render-triggering) -------------------------------
   const prevCallingStateRef = useRef<CallingState>(CallingState.IDLE)
@@ -1367,6 +1377,7 @@ export function useStreamVoiceSession(
     setIsSophiaReady(false)
     setStage("connecting")
     setError(undefined)
+    setIsMuted(false)
     setPartialReply("")
     setFinalReply("")
     recordSophiaCaptureEvent({
@@ -1531,6 +1542,7 @@ export function useStreamVoiceSession(
     setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
+    setIsMuted(false)
     setListeningPresence(false)
     setSpeakingPresence(false)
     settlePresence()
@@ -1569,6 +1581,7 @@ export function useStreamVoiceSession(
     setStage("listening")
     setSpeakingPresence(false)
     setListeningPresence(true)
+    setIsMuted(false)
     settlePresence()
   }, [
     clearThinking,
@@ -1604,6 +1617,7 @@ export function useStreamVoiceSession(
     setIsSophiaReady(false)
     setCredentials(null)
     setStage("idle")
+    setIsMuted(false)
     setListeningPresence(false)
     setSpeakingPresence(false)
     settlePresence()
@@ -1650,8 +1664,72 @@ export function useStreamVoiceSession(
     setPartialReply("")
     setFinalReply("")
     setError(undefined)
+    setIsMuted(false)
     resetPresence()
   }, [cancelPendingStartRequest, clearAutoPreconnectTimer, closeEventSource, clearStartupReadyTimeout, leave, clearThinking, releasePreparedVoiceConnect, requestCurrentVoiceDisconnect, resetPresence])
+
+  /**
+   * Mute the microphone without tearing down the call/agent session.
+   *
+   * Keeps StreamVideoClient, Call, SSE, and the Voice Agent alive on the server.
+   * Use this for the in-session mic toggle instead of stopTalking — avoids
+   * the progressive latency accumulation caused by repeated create/destroy
+   * cycles (Cartesia HTTP/2, Deepgram WebSocket, Stream SFU reconnects).
+   */
+  const muteMic = useCallback(async () => {
+    if (!call) return
+    try {
+      await call.microphone.disable()
+    } catch (err) {
+      logger.logError(err, {
+        component: "StreamVoiceSession",
+        action: "muteMic",
+      })
+    }
+    setIsMuted(true)
+    setStage("idle")
+    setListeningPresence(false)
+    settlePresence()
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "mic-muted",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+        callId: credentials?.callId ?? null,
+      },
+    })
+  }, [call, credentials?.callId, setListeningPresence, settlePresence])
+
+  /**
+   * Unmute the microphone. If no live call exists, fall back to startTalking
+   * (full connect path).
+   */
+  const unmuteMic = useCallback(async () => {
+    if (!call || callingState !== CallingState.JOINED) {
+      await startTalking()
+      return
+    }
+    try {
+      await call.microphone.enable()
+    } catch (err) {
+      logger.logError(err, {
+        component: "StreamVoiceSession",
+        action: "unmuteMic",
+      })
+    }
+    setIsMuted(false)
+    setStage("listening")
+    setListeningPresence(true)
+    settlePresence()
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "mic-unmuted",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+        callId: credentials?.callId ?? null,
+      },
+    })
+  }, [call, callingState, credentials?.callId, setListeningPresence, settlePresence, startTalking])
 
   // --- Cleanup on unmount --------------------------------------------------
   useEffect(() => {
@@ -1692,6 +1770,10 @@ export function useStreamVoiceSession(
     error,
     startTalking,
     stopTalking,
+    muteMic,
+    unmuteMic,
+    isMuted,
+    hasLiveCall: callingState === CallingState.JOINED,
     bargeIn,
     softBargeIn,
     resetVoiceState,

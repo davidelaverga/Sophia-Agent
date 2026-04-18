@@ -19,6 +19,7 @@ from voice.adapters.base import (
     BackendEvent,
     BackendRequest,
     BackendStageError,
+    ARTIFACT_VOICE_DELIVERY_DEFAULTS,
     REQUIRED_ARTIFACT_FIELDS,
 )
 from voice.config import VoiceSettings
@@ -442,12 +443,25 @@ class SophiaLLM(LLM):
         )
 
     def note_backend_request_started(self, user_id: str) -> None:
-        request_start_ms = self._turn_diagnostics.note_backend_request_start(
+        tracker = self._turn_diagnostics
+        was_started = (
+            tracker._turns.get(user_id) is not None
+            and tracker._turns[user_id].backend_request_start_ms is not None
+        )
+        request_start_ms = tracker.note_backend_request_start(
             user_id,
             time.perf_counter(),
         )
         if request_start_ms is None:
             return
+
+        if was_started:
+            logger.info(
+                "[VOICE:LLM] TURN_MERGE_REANCHOR | user_id=%s | backend=%s | "
+                "cancel-and-merge reset telemetry clock for final request",
+                user_id,
+                self.settings.backend_mode,
+            )
 
         logger.info(
             "voice.metric metric=backend_request_start_ms user_id=%s value=%.2f backend=%s",
@@ -629,9 +643,9 @@ class SophiaLLM(LLM):
         user_id = self._resolve_user_id(participant)
         logger.info(
             "[VOICE:LLM] GENERATE_START | user_id=%s | platform=%s | "
-            "ritual=%s | context_mode=%s | message='%s'",
+            "ritual=%s | context_mode=%s | prompt_chars=%d | message='%s'",
             user_id, self._runtime_platform, self._runtime_ritual,
-            self._runtime_context_mode, text[:80],
+            self._runtime_context_mode, len(text), text[:80],
         )
         if not text.strip():
             self.note_stage_error(
@@ -748,6 +762,8 @@ class SophiaLLM(LLM):
         text_parts: list[str] = []
         sequence = 0
         first_token_ms: float | None = None
+        first_event_ms: float | None = None
+        artifact_ms: float | None = None
         artifact_seen = False
         backend_event_seen = False
         progress_started = False
@@ -756,6 +772,7 @@ class SophiaLLM(LLM):
         async for event in self._backend.stream_events(request):
             if not backend_event_seen:
                 backend_event_seen = True
+                first_event_ms = (time.perf_counter() - request_started) * 1000
                 self.note_backend_first_event(request.user_id)
 
             if event.kind == "text":
@@ -806,6 +823,7 @@ class SophiaLLM(LLM):
                     response_text="".join(text_parts),
                     user_text=request.text,
                 )
+                artifact_ms = (time.perf_counter() - request_started) * 1000
                 self.note_backend_completed(request.user_id)
                 await self._emit_transcript_event(
                     "".join(text_parts),
@@ -857,15 +875,44 @@ class SophiaLLM(LLM):
             )
 
         total_ms = (time.perf_counter() - request_started) * 1000
+        response_text = "".join(text_parts)
         logger.info(
             "[VOICE:LLM] GENERATE_COMPLETE | user_id=%s | "
             "response_length=%d | artifact_seen=%s | chunks=%d | total_ms=%.0f",
-            request.user_id, len("".join(text_parts)),
+            request.user_id, len(response_text),
             artifact_seen, sequence, total_ms,
         )
 
+        # Single-line per-turn breakdown so we can see where the time went
+        # without cross-correlating multiple log lines. All durations are
+        # measured from request_started (after user_ended).
+        logger.info(
+            "[TURN_BREAKDOWN] user_id=%s | prompt_chars=%d | response_chars=%d | "
+            "chunks=%d | request_to_first_event_ms=%s | first_event_to_first_text_ms=%s | "
+            "request_to_first_text_ms=%s | first_text_to_artifact_ms=%s | "
+            "request_to_artifact_ms=%.0f | backend=%s",
+            request.user_id,
+            len(request.text),
+            len(response_text),
+            sequence,
+            f"{first_event_ms:.0f}" if first_event_ms is not None else "none",
+            (
+                f"{(first_token_ms - first_event_ms):.0f}"
+                if first_event_ms is not None and first_token_ms is not None
+                else "none"
+            ),
+            f"{first_token_ms:.0f}" if first_token_ms is not None else "none",
+            (
+                f"{(artifact_ms - first_token_ms):.0f}"
+                if artifact_ms is not None and first_token_ms is not None
+                else "none"
+            ),
+            artifact_ms if artifact_ms is not None else total_ms,
+            self.settings.backend_mode,
+        )
+
         return (
-            "".join(text_parts),
+            response_text,
             {"backend_mode": self.settings.backend_mode, "chunk_count": sequence},
             first_token_ms,
         )
@@ -924,7 +971,27 @@ class SophiaLLM(LLM):
                 recoverable=False,
             )
 
-        missing = sorted(REQUIRED_ARTIFACT_FIELDS.difference(artifact))
+        # Voice delivery fields (voice_emotion_primary/secondary/speed) are TTS
+        # metadata. When Claude occasionally omits them the rest of the
+        # artifact is typically well-formed — failing the whole turn would
+        # truncate TTS playback and hide the transcript from the UI even
+        # though the response is already coherent. Fill neutrals here and let
+        # `_normalize_artifact` upgrade them from the user/response signal.
+        artifact_filled = dict(artifact)
+        defaulted: list[str] = []
+        for field, default in ARTIFACT_VOICE_DELIVERY_DEFAULTS.items():
+            if field not in artifact_filled:
+                artifact_filled[field] = default
+                defaulted.append(field)
+        if defaulted:
+            logger.warning(
+                "[VOICE:LLM] ARTIFACT_VOICE_DEFAULTED | fields=%s | "
+                "backend emitted artifact without voice delivery metadata — "
+                "applied neutral defaults so the turn can complete",
+                ",".join(defaulted),
+            )
+
+        missing = sorted(REQUIRED_ARTIFACT_FIELDS.difference(artifact_filled))
         if missing:
             raise BackendStageError(
                 "backend-contract",
@@ -933,7 +1000,7 @@ class SophiaLLM(LLM):
             )
 
         return self._normalize_artifact(
-            dict(artifact),
+            artifact_filled,
             response_text=response_text,
             user_text=user_text,
         )

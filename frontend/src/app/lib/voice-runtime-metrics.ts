@@ -96,6 +96,8 @@ export type VoiceRecentTurnSummary = {
   firstAudioMs: number | null
   falseUserEndedCount: number | null
   duplicatePhaseTotal: number
+  userTranscriptChars: number | null
+  assistantTranscriptChars: number | null
 }
 
 export type VoiceBottleneckDiagnosis = {
@@ -886,12 +888,34 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
 function buildRecentTurns(events: NormalizedVoiceCaptureEvent[]): VoiceRecentTurnSummary[] {
   const completedTurns: VoiceRecentTurnSummary[] = []
   let lastUserTranscriptAtMs: number | null = null
+  let lastUserTranscriptChars: number | null = null
   let lastUserEndedAtMs: number | null = null
   let firstAgentStartedAtMs: number | null = null
+  let lastAssistantTranscriptChars: number | null = null
 
   for (const event of events) {
     if (event.name === "sophia.user_transcript") {
       lastUserTranscriptAtMs = event.atMs
+      const text = asString(eventData(event)?.text)
+      lastUserTranscriptChars = text !== null ? text.length : null
+      continue
+    }
+
+    if (event.name === "sophia.transcript") {
+      const data = eventData(event)
+      const isFinal = data?.is_final === true || data?.final === true
+      const text = asString(data?.text)
+      // Keep a running assistant-transcript length; the final frame wins when
+      // we emit the turn diagnostic below.
+      if (text !== null) {
+        lastAssistantTranscriptChars = text.length
+      }
+      if (isFinal) {
+        // Final frame is the authoritative length for this turn.
+        if (text !== null) {
+          lastAssistantTranscriptChars = text.length
+        }
+      }
       continue
     }
 
@@ -928,14 +952,20 @@ function buildRecentTurns(events: NormalizedVoiceCaptureEvent[]): VoiceRecentTur
       firstAudioMs: asFiniteNumber(data?.first_audio_ms),
       falseUserEndedCount: asFiniteNumber(data?.raw_false_end_count),
       duplicatePhaseTotal,
+      userTranscriptChars: lastUserTranscriptChars,
+      assistantTranscriptChars: lastAssistantTranscriptChars,
     })
 
     lastUserTranscriptAtMs = null
+    lastUserTranscriptChars = null
     lastUserEndedAtMs = null
     firstAgentStartedAtMs = null
+    lastAssistantTranscriptChars = null
   }
 
-  return completedTurns.slice(-4).reverse()
+  // Keep up to 12 turns so a full conversation (typical: 8–12 turns) is
+  // visible in the exported telemetry report.
+  return completedTurns.slice(-12).reverse()
 }
 
 function levelFromThresholdState(

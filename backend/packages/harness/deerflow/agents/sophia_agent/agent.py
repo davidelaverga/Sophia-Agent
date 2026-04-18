@@ -145,14 +145,17 @@ def make_sophia_agent(config: RunnableConfig):
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # Post-chain: prompt assembly, then caching, then title
-    from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+    # Post-chain: prompt assembly (cache-ready but currently disabled) then title
     middlewares.extend(
         [
-            PromptAssemblyMiddleware(),
-            # Prompt caching AFTER assembly — adds cache_control to the assembled
-            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
-            AnthropicPromptCachingMiddleware(ttl="5m"),
+            # Prompt caching is wired up (PromptAssemblyMiddleware can emit a
+            # structured SystemMessage with cache_control on the stable prefix),
+            # but disabled today because Anthropic prompt caching is not active
+            # on this account/model (verified with direct SDK calls: both
+            # cache_read and cache_creation stay at 0 regardless of prefix size
+            # or cache_control placement). When it flips on, set
+            # enable_prompt_caching=True and watch for [PromptCache] HIT lines.
+            PromptAssemblyMiddleware(enable_prompt_caching=False, cache_ttl="5m"),
             SophiaTitleMiddleware(),
         ]
     )
