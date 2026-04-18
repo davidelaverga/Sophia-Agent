@@ -94,7 +94,7 @@ def test_build_builder_progress_description_uses_document_topic():
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
 
     task = (
-        "Create exactly one markdown file at outputs/dangers-of-war.md. "
+        "Create exactly one markdown file at /mnt/user-data/outputs/the-dangers-of-war.md. "
         "Original request: Actually, I need your help, Sofia. Create a document about the dangers of war. "
         "Topic: the dangers of war. "
         "Length: about one page (roughly 450-600 words)."

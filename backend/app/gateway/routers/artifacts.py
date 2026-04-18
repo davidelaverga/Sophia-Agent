@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
 _OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
+_WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
 
 
 class ThreadArtifactListItem(BaseModel):
@@ -72,6 +73,41 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
             return None
     except (zipfile.BadZipFile, KeyError):
         return None
+
+
+def _relative_output_artifact_path(path: str) -> str | None:
+    normalized = path.lstrip("/")
+    if normalized == _OUTPUTS_VIRTUAL_PATH:
+        return ""
+    if normalized.startswith(_OUTPUTS_VIRTUAL_PATH + "/"):
+        return normalized[len(_OUTPUTS_VIRTUAL_PATH) + 1 :]
+    return None
+
+
+def _resolve_artifact_path(thread_id: str, path: str) -> Path:
+    actual_path = resolve_thread_virtual_path(thread_id, path)
+    if actual_path.exists():
+        return actual_path
+
+    relative_output_path = _relative_output_artifact_path(path)
+    if relative_output_path is None:
+        return actual_path
+
+    fallback_virtual_path = _WORKSPACE_OUTPUTS_VIRTUAL_PATH
+    if relative_output_path:
+        fallback_virtual_path = f"{fallback_virtual_path}/{relative_output_path}"
+
+    fallback_path = resolve_thread_virtual_path(thread_id, fallback_virtual_path)
+    if fallback_path.exists():
+        logger.warning(
+            "Artifact missing under outputs, serving workspace/outputs fallback: thread_id=%s requested_path=%s fallback_path=%s",
+            thread_id,
+            path,
+            fallback_path,
+        )
+        return fallback_path
+
+    return actual_path
 
 
 @router.get(
@@ -154,7 +190,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
         skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
         internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-        actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path)
+        actual_skill_path = _resolve_artifact_path(thread_id, skill_file_path)
 
         if not actual_skill_path.exists():
             raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
@@ -180,7 +216,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    actual_path = resolve_thread_virtual_path(thread_id, path)
+    actual_path = _resolve_artifact_path(thread_id, path)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
