@@ -15,7 +15,7 @@ from typing import NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import patch_dangling_tool_call_messages
 from deerflow.agents.sophia_agent.utils import log_middleware
