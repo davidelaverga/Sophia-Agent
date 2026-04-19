@@ -106,6 +106,19 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "</output_contract>"
         )
 
+        sections.append(
+            "<preinstalled_libraries>\n"
+            "The sandbox already has these Python libraries installed. Import them directly — do NOT run pip install:\n"
+            "- PDF: reportlab, fpdf2 (fpdf), pypdf\n"
+            "- Office: python-pptx (pptx), python-docx (docx), openpyxl\n"
+            "- Images: pillow (PIL)\n"
+            "- Charts / data: matplotlib, seaborn, numpy, pandas, duckdb\n"
+            "- Other: markdown, requests, httpx\n"
+            "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
+            "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
+            "</preinstalled_libraries>"
+        )
+
         if task_type == "research":
             sections.append(
                 "<research_output_requirements>\n"
@@ -139,8 +152,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"You have a STRICT budget of {_HARD_CEILING} tool-call turns total. "
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
             "Plan your work to fit within this budget:\n"
-            "- Turn 1: Create the output file with complete content in a single write_file call.\n"
-            "- Turns 2-3: Make targeted edits only if critical fixes are needed.\n"
+            "- For text deliverables (markdown, html, plain text, code): write the complete file in a single write_file_tool call on turn 1.\n"
+            "- For binary deliverables (pdf, pptx, docx, xlsx, png): turn 1 write the generator script, turn 2 run it with bash_tool, turn 3 verify with ls_tool. "
+            "Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
+            "- Make targeted edits only if critical fixes are needed.\n"
             "- Final turn: Call emit_builder_artifact. This is MANDATORY — without it your work is lost.\n"
             "Do NOT iterate endlessly to perfect the output. Ship a complete first draft, then finalize.\n"
             "</completion_instruction>"
