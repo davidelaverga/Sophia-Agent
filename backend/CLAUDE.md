@@ -102,6 +102,8 @@ Notable regression tests:
 - `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, native web tool loading, `present_files` fallback extraction, and default builder model resolution)
 - `tests/test_dangling_tool_call_middleware.py` (repairs Anthropic `tool_use`/`tool_result` pairing on the Sophia companion and builder chains)
 
+Dependency floors: `langchain>=1.2.15` is required so the `_fetch_last_ai_and_tool_messages` helper used by LangChain's `tools_to_model` routing edge returns `(None, [])` on empty/partial states instead of raising `UnboundLocalError` when the Sophia builder triggers parallel tool calls. The bump transitively requires `langchain-core>=1.3.0` and `langgraph>=1.1.8`.
+
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
 
