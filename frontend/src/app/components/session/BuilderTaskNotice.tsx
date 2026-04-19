@@ -33,7 +33,10 @@ const PHASE_META: Record<BuilderTaskV1['phase'], {
 };
 
 const PROGRESSBAR_LABEL = 'Builder progress';
-const LOCAL_STUCK_IDLE_MS = 45_000;
+// Matches backend subagents.executor._STUCK_IDLE_MS. Generous enough to cover
+// long single-LLM iterations on the builder (Sonnet often spends 90–130s on a
+// single generation).
+const LOCAL_STUCK_IDLE_MS = 150_000;
 
 function parseTimestampMs(value: string | undefined): number | null {
   if (!value) {

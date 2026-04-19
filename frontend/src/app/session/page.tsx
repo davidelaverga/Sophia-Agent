@@ -234,6 +234,7 @@ function SessionPageContent() {
     builderArtifact,
     builderTask,
     clearBuilderTask,
+    clearBuilderArtifact,
     cancelBuilderTask,
     isCancellingBuilderTask,
     ingestArtifacts,
@@ -540,7 +541,7 @@ function SessionPageContent() {
     [builderPrimaryFile?.path, resolvedThreadId],
   );
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
-  const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.88);
+  const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
   const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
 
   const handleVoiceDownloadBuilderArtifact = useCallback(() => {
@@ -1009,6 +1010,8 @@ function SessionPageContent() {
                   onOpen={handleOpenArtifactsPanel}
                   downloadHref={builderDownloadHref}
                   onDownload={() => haptic('medium')}
+                  onDismiss={clearBuilderArtifact}
+                  itemCount={builderArtifactLibrary.length || undefined}
                   isNew={hasNewArtifacts}
                 />
               </div>
@@ -1035,6 +1038,8 @@ function SessionPageContent() {
                   onOpen={handleOpenArtifactsPanel}
                   downloadHref={builderDownloadHref}
                   onDownload={() => haptic('medium')}
+                  onDismiss={clearBuilderArtifact}
+                  itemCount={builderArtifactLibrary.length || undefined}
                   isNew={hasNewArtifacts}
                   compact={true}
                 />

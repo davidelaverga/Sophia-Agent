@@ -108,6 +108,35 @@ class TestSophiaStateSchemas:
         assert get_type_hints(SessionStateState, include_extras=True)["messages"] == agent_messages
         assert get_type_hints(TurnCountState, include_extras=True)["messages"] == agent_messages
 
+
+class TestMessageCoercionMiddleware:
+    def _get_middleware(self):
+        from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
+
+        return MessageCoercionMiddleware()
+
+    def test_coerces_role_content_dict_messages(self):
+        from langchain_core.messages import HumanMessage
+
+        mw = self._get_middleware()
+        state = {"messages": [{"role": "user", "content": "Hey, Sofia. How are you?"}]}
+
+        result = mw.before_agent(state, _make_runtime())
+
+        assert result is not None
+        assert len(result["messages"]) == 1
+        assert isinstance(result["messages"][0], HumanMessage)
+        assert result["messages"][0].content == "Hey, Sofia. How are you?"
+        assert result["messages"][0].type == "human"
+
+    def test_skips_already_typed_messages(self):
+        from langchain_core.messages import HumanMessage
+
+        mw = self._get_middleware()
+        state = {"messages": [HumanMessage(content="hello")]}
+
+        assert mw.before_agent(state, _make_runtime()) is None
+
 # --- Helpers ---
 
 def _make_runtime(**context_kwargs):
@@ -273,21 +302,6 @@ class TestFileInjectionMiddleware:
         # Crisis: only soul injected
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
         assert result["system_prompt_blocks"] == ["Soul"]
-
-    def test_cacheable_prefix_count_matches_blocks(self, tmp_path):
-        """Every block pushed by FileInjection is part of the cacheable prefix."""
-        from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
-        soul = self._make_file(tmp_path, "soul.md", "Soul")
-        voice = self._make_file(tmp_path, "voice.md", "Voice")
-        tech = self._make_file(tmp_path, "tech.md", "Tech")
-        mw = FileInjectionMiddleware((soul, False), (voice, True), (tech, True))
-
-        normal = mw.before_agent({"messages": []}, _make_runtime())
-        assert normal["system_prompt_cacheable_prefix_count"] == 3
-
-        crisis = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
-        # Crisis drops voice+tech, so count matches the filtered list.
-        assert crisis["system_prompt_cacheable_prefix_count"] == 1
 
     def test_missing_file_raises_at_init(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -1404,123 +1418,6 @@ class TestPromptAssemblyMiddleware:
         assert "old system" not in msgs[0].content
         assert msgs[1].content == "hello"
 
-    def test_emits_cache_control_when_prefix_count_set(self):
-        """When a cacheable prefix count is set, system message is a list with cache_control
-        on the prefix block and a plain tail block."""
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        mw = PromptAssemblyMiddleware(enable_prompt_caching=True, cache_ttl="5m")
-
-        human_msg = HumanMessage(content="hi")
-        state = {
-            "messages": [human_msg],
-            "system_prompt_blocks": ["SOUL", "VOICE", "TECH", "TONE_BAND", "SKILL"],
-            "system_prompt_cacheable_prefix_count": 3,
-        }
-        request = self._make_model_request([human_msg], state)
-
-        captured = {}
-
-        def handler(req):
-            captured["messages"] = req.messages
-            return MagicMock()
-
-        mw.wrap_model_call(request, handler)
-
-        sys_msg = captured["messages"][0]
-        assert isinstance(sys_msg, SystemMessage)
-        assert isinstance(sys_msg.content, list)
-        assert len(sys_msg.content) == 2
-        prefix, tail = sys_msg.content
-        assert prefix["type"] == "text"
-        assert prefix["cache_control"] == {"type": "ephemeral", "ttl": "5m"}
-        assert "SOUL" in prefix["text"]
-        assert "TECH" in prefix["text"]
-        assert "TONE_BAND" not in prefix["text"]
-        assert tail["type"] == "text"
-        assert "cache_control" not in tail
-        assert "TONE_BAND" in tail["text"]
-        assert "SKILL" in tail["text"]
-
-    def test_no_cache_control_when_prefix_count_zero(self):
-        """Without a cacheable prefix set, system message is a plain string."""
-        from langchain_core.messages import HumanMessage, SystemMessage
-
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        mw = PromptAssemblyMiddleware(enable_prompt_caching=True)
-
-        human_msg = HumanMessage(content="hi")
-        state = {
-            "messages": [human_msg],
-            "system_prompt_blocks": ["A", "B"],
-        }
-        request = self._make_model_request([human_msg], state)
-
-        captured = {}
-
-        def handler(req):
-            captured["messages"] = req.messages
-            return MagicMock()
-
-        mw.wrap_model_call(request, handler)
-
-        sys_msg = captured["messages"][0]
-        assert isinstance(sys_msg, SystemMessage)
-        assert isinstance(sys_msg.content, str)
-
-    def test_no_cache_blocks_when_prefix_equals_block_count(self):
-        """When every block is cacheable, fall back to plain string (no empty tail)."""
-        from langchain_core.messages import HumanMessage
-
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        mw = PromptAssemblyMiddleware(enable_prompt_caching=True)
-
-        human_msg = HumanMessage(content="hi")
-        state = {
-            "messages": [human_msg],
-            "system_prompt_blocks": ["A", "B"],
-            "system_prompt_cacheable_prefix_count": 2,
-        }
-        request = self._make_model_request([human_msg], state)
-
-        captured = {}
-
-        def handler(req):
-            captured["messages"] = req.messages
-            return MagicMock()
-
-        mw.wrap_model_call(request, handler)
-
-        sys_msg = captured["messages"][0]
-        assert isinstance(sys_msg.content, str)
-
-    def test_caching_disabled_emits_plain_string(self):
-        """enable_prompt_caching=False keeps the plain-string format even with prefix set."""
-        from langchain_core.messages import HumanMessage
-
-        from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-        mw = PromptAssemblyMiddleware(enable_prompt_caching=False)
-
-        human_msg = HumanMessage(content="hi")
-        state = {
-            "messages": [human_msg],
-            "system_prompt_blocks": ["A", "B", "C"],
-            "system_prompt_cacheable_prefix_count": 2,
-        }
-        request = self._make_model_request([human_msg], state)
-
-        captured = {}
-
-        def handler(req):
-            captured["messages"] = req.messages
-            return MagicMock()
-
-        mw.wrap_model_call(request, handler)
-
-        sys_msg = captured["messages"][0]
-        assert isinstance(sys_msg.content, str)
-
     def test_patches_interrupted_switch_to_builder_call_before_model(self):
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
@@ -2200,6 +2097,8 @@ class TestBuilderTaskMiddleware:
         assert "<builder_endgame>" in briefing
         assert "emit_builder_artifact" in briefing
         assert "bash, write_file" in briefing
+        assert "/mnt/user-data/outputs/" in briefing
+        assert "Do NOT use relative paths like outputs/report.md" in briefing
 
     def test_adds_research_citation_requirements(self):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware

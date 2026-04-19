@@ -277,9 +277,9 @@ describe('buildVoiceDeveloperMetrics', () => {
           totalSteps: 4,
           completedSteps: 1,
           activeStepTitle: 'Draft outline',
-          idleMs: 60000,
+          idleMs: 260000,
           stuck: true,
-          stuckReason: 'No visible builder progress for 60s. It may be blocked on a tool or looping without advancing the deliverable.',
+          stuckReason: 'No visible builder progress for 4m 20s. It may be blocked on a tool or looping without advancing the deliverable.',
           lastUpdateAt: '2026-04-07T12:00:20.000Z',
           lastProgressAt: '2026-04-07T11:59:20.000Z',
         },
@@ -335,13 +335,13 @@ describe('buildVoiceDeveloperMetrics', () => {
       stage: 'listening',
       events,
       snapshot: buildSnapshot(),
-      nowMs: Date.parse('2026-04-15T04:44:38.597Z'),
+      nowMs: Date.parse('2026-04-15T04:46:30.000Z'),
     });
 
     expect(metrics.builder.phase).toBe('running');
     expect(metrics.builder.stuck).toBe(true);
-    expect(metrics.builder.idleMs).toBeGreaterThanOrEqual(65000);
-    expect(metrics.builder.stuckReason).toMatch(/No visible builder progress for \d+s/i);
+    expect(metrics.builder.idleMs).toBeGreaterThanOrEqual(150000);
+    expect(metrics.builder.stuckReason).toMatch(/No visible builder progress for \d+(m|m \d+s|s)/i);
     expect(metrics.events.builder).toBe(1);
     expect(metrics.counts.builderEvents).toBe(1);
     expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(true);

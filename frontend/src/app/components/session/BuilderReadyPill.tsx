@@ -1,7 +1,7 @@
 'use client';
 
-import { ArrowUpRight, Download } from 'lucide-react';
-import type { MouseEventHandler } from 'react';
+import { ArrowUpRight, Download, X } from 'lucide-react';
+import type { MouseEvent, MouseEventHandler } from 'react';
 
 import { cn } from '../../lib/utils';
 
@@ -10,8 +10,11 @@ type BuilderReadyPillProps = {
   onOpen: () => void;
   downloadHref?: string | null;
   onDownload?: MouseEventHandler<HTMLAnchorElement>;
+  onDismiss?: () => void;
   isNew?: boolean;
   compact?: boolean;
+  /** When >1, the pill badges a multi-file deliverable set (opens the panel for the full library). */
+  itemCount?: number;
   className?: string;
 };
 
@@ -20,10 +23,17 @@ export function BuilderReadyPill({
   onOpen,
   downloadHref,
   onDownload,
+  onDismiss,
   isNew = false,
   compact = false,
+  itemCount,
   className,
 }: BuilderReadyPillProps) {
+  const handleDismissClick = (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    onDismiss?.();
+  };
+  const showCountBadge = typeof itemCount === 'number' && itemCount > 1;
   return (
     <div
       className={cn(
@@ -35,7 +45,9 @@ export function BuilderReadyPill({
       )}
       style={{
         borderColor: 'color-mix(in srgb, var(--sophia-purple) 22%, var(--cosmic-border-soft))',
-        background: 'linear-gradient(180deg, color-mix(in srgb, var(--sophia-purple) 10%, var(--cosmic-panel-soft)), color-mix(in srgb, var(--cosmic-panel) 88%, transparent))',
+        background: compact
+          ? 'linear-gradient(180deg, color-mix(in srgb, var(--sophia-purple) 6%, color-mix(in srgb, var(--cosmic-panel-soft) 62%, transparent)), color-mix(in srgb, var(--cosmic-panel) 58%, transparent))'
+          : 'linear-gradient(180deg, color-mix(in srgb, var(--sophia-purple) 10%, var(--cosmic-panel-soft)), color-mix(in srgb, var(--cosmic-panel) 88%, transparent))',
         boxShadow: isNew
           ? '0 14px 36px color-mix(in srgb, var(--sophia-purple) 16%, transparent)'
           : '0 10px 26px color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
@@ -115,6 +127,18 @@ export function BuilderReadyPill({
             >
               100%
             </span>
+            {showCountBadge && (
+              <span
+                className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
+                style={{
+                  color: 'var(--sophia-purple)',
+                  background: 'color-mix(in srgb, var(--sophia-purple) 16%, transparent)',
+                }}
+                title={`${itemCount} deliverables in this session`}
+              >
+                {itemCount} files
+              </span>
+            )}
           </div>
 
           <p className={cn(compact ? 'mt-0.5 text-[11px]' : 'mt-1 text-[12px]', 'truncate tracking-[0.03em]')} style={{ color: 'var(--cosmic-text)' }}>
@@ -157,6 +181,26 @@ export function BuilderReadyPill({
               <Download className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
               download
             </a>
+          )}
+
+          {onDismiss && (
+            <button
+              type="button"
+              onClick={handleDismissClick}
+              aria-label="Dismiss deliverable"
+              className={cn(
+                'inline-flex items-center justify-center rounded-full border transition-opacity hover:opacity-100',
+                compact ? 'h-5 w-5' : 'h-6 w-6',
+              )}
+              style={{
+                borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',
+                color: 'var(--cosmic-text-whisper)',
+                background: 'color-mix(in srgb, var(--cosmic-panel-soft) 52%, transparent)',
+                opacity: 0.78,
+              }}
+            >
+              <X className={cn(compact ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+            </button>
           )}
         </div>
       </div>

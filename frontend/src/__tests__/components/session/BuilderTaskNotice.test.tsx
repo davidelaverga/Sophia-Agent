@@ -83,14 +83,14 @@ describe('BuilderTaskNotice', () => {
           totalSteps: 4,
           completedSteps: 1,
           stuck: true,
-          stuckReason: 'No visible builder progress for 60s. It may be blocked on a tool or looping without advancing the deliverable.',
-          idleMs: 60000,
+          stuckReason: 'No visible builder progress for 2m 40s. It may be blocked on a tool or looping without advancing the deliverable.',
+          idleMs: 160000,
         }}
       />,
     );
 
     expect(screen.getByText('stalled')).toBeInTheDocument();
-    expect(screen.getAllByText(/No visible builder progress for 60s/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/No visible builder progress for 2m 40s/i).length).toBeGreaterThan(0);
     expect(screen.getByText('25%')).toBeInTheDocument();
   });
 
@@ -116,11 +116,11 @@ describe('BuilderTaskNotice', () => {
       );
 
       act(() => {
-        vi.advanceTimersByTime(45_000);
+        vi.advanceTimersByTime(150_000);
       });
 
       expect(screen.getByText('stalled')).toBeInTheDocument();
-      expect(screen.getAllByText(/No visible builder progress for 1m/i).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/No visible builder progress for 2m/i).length).toBeGreaterThan(0);
     } finally {
       vi.useRealTimers();
     }

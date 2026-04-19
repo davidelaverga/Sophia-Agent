@@ -6,6 +6,10 @@ Creates the Sophia companion agent with its middleware chain.
 import logging
 import os
 
+# Apply defensive langchain patches *before* importing anything that builds
+# the agent graph. See deerflow.agents._langchain_patches for details.
+from deerflow.agents import _langchain_patches  # noqa: F401
+
 from langchain.agents import create_agent
 from langchain.agents.middleware import SummarizationMiddleware
 from langchain_anthropic import ChatAnthropic
@@ -18,6 +22,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSess
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
 from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
@@ -105,53 +110,52 @@ def make_sophia_agent(config: RunnableConfig):
     middlewares = [
         # 1. Infrastructure
         ThreadDataMiddleware(lazy_init=True),
-        # 2. Crisis fast-path (before any expensive middleware)
+        # 2. Normalize message-like dict payloads before middleware inspects them.
+        MessageCoercionMiddleware(),
+        # 3. Crisis fast-path (before any expensive middleware)
         CrisisCheckMiddleware(),
-        # 3. Always-loaded identity files (soul always, voice+techniques skip on crisis)
+        # 4. Always-loaded identity files (soul always, voice+techniques skip on crisis)
         FileInjectionMiddleware(
             (SKILLS_PATH / "soul.md", False),
             (SKILLS_PATH / "voice.md", True),
             (SKILLS_PATH / "techniques.md", True),
         ),
-        # 4. Platform signal
+        # 5. Platform signal
         PlatformContextMiddleware(),
-        # 5. Derive prior completed turns before first-turn-only middleware runs.
+        # 6. Derive prior completed turns before first-turn-only middleware runs.
         TurnCountMiddleware(),
-        # 6-7. User context
+        # 7-8. User context
         UserIdentityMiddleware(user_id),
         SessionStateMiddleware(user_id),
-        # 8-10. Calibration (order matters: tone -> context -> ritual -> skill)
+        # 9-11. Calibration (order matters: tone -> context -> ritual -> skill)
         ToneGuidanceMiddleware(SKILLS_PATH / "tone_guidance.md"),
         ContextAdaptationMiddleware(SKILLS_PATH / "context", context_mode),
         RitualMiddleware(SKILLS_PATH / "rituals", ritual),
-        # 11. Skill routing (reads tone band + ritual from state)
+        # 12. Skill routing (reads tone band + ritual from state)
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
-        # 12. Memory (after ritual+skill set — retrieval biased by both)
+        # 13. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
-        # 13. Builder session tracking (must run before ArtifactMiddleware synthesis)
+        # 14. Builder session tracking (must run before ArtifactMiddleware synthesis)
         BuilderSessionMiddleware(),
-        # 14. Artifact system
+        # 15. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
-        # 15. Deterministic Builder command routing for explicit document requests
+        # 16. Deterministic Builder command routing for explicit document requests
         BuilderCommandMiddleware(),
     ]
 
-    # 16. Summarization (config-driven trigger/keep policy)
+    # 17. Summarization (config-driven trigger/keep policy)
     summarization_middleware = _create_summarization_middleware()
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # Post-chain: prompt assembly (cache-ready but currently disabled) then title
+    # Post-chain: prompt assembly, then caching, then title
+    from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
     middlewares.extend(
         [
-            # Prompt caching is wired up (PromptAssemblyMiddleware can emit a
-            # structured SystemMessage with cache_control on the stable prefix),
-            # but disabled today because Anthropic prompt caching is not active
-            # on this account/model (verified with direct SDK calls: both
-            # cache_read and cache_creation stay at 0 regardless of prefix size
-            # or cache_control placement). When it flips on, set
-            # enable_prompt_caching=True and watch for [PromptCache] HIT lines.
-            PromptAssemblyMiddleware(enable_prompt_caching=False, cache_ttl="5m"),
+            PromptAssemblyMiddleware(),
+            # Prompt caching AFTER assembly — adds cache_control to the assembled
+            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
+            AnthropicPromptCachingMiddleware(ttl="5m"),
             SophiaTitleMiddleware(),
         ]
     )

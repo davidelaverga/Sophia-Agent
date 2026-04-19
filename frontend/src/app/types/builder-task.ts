@@ -1,6 +1,6 @@
 export type BuilderTaskPhaseV1 = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
 
-export type BuilderTaskProgressSourceV1 = 'todos' | 'messages' | 'none';
+export type BuilderTaskProgressSourceV1 = 'todos' | 'messages' | 'iterations' | 'none';
 
 export type BuilderTodoV1 = {
   id?: number;

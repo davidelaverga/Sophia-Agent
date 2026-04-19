@@ -284,7 +284,7 @@ export function parseBuilderTaskPayload(data: unknown): BuilderTaskV1 | null {
     ...(typeof messageIndex === 'number' ? { messageIndex } : {}),
     ...(typeof totalMessages === 'number' ? { totalMessages } : {}),
     ...(typeof progressPercent === 'number' ? { progressPercent } : {}),
-    ...(progressSource === 'todos' || progressSource === 'messages' || progressSource === 'none'
+    ...(progressSource === 'todos' || progressSource === 'messages' || progressSource === 'iterations' || progressSource === 'none'
       ? { progressSource }
       : {}),
     ...(typeof totalSteps === 'number' ? { totalSteps } : {}),

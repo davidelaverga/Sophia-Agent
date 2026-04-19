@@ -190,10 +190,20 @@ async def list_artifacts(thread_id: str) -> ThreadArtifactListResponse:
     if not outputs_path.is_dir():
         raise HTTPException(status_code=400, detail=f"Path is not a directory: {_OUTPUTS_VIRTUAL_PATH}")
 
+    # Filter out builder-internal generator/helper scripts.
+    # Convention (see builder_task.py completion_instruction): scripts that
+    # produce a binary deliverable are named `_generate_<name>.py`,
+    # `_gen_<name>.py`, `_launcher.py`, etc. Those live under outputs/ as
+    # byproducts of the build process but should never be surfaced to the
+    # user as deliverables — the user wants the PDF/PPTX/DOCX, not the
+    # script that made it.
+    def _is_builder_internal(name: str) -> bool:
+        return name.startswith("_") and name.endswith(".py")
+
     files_with_stat = [
         (candidate, candidate.stat())
         for candidate in outputs_path.rglob("*")
-        if candidate.is_file()
+        if candidate.is_file() and not _is_builder_internal(candidate.name)
     ]
     files_with_stat.sort(key=lambda item: item[1].st_mtime, reverse=True)
 
