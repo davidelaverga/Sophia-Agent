@@ -8,6 +8,10 @@ via switch_to_builder, using DeerFlow's sandbox tools.
 import logging
 import os
 
+# Apply defensive langchain patches *before* importing anything that builds
+# the agent graph. See deerflow.agents._langchain_patches for details.
+from deerflow.agents import _langchain_patches  # noqa: F401
+
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
@@ -122,7 +126,7 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         # apart) keeping the connection alive regardless of total generation
         # time.
         streaming=True,
-        timeout=120.0,
+        timeout=240.0,
         max_retries=2,
     )
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)

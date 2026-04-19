@@ -787,7 +787,7 @@ function buildRegressionMarkers(params: {
       key: "builder-stall",
       title: "Builder progress stalled",
       detail: builder.stuckReason ?? "No visible builder progress has been observed recently.",
-      level: (builder.idleMs ?? 0) >= 90000 ? "bad" : "warn",
+      level: (builder.idleMs ?? 0) >= 240000 ? "bad" : "warn",
     })
   }
 
@@ -832,7 +832,7 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
       : null
 
   const progressSourceValue = asString(payload?.progressSource) ?? asString(payload?.progress_source)
-  const progressSource = progressSourceValue === "todos" || progressSourceValue === "messages" || progressSourceValue === "none"
+  const progressSource = progressSourceValue === "todos" || progressSourceValue === "messages" || progressSourceValue === "iterations" || progressSourceValue === "none"
     ? progressSourceValue
     : null
 
@@ -855,7 +855,7 @@ function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: numbe
       inferredIdleMs ?? 0,
     )
     : null
-  const stuck = phase === "running" && ((asBoolean(payload?.stuck) ?? asBoolean(payload?.is_stuck) ?? false) || ((idleMs ?? 0) >= 45000))
+  const stuck = phase === "running" && ((asBoolean(payload?.stuck) ?? asBoolean(payload?.is_stuck) ?? false) || ((idleMs ?? 0) >= 150000))
   const stuckReason = asString(payload?.stuckReason)
     ?? asString(payload?.stuck_reason)
     ?? (stuck

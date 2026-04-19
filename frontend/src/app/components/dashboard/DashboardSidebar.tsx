@@ -17,7 +17,7 @@ import {
   X,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useCallback, useEffect, useMemo, useState, type RefObject } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
@@ -50,6 +50,10 @@ function formatDeleteLabel(text: string) {
   const normalized = text.trim();
   if (!normalized) return 'session';
   return truncatePreview(normalized, 38);
+}
+
+function formatSessionCount(count: number) {
+  return `${count} session${count === 1 ? '' : 's'}`;
 }
 
 function parseSessionTimestamp(value: string | null | undefined): number {
@@ -416,6 +420,147 @@ function useDeleteFeedback() {
   };
 }
 
+function useClearAllFeedback() {
+  const showToast = useUiStore((state) => state.showToast);
+  const [isClearingAll, setIsClearingAll] = useState(false);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+
+  const requestClearAll = useCallback(() => {
+    if (isClearingAll) return;
+    haptic('light');
+    setConfirmClearAll(true);
+  }, [isClearingAll]);
+
+  const cancelClearAll = useCallback(() => {
+    if (isClearingAll) return;
+    setConfirmClearAll(false);
+  }, [isClearingAll]);
+
+  const runClearAll = useCallback(async ({
+    count,
+    onClearAll,
+  }: {
+    count: number;
+    onClearAll: () => boolean | void | Promise<boolean | void>;
+  }) => {
+    if (isClearingAll) return;
+
+    setIsClearingAll(true);
+    await wait(DELETE_FEEDBACK_DELAY_MS);
+
+    let cleared = false;
+    try {
+      cleared = (await onClearAll()) !== false;
+    } catch {
+      cleared = false;
+    }
+
+    setIsClearingAll(false);
+    setConfirmClearAll(false);
+
+    if (cleared) {
+      haptic('success');
+      showToast({
+        message: `Cleared ${formatSessionCount(count)}.`,
+        variant: 'success',
+        durationMs: 3200,
+      });
+      return;
+    }
+
+    haptic('error');
+    showToast({
+      message: "Couldn't clear all sessions.",
+      variant: 'error',
+    });
+  }, [isClearingAll, showToast]);
+
+  return {
+    isClearingAll,
+    confirmClearAll,
+    requestClearAll,
+    cancelClearAll,
+    runClearAll,
+  };
+}
+
+function ClearAllSessionsButton({
+  count,
+  isClearingAll,
+  confirmClearAll,
+  onRequestClearAll,
+  onCancelClearAll,
+  onConfirmClearAll,
+}: {
+  count: number;
+  isClearingAll: boolean;
+  confirmClearAll: boolean;
+  onRequestClearAll: () => void;
+  onCancelClearAll: () => void;
+  onConfirmClearAll: () => void;
+}) {
+  if (count === 0) return null;
+
+  if (isClearingAll) {
+    return (
+      <span
+        aria-live="polite"
+        className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium"
+        style={{
+          color: 'var(--error)',
+          background: 'color-mix(in srgb, var(--error) 12%, transparent)',
+        }}
+      >
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Clearing...
+      </span>
+    );
+  }
+
+  if (confirmClearAll) {
+    return (
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          aria-label="Confirm clear all sessions"
+          onClick={onConfirmClearAll}
+          className="cosmic-focus-ring inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium transition-colors duration-150"
+          style={{
+            color: 'var(--error)',
+            background: 'color-mix(in srgb, var(--error) 12%, transparent)',
+          }}
+        >
+          <Trash2 className="h-3 w-3" />
+          Delete {count}?
+        </button>
+        <button
+          type="button"
+          aria-label="Cancel clear all sessions"
+          onClick={onCancelClearAll}
+          className="cosmic-focus-ring inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors duration-150 hover:bg-white/[0.06]"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      aria-label="Clear all sessions"
+      onClick={onRequestClearAll}
+      className="cosmic-focus-ring inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium transition-colors duration-150 hover:bg-white/[0.06]"
+      style={{ color: 'var(--cosmic-text-whisper)' }}
+      title={`Delete all ${formatSessionCount(count)}`}
+    >
+      <Trash2 className="h-3 w-3" />
+      Clear all
+    </button>
+  );
+}
+
 // =============================================================================
 // LEFT SIDEBAR: Sessions
 // =============================================================================
@@ -434,17 +579,21 @@ export function RecentSessionsSidebar({
   const { user } = useAuth();
   const router = useRouter();
   const historySessions = useSessionHistoryStore((s) => s.sessions);
+  const clearHistory = useSessionHistoryStore((s) => s.clearHistory);
   const removeHistorySession = useSessionHistoryStore((s) => s.removeSession);
   const recentSessions = useSessionStore(selectRecentSessions);
   const isLoadingSessions = useSessionStore(selectIsLoadingSessions);
   const refreshRecentSessions = useSessionStore((s) => s.refreshRecentSessions);
   const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
   const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
+  const clearSession = useSessionStore((s) => s.clearSession);
+  const removeAllSessions = useSessionStore((s) => s.removeAllSessions);
   const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
   const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const { deletingKey, runDelete } = useDeleteFeedback();
+  const { isClearingAll, confirmClearAll, requestClearAll, cancelClearAll, runClearAll } = useClearAllFeedback();
   const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   const panelSweepRef = useSweepGlow();
@@ -492,6 +641,25 @@ export function RecentSessionsSidebar({
     return rows.filter((r) => r.description.toLowerCase().includes(q));
   }, [rows, query]);
 
+  const handleClearAll = useCallback(async () => {
+    const hasBackendRows = rows.some((row) => row.key.startsWith('backend-'));
+
+    if (hasBackendRows) {
+      const deleted = await removeAllSessions(resolvedUserId);
+      if (!deleted) {
+        return false;
+      }
+    }
+
+    clearHistory();
+
+    if (currentSession?.sessionId && rows.some((row) => row.sessionId === currentSession.sessionId)) {
+      clearSession();
+    }
+
+    return true;
+  }, [rows, removeAllSessions, resolvedUserId, clearHistory, currentSession?.sessionId, clearSession]);
+
   const sessionsBadge = badgeCount > 9 ? '9+' : String(badgeCount);
 
   return (
@@ -527,16 +695,26 @@ export function RecentSessionsSidebar({
                 </span>
               ) : null}
             </div>
-            <button
-              type="button"
-              onClick={() => { haptic('light'); onToggle(); }}
-              aria-label="Collapse sessions"
-              title="Collapse sessions"
-              className="cosmic-focus-ring flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-200 hover:bg-white/[0.06]"
-              style={{ color: 'var(--cosmic-text-muted)' }}
-            >
-              <ChevronRight className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <ClearAllSessionsButton
+                count={badgeCount}
+                isClearingAll={isClearingAll}
+                confirmClearAll={confirmClearAll}
+                onRequestClearAll={requestClearAll}
+                onCancelClearAll={cancelClearAll}
+                onConfirmClearAll={() => void runClearAll({ count: badgeCount, onClearAll: handleClearAll })}
+              />
+              <button
+                type="button"
+                onClick={() => { haptic('light'); onToggle(); }}
+                aria-label="Collapse sessions"
+                title="Collapse sessions"
+                className="cosmic-focus-ring flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-200 hover:bg-white/[0.06]"
+                style={{ color: 'var(--cosmic-text-muted)' }}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           {/* Search */}
@@ -711,11 +889,28 @@ interface MobileBottomSheetProps {
 }
 
 export function MobileBottomSheet({ isOpen, onClose, title, icon, children }: MobileBottomSheetProps) {
+  // Fire a soft haptic the first time the sheet opens so the user feels the
+  // surface rise. We use a ref-based latch so re-renders don't retrigger it.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      wasOpenRef.current = true;
+      haptic('light');
+    } else if (!isOpen && wasOpenRef.current) {
+      wasOpenRef.current = false;
+    }
+  }, [isOpen]);
+
+  const handleClose = useCallback(() => {
+    haptic('selection');
+    onClose();
+  }, [onClose]);
+
   if (!isOpen) return null;
 
   return (
     <div className="fixed inset-0 z-50 lg:hidden">
-      <div className="cosmic-modal-backdrop absolute inset-0" onClick={onClose} />
+      <div className="cosmic-modal-backdrop absolute inset-0" onClick={handleClose} />
       <div className={cn(
         'absolute bottom-0 left-0 right-0',
         'cosmic-surface-panel-strong rounded-t-3xl border-t',
@@ -731,7 +926,7 @@ export function MobileBottomSheet({ isOpen, onClose, title, icon, children }: Mo
             <h3 className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>{title}</h3>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="cosmic-chrome-button cosmic-focus-ring rounded-xl p-2 transition-colors"
           >
             <X className="h-5 w-5" style={{ color: 'var(--cosmic-text-muted)' }} />
@@ -753,16 +948,20 @@ export function MobileSessionsContent() {
   const { user } = useAuth();
   const router = useRouter();
   const historySessions = useSessionHistoryStore((s) => s.sessions);
+  const clearHistory = useSessionHistoryStore((s) => s.clearHistory);
   const removeHistorySession = useSessionHistoryStore((s) => s.removeSession);
   const recentSessions = useSessionStore(selectRecentSessions);
   const refreshRecentSessions = useSessionStore((s) => s.refreshRecentSessions);
   const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
   const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
+  const clearSession = useSessionStore((s) => s.clearSession);
+  const removeAllSessions = useSessionStore((s) => s.removeAllSessions);
   const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
   const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const { deletingKey, runDelete } = useDeleteFeedback();
+  const { isClearingAll, confirmClearAll, requestClearAll, cancelClearAll, runClearAll } = useClearAllFeedback();
   const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   useEffect(() => {
@@ -806,6 +1005,25 @@ export function MobileSessionsContent() {
     return rows.filter((r) => r.description.toLowerCase().includes(q));
   }, [rows, query]);
 
+  const handleClearAll = useCallback(async () => {
+    const hasBackendRows = rows.some((row) => row.key.startsWith('backend-'));
+
+    if (hasBackendRows) {
+      const deleted = await removeAllSessions(resolvedUserId);
+      if (!deleted) {
+        return false;
+      }
+    }
+
+    clearHistory();
+
+    if (currentSession?.sessionId && rows.some((row) => row.sessionId === currentSession.sessionId)) {
+      clearSession();
+    }
+
+    return true;
+  }, [rows, removeAllSessions, resolvedUserId, clearHistory, currentSession?.sessionId, clearSession]);
+
   if (rows.length === 0) {
     return (
       <p className="py-12 text-center text-sm" style={{ color: 'var(--cosmic-text-whisper)' }}>
@@ -816,6 +1034,17 @@ export function MobileSessionsContent() {
 
   return (
     <div>
+      <div className="mb-3 flex justify-end">
+        <ClearAllSessionsButton
+          count={rows.length}
+          isClearingAll={isClearingAll}
+          confirmClearAll={confirmClearAll}
+          onRequestClearAll={requestClearAll}
+          onCancelClearAll={cancelClearAll}
+          onConfirmClearAll={() => void runClearAll({ count: rows.length, onClearAll: handleClearAll })}
+        />
+      </div>
+
       {/* Search */}
       <div className="relative mb-3">
         <Search

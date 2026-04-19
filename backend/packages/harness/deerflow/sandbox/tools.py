@@ -631,16 +631,38 @@ def ensure_thread_directories_exist(runtime: ToolRuntime[ContextT, ThreadState] 
 
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, command: str) -> str:
-    """Execute a bash command in a Linux environment.
+    """Execute a shell command. The shell depends on the host OS — read the rules carefully.
 
+    Shell detection (auto):
+      - Linux / macOS (production sandbox): real bash. Full bash syntax is available.
+      - Windows (local dev only): PowerShell 7 (pwsh). Bash-isms will fail.
 
-    - Use `python` to run Python code.
-    - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
-    - Use `python -m pip` (inside the virtual environment) to install Python packages.
+    Universal rules (both OSes):
+      - Use `python` — NEVER `python3`. On Windows `python3` triggers the Microsoft Store
+        alias and hangs/fails with "Python was not found".
+      - For any multi-line content (scripts, JSON, YAML, markdown), use the `write_file`
+        tool instead of shell redirection. Do NOT use heredocs (`cat << EOF`).
+      - Prefer absolute paths under `/mnt/user-data/...`.
+      - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
+      - Install Python packages with `python -m pip install <pkg>`.
+
+    Windows-specific (PowerShell) rules:
+      - Heredocs (`<<EOF`) do NOT work — PowerShell parses `<<` as redirection.
+      - Chain commands with `;` not `&&`. PowerShell 7 supports `&&` but `;` is safer.
+      - Avoid complex nested quoting in `-c` flags; write a script file instead.
+      - Forward slashes in paths work fine; PowerShell normalizes them.
+
+    Unix-specific (bash) rules:
+      - Full POSIX shell is available. `&&`, `||`, pipes, subshells all work.
+      - Heredocs work, but `write_file` is still preferred for readability.
+
+    If a command fails with a cryptic parse error on Windows, it is almost always a
+    bash-ism. Switch to `write_file` + `python script.py` instead of trying to fix the
+    shell syntax.
 
     Args:
         description: Explain why you are running this command in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
-        command: The bash command to execute. Always use absolute paths for files and directories.
+        command: The command to execute. Always use absolute paths for files and directories.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)

@@ -708,9 +708,9 @@ function buildBuilderTaskEvent(
     : typeof data.progressPercent === 'number'
       ? data.progressPercent
       : undefined;
-  const progressSource = data.progress_source === 'todos' || data.progress_source === 'messages' || data.progress_source === 'none'
+  const progressSource = data.progress_source === 'todos' || data.progress_source === 'messages' || data.progress_source === 'iterations' || data.progress_source === 'none'
     ? data.progress_source
-    : data.progressSource === 'todos' || data.progressSource === 'messages' || data.progressSource === 'none'
+    : data.progressSource === 'todos' || data.progressSource === 'messages' || data.progressSource === 'iterations' || data.progressSource === 'none'
       ? data.progressSource
       : undefined;
   const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;

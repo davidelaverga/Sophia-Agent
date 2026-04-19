@@ -27,7 +27,20 @@ from deerflow.subagents.config import SubagentConfig
 
 logger = logging.getLogger(__name__)
 
-_STUCK_IDLE_MS = 45000
+# Idle threshold before declaring a subagent stuck. Generous enough to cover
+# long single-LLM iterations on the builder (Sonnet often spends 90–130s on a
+# single generation when writing large deliverables at max_tokens=8192).
+_STUCK_IDLE_MS = 150_000
+
+# Synthetic progress uses the turn budget as denominator; kept in sync with
+# BuilderTaskMiddleware._HARD_CEILING. Capped below 100% so real completion
+# (todos_progress == 100 or status == COMPLETED) remains visually distinct.
+_SYNTHETIC_PROGRESS_BUDGET_TURNS = 12
+_SYNTHETIC_PROGRESS_CAP = 90
+
+# How often the heartbeat loop bumps last_update_at while the agent streams.
+# Only touches heartbeat (liveness), never last_progress_at (real progress).
+_HEARTBEAT_INTERVAL_SECONDS = 5.0
 
 
 class SubagentStatus(Enum):
@@ -224,6 +237,24 @@ def build_subagent_progress_payload(
         progress_source = "todos"
     elif result.status == SubagentStatus.COMPLETED:
         progress_percent = 100
+
+    # Synthetic fallback: when no todos populate progress and the subagent is
+    # still running, advance the bar based on iteration count vs the turn
+    # budget. Prevents the UI from sitting on the early-stage placeholder
+    # (~22%) for the entire run when the builder doesn't update write_todos.
+    if (
+        result.status == SubagentStatus.RUNNING
+        and result.iteration_count > 0
+        and (progress_percent is None or progress_percent < _SYNTHETIC_PROGRESS_CAP)
+    ):
+        synthetic = min(
+            _SYNTHETIC_PROGRESS_CAP,
+            round((result.iteration_count / _SYNTHETIC_PROGRESS_BUDGET_TURNS) * _SYNTHETIC_PROGRESS_CAP),
+        )
+        if progress_percent is None or synthetic > progress_percent:
+            progress_percent = synthetic
+            if progress_source == "none":
+                progress_source = "iterations"
 
     heartbeat_anchor = result.last_update_at or result.started_at
     progress_anchor = result.last_progress_at or result.started_at
@@ -695,7 +726,19 @@ class SubagentExecutor:
             config.disallowed_tools,
         )
 
-        logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
+        # Log tool count truthfully — when a pre_built_agent is provided, the
+        # executor's own `tools` list is irrelevant (the agent has its tools
+        # baked in). Logging "0 tools" in that case misleads debugging.
+        if self.pre_built_agent is not None:
+            logger.info(
+                f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} "
+                f"with pre-built agent (executor tools={len(self.tools)} ignored)"
+            )
+        else:
+            logger.info(
+                f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} "
+                f"with {len(self.tools)} tools"
+            )
 
     @staticmethod
     def _append_ai_message(result: SubagentResult, message: AIMessage) -> None:
@@ -836,6 +879,39 @@ class SubagentExecutor:
 
         def _timed_out_externally() -> bool:
             return result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT
+
+        heartbeat_stop_event = asyncio.Event()
+
+        async def _heartbeat_loop() -> None:
+            """Bump last_update_at while the agent streams so the UI sees liveness
+            even when a single LLM call exceeds the chunk interval. Never touches
+            last_progress_at — real progress still gates the stall detector."""
+            try:
+                while not heartbeat_stop_event.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            heartbeat_stop_event.wait(),
+                            timeout=_HEARTBEAT_INTERVAL_SECONDS,
+                        )
+                        return
+                    except asyncio.TimeoutError:
+                        pass
+                    if result.status != SubagentStatus.RUNNING:
+                        return
+                    result.last_update_at = datetime.now()
+                    try:
+                        persist_background_task_status_payload(result)
+                    except Exception:  # pragma: no cover - persistence is best-effort
+                        logger.debug(
+                            "[trace=%s] Subagent %s heartbeat persist failed",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=True,
+                        )
+            except asyncio.CancelledError:
+                return
+
+        heartbeat_task = asyncio.create_task(_heartbeat_loop())
 
         try:
             if cancel_event and cancel_event.is_set():
@@ -1044,6 +1120,14 @@ class SubagentExecutor:
             result.error_type = type(e).__qualname__
             result.completed_at = datetime.now()
             result.last_update_at = result.completed_at
+        finally:
+            heartbeat_stop_event.set()
+            if not heartbeat_task.done():
+                heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except (asyncio.CancelledError, Exception):  # pragma: no cover - cleanup path
+                pass
 
         persist_background_task_status_payload(result)
         return result

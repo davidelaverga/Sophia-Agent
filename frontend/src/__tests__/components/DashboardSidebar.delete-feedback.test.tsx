@@ -8,8 +8,11 @@ const showToastMock = vi.fn();
 const refreshRecentSessionsMock = vi.fn();
 const restoreOpenSessionMock = vi.fn();
 const viewEndedSessionMock = vi.fn();
+const clearSessionMock = vi.fn();
+const removeAllSessionsMock = vi.fn();
 const removeOpenSessionMock = vi.fn();
 const removeRecentSessionMock = vi.fn();
+const clearHistoryMock = vi.fn();
 const removeHistorySessionMock = vi.fn();
 
 const sessionStoreState = {
@@ -18,6 +21,8 @@ const sessionStoreState = {
   refreshRecentSessions: refreshRecentSessionsMock,
   restoreOpenSession: restoreOpenSessionMock,
   viewEndedSession: viewEndedSessionMock,
+  clearSession: clearSessionMock,
+  removeAllSessions: removeAllSessionsMock,
   removeOpenSession: removeOpenSessionMock,
   removeRecentSession: removeRecentSessionMock,
   session: null,
@@ -25,6 +30,7 @@ const sessionStoreState = {
 
 const historyStoreState = {
   sessions: [],
+  clearHistory: clearHistoryMock,
   removeSession: removeHistorySessionMock,
 };
 
@@ -64,8 +70,11 @@ describe('DashboardSidebar delete feedback', () => {
     refreshRecentSessionsMock.mockReset();
     restoreOpenSessionMock.mockReset();
     viewEndedSessionMock.mockReset();
+    clearSessionMock.mockReset();
+    removeAllSessionsMock.mockReset();
     removeOpenSessionMock.mockReset();
     removeRecentSessionMock.mockReset();
+    clearHistoryMock.mockReset();
     removeHistorySessionMock.mockReset();
 
     sessionStoreState.recentSessions = [
@@ -108,6 +117,29 @@ describe('DashboardSidebar delete feedback', () => {
 
     expect(showToastMock).toHaveBeenCalledWith(expect.objectContaining({
       message: 'Deleted Preparing for investor meeting.',
+      variant: 'success',
+    }));
+    expect(hapticMock).toHaveBeenCalledWith('success');
+  });
+
+  it('shows clear-all confirmation and success toast when removing all sessions', async () => {
+    removeAllSessionsMock.mockResolvedValue({ ok: true, deleted_count: 1, session_ids: ['sess-1'] });
+    const user = userEvent.setup();
+
+    render(<RecentSessionsSidebar isExpanded={true} onToggle={vi.fn()} />);
+
+    await user.click(screen.getByLabelText('Clear all sessions'));
+    await user.click(screen.getByLabelText('Confirm clear all sessions'));
+
+    expect(screen.getByText('Clearing...')).toBeInTheDocument();
+
+    await waitFor(() => {
+      expect(removeAllSessionsMock).toHaveBeenCalledWith(undefined);
+    });
+
+    expect(clearHistoryMock).toHaveBeenCalledTimes(1);
+    expect(showToastMock).toHaveBeenCalledWith(expect.objectContaining({
+      message: 'Cleared 1 session.',
       variant: 'success',
     }));
     expect(hapticMock).toHaveBeenCalledWith('success');

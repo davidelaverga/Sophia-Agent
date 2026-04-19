@@ -86,8 +86,8 @@ def test_normalize_builder_request_preserves_real_research_task():
 def test_resolve_builder_limits_shortens_demo_budget():
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
 
-    assert switch_module._resolve_builder_limits(True) == (16, 45)
-    assert switch_module._resolve_builder_limits(False) == (50, 120)
+    assert switch_module._resolve_builder_limits(True) == (40, 45)
+    assert switch_module._resolve_builder_limits(False) == (150, 600)
 
 
 def test_build_builder_progress_description_uses_document_topic():

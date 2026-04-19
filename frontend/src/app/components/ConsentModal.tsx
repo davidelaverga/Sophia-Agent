@@ -1,9 +1,10 @@
 'use client'
 
 import { X, Shield, AlertCircle } from 'lucide-react'
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 
 import { useCopy, useTranslation } from '../copy'
+import { haptic } from '../hooks/useHaptics'
 import { useAuth } from '../providers'
 
 interface ConsentModalProps {
@@ -39,6 +40,7 @@ export default function ConsentModal({ onAccept, onClose }: ConsentModalProps) {
       })
 
       if (response.ok) {
+        haptic('success')
         onAccept()
       } else {
         // Log error but still allow user to continue
@@ -62,6 +64,11 @@ export default function ConsentModal({ onAccept, onClose }: ConsentModalProps) {
     }
   }
 
+  const handleClose = useCallback(() => {
+    haptic('light')
+    onClose()
+  }, [onClose])
+
   return (
     <div className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-sophia-bg/70 backdrop-blur-sm p-0 sm:p-4">
       <div className="w-full max-w-md sm:max-w-lg bg-sophia-surface/95 backdrop-blur-xl border border-sophia-surface-border rounded-t-3xl sm:rounded-3xl max-h-[90vh] flex flex-col shadow-soft">
@@ -72,7 +79,7 @@ export default function ConsentModal({ onAccept, onClose }: ConsentModalProps) {
             <h3 className="text-lg font-semibold text-sophia-text">{t('consentModal.title')}</h3>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="p-2 -mr-2 text-sophia-text2 hover:text-sophia-text transition-colors rounded-lg hover:bg-sophia-purple/10"
             aria-label="Close"
           >
@@ -140,7 +147,7 @@ export default function ConsentModal({ onAccept, onClose }: ConsentModalProps) {
         {/* Footer buttons - fixed at bottom */}
         <div className="flex gap-3 p-5 sm:p-6 pt-4 flex-shrink-0 border-t border-sophia-surface-border pb-safe">
           <button
-            onClick={onClose}
+            onClick={handleClose}
             disabled={isSubmitting}
             className="flex-1 h-12 px-4 border border-sophia-surface-border text-sophia-text2 rounded-xl bg-transparent transition-all hover:bg-sophia-purple/10 disabled:opacity-50 disabled:cursor-not-allowed active:scale-[0.98]"
           >

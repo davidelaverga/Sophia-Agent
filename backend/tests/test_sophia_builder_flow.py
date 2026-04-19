@@ -766,6 +766,8 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
 
     companion_types = [type(mw).__name__ for mw in captured_companion["middleware"]]
+    assert "MessageCoercionMiddleware" in companion_types
+    assert companion_types.index("MessageCoercionMiddleware") < companion_types.index("CrisisCheckMiddleware")
     assert "BuilderSessionMiddleware" in companion_types
     assert "SummarizationMiddleware" in companion_types
 

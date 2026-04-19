@@ -234,6 +234,7 @@ function SessionPageContent() {
     builderArtifact,
     builderTask,
     clearBuilderTask,
+    clearBuilderArtifact,
     cancelBuilderTask,
     isCancellingBuilderTask,
     ingestArtifacts,
@@ -540,7 +541,7 @@ function SessionPageContent() {
     [builderPrimaryFile?.path, resolvedThreadId],
   );
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
-  const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.88);
+  const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
   const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
 
   const handleVoiceDownloadBuilderArtifact = useCallback(() => {
@@ -879,7 +880,10 @@ function SessionPageContent() {
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-          <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
+          {/* Voice telemetry panel is intentionally hidden in production sessions. It served its
+              diagnostic purpose during the voice transport migration. Keep the component mounted
+              path commented for quick re-enable when benchmarking regressions. */}
+          {false && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
 
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
               A radial vignette that darkens the center (where text lives) and fades to
@@ -1009,6 +1013,8 @@ function SessionPageContent() {
                   onOpen={handleOpenArtifactsPanel}
                   downloadHref={builderDownloadHref}
                   onDownload={() => haptic('medium')}
+                  onDismiss={clearBuilderArtifact}
+                  itemCount={builderArtifactLibrary.length || undefined}
                   isNew={hasNewArtifacts}
                 />
               </div>
@@ -1035,6 +1041,8 @@ function SessionPageContent() {
                   onOpen={handleOpenArtifactsPanel}
                   downloadHref={builderDownloadHref}
                   onDownload={() => haptic('medium')}
+                  onDismiss={clearBuilderArtifact}
+                  itemCount={builderArtifactLibrary.length || undefined}
                   isNew={hasNewArtifacts}
                   compact={true}
                 />

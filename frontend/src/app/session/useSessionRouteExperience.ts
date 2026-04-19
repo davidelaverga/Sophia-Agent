@@ -120,6 +120,11 @@ export function useSessionRouteExperience({
     });
   }, []);
 
+  const clearBuilderArtifact = useCallback(() => {
+    setBuilderArtifact(null);
+    storeBuilderArtifact(null);
+  }, [storeBuilderArtifact]);
+
   /** Setter that rejects stale SSE events for tasks the user already dismissed. */
   const guardedSetBuilderTask = useCallback((task: BuilderTaskV1 | null) => {
     if (task?.taskId && dismissedTaskIdsRef.current.has(task.taskId)) return;
@@ -438,6 +443,7 @@ export function useSessionRouteExperience({
     builderArtifact,
     builderTask,
     clearBuilderTask,
+    clearBuilderArtifact,
     cancelBuilderTask,
     isCancellingBuilderTask,
     ingestArtifacts,

@@ -17,6 +17,29 @@ dependencies = [
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
     "mem0ai>=1.0.9",
+    # Builder document-generation runtime.
+    # These libraries are imported by skill scripts the builder executes
+    # (ppt-generation, data-analysis, image-generation) and by any PDF/DOCX
+    # deliverable the model decides to produce. Pre-installing them keeps the
+    # builder from burning its turn budget on `pip install` inside the sandbox,
+    # which in Render routinely trips the 12-turn hard ceiling or the
+    # Anthropic HTTP read timeout.
+    "pillow>=10.4.0",
+    "python-pptx>=1.0.2",
+    "python-docx>=1.1.2",
+    "openpyxl>=3.1.5",
+    "pypdf>=5.1.0",
+    "reportlab>=4.2.5",
+    "fpdf2>=2.8.1",
+    "markdown>=3.7",
+    "duckdb>=1.1.3",
+    "requests>=2.32.3",
+    # Visualization runtime — matplotlib/seaborn charts embedded in PDFs,
+    # numpy/pandas for any data wrangling the builder needs before rendering.
+    "matplotlib>=3.9.2",
+    "seaborn>=0.13.2",
+    "numpy>=2.1.0",
+    "pandas>=2.2.3",
 ]
 
 [dependency-groups]

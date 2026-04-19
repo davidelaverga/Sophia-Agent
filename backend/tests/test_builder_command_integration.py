@@ -123,8 +123,8 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
             name="general-purpose",
             description="General helper",
             system_prompt="Base system prompt",
-            max_turns=50,
-            timeout_seconds=120,
+            max_turns=150,
+            timeout_seconds=600,
         ),
     )
     monkeypatch.setattr(
@@ -163,8 +163,8 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     assert captured["owner_id"] == "builder-user"
     assert captured["executor_kwargs"]["thread_id"] == "thread-direct-doc"
     assert captured["executor_kwargs"]["parent_model"] == "test-parent-model"
-    assert captured["executor_kwargs"]["config"].max_turns == 50
-    assert captured["executor_kwargs"]["config"].timeout_seconds == 120
+    assert captured["executor_kwargs"]["config"].max_turns == 150
+    assert captured["executor_kwargs"]["config"].timeout_seconds == 600
     assert captured["executor_kwargs"]["extra_configurable"]["delegation_context"]["task_type"] == "document"
     assert cleaned_task_ids == [tool_call["id"]]
 

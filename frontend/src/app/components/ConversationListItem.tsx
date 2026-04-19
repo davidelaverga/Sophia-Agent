@@ -9,8 +9,10 @@
 "use client"
 
 import { Mic, MessageCircle, Layers, Cloud, Trash2, Clock, ChevronRight } from "lucide-react"
+import { useCallback } from "react"
 
 import { useTranslation } from "../copy"
+import { haptic } from "../hooks/useHaptics"
 import { formatLocalizedRelativeTime } from "../lib/format-time-localized"
 
 export interface ConversationItem {
@@ -79,10 +81,21 @@ export function ConversationListItem({
     locale
   )
 
+  const handleOpen = useCallback(() => {
+    haptic('light')
+    onClick()
+  }, [onClick])
+
+  const handleDelete = useCallback((event: React.MouseEvent) => {
+    event.stopPropagation()
+    haptic('medium')
+    onDelete(event)
+  }, [onDelete])
+
   return (
     <button
       key={id}
-      onClick={onClick}
+      onClick={handleOpen}
       className="group w-full flex items-start gap-3 p-3.5 rounded-xl bg-sophia-bg/20 hover:bg-sophia-bg/40 border border-transparent hover:border-sophia-surface-border transition-all duration-200 text-left"
     >
       {/* Mode indicator icon */}
@@ -107,10 +120,12 @@ export function ConversationListItem({
             </span>
           </div>
           
-          {/* Delete button */}
+          {/* Delete button — the extended ::before reaches a ~40px touch target
+              without changing the visual size. On desktop the button stays hidden
+              behind `group-hover`; on touch (`:focus-within`) it stays reachable. */}
           <button
-            onClick={onDelete}
-            className="opacity-0 group-hover:opacity-100 p-1.5 hover:bg-sophia-error/10 rounded-lg transition-all flex-shrink-0 border border-transparent hover:border-sophia-error/20"
+            onClick={handleDelete}
+            className="relative opacity-0 group-hover:opacity-100 focus-visible:opacity-100 p-1.5 hover:bg-sophia-error/10 rounded-lg transition-all flex-shrink-0 border border-transparent hover:border-sophia-error/20 before:absolute before:-inset-2.5 before:content-[''] before:rounded-xl"
             title={t("welcomeBack.deleteConversationTitle")}
           >
             <Trash2 className="w-4 h-4 text-sophia-error/60 hover:text-sophia-error" />

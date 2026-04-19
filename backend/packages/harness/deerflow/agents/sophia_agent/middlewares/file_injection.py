@@ -21,10 +21,6 @@ logger = logging.getLogger(__name__)
 class FileInjectionState(AgentState):
     skip_expensive: NotRequired[bool]
     system_prompt_blocks: NotRequired[list[str]]
-    # Number of leading blocks in system_prompt_blocks that are stable across
-    # turns (safe to cache via Anthropic prompt caching). Set by this
-    # middleware and read by PromptAssemblyMiddleware.
-    system_prompt_cacheable_prefix_count: NotRequired[int]
 
 
 class FileInjectionMiddleware(AgentMiddleware[FileInjectionState]):
@@ -69,13 +65,5 @@ class FileInjectionMiddleware(AgentMiddleware[FileInjectionState]):
         # accumulation across turns via the LangGraph checkpointer.
         # All subsequent middlewares extend from state, which now contains
         # only the current turn's blocks.
-        #
-        # The files injected here (soul.md, voice.md, techniques.md) are
-        # immutable across a user's lifetime, so we mark them as the cacheable
-        # prefix. PromptAssemblyMiddleware uses this count to place Anthropic
-        # cache_control after these blocks exactly.
         log_middleware("FileInjection", f"{len(blocks)} files injected (crisis={is_crisis})", _t0)
-        return {
-            "system_prompt_blocks": blocks,
-            "system_prompt_cacheable_prefix_count": len(blocks),
-        }
+        return {"system_prompt_blocks": blocks}

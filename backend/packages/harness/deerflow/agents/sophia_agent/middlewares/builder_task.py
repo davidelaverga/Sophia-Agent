@@ -106,6 +106,19 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "</output_contract>"
         )
 
+        sections.append(
+            "<preinstalled_libraries>\n"
+            "The sandbox already has these Python libraries installed. Import them directly — do NOT run pip install:\n"
+            "- PDF: reportlab, fpdf2 (fpdf), pypdf\n"
+            "- Office: python-pptx (pptx), python-docx (docx), openpyxl\n"
+            "- Images: pillow (PIL)\n"
+            "- Charts / data: matplotlib, seaborn, numpy, pandas, duckdb\n"
+            "- Other: markdown, requests, httpx\n"
+            "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
+            "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
+            "</preinstalled_libraries>"
+        )
+
         if task_type == "research":
             sections.append(
                 "<research_output_requirements>\n"
@@ -131,7 +144,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Completion instruction — always present, includes budget so the model
         # plans from turn 0 instead of discovering the limit mid-loop.
-        _HARD_CEILING = 12
+        # MUST stay in sync with BuilderArtifactMiddleware._HARD_CEILING in
+        # builder_artifact.py — otherwise the model's budget math lies and it
+        # over-commits to retries past its advertised limit.
+        _HARD_CEILING = 20
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
 
         sections.append(
@@ -139,8 +155,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"You have a STRICT budget of {_HARD_CEILING} tool-call turns total. "
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
             "Plan your work to fit within this budget:\n"
-            "- Turn 1: Create the output file with complete content in a single write_file call.\n"
-            "- Turns 2-3: Make targeted edits only if critical fixes are needed.\n"
+            "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
+            "- For text deliverables (markdown, html, plain text, code): write the complete file in a single write_file_tool call. Do NOT split the same file across multiple write_file_tool calls — if output risks exceeding the write budget, ship a tighter draft instead of fragmenting.\n"
+            "- For binary deliverables (pdf, pptx, docx, xlsx, png): the DELIVERABLE IS THE BINARY, NOT THE SCRIPT. You MUST:\n"
+            "    (a) Turn 2: write ONE generator script to /mnt/user-data/outputs/_generate_<name>.py that produces the whole binary end-to-end. Keep the script under 120 lines with minimal styling — a tight script generates 3-5x faster than an elaborate one, and time saved here is time you have to recover from errors. If content risks exceeding ~120 lines, split into data.json + a short generator script in two sequential write_file_tool calls.\n"
+            "    (b) Turn 3: run it with bash_tool (e.g. `python /mnt/user-data/outputs/_generate_<name>.py`). This step is MANDATORY — skipping it leaves the user with a useless .py file.\n"
+            "    (c) Turn 4: verify the binary exists with ls_tool on /mnt/user-data/outputs/. If the binary is missing or bash_tool returned an error, fix the script and re-run — BUT at most 2 fix-and-retry cycles. After 2 failed retries, call emit_builder_artifact with whatever partial deliverable is on disk (the generator .py or a degraded binary), set confidence<=0.5, and put a clear explanation in companion_tone_hint. NEVER exit without calling emit_builder_artifact.\n"
+            "    (d) emit_builder_artifact.artifact_path MUST point to the BINARY file (e.g. .pdf, .pptx, .png) — never to the generator .py script. The .py may appear in supporting_files, but artifact_path must be the final deliverable the user asked for.\n"
+            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
+            "- After each meaningful step (write_file, successful bash run), call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
+            "- Make targeted edits only if critical fixes are needed.\n"
             "- Final turn: Call emit_builder_artifact. This is MANDATORY — without it your work is lost.\n"
             "Do NOT iterate endlessly to perfect the output. Ship a complete first draft, then finalize.\n"
             "</completion_instruction>"
@@ -157,13 +181,18 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             if remaining <= 3:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
-                    "Your NEXT action MUST be emit_builder_artifact. "
-                    "Ship what you have NOW.\n"
+                    "Your NEXT action MUST be emit_builder_artifact — DO NOT call write_todos, "
+                    "write_file, bash_tool, or any other tool on this turn. "
+                    "Ship what you have NOW, even if partial. "
+                    "Use artifact_path pointing to the best file that exists on disk; "
+                    "if only a generator .py exists, emit that with confidence<=0.4 and "
+                    "explain in companion_tone_hint.\n"
                 )
             elif remaining <= 6:
                 escalation += (
                     "WARNING: Running low on turns. Wrap up edits and call "
-                    "emit_builder_artifact within the next 1-2 turns.\n"
+                    "emit_builder_artifact within the next 1-2 turns. "
+                    "Stop re-planning with write_todos; that wastes a turn.\n"
                 )
             else:
                 escalation += (

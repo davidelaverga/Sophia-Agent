@@ -8,11 +8,11 @@ minimal result when the builder ends with plain text (no tool call).
 import logging
 import time
 from pathlib import Path
-from typing import Any, NotRequired, override
+from typing import Any, Awaitable, Callable, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import hook_config
+from langchain.agents.middleware.types import ModelRequest, hook_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -129,6 +129,60 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         history = list(state.get("builder_tool_turn_summaries", []) or [])
         history.append(summary)
         return history[-12:]
+
+    # Ceiling enforcement — MUST stay in sync with _HARD_CEILING in after_model
+    # and with builder_task.py's _HARD_CEILING. When the model is within this
+    # many turns of termination, we force Anthropic tool_choice to emit so the
+    # model literally cannot call any other tool. Prompt-level escalation is
+    # not reliable mid-retry-loop; the API-level constraint is.
+    _FORCE_EMIT_REMAINING = 2
+    _CEILING_FOR_FORCE = 20
+
+    @staticmethod
+    def _should_force_emit(state: BuilderArtifactState) -> bool:
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        remaining = BuilderArtifactMiddleware._CEILING_FOR_FORCE - non_artifact_turns
+        return remaining <= BuilderArtifactMiddleware._FORCE_EMIT_REMAINING and non_artifact_turns > 0
+
+    @staticmethod
+    def _forced_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces emit_builder_artifact."""
+        return {"type": "tool", "name": "emit_builder_artifact"}
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Any],
+    ) -> Any:
+        """Force emit_builder_artifact tool_choice when ceiling is imminent."""
+        if self._should_force_emit(request.state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+                "(non_artifact_turns=%s, ceiling=%s)",
+                request.state.get("builder_non_artifact_turns"),
+                self._CEILING_FOR_FORCE,
+            )
+            request = request.override(tool_choice=self._forced_tool_choice())
+        return handler(request)
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[Any]],
+    ) -> Any:
+        """Async variant — same logic as wrap_model_call."""
+        if self._should_force_emit(request.state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+                "(non_artifact_turns=%s, ceiling=%s)",
+                request.state.get("builder_non_artifact_turns"),
+                self._CEILING_FOR_FORCE,
+            )
+            request = request.override(tool_choice=self._forced_tool_choice())
+        return await handler(request)
+
     @hook_config(can_jump_to=["end"])
     @override
     def after_model(self, state: BuilderArtifactState, runtime: Runtime) -> dict | None:
@@ -185,6 +239,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_task_started_at_ms": 0,
                         "jump_to": "end",
                     }
 
@@ -194,6 +249,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
                 # Has tool calls but none are emit_builder_artifact -- agent loop continues
                 non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+                # Record task start wall-clock on the first non-emit turn so
+                # the ceiling fallback can scan ONLY files produced during
+                # this task (prevents promoting a stale file from a prior
+                # builder task that ran in the same thread).
+                builder_task_started_at_ms = state.get("builder_task_started_at_ms")
+                if not isinstance(builder_task_started_at_ms, (int, float)) or builder_task_started_at_ms <= 0:
+                    builder_task_started_at_ms = int(time.time() * 1000)
                 history = self._append_turn_summary(
                     state,
                     {
@@ -204,33 +266,111 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"
 
-                # Hard ceiling: force end before hitting the recursion limit
-                _HARD_CEILING = 12
+                # Hard ceiling: force end before hitting the recursion limit.
+                # Binary deliverables (PDF/PPTX/DOCX) frequently need:
+                #   1. write_todos
+                #   2. write_file (generator script)
+                #   3. bash (run) — may fail and need retries
+                #   4. bash (verify / ls)
+                #   5. emit_builder_artifact
+                # On a tricky script, retries can eat 6-8 turns easily.
+                # 20 gives bash room to recover; below that we were force-stopping
+                # on healthy builds that just had one or two failed runs.
+                _HARD_CEILING = 20
                 if non_artifact_turns >= _HARD_CEILING:
                     logger.warning(
                         "BuilderArtifact: hard ceiling reached at turn=%d, tools=%s — forcing end with fallback",
                         non_artifact_turns,
                         joined_names,
                     )
-                    fallback = {
-                        "artifact_path": None,
-                        "artifact_type": "unknown",
-                        "artifact_title": "Build task force-stopped",
-                        "steps_completed": non_artifact_turns,
-                        "decisions_made": [],
-                        "companion_summary": (
-                            f"The builder made {non_artifact_turns} edits but didn't finish cleanly. "
-                            "The work-in-progress files may still be useful."
-                        ),
-                        "companion_tone_hint": "Apologetic — builder ran out of budget.",
-                        "user_next_action": "Check the output files and let me know what to fix.",
-                        "confidence": 0.2,
-                    }
+                    # Best-effort: scan the outputs dir for a real binary
+                    # deliverable (pdf/pptx/docx/xlsx/png/html/zip) that the
+                    # builder already produced but never emitted. If we find
+                    # one, promote it to artifact_path so the user gets the
+                    # real file instead of "force-stopped" with no download.
+                    promoted_path: str | None = None
+                    promoted_type = "unknown"
+                    try:
+                        thread_data_local = state.get("thread_data") or {}
+                        outputs_host_path_local = (
+                            thread_data_local.get("outputs_path")
+                            if isinstance(thread_data_local, dict)
+                            else None
+                        )
+                        if outputs_host_path_local:
+                            outputs_root_local = Path(outputs_host_path_local)
+                            if outputs_root_local.is_dir():
+                                # Preferred extensions, in priority order
+                                _PROMOTE_EXTS = (
+                                    ".pdf", ".pptx", ".docx", ".xlsx",
+                                    ".png", ".jpg", ".jpeg", ".svg",
+                                    ".html", ".zip",
+                                )
+                                candidates = [
+                                    p for p in outputs_root_local.rglob("*")
+                                    if p.is_file()
+                                    and not p.name.startswith("_")
+                                    and p.suffix.lower() in _PROMOTE_EXTS
+                                ]
+                                # Only promote files produced during THIS task.
+                                # Subtract a small grace window (5s) to absorb
+                                # clock skew between builder and host.
+                                if builder_task_started_at_ms:
+                                    min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
+                                    candidates = [
+                                        p for p in candidates
+                                        if p.stat().st_mtime >= min_mtime
+                                    ]
+                                if candidates:
+                                    # Most recently modified wins
+                                    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                                    best = candidates[0]
+                                    rel = best.relative_to(outputs_root_local).as_posix()
+                                    promoted_path = f"/mnt/user-data/outputs/{rel}"
+                                    ext = best.suffix.lower().lstrip(".")
+                                    promoted_type = ext or "unknown"
+                    except Exception as exc:  # noqa: BLE001 — best-effort only
+                        logger.warning(
+                            "BuilderArtifact: ceiling fallback scan failed error=%s",
+                            exc,
+                        )
+
+                    if promoted_path:
+                        fallback = {
+                            "artifact_path": promoted_path,
+                            "artifact_type": promoted_type,
+                            "artifact_title": "Build task completed (recovered)",
+                            "steps_completed": non_artifact_turns,
+                            "decisions_made": [],
+                            "companion_summary": (
+                                "The builder ran long and didn't call emit cleanly, "
+                                "but the deliverable is on disk — I'm surfacing it now."
+                            ),
+                            "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
+                            "user_next_action": "Open the file and let me know if it lands.",
+                            "confidence": 0.5,
+                        }
+                    else:
+                        fallback = {
+                            "artifact_path": None,
+                            "artifact_type": "unknown",
+                            "artifact_title": "Build task force-stopped",
+                            "steps_completed": non_artifact_turns,
+                            "decisions_made": [],
+                            "companion_summary": (
+                                f"The builder made {non_artifact_turns} edits but didn't finish cleanly. "
+                                "No final deliverable was produced."
+                            ),
+                            "companion_tone_hint": "Apologetic — builder ran out of budget.",
+                            "user_next_action": "Tell me what to try differently and I'll run it again.",
+                            "confidence": 0.2,
+                        }
                     return {
                         "builder_result": fallback,
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
+                        "builder_task_started_at_ms": 0,
                         "jump_to": "end",
                     }
 
@@ -243,6 +383,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_non_artifact_turns": non_artifact_turns,
                     "builder_last_tool_names": tool_names,
                     "builder_tool_turn_summaries": history,
+                    "builder_task_started_at_ms": builder_task_started_at_ms,
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback

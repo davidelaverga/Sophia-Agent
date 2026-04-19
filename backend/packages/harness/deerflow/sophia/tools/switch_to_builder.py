@@ -738,8 +738,20 @@ def _build_demo_builder_task() -> str:
 
 
 def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int]:
-    """Return recursion and timeout budgets for the delegated Builder task."""
-    if demo_mode:
-        return 16, 45
+    """Return recursion and timeout budgets for the delegated Builder task.
 
-    return 50, 120
+    Budget must be large enough for Sonnet to generate multi-page documents
+    with images/charts and still call emit_builder_artifact. A single streamed
+    LLM turn can easily take 90-150s for a 5-page PDF, so the overall budget
+    needs substantial headroom above one turn.
+
+    `max_turns` is forwarded to LangGraph as `recursion_limit`. Because the
+    Sophia middleware chain yields multiple graph super-steps per logical
+    tool call (~5 per turn with before/after hooks + prompt assembly), we
+    size the budget well above the _HARD_CEILING=12 prompt guidance so the
+    agent does not abort with GraphRecursionError on a normal deliverable.
+    """
+    if demo_mode:
+        return 40, 45
+
+    return 150, 600

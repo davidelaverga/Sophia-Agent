@@ -1,5 +1,6 @@
 "use client"
 
+import { haptic } from "../hooks/useHaptics"
 import { useModeSwitch } from "../hooks/useModeSwitch"
 import { useUiStore, type FocusMode } from "../stores/ui-store"
 
@@ -16,9 +17,20 @@ export function ModeToggle({ opacity = 1, isBusy = false }: { opacity?: number; 
 
   function handleSelect(mode: FocusMode) {
     if (mode === currentMode) return
-    if (isBusy) return
-    if (mode === "voice" && !canSwitchToVoice.canSwitch) return
-    if (mode === "text" && !canSwitchToChat.canSwitch) return
+    if (isBusy) {
+      // Tactile ack that the tap was noticed even though the switch is blocked.
+      haptic('error')
+      return
+    }
+    if (mode === "voice" && !canSwitchToVoice.canSwitch) {
+      haptic('error')
+      return
+    }
+    if (mode === "text" && !canSwitchToChat.canSwitch) {
+      haptic('error')
+      return
+    }
+    haptic('selection')
     setMode(mode)
     setManualOverride(true)
   }
