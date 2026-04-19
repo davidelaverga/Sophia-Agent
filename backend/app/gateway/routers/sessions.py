@@ -117,6 +117,12 @@ class SessionDeleteResponse(BaseModel):
     session_id: str
 
 
+class SessionBulkDeleteResponse(BaseModel):
+    ok: bool = True
+    deleted_count: int
+    session_ids: list[str]
+
+
 _REQUEST_PREFIX_PATTERNS = (
     re.compile(r".*?\b(?:can|could|would)\s+you\s+help\s+me\s+(?:with|on|about)\s+", re.IGNORECASE),
     re.compile(r".*?\b(?:can|could|would)\s+you\s+help\s+me\s+to\s+", re.IGNORECASE),
@@ -439,6 +445,32 @@ async def update_session(
         )
 
     return _record_to_info(record)
+
+
+@router.delete("/bulk", response_model=SessionBulkDeleteResponse)
+async def delete_all_sessions(
+    user_id: str = Query(default="dev-user"),
+) -> SessionBulkDeleteResponse:
+    """Delete all persisted session records for the resolved user."""
+    normalized_user_id = _normalize_user_id(user_id)
+    deleted_records = _store.delete_all(normalized_user_id)
+
+    if not deleted_records:
+        legacy_user_id = _legacy_user_id_for(normalized_user_id)
+        if legacy_user_id is not None:
+            deleted_records = _store.delete_all(legacy_user_id)
+
+    if deleted_records:
+        from app.gateway.inactivity_watcher import unregister_thread
+
+        for record in deleted_records:
+            unregister_thread(record.thread_id)
+
+    return SessionBulkDeleteResponse(
+        ok=True,
+        deleted_count=len(deleted_records),
+        session_ids=[record.session_id for record in deleted_records],
+    )
 
 
 @router.delete("/{session_id}", response_model=SessionDeleteResponse)

@@ -149,7 +149,7 @@ export function SessionConversationPane({
 
       <div className="flex-1 overflow-y-auto scroll-pb-4 [-webkit-overflow-scrolling:touch] [&::-webkit-scrollbar]:w-1 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--cosmic-border)] [&::-webkit-scrollbar-track]:bg-transparent" style={{ scrollbarColor: 'var(--cosmic-border) transparent' }}>
         {messages.length === 0 && isInitializingChat ? (
-          <div className="p-4 pb-6 max-w-3xl lg:max-w-4xl mx-auto animate-pulse">
+          <div className="px-4 pt-16 pb-6 sm:pt-4 max-w-3xl lg:max-w-4xl mx-auto animate-pulse">
             <div className="max-w-[70%] rounded-2xl border px-4 py-3" style={{ background: 'var(--cosmic-panel-soft)', borderColor: 'var(--cosmic-border-soft)' }}>
               <div className="flex items-center gap-2 mb-2">
                 <div className="h-6 w-6 rounded-full" style={{ background: 'var(--cosmic-panel-accent)' }} />
@@ -171,7 +171,7 @@ export function SessionConversationPane({
         ) : (
           <div
             data-onboarding="session-conversation"
-            className="p-4 pb-6 space-y-5 max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto"
+            className="px-4 pt-16 pb-6 sm:pt-4 space-y-5 max-w-3xl lg:max-w-4xl xl:max-w-5xl 2xl:max-w-6xl mx-auto"
             role="log"
             aria-live="polite"
             aria-label="Conversation with Sophia"

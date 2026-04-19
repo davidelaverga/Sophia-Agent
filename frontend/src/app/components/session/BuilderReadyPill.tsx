@@ -3,6 +3,7 @@
 import { ArrowUpRight, Download, X } from 'lucide-react';
 import type { MouseEvent, MouseEventHandler } from 'react';
 
+import { haptic } from '../../hooks/useHaptics';
 import { cn } from '../../lib/utils';
 
 type BuilderReadyPillProps = {
@@ -31,7 +32,16 @@ export function BuilderReadyPill({
 }: BuilderReadyPillProps) {
   const handleDismissClick = (event: MouseEvent<HTMLButtonElement>) => {
     event.stopPropagation();
+    haptic('selection');
     onDismiss?.();
+  };
+  const handleOpenClick = () => {
+    haptic('light');
+    onOpen();
+  };
+  const handleDownloadClick: MouseEventHandler<HTMLAnchorElement> = (event) => {
+    haptic('success');
+    onDownload?.(event);
   };
   const showCountBadge = typeof itemCount === 'number' && itemCount > 1;
   return (
@@ -100,7 +110,7 @@ export function BuilderReadyPill({
       <div className={cn('relative flex items-center pr-1', compact ? 'gap-2' : 'gap-2.5')}>
         <button
           type="button"
-          onClick={onOpen}
+          onClick={handleOpenClick}
           className="min-w-0 flex-1 text-left transition-opacity hover:opacity-100"
           style={{ opacity: 0.98 }}
         >
@@ -149,7 +159,7 @@ export function BuilderReadyPill({
         <div className={cn('flex shrink-0 items-center gap-1.5', compact ? 'pb-1.5' : 'pb-2')}>
           <button
             type="button"
-            onClick={onOpen}
+            onClick={handleOpenClick}
             className={cn(
               'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] lowercase transition-opacity hover:opacity-100',
               compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
@@ -167,7 +177,7 @@ export function BuilderReadyPill({
           {downloadHref && (
             <a
               href={downloadHref}
-              onClick={onDownload}
+              onClick={handleDownloadClick}
               className={cn(
                 'inline-flex items-center gap-1 rounded-full border tracking-[0.08em] lowercase transition-opacity hover:opacity-100',
                 compact ? 'px-2 py-0.5 text-[9px]' : 'px-2.5 py-1 text-[10px]',
@@ -188,9 +198,15 @@ export function BuilderReadyPill({
               type="button"
               onClick={handleDismissClick}
               aria-label="Dismiss deliverable"
+              // Visual footprint stays minimal (compact 20px / regular 24px), but the
+              // ::before extends a full 44×44 tap area on touch devices so mobile taps
+              // don't miss and accidentally re-open the pill.
               className={cn(
-                'inline-flex items-center justify-center rounded-full border transition-opacity hover:opacity-100',
-                compact ? 'h-5 w-5' : 'h-6 w-6',
+                'relative inline-flex items-center justify-center rounded-full border transition-opacity hover:opacity-100',
+                "before:absolute before:content-['']",
+                compact
+                  ? 'h-5 w-5 before:-inset-[12px]'
+                  : 'h-6 w-6 before:-inset-[10px]',
               )}
               style={{
                 borderColor: 'color-mix(in srgb, var(--cosmic-border-soft) 88%, transparent)',

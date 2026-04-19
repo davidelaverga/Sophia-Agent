@@ -1,8 +1,9 @@
 "use client";
 
 import { Wifi, WifiOff, RotateCw, AlertTriangle } from "lucide-react";
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
+import { haptic } from "../hooks/useHaptics";
 import { errorCopy } from "../lib/error-copy";
 import { cn } from "../lib/utils";
 import { useChatStore } from "../stores/chat-store";
@@ -14,6 +15,16 @@ export function ConnectionStatusBanner() {
   const retryStream = useChatStore((state) => state.retryStream);
   const dismissInterrupted = useChatStore((state) => state.dismissInterrupted);
   const connectivityStatus = useConnectivityStore((state) => state.status);
+
+  const handleRetry = useCallback(() => {
+    haptic('medium');
+    retryStream();
+  }, [retryStream]);
+
+  const handleDismiss = useCallback(() => {
+    haptic('light');
+    dismissInterrupted();
+  }, [dismissInterrupted]);
 
   const state = useMemo(() => {
     const isOffline = connectivityStatus === "offline";
@@ -67,7 +78,7 @@ export function ConnectionStatusBanner() {
         {state === "offline" && (
           <button
             type="button"
-            onClick={retryStream}
+            onClick={handleRetry}
             aria-label="Retry connection"
             className={cn(
               "rounded-lg px-2.5 py-1 text-xs font-medium",
@@ -84,7 +95,7 @@ export function ConnectionStatusBanner() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={retryStream}
+              onClick={handleRetry}
               aria-label="Retry last reply"
               className={cn(
                 "rounded-lg px-2.5 py-1 text-xs font-medium",
@@ -97,7 +108,7 @@ export function ConnectionStatusBanner() {
             </button>
             <button
               type="button"
-              onClick={dismissInterrupted}
+              onClick={handleDismiss}
               aria-label="Dismiss notification"
               className={cn(
                 "rounded-lg px-2.5 py-1 text-xs font-medium",

@@ -61,6 +61,12 @@ export interface SessionDeleteResponse {
   session_id: string;
 }
 
+export interface SessionBulkDeleteResponse {
+  ok: boolean;
+  deleted_count: number;
+  session_ids: string[];
+}
+
 // ============================================================================
 // HELPERS
 // ============================================================================
@@ -473,6 +479,23 @@ export async function deleteSessionRecord(
 
   return fetchWithAuth<SessionDeleteResponse>(
     `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
+    { method: 'DELETE' }
+  );
+}
+
+/**
+ * Delete all persisted session records for the current user.
+ */
+export async function deleteAllSessionRecords(
+  userId?: string
+): Promise<ApiResponse<SessionBulkDeleteResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionBulkDeleteResponse>(
+    `${SESSIONS_BASE}/bulk${params.size > 0 ? `?${params.toString()}` : ''}`,
     { method: 'DELETE' }
   );
 }

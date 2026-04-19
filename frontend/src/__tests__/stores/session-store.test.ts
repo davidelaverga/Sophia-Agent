@@ -10,6 +10,7 @@ const getOpenSessionsMock = vi.fn();
 const listSessionsMock = vi.fn();
 const getSessionMock = vi.fn();
 const deleteSessionRecordMock = vi.fn();
+const deleteAllSessionRecordsMock = vi.fn();
 const endSessionMock = vi.fn();
 const clearChatSessionMock = vi.fn();
 const loadSessionMock = vi.fn();
@@ -30,6 +31,7 @@ vi.mock('../../app/lib/api/sessions-api', () => ({
   listSessions: (...args: unknown[]) => listSessionsMock(...args),
   getSession: (...args: unknown[]) => getSessionMock(...args),
   deleteSessionRecord: (...args: unknown[]) => deleteSessionRecordMock(...args),
+  deleteAllSessionRecords: (...args: unknown[]) => deleteAllSessionRecordsMock(...args),
   endSession: (...args: unknown[]) => endSessionMock(...args),
   isError: (result: { success: boolean }) => !result.success,
 }));
@@ -56,6 +58,7 @@ describe('Session Store', () => {
     listSessionsMock.mockReset();
     getSessionMock.mockReset();
     deleteSessionRecordMock.mockReset();
+    deleteAllSessionRecordsMock.mockReset();
     endSessionMock.mockReset();
     clearChatSessionMock.mockReset();
     loadSessionMock.mockReset();
@@ -64,6 +67,7 @@ describe('Session Store', () => {
     listSessionsMock.mockResolvedValue({ success: true, data: { sessions: [], total: 0 } });
     getSessionMock.mockResolvedValue({ success: false, error: 'missing', code: 'NOT_FOUND' });
     deleteSessionRecordMock.mockResolvedValue({ success: true, data: { ok: true, session_id: 'sess-1' } });
+    deleteAllSessionRecordsMock.mockResolvedValue({ success: true, data: { ok: true, deleted_count: 0, session_ids: [] } });
     endSessionMock.mockResolvedValue({ success: true, data: { ended_at: '2026-04-15T00:10:00.000Z', turn_count: 2 } });
     loadSessionMock.mockResolvedValue(true);
 
@@ -362,6 +366,87 @@ describe('Session Store', () => {
       expect(useSessionStore.getState().lastOpenSessionsFetchAt).toBeNull();
       expect(clearChatSessionMock).toHaveBeenCalledTimes(1);
       expect(endSessionMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('removeAllSessions', () => {
+    it('should bulk delete persisted sessions and clear local state', async () => {
+      const { createSession, updateFromBackend, removeAllSessions } = useSessionStore.getState();
+
+      createSession('dev-user', 'prepare', 'gaming');
+      updateFromBackend('sess-1', 'thread-1');
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'prepare',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 2,
+          },
+        ],
+        recentSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'prepare',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 2,
+          },
+        ],
+        lastOpenSessionsFetchAt: Date.now(),
+      });
+      deleteAllSessionRecordsMock.mockResolvedValue({
+        success: true,
+        data: { ok: true, deleted_count: 1, session_ids: ['sess-1'] },
+      });
+
+      const deleted = await removeAllSessions('dev-user');
+
+      expect(deleted).toEqual({ ok: true, deleted_count: 1, session_ids: ['sess-1'] });
+      expect(deleteAllSessionRecordsMock).toHaveBeenCalledWith('dev-user');
+      expect(useSessionStore.getState().openSessions).toEqual([]);
+      expect(useSessionStore.getState().recentSessions).toEqual([]);
+      expect(useSessionStore.getState().session).toBeNull();
+      expect(useSessionStore.getState().lastOpenSessionsFetchAt).toBeNull();
+      expect(clearChatSessionMock).toHaveBeenCalledTimes(1);
+      expect(invalidateActiveSessionCacheMock).toHaveBeenCalledTimes(1);
+    });
+
+    it('should preserve local state when bulk deletion fails', async () => {
+      const { removeAllSessions } = useSessionStore.getState();
+      deleteAllSessionRecordsMock.mockResolvedValue({
+        success: false,
+        error: 'boom',
+        code: 'SERVER_ERROR',
+      });
+
+      useSessionStore.setState({
+        openSessions: [
+          {
+            session_id: 'sess-1',
+            thread_id: 'thread-1',
+            session_type: 'prepare',
+            preset_context: 'gaming',
+            status: 'open',
+            started_at: '2026-04-15T00:00:00.000Z',
+            updated_at: '2026-04-15T00:05:00.000Z',
+            turn_count: 2,
+          },
+        ],
+      });
+
+      const deleted = await removeAllSessions('dev-user');
+
+      expect(deleted).toBeNull();
+      expect(useSessionStore.getState().openSessions).toHaveLength(1);
+      expect(clearChatSessionMock).not.toHaveBeenCalled();
     });
   });
 

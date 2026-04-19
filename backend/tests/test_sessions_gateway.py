@@ -97,6 +97,65 @@ def test_delete_session_removes_persisted_record(isolated_session_store):
     assert open_response.json() == {"sessions": [], "count": 0}
 
 
+def test_delete_all_sessions_removes_all_records_and_unregisters_threads(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-open",
+            thread_id="thread-open",
+            user_id="dev-user",
+            status="open",
+            updated_at="2026-04-15T00:01:00+00:00",
+        )
+    )
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-ended",
+            thread_id="thread-ended",
+            user_id="dev-user",
+            status="ended",
+            updated_at="2026-04-15T00:02:00+00:00",
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister_thread:
+        response = client.delete("/api/v1/sessions/bulk?user_id=dev-user")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "deleted_count": 2,
+        "session_ids": ["session-ended", "session-open"],
+    }
+    assert isolated_session_store.get("dev-user", "session-open") is None
+    assert isolated_session_store.get("dev-user", "session-ended") is None
+    mock_unregister_thread.assert_any_call("thread-open")
+    mock_unregister_thread.assert_any_call("thread-ended")
+    assert mock_unregister_thread.call_count == 2
+
+
+def test_delete_all_sessions_falls_back_to_legacy_dev_user_records(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="legacy-session",
+            thread_id="legacy-thread",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister_thread:
+        response = client.delete("/api/v1/sessions/bulk?user_id=real-user-123")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True,
+        "deleted_count": 1,
+        "session_ids": ["legacy-session"],
+    }
+    assert isolated_session_store.get("dev-user", "legacy-session") is None
+    mock_unregister_thread.assert_called_once_with("legacy-thread")
+
+
 def test_delete_session_returns_404_for_unknown_session():
     response = client.delete("/api/v1/sessions/missing-session?user_id=dev-user")
 

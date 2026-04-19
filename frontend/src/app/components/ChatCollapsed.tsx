@@ -1,8 +1,10 @@
 "use client"
 
 import { MessageSquare, ChevronRight } from "lucide-react"
+import { useCallback } from "react"
 
 import { useTranslation } from "../copy"
+import { haptic } from "../hooks/useHaptics"
 import { useModeSwitch } from "../hooks/useModeSwitch"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
 
@@ -33,10 +35,15 @@ export function ChatCollapsed() {
   const isDisabled = !canSwitchToChat.canSwitch
   const tooltipMessage = canSwitchToChat.message || t("collapsed.chat.tooltipFallback")
 
+  const handleClick = useCallback(() => {
+    haptic('selection')
+    switchToChat()
+  }, [switchToChat])
+
   return (
     <button
       type="button"
-      onClick={switchToChat}
+      onClick={handleClick}
       disabled={isDisabled}
       title={tooltipMessage}
       className="w-full group rounded-2xl bg-sophia-surface p-3 sm:p-4 shadow-soft hover:shadow-md transition-all duration-300 animate-fadeIn disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:shadow-soft"

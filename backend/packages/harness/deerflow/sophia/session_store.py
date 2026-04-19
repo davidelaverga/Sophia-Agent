@@ -129,6 +129,25 @@ class SessionStore:
         path.unlink()
         return True
 
+    def delete_all(self, user_id: str) -> list[SessionRecord]:
+        """Delete all session records for a user and return the deleted records."""
+        user_dir = self._user_dir(user_id)
+        if not user_dir.is_dir():
+            return []
+
+        deleted_records: list[SessionRecord] = []
+        for path in user_dir.glob("*.json"):
+            record = self._read(path)
+            if record is not None:
+                deleted_records.append(record)
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                continue
+
+        deleted_records.sort(key=lambda record: record.updated_at, reverse=True)
+        return deleted_records
+
     def list_open(self, user_id: str) -> list[SessionRecord]:
         """Return all resumable sessions for a user, newest first."""
         return [

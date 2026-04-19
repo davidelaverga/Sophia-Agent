@@ -11,6 +11,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 
 import { invalidateActiveSessionCache } from '../hooks/useSessionStart';
 import {
+  deleteAllSessionRecords,
   deleteSessionRecord,
   endSession as endSessionAPI,
   getOpenSessions as fetchOpenSessions,
@@ -63,6 +64,7 @@ interface SessionState {
   viewEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode) => void;
   removeOpenSession: (sessionId: string, userId?: string) => Promise<boolean>;
   removeRecentSession: (sessionId: string, userId?: string) => Promise<boolean>;
+  removeAllSessions: (userId?: string) => Promise<{ deleted_count: number; session_ids: string[] } | null>;
   recordOpenSessionActivity: (sessionId: string, activity: {
     messagePreview?: string;
     title?: string | null;
@@ -541,6 +543,47 @@ export const useSessionStore = create<SessionState>()(
         invalidateActiveSessionCache();
 
         return true;
+      },
+
+      removeAllSessions: async (userId) => {
+        const activeSession = get().session;
+        const resolvedUserId = userId?.trim() || activeSession?.userId;
+        const result = await deleteAllSessionRecords(resolvedUserId);
+
+        if (isError(result)) {
+          logger.warn('SessionStore: Failed to delete all persisted sessions', {
+            userId: resolvedUserId,
+            code: result.code,
+            error: result.error,
+          });
+          return null;
+        }
+
+        const shouldClearCurrentSession = Boolean(activeSession);
+        set({
+          openSessions: [],
+          recentSessions: [],
+          lastOpenSessionsFetchAt: null,
+          lastOpenSessionsUserId: null,
+          lastDeletedSessionId: activeSession?.sessionId ?? null,
+          ...(shouldClearCurrentSession ? { session: null } : {}),
+        });
+
+        if (shouldClearCurrentSession) {
+          try {
+            const { useChatStore } = await import('./chat-store');
+            useChatStore.getState().clearSession();
+          } catch (error) {
+            logger.warn('SessionStore: Failed to clear chat state after bulk session deletion', {
+              userId: resolvedUserId,
+              error,
+            });
+          }
+        }
+
+        invalidateActiveSessionCache();
+
+        return result.data;
       },
 
       // Create a new session (Week 1: local IDs, Week 2: backend IDs)
