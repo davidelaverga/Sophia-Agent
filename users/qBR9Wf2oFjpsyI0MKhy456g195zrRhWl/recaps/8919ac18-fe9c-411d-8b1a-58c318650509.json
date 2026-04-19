@@ -1,0 +1,17 @@
+{
+  "session_id": "8919ac18-fe9c-411d-8b1a-58c318650509",
+  "thread_id": "7b6fc609-00ca-4870-be5c-aafc1e59ab63",
+  "session_type": "open",
+  "context_mode": "gaming",
+  "started_at": "2026-04-17T02:27:57.538Z",
+  "ended_at": "2026-04-17T02:33:51.981502+00:00",
+  "turn_count": 31,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "Help only works if they're actually ready. Checking in on that before diving in.",
+    "reflection_candidate": {
+      "prompt": "What would it look like to actually decide instead of just hoping April 18 decides for you?"
+    },
+    "status": "ready"
+  }
+}

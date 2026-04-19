@@ -11,7 +11,6 @@ import os
 from deerflow.agents import _langchain_patches  # noqa: F401
 
 from langchain.agents import create_agent
-from langchain.agents.middleware import SummarizationMiddleware
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
@@ -45,8 +44,10 @@ from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 logger = logging.getLogger(__name__)
 
 
-def _create_summarization_middleware() -> SummarizationMiddleware | None:
-    """Create a SummarizationMiddleware instance from app config."""
+def _create_summarization_middleware():
+    """Create a SophiaSummarizationMiddleware instance from app config."""
+    from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
+
     config = get_summarization_config()
     if not config.enabled:
         return None
@@ -70,7 +71,7 @@ def _create_summarization_middleware() -> SummarizationMiddleware | None:
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    return SummarizationMiddleware(**kwargs)
+    return SophiaSummarizationMiddleware(**kwargs)
 
 
 def make_sophia_agent(config: RunnableConfig):

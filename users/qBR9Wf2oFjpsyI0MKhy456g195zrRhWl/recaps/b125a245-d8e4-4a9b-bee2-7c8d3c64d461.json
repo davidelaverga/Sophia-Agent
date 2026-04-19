@@ -1,0 +1,17 @@
+{
+  "session_id": "b125a245-d8e4-4a9b-bee2-7c8d3c64d461",
+  "thread_id": "4e06c8dd-d284-4682-a5ed-25f68ed254c1",
+  "session_type": "open",
+  "context_mode": "gaming",
+  "started_at": "2026-04-17T01:16:40.814Z",
+  "ended_at": "2026-04-17T01:33:46.558960+00:00",
+  "turn_count": 43,
+  "status": "ready",
+  "recap_artifacts": {
+    "takeaway": "The fear isn't about losing himself. It's about losing the people he loves. That's a completely different conversation than \\\"giving up my life.\\\"",
+    "reflection_candidate": {
+      "prompt": "Do you actually have to choose between being a father and being a son and a friend?"
+    },
+    "status": "ready"
+  }
+}
