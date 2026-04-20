@@ -1829,6 +1829,210 @@ class TestHandleChatWithArtifacts:
         assert _is_thread_missing_error(other_404) is False
         assert _is_thread_missing_error(server_error) is False
 
+    def test_handle_chat_heal_rebuilds_uploads_under_new_thread(self):
+        """On 404 self-heal, inbound files are re-read under the healed thread_id
+        and the retried runs.wait uses a fresh human_message_payload that points
+        at the new thread's uploads.
+
+        Uses channel "test" (not "telegram") so the payload goes through the
+        generic ``_compose_inbound_content`` path, which renders virtual_path
+        into the content block and the additional_kwargs.files metadata —
+        both of which we can then assert on without reaching into telegram-
+        specific block builders.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            store.set_thread_id("test", "chat-heal-uploads", "stale-thread-xyz", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            captured_read_thread_ids: list[str] = []
+
+            async def fake_read_and_store(msg, thread_id):
+                captured_read_thread_ids.append(thread_id)
+                # Embed the thread_id in the virtual_path so the payload
+                # content makes the provenance obvious at assert time.
+                return [
+                    {
+                        "filename": "pic.png",
+                        "size": 3,
+                        "virtual_path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "extension": ".png",
+                        "mime_type": "image/png",
+                        "status": "uploaded",
+                    }
+                ]
+
+            manager._read_and_store_inbound_files = fake_read_and_store  # type: ignore[assignment]
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/stale-thread-xyz/runs/wait",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Thread or assistant not found."},
+            )
+            thread_missing_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+            success_result = {
+                "messages": [
+                    {"type": "human", "content": "describe the image"},
+                    {"type": "ai", "content": "Healed and processed."},
+                ]
+            }
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread-777")
+            mock_client.runs.wait = AsyncMock(side_effect=[thread_missing_error, success_result])
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat-heal-uploads",
+                    user_id="user-1",
+                    text="describe the image",
+                    files=[{"kind": "image", "ref": "some-image-ref"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # Upload storage ran twice: once pre-heal, once post-heal.
+            assert captured_read_thread_ids == ["stale-thread-xyz", "fresh-thread-777"]
+
+            # Two runs.wait calls: first fails with 404, second succeeds.
+            assert mock_client.runs.wait.call_count == 2
+            first_payload = mock_client.runs.wait.call_args_list[0][1]["input"]["messages"][0]
+            second_payload = mock_client.runs.wait.call_args_list[1][1]["input"]["messages"][0]
+
+            first_serialized = json.dumps(first_payload)
+            second_serialized = json.dumps(second_payload)
+
+            # Pre-heal payload references the stale thread's uploads.
+            assert "stale-thread-xyz" in first_serialized
+            # Post-heal payload references ONLY the fresh thread's uploads.
+            assert "fresh-thread-777" in second_serialized
+            assert "stale-thread-xyz" not in second_serialized, (
+                "retried payload must not reference the stale thread's uploads"
+            )
+            assert outbound_received[0].thread_id == "fresh-thread-777"
+
+        _run(go())
+
+    def test_handle_streaming_chat_heal_rebuilds_uploads_under_new_thread(self):
+        """The Feishu streaming path has the same self-heal retry; its payload
+        must also be rebuilt against the healed thread's uploads.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            store.set_thread_id("feishu", "chat-heal-stream", "stale-thread-stream", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            captured_read_thread_ids: list[str] = []
+
+            async def fake_read_and_store(msg, thread_id):
+                captured_read_thread_ids.append(thread_id)
+                return [
+                    {
+                        "filename": "pic.png",
+                        "size": 3,
+                        "virtual_path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "extension": ".png",
+                        "mime_type": "image/png",
+                        "status": "uploaded",
+                    }
+                ]
+
+            manager._read_and_store_inbound_files = fake_read_and_store  # type: ignore[assignment]
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/stale-thread-stream/runs/stream",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Thread or assistant not found."},
+            )
+            thread_missing_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+
+            success_stream_parts = [
+                _make_stream_part(
+                    "values",
+                    {"messages": [
+                        {"type": "human", "content": "describe the image"},
+                        {"type": "ai", "content": "Healed streaming reply."},
+                    ]},
+                ),
+            ]
+
+            def stream_side_effect(thread_id, assistant_id, **kwargs):
+                if mock_client.runs.stream.call_count == 1:
+                    async def _raiser():
+                        raise thread_missing_error
+                        yield  # pragma: no cover
+                    return _raiser()
+                return _make_async_iterator(success_stream_parts)
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread-stream-999")
+            mock_client.runs.stream = MagicMock(side_effect=stream_side_effect)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-heal-stream",
+                    user_id="user-1",
+                    text="describe the image",
+                    files=[{"kind": "image", "ref": "feishu-image-id"}],
+                )
+            )
+            # Streaming path publishes at least one outbound (the final one).
+            await _wait_for(lambda: any(msg.is_final for msg in outbound_received))
+            await manager.stop()
+
+            # Upload storage ran twice: once pre-heal, once post-heal.
+            assert captured_read_thread_ids == ["stale-thread-stream", "fresh-thread-stream-999"]
+
+            # runs.stream was called twice (initial + retry).
+            assert mock_client.runs.stream.call_count == 2
+            second_stream_kwargs = mock_client.runs.stream.call_args_list[1][1]
+            second_payload = second_stream_kwargs["input"]["messages"][0]
+
+            serialized = json.dumps(second_payload)
+            assert "fresh-thread-stream-999" in serialized
+            assert "stale-thread-stream" not in serialized
+
+        _run(go())
+
 
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):

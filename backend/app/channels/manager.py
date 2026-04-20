@@ -1026,6 +1026,35 @@ class ChannelManager:
         new_assistant_id, new_run_config, new_run_context = self._resolve_run_params(msg, new_thread_id)
         return new_thread_id, new_assistant_id, new_run_config, new_run_context
 
+    async def _resync_uploads_after_heal(
+        self,
+        msg: InboundMessage,
+        healed_thread_id: str,
+    ) -> dict[str, Any]:
+        """Re-store inbound uploads under the healed thread and rebuild payload.
+
+        ``_read_and_store_inbound_files`` is keyed on ``thread_id`` — the
+        uploads we stored before the heal live under the stale thread's
+        uploads dir, which the healed run cannot see. Call this after
+        ``_heal_stale_thread`` so virtual paths in the retried
+        ``human_message_payload`` point at files the new thread actually
+        owns.
+        """
+        if not msg.files:
+            # No inbound files — the default text-only payload is still correct.
+            return self._build_human_message_payload(msg, [])
+
+        logger.info(
+            "[Manager] re-syncing %d inbound file refs under healed thread_id=%s "
+            "(event=langgraph_thread_self_heal_resync channel=%s chat_id=%s)",
+            len(msg.files),
+            healed_thread_id,
+            msg.channel_name,
+            msg.chat_id,
+        )
+        uploaded_files = await self._read_and_store_inbound_files(msg, healed_thread_id)
+        return self._build_human_message_payload(msg, uploaded_files)
+
     @staticmethod
     def _make_safe_upload_filename(filename: str, fallback_index: int) -> str:
         safe = Path(filename).name.strip()
@@ -1275,6 +1304,10 @@ class ChannelManager:
                     run_config,
                     run_context,
                 ) = await self._heal_stale_thread(client, msg, thread_id)
+                # Uploads staged under the stale thread are invisible from
+                # the healed run. Re-read inbound files under the new
+                # thread_id and rebuild the payload so tool reads resolve.
+                human_message_payload = await self._resync_uploads_after_heal(msg, thread_id)
                 run_kwargs = {
                     "input": {"messages": [human_message_payload]},
                     "config": run_config,
@@ -1352,9 +1385,14 @@ class ChannelManager:
         stream_error: BaseException | None = None
         chunks_received = 0
 
+        # ``human_message_payload`` is captured by reference so it can be
+        # swapped out by the self-heal path below without redeclaring the
+        # inner helper.
+        current_payload: dict[str, Any] = human_message_payload
+
         def _build_stream_kwargs() -> dict[str, Any]:
             payload: dict[str, Any] = {
-                "input": {"messages": [human_message_payload]},
+                "input": {"messages": [current_payload]},
                 "config": run_config,
                 "stream_mode": ["messages-tuple", "values"],
             }
@@ -1413,6 +1451,9 @@ class ChannelManager:
                     run_config,
                     run_context,
                 ) = await self._heal_stale_thread(client, msg, thread_id)
+                # Re-stage uploads + rebuild the payload under the new
+                # thread_id so downstream tool reads hit the right paths.
+                current_payload = await self._resync_uploads_after_heal(msg, thread_id)
                 stream_kwargs = _build_stream_kwargs()
                 await _iterate_stream(client.runs.stream(thread_id, assistant_id, **stream_kwargs))
         except Exception as exc:
