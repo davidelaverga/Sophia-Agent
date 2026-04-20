@@ -77,10 +77,14 @@ def make_sophia_agent(config: RunnableConfig):
         # 2. Crisis fast-path (before any expensive middleware)
         CrisisCheckMiddleware(),
         # 3. Always-loaded identity files (soul always, voice+techniques skip on crisis)
+        #    AGENTS.md is a small shared companion↔builder building contract.
+        #    skip_on_crisis=False because crisis paths never call the builder
+        #    and the extra ~500 tokens are negligible at peak.
         FileInjectionMiddleware(
             (SKILLS_PATH / "soul.md", False),
             (SKILLS_PATH / "voice.md", True),
             (SKILLS_PATH / "techniques.md", True),
+            (SKILLS_PATH / "AGENTS.md", False),
         ),
         # 4. Platform signal
         PlatformContextMiddleware(),
