@@ -210,6 +210,63 @@ class TestBuilderArtifactBeforeModelCap:
         assert not getattr(new_messages[0], "tool_calls", None)
         assert "turn cap" in new_messages[0].content.lower()
 
+    def test_at_cap_reuses_delegation_task_id_as_continuation(self):
+        """The middleware must thread the outer subagent task_id into the
+        partial result so the resume path can look it up in
+        ``_retained_background_tasks``. This is the regression guard for
+        the original PR G Codex P1 finding.
+        """
+        middleware = ba.BuilderArtifactMiddleware(turn_cap=1)
+        messages = [
+            _ai_with_tool_call("bash"),
+            _ai_plain("paused"),
+        ]
+        state = {
+            "messages": messages,
+            "delegation_context": {
+                "task_id": "toolu_original_123",
+                "task": "demo",
+                "task_type": "document",
+            },
+        }
+
+        result = middleware.before_model(state, self._runtime())
+
+        assert result is not None
+        assert result["builder_result"]["continuation_task_id"] == "toolu_original_123"
+        # The surfaced AIMessage also names the continuation id so anything
+        # inspecting the message channel can still see it.
+        assert "toolu_original_123" in result["messages"][0].content
+
+    def test_at_cap_falls_back_to_uuid_when_no_delegation_task_id(self):
+        middleware = ba.BuilderArtifactMiddleware(turn_cap=1)
+        messages = [_ai_with_tool_call("bash"), _ai_plain("paused")]
+
+        # No delegation_context in state — e.g. a direct test invocation.
+        result = middleware.before_model({"messages": messages}, self._runtime())
+
+        assert result is not None
+        continuation = result["builder_result"]["continuation_task_id"]
+        assert isinstance(continuation, str) and continuation
+        # Should not happen to match our canonical sentinel.
+        assert continuation != "toolu_original_123"
+
+    def test_at_cap_ignores_empty_delegation_task_id(self):
+        middleware = ba.BuilderArtifactMiddleware(turn_cap=1)
+        messages = [_ai_with_tool_call("bash"), _ai_plain("paused")]
+        state = {
+            "messages": messages,
+            "delegation_context": {"task_id": "   "},  # whitespace-only
+        }
+
+        result = middleware.before_model(state, self._runtime())
+
+        assert result is not None
+        continuation = result["builder_result"]["continuation_task_id"]
+        assert isinstance(continuation, str) and continuation
+        # Whitespace id must not leak through; fallback uuid must be used.
+        assert continuation.strip() == continuation
+
 
 # ---------------------------------------------------------------------------
 # BuilderTaskMiddleware resume_from rendering

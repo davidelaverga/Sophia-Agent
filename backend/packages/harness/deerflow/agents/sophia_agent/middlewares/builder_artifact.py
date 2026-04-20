@@ -204,10 +204,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if turns_used < self.turn_cap:
             return None
 
+        # Reuse the outer subagent task_id as the continuation_task_id so
+        # ``get_background_task_result(resume_from_task_id)`` on the resume
+        # call side can find the retained prior run. The delegation_context
+        # is populated by ``switch_to_builder`` before the executor starts.
+        delegation_context = state.get("delegation_context") or {}
+        continuation_task_id = None
+        if isinstance(delegation_context, dict):
+            candidate = delegation_context.get("task_id")
+            if isinstance(candidate, str) and candidate.strip():
+                continuation_task_id = candidate
+
         partial = build_partial_builder_result(
             messages=messages,
             turn_cap=self.turn_cap,
             turns_used=turns_used,
+            continuation_task_id=continuation_task_id,
         )
         logger.warning(
             "[BuilderArtifact] HARD_TURN_CAP hit: turns_used=%d cap=%d continuation_task_id=%s "

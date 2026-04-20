@@ -228,11 +228,20 @@ def switch_to_builder(
         except Exception:
             pass
 
+    # Compute the executor task_id up front so it can be threaded into the
+    # delegation_context. The middleware uses this exact value as the
+    # ``continuation_task_id`` on a turn-cap pause, which is the same key
+    # ``get_background_task_result`` looks up on resume. Historically this
+    # was assigned only after the executor was constructed, which meant the
+    # pause used a random uuid that resume could never find.
+    task_id = resolved_tool_call_id or str(uuid.uuid4())[:8]
+
     logger.info(
-        "[Builder] switch_to_builder called: task_type=%s, retry_attempt=%d, resume_from=%s, tone=%.1f, ritual=%s, thread_id=%s",
+        "[Builder] switch_to_builder called: task_type=%s, retry_attempt=%d, resume_from=%s, task_id=%s, tone=%.1f, ritual=%s, thread_id=%s",
         task_type,
         retry_attempt,
         resume_from_task_id,
+        task_id,
         companion_artifact.get("tone_estimate", 2.5),
         active_ritual,
         thread_id,
@@ -248,6 +257,7 @@ def switch_to_builder(
     delegation_context = {
         "task": task,
         "task_type": task_type,
+        "task_id": task_id,
         "retry_attempt": retry_attempt,
         "companion_artifact": companion_artifact,
         "user_identity": None,  # injected by UserIdentityMiddleware in builder chain
@@ -292,7 +302,6 @@ def switch_to_builder(
     # ------------------------------------------------------------------
     # 5. Execute + poll
     # ------------------------------------------------------------------
-    task_id = resolved_tool_call_id or str(uuid.uuid4())[:8]
     executor.execute_async(task, task_id=task_id)
     logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
 
