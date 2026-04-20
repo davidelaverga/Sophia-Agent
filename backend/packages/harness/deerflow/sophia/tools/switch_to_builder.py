@@ -77,6 +77,16 @@ class SwitchToBuilderInput(BaseModel):
             "companion should offer alternatives instead of delegating again."
         ),
     )
+    resume_from_task_id: str | None = Field(
+        default=None,
+        description=(
+            "Pass the continuation_task_id from a previous `partial` builder "
+            "result when the user confirms they want to resume the build. "
+            "The builder will receive a <resume_from> briefing that lists the "
+            "already-completed files and a summary of what was done so it can "
+            "pick up without redoing work. Leave null for a fresh delegation."
+        ),
+    )
 
 
 def resolve_builder_timeout(task_type: str) -> int:
@@ -87,11 +97,68 @@ def resolve_builder_timeout(task_type: str) -> int:
     return TASK_TYPE_TIMEOUTS.get(task_type, DEFAULT_TIMEOUT_SECONDS)
 
 
+def _build_resume_context_from_previous_task(prev_task_id: str) -> dict | None:
+    """Fetch the prior builder task and project its partial result as
+    resume context for the next delegation.
+
+    Returns None when no matching task is found (expired or never existed),
+    which the caller treats as “no resume context available” so the builder
+    still starts, albeit from scratch.
+    """
+    prev = get_background_task_result(prev_task_id)
+    if prev is None:
+        logger.warning(
+            "[Builder] resume_from_task_id=%s not found; starting without resume context",
+            prev_task_id,
+        )
+        return None
+
+    prev_builder_result: dict = {}
+    if prev.final_state and isinstance(prev.final_state, dict):
+        candidate = prev.final_state.get("builder_result")
+        if isinstance(candidate, dict):
+            prev_builder_result = candidate
+
+    # We resume on any prior builder_result that exposes completed files or a
+    # summary; that covers `partial` pauses AND the recovered partial paths
+    # built from failed/timed-out runs in Commit 1.
+    completed_files = prev_builder_result.get("completed_files") or []
+    if not completed_files:
+        artifact_path = prev_builder_result.get("artifact_path")
+        if isinstance(artifact_path, str) and artifact_path.strip():
+            completed_files = [artifact_path]
+        supporting = prev_builder_result.get("supporting_files") or []
+        if isinstance(supporting, list):
+            completed_files = list(completed_files) + [
+                path for path in supporting if isinstance(path, str) and path.strip()
+            ]
+
+    if not completed_files and not prev_builder_result.get("summary_of_done"):
+        logger.info(
+            "[Builder] resume_from_task_id=%s has no recoverable progress; skipping resume context",
+            prev_task_id,
+        )
+        return None
+
+    return {
+        "previous_task_id": prev_task_id,
+        "previous_status": prev_builder_result.get("status"),
+        "previous_continuation_task_id": prev_builder_result.get("continuation_task_id"),
+        "completed_files": completed_files,
+        "summary_of_done": prev_builder_result.get("summary_of_done")
+        or prev_builder_result.get("companion_summary"),
+        "turns_used": prev_builder_result.get("turns_used"),
+        "turn_cap": prev_builder_result.get("turn_cap"),
+        "previous_artifact_path": prev_builder_result.get("artifact_path"),
+    }
+
+
 @tool(args_schema=SwitchToBuilderInput)
 def switch_to_builder(
     task: str,
     task_type: str,
     retry_attempt: int = 0,
+    resume_from_task_id: str | None = None,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command | str:
@@ -99,7 +166,9 @@ def switch_to_builder(
     something requiring file creation or multi-step execution.
     Do NOT call for emotional conversation, reflection, or memory tasks.
     Before calling this, ensure you have complete specs — ask any clarifying
-    questions first, then delegate with the complete brief."""
+    questions first, then delegate with the complete brief.
+    Pass resume_from_task_id only after the user explicitly asks to continue a
+    paused (partial) build."""
 
     resolved_tool_call_id = resolve_tool_call_id(
         runtime,
@@ -160,9 +229,10 @@ def switch_to_builder(
             pass
 
     logger.info(
-        "[Builder] switch_to_builder called: task_type=%s, retry_attempt=%d, tone=%.1f, ritual=%s, thread_id=%s",
+        "[Builder] switch_to_builder called: task_type=%s, retry_attempt=%d, resume_from=%s, tone=%.1f, ritual=%s, thread_id=%s",
         task_type,
         retry_attempt,
+        resume_from_task_id,
         companion_artifact.get("tone_estimate", 2.5),
         active_ritual,
         thread_id,
@@ -171,6 +241,10 @@ def switch_to_builder(
     # ------------------------------------------------------------------
     # 2. Build delegation context (per spec §2.1)
     # ------------------------------------------------------------------
+    resume_context = None
+    if resume_from_task_id:
+        resume_context = _build_resume_context_from_previous_task(resume_from_task_id)
+
     delegation_context = {
         "task": task,
         "task_type": task_type,
@@ -180,6 +254,7 @@ def switch_to_builder(
         "relevant_memories": injected_memories[:5],
         "active_ritual": active_ritual,
         "ritual_phase": ritual_phase,
+        "resume_context": resume_context,
     }
 
     # ------------------------------------------------------------------
@@ -256,6 +331,23 @@ def switch_to_builder(
                 builder_result=builder_result,
             )
             title = builder_result.get("artifact_title") or "the deliverable"
+
+            # The builder can now halt itself at the turn cap with a partial
+            # result. The subagent finishes cleanly in that case (status
+            # COMPLETED), but the builder_result.status tells us to prompt the
+            # user to continue or stop instead of presenting a final delivery.
+            if builder_result.get("status") == BUILDER_STATUS_PARTIAL:
+                cleanup_background_task(task_id)
+                return _build_partial_pause_command(
+                    task=task,
+                    task_type=task_type,
+                    task_id=task_id,
+                    thread_id=thread_id,
+                    builder_result=builder_result,
+                    builder_delivery=builder_delivery,
+                    tool_call_id=resolved_tool_call_id,
+                )
+
             cleanup_background_task(task_id)
             tool_message = (
                 f"Builder completed successfully. {title} is ready, and this reply can attach it for delivery."
@@ -435,6 +527,73 @@ def _infer_builder_artifact_type(path: str | None) -> str:
     if suffix in {".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs"}:
         return "code"
     return "document"
+
+
+def _build_partial_pause_command(
+    *,
+    task: str,
+    task_type: str,
+    task_id: str,
+    thread_id: str | None,
+    builder_result: dict,
+    builder_delivery: dict | None,
+    tool_call_id: str,
+) -> Command:
+    """Build the Command returned when the builder paused at the turn cap.
+
+    The ToolMessage is explicit about asking the user whether to continue,
+    and carries the ``continuation_task_id`` so the companion can round-trip
+    it back into ``switch_to_builder(resume_from_task_id=...)`` without
+    inventing a new value.
+    """
+    continuation_task_id = builder_result.get("continuation_task_id") or task_id
+    completed_files = builder_result.get("completed_files") or []
+    completed_preview = ", ".join(completed_files[:3]) if completed_files else "no files yet"
+    summary = (
+        builder_result.get("summary_of_done")
+        or builder_result.get("companion_summary")
+        or ""
+    )
+    summary_line = f" Summary so far: {summary}" if summary else ""
+    delivery_line = (
+        " A partial draft is attached for this reply."
+        if builder_delivery is not None
+        else ""
+    )
+    tool_message = (
+        "Builder paused after hitting the turn cap "
+        f"({builder_result.get('turns_used')}/{builder_result.get('turn_cap')})."
+        f"{delivery_line} Completed so far: {completed_preview}."
+        f"{summary_line} Tell the user: 'We reached the building turn limit. Do you want to continue?' "
+        "If they say yes, call switch_to_builder again with the SAME task description and "
+        f"resume_from_task_id='{continuation_task_id}'. If they say no, present what we have and stop."
+    )
+    logger.info(
+        "[Builder] partial pause emitted task_id=%s continuation_task_id=%s completed_files=%d",
+        task_id,
+        continuation_task_id,
+        len(completed_files),
+    )
+    return Command(
+        update={
+            "builder_result": builder_result,
+            "builder_task": {
+                "task": task,
+                "task_type": task_type,
+                "task_id": task_id,
+                "status": BUILDER_STATUS_PARTIAL,
+                "continuation_task_id": continuation_task_id,
+            },
+            "builder_delivery": builder_delivery,
+            "messages": [
+                ToolMessage(
+                    tool_message,
+                    tool_call_id=tool_call_id,
+                    name=TOOL_NAME,
+                )
+            ],
+        }
+    )
 
 
 def _retry_aware_failure_message(*, base: str, retry_attempt: int) -> str:

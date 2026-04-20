@@ -45,9 +45,18 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         relevant_memories: list[str] = delegation_context.get("relevant_memories", [])
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
+        resume_context: dict | None = delegation_context.get("resume_context")
 
         # --- Build briefing sections ---
         sections: list[str] = []
+
+        # Resume-from block (highest priority for the builder's attention)
+        # is rendered first so the model reads it before any other context
+        # and knows not to redo completed work.
+        if resume_context:
+            resume_section = self._resume_from_guidance(resume_context)
+            if resume_section:
+                sections.append(f"<resume_from>\n{resume_section}\n</resume_from>")
 
         # Tone guidance
         tone_estimate: float = companion_artifact.get("tone_estimate", 2.5)
@@ -138,6 +147,57 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "User is high energy. Be ambitious. Add surprise element. "
             "Don't play it safe."
         )
+
+    @staticmethod
+    def _resume_from_guidance(resume_context: dict) -> str | None:
+        """Render a builder-facing briefing from resume_context.
+
+        The block is meant to be read before the main task description and
+        tell the builder:
+          1. You are continuing a paused build — do NOT redo completed work.
+          2. These files already exist in /mnt/user-data/outputs.
+          3. Here is the summary of what was done, as context.
+
+        Returns None when the context is too empty to be worth rendering.
+        """
+        completed_files = resume_context.get("completed_files") or []
+        summary = resume_context.get("summary_of_done")
+        if not completed_files and not summary:
+            return None
+
+        previous_task_id = resume_context.get("previous_task_id")
+        previous_status = resume_context.get("previous_status")
+        turns_used = resume_context.get("turns_used")
+        turn_cap = resume_context.get("turn_cap")
+
+        lines: list[str] = [
+            "You are RESUMING a paused builder run. Read this carefully:",
+            "",
+            "- Do NOT redo work listed below. Open those files with read_file if",
+            "  you need their contents, then continue with what is still missing.",
+            "- Do NOT start from scratch. Build on top of completed_files.",
+            "- Finish with emit_builder_artifact when the deliverable is ready.",
+        ]
+        if previous_task_id:
+            lines.append(f"- previous_task_id: {html.escape(str(previous_task_id), quote=True)}")
+        if previous_status:
+            lines.append(f"- previous_status: {html.escape(str(previous_status), quote=True)}")
+        if turns_used is not None and turn_cap is not None:
+            lines.append(f"- previous_turns: {turns_used}/{turn_cap}")
+
+        if completed_files:
+            lines.append("- completed_files:")
+            for path in completed_files[:25]:
+                lines.append(f"    - {html.escape(str(path), quote=True)}")
+            if len(completed_files) > 25:
+                lines.append(f"    - … and {len(completed_files) - 25} more")
+
+        if summary:
+            safe_summary = html.escape(str(summary), quote=True)
+            lines.append("- summary_of_done:")
+            lines.append(f"    {safe_summary}")
+
+        return "\n".join(lines)
 
     @staticmethod
     def _ritual_guidance(ritual: str, phase: str | None) -> str | None:
