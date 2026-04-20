@@ -96,10 +96,13 @@ make format     # Format code with ruff
 Notable regression tests:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
-- `tests/test_subagent_executor.py` (subagent async execution plus retained terminal task visibility after cleanup)
+- `tests/test_subagent_executor.py` (subagent async execution, retained terminal task visibility after cleanup, and cooperative cancel-event wiring on timeout)
 - `tests/test_sessions_gateway.py` (session start plus compatibility `/api/v1/sessions/{session_id}/touch` activity pings)
 - `tests/test_gateway_sophia.py` (Sophia gateway routes, including builder task polling via `/api/sophia/{user_id}/tasks/{task_id}`)
-- `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, native web tool loading, `present_files` fallback extraction, and default builder model resolution)
+- `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, native web tool loading, `present_files` fallback extraction, default builder model resolution, per-task-type timeouts, retry-aware failure phrasing, and `view_image_tool` wiring)
+- `tests/test_builder_turn_cap.py` (HARD_TURN_CAP enforcement, partial builder_result shape, resume_context projection, and `<resume_from>` briefing rendering)
+- `tests/test_sophia_agents_md_injection.py` (shared companion↔builder `AGENTS.md` contract content + injection on both agents)
+- `tests/test_sandbox_capability_check.py` (capability probes + exit code for `scripts/sandbox_capability_check.py`)
 - `tests/test_dangling_tool_call_middleware.py` (repairs Anthropic `tool_use`/`tool_result` pairing on the Sophia companion and builder chains)
 
 Dependency floors: `langchain>=1.2.15` is required so the `_fetch_last_ai_and_tool_messages` helper used by LangChain's `tools_to_model` routing edge returns `(None, [])` on empty/partial states instead of raising `UnboundLocalError` when the Sophia builder triggers parallel tool calls. The bump transitively requires `langchain-core>=1.3.0` and `langgraph>=1.1.8`.
@@ -111,6 +114,16 @@ Sophia tool invariants:
 
 Sophia middleware state schema invariant:
 - Any middleware that declares a `state_schema` extending `AgentState` must either inherit `messages` unchanged or redeclare it with the `add_messages` reducer. Declaring `messages: NotRequired[list]` (or any plain `list` annotation) shadows the inherited `Annotated[list, add_messages]` declaration, downgrades the LangGraph channel to `LastValue`, and makes parallel tool dispatch (for example two `web_search` calls in one AI message) crash with `InvalidUpdateError: At key 'messages': Can receive only one value per step`. `tests/test_sophia_state_schema_invariants.py` catches this regression at import time across every Sophia middleware state class.
+
+Sophia builder safeguards (PR G):
+- `switch_to_builder` uses a per-task-type timeout dict in `TASK_TYPE_TIMEOUTS` (`document=600`, `presentation=900`, `research=900`, `visual_report=900`, `frontend=720`, default `600s`) and always pairs `concurrent.futures.Future.cancel()` with a module-level `_cancel_events[task_id]` signal on timeout. `_aexecute` checks the event between `astream` chunks, so timed-out subagents stop making further Anthropic calls instead of lingering for many more minutes. The builder's `ChatAnthropic` also sets `default_request_timeout=180.0` so individual HTTP requests cannot keep a subagent alive past the outer timeout.
+- `SwitchToBuilderInput` accepts `retry_attempt: 0..2` and `resume_from_task_id: str | None`. Failure/partial ToolMessages phrase themselves based on `retry_attempt` (retry offer at 0, alternatives prompt at >=1) and tag `builder_result.status` as `completed | partial | failed_retryable | failed_terminal` for the companion to branch on.
+- `BuilderArtifactMiddleware.before_model` enforces `HARD_TURN_CAP = 40` tool-bearing turns via `hook_config(can_jump_to=["end"])`. At the cap it synthesises a canonical partial builder_result (status=`partial`, `continuation_task_id`, `completed_files`, `summary_of_done`, `turns_used`, `turn_cap`, `confidence=0.5`) and emits a plain AIMessage so the messages channel never carries dangling tool_calls after the jump.
+- `switch_to_builder(resume_from_task_id=...)` pulls the prior subagent result via `get_background_task_result`, projects `completed_files` / `summary_of_done` / turn stats into `delegation_context["resume_context"]`, and `BuilderTaskMiddleware` renders them as a `<resume_from>` block at the top of the builder briefing.
+- `skills/public/sophia/AGENTS.md` is the shared companion↔builder building contract (roles, `SwitchToBuilderInput` shape, status taxonomy, per-status communication protocol, builder obligations, crash posture). It is injected into both `sophia_agent/agent.py` and `sophia_agent/builder_agent.py` via `FileInjectionMiddleware(..., skip_on_crisis=False)`. Keep the file narrow: memories, crisis, identity, and artifact behaviour are harness-enforced and must not be duplicated here.
+- `BuilderTaskMiddleware` ships a `TASK_TYPE_SKILLS` mapping (`research -> chart-visualization/data-analysis/deep-research`, `visual_report -> chart-visualization/data-analysis`, `presentation -> chart-visualization/frontend-design`, `frontend -> frontend-design`, `document -> []`). It loads each listed `SKILL.md` from `skills/public/<skill>/SKILL.md` and injects it as a `<builder_skill name="...">` block before the builder briefing. Missing files log a warning and are skipped rather than crashing the builder.
+- The builder toolset includes `view_image_tool` so visual_report/presentation runs can re-read their own generated PNG/SVG assets.
+- `scripts/sandbox_capability_check.py` is a standalone diagnostic that inventories `pandoc`, `weasyprint`, `reportlab`, `matplotlib`, and `pillow` on the sandbox. Exit 0 when all required capabilities are present, 1 otherwise; `--json` emits a machine-readable report. Run it post-deploy to catch capability gaps before users see `failed_terminal` from the builder.
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
