@@ -25,7 +25,7 @@ from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
-from deerflow.tools.builtins import present_file_tool
+from deerflow.tools.builtins import present_file_tool, view_image_tool
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
@@ -119,7 +119,10 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     if web_tools:
         middlewares.insert(-1, WebResearchGuidanceMiddleware())
 
-    # Sandbox tools (bash, file ops) + present_files + emit_builder_artifact
+    # Sandbox tools (bash, file ops) + present_files + view_image +
+    # emit_builder_artifact. view_image lets the builder read back PNG/SVG
+    # charts, screenshots, or generated visuals while iterating on a
+    # visual_report or presentation.
     tools = [
         bash_tool,
         ls_tool,
@@ -127,6 +130,7 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         write_file_tool,
         str_replace_tool,
         present_file_tool,
+        view_image_tool,
         emit_builder_artifact,
         *web_tools,
     ]

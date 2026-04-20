@@ -406,6 +406,121 @@ class TestSwitchToBuilderInputResumeField:
         assert payload.resume_from_task_id == "cont-abc"
 
 
+# ---------------------------------------------------------------------------
+# Task-type-aware skills injection (Commit 4)
+# ---------------------------------------------------------------------------
+
+
+class TestTaskTypeSkillInjection:
+    def _runtime(self):
+        runtime = MagicMock()
+        runtime.context = {}
+        return runtime
+
+    def _middleware(self, tmp_path, mapping):
+        # Build a fake skills_root containing SKILL.md files keyed by the
+        # provided mapping so the middleware has something to read.
+        for skills in mapping.values():
+            for skill_name in skills:
+                skill_dir = tmp_path / skill_name
+                skill_dir.mkdir(parents=True, exist_ok=True)
+                (skill_dir / "SKILL.md").write_text(
+                    f"# {skill_name}\nContent for {skill_name}\n",
+                    encoding="utf-8",
+                )
+        return bt.BuilderTaskMiddleware(
+            skills_root=tmp_path,
+            task_type_skills=mapping,
+        )
+
+    def test_visual_report_loads_chart_and_data_skills(self, tmp_path):
+        middleware = self._middleware(
+            tmp_path,
+            {"visual_report": ["chart-visualization", "data-analysis"]},
+        )
+        state = {
+            "delegation_context": {
+                "task": "Build a report",
+                "task_type": "visual_report",
+                "companion_artifact": {"tone_estimate": 2.5},
+            },
+            "system_prompt_blocks": [],
+        }
+
+        update = middleware.before_agent(state, self._runtime())
+        assert update is not None
+        blocks = update["system_prompt_blocks"]
+
+        skill_blocks = [b for b in blocks if b.startswith("<builder_skill")]
+        assert len(skill_blocks) == 2
+        joined = "\n".join(skill_blocks)
+        assert 'name="chart-visualization"' in joined
+        assert 'name="data-analysis"' in joined
+        assert "Content for chart-visualization" in joined
+        assert "Content for data-analysis" in joined
+
+        # Briefing block is appended AFTER the skill blocks so the briefing
+        # can reference them without the model scrolling.
+        briefing_indices = [
+            i for i, block in enumerate(blocks) if block.startswith("<builder_briefing>")
+        ]
+        skill_indices = [
+            i for i, block in enumerate(blocks) if block.startswith("<builder_skill")
+        ]
+        assert briefing_indices and skill_indices
+        assert max(skill_indices) < briefing_indices[0]
+
+    def test_document_task_loads_no_extra_skills(self, tmp_path):
+        middleware = self._middleware(
+            tmp_path,
+            {"document": [], "visual_report": ["chart-visualization"]},
+        )
+        state = {
+            "delegation_context": {
+                "task": "Write a plain doc",
+                "task_type": "document",
+                "companion_artifact": {"tone_estimate": 2.5},
+            },
+            "system_prompt_blocks": [],
+        }
+
+        update = middleware.before_agent(state, self._runtime())
+        assert update is not None
+        blocks = update["system_prompt_blocks"]
+        assert not any(b.startswith("<builder_skill") for b in blocks)
+
+    def test_missing_skill_file_is_skipped_not_fatal(self, tmp_path):
+        # Map to a skill that does NOT exist on disk; middleware must not
+        # raise and must still render the briefing.
+        middleware = bt.BuilderTaskMiddleware(
+            skills_root=tmp_path,
+            task_type_skills={"frontend": ["nonexistent-skill"]},
+        )
+        state = {
+            "delegation_context": {
+                "task": "Build a page",
+                "task_type": "frontend",
+                "companion_artifact": {"tone_estimate": 2.5},
+            },
+            "system_prompt_blocks": [],
+        }
+
+        update = middleware.before_agent(state, self._runtime())
+        assert update is not None
+        blocks = update["system_prompt_blocks"]
+        assert not any(b.startswith("<builder_skill") for b in blocks)
+        assert any(b.startswith("<builder_briefing>") for b in blocks)
+
+    def test_default_task_type_skills_mapping_is_complete(self):
+        # Guardrail: the shipping mapping must name every task_type the
+        # companion can send except `document` (intentionally empty). If the
+        # Literal is extended, this test reminds you to update the mapping.
+        expected = {"document", "presentation", "research", "visual_report", "frontend"}
+        assert expected.issubset(bt.TASK_TYPE_SKILLS.keys())
+        # document is explicitly an empty list, not missing.
+        assert bt.TASK_TYPE_SKILLS["document"] == []
+
+
 class TestBuildPartialPauseCommand:
     def test_message_names_continuation_id_and_asks_to_continue(self):
         builder_result = {

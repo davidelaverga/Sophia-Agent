@@ -1813,7 +1813,10 @@ class TestEmitBuilderArtifactTool:
 class TestBuilderTaskMiddleware:
     def test_injects_briefing_with_context(self):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
-        mw = BuilderTaskMiddleware()
+        # Force an empty task-type-skills mapping so this test stays focused
+        # on briefing injection behaviour. Task-type skill loading is
+        # covered separately in test_builder_turn_cap.py.
+        mw = BuilderTaskMiddleware(task_type_skills={})
         state = {
             "system_prompt_blocks": ["existing block"],
             "delegation_context": {

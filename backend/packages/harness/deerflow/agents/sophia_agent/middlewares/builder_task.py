@@ -4,20 +4,45 @@ Translates the companion's emotional context into behavioral guidance
 for the builder agent. Reads ``delegation_context`` from the runtime
 config and injects a ``<builder_briefing>`` block into
 ``system_prompt_blocks``.
+
+Also injects task-type-aware skill files (e.g. ``chart-visualization``
+for visual_report) so the builder has the domain reference material it
+needs for the requested deliverable type.
 """
 
 import html
 import logging
 import time
+from pathlib import Path
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
+
+# Mapping from task_type (as sent by the companion) to the list of skill
+# directory names under ``skills/public/`` that the builder should have in
+# context. Only SKILL.md is loaded per skill — references/ and scripts/
+# subdirectories stay on disk and can be opened via read_file as needed.
+# ``document`` deliberately maps to no extra skills: the base sandbox tools
+# and the companion-supplied brief are enough for plain document writing.
+TASK_TYPE_SKILLS: dict[str, list[str]] = {
+    "research": ["chart-visualization", "data-analysis", "deep-research"],
+    "visual_report": ["chart-visualization", "data-analysis"],
+    "presentation": ["chart-visualization", "frontend-design"],
+    "frontend": ["frontend-design"],
+    "document": [],
+}
+
+# Default skills root: ``/skills/public/`` — the parent of the sophia
+# skill bundle (``SKILLS_PATH``). Computed lazily so tests can override via
+# ``BuilderTaskMiddleware(skills_root=...)``.
+_DEFAULT_SKILLS_ROOT = SKILLS_PATH.parent
 
 
 class BuilderTaskState(AgentState):
@@ -26,9 +51,26 @@ class BuilderTaskState(AgentState):
 
 
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
-    """Inject builder briefing derived from companion delegation context."""
+    """Inject builder briefing derived from companion delegation context.
+
+    When the companion delegates a task with ``task_type="research"`` (for
+    example), the middleware also reads the relevant skill files and
+    prepends them as separate ``system_prompt_blocks`` entries so the
+    builder has the domain guidance it needs (chart conventions,
+    data-analysis patterns, deep-research protocol, etc.).
+    """
 
     state_schema = BuilderTaskState
+
+    def __init__(
+        self,
+        *,
+        skills_root: Path | None = None,
+        task_type_skills: dict[str, list[str]] | None = None,
+    ) -> None:
+        super().__init__()
+        self.skills_root = skills_root or _DEFAULT_SKILLS_ROOT
+        self.task_type_skills = task_type_skills if task_type_skills is not None else TASK_TYPE_SKILLS
 
     @override
     def before_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:
@@ -46,6 +88,23 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
         resume_context: dict | None = delegation_context.get("resume_context")
+
+        # --- Load task-type-aware skill files ---
+        # These are injected as their own blocks BEFORE the builder_briefing
+        # so the briefing can reference them by name without the model
+        # scrolling back.
+        skill_blocks: list[str] = []
+        skill_names_loaded: list[str] = []
+        for skill_name in self.task_type_skills.get(task_type, []):
+            content = self._read_skill_file(skill_name)
+            if content is None:
+                continue
+            skill_blocks.append(
+                f"<builder_skill name=\"{html.escape(skill_name, quote=True)}\">\n"
+                f"{content}\n"
+                f"</builder_skill>"
+            )
+            skill_names_loaded.append(skill_name)
 
         # --- Build briefing sections ---
         sections: list[str] = []
@@ -106,14 +165,45 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         briefing = "<builder_briefing>\n" + "\n\n".join(sections) + "\n</builder_briefing>"
 
         blocks = list(state.get("system_prompt_blocks", []))
+        # Skill blocks are appended before the briefing so the briefing can
+        # reference them. Both stay grouped after whatever upstream files
+        # (soul, voice, techniques, AGENTS.md) already wrote.
+        blocks.extend(skill_blocks)
         blocks.append(briefing)
 
+        skills_summary = ",".join(skill_names_loaded) if skill_names_loaded else "none"
         log_middleware(
             "BuilderTask",
-            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'}",
+            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} "
+            f"skills={skills_summary}",
             _t0,
         )
         return {"system_prompt_blocks": blocks}
+
+    def _read_skill_file(self, skill_name: str) -> str | None:
+        """Return the contents of ``<skills_root>/<skill_name>/SKILL.md``.
+
+        Returns ``None`` and logs a warning if the file is missing so that
+        a packaging gap (e.g. a skill removed from disk) degrades into a
+        smaller prompt rather than crashing the builder.
+        """
+        path = self.skills_root / skill_name / "SKILL.md"
+        if not path.is_file():
+            logger.warning(
+                "[BuilderTask] skill file missing: %s (skill=%s)",
+                path,
+                skill_name,
+            )
+            return None
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            logger.warning(
+                "[BuilderTask] failed to read skill file %s: %s",
+                path,
+                exc,
+            )
+            return None
 
     # ------------------------------------------------------------------
     # Private helpers

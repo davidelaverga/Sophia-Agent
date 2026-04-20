@@ -163,6 +163,21 @@ def test_builder_agent_defaults_to_stronger_model(monkeypatch):
     assert source == "default"
 
 
+def test_builder_agent_source_wires_view_image_tool():
+    """The builder must have access to view_image_tool so it can inspect
+    generated PNG/SVG charts and screenshots while iterating on a
+    visual_report or presentation. Asserted via source inspection so we
+    don't have to instantiate the full agent (which would require live
+    Anthropic credentials).
+    """
+    import inspect
+
+    src = inspect.getsource(builder_agent_module)
+    assert "view_image_tool" in src
+    # Both the import and the tool list entry should be present.
+    assert "from deerflow.tools.builtins import present_file_tool, view_image_tool" in src
+
+
 class TestResolveToolCallId:
     def test_prefers_runtime_tool_call_id_over_injected(self):
         runtime = _make_runtime(runtime_tool_call_id="toolu_runtime")
