@@ -79,6 +79,14 @@ _retained_background_tasks: dict[str, _RetainedTaskEntry] = {}
 _background_tasks_lock = threading.Lock()
 BACKGROUND_TASK_RETENTION_SECONDS = 15 * 60
 
+# Cancellation events keyed by task_id. When a background task times out or is
+# otherwise cancelled, ``execute_async`` sets the event so that ``_aexecute``
+# can stop between ``astream`` chunks instead of running for many more minutes
+# on a zombie LLM loop. ``concurrent.futures.Future.cancel()`` alone is
+# best-effort (it can only prevent scheduled-but-not-started work), so this
+# event is the cooperative path that actually stops in-flight subagents.
+_cancel_events: dict[str, threading.Event] = {}
+
 # Thread pool for background task scheduling and orchestration
 _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-scheduler-")
 
@@ -262,12 +270,22 @@ class SubagentExecutor:
 
         return state
 
-    async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    async def _aexecute(
+        self,
+        task: str,
+        result_holder: SubagentResult | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SubagentResult:
         """Execute a task asynchronously.
 
         Args:
             task: The task description for the subagent.
             result_holder: Optional pre-created result object to update during execution.
+            cancel_event: Optional event that is checked between ``astream``
+                chunks. When set, execution stops cooperatively and returns a
+                ``TIMED_OUT`` result. Callers typically pass the event owned by
+                ``execute_async`` so that an outer timeout can actually stop
+                the subagent mid-loop.
 
         Returns:
             SubagentResult with the execution result.
@@ -308,8 +326,21 @@ class SubagentExecutor:
             # Use stream instead of invoke to get real-time updates
             # This allows us to collect AI messages as they are generated
             final_state = None
+            cancelled = False
             async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
                 final_state = chunk
+
+                # Cooperative cancellation: stop promptly when the owning
+                # ``execute_async`` invocation has signalled a timeout. We
+                # check between chunks, which means the current in-flight
+                # LLM call still finishes but no further tool turns run.
+                if cancel_event is not None and cancel_event.is_set():
+                    cancelled = True
+                    logger.warning(
+                        f"[trace={self.trace_id}] event=subagent_timeout_cancelled_cleanly "
+                        f"subagent={self.config.name} captured_ai_messages={len(result.ai_messages)}"
+                    )
+                    break
 
                 # Extract AI messages from the current state
                 messages = chunk.get("messages", [])
@@ -331,6 +362,13 @@ class SubagentExecutor:
                         if not is_duplicate:
                             result.ai_messages.append(message_dict)
                             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}")
+
+            if cancelled:
+                result.status = SubagentStatus.TIMED_OUT
+                result.error = result.error or "Execution cancelled cooperatively after timeout"
+                result.final_state = final_state
+                result.completed_at = datetime.now()
+                return result
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
 
@@ -388,7 +426,12 @@ class SubagentExecutor:
 
         return result
 
-    def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
+    def execute(
+        self,
+        task: str,
+        result_holder: SubagentResult | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> SubagentResult:
         """Execute a task synchronously (wrapper around async execution).
 
         This method runs the async execution in a new event loop, allowing
@@ -397,6 +440,9 @@ class SubagentExecutor:
         Args:
             task: The task description for the subagent.
             result_holder: Optional pre-created result object to update during execution.
+            cancel_event: Optional event forwarded to ``_aexecute`` so that an
+                outer timeout (see ``execute_async``) can stop the subagent
+                cooperatively between chunks.
 
         Returns:
             SubagentResult with the execution result.
@@ -411,7 +457,7 @@ class SubagentExecutor:
         # an async context where an event loop already exists). Subagent execution
         # errors are handled within _aexecute() and returned as FAILED status.
         try:
-            return asyncio.run(self._aexecute(task, result_holder))
+            return asyncio.run(self._aexecute(task, result_holder, cancel_event))
         except Exception as e:
             logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
             # Create a result with error if we don't have one
@@ -451,10 +497,16 @@ class SubagentExecutor:
 
         logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
 
+        # A fresh cancel event per task. It is owned by this scheduler run and
+        # removed in the ``finally`` block below so memory does not grow with
+        # the number of dispatched subagents.
+        cancel_event = threading.Event()
+
         with _background_tasks_lock:
             _prune_retained_background_tasks_locked()
             _retained_background_tasks.pop(task_id, None)
             _background_tasks[task_id] = result
+            _cancel_events[task_id] = cancel_event
 
         # Submit to scheduler pool
         def run_task():
@@ -466,7 +518,9 @@ class SubagentExecutor:
             try:
                 # Submit execution to execution pool with timeout
                 # Pass result_holder so execute() can update it in real-time
-                execution_future: Future = _execution_pool.submit(self.execute, task, result_holder)
+                execution_future: Future = _execution_pool.submit(
+                    self.execute, task, result_holder, cancel_event
+                )
                 try:
                     # Wait for execution with timeout
                     exec_result = execution_future.result(timeout=self.config.timeout_seconds)
@@ -483,14 +537,28 @@ class SubagentExecutor:
                         _background_tasks[task_id].status = SubagentStatus.TIMED_OUT
                         _background_tasks[task_id].error = f"Execution timed out after {self.config.timeout_seconds} seconds"
                         _background_tasks[task_id].completed_at = datetime.now()
-                    # Cancel the future (best effort - may not stop the actual execution)
+                    # 1. Cooperative cancellation: signals ``_aexecute`` to
+                    #    break out between ``astream`` chunks. This is what
+                    #    actually stops an in-flight subagent from making
+                    #    another ~150s Anthropic call.
+                    cancel_event.set()
+                    # 2. Best-effort ``Future.cancel()`` only prevents
+                    #    not-yet-started work, so it is kept as a belt-
+                    #    and-suspenders guard after the cooperative signal.
                     execution_future.cancel()
+                    logger.info(
+                        f"[trace={self.trace_id}] event=subagent_timeout_cancelled_cleanly "
+                        f"task_id={task_id} subagent={self.config.name}"
+                    )
             except Exception as e:
                 logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed")
                 with _background_tasks_lock:
                     _background_tasks[task_id].status = SubagentStatus.FAILED
                     _background_tasks[task_id].error = str(e)
                     _background_tasks[task_id].completed_at = datetime.now()
+            finally:
+                with _background_tasks_lock:
+                    _cancel_events.pop(task_id, None)
 
         _scheduler_pool.submit(run_task)
         return task_id

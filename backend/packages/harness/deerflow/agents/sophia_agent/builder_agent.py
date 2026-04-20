@@ -74,10 +74,17 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         model_source,
     )
 
+    # ``default_request_timeout`` (aliased to ``timeout`` in newer
+    # langchain-anthropic) caps a single HTTP request to Anthropic. Without
+    # it, a stuck connection can keep a builder subagent "running" for many
+    # minutes even though the subagent-level timeout in switch_to_builder has
+    # already fired. 180s leaves room for long tool-heavy turns while still
+    # cutting off genuinely hung requests.
     model = ChatAnthropic(
         model=resolved_model_name,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
+        default_request_timeout=180.0,
     )
     web_tools = load_sophia_web_tools()
 
@@ -125,6 +132,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     )
     # Builder needs enough steps for multi-file creation.
     # Each tool call = ~3 graph steps. 50 steps ≈ 16 tool turns.
-    # The 120s timeout in switch_to_builder is the real safety net.
+    # The per-task-type timeout in switch_to_builder (600–900s) is the real
+    # safety net, with cooperative cancellation in subagents/executor.py as
+    # the backstop for stuck runs.
     agent.recursion_limit = 50
     return agent

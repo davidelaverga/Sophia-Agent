@@ -33,6 +33,29 @@ logger = logging.getLogger(__name__)
 
 TOOL_NAME = "switch_to_builder"
 
+# Per-task-type timeouts (in seconds). The builder needs significantly longer
+# than the 120s we used in earlier revisions because research + visual reports
+# routinely require dozens of tool calls. The timeout is the only safety net
+# that fires when something genuinely goes wrong; companion-facing latency is
+# handled by pause/resume (PR G Commit 2), not a shorter timeout.
+TASK_TYPE_TIMEOUTS: dict[str, int] = {
+    "document": 600,
+    "presentation": 900,
+    "research": 900,
+    "visual_report": 900,
+    "frontend": 720,
+}
+DEFAULT_TIMEOUT_SECONDS = 600
+
+# Builder result status taxonomy used across the companion/builder contract.
+# Commit 1 introduces `completed`, `failed_retryable`, and `failed_terminal`.
+# `partial` is introduced by Commit 2 (pause/resume). These strings are the
+# canonical values that `skills/public/sophia/AGENTS.md` documents.
+BUILDER_STATUS_COMPLETED = "completed"
+BUILDER_STATUS_PARTIAL = "partial"
+BUILDER_STATUS_FAILED_RETRYABLE = "failed_retryable"
+BUILDER_STATUS_FAILED_TERMINAL = "failed_terminal"
+
 
 class SwitchToBuilderInput(BaseModel):
     task: str = Field(
@@ -43,12 +66,32 @@ class SwitchToBuilderInput(BaseModel):
     task_type: Literal["frontend", "presentation", "research", "document", "visual_report"] = Field(
         description="Type of deliverable. Determines builder skill loading."
     )
+    retry_attempt: int = Field(
+        default=0,
+        ge=0,
+        le=2,
+        description=(
+            "0 for the first delegation. Increment to 1 when the user has asked "
+            "Sophia to retry after a `failed_retryable` builder result. 2 is "
+            "reserved for the rare case of a second retry; after that the "
+            "companion should offer alternatives instead of delegating again."
+        ),
+    )
+
+
+def resolve_builder_timeout(task_type: str) -> int:
+    """Return the timeout (seconds) for a given builder task type.
+
+    Unknown task types fall back to ``DEFAULT_TIMEOUT_SECONDS``.
+    """
+    return TASK_TYPE_TIMEOUTS.get(task_type, DEFAULT_TIMEOUT_SECONDS)
 
 
 @tool(args_schema=SwitchToBuilderInput)
 def switch_to_builder(
     task: str,
     task_type: str,
+    retry_attempt: int = 0,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command | str:
@@ -117,8 +160,9 @@ def switch_to_builder(
             pass
 
     logger.info(
-        "[Builder] switch_to_builder called: task_type=%s, tone=%.1f, ritual=%s, thread_id=%s",
+        "[Builder] switch_to_builder called: task_type=%s, retry_attempt=%d, tone=%.1f, ritual=%s, thread_id=%s",
         task_type,
+        retry_attempt,
         companion_artifact.get("tone_estimate", 2.5),
         active_ritual,
         thread_id,
@@ -130,6 +174,7 @@ def switch_to_builder(
     delegation_context = {
         "task": task,
         "task_type": task_type,
+        "retry_attempt": retry_attempt,
         "companion_artifact": companion_artifact,
         "user_identity": None,  # injected by UserIdentityMiddleware in builder chain
         "relevant_memories": injected_memories[:5],
@@ -151,8 +196,11 @@ def switch_to_builder(
         logger.warning("[Builder] subagent config not found — returning stub")
         return f"Builder task queued: [{task_type}] {task}"
 
-    # Override limits for builder execution
-    config = replace(config, max_turns=50, timeout_seconds=120, name="sophia_builder")
+    # Override limits for builder execution. Timeout is chosen per-task-type
+    # because research and visual reports routinely need more wall-clock time
+    # than a short document edit. See `TASK_TYPE_TIMEOUTS` above.
+    timeout_seconds = resolve_builder_timeout(task_type)
+    config = replace(config, max_turns=50, timeout_seconds=timeout_seconds, name="sophia_builder")
 
     executor = SubagentExecutor(
         config=config,
@@ -199,6 +247,10 @@ def switch_to_builder(
 
             # Extract builder_result from final state
             builder_result = extract_builder_result_from_subagent_result(result)
+            # Tag the status field so the companion can rely on the shared
+            # status taxonomy without having to re-derive it from the
+            # artifact payload. Existing builders may not set this yet.
+            builder_result.setdefault("status", BUILDER_STATUS_COMPLETED)
             builder_delivery = build_builder_delivery_payload(
                 thread_id=thread_id,
                 builder_result=builder_result,
@@ -243,6 +295,7 @@ def switch_to_builder(
                 thread_id=thread_id,
                 tool_call_id=resolved_tool_call_id,
                 failure_reason=result.error or "Unknown error",
+                retry_attempt=retry_attempt,
             )
             cleanup_background_task(task_id)
             if partial_update is not None:
@@ -250,6 +303,7 @@ def switch_to_builder(
             return _format_error_command(
                 result.error or "Unknown error",
                 resolved_tool_call_id,
+                retry_attempt=retry_attempt,
             )
 
         elif result.status == SubagentStatus.TIMED_OUT:
@@ -265,6 +319,7 @@ def switch_to_builder(
                 thread_id=thread_id,
                 tool_call_id=resolved_tool_call_id,
                 failure_reason=f"Timed out after {config.timeout_seconds}s",
+                retry_attempt=retry_attempt,
             )
             cleanup_background_task(task_id)
             if partial_update is not None:
@@ -272,6 +327,7 @@ def switch_to_builder(
             return _format_error_command(
                 f"Timed out after {config.timeout_seconds}s",
                 resolved_tool_call_id,
+                retry_attempt=retry_attempt,
             )
 
         time.sleep(5)
@@ -283,6 +339,7 @@ def switch_to_builder(
             return _format_error_command(
                 f"Polling timed out after {poll_count} polls",
                 resolved_tool_call_id,
+                retry_attempt=retry_attempt,
             )
 
 
@@ -380,6 +437,28 @@ def _infer_builder_artifact_type(path: str | None) -> str:
     return "document"
 
 
+def _retry_aware_failure_message(*, base: str, retry_attempt: int) -> str:
+    """Pick the user-facing phrasing for a builder failure.
+
+    ``retry_attempt == 0`` means this was the first try — we offer a retry.
+    ``retry_attempt >= 1`` means the user already asked for a second run and
+    it still failed; we flag this as likely technical and offer alternatives
+    instead of silently retrying again.
+    """
+    if retry_attempt <= 0:
+        return (
+            f"{base} Tell the user: 'Something went wrong during building. "
+            "Do you want me to try again?' Do not retry automatically; wait "
+            "for the user to confirm."
+        )
+    return (
+        f"{base} The previous retry also failed. Tell the user this looks "
+        "like a technical issue and offer alternatives: a partial draft from "
+        "what we already have, a text summary, or stopping for now. Do NOT "
+        "delegate to the builder again on your own."
+    )
+
+
 def _build_partial_builder_update(
     *,
     result,
@@ -390,6 +469,7 @@ def _build_partial_builder_update(
     thread_id: str | None,
     tool_call_id: str,
     failure_reason: str,
+    retry_attempt: int = 0,
 ) -> Command | None:
     builder_result = extract_builder_result_from_subagent_result(result)
     artifact_path = builder_result.get("artifact_path")
@@ -402,24 +482,41 @@ def _build_partial_builder_update(
     if not has_recoverable_output:
         return None
 
+    # Partial deliveries are still a best-effort recovery of a failed or
+    # timed-out build. The companion should treat them using the same
+    # retryable-vs-terminal taxonomy as a hard failure so the retry
+    # prompt is consistent across both surfaces.
+    builder_status = (
+        BUILDER_STATUS_FAILED_RETRYABLE
+        if retry_attempt <= 0
+        else BUILDER_STATUS_FAILED_TERMINAL
+    )
+    builder_result["status"] = builder_status
+
     builder_delivery = build_builder_delivery_payload(
         thread_id=thread_id,
         builder_result=builder_result,
     )
     title = builder_result.get("artifact_title") or "the draft deliverable"
     failure_label = "timed out" if status == "timed_out" else "hit an error"
-    tool_message = (
+    base_message = (
         f"Builder {failure_label} before finishing cleanly, but {title} is attached for this reply. "
         f"Tell the user it is a draft or partial result and briefly mention this limitation: {failure_reason}"
         if builder_delivery is not None
         else f"Builder {failure_label} before finishing cleanly, but it produced a partial result for {title}. "
         f"Tell the user it is incomplete and briefly mention this limitation: {failure_reason}"
     )
+    tool_message = _retry_aware_failure_message(
+        base=base_message,
+        retry_attempt=retry_attempt,
+    )
     logger.warning(
-        "[Builder] returning partial builder result after %s task_id=%s artifact=%s",
+        "[Builder] returning partial builder result after %s task_id=%s artifact=%s status=%s retry_attempt=%d",
         status,
         task_id,
         artifact_path,
+        builder_status,
+        retry_attempt,
     )
     return Command(
         update={
@@ -443,7 +540,12 @@ def _build_partial_builder_update(
     )
 
 
-def _format_error_command(error: str, tool_call_id: str) -> Command:
+def _format_error_command(
+    error: str,
+    tool_call_id: str,
+    *,
+    retry_attempt: int = 0,
+) -> Command:
     """Return a Command that surfaces a builder error as a paired ToolMessage.
 
     LangGraph requires every tool call to have a matching ``ToolMessage`` in
@@ -451,12 +553,22 @@ def _format_error_command(error: str, tool_call_id: str) -> Command:
     the originating ``tool_call_id`` rather than a bare string. The ``name``
     is set so downstream message inspection can attribute the failure to
     ``switch_to_builder`` reliably.
+
+    The phrasing branches on ``retry_attempt`` so the companion tells the
+    user the right thing (retry prompt vs alternatives). The companion must
+    never retry on its own; retry_attempt is only incremented when the user
+    explicitly asks to try again.
     """
+    base = f"Builder failed: {error}."
+    message = _retry_aware_failure_message(
+        base=base,
+        retry_attempt=retry_attempt,
+    )
     return Command(
         update={
             "messages": [
                 ToolMessage(
-                    f"Builder failed: {error}",
+                    message,
                     tool_call_id=tool_call_id,
                     name=TOOL_NAME,
                 )

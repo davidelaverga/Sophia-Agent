@@ -286,4 +286,196 @@ class TestSwitchToBuilderErrorCommand:
         message = command.update["messages"][0]
         assert message.tool_call_id == "toolu_error_id"
         assert message.name == "switch_to_builder"
-        assert message.content == "Builder failed: Task disappeared"
+        # Default retry_attempt=0 produces the retry-offer phrasing with the
+        # underlying error embedded.
+        assert "Task disappeared" in message.content
+        assert "try again" in message.content.lower()
+
+    def test_format_error_command_first_attempt_offers_retry(self):
+        command = switch_to_builder_module._format_error_command(
+            "Network blip",
+            "toolu_first",
+            retry_attempt=0,
+        )
+        content = command.update["messages"][0].content
+        assert "try again" in content.lower()
+        assert "alternatives" not in content.lower()
+
+    def test_format_error_command_second_attempt_offers_alternatives(self):
+        command = switch_to_builder_module._format_error_command(
+            "Still broken",
+            "toolu_second",
+            retry_attempt=1,
+        )
+        content = command.update["messages"][0].content
+        assert "alternatives" in content.lower()
+        # The companion must be told not to silently retry again.
+        assert "do not delegate" in content.lower() or "do not delegate" in content.lower()
+
+
+class TestSwitchToBuilderTimeouts:
+    def test_known_task_types_have_explicit_timeouts(self):
+        # Every Literal option on SwitchToBuilderInput should have an entry
+        # in TASK_TYPE_TIMEOUTS to avoid accidentally falling back to the
+        # default for a supported type.
+        expected = {"frontend", "presentation", "research", "document", "visual_report"}
+        assert expected.issubset(switch_to_builder_module.TASK_TYPE_TIMEOUTS.keys())
+
+    def test_resolve_builder_timeout_for_research(self):
+        assert switch_to_builder_module.resolve_builder_timeout("research") == 900
+
+    def test_resolve_builder_timeout_for_document(self):
+        assert switch_to_builder_module.resolve_builder_timeout("document") == 600
+
+    def test_resolve_builder_timeout_for_unknown_task_type_falls_back(self):
+        assert (
+            switch_to_builder_module.resolve_builder_timeout("nope")
+            == switch_to_builder_module.DEFAULT_TIMEOUT_SECONDS
+        )
+
+    def test_timeouts_are_strictly_greater_than_previous_120s_default(self):
+        # Regression guard: the whole point of PR G Commit 1 is that the
+        # short 120s timeout was killing legitimate long-running research
+        # builds. Don't let anyone regress below the safe floor.
+        for value in switch_to_builder_module.TASK_TYPE_TIMEOUTS.values():
+            assert value > 120
+        assert switch_to_builder_module.DEFAULT_TIMEOUT_SECONDS > 120
+
+
+class TestSwitchToBuilderInputSchema:
+    def test_retry_attempt_defaults_to_zero(self):
+        payload = switch_to_builder_module.SwitchToBuilderInput(
+            task="Draft a doc",
+            task_type="document",
+        )
+        assert payload.retry_attempt == 0
+
+    def test_retry_attempt_accepts_one(self):
+        payload = switch_to_builder_module.SwitchToBuilderInput(
+            task="Draft a doc",
+            task_type="document",
+            retry_attempt=1,
+        )
+        assert payload.retry_attempt == 1
+
+    def test_retry_attempt_rejects_three(self):
+        from pydantic import ValidationError
+        try:
+            switch_to_builder_module.SwitchToBuilderInput(
+                task="Draft a doc",
+                task_type="document",
+                retry_attempt=3,
+            )
+        except ValidationError:
+            return
+        raise AssertionError("retry_attempt=3 should be rejected")
+
+    def test_retry_attempt_rejects_negative(self):
+        from pydantic import ValidationError
+        try:
+            switch_to_builder_module.SwitchToBuilderInput(
+                task="Draft a doc",
+                task_type="document",
+                retry_attempt=-1,
+            )
+        except ValidationError:
+            return
+        raise AssertionError("retry_attempt=-1 should be rejected")
+
+
+class TestBuildPartialBuilderUpdateStatusTaxonomy:
+    def _make_timed_out_result(self):
+        return SimpleNamespace(
+            task_id="toolu_partial",
+            final_state={
+                "builder_result": {
+                    "artifact_path": "outputs/draft.md",
+                    "artifact_title": "draft.md",
+                }
+            },
+            ai_messages=[],
+            result="partial draft",
+        )
+
+    def test_partial_first_attempt_marks_failed_retryable(self, monkeypatch):
+        monkeypatch.setattr(
+            switch_to_builder_module,
+            "build_builder_delivery_payload",
+            lambda *, thread_id, builder_result: {
+                "source": "builder_result",
+                "attachments": [{"virtual_path": "/mnt/user-data/outputs/draft.md"}],
+            },
+        )
+
+        command = switch_to_builder_module._build_partial_builder_update(
+            result=self._make_timed_out_result(),
+            task="Write a report",
+            task_type="document",
+            task_id="toolu_partial",
+            status="timed_out",
+            thread_id="thread-xyz",
+            tool_call_id="toolu_partial",
+            failure_reason="Timed out after 600s",
+            retry_attempt=0,
+        )
+
+        assert command is not None
+        builder_result = command.update["builder_result"]
+        assert builder_result["status"] == switch_to_builder_module.BUILDER_STATUS_FAILED_RETRYABLE
+        message = command.update["messages"][0]
+        assert "try again" in message.content.lower()
+
+    def test_partial_second_attempt_marks_failed_terminal(self, monkeypatch):
+        monkeypatch.setattr(
+            switch_to_builder_module,
+            "build_builder_delivery_payload",
+            lambda *, thread_id, builder_result: {
+                "source": "builder_result",
+                "attachments": [{"virtual_path": "/mnt/user-data/outputs/draft.md"}],
+            },
+        )
+
+        command = switch_to_builder_module._build_partial_builder_update(
+            result=self._make_timed_out_result(),
+            task="Write a report",
+            task_type="document",
+            task_id="toolu_partial_2",
+            status="failed",
+            thread_id="thread-xyz",
+            tool_call_id="toolu_partial_2",
+            failure_reason="Second attempt also failed",
+            retry_attempt=1,
+        )
+
+        assert command is not None
+        builder_result = command.update["builder_result"]
+        assert builder_result["status"] == switch_to_builder_module.BUILDER_STATUS_FAILED_TERMINAL
+        message = command.update["messages"][0]
+        assert "alternatives" in message.content.lower()
+
+    def test_partial_without_recoverable_output_returns_none(self):
+        empty_result = SimpleNamespace(
+            task_id="toolu_empty",
+            final_state={
+                "builder_result": {
+                    "artifact_path": None,
+                    "supporting_files": None,
+                }
+            },
+            ai_messages=[],
+            result="nothing",
+        )
+
+        command = switch_to_builder_module._build_partial_builder_update(
+            result=empty_result,
+            task="Write a report",
+            task_type="document",
+            task_id="toolu_empty",
+            status="timed_out",
+            thread_id="thread-xyz",
+            tool_call_id="toolu_empty",
+            failure_reason="Timed out after 600s",
+            retry_attempt=0,
+        )
+
+        assert command is None

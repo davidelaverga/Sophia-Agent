@@ -355,6 +355,80 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.COMPLETED
         assert "Task" in result.result
 
+    @pytest.mark.anyio
+    async def test_aexecute_stops_cooperatively_when_cancel_event_set(
+        self, classes, base_config, mock_agent, msg
+    ):
+        """When the outer caller sets the cancel event, _aexecute stops
+        between astream chunks and returns a TIMED_OUT result instead of
+        running to completion.
+
+        This is the cooperative path that prevents zombie subagents from
+        continuing to make ~150s Anthropic calls long after the
+        switch_to_builder tool has already returned a timeout error.
+        """
+        import threading
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        cancel_event = threading.Event()
+
+        msg1 = msg.ai("First chunk", "msg-1")
+        msg2 = msg.ai("Second chunk (should be skipped)", "msg-2")
+
+        async def astream_that_cancels_after_first_chunk(*args, **kwargs):
+            yield {"messages": [msg.human("Task"), msg1]}
+            # Outer scheduler would normally set this on FuturesTimeoutError;
+            # we simulate that here so the next iteration breaks the loop.
+            cancel_event.set()
+            yield {"messages": [msg.human("Task"), msg1, msg2]}
+            # A real zombie would yield many more chunks here; cooperative
+            # cancellation must break out before this runs to completion.
+
+        mock_agent.astream = astream_that_cancels_after_first_chunk
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", cancel_event=cancel_event)
+
+        assert result.status == SubagentStatus.TIMED_OUT
+        # Only the AI message from the first chunk should have been captured;
+        # the second chunk is discarded after the cancel break.
+        assert len(result.ai_messages) == 1
+        assert result.ai_messages[0]["id"] == "msg-1"
+        assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_ignores_cancel_event_when_not_provided(
+        self, classes, base_config, mock_agent, msg
+    ):
+        """Legacy callers that don't pass a cancel_event keep working."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_message = msg.ai("Done", "msg-1")
+        final_state = {"messages": [msg.human("Task"), final_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            # No cancel_event argument at all.
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "Done"
+
 
 # -----------------------------------------------------------------------------
 # Sync Execution Path Tests
@@ -814,3 +888,82 @@ class TestCleanupBackgroundTask:
 
         # Should be removed because completed_at is set
         assert task_id not in executor_module._background_tasks
+
+
+class TestExecuteAsyncTimeoutCancellation:
+    """execute_async must set the cancel event on FuturesTimeoutError and
+    clean the event out of the module-level registry when run_task returns.
+    """
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        import importlib
+
+        from deerflow.subagents import executor
+
+        return importlib.reload(executor)
+
+    def test_timeout_sets_cancel_event_and_cleans_up_registry(
+        self, executor_module, classes
+    ):
+        import time
+
+        # ``importlib.reload(executor)`` above creates a fresh ``SubagentStatus``
+        # class inside ``executor_module`` that is NOT the same class object as
+        # ``classes["SubagentStatus"]`` (which was imported before reload).
+        # We compare by ``.name`` to stay independent of class identity.
+        def status_name(value) -> str:
+            return getattr(value, "name", str(value))
+
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        # Short timeout so the test stays fast.
+        config = SubagentConfig(
+            name="test-timeout",
+            description="test",
+            system_prompt="test",
+            max_turns=10,
+            timeout_seconds=0.3,
+        )
+
+        executor = SubagentExecutor(config=config, tools=[])
+
+        observed_cancel_events: list = []
+
+        def blocking_execute(task, result_holder, cancel_event=None):
+            # Record the event so the test can assert it was handed in by
+            # execute_async and was already set by the time we returned.
+            observed_cancel_events.append(cancel_event)
+            if cancel_event is not None:
+                # Wait up to 10s so the outer timeout has a chance to fire.
+                cancel_event.wait(timeout=10.0)
+            return result_holder
+
+        with patch.object(executor, "execute", side_effect=blocking_execute):
+            task_id = executor.execute_async("block")
+
+            # Poll until the task reaches TIMED_OUT, bounded to avoid
+            # hanging the suite if something regresses.
+            deadline = time.time() + 5.0
+            final_result = None
+            while time.time() < deadline:
+                final_result = executor_module.get_background_task_result(task_id)
+                if final_result is not None and status_name(final_result.status) == "TIMED_OUT":
+                    break
+                time.sleep(0.05)
+
+        assert final_result is not None, "task result never materialized"
+        assert status_name(final_result.status) == "TIMED_OUT"
+        assert observed_cancel_events, "execute() was never invoked"
+        assert observed_cancel_events[0] is not None
+        assert observed_cancel_events[0].is_set()
+
+        # The scheduler's finally block should have removed the registry
+        # entry. Poll briefly because run_task finishes in another thread.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if task_id not in executor_module._cancel_events:
+                break
+            time.sleep(0.05)
+        assert task_id not in executor_module._cancel_events
