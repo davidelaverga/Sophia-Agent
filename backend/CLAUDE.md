@@ -109,6 +109,9 @@ Sophia tool invariants:
 - Every `ToolMessage` returned from a Sophia tool must set both `tool_call_id` (from the resolver) and `name` (the tool's own name), so LangGraph's `Command.update` validation never rejects the response.
 - `share_builder_artifact` is a re-share-only tool: the docstring explicitly tells the model never to invoke it in the same turn as `switch_to_builder`, because `switch_to_builder` already attaches the builder deliverable through `state["builder_delivery"]`. `BuilderDeliveryMiddleware` clears that ephemeral field at the start of each new turn, so re-sharing requires the persistent `builder_result` to still be in state.
 
+Sophia middleware state schema invariant:
+- Any middleware that declares a `state_schema` extending `AgentState` must either inherit `messages` unchanged or redeclare it with the `add_messages` reducer. Declaring `messages: NotRequired[list]` (or any plain `list` annotation) shadows the inherited `Annotated[list, add_messages]` declaration, downgrades the LangGraph channel to `LastValue`, and makes parallel tool dispatch (for example two `web_search` calls in one AI message) crash with `InvalidUpdateError: At key 'messages': Can receive only one value per step`. `tests/test_sophia_state_schema_invariants.py` catches this regression at import time across every Sophia middleware state class.
+
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
 

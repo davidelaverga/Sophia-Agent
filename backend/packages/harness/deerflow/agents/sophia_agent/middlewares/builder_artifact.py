@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 
 
 class BuilderArtifactState(AgentState):
-    messages: NotRequired[list]
+    # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
+    # ``messages`` with the ``add_messages`` reducer so parallel tool calls
+    # (e.g. two ``web_search`` entries in one AI message) can each append a
+    # ``ToolMessage`` within the same super-step. Shadowing it with a plain
+    # ``list`` annotation downgrades the channel to ``LastValue`` and causes
+    # ``InvalidUpdateError: At key 'messages': Can receive only one value per step``.
     builder_result: NotRequired[dict | None]
 
 

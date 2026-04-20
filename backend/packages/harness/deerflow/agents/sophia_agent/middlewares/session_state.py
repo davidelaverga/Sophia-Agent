@@ -34,7 +34,10 @@ class SessionStateState(AgentState):
     turn_count: NotRequired[int]
     skip_expensive: NotRequired[bool]
     system_prompt_blocks: NotRequired[list[str]]
-    messages: NotRequired[list]
+    # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
+    # ``messages`` with the ``add_messages`` reducer; shadowing it with a plain
+    # ``list`` downgrades the channel to ``LastValue`` and makes parallel tool
+    # calls crash with ``InvalidUpdateError``.
 
 
 class SessionStateMiddleware(AgentMiddleware[SessionStateState]):
