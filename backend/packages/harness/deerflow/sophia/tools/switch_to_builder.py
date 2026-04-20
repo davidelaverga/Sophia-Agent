@@ -284,8 +284,15 @@ def switch_to_builder(
     # Override limits for builder execution. Timeout is chosen per-task-type
     # because research and visual reports routinely need more wall-clock time
     # than a short document edit. See `TASK_TYPE_TIMEOUTS` above.
+    #
+    # max_turns is forwarded to LangGraph's ``recursion_limit``. Each builder
+    # tool turn costs ~2 super-steps (LLM call + tool node), so 120 steps
+    # covers up to ~60 tool turns. We deliberately sit above HARD_TURN_CAP=40
+    # so the partial-pause middleware (see BuilderArtifactMiddleware) is the
+    # user-visible cap while recursion_limit is just headroom for it to fire
+    # cleanly rather than crashing the subgraph.
     timeout_seconds = resolve_builder_timeout(task_type)
-    config = replace(config, max_turns=50, timeout_seconds=timeout_seconds, name="sophia_builder")
+    config = replace(config, max_turns=120, timeout_seconds=timeout_seconds, name="sophia_builder")
 
     executor = SubagentExecutor(
         config=config,

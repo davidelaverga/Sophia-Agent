@@ -57,6 +57,47 @@ def _ai_plain(text: str) -> AIMessage:
 # ---------------------------------------------------------------------------
 
 
+class TestRecursionHeadroom:
+    def test_hard_turn_cap_has_headroom_below_recursion_limit(self):
+        """The recursion_limit must be high enough that the partial pause
+        can fire before LangGraph's own recursion guard aborts the run.
+
+        Each builder tool turn costs ~2 LangGraph super-steps, so we
+        require at least ``2 * HARD_TURN_CAP`` steps, plus a small
+        headroom for the final emit_builder_artifact turn.
+        """
+        # Access via import to avoid circular test-time behaviour.
+        import importlib
+
+        builder_agent_mod = importlib.import_module(
+            "deerflow.agents.sophia_agent.builder_agent"
+        )
+        switch_mod = importlib.import_module(
+            "deerflow.sophia.tools.switch_to_builder"
+        )
+
+        # Inspect the source so we don't need to actually instantiate the
+        # builder (which requires Anthropic credentials).
+        builder_src = importlib.import_module(
+            "deerflow.agents.sophia_agent.builder_agent"
+        )
+        src_text = builder_agent_mod.__loader__.get_source(builder_agent_mod.__name__)
+        assert "agent.recursion_limit = 120" in src_text, (
+            "builder_agent recursion_limit must provide headroom above HARD_TURN_CAP"
+        )
+        assert builder_src is not None  # keep import used
+
+        # The per-delegation config also caps recursion; it must mirror the
+        # agent setting.
+        switch_src = switch_mod.__loader__.get_source(switch_mod.__name__)
+        assert "max_turns=120" in switch_src
+
+        required_min = 2 * ba.HARD_TURN_CAP
+        assert 120 >= required_min + 5, (
+            f"recursion_limit=120 must leave headroom over 2 * HARD_TURN_CAP={required_min}"
+        )
+
+
 class TestCountToolBearingTurns:
     def test_counts_only_ai_messages_with_tool_calls(self):
         messages = [

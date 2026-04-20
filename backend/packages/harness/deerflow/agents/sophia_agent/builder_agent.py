@@ -142,9 +142,12 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         state_schema=SophiaState,
     )
     # Builder needs enough steps for multi-file creation.
-    # Each tool call = ~3 graph steps. 50 steps ≈ 16 tool turns.
-    # The per-task-type timeout in switch_to_builder (600–900s) is the real
-    # safety net, with cooperative cancellation in subagents/executor.py as
-    # the backstop for stuck runs.
-    agent.recursion_limit = 50
+    # Each tool turn costs ~2 super-steps (LLM call + tool node), so 120
+    # super-steps covers ~60 tool turns. We set this above
+    # ``HARD_TURN_CAP = 40`` in BuilderArtifactMiddleware so the turn-cap
+    # pause is the user-visible ceiling while recursion_limit is just
+    # headroom. The per-task-type timeout in switch_to_builder (600–900s)
+    # and cooperative cancellation in subagents/executor.py remain the
+    # backstops for genuinely stuck runs.
+    agent.recursion_limit = 120
     return agent
