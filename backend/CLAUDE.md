@@ -104,6 +104,11 @@ Notable regression tests:
 
 Dependency floors: `langchain>=1.2.15` is required so the `_fetch_last_ai_and_tool_messages` helper used by LangChain's `tools_to_model` routing edge returns `(None, [])` on empty/partial states instead of raising `UnboundLocalError` when the Sophia builder triggers parallel tool calls. The bump transitively requires `langchain-core>=1.3.0` and `langgraph>=1.1.8`.
 
+Sophia tool invariants:
+- Tools that return `Command(update={...})` must resolve their tool call id through `deerflow.sophia.tools._tool_call_id.resolve_tool_call_id`. The resolver prefers `runtime.tool_call_id` (always present on `langchain.tools.ToolRuntime`) and falls back to the `Annotated[str, InjectedToolCallId]` parameter. It raises `ValueError` if neither source has a non-empty id, so failures are loud rather than silently corrupting the LangGraph turn.
+- Every `ToolMessage` returned from a Sophia tool must set both `tool_call_id` (from the resolver) and `name` (the tool's own name), so LangGraph's `Command.update` validation never rejects the response.
+- `share_builder_artifact` is a re-share-only tool: the docstring explicitly tells the model never to invoke it in the same turn as `switch_to_builder`, because `switch_to_builder` already attaches the builder deliverable through `state["builder_delivery"]`. `BuilderDeliveryMiddleware` clears that ephemeral field at the start of each new turn, so re-sharing requires the persistent `builder_result` to still be in state.
+
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
 

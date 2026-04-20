@@ -11,7 +11,10 @@ from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel
 
+from deerflow.sophia.tools._tool_call_id import resolve_tool_call_id
 from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
+
+TOOL_NAME = "share_builder_artifact"
 
 
 class ShareBuilderArtifactInput(BaseModel):
@@ -39,11 +42,20 @@ def share_builder_artifact(
     runtime: ToolRuntime[ContextT, dict[str, Any]] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> Command:
-    """Attach the latest builder-created file to the current reply.
+    """Re-attach a builder deliverable that was already produced in THIS chat.
 
-    Use this when the user asks you to send, resend, share, or attach the most
-    recent document or file that Sophia already built in this chat.
+    Only call this when the user asks you to RESEND, REATTACH, or SHARE AGAIN
+    the most recent document Sophia already built in the current conversation.
+    Do NOT call this in the same turn as `switch_to_builder` or right after a
+    new builder run completes — `switch_to_builder` already attaches its own
+    deliverable through `state["builder_delivery"]`.
     """
+
+    resolved_tool_call_id = resolve_tool_call_id(
+        runtime,
+        tool_call_id,
+        tool_name=TOOL_NAME,
+    )
 
     state = runtime.state or {} if runtime is not None else {}
     builder_result = state.get("builder_result")
@@ -53,7 +65,8 @@ def share_builder_artifact(
                 "messages": [
                     ToolMessage(
                         "There is no previous builder deliverable available to share in this chat.",
-                        tool_call_id=tool_call_id,
+                        tool_call_id=resolved_tool_call_id,
+                        name=TOOL_NAME,
                     )
                 ]
             }
@@ -70,7 +83,8 @@ def share_builder_artifact(
                 "messages": [
                     ToolMessage(
                         f"{title} exists, but it could not be attached for delivery right now. Explain that clearly to the user.",
-                        tool_call_id=tool_call_id,
+                        tool_call_id=resolved_tool_call_id,
+                        name=TOOL_NAME,
                     )
                 ]
             }
@@ -83,7 +97,8 @@ def share_builder_artifact(
             "messages": [
                 ToolMessage(
                     f"{title} is attached for this reply. Briefly tell the user that you are sending it now.",
-                    tool_call_id=tool_call_id,
+                    tool_call_id=resolved_tool_call_id,
+                    name=TOOL_NAME,
                 )
             ],
         }

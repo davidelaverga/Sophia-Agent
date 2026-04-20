@@ -8,18 +8,27 @@ from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from deerflow.config.paths import Paths
 from deerflow.config.tool_config import ToolConfig
+from deerflow.sophia.tools._tool_call_id import resolve_tool_call_id
 
 builder_agent_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
 share_builder_artifact_module = importlib.import_module("deerflow.sophia.tools.share_builder_artifact")
 switch_to_builder_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
 
 
-def _make_runtime(*, state: dict | None = None, thread_id: str = "thread-123") -> SimpleNamespace:
-    return SimpleNamespace(
+def _make_runtime(
+    *,
+    state: dict | None = None,
+    thread_id: str = "thread-123",
+    runtime_tool_call_id: str | None = None,
+) -> SimpleNamespace:
+    runtime = SimpleNamespace(
         state=state or {},
         context={"thread_id": thread_id},
         config={"configurable": {"thread_id": thread_id}},
     )
+    if runtime_tool_call_id is not None:
+        runtime.tool_call_id = runtime_tool_call_id
+    return runtime
 
 
 def test_build_builder_delivery_payload_reads_thread_outputs(monkeypatch, tmp_path):
@@ -152,3 +161,129 @@ def test_builder_agent_defaults_to_stronger_model(monkeypatch):
 
     assert model_name == "claude-sonnet-4-6"
     assert source == "default"
+
+
+class TestResolveToolCallId:
+    def test_prefers_runtime_tool_call_id_over_injected(self):
+        runtime = _make_runtime(runtime_tool_call_id="toolu_runtime")
+
+        resolved = resolve_tool_call_id(runtime, "toolu_injected", tool_name="share_builder_artifact")
+
+        assert resolved == "toolu_runtime"
+
+    def test_falls_back_to_injected_when_runtime_id_is_empty(self):
+        runtime = _make_runtime(runtime_tool_call_id="")
+
+        resolved = resolve_tool_call_id(runtime, "toolu_injected", tool_name="share_builder_artifact")
+
+        assert resolved == "toolu_injected"
+
+    def test_falls_back_to_injected_when_runtime_has_no_attr(self):
+        runtime = _make_runtime()
+
+        resolved = resolve_tool_call_id(runtime, "toolu_injected", tool_name="share_builder_artifact")
+
+        assert resolved == "toolu_injected"
+
+    def test_raises_when_neither_source_has_id(self):
+        runtime = _make_runtime(runtime_tool_call_id="")
+
+        try:
+            resolve_tool_call_id(runtime, "", tool_name="share_builder_artifact")
+        except ValueError as exc:
+            assert "share_builder_artifact" in str(exc)
+        else:
+            raise AssertionError("resolve_tool_call_id should have raised ValueError")
+
+    def test_handles_runtime_none(self):
+        resolved = resolve_tool_call_id(None, "toolu_injected", tool_name="switch_to_builder")
+
+        assert resolved == "toolu_injected"
+
+
+class TestShareBuilderArtifactToolCallIdIntegrity:
+    def test_uses_runtime_tool_call_id_when_injected_is_empty(self, monkeypatch):
+        monkeypatch.setattr(
+            share_builder_artifact_module,
+            "build_builder_delivery_payload",
+            lambda *, thread_id, builder_result: {
+                "source": "builder_result",
+                "attachments": [{"virtual_path": "/mnt/user-data/outputs/brief.md"}],
+            },
+        )
+
+        result = share_builder_artifact_module.share_builder_artifact.func(
+            runtime=_make_runtime(
+                state={
+                    "builder_result": {
+                        "artifact_title": "brief.md",
+                        "artifact_path": "outputs/brief.md",
+                    }
+                },
+                runtime_tool_call_id="toolu_from_runtime",
+            ),
+            tool_call_id="",
+        )
+
+        assert result.update["messages"][0].tool_call_id == "toolu_from_runtime"
+        assert result.update["messages"][0].name == "share_builder_artifact"
+
+    def test_no_previous_deliverable_branch_emits_paired_tool_message(self):
+        result = share_builder_artifact_module.share_builder_artifact.func(
+            runtime=_make_runtime(runtime_tool_call_id="toolu_no_state"),
+            tool_call_id="",
+        )
+
+        message = result.update["messages"][0]
+        assert message.tool_call_id == "toolu_no_state"
+        assert message.name == "share_builder_artifact"
+        assert message.content == "There is no previous builder deliverable available to share in this chat."
+
+    def test_delivery_unavailable_branch_emits_paired_tool_message(self, monkeypatch):
+        monkeypatch.setattr(
+            share_builder_artifact_module,
+            "build_builder_delivery_payload",
+            lambda *, thread_id, builder_result: None,
+        )
+
+        result = share_builder_artifact_module.share_builder_artifact.func(
+            runtime=_make_runtime(
+                state={
+                    "builder_result": {
+                        "artifact_title": "brief.md",
+                        "artifact_path": "outputs/brief.md",
+                    }
+                },
+                runtime_tool_call_id="toolu_partial",
+            ),
+            tool_call_id="",
+        )
+
+        message = result.update["messages"][0]
+        assert message.tool_call_id == "toolu_partial"
+        assert message.name == "share_builder_artifact"
+        assert "could not be attached" in message.content
+
+    def test_raises_when_no_tool_call_id_anywhere(self):
+        try:
+            share_builder_artifact_module.share_builder_artifact.func(
+                runtime=_make_runtime(runtime_tool_call_id=""),
+                tool_call_id="",
+            )
+        except ValueError as exc:
+            assert "share_builder_artifact" in str(exc)
+        else:
+            raise AssertionError("share_builder_artifact should have raised ValueError")
+
+
+class TestSwitchToBuilderErrorCommand:
+    def test_format_error_command_emits_paired_tool_message(self):
+        command = switch_to_builder_module._format_error_command(
+            "Task disappeared",
+            "toolu_error_id",
+        )
+
+        message = command.update["messages"][0]
+        assert message.tool_call_id == "toolu_error_id"
+        assert message.name == "switch_to_builder"
+        assert message.content == "Builder failed: Task disappeared"

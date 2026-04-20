@@ -20,6 +20,7 @@ from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
 
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.sophia.tools._tool_call_id import resolve_tool_call_id
 from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
 from deerflow.subagents import SubagentExecutor, get_subagent_config
 from deerflow.subagents.executor import (
@@ -29,6 +30,8 @@ from deerflow.subagents.executor import (
 )
 
 logger = logging.getLogger(__name__)
+
+TOOL_NAME = "switch_to_builder"
 
 
 class SwitchToBuilderInput(BaseModel):
@@ -54,6 +57,12 @@ def switch_to_builder(
     Do NOT call for emotional conversation, reflection, or memory tasks.
     Before calling this, ensure you have complete specs — ask any clarifying
     questions first, then delegate with the complete brief."""
+
+    resolved_tool_call_id = resolve_tool_call_id(
+        runtime,
+        tool_call_id,
+        tool_name=TOOL_NAME,
+    )
 
     # ------------------------------------------------------------------
     # 1. Extract companion state
@@ -160,7 +169,7 @@ def switch_to_builder(
     # ------------------------------------------------------------------
     # 5. Execute + poll
     # ------------------------------------------------------------------
-    task_id = tool_call_id or str(uuid.uuid4())[:8]
+    task_id = resolved_tool_call_id or str(uuid.uuid4())[:8]
     executor.execute_async(task, task_id=task_id)
     logger.info("[Builder] Task %s started (trace=%s)", task_id, trace_id)
 
@@ -181,7 +190,7 @@ def switch_to_builder(
         if result is None:
             logger.error("[Builder] Task %s not found", task_id)
             cleanup_background_task(task_id)
-            return _format_error("Task disappeared")
+            return _format_error_command("Task disappeared", resolved_tool_call_id)
 
         if result.status == SubagentStatus.COMPLETED:
             logger.info("[Builder] Task %s completed after %d polls", task_id, poll_count)
@@ -211,7 +220,13 @@ def switch_to_builder(
                         "status": "completed",
                     },
                     "builder_delivery": builder_delivery,
-                    "messages": [ToolMessage(tool_message, tool_call_id=tool_call_id)],
+                    "messages": [
+                        ToolMessage(
+                            tool_message,
+                            tool_call_id=resolved_tool_call_id,
+                            name=TOOL_NAME,
+                        )
+                    ],
                 }
             )
 
@@ -226,13 +241,16 @@ def switch_to_builder(
                 task_id=task_id,
                 status="failed",
                 thread_id=thread_id,
-                tool_call_id=tool_call_id,
+                tool_call_id=resolved_tool_call_id,
                 failure_reason=result.error or "Unknown error",
             )
             cleanup_background_task(task_id)
             if partial_update is not None:
                 return partial_update
-            return _format_error(result.error or "Unknown error")
+            return _format_error_command(
+                result.error or "Unknown error",
+                resolved_tool_call_id,
+            )
 
         elif result.status == SubagentStatus.TIMED_OUT:
             logger.warning("[Builder] Task %s timed out", task_id)
@@ -245,13 +263,16 @@ def switch_to_builder(
                 task_id=task_id,
                 status="timed_out",
                 thread_id=thread_id,
-                tool_call_id=tool_call_id,
+                tool_call_id=resolved_tool_call_id,
                 failure_reason=f"Timed out after {config.timeout_seconds}s",
             )
             cleanup_background_task(task_id)
             if partial_update is not None:
                 return partial_update
-            return _format_error(f"Timed out after {config.timeout_seconds}s")
+            return _format_error_command(
+                f"Timed out after {config.timeout_seconds}s",
+                resolved_tool_call_id,
+            )
 
         time.sleep(5)
         poll_count += 1
@@ -259,7 +280,10 @@ def switch_to_builder(
         if poll_count > max_poll_count:
             logger.error("[Builder] Task %s polling timed out", task_id)
             cleanup_background_task(task_id)
-            return _format_error(f"Polling timed out after {poll_count} polls")
+            return _format_error_command(
+                f"Polling timed out after {poll_count} polls",
+                resolved_tool_call_id,
+            )
 
 
 # ------------------------------------------------------------------
@@ -408,10 +432,34 @@ def _build_partial_builder_update(
                 "error": failure_reason,
             },
             "builder_delivery": builder_delivery,
-            "messages": [ToolMessage(tool_message, tool_call_id=tool_call_id)],
+            "messages": [
+                ToolMessage(
+                    tool_message,
+                    tool_call_id=tool_call_id,
+                    name=TOOL_NAME,
+                )
+            ],
         }
     )
 
-def _format_error(error: str) -> str:
-    """Format a builder error for the companion."""
-    return f"Builder failed: {error}"
+
+def _format_error_command(error: str, tool_call_id: str) -> Command:
+    """Return a Command that surfaces a builder error as a paired ToolMessage.
+
+    LangGraph requires every tool call to have a matching ``ToolMessage`` in
+    the response, so a builder failure must travel back as a ToolMessage with
+    the originating ``tool_call_id`` rather than a bare string. The ``name``
+    is set so downstream message inspection can attribute the failure to
+    ``switch_to_builder`` reliably.
+    """
+    return Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    f"Builder failed: {error}",
+                    tool_call_id=tool_call_id,
+                    name=TOOL_NAME,
+                )
+            ],
+        }
+    )
