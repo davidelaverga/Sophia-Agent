@@ -161,6 +161,52 @@ button, a, [role="button"] {
   --life-bloom-layer-opacity: 0.5;
   --life-vignette: rgba(200, 170, 235, 0.04);
   --life-vignette-edge: rgba(185, 150, 225, 0.08);
+
+  /* Danger tokens — light theme overrides */
+  --cosmic-danger: #b44060;
+  --cosmic-danger-text: #7a2040;
+  --cosmic-danger-muted: #9a6878;
+  --cosmic-danger-border: rgba(180, 64, 96, 0.18);
+  --cosmic-danger-bg: rgba(180, 64, 96, 0.10);
+
+  /* Journal category tokens — light theme (darker for contrast on white) */
+  --journal-decision: #3a8a7a;
+  --journal-decision-bg: rgba(58,138,122,0.10);
+  --journal-pattern: #6a5ea8;
+  --journal-pattern-bg: rgba(106,94,168,0.10);
+  --journal-lesson: #a07840;
+  --journal-lesson-bg: rgba(160,120,64,0.10);
+  --journal-feeling: #a85878;
+  --journal-feeling-bg: rgba(168,88,120,0.10);
+  --journal-relationship: #5878a8;
+  --journal-relationship-bg: rgba(88,120,168,0.10);
+  --journal-commitment: #48a080;
+  --journal-commitment-bg: rgba(72,160,128,0.10);
+  --journal-preference: #7868a0;
+  --journal-preference-bg: rgba(120,104,160,0.10);
+  --journal-fact: #6880a0;
+  --journal-fact-bg: rgba(104,128,160,0.10);
+  --journal-ritual: #7a6890;
+  --journal-ritual-bg: rgba(122,104,144,0.10);
+  --journal-default: #8070b8;
+  --journal-default-bg: rgba(128,112,184,0.10);
+
+  /* Journal importance tokens — light theme */
+  --journal-structural: #c08030;
+  --journal-structural-glow: rgba(192,128,48,0.32);
+  --journal-potential: #3a9888;
+  --journal-potential-glow: rgba(58,152,136,0.30);
+  --journal-contextual: #686488;
+  --journal-contextual-glow: rgba(104,100,136,0.22);
+
+  /* Overlay & tooltip tokens — light theme */
+  --cosmic-tooltip-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 246, 252, 0.97) 100%);
+  --cosmic-tooltip-border: rgba(120, 100, 180, 0.18);
+  --cosmic-tooltip-shadow: 0 18px 48px rgba(0, 0, 0, 0.12), 0 0 0 1px rgba(120, 100, 180, 0.08);
+  --cosmic-tooltip-arrow-bg: rgba(255, 255, 255, 0.98);
+  --cosmic-tooltip-arrow-border: rgba(120, 100, 180, 0.18);
+  --cosmic-overlay-scrim: rgba(30, 20, 50, 0.50);
+  --cosmic-overlay-wash: rgba(30, 20, 50, 0.06);
 }
 
 /* 🌙 Dark Mode – Proposal 1: Accessible Indigo */
@@ -558,6 +604,66 @@ button, a, [role="button"] {
   --cosmic-reading-corridor: radial-gradient(ellipse 65% 80% at 50% 50%, color-mix(in srgb, var(--bg) 94%, transparent) 0%, color-mix(in srgb, var(--bg) 78%, transparent) 55%, color-mix(in srgb, var(--bg) 30%, transparent) 100%);
   --cosmic-modal-backdrop: color-mix(in srgb, var(--bg) 55%, transparent);
   --cosmic-bottom-bar-bg: color-mix(in srgb, var(--bg) 82%, transparent);
+
+  /* Interaction states */
+  --cosmic-hover-bg: color-mix(in srgb, var(--sophia-purple) 6%, transparent);
+  --cosmic-active-bg: color-mix(in srgb, var(--sophia-purple) 9%, transparent);
+  --cosmic-border-faint: color-mix(in srgb, var(--sophia-purple) 6%, transparent);
+  --cosmic-focus-ring: color-mix(in srgb, var(--sophia-purple) 55%, transparent);
+
+  /* Teal action tokens */
+  --cosmic-teal-bg: color-mix(in srgb, var(--cosmic-teal) 16%, transparent);
+  --cosmic-teal-border: color-mix(in srgb, var(--cosmic-teal) 22%, transparent);
+
+  /* Danger / destructive tokens */
+  --cosmic-danger: #df95a8;
+  --cosmic-danger-text: #f3dbe3;
+  --cosmic-danger-muted: #b59db0;
+  --cosmic-danger-border: rgba(214, 123, 145, 0.20);
+  --cosmic-danger-bg: rgba(118, 42, 67, 0.28);
+
+  /* Elevations */
+  --cosmic-shadow-heavy: 0 12px 40px color-mix(in srgb, var(--bg) 70%, transparent);
+  --cosmic-divider: linear-gradient(90deg, transparent, color-mix(in srgb, var(--sophia-purple) 8%, transparent), transparent);
+
+  /* Journal category tokens */
+  --journal-decision: #59bead;
+  --journal-decision-bg: rgba(89,190,173,0.10);
+  --journal-pattern: #8b7ec8;
+  --journal-pattern-bg: rgba(139,126,200,0.12);
+  --journal-lesson: #d4b088;
+  --journal-lesson-bg: rgba(200,165,120,0.10);
+  --journal-feeling: #d490b0;
+  --journal-feeling-bg: rgba(200,120,160,0.10);
+  --journal-relationship: #88aad0;
+  --journal-relationship-bg: rgba(120,155,200,0.10);
+  --journal-commitment: #88d0b0;
+  --journal-commitment-bg: rgba(120,200,165,0.10);
+  --journal-preference: #b0a0c8;
+  --journal-preference-bg: rgba(180,160,200,0.10);
+  --journal-fact: #a0b4c8;
+  --journal-fact-bg: rgba(170,185,200,0.10);
+  --journal-ritual: #af9bbe;
+  --journal-ritual-bg: rgba(175,155,190,0.10);
+  --journal-default: #b8a8e8;
+  --journal-default-bg: rgba(184,164,232,0.10);
+
+  /* Journal importance tokens */
+  --journal-structural: #f0b97a;
+  --journal-structural-glow: rgba(240,185,122,0.42);
+  --journal-potential: #7fd3c6;
+  --journal-potential-glow: rgba(127,211,198,0.40);
+  --journal-contextual: #8c87a6;
+  --journal-contextual-glow: rgba(140,135,166,0.28);
+
+  /* Overlay & tooltip tokens */
+  --cosmic-tooltip-bg: linear-gradient(180deg, rgba(18, 13, 30, 0.96) 0%, rgba(13, 10, 24, 0.94) 100%);
+  --cosmic-tooltip-border: rgba(156, 132, 205, 0.28);
+  --cosmic-tooltip-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(156, 132, 205, 0.12), inset 0 1px 0 rgba(255,255,255,0.04);
+  --cosmic-tooltip-arrow-bg: rgba(15, 10, 25, 0.92);
+  --cosmic-tooltip-arrow-border: rgba(124, 92, 170, 0.2);
+  --cosmic-overlay-scrim: rgba(6, 4, 12, 0.60);
+  --cosmic-overlay-wash: rgba(8, 5, 16, 0.10);
 }
 
 /* WebKit/Blink */
@@ -967,6 +1073,92 @@ a {
 .animate-shimmer {
   animation: shimmer 1.5s infinite linear;
   background-size: 200% 100%;
+}
+
+/* Builder constellation orbit — particles trace an elliptical path */
+@keyframes builder-orbit {
+  0%   { transform: rotate(0deg)   translateX(var(--orbit-r)) rotate(0deg);   opacity: 0.18; }
+  25%  { opacity: 0.55; }
+  50%  { transform: rotate(180deg) translateX(var(--orbit-r)) rotate(-180deg); opacity: 0.18; }
+  75%  { opacity: 0.55; }
+  100% { transform: rotate(360deg) translateX(var(--orbit-r)) rotate(-360deg); opacity: 0.18; }
+}
+
+@keyframes builder-core-breath {
+  0%, 100% { transform: scale(1);   box-shadow: 0 0 12px color-mix(in srgb, var(--sophia-purple) 25%, transparent); }
+  50%      { transform: scale(1.15); box-shadow: 0 0 22px color-mix(in srgb, var(--sophia-purple) 45%, transparent); }
+}
+
+@keyframes builder-reveal {
+  from { opacity: 0; transform: translateY(8px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0)  scale(1); }
+}
+
+@keyframes builder-progress-sheen {
+  0% { transform: translateX(-140%); opacity: 0; }
+  20% { opacity: 0.38; }
+  100% { transform: translateX(280%); opacity: 0; }
+}
+
+@keyframes builder-progress-indeterminate {
+  0% { transform: translateX(-130%) scaleX(0.84); opacity: 0.4; }
+  50% { transform: translateX(90%) scaleX(1); opacity: 0.8; }
+  100% { transform: translateX(245%) scaleX(0.84); opacity: 0.4; }
+}
+
+@keyframes builder-complete-surge {
+  0% { filter: saturate(1) brightness(1); }
+  45% { filter: saturate(1.28) brightness(1.08); }
+  100% { filter: saturate(1) brightness(1); }
+}
+
+@keyframes builder-progress-spark {
+  0% { transform: translateX(-28%); opacity: 0; }
+  25% { opacity: 0.34; }
+  100% { transform: translateX(128%); opacity: 0; }
+}
+
+@keyframes builder-pill-fill {
+  0% { transform: scaleX(0.08); filter: saturate(0.88) brightness(0.92); }
+  100% { transform: scaleX(1); filter: saturate(1) brightness(1); }
+}
+
+@keyframes builder-ready-pill-enter {
+  0% { opacity: 0; transform: translateY(10px) scale(0.96); }
+  60% { opacity: 1; transform: translateY(-1px) scale(1.01); }
+  100% { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@keyframes builder-ready-dot {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 10px color-mix(in srgb, var(--cosmic-teal) 32%, transparent); }
+  50% { transform: scale(1.3); box-shadow: 0 0 18px color-mix(in srgb, var(--cosmic-teal) 46%, transparent); }
+}
+
+/* ── Context-switch discovery pulse ── */
+@keyframes ritual-context-pulse-ring {
+  0%   { opacity: 0.7; transform: translate(-50%, -50%) scale(0.95); }
+  100% { opacity: 0; transform: translate(-50%, -50%) scale(1.5); }
+}
+.ritual-context-pulse {
+  position: relative;
+}
+.ritual-context-pulse::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 1.5px solid var(--sophia-purple);
+  transform: translate(-50%, -50%) scale(0.95);
+  animation: ritual-context-pulse-ring 0.7s ease-out forwards;
+  pointer-events: none;
+}
+
+@keyframes builder-ready-aura {
+  0%, 100% { transform: scale(0.92); opacity: 0.42; }
+  50% { transform: scale(1.08); opacity: 0.78; }
 }
 
 /* Skeleton shimmer effect for loading states */
@@ -1589,6 +1781,163 @@ a {
 /* ============================================================================
    Context-world particle animations
    ============================================================================ */
+
+/* ============================================================================
+   Visual Fidelity Tiers — CSS-only adaptations
+   Driven by data-visual-tier="1|2|3" on <html>, set by useVisualTier().
+
+   Tier 3 (full):   No overrides — default rendering.
+   Tier 2 (medium): Reduced blur, fewer concurrent animations.
+   Tier 1 (low):    No backdrop-filter, static borders, minimal animations.
+   ============================================================================ */
+
+/* --- Tier 2: Medium fidelity -------------------------------------------- */
+
+html[data-visual-tier="2"] .cosmic-chrome-button {
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
+html[data-visual-tier="2"] .cosmic-surface-panel {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+html[data-visual-tier="2"] .cosmic-surface-panel-strong {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+html[data-visual-tier="2"] .cosmic-bottom-bar {
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+}
+
+/* Embrace: keep glow + border only, skip pulse/breathe/extend */
+html[data-visual-tier="2"] .animate-embrace-pulse,
+html[data-visual-tier="2"] .animate-embrace-breathe,
+html[data-visual-tier="2"] .animate-embrace-extend,
+html[data-visual-tier="2"] .animate-embrace-extend-delayed {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: translateY(-50%) scaleX(1) !important;
+}
+
+/* borderStreak: slow it down */
+html[data-visual-tier="2"] .animate-borderStreak {
+  animation-duration: 3s;
+}
+
+/* --- Tier 1: Low fidelity ----------------------------------------------- */
+
+/* Remove ALL backdrop-filter on cosmic surfaces → opaque fallback */
+html[data-visual-tier="1"] .cosmic-chrome-button,
+html[data-visual-tier="1"] .cosmic-surface-panel,
+html[data-visual-tier="1"] .cosmic-surface-panel-strong,
+html[data-visual-tier="1"] .cosmic-bottom-bar,
+html[data-visual-tier="1"] .cosmic-modal-backdrop {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+/* Opaque panel fallbacks when backdrop-filter is removed */
+html[data-visual-tier="1"] .cosmic-surface-panel {
+  background: var(--cosmic-panel-strong);
+}
+
+html[data-visual-tier="1"] .cosmic-surface-panel-strong {
+  background: color-mix(in srgb, var(--cosmic-panel-strong) 96%, var(--bg));
+}
+
+/* Kill animated box-shadows (mic rings, embrace, badges) */
+html[data-visual-tier="1"] .animate-mic-breathe,
+html[data-visual-tier="1"] .animate-mic-active-breathe {
+  animation: none !important;
+}
+
+/* Embrace: all animations off */
+html[data-visual-tier="1"] .animate-embrace-glow,
+html[data-visual-tier="1"] .animate-embrace-pulse,
+html[data-visual-tier="1"] .animate-embrace-border,
+html[data-visual-tier="1"] .animate-embrace-breathe,
+html[data-visual-tier="1"] .animate-embrace-extend,
+html[data-visual-tier="1"] .animate-embrace-extend-delayed {
+  animation: none !important;
+  opacity: 1 !important;
+  transform: translateY(-50%) scaleX(1) !important;
+}
+
+/* borderStreak: static border */
+html[data-visual-tier="1"] .animate-borderStreak {
+  animation: none !important;
+}
+
+/* Resonance pulse: static */
+html[data-visual-tier="1"] .animate-resonance {
+  animation: none !important;
+  opacity: 0.2 !important;
+}
+
+/* Breathe animations: static */
+html[data-visual-tier="1"] .animate-breathe,
+html[data-visual-tier="1"] .animate-breatheSlow,
+html[data-visual-tier="1"] .animate-breathe-subtle {
+  animation: none !important;
+}
+
+/* Bloom/drift: static */
+html[data-visual-tier="1"] .animate-bloomBreathe,
+html[data-visual-tier="1"] .animate-bloomDrift,
+html[data-visual-tier="1"] .animate-bloomDriftReverse {
+  animation: none !important;
+}
+
+/* Float: static */
+html[data-visual-tier="1"] .animate-float,
+html[data-visual-tier="1"] .animate-float-subtle {
+  animation: none !important;
+}
+
+/* Slow infinite animations: keep but reduce to single iteration */
+html[data-visual-tier="1"] .animate-pulseSoft,
+html[data-visual-tier="1"] .animate-glowBreathe,
+html[data-visual-tier="1"] .animate-pulse-gentle {
+  animation-iteration-count: 1 !important;
+}
+
+/* Reduce all remaining animation durations on tier 1 */
+html[data-visual-tier="1"] *:not(.animate-spin):not(.animate-pulse) {
+  animation-duration: 0.3s !important;
+  transition-duration: 0.15s !important;
+}
+
+/* --- Message bubble fidelity adaptations -------------------------------- */
+
+/* Tier 2: reduce blur values */
+html[data-visual-tier="2"] .sophia-bubble-user {
+  backdrop-filter: blur(6px) saturate(1.05) !important;
+  -webkit-backdrop-filter: blur(6px) saturate(1.05) !important;
+}
+
+html[data-visual-tier="2"] .sophia-bubble-assistant {
+  backdrop-filter: blur(8px) saturate(1.08) !important;
+  -webkit-backdrop-filter: blur(8px) saturate(1.08) !important;
+}
+
+/* Tier 1: no backdrop-filter at all — opaque backgrounds */
+html[data-visual-tier="1"] .sophia-bubble-user,
+html[data-visual-tier="1"] .sophia-bubble-assistant {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+html[data-visual-tier="1"] .sophia-bubble-user {
+  background: color-mix(in srgb, var(--user-bubble) 94%, var(--bg)) !important;
+}
+
+html[data-visual-tier="1"] .sophia-bubble-assistant {
+  background: color-mix(in srgb, var(--sophia-bubble) 94%, var(--bg)) !important;
+}
 
 @keyframes bokehFloat {
   0%, 100% {

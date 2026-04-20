@@ -59,8 +59,8 @@ export const FIRST_RUN_ONBOARDING_STEPS: readonly FirstRunOnboardingStepConfig[]
     },
     content: {
       title: "Rituals",
-      body: "Each ritual sets a different tone for the session. Pick one when you want structure, or tap the mic without one for an open conversation.",
-      voiceLine: "These four rituals change the tone of our session. Or you can skip them and start open.",
+      body: "Each ritual changes the tone of the session. Choose one first when you want structure, then tap the mic to start.",
+      voiceLine: "These rituals set the tone. Pick one first, then tap the mic to begin.",
       position: "top",
       primaryActionLabel: "Next",
     },
@@ -78,8 +78,8 @@ export const FIRST_RUN_ONBOARDING_STEPS: readonly FirstRunOnboardingStepConfig[]
     },
     content: {
       title: "The microphone",
-      body: "Tap it to start a session with me. You can talk or type, but voice is always first.",
-      voiceLine: "Tap the mic to start a session.",
+      body: "Once you choose a ritual, tap the mic to start. If nothing is selected, the mic starts an open session.",
+      voiceLine: "Tap the mic to begin. With no ritual selected, it starts open.",
       position: "bottom",
       primaryActionLabel: "Next",
     },

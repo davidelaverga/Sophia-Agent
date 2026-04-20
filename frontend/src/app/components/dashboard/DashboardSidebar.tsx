@@ -1,140 +1,568 @@
 /**
- * Dashboard Sidebar Components
- * Phase 4 Week 4 - Subphase 3
- * 
- * Collapsible sidebars for desktop/tablet with mobile floating buttons.
- * Left: Recent Sessions
- * Right: Conversation History
+ * Dashboard Sidebar Components — Sophia
+ *
+ * Borderless, text-first sidebars that melt into the dark background.
+ * No panel container, no card backgrounds, no icon wells.
+ * Sweep light manifests as subtle text brightness — nothing more.
  */
 
 'use client';
 
-import { 
-  Clock, 
-  ChevronLeft, 
-  ChevronRight, 
-  X,
-  MessageCircle,
-  Target,
-  RefreshCw,
-  Wind,
+import {
+  ChevronRight,
+  Loader2,
+  Search,
   Sparkles,
+  Trash2,
+  X,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
+import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
 import { humanizeTime } from '../../lib/humanize-time';
-import type { PresetType, ContextMode } from '../../lib/session-types';
+import type { SessionInfo } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
+import { useAuth } from '../../providers';
 import { useConversationStore } from '../../stores/conversation-store';
 import { useSessionHistoryStore, type SessionHistoryEntry } from '../../stores/session-history-store';
+import { useSessionStore, selectRecentSessions, selectIsLoadingSessions } from '../../stores/session-store';
+import { useUiStore } from '../../stores/ui-store';
+
+import { useSweepGlow } from './sweepLight';
 
 // =============================================================================
 // CONFIGS
 // =============================================================================
 
-const PRESET_ICONS: Record<PresetType, typeof Target> = {
-  prepare: Target,
-  debrief: MessageCircle,
-  reset: RefreshCw,
-  vent: Wind,
-  open: MessageCircle,
-  chat: MessageCircle,
-};
-
-const PRESET_LABELS: Record<PresetType, string> = {
-  prepare: 'Pre-game',
-  debrief: 'Debrief',
-  reset: 'Reset',
-  vent: 'Vent',
-  open: 'Chat',
-  chat: 'Chat',
-};
-
-const CONTEXT_COLORS: Record<ContextMode, string> = {
-  gaming: 'text-emerald-500',
-  work: 'text-blue-500',
-  life: 'text-pink-500',
-};
-
-// =============================================================================
-// SESSION CARD (for Recent Sessions sidebar)
-// =============================================================================
-
-interface SessionCardProps {
-  session: SessionHistoryEntry;
-  onClick: () => void;
-  compact?: boolean;
+function truncatePreview(text: string, max: number) {
+  return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
-function SessionCard({ session, onClick, compact = false }: SessionCardProps) {
-  const Icon = PRESET_ICONS[session.presetType];
-  const label = PRESET_LABELS[session.presetType];
-  const timeAgo = humanizeTime(session.endedAt);
-  const paddingClass = compact ? 'px-2 py-1.5' : 'px-2.5 py-2';
-  
+const DELETE_FEEDBACK_DELAY_MS = 220;
+
+function wait(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function formatDeleteLabel(text: string) {
+  const normalized = text.trim();
+  if (!normalized) return 'session';
+  return truncatePreview(normalized, 38);
+}
+
+function formatSessionCount(count: number) {
+  return `${count} session${count === 1 ? '' : 's'}`;
+}
+
+function parseSessionTimestamp(value: string | null | undefined): number {
+  if (!value) return 0;
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function normalizeSessionStatus(status: string | null | undefined): 'open' | 'paused' | 'ended' {
+  if (status === 'open' || status === 'paused') {
+    return status;
+  }
+
+  return 'ended';
+}
+
+function resolveSessionDescription(session: SessionInfo | null, historyEntry: SessionHistoryEntry | undefined): string {
+  const description = [
+    historyEntry?.takeawayPreview?.trim(),
+    session?.title?.trim(),
+    session?.last_message_preview?.trim(),
+    session?.focus_cue?.trim(),
+    session?.intention?.trim(),
+  ].find((value) => Boolean(value));
+
+  const normalizedStatus = normalizeSessionStatus(session?.status);
+  const fallback = normalizedStatus === 'ended'
+    ? 'Session ended'
+    : normalizedStatus === 'paused'
+      ? 'Paused session'
+      : 'New session';
+  return truncatePreview(description || fallback, 120);
+}
+
+interface SessionListRow {
+  key: string;
+  sessionId: string;
+  description: string;
+  time: ReturnType<typeof humanizeTime>;
+  turns: number;
+  isActive: boolean;
+  statusText: string;
+  onClick: () => void;
+  onDelete: () => boolean | Promise<boolean>;
+  sortAt: number;
+}
+
+interface BuildSessionRowsOptions {
+  recentSessions: SessionInfo[];
+  historySessions: SessionHistoryEntry[];
+  currentSessionId?: string;
+  onOpenBackendSession: (session: SessionInfo) => void;
+  onOpenLocalSession: (session: SessionHistoryEntry) => void;
+  onDeleteBackendSession: (session: SessionInfo) => Promise<boolean>;
+  onDeleteLocalSession: (session: SessionHistoryEntry) => boolean | Promise<boolean>;
+}
+
+function buildSessionRows({
+  recentSessions,
+  historySessions,
+  currentSessionId,
+  onOpenBackendSession,
+  onOpenLocalSession,
+  onDeleteBackendSession,
+  onDeleteLocalSession,
+}: BuildSessionRowsOptions): SessionListRow[] {
+  const historyById = new Map(historySessions.map((session) => [session.sessionId, session]));
+  const backendSessionIds = new Set(recentSessions.map((session) => session.session_id));
+  const rows: SessionListRow[] = recentSessions.map((session) => {
+    const historyEntry = historyById.get(session.session_id);
+    const status = normalizeSessionStatus(session.status);
+    const timeSource = status === 'ended'
+      ? historyEntry?.endedAt || session.ended_at || session.updated_at
+      : session.updated_at;
+
+    const statusText = status === 'open'
+      ? 'Active'
+      : status === 'paused'
+        ? 'Paused'
+        : 'Archived';
+
+    return {
+      key: `backend-${session.session_id}`,
+      sessionId: session.session_id,
+      description: resolveSessionDescription(session, historyEntry),
+      time: humanizeTime(timeSource),
+      turns: historyEntry?.messageCount ?? session.turn_count,
+      isActive: currentSessionId === session.session_id,
+      statusText,
+      onClick: () => onOpenBackendSession(session),
+      onDelete: () => onDeleteBackendSession(session),
+      sortAt: parseSessionTimestamp(timeSource),
+    };
+  });
+
+  for (const session of historySessions) {
+    if (backendSessionIds.has(session.sessionId)) {
+      continue;
+    }
+
+    rows.push({
+      key: `local-${session.sessionId}`,
+      sessionId: session.sessionId,
+      description: truncatePreview(session.takeawayPreview?.trim() || 'Session ended', 120),
+      time: humanizeTime(session.endedAt),
+      turns: session.messageCount,
+      isActive: currentSessionId === session.sessionId,
+      statusText: 'Archived',
+      onClick: () => onOpenLocalSession(session),
+      onDelete: () => onDeleteLocalSession(session),
+      sortAt: parseSessionTimestamp(session.endedAt),
+    });
+  }
+
+  return rows.sort((left, right) => right.sortAt - left.sortAt);
+}
+
+// =============================================================================
+// HIGHLIGHT — wraps matching substrings
+// =============================================================================
+
+function HighlightText({ text, query }: { text: string; query: string }) {
+  if (!query.trim()) return <>{text}</>;
+
+  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+
+  return (
+    <>
+      {parts.map((part, i) =>
+        part.toLowerCase() === query.toLowerCase() ? (
+          <mark
+            key={i}
+            className="rounded-sm bg-transparent font-medium"
+            style={{ color: 'var(--sophia-purple)' }}
+          >
+            {part}
+          </mark>
+        ) : (
+          <span key={i}>{part}</span>
+        ),
+      )}
+    </>
+  );
+}
+
+// =============================================================================
+// SESSION ROW — description-first, no preset label
+// =============================================================================
+
+interface SessionRowProps {
+  rowKey: string;
+  description: string;
+  timeText: string;
+  timeTooltip: string;
+  turns: number;
+  statusText: string;
+  isActive: boolean;
+  query: string;
+  isDeleting: boolean;
+  onClick: () => void;
+  onDelete: () => void | Promise<void>;
+}
+
+function SessionRow({
+  rowKey: _rowKey,
+  description,
+  timeText,
+  timeTooltip,
+  turns,
+  statusText,
+  isActive,
+  query,
+  isDeleting,
+  onClick,
+  onDelete,
+}: SessionRowProps) {
+  const sweepRef = useSweepGlow();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  useEffect(() => {
+    if (isDeleting) {
+      setConfirmDelete(false);
+    }
+  }, [isDeleting]);
+
   return (
     <button
+      ref={sweepRef as RefObject<HTMLButtonElement>}
       onClick={() => {
+        if (isDeleting) return;
+        if (confirmDelete) { setConfirmDelete(false); return; }
         haptic('light');
         onClick();
       }}
+      onMouseLeave={() => { if (!isDeleting) setConfirmDelete(false); }}
+      aria-busy={isDeleting}
       className={cn(
-        'w-full rounded-xl text-left transition-all duration-150 group',
-        'hover:bg-sophia-bg/60',
-        'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple focus-visible:ring-inset',
-        paddingClass,
-        !session.recapViewed && 'bg-sophia-purple/5'
+        'cosmic-focus-ring group relative w-full rounded-lg px-3 py-2.5 text-left transition-all duration-200',
+        'hover:bg-white/[0.03]',
+        isDeleting && 'scale-[0.985] bg-red-500/[0.06] opacity-70',
       )}
+      style={{
+        filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.18))',
+        boxShadow: [
+          `calc(var(--sweep-sx, 0) * 4px) calc(var(--sweep-sy, 0) * 4px) calc(6px + var(--sweep-glow, 0) * 8px) rgba(0,0,0, calc(0.15 + var(--sweep-glow, 0) * 0.25))`,
+          `0 0 calc(var(--sweep-glow, 0) * 12px) color-mix(in srgb, var(--sophia-purple) calc(var(--sweep-glow, 0) * 8%), transparent)`,
+        ].join(', '),
+      }}
     >
-      <div className="flex items-center gap-2">
-        {/* Icon */}
-        <div className={cn(
-          'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 transition-colors',
-          !session.recapViewed 
-            ? 'bg-sophia-purple/15' 
-            : 'bg-sophia-surface-border/40 group-hover:bg-sophia-purple/10'
-        )}>
-          <Icon className={cn(
-            'w-3.5 h-3.5 transition-colors',
-            !session.recapViewed ? 'text-sophia-purple' : 'text-sophia-text2/70 group-hover:text-sophia-purple'
-          )} />
-        </div>
-        
-        {/* Content */}
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center justify-between gap-1">
-            <span className="text-[13px] font-medium text-sophia-text truncate">
-              {label}
+      {/* Active accent — 2px left bar */}
+      {isActive && (
+        <span
+          className="absolute left-0 top-2 bottom-2 w-[2px] rounded-full"
+          style={{ background: 'var(--sophia-purple)', boxShadow: '0 0 8px var(--sophia-purple)' }}
+        />
+      )}
+
+      {/* Delete: two-step — first click shows confirm, second click deletes */}
+      {isDeleting ? (
+        <span
+          aria-live="polite"
+          className={cn(
+            'absolute right-2 top-2 flex items-center gap-1 rounded-md px-1.5 py-0.5',
+            'text-[10px] font-medium transition-all duration-150',
+            'bg-red-500/15',
+          )}
+          style={{ color: 'var(--error)' }}
+        >
+          <Loader2 className="h-2.5 w-2.5 animate-spin" />
+          Deleting...
+        </span>
+      ) : confirmDelete ? (
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label="Confirm delete"
+          onClick={(e) => { e.stopPropagation(); haptic('medium'); void onDelete(); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); haptic('medium'); void onDelete(); } }}
+          className={cn(
+            'absolute right-2 top-2 flex items-center gap-1 rounded-md px-1.5 py-0.5',
+            'text-[10px] font-medium transition-all duration-150',
+            'bg-red-500/15 hover:bg-red-500/25',
+          )}
+          style={{ color: 'var(--error)' }}
+        >
+          <Trash2 className="h-2.5 w-2.5" />
+          Delete?
+        </span>
+      ) : (
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label="Delete session"
+          onClick={(e) => { e.stopPropagation(); haptic('light'); setConfirmDelete(true); }}
+          onKeyDown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); haptic('light'); setConfirmDelete(true); } }}
+          className={cn(
+            'absolute right-2 top-2 flex h-5 w-5 items-center justify-center rounded-md',
+            'opacity-0 transition-opacity duration-150 group-hover:opacity-100',
+            'hover:bg-white/[0.08]',
+          )}
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          <Trash2 className="h-3 w-3" />
+        </span>
+      )}
+
+      <p
+        className={cn(
+          'line-clamp-2 pr-5 text-[13px] leading-snug transition-colors duration-200',
+          isActive ? 'font-medium' : 'font-normal',
+          isDeleting && 'pr-16',
+        )}
+        style={{ color: isActive ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text)' }}
+      >
+        <HighlightText text={description} query={query} />
+      </p>
+
+      <div className="mt-1 flex items-center gap-1">
+        <span
+          className="text-[10px]"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+          title={timeTooltip}
+        >
+          {timeText}
+        </span>
+        {turns > 0 && (
+          <>
+            <span style={{ color: 'var(--cosmic-text-faint)' }}>&middot;</span>
+            <span className="text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+              {turns} {turns === 1 ? 'turn' : 'turns'}
             </span>
-            <span className={cn('text-[10px] shrink-0 capitalize', CONTEXT_COLORS[session.contextMode])}>
-              {session.contextMode}
+          </>
+        )}
+        <>
+          <span style={{ color: 'var(--cosmic-text-faint)' }}>&middot;</span>
+          <span
+            className="text-[10px]"
+            style={{ color: isActive ? 'var(--sophia-purple)' : 'var(--cosmic-text-whisper)' }}
+          >
+            {statusText}
+          </span>
+        </>
+        {isDeleting && (
+          <>
+            <span style={{ color: 'var(--cosmic-text-faint)' }}>&middot;</span>
+            <span className="text-[10px] font-medium" style={{ color: 'var(--error)' }}>
+              Removing
             </span>
-          </div>
-          
-          {/* Meta row: time + preview */}
-          <div className="flex items-center gap-1.5 mt-0.5">
-            <span className="text-[10px] text-sophia-text2/50" title={timeAgo.tooltip}>
-              {timeAgo.text}
-            </span>
-            {session.takeawayPreview && (
-              <>
-                <span className="text-sophia-text2/30">·</span>
-                <span className="text-[10px] text-sophia-text2/60 truncate">
-                  {session.takeawayPreview.slice(0, 30)}{session.takeawayPreview.length > 30 ? '…' : ''}
-                </span>
-              </>
-            )}
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </button>
   );
 }
 
+function useDeleteFeedback() {
+  const showToast = useUiStore((state) => state.showToast);
+  const [deletingKey, setDeletingKey] = useState<string | null>(null);
+
+  const runDelete = useCallback(async ({
+    key,
+    label,
+    onDelete,
+  }: {
+    key: string;
+    label: string;
+    onDelete: () => boolean | void | Promise<boolean | void>;
+  }) => {
+    if (deletingKey === key) return;
+
+    setDeletingKey(key);
+    await wait(DELETE_FEEDBACK_DELAY_MS);
+
+    let deleted = false;
+    try {
+      deleted = (await onDelete()) !== false;
+    } catch {
+      deleted = false;
+    }
+
+    if (deleted) {
+      haptic('success');
+      showToast({
+        message: `Deleted ${formatDeleteLabel(label)}.`,
+        variant: 'success',
+        durationMs: 3200,
+      });
+      setDeletingKey((current) => (current === key ? null : current));
+      return;
+    }
+
+    haptic('error');
+    setDeletingKey((current) => (current === key ? null : current));
+    showToast({
+      message: `Couldn't delete ${formatDeleteLabel(label)}.`,
+      variant: 'error',
+    });
+  }, [deletingKey, showToast]);
+
+  return {
+    deletingKey,
+    runDelete,
+  };
+}
+
+function useClearAllFeedback() {
+  const showToast = useUiStore((state) => state.showToast);
+  const [isClearingAll, setIsClearingAll] = useState(false);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+
+  const requestClearAll = useCallback(() => {
+    if (isClearingAll) return;
+    haptic('light');
+    setConfirmClearAll(true);
+  }, [isClearingAll]);
+
+  const cancelClearAll = useCallback(() => {
+    if (isClearingAll) return;
+    setConfirmClearAll(false);
+  }, [isClearingAll]);
+
+  const runClearAll = useCallback(async ({
+    count,
+    onClearAll,
+  }: {
+    count: number;
+    onClearAll: () => boolean | void | Promise<boolean | void>;
+  }) => {
+    if (isClearingAll) return;
+
+    setIsClearingAll(true);
+    await wait(DELETE_FEEDBACK_DELAY_MS);
+
+    let cleared = false;
+    try {
+      cleared = (await onClearAll()) !== false;
+    } catch {
+      cleared = false;
+    }
+
+    setIsClearingAll(false);
+    setConfirmClearAll(false);
+
+    if (cleared) {
+      haptic('success');
+      showToast({
+        message: `Cleared ${formatSessionCount(count)}.`,
+        variant: 'success',
+        durationMs: 3200,
+      });
+      return;
+    }
+
+    haptic('error');
+    showToast({
+      message: "Couldn't clear all sessions.",
+      variant: 'error',
+    });
+  }, [isClearingAll, showToast]);
+
+  return {
+    isClearingAll,
+    confirmClearAll,
+    requestClearAll,
+    cancelClearAll,
+    runClearAll,
+  };
+}
+
+function ClearAllSessionsButton({
+  count,
+  isClearingAll,
+  confirmClearAll,
+  onRequestClearAll,
+  onCancelClearAll,
+  onConfirmClearAll,
+}: {
+  count: number;
+  isClearingAll: boolean;
+  confirmClearAll: boolean;
+  onRequestClearAll: () => void;
+  onCancelClearAll: () => void;
+  onConfirmClearAll: () => void;
+}) {
+  if (count === 0) return null;
+
+  if (isClearingAll) {
+    return (
+      <span
+        aria-live="polite"
+        className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium"
+        style={{
+          color: 'var(--error)',
+          background: 'color-mix(in srgb, var(--error) 12%, transparent)',
+        }}
+      >
+        <Loader2 className="h-3 w-3 animate-spin" />
+        Clearing...
+      </span>
+    );
+  }
+
+  if (confirmClearAll) {
+    return (
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          aria-label="Confirm clear all sessions"
+          onClick={onConfirmClearAll}
+          className="cosmic-focus-ring inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium transition-colors duration-150"
+          style={{
+            color: 'var(--error)',
+            background: 'color-mix(in srgb, var(--error) 12%, transparent)',
+          }}
+        >
+          <Trash2 className="h-3 w-3" />
+          Delete {count}?
+        </button>
+        <button
+          type="button"
+          aria-label="Cancel clear all sessions"
+          onClick={onCancelClearAll}
+          className="cosmic-focus-ring inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors duration-150 hover:bg-white/[0.06]"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          <X className="h-3 w-3" />
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      aria-label="Clear all sessions"
+      onClick={onRequestClearAll}
+      className="cosmic-focus-ring inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-medium transition-colors duration-150 hover:bg-white/[0.06]"
+      style={{ color: 'var(--cosmic-text-whisper)' }}
+      title={`Delete all ${formatSessionCount(count)}`}
+    >
+      <Trash2 className="h-3 w-3" />
+      Clear all
+    </button>
+  );
+}
+
 // =============================================================================
-// LEFT SIDEBAR: Recent Sessions
+// LEFT SIDEBAR: Sessions
 // =============================================================================
 
 interface RecentSessionsSidebarProps {
@@ -143,122 +571,215 @@ interface RecentSessionsSidebarProps {
   className?: string;
 }
 
-export function RecentSessionsSidebar({ 
-  isExpanded, 
+export function RecentSessionsSidebar({
+  isExpanded,
   onToggle,
-  className 
+  className,
 }: RecentSessionsSidebarProps) {
+  const { user } = useAuth();
   const router = useRouter();
-  const sessions = useSessionHistoryStore((state) => state.sessions);
-  const recentSessions = sessions.slice(0, 4); // Show max 4 for density
-  
-  // Calculate unviewed count
-  const unviewedCount = sessions.filter(s => !s.recapViewed).length;
-  
-  const handleSessionClick = (sessionId: string) => {
-    router.push(`/recap/${sessionId}`);
-  };
-  
+  const historySessions = useSessionHistoryStore((s) => s.sessions);
+  const clearHistory = useSessionHistoryStore((s) => s.clearHistory);
+  const removeHistorySession = useSessionHistoryStore((s) => s.removeSession);
+  const recentSessions = useSessionStore(selectRecentSessions);
+  const isLoadingSessions = useSessionStore(selectIsLoadingSessions);
+  const refreshRecentSessions = useSessionStore((s) => s.refreshRecentSessions);
+  const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
+  const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
+  const clearSession = useSessionStore((s) => s.clearSession);
+  const removeAllSessions = useSessionStore((s) => s.removeAllSessions);
+  const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
+  const currentSession = useSessionStore((s) => s.session);
+  const [query, setQuery] = useState('');
+  const { deletingKey, runDelete } = useDeleteFeedback();
+  const { isClearingAll, confirmClearAll, requestClearAll, cancelClearAll, runClearAll } = useClearAllFeedback();
+  const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
+
+  const panelSweepRef = useSweepGlow();
+
+  useEffect(() => {
+    if (isExpanded) void refreshRecentSessions(resolvedUserId);
+  }, [isExpanded, refreshRecentSessions, resolvedUserId]);
+
+  const rows = useMemo(() => {
+    return buildSessionRows({
+      recentSessions,
+      historySessions,
+      currentSessionId: currentSession?.sessionId,
+      onOpenBackendSession: (session) => {
+        void (async () => {
+          await restoreOpenSession(session, resolvedUserId);
+          router.push('/session');
+        })();
+      },
+      onOpenLocalSession: (session) => {
+        viewEndedSession(session.sessionId, session.presetType, session.contextMode);
+        router.push('/session');
+      },
+      onDeleteBackendSession: async (session) => {
+        const deleted = normalizeSessionStatus(session.status) !== 'ended'
+          ? await removeOpenSession(session.session_id, resolvedUserId)
+          : await removeRecentSession(session.session_id, resolvedUserId);
+        if (deleted) {
+          removeHistorySession(session.session_id);
+        }
+        return deleted;
+      },
+      onDeleteLocalSession: async (session) => {
+        removeHistorySession(session.sessionId);
+        return true;
+      },
+    });
+  }, [recentSessions, historySessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, router, viewEndedSession, removeOpenSession, removeRecentSession, removeHistorySession]);
+
+  const badgeCount = rows.length;
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return rows;
+    const q = query.toLowerCase();
+    return rows.filter((r) => r.description.toLowerCase().includes(q));
+  }, [rows, query]);
+
+  const handleClearAll = useCallback(async () => {
+    const hasBackendRows = rows.some((row) => row.key.startsWith('backend-'));
+
+    if (hasBackendRows) {
+      const deleted = await removeAllSessions(resolvedUserId);
+      if (!deleted) {
+        return false;
+      }
+    }
+
+    clearHistory();
+
+    if (currentSession?.sessionId && rows.some((row) => row.sessionId === currentSession.sessionId)) {
+      clearSession();
+    }
+
+    return true;
+  }, [rows, removeAllSessions, resolvedUserId, clearHistory, currentSession?.sessionId, clearSession]);
+
+  const sessionsBadge = badgeCount > 9 ? '9+' : String(badgeCount);
+
   return (
     <div className={cn(
-      'hidden lg:flex flex-col transition-all duration-300 ease-out',
-      isExpanded ? 'w-[260px]' : 'w-14',
-      className
+      'hidden lg:flex flex-col overflow-hidden transition-all duration-300 ease-out',
+      isExpanded ? 'w-[220px] opacity-100' : 'w-0 opacity-0 pointer-events-none',
+      className,
     )}>
-      {/* Toggle button */}
-      <button
-        onClick={() => {
-          haptic('light');
-          onToggle();
-        }}
-        className={cn(
-          'relative flex items-center justify-center w-10 h-10 rounded-xl mb-4',
-          'bg-sophia-surface border border-sophia-surface-border',
-          'hover:border-sophia-purple/30 hover:scale-105',
-          'transition-all duration-200 shadow-soft',
-          'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple',
-          !isExpanded && 'self-center'
-        )}
-        aria-label={isExpanded ? 'Collapse sessions' : 'Expand sessions'}
-      >
-        {isExpanded ? (
-          <ChevronLeft className="w-4 h-4 text-sophia-text2" />
-        ) : (
-          <Clock className="w-4 h-4 text-sophia-text2" />
-        )}
-        {/* Notification dot for unviewed sessions */}
-        {!isExpanded && unviewedCount > 0 && (
-          <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-sophia-purple text-[9px] font-semibold text-white flex items-center justify-center">
-            {unviewedCount > 9 ? '9+' : unviewedCount}
-          </span>
-        )}
-      </button>
-      
       {/* Content */}
       {isExpanded && (
-        <div className={cn(
-          'flex-1 rounded-2xl overflow-hidden',
-          'bg-sophia-surface/50 backdrop-blur-sm',
-          'border border-sophia-surface-border',
-          'shadow-soft'
-        )}>
-          {/* Header */}
-          <div className="px-3 pt-3 pb-2">
-            <div className="flex items-center justify-between">
-              <h3 className="text-[13px] font-semibold text-sophia-text">
-                Recent Sessions
-              </h3>
-              {unviewedCount > 0 && (
-                <span className="text-[10px] text-sophia-purple bg-sophia-purple/10 px-1.5 py-0.5 rounded-full font-medium">
-                  {unviewedCount} new
+        <div
+          ref={panelSweepRef as RefObject<HTMLDivElement>}
+          className="flex flex-1 flex-col overflow-hidden rounded-2xl"
+          style={{
+            filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.12))',
+            boxShadow: [
+              `calc(var(--sweep-sx, 0) * 6px) calc(var(--sweep-sy, 0) * 6px) calc(12px + var(--sweep-glow, 0) * 16px) rgba(0,0,0, calc(0.12 + var(--sweep-glow, 0) * 0.2))`,
+              `0 0 calc(var(--sweep-glow, 0) * 20px) color-mix(in srgb, var(--sophia-purple) calc(var(--sweep-glow, 0) * 6%), transparent)`,
+            ].join(', '),
+          }}
+        >
+          <div className="mb-3 flex items-center justify-between px-2">
+            <div className="flex items-center gap-2">
+              <span className="text-[12px] font-medium" style={{ color: 'var(--cosmic-text)' }}>
+                Sessions
+              </span>
+              {badgeCount > 0 ? (
+                <span
+                  className="flex min-w-[18px] items-center justify-center rounded-full px-1.5 text-[10px] font-semibold text-white"
+                  style={{ background: 'var(--sophia-purple)' }}
+                >
+                  {sessionsBadge}
                 </span>
-              )}
+              ) : null}
+            </div>
+            <div className="flex items-center gap-1">
+              <ClearAllSessionsButton
+                count={badgeCount}
+                isClearingAll={isClearingAll}
+                confirmClearAll={confirmClearAll}
+                onRequestClearAll={requestClearAll}
+                onCancelClearAll={cancelClearAll}
+                onConfirmClearAll={() => void runClearAll({ count: badgeCount, onClearAll: handleClearAll })}
+              />
+              <button
+                type="button"
+                onClick={() => { haptic('light'); onToggle(); }}
+                aria-label="Collapse sessions"
+                title="Collapse sessions"
+                className="cosmic-focus-ring flex h-8 w-8 items-center justify-center rounded-full transition-colors duration-200 hover:bg-white/[0.06]"
+                style={{ color: 'var(--cosmic-text-muted)' }}
+              >
+                <ChevronRight className="h-4 w-4" />
+              </button>
             </div>
           </div>
-          
-          {/* Sessions list */}
-          <div className="px-2 pb-2">
-            {recentSessions.length === 0 ? (
-              <div className="flex flex-col items-center justify-center py-8 text-center px-4">
-                <div className="w-10 h-10 rounded-xl bg-sophia-purple/5 flex items-center justify-center mb-2">
-                  <Sparkles className="w-5 h-5 text-sophia-text2/30" />
-                </div>
-                <p className="text-[13px] font-medium text-sophia-text2">No sessions yet</p>
-                <p className="text-[11px] text-sophia-text2/50 mt-0.5">
-                  Your history will appear here
-                </p>
+
+          {/* Search */}
+          <div className="relative mb-3 px-2">
+            <Search
+              className="pointer-events-none absolute left-4 top-1/2 h-3.5 w-3.5 -translate-y-1/2"
+              style={{ color: 'var(--cosmic-text-whisper)' }}
+            />
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search sessions…"
+              className={cn(
+                'w-full rounded-lg border-0 bg-white/[0.04] py-1.5 pl-8 pr-3',
+                'text-[12px] placeholder:text-[12px]',
+                'outline-none transition-colors duration-200',
+                'focus:bg-white/[0.06]',
+              )}
+              style={{
+                color: 'var(--cosmic-text)',
+                // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                ['--tw-placeholder-opacity' as any]: 1,
+              }}
+            />
+          </div>
+
+          {/* List */}
+          <div className="flex-1 space-y-0.5 overflow-y-auto" style={{ maxHeight: 'calc(100% - 48px)' }}>
+            {isLoadingSessions && rows.length === 0 && (
+              <div className="flex items-center justify-center py-8">
+                <div
+                  className="h-4 w-4 animate-spin rounded-full border-2"
+                  style={{ borderColor: 'var(--cosmic-border-soft)', borderTopColor: 'var(--sophia-purple)' }}
+                />
               </div>
-            ) : (
-              <>
-                <div className="space-y-1">
-                  {recentSessions.map((session) => (
-                    <SessionCard
-                      key={session.sessionId}
-                      session={session}
-                      onClick={() => handleSessionClick(session.sessionId)}
-                      compact={true}
-                    />
-                  ))}
-                </div>
-                
-                {/* View All link */}
-                {sessions.length > 4 && (
-                  <button
-                    onClick={() => {
-                      haptic('light');
-                      // TODO: Navigate to full history
-                    }}
-                    className={cn(
-                      'w-full mt-2 py-2 text-[12px] font-medium',
-                      'text-sophia-purple hover:text-sophia-purple/80',
-                      'transition-colors',
-                      'focus:outline-none focus-visible:underline'
-                    )}
-                  >
-                    View all {sessions.length} sessions
-                  </button>
-                )}
-              </>
+            )}
+
+            {filtered.map((r) => (
+              <SessionRow
+                key={r.key}
+                rowKey={r.key}
+                description={r.description}
+                timeText={r.time.text}
+                timeTooltip={r.time.tooltip}
+                turns={r.turns}
+                statusText={r.statusText}
+                isActive={r.isActive}
+                query={query}
+                isDeleting={deletingKey === r.key}
+                onClick={r.onClick}
+                onDelete={() => runDelete({ key: r.key, label: r.description, onDelete: r.onDelete })}
+              />
+            ))}
+
+            {filtered.length === 0 && !isLoadingSessions && rows.length > 0 && (
+              <p className="px-3 pt-4 text-[12px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                No matches
+              </p>
+            )}
+
+            {rows.length === 0 && !isLoadingSessions && (
+              <p className="px-3 pt-4 text-[12px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                No sessions yet
+              </p>
             )}
           </div>
         </div>
@@ -268,7 +789,7 @@ export function RecentSessionsSidebar({
 }
 
 // =============================================================================
-// RIGHT SIDEBAR: Conversation History
+// RIGHT SIDEBAR: Last Insight
 // =============================================================================
 
 interface ConversationHistorySidebarProps {
@@ -277,125 +798,81 @@ interface ConversationHistorySidebarProps {
   className?: string;
 }
 
-export function ConversationHistorySidebar({ 
-  isExpanded, 
+export function ConversationHistorySidebar({
+  isExpanded,
   onToggle,
-  className 
+  className,
 }: ConversationHistorySidebarProps) {
-  const refreshConversations = useConversationStore((state) => state.refreshConversations);
-  const sessions = useSessionHistoryStore((state) => state.sessions);
-  
-  // Get latest session with takeaway for "Last Insight"
-  const lastInsightSession = sessions.find(s => s.takeawayPreview);
-  
-  // Refresh on expand
+  const sweepRef = useSweepGlow();
+  const refreshConversations = useConversationStore((s) => s.refreshConversations);
+  const sessions = useSessionHistoryStore((s) => s.sessions);
+  const lastInsight = sessions.find((s) => s.takeawayPreview);
+
   const handleToggle = useCallback(() => {
-    if (!isExpanded) {
-      void refreshConversations();
-    }
+    if (!isExpanded) void refreshConversations();
     onToggle();
   }, [isExpanded, onToggle, refreshConversations]);
-  
+
   return (
-    <>
-      <div className={cn(
-        'hidden lg:flex flex-col transition-all duration-300 ease-out',
-        isExpanded ? 'w-[260px]' : 'w-14',
-        className
-      )}>
-        {/* Toggle button */}
-        <button
-          onClick={() => {
-            haptic('light');
-            handleToggle();
-          }}
-          className={cn(
-            'flex items-center justify-center w-10 h-10 rounded-xl mb-4',
-            'bg-sophia-surface border border-sophia-surface-border',
-            'hover:border-sophia-purple/30 hover:scale-105',
-            'transition-all duration-200 shadow-soft',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-sophia-purple',
-            !isExpanded && 'self-center'
-          )}
-          aria-label={isExpanded ? 'Collapse insight' : 'Expand insight'}
-        >
-          {isExpanded ? (
-            <ChevronRight className="w-4 h-4 text-sophia-text2" />
-          ) : (
-            <Sparkles className="w-4 h-4 text-sophia-text2" />
-          )}
-        </button>
-        
-        {/* Content */}
-        {isExpanded && (
-          <div className={cn(
-            'flex-1 rounded-2xl overflow-hidden',
-            'bg-sophia-surface/50 backdrop-blur-sm',
-            'border border-sophia-surface-border',
-            'shadow-soft'
-          )}>
-            {/* Header */}
-            <div className="px-3 pt-3 pb-2">
-              <h3 className="text-[13px] font-semibold text-sophia-text">
-                Last Insight
-              </h3>
-              <p className="text-[10px] text-sophia-text2/50 mt-0.5">
-                Your most recent takeaway
-              </p>
-            </div>
-            
-            {/* Insight content */}
-            <div className="px-3 pb-3">
-              {!lastInsightSession ? (
-                <div className="flex flex-col items-center justify-center py-8 text-center px-2">
-                  <div className="w-10 h-10 rounded-xl bg-sophia-purple/5 flex items-center justify-center mb-2">
-                    <Sparkles className="w-5 h-5 text-sophia-text2/30" />
-                  </div>
-                  <p className="text-[13px] font-medium text-sophia-text2">No insights yet</p>
-                  <p className="text-[11px] text-sophia-text2/50 mt-0.5">
-                    Complete a session to see your takeaway here
-                  </p>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {/* Insight card - hero snippet style */}
-                  <div className={cn(
-                    'relative p-3 rounded-xl',
-                    'bg-sophia-purple/5',
-                    'border border-sophia-purple/10'
-                  )}>
-                    {/* Quote styling */}
-                    <div className="absolute top-2 left-2 text-2xl text-sophia-purple/20 font-serif leading-none select-none">&ldquo;</div>
-                    
-                    {/* Insight text */}
-                    <p className="text-[13px] text-sophia-text leading-relaxed pl-4 pr-1 line-clamp-4">
-                      {lastInsightSession.takeawayPreview}
-                    </p>
-                    
-                    {/* Session meta */}
-                    <div className="mt-2 pt-2 border-t border-sophia-purple/10 flex items-center justify-between">
-                      <div className="flex items-center gap-1.5">
-                        {(() => {
-                          const Icon = PRESET_ICONS[lastInsightSession.presetType];
-                          return <Icon className="w-3 h-3 text-sophia-purple/50" />;
-                        })()}
-                        <span className="text-[10px] text-sophia-text2/70">
-                          {PRESET_LABELS[lastInsightSession.presetType]}
-                        </span>
-                      </div>
-                      <span className="text-[10px] text-sophia-text2/50">
-                        {humanizeTime(lastInsightSession.endedAt).text}
-                      </span>
-                    </div>
-                  </div>
-                  
-                </div>
-              )}
-            </div>
-          </div>
+    <div className={cn(
+      'hidden lg:flex flex-col transition-all duration-300 ease-out',
+      isExpanded ? 'w-[220px]' : 'w-14',
+      className,
+    )}>
+      {/* Toggle */}
+      <button
+        onClick={() => { haptic('light'); handleToggle(); }}
+        className={cn(
+          'cosmic-chrome-button cosmic-focus-ring flex h-10 w-10 items-center justify-center rounded-xl mb-6 transition-all duration-200 hover:scale-105',
+          !isExpanded && 'self-center',
         )}
-      </div>
-    </>
+        aria-label={isExpanded ? 'Collapse insight' : 'Expand insight'}
+      >
+        {isExpanded ? <ChevronRight className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+      </button>
+
+      {/* Content — borderless */}
+      {isExpanded && (
+        <div
+          ref={sweepRef as RefObject<HTMLDivElement>}
+          className="flex-1 overflow-hidden"
+          style={{ filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.15))' }}
+        >
+          <h3
+            className="mb-4 px-3 font-cormorant text-[1.1rem] leading-none"
+            style={{ color: 'var(--cosmic-text-muted)' }}
+          >
+            Insight
+          </h3>
+
+          {!lastInsight ? (
+            <p className="px-3 text-[12px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+              Complete a session to see your takeaway
+            </p>
+          ) : (
+            <div className="px-3">
+              <div
+                className="select-none font-serif text-xl leading-none"
+                style={{ color: 'color-mix(in srgb, var(--sophia-glow) 20%, transparent)' }}
+              >&ldquo;</div>
+
+              <p
+                className="mt-1 line-clamp-5 text-[13px] leading-relaxed"
+                style={{ color: 'var(--cosmic-text)' }}
+              >
+                {lastInsight.takeawayPreview}
+              </p>
+
+              <div className="mt-3">
+                <span className="text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                  {humanizeTime(lastInsight.endedAt).text}
+                </span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -411,51 +888,51 @@ interface MobileBottomSheetProps {
   children: React.ReactNode;
 }
 
-export function MobileBottomSheet({ 
-  isOpen, 
-  onClose, 
-  title, 
-  icon,
-  children 
-}: MobileBottomSheetProps) {
+export function MobileBottomSheet({ isOpen, onClose, title, icon, children }: MobileBottomSheetProps) {
+  // Fire a soft haptic the first time the sheet opens so the user feels the
+  // surface rise. We use a ref-based latch so re-renders don't retrigger it.
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      wasOpenRef.current = true;
+      haptic('light');
+    } else if (!isOpen && wasOpenRef.current) {
+      wasOpenRef.current = false;
+    }
+  }, [isOpen]);
+
+  const handleClose = useCallback(() => {
+    haptic('selection');
+    onClose();
+  }, [onClose]);
+
   if (!isOpen) return null;
-  
+
   return (
-    <div className="lg:hidden fixed inset-0 z-50">
-      {/* Backdrop */}
-      <div 
-        className="cosmic-modal-backdrop absolute inset-0"
-        onClick={onClose}
-      />
-      
-      {/* Sheet */}
+    <div className="fixed inset-0 z-50 lg:hidden">
+      <div className="cosmic-modal-backdrop absolute inset-0" onClick={handleClose} />
       <div className={cn(
         'absolute bottom-0 left-0 right-0',
         'cosmic-surface-panel-strong rounded-t-3xl border-t',
         'max-h-[70vh] overflow-hidden',
-        'animate-in slide-in-from-bottom duration-300'
+        'animate-in slide-in-from-bottom duration-300',
       )}>
-        {/* Handle */}
-        <div className="flex justify-center pt-3 pb-2">
+        <div className="flex justify-center pb-2 pt-3">
           <div className="h-1 w-10 rounded-full" style={{ background: 'var(--cosmic-text-faint)' }} />
         </div>
-        
-        {/* Header */}
         <div className="flex items-center justify-between px-5 pb-4">
           <div className="flex items-center gap-2">
             {icon}
             <h3 className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>{title}</h3>
           </div>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             className="cosmic-chrome-button cosmic-focus-ring rounded-xl p-2 transition-colors"
           >
             <X className="h-5 w-5" style={{ color: 'var(--cosmic-text-muted)' }} />
           </button>
         </div>
-        
-        {/* Content */}
-        <div className="px-5 pb-8 overflow-y-auto max-h-[calc(70vh-100px)]">
+        <div className="max-h-[calc(70vh-100px)] overflow-y-auto px-5 pb-8">
           {children}
         </div>
       </div>
@@ -468,31 +945,150 @@ export function MobileBottomSheet({
 // =============================================================================
 
 export function MobileSessionsContent() {
+  const { user } = useAuth();
   const router = useRouter();
-  const sessions = useSessionHistoryStore((state) => state.sessions);
-  const recentSessions = sessions.slice(0, 10);
-  
-  if (recentSessions.length === 0) {
+  const historySessions = useSessionHistoryStore((s) => s.sessions);
+  const clearHistory = useSessionHistoryStore((s) => s.clearHistory);
+  const removeHistorySession = useSessionHistoryStore((s) => s.removeSession);
+  const recentSessions = useSessionStore(selectRecentSessions);
+  const refreshRecentSessions = useSessionStore((s) => s.refreshRecentSessions);
+  const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
+  const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
+  const clearSession = useSessionStore((s) => s.clearSession);
+  const removeAllSessions = useSessionStore((s) => s.removeAllSessions);
+  const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
+  const currentSession = useSessionStore((s) => s.session);
+  const [query, setQuery] = useState('');
+  const { deletingKey, runDelete } = useDeleteFeedback();
+  const { isClearingAll, confirmClearAll, requestClearAll, cancelClearAll, runClearAll } = useClearAllFeedback();
+  const resolvedUserId = user?.id || currentSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
+
+  useEffect(() => {
+    void refreshRecentSessions(resolvedUserId);
+  }, [refreshRecentSessions, resolvedUserId]);
+
+  const rows = useMemo(() => {
+    return buildSessionRows({
+      recentSessions,
+      historySessions,
+      currentSessionId: currentSession?.sessionId,
+      onOpenBackendSession: (session) => {
+        void (async () => {
+          await restoreOpenSession(session, resolvedUserId);
+          router.push('/session');
+        })();
+      },
+      onOpenLocalSession: (session) => {
+        viewEndedSession(session.sessionId, session.presetType, session.contextMode);
+        router.push('/session');
+      },
+      onDeleteBackendSession: async (session) => {
+        const deleted = normalizeSessionStatus(session.status) !== 'ended'
+          ? await removeOpenSession(session.session_id, resolvedUserId)
+          : await removeRecentSession(session.session_id, resolvedUserId);
+        if (deleted) {
+          removeHistorySession(session.session_id);
+        }
+        return deleted;
+      },
+      onDeleteLocalSession: async (session) => {
+        removeHistorySession(session.sessionId);
+        return true;
+      },
+    });
+  }, [recentSessions, historySessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, router, viewEndedSession, removeOpenSession, removeRecentSession, removeHistorySession]);
+
+  const filtered = useMemo(() => {
+    if (!query.trim()) return rows;
+    const q = query.toLowerCase();
+    return rows.filter((r) => r.description.toLowerCase().includes(q));
+  }, [rows, query]);
+
+  const handleClearAll = useCallback(async () => {
+    const hasBackendRows = rows.some((row) => row.key.startsWith('backend-'));
+
+    if (hasBackendRows) {
+      const deleted = await removeAllSessions(resolvedUserId);
+      if (!deleted) {
+        return false;
+      }
+    }
+
+    clearHistory();
+
+    if (currentSession?.sessionId && rows.some((row) => row.sessionId === currentSession.sessionId)) {
+      clearSession();
+    }
+
+    return true;
+  }, [rows, removeAllSessions, resolvedUserId, clearHistory, currentSession?.sessionId, clearSession]);
+
+  if (rows.length === 0) {
     return (
-      <div className="flex flex-col items-center justify-center py-12 text-center">
-        <Sparkles className="w-12 h-12 text-sophia-text2/30 mb-3" />
-        <p className="text-sophia-text2">No sessions yet</p>
-        <p className="text-sm text-sophia-text2/60 mt-1">
-          Start talking to build your history
-        </p>
-      </div>
+      <p className="py-12 text-center text-sm" style={{ color: 'var(--cosmic-text-whisper)' }}>
+        No sessions yet
+      </p>
     );
   }
-  
+
   return (
-    <div className="space-y-3">
-      {recentSessions.map((session) => (
-        <SessionCard
-          key={session.sessionId}
-          session={session}
-          onClick={() => router.push(`/recap/${session.sessionId}`)}
+    <div>
+      <div className="mb-3 flex justify-end">
+        <ClearAllSessionsButton
+          count={rows.length}
+          isClearingAll={isClearingAll}
+          confirmClearAll={confirmClearAll}
+          onRequestClearAll={requestClearAll}
+          onCancelClearAll={cancelClearAll}
+          onConfirmClearAll={() => void runClearAll({ count: rows.length, onClearAll: handleClearAll })}
         />
-      ))}
+      </div>
+
+      {/* Search */}
+      <div className="relative mb-3">
+        <Search
+          className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search sessions…"
+          className={cn(
+            'w-full rounded-lg border-0 bg-white/[0.04] py-1.5 pl-8 pr-3',
+            'text-[12px] placeholder:text-[12px]',
+            'outline-none transition-colors duration-200',
+            'focus:bg-white/[0.06]',
+          )}
+          style={{ color: 'var(--cosmic-text)' }}
+        />
+      </div>
+
+      <div className="space-y-0.5">
+        {filtered.map((r) => (
+          <SessionRow
+            key={r.key}
+            rowKey={r.key}
+            description={r.description}
+            timeText={r.time.text}
+            timeTooltip={r.time.tooltip}
+            turns={r.turns}
+            statusText={r.statusText}
+            isActive={r.isActive}
+            query={query}
+            isDeleting={deletingKey === r.key}
+            onClick={r.onClick}
+            onDelete={() => runDelete({ key: r.key, label: r.description, onDelete: r.onDelete })}
+          />
+        ))}
+        {filtered.length === 0 && (
+          <p className="px-3 pt-4 text-[12px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+            No matches
+          </p>
+        )}
+      </div>
     </div>
   );
 }

@@ -8,9 +8,12 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from urllib.parse import quote
 
 import httpx
+from dotenv import dotenv_values
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -28,6 +31,8 @@ SUPPORTED_PLATFORMS = {"voice", "text", "ios_voice"}
 SUPPORTED_CONTEXT_MODES = {"work", "gaming", "life"}
 VOICE_SERVER_DISPATCH_TIMEOUT = 10.0
 VOICE_SERVER_WARMUP_TIMEOUT = 5.0
+BACKEND_DIR = Path(__file__).resolve().parents[3]
+REPO_ROOT = BACKEND_DIR.parent
 
 
 @dataclass(frozen=True)
@@ -39,6 +44,31 @@ class ActiveVoiceSession:
 _active_voice_sessions: dict[str, ActiveVoiceSession] = {}
 _active_voice_session_locks: dict[str, asyncio.Lock] = {}
 _active_voice_session_locks_guard = asyncio.Lock()
+
+# Background tasks for fire-and-forget preflight disconnects.
+# Held in a module-level set so asyncio doesn't GC them mid-flight.
+_background_disconnect_tasks: set[asyncio.Task] = set()
+
+
+def _schedule_background_disconnect(call_id: str, session_id: str) -> None:
+    """Fire-and-forget disconnect of a previous voice session.
+
+    Avoids blocking /voice/connect on the voice server's DELETE response.
+    Progressive latency accumulation (1-3s → 5s → 8s → 10s) observed by
+    users is caused by awaiting this disconnect while the previous session's
+    Cartesia/Deepgram/Stream resources are still tearing down.
+    """
+    try:
+        task = asyncio.create_task(_disconnect_voice_session(call_id, session_id))
+    except RuntimeError:
+        # No running event loop — nothing to do (shouldn't happen in FastAPI path).
+        logger.warning(
+            "voice.connect: cannot schedule background disconnect (no loop) call_id=%s",
+            call_id,
+        )
+        return
+    _background_disconnect_tasks.add(task)
+    task.add_done_callback(_background_disconnect_tasks.discard)
 
 
 def _get_voice_server_url() -> str:
@@ -105,15 +135,42 @@ class VoiceWarmupRequest(BaseModel):
     session_id: str = Field(..., description="The session_id returned from /voice/connect")
 
 
+@lru_cache(maxsize=1)
+def _get_voice_env_fallback() -> dict[str, str]:
+    values: dict[str, str] = {}
+
+    for env_file in (REPO_ROOT / "voice" / ".env", BACKEND_DIR / ".env", REPO_ROOT / ".env"):
+        if not env_file.exists():
+            continue
+
+        for key, value in dotenv_values(env_file).items():
+            if key in values or value is None:
+                continue
+
+            stripped = value.strip()
+            if stripped:
+                values[key] = stripped
+
+    return values
+
+
+def _get_configured_env(name: str) -> str:
+    direct_value = os.getenv(name, "").strip()
+    if direct_value:
+        return direct_value
+
+    return _get_voice_env_fallback().get(name, "")
+
+
 def _get_stream_api_key() -> str:
-    key = os.getenv("STREAM_API_KEY", "").strip()
+    key = _get_configured_env("STREAM_API_KEY")
     if not key:
         raise HTTPException(status_code=503, detail="STREAM_API_KEY not configured")
     return key
 
 
 def _get_stream_api_secret() -> str:
-    secret = os.getenv("STREAM_API_SECRET", "").strip()
+    secret = _get_configured_env("STREAM_API_SECRET")
     if not secret:
         raise HTTPException(status_code=503, detail="STREAM_API_SECRET not configured")
     return secret
@@ -202,12 +259,15 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
         previous_session = _active_voice_sessions.get(user_id)
         if previous_session is not None:
             logger.info(
-                "voice.connect closing previous session user_id=%s call_id=%s session_id=%s",
+                "voice.connect closing previous session (background) user_id=%s call_id=%s session_id=%s",
                 user_id,
                 previous_session.call_id,
                 previous_session.session_id,
             )
-            await _disconnect_voice_session(
+            # Fire-and-forget: don't block the new connect on the previous
+            # session's teardown. The previous call_id is independent of the
+            # new one (Stream SFU routes by call_id), so there's no race.
+            _schedule_background_disconnect(
                 previous_session.call_id,
                 previous_session.session_id,
             )

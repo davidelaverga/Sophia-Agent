@@ -1,0 +1,11 @@
+{
+  "session_id": "abc84134-f7e2-4e67-b162-3541d7c04b4d",
+  "thread_id": "abc84134-f7e2-4e67-b162-3541d7c04b4d",
+  "session_type": null,
+  "context_mode": null,
+  "started_at": null,
+  "ended_at": "2026-04-07T18:59:10.836052+00:00",
+  "turn_count": 0,
+  "status": "processing",
+  "recap_artifacts": null
+}

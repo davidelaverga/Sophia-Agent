@@ -14,8 +14,9 @@ the real implementation in isolation.
 
 import asyncio
 import sys
-from datetime import UTC, datetime, timedelta
-from unittest.mock import MagicMock, patch
+import threading
+from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -31,7 +32,7 @@ _MOCKED_MODULE_NAMES = [
 ]
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(scope="module", autouse=True)
 def _setup_executor_classes():
     """Set up mocked modules and import real executor classes.
 
@@ -147,6 +148,7 @@ def mock_agent():
     """Return a properly configured mock agent with async stream."""
     agent = MagicMock()
     agent.astream = MagicMock()
+    agent.ainvoke = MagicMock()
     return agent
 
 
@@ -241,6 +243,99 @@ class TestAsyncExecutionPath:
         assert result.ai_messages[1]["id"] == "msg-2"
 
     @pytest.mark.anyio
+    async def test_aexecute_collects_ai_messages_without_streaming(self, classes, base_config, mock_agent, msg):
+        """Test that AI messages are collected from the final state in non-streaming mode."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        final_state = {
+            "messages": [
+                msg.human("Task"),
+                msg.ai("First response", "msg-1"),
+                msg.ai("Second response", "msg-2"),
+            ]
+        }
+        mock_agent.ainvoke = AsyncMock(return_value=final_state)
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+            stream_messages=False,
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert len(result.ai_messages) == 2
+        assert result.ai_messages[0]["id"] == "msg-1"
+        assert result.ai_messages[1]["id"] == "msg-2"
+
+    @pytest.mark.anyio
+    async def test_aexecute_tracks_last_ai_message_summary(self, classes, base_config, mock_agent, msg):
+        """Test that the latest AI turn summary is captured for diagnostics."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        final_message = AIMessage(
+            content="Done",
+            tool_calls=[{"id": "tc-emit", "name": "emit_builder_artifact", "args": {"artifact_type": "document"}}],
+        )
+        final_state = {"messages": [msg.human("Task"), final_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.last_ai_message_summary is not None
+        assert result.last_ai_message_summary["tool_names"] == ["emit_builder_artifact"]
+        assert result.last_ai_message_summary["has_emit_builder_artifact"] is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_records_late_ai_summary_after_external_timeout(self, classes, base_config, mock_agent, msg):
+        """Test timeout-safe diagnostics for AI turns that arrive after terminal timeout."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        AIMessage = classes["AIMessage"]
+
+        late_message = AIMessage(content="Late response", tool_calls=[{"id": "tc-bash", "name": "bash", "args": {"command": "ls"}}])
+        chunk = {"messages": [msg.human("Task"), late_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([chunk])
+
+        result_holder = SubagentResult(
+            task_id="task-timeout",
+            trace_id="trace-timeout",
+            status=SubagentStatus.TIMED_OUT,
+            started_at=datetime.now(),
+            timed_out_at=datetime.now(),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", result_holder=result_holder)
+
+        assert result is result_holder
+        assert result.status == SubagentStatus.TIMED_OUT
+        assert result.late_ai_message_summary is not None
+        assert result.late_ai_message_summary["tool_names"] == ["bash"]
+        assert result.timeout_observed_during_stream is True
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_duplicate_messages(self, classes, base_config, mock_agent, msg):
         """Test that duplicate AI messages are not added."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -263,6 +358,33 @@ class TestAsyncExecutionPath:
             result = await executor._aexecute("Task")
 
         assert len(result.ai_messages) == 1
+
+    @pytest.mark.anyio
+    async def test_aexecute_stops_when_cancel_event_is_set(self, classes, base_config, mock_agent, msg):
+        """Test that cooperative cancellation returns a CANCELLED result."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        cancel_event = threading.Event()
+
+        async def cancel_during_stream(*args, **kwargs):
+            cancel_event.set()
+            yield {"messages": [msg.human("Task"), msg.ai("Partial draft", "msg-1")]}
+
+        mock_agent.astream = cancel_during_stream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task", cancel_event=cancel_event)
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Execution cancelled by user"
+        assert result.completed_at is not None
 
     @pytest.mark.anyio
     async def test_aexecute_handles_list_content(self, classes, base_config, mock_agent, msg):
@@ -354,80 +476,6 @@ class TestAsyncExecutionPath:
         # Should fallback to string representation of last message
         assert result.status == SubagentStatus.COMPLETED
         assert "Task" in result.result
-
-    @pytest.mark.anyio
-    async def test_aexecute_stops_cooperatively_when_cancel_event_set(
-        self, classes, base_config, mock_agent, msg
-    ):
-        """When the outer caller sets the cancel event, _aexecute stops
-        between astream chunks and returns a TIMED_OUT result instead of
-        running to completion.
-
-        This is the cooperative path that prevents zombie subagents from
-        continuing to make ~150s Anthropic calls long after the
-        switch_to_builder tool has already returned a timeout error.
-        """
-        import threading
-
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentStatus = classes["SubagentStatus"]
-
-        cancel_event = threading.Event()
-
-        msg1 = msg.ai("First chunk", "msg-1")
-        msg2 = msg.ai("Second chunk (should be skipped)", "msg-2")
-
-        async def astream_that_cancels_after_first_chunk(*args, **kwargs):
-            yield {"messages": [msg.human("Task"), msg1]}
-            # Outer scheduler would normally set this on FuturesTimeoutError;
-            # we simulate that here so the next iteration breaks the loop.
-            cancel_event.set()
-            yield {"messages": [msg.human("Task"), msg1, msg2]}
-            # A real zombie would yield many more chunks here; cooperative
-            # cancellation must break out before this runs to completion.
-
-        mock_agent.astream = astream_that_cancels_after_first_chunk
-
-        executor = SubagentExecutor(
-            config=base_config,
-            tools=[],
-            thread_id="test-thread",
-        )
-
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            result = await executor._aexecute("Task", cancel_event=cancel_event)
-
-        assert result.status == SubagentStatus.TIMED_OUT
-        # Only the AI message from the first chunk should have been captured;
-        # the second chunk is discarded after the cancel break.
-        assert len(result.ai_messages) == 1
-        assert result.ai_messages[0]["id"] == "msg-1"
-        assert result.completed_at is not None
-
-    @pytest.mark.anyio
-    async def test_aexecute_ignores_cancel_event_when_not_provided(
-        self, classes, base_config, mock_agent, msg
-    ):
-        """Legacy callers that don't pass a cancel_event keep working."""
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentStatus = classes["SubagentStatus"]
-
-        final_message = msg.ai("Done", "msg-1")
-        final_state = {"messages": [msg.human("Task"), final_message]}
-        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
-
-        executor = SubagentExecutor(
-            config=base_config,
-            tools=[],
-            thread_id="test-thread",
-        )
-
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            # No cancel_event argument at all.
-            result = await executor._aexecute("Task")
-
-        assert result.status == SubagentStatus.COMPLETED
-        assert result.result == "Done"
 
 
 # -----------------------------------------------------------------------------
@@ -556,6 +604,52 @@ class TestSyncExecutionPath:
         assert result is result_holder
         assert result.task_id == "predefined-id"
         assert result.status == SubagentStatus.COMPLETED
+
+
+class TestTaskStatusPayload:
+    def test_background_task_payload_includes_shell_telemetry(self, classes):
+        from deerflow.subagents.executor import build_background_task_status_payload
+
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        result = SubagentResult(
+            task_id="task-shell-1",
+            trace_id="trace-shell-1",
+            status=SubagentStatus.TIMED_OUT,
+            result=None,
+            error=None,
+            started_at=datetime.now(),
+            timed_out_at=datetime.now(),
+        )
+        result.live_state = {
+            "builder_task": {
+                "task_id": "task-shell-1",
+                "status": "running",
+                "description": "Builder: shell repro",
+            },
+            "last_shell_command": {
+                "tool": "bash",
+                "status": "shell_unavailable",
+                "requested_command": "ls /mnt/user-data/workspace",
+                "error": "No suitable shell executable found.",
+            },
+            "recent_shell_commands": [
+                {
+                    "tool": "bash",
+                    "status": "shell_unavailable",
+                    "requested_command": "ls /mnt/user-data/workspace",
+                    "error": "No suitable shell executable found.",
+                }
+            ],
+        }
+
+        payload = build_background_task_status_payload(result)
+
+        assert payload["debug"]["last_shell_command"]["status"] == "shell_unavailable"
+        assert payload["debug"]["last_shell_command"]["requested_command"] == "ls /mnt/user-data/workspace"
+        assert payload["debug"]["recent_shell_commands"][0]["error"] == "No suitable shell executable found."
+        assert payload["detail"] == "No suitable shell executable found."
 
 
 # -----------------------------------------------------------------------------
@@ -740,49 +834,6 @@ class TestCleanupBackgroundTask:
 
         assert task_id not in executor_module._background_tasks
 
-    def test_cleanup_retains_terminal_task_for_status_queries(self, executor_module, classes):
-        """Terminal tasks stay queryable after cleanup via the retained store."""
-        SubagentResult = classes["SubagentResult"]
-        SubagentStatus = classes["SubagentStatus"]
-
-        task_id = "test-retained-task"
-        result = SubagentResult(
-            task_id=task_id,
-            trace_id="test-trace",
-            status=SubagentStatus.COMPLETED,
-            result="done",
-            completed_at=datetime.now(),
-        )
-        executor_module._background_tasks[task_id] = result
-
-        executor_module.cleanup_background_task(task_id)
-
-        retained_result = executor_module.get_background_task_result(task_id)
-        assert task_id not in executor_module._background_tasks
-        assert retained_result is not None
-        assert retained_result.result == "done"
-
-    def test_get_background_task_result_prunes_expired_retained_task(self, executor_module, classes):
-        """Expired retained terminal states are dropped on read."""
-        SubagentResult = classes["SubagentResult"]
-        SubagentStatus = classes["SubagentStatus"]
-
-        task_id = "expired-retained-task"
-        result = SubagentResult(
-            task_id=task_id,
-            trace_id="test-trace",
-            status=SubagentStatus.COMPLETED,
-            result="done",
-            completed_at=datetime.now(),
-        )
-        executor_module._retained_background_tasks[task_id] = executor_module._RetainedTaskEntry(
-            result=result,
-            expires_at=datetime.now(UTC) - timedelta(seconds=1),
-        )
-
-        assert executor_module.get_background_task_result(task_id) is None
-        assert task_id not in executor_module._retained_background_tasks
-
     def test_cleanup_removes_terminal_failed_task(self, executor_module, classes):
         """Test that cleanup removes a FAILED task."""
         SubagentResult = classes["SubagentResult"]
@@ -820,6 +871,70 @@ class TestCleanupBackgroundTask:
         executor_module.cleanup_background_task(task_id)
 
         assert task_id not in executor_module._background_tasks
+
+    def test_cleanup_removes_terminal_cancelled_task_and_aux_state(self, executor_module, classes):
+        """Test that cleanup removes a CANCELLED task and any cancellation bookkeeping."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-cancelled-task"
+        result = SubagentResult(
+            task_id=task_id,
+            trace_id="test-trace",
+            status=SubagentStatus.CANCELLED,
+            error="Execution cancelled by user",
+            completed_at=datetime.now(),
+        )
+        executor_module._background_tasks[task_id] = result
+        executor_module._background_task_cancel_events[task_id] = threading.Event()
+        executor_module._background_task_futures[task_id] = MagicMock()
+
+        executor_module.cleanup_background_task(task_id)
+
+        assert task_id not in executor_module._background_tasks
+        assert task_id not in executor_module._background_task_cancel_events
+        assert task_id not in executor_module._background_task_futures
+
+
+class TestCancelBackgroundTask:
+    """Test cancel_background_task lifecycle updates."""
+
+    @pytest.fixture
+    def executor_module(self, _setup_executor_classes):
+        import importlib
+
+        from deerflow.subagents import executor
+
+        return importlib.reload(executor)
+
+    def test_cancel_marks_running_task_and_signals_execution(self, executor_module, classes):
+        """Test that cancel_background_task marks the task cancelled and signals its future/event."""
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        task_id = "test-running-cancel"
+        result = SubagentResult(
+          task_id=task_id,
+          trace_id="test-trace",
+          status=SubagentStatus.RUNNING,
+          started_at=datetime.now(),
+        )
+        cancel_event = threading.Event()
+        execution_future = MagicMock()
+
+        executor_module._background_tasks[task_id] = result
+        executor_module._background_task_cancel_events[task_id] = cancel_event
+        executor_module._background_task_futures[task_id] = execution_future
+
+        cancelled = executor_module.cancel_background_task(task_id)
+
+        assert cancelled is result
+        assert cancelled.status.value == executor_module.SubagentStatus.CANCELLED.value
+        assert cancelled.cancel_requested is True
+        assert cancelled.error == "Execution cancelled by user"
+        assert cancelled.completed_at is not None
+        assert cancel_event.is_set() is True
+        execution_future.cancel.assert_called_once()
 
     def test_cleanup_skips_running_task(self, executor_module, classes):
         """Test that cleanup does NOT remove a RUNNING task.
@@ -888,82 +1003,3 @@ class TestCleanupBackgroundTask:
 
         # Should be removed because completed_at is set
         assert task_id not in executor_module._background_tasks
-
-
-class TestExecuteAsyncTimeoutCancellation:
-    """execute_async must set the cancel event on FuturesTimeoutError and
-    clean the event out of the module-level registry when run_task returns.
-    """
-
-    @pytest.fixture
-    def executor_module(self, _setup_executor_classes):
-        import importlib
-
-        from deerflow.subagents import executor
-
-        return importlib.reload(executor)
-
-    def test_timeout_sets_cancel_event_and_cleans_up_registry(
-        self, executor_module, classes
-    ):
-        import time
-
-        # ``importlib.reload(executor)`` above creates a fresh ``SubagentStatus``
-        # class inside ``executor_module`` that is NOT the same class object as
-        # ``classes["SubagentStatus"]`` (which was imported before reload).
-        # We compare by ``.name`` to stay independent of class identity.
-        def status_name(value) -> str:
-            return getattr(value, "name", str(value))
-
-        SubagentConfig = classes["SubagentConfig"]
-        SubagentExecutor = classes["SubagentExecutor"]
-
-        # Short timeout so the test stays fast.
-        config = SubagentConfig(
-            name="test-timeout",
-            description="test",
-            system_prompt="test",
-            max_turns=10,
-            timeout_seconds=0.3,
-        )
-
-        executor = SubagentExecutor(config=config, tools=[])
-
-        observed_cancel_events: list = []
-
-        def blocking_execute(task, result_holder, cancel_event=None):
-            # Record the event so the test can assert it was handed in by
-            # execute_async and was already set by the time we returned.
-            observed_cancel_events.append(cancel_event)
-            if cancel_event is not None:
-                # Wait up to 10s so the outer timeout has a chance to fire.
-                cancel_event.wait(timeout=10.0)
-            return result_holder
-
-        with patch.object(executor, "execute", side_effect=blocking_execute):
-            task_id = executor.execute_async("block")
-
-            # Poll until the task reaches TIMED_OUT, bounded to avoid
-            # hanging the suite if something regresses.
-            deadline = time.time() + 5.0
-            final_result = None
-            while time.time() < deadline:
-                final_result = executor_module.get_background_task_result(task_id)
-                if final_result is not None and status_name(final_result.status) == "TIMED_OUT":
-                    break
-                time.sleep(0.05)
-
-        assert final_result is not None, "task result never materialized"
-        assert status_name(final_result.status) == "TIMED_OUT"
-        assert observed_cancel_events, "execute() was never invoked"
-        assert observed_cancel_events[0] is not None
-        assert observed_cancel_events[0].is_set()
-
-        # The scheduler's finally block should have removed the registry
-        # entry. Poll briefly because run_task finishes in another thread.
-        deadline = time.time() + 2.0
-        while time.time() < deadline:
-            if task_id not in executor_module._cancel_events:
-                break
-            time.sleep(0.05)
-        assert task_id not in executor_module._cancel_events

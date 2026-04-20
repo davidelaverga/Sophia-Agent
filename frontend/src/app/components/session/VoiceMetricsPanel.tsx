@@ -458,6 +458,15 @@ export function VoiceMetricsPanel({
     : undefined
 
   const latestFalseEndsDisplay = Math.max((metrics.lastTurn.falseUserEndedCount ?? 1) - 1, 0)
+  const builderTone = metrics.builder.phase === "failed" || metrics.builder.phase === "timed_out"
+    ? "bad"
+    : metrics.builder.stuck
+      ? "warn"
+      : metrics.builder.phase === "completed"
+        ? "good"
+        : metrics.builder.phase === "running"
+          ? "neutral"
+          : "neutral"
 
   const panel = (
     <section className={cn(
@@ -501,6 +510,12 @@ export function VoiceMetricsPanel({
                 label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
                 tone={metrics.microphone.detectedAudio ? "good" : "warn"}
               />
+              {metrics.builder.phase && (
+                <ToneBadge
+                  label={`Builder: ${metrics.builder.phase}${typeof metrics.builder.progressPercent === "number" ? ` ${metrics.builder.progressPercent}%` : ""}`}
+                  tone={builderTone}
+                />
+              )}
               {metrics.regressions.length > 0 && (
                 <ToneBadge
                   label={`${metrics.regressions.length} regression ${metrics.regressions.length === 1 ? "marker" : "markers"}`}
@@ -730,6 +745,7 @@ export function VoiceMetricsPanel({
                     ["voice-runtime", String(metrics.events.voiceRuntime)],
                     ["voice-session", String(metrics.events.voiceSession)],
                     ["harness-input", String(metrics.events.harnessInput)],
+                      ["builder", String(metrics.events.builder)],
                     ["SSE errors", String(metrics.events.sseErrors)],
                     ["Invalid payloads", String(metrics.events.invalidPayloads)],
                     ["Duplicate transcripts", String(metrics.events.duplicateUserTranscriptIgnored)],
@@ -760,6 +776,26 @@ export function VoiceMetricsPanel({
                         : metrics.lastTurn.reason && metrics.lastTurn.reason !== "completed"
                           ? "warn"
                           : "neutral"}
+                />
+
+                <InfoCard
+                  icon={Activity}
+                  title="Builder workflow"
+                  rows={[
+                    ["Phase", metrics.builder.phase ?? "inactive"],
+                    ["Progress", formatPercent(metrics.builder.progressPercent)],
+                    ["Steps", metrics.builder.totalSteps !== null ? `${metrics.builder.completedSteps ?? 0}/${metrics.builder.totalSteps}` : "pending"],
+                    ["Active step", metrics.builder.activeStepTitle ?? "pending"],
+                    ["Idle", formatMs(metrics.builder.idleMs)],
+                    ["Last update", formatIsoAge(metrics.builder.lastUpdateAt)],
+                    ["Last progress", formatIsoAge(metrics.builder.lastProgressAt)],
+                  ]}
+                  footer={metrics.builder.stuckReason
+                    ?? metrics.builder.detail
+                    ?? (metrics.builder.phase === "running"
+                      ? "Builder heartbeats and todo completion are recorded here while the deliverable is assembled."
+                      : "Builder telemetry appears once a companion turn delegates to the builder.")}
+                  tone={builderTone}
                 />
 
                 <RecentTurnsCard turns={metrics.recentTurns} />
@@ -1050,6 +1086,10 @@ function formatMsCompact(value: number): string {
 
 function formatDecimal(value: number | null): string {
   return value === null ? "--" : value.toFixed(3)
+}
+
+function formatPercent(value: number | null): string {
+  return value === null ? "--" : `${value}%`
 }
 
 function thresholdKeyForLabel(label: string): keyof VoiceDeveloperMetrics["thresholds"] {

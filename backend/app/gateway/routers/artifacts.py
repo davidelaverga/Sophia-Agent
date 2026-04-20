@@ -1,17 +1,35 @@
 import logging
 import mimetypes
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.sophia.storage import supabase_artifact_store
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["artifacts"])
+_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
+_WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
+
+
+class ThreadArtifactListItem(BaseModel):
+    path: str
+    name: str
+    size_bytes: int
+    modified_at: str
+    mime_type: str | None = None
+
+
+class ThreadArtifactListResponse(BaseModel):
+    thread_id: str
+    artifacts: list[ThreadArtifactListItem] = Field(default_factory=list)
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -58,6 +76,152 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
         return None
 
 
+def _relative_output_artifact_path(path: str) -> str | None:
+    normalized = path.lstrip("/")
+    if normalized == _OUTPUTS_VIRTUAL_PATH:
+        return ""
+    if normalized.startswith(_OUTPUTS_VIRTUAL_PATH + "/"):
+        return normalized[len(_OUTPUTS_VIRTUAL_PATH) + 1 :]
+    return None
+
+
+def _resolve_artifact_path(thread_id: str, path: str) -> Path:
+    actual_path = resolve_thread_virtual_path(thread_id, path)
+    if actual_path.exists():
+        return actual_path
+
+    relative_output_path = _relative_output_artifact_path(path)
+    if relative_output_path is None:
+        return actual_path
+
+    fallback_virtual_path = _WORKSPACE_OUTPUTS_VIRTUAL_PATH
+    if relative_output_path:
+        fallback_virtual_path = f"{fallback_virtual_path}/{relative_output_path}"
+
+    fallback_path = resolve_thread_virtual_path(thread_id, fallback_virtual_path)
+    if fallback_path.exists():
+        logger.warning(
+            "Artifact missing under outputs, serving workspace/outputs fallback: thread_id=%s requested_path=%s fallback_path=%s",
+            thread_id,
+            path,
+            fallback_path,
+        )
+        return fallback_path
+
+    return actual_path
+
+
+def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Response | None:
+    """Serve the artifact from the ``sophia_builder`` Supabase bucket when missing locally.
+
+    Layout: ``sophia_builder/{thread_id}/{relative_output_path}``. Returns
+    ``None`` when Supabase is not configured, the path is not under the
+    outputs virtual prefix, or the object is missing. Raises ``HTTPException``
+    with 502 only when Supabase responds with an unexpected transport error.
+    """
+    relative = _relative_output_artifact_path(path)
+    if relative is None or relative == "":
+        return None
+    try:
+        result = supabase_artifact_store.download_artifact(
+            thread_id=thread_id,
+            filename=relative,
+        )
+    except Exception:  # noqa: BLE001 — network/transport failure
+        logger.exception(
+            "Supabase download failed: thread_id=%s requested_path=%s", thread_id, path
+        )
+        return None
+    if result is None:
+        return None
+
+    content, supabase_mime = result
+    filename = Path(relative).name
+    mime_type = supabase_mime or mimetypes.guess_type(filename)[0]
+    encoded_filename = quote(filename)
+
+    logger.info(
+        "Serving artifact from Supabase bucket: thread_id=%s requested_path=%s bytes=%d",
+        thread_id,
+        path,
+        len(content),
+    )
+
+    if request.query_params.get("download"):
+        return Response(
+            content=content,
+            media_type=mime_type or "application/octet-stream",
+            headers={
+                "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}",
+            },
+        )
+
+    if mime_type == "text/html":
+        return HTMLResponse(content=content.decode("utf-8", errors="replace"))
+    if mime_type and mime_type.startswith("text/"):
+        return PlainTextResponse(
+            content=content.decode("utf-8", errors="replace"),
+            media_type=mime_type,
+        )
+
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return Response(
+            content=content,
+            media_type=mime_type or "application/octet-stream",
+            headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"},
+        )
+    return PlainTextResponse(content=text, media_type=mime_type or "text/plain")
+
+
+@router.get(
+    "/threads/{thread_id}/artifacts",
+    response_model=ThreadArtifactListResponse,
+    summary="List Thread Artifacts",
+    description="List files generated under the thread's outputs directory.",
+)
+async def list_artifacts(thread_id: str) -> ThreadArtifactListResponse:
+    outputs_path = resolve_thread_virtual_path(thread_id, _OUTPUTS_VIRTUAL_PATH)
+
+    if not outputs_path.exists():
+        return ThreadArtifactListResponse(thread_id=thread_id, artifacts=[])
+
+    if not outputs_path.is_dir():
+        raise HTTPException(status_code=400, detail=f"Path is not a directory: {_OUTPUTS_VIRTUAL_PATH}")
+
+    # Filter out builder-internal generator/helper scripts.
+    # Convention (see builder_task.py completion_instruction): scripts that
+    # produce a binary deliverable are named `_generate_<name>.py`,
+    # `_gen_<name>.py`, `_launcher.py`, etc. Those live under outputs/ as
+    # byproducts of the build process but should never be surfaced to the
+    # user as deliverables — the user wants the PDF/PPTX/DOCX, not the
+    # script that made it.
+    def _is_builder_internal(name: str) -> bool:
+        return name.startswith("_") and name.endswith(".py")
+
+    files_with_stat = [
+        (candidate, candidate.stat())
+        for candidate in outputs_path.rglob("*")
+        if candidate.is_file() and not _is_builder_internal(candidate.name)
+    ]
+    files_with_stat.sort(key=lambda item: item[1].st_mtime, reverse=True)
+
+    artifacts: list[ThreadArtifactListItem] = []
+    for file_path, stat_result in files_with_stat:
+        relative_path = file_path.relative_to(outputs_path).as_posix()
+        mime_type, _ = mimetypes.guess_type(file_path.name)
+        artifacts.append(ThreadArtifactListItem(
+            path=f"{_OUTPUTS_VIRTUAL_PATH}/{relative_path}",
+            name=file_path.name,
+            size_bytes=stat_result.st_size,
+            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+            mime_type=mime_type,
+        ))
+
+    return ThreadArtifactListResponse(thread_id=thread_id, artifacts=artifacts)
+
+
 @router.get(
     "/threads/{thread_id}/artifacts/{path:path}",
     summary="Get Artifact File",
@@ -101,7 +265,7 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
         skill_file_path = path[: marker_pos + len(".skill")]  # e.g., "mnt/user-data/outputs/my-skill.skill"
         internal_path = path[marker_pos + len(skill_marker) :]  # e.g., "SKILL.md"
 
-        actual_skill_path = resolve_thread_virtual_path(thread_id, skill_file_path)
+        actual_skill_path = _resolve_artifact_path(thread_id, skill_file_path)
 
         if not actual_skill_path.exists():
             raise HTTPException(status_code=404, detail=f"Skill file not found: {skill_file_path}")
@@ -127,11 +291,14 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
         except UnicodeDecodeError:
             return Response(content=content, media_type=mime_type or "application/octet-stream", headers=cache_headers)
 
-    actual_path = resolve_thread_virtual_path(thread_id, path)
+    actual_path = _resolve_artifact_path(thread_id, path)
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
     if not actual_path.exists():
+        supabase_response = _try_serve_from_supabase(thread_id, path, request)
+        if supabase_response is not None:
+            return supabase_response
         raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
 
     if not actual_path.is_file():

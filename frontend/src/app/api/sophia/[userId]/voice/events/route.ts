@@ -1,18 +1,15 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getAuthenticatedUserId, getUserScopedAuthHeader } from '../../../../../lib/auth/server-auth';
-import { getPrimaryGatewayUrl } from '../../../../_lib/gateway-url';
+import { fetchSophiaApi, resolveSophiaUserId } from '../../../../_lib/sophia';
 
 export const dynamic = 'force-dynamic';
-
-const BACKEND_URL = getPrimaryGatewayUrl();
 
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ userId: string }> },
 ) {
   const { userId } = await params;
-  const authenticatedUserId = await getAuthenticatedUserId();
+  const authenticatedUserId = await resolveSophiaUserId();
 
   if (!authenticatedUserId) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
@@ -22,25 +19,16 @@ export async function GET(
     return NextResponse.json({ error: 'Token does not grant access to this user' }, { status: 403 });
   }
 
-  const authHeader = await getUserScopedAuthHeader();
-  if (!authHeader) {
-    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
-  }
-
-  const url = new URL(`${BACKEND_URL}/api/sophia/${encodeURIComponent(userId)}/voice/events`);
-
-  req.nextUrl.searchParams.forEach((value, key) => {
-    url.searchParams.set(key, value);
-  });
-
-  const backendResponse = await fetch(url.toString(), {
+  const backendResponse = await fetchSophiaApi(
+    `/api/sophia/${encodeURIComponent(userId)}/voice/events${req.nextUrl.search}`,
+    {
     method: 'GET',
     headers: {
       Accept: 'text/event-stream',
-      Authorization: authHeader,
     },
     cache: 'no-store',
-  });
+    },
+  );
 
   if (!backendResponse.ok || !backendResponse.body) {
     const responseText = await backendResponse.text().catch(() => '');

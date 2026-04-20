@@ -23,6 +23,10 @@ import type {
   MicroBriefingResponse,
   SessionContext,
   SessionInfo,
+  OpenSessionsResponse,
+  SessionListResponse,
+  SessionUpdateRequest,
+  SessionMessagesResponse,
 } from '../../types/session';
 
 // ============================================================================
@@ -51,6 +55,17 @@ export interface ApiError {
 }
 
 export type ApiResponse<T> = ApiResult<T> | ApiError;
+
+export interface SessionDeleteResponse {
+  ok: boolean;
+  session_id: string;
+}
+
+export interface SessionBulkDeleteResponse {
+  ok: boolean;
+  deleted_count: number;
+  session_ids: string[];
+}
 
 // ============================================================================
 // HELPERS
@@ -242,9 +257,14 @@ export async function submitDebriefDecision(
  * }
  * ```
  */
-export async function getActiveSession(): Promise<ApiResponse<ActiveSessionResponse>> {
+export async function getActiveSession(userId?: string): Promise<ApiResponse<ActiveSessionResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
   return fetchWithAuth<ActiveSessionResponse>(
-    `${SESSIONS_BASE}/active`,
+    `${SESSIONS_BASE}/active${params.size > 0 ? `?${params.toString()}` : ''}`,
     {
       method: 'GET',
     }
@@ -323,6 +343,160 @@ export async function getSessionDetails(
     {
       method: 'GET',
     }
+  );
+}
+
+// ============================================================================
+// MULTI-SESSION API FUNCTIONS
+// ============================================================================
+
+/**
+ * Get all open sessions for the current user
+ */
+export async function getOpenSessions(
+  userId?: string
+): Promise<ApiResponse<OpenSessionsResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<OpenSessionsResponse>(
+    `${SESSIONS_BASE}/open${params.size > 0 ? `?${params.toString()}` : ''}`,
+    { method: 'GET' }
+  );
+}
+
+/**
+ * List recent sessions with optional status filter
+ */
+export async function listSessions(
+  userId?: string,
+  options: { limit?: number; status?: 'open' | 'paused' | 'ended' } = {}
+): Promise<ApiResponse<SessionListResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+  if (options.limit) params.set('limit', String(options.limit));
+  if (options.status) params.set('status', options.status);
+  return fetchWithAuth<SessionListResponse>(
+    `${SESSIONS_BASE}/list?${params.toString()}`,
+    { method: 'GET' }
+  );
+}
+
+/**
+ * Get a single session by ID
+ */
+export async function getSession(
+  sessionId: string,
+  userId?: string
+): Promise<ApiResponse<SessionInfo>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionInfo>(
+    `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
+    { method: 'GET' }
+  );
+}
+
+/**
+ * Update session metadata (e.g. title)
+ */
+export async function updateSession(
+  sessionId: string,
+  updates: SessionUpdateRequest,
+  userId?: string
+): Promise<ApiResponse<SessionInfo>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionInfo>(
+    `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(updates),
+    }
+  );
+}
+
+/**
+ * Touch a session — increment message count and update preview.
+ * Called after each user message.
+ */
+export async function touchSession(
+  sessionId: string,
+  userId?: string,
+  messagePreview?: string
+): Promise<ApiResponse<SessionInfo>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+  if (messagePreview) params.set('message_preview', messagePreview.slice(0, 200));
+  return fetchWithAuth<SessionInfo>(
+    `${SESSIONS_BASE}/${sessionId}/touch?${params.toString()}`,
+    { method: 'POST' }
+  );
+}
+
+/**
+ * Get conversation messages from a session's LangGraph thread.
+ * Used when switching back to an open session to restore history.
+ */
+export async function getSessionMessages(
+  sessionId: string,
+  userId?: string
+): Promise<ApiResponse<SessionMessagesResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionMessagesResponse>(
+    `${SESSIONS_BASE}/${sessionId}/messages${params.size > 0 ? `?${params.toString()}` : ''}`,
+    { method: 'GET' }
+  );
+}
+
+/**
+ * Delete a persisted session record.
+ */
+export async function deleteSessionRecord(
+  sessionId: string,
+  userId?: string
+): Promise<ApiResponse<SessionDeleteResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionDeleteResponse>(
+    `${SESSIONS_BASE}/${sessionId}${params.size > 0 ? `?${params.toString()}` : ''}`,
+    { method: 'DELETE' }
+  );
+}
+
+/**
+ * Delete all persisted session records for the current user.
+ */
+export async function deleteAllSessionRecords(
+  userId?: string
+): Promise<ApiResponse<SessionBulkDeleteResponse>> {
+  const params = new URLSearchParams();
+  if (typeof userId === 'string' && userId.trim()) {
+    params.set('user_id', userId.trim());
+  }
+
+  return fetchWithAuth<SessionBulkDeleteResponse>(
+    `${SESSIONS_BASE}/bulk${params.size > 0 ? `?${params.toString()}` : ''}`,
+    { method: 'DELETE' }
   );
 }
 

@@ -55,6 +55,8 @@ interface RitualOrbitProps {
   revealed?: boolean;
   /** Instant collapse of ritual nodes (context switch out) */
   switching?: boolean;
+  /** Short glow pulse after context switch to signal that rituals changed */
+  contextPulse?: boolean;
 }
 
 export function RitualOrbit({
@@ -70,6 +72,7 @@ export function RitualOrbit({
   onContinueSession,
   revealed = true,
   switching = false,
+  contextPulse = false,
 }: RitualOrbitProps) {
   // Stagger delays matching prototype: 0.6s, 0.75s, 0.9s, 1.05s
   const STAGGER_DELAYS = [0.6, 0.75, 0.9, 1.05];
@@ -100,6 +103,7 @@ export function RitualOrbit({
             baseTransform={position.baseTransform}
             revealed={revealed}
             switching={switching}
+            contextPulse={contextPulse}
             staggerDelay={STAGGER_DELAYS[index] ?? 0.6}
           />
         );

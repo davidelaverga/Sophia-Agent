@@ -3,12 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
+import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
 import { cn } from "../../lib/utils"
 import { usePresenceStore } from "../../stores/presence-store"
+import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
+  builderArtifact?: BuilderArtifactV1 | null
+  builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
+  threadId?: string
   isVisible: boolean
   onDismiss: () => void
   isVoiceMode: boolean
@@ -30,6 +35,9 @@ interface PresenceArtifactPanelProps {
  */
 export function PresenceArtifactPanel({
   artifacts,
+  builderArtifact,
+  builderArtifactLibrary = [],
+  threadId,
   isVisible,
   onDismiss,
   isVoiceMode,
@@ -43,10 +51,11 @@ export function PresenceArtifactPanel({
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const status = usePresenceStore((s) => s.status)
+  const hasBuilderLibrary = builderArtifactLibrary.length > 0
 
   // Phase lifecycle
   useEffect(() => {
-    if (isVisible && artifacts) {
+    if (isVisible && (artifacts || builderArtifact || hasBuilderLibrary)) {
       setPhase("entering")
       setRevealStep(0)
       setReflectionTapped(false)
@@ -57,7 +66,7 @@ export function PresenceArtifactPanel({
       return () => clearTimeout(t)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVisible, artifacts])
+  }, [isVisible, artifacts, builderArtifact, hasBuilderLibrary])
 
   // Staggered reveal — each piece fades in like a star brightening
   useEffect(() => {
@@ -76,13 +85,14 @@ export function PresenceArtifactPanel({
     return () => staggerRef.current.forEach(clearTimeout)
   }, [phase])
 
-  // Voice mode: auto-dismiss after 18s (long enough to read)
+  // Voice mode: auto-dismiss after 18s — BUT NOT when builder deliverable is present
+  // Builder results are high-value; user needs time to act on them
   useEffect(() => {
     if (autoCollapseRef.current) {
       clearTimeout(autoCollapseRef.current)
       autoCollapseRef.current = null
     }
-    if (phase === "visible" && isVoiceMode) {
+    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary) {
       autoCollapseRef.current = setTimeout(() => {
         autoCollapseRef.current = null
         onDismiss()
@@ -91,7 +101,7 @@ export function PresenceArtifactPanel({
     return () => {
       if (autoCollapseRef.current) clearTimeout(autoCollapseRef.current)
     }
-  }, [phase, isVoiceMode, onDismiss])
+  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary])
 
   const handleDismiss = useCallback(() => {
     haptic("light")
@@ -108,13 +118,17 @@ export function PresenceArtifactPanel({
     })
   }, [artifacts?.reflection_candidate, reflectionTapped, onReflectionTap])
 
-  if (!artifacts || phase === "hidden") return null
+  if ((!artifacts && !builderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
 
-  const { takeaway, reflection_candidate, memory_candidates } = artifacts
+  const takeaway = artifacts?.takeaway
+  const reflection_candidate = artifacts?.reflection_candidate
+  const memory_candidates = artifacts?.memory_candidates
+  const builderFiles = getBuilderArtifactFiles(builderArtifact)
+  const hasBuilder = !!builderArtifact
   const hasReflection = !!reflection_candidate?.prompt
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
-  const hasContent = hasTakeaway || hasReflection || hasMemories
+  const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories
 
   if (!hasContent) return null
 
@@ -183,6 +197,195 @@ export function PresenceArtifactPanel({
             <path d="M2 2l8 8M10 2l-8 8" strokeLinecap="round" />
           </svg>
         </button>
+
+        {hasBuilder && builderArtifact && (
+          <div
+            className={cn(
+              "mb-4 transition-all duration-[1400ms] ease-out",
+              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
+            )}
+          >
+            {/* Type badge — centered */}
+            <div className="text-center mb-3">
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[9px] tracking-[0.14em] uppercase"
+                style={{
+                  borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                  color: 'var(--sophia-purple)',
+                  background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
+                }}
+              >
+                ✦ {builderArtifact.artifactType?.replace(/_/g, ' ') ?? 'deliverable'}
+              </span>
+            </div>
+
+            {/* Title */}
+            <p
+              className="font-cormorant text-[20px] leading-[1.35] font-light text-center"
+              style={{
+                color: 'var(--cosmic-text-strong)',
+                textShadow: isActive
+                  ? `0 0 20px color-mix(in srgb, ${bloomColor} 18%, transparent)`
+                  : 'none',
+              }}
+            >
+              {builderArtifact.artifactTitle}
+            </p>
+
+            {/* Summary */}
+            {builderArtifact.companionSummary && (
+              <p
+                className="mt-2 font-cormorant text-[14px] leading-[1.65] font-light text-center"
+                style={{ color: 'var(--cosmic-text-whisper)' }}
+              >
+                {builderArtifact.companionSummary}
+              </p>
+            )}
+
+            {/* Next action */}
+            {builderArtifact.userNextAction && (
+              <p
+                className="mt-2.5 text-center text-[10px] tracking-[0.06em]"
+                style={{ color: 'var(--cosmic-text-faint)' }}
+              >
+                Next → {builderArtifact.userNextAction}
+              </p>
+            )}
+
+            {/* File actions — pill buttons with proper tap targets */}
+            {builderFiles.length > 0 && (
+              <div className="mt-4 flex flex-col items-center gap-2">
+                {builderFiles.map((file) => {
+                  const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
+                  const openHref = buildThreadArtifactHref(threadId, file.path)
+
+                  return (
+                    <div
+                      key={file.path}
+                      className="flex items-center gap-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <span className="text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                        {file.label}
+                      </span>
+                      <div className="flex gap-1.5">
+                        {openHref && (
+                          <a
+                            href={openHref}
+                            target="_blank"
+                            rel="noreferrer"
+                            aria-label={`Open ${file.label}`}
+                            className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                            style={{
+                              borderColor: 'var(--cosmic-border-soft)',
+                              color: 'var(--cosmic-text-whisper)',
+                            }}
+                            onClick={() => haptic('light')}
+                          >
+                            open
+                          </a>
+                        )}
+                        {downloadHref && (
+                          <a
+                            href={downloadHref}
+                            aria-label={`Download ${file.label}`}
+                            className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                            style={{
+                              borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                              color: 'var(--sophia-purple)',
+                              background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
+                            }}
+                            onClick={() => haptic('medium')}
+                          >
+                            download
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        {hasBuilderLibrary && (
+          <div
+            className={cn(
+              "mb-4 transition-all duration-[1400ms] ease-out",
+              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
+            )}
+          >
+            <p
+              className="mb-2 text-center text-[9px] tracking-[0.18em] uppercase"
+              style={{ color: 'var(--cosmic-text-faint)' }}
+            >
+              Session files
+            </p>
+
+            <div className="flex flex-col items-center gap-2">
+              {builderArtifactLibrary.map((file) => {
+                const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
+                const openHref = buildThreadArtifactHref(threadId, file.path)
+                const meta = [formatBuilderArtifactFileSize(file.sizeBytes), file.mimeType]
+                  .filter(Boolean)
+                  .join(' • ')
+
+                return (
+                  <div
+                    key={file.path}
+                    className="flex items-center gap-2"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <div className="text-center">
+                      <span className="block text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                        {file.name}
+                      </span>
+                      {meta && (
+                        <span className="block text-[9px]" style={{ color: 'var(--cosmic-text-faint)' }}>
+                          {meta}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex gap-1.5">
+                      {openHref && (
+                        <a
+                          href={openHref}
+                          target="_blank"
+                          rel="noreferrer"
+                          aria-label={`Open ${file.name}`}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                          style={{
+                            borderColor: 'var(--cosmic-border-soft)',
+                            color: 'var(--cosmic-text-whisper)',
+                          }}
+                          onClick={() => haptic('light')}
+                        >
+                          open
+                        </a>
+                      )}
+                      {downloadHref && (
+                        <a
+                          href={downloadHref}
+                          aria-label={`Download ${file.name}`}
+                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
+                          style={{
+                            borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
+                            color: 'var(--sophia-purple)',
+                            background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
+                          }}
+                          onClick={() => haptic('medium')}
+                        >
+                          download
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
 
         {/* === TAKEAWAY === emerges like a fading-in constellation */}
         {hasTakeaway && (

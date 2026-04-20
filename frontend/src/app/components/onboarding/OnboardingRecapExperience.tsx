@@ -56,9 +56,6 @@ export function OnboardingRecapExperience() {
         candidates={mockRecapArtifacts.memoryCandidates}
         decisions={decisions}
         onDecisionChange={handleDecisionChange}
-        reflectionPrompt={mockRecapArtifacts.reflectionCandidate?.prompt}
-        reflectionTag={mockRecapArtifacts.reflectionCandidate?.tag}
-        onReflect={() => undefined}
         disabled={false}
       />
 

@@ -6,7 +6,7 @@ import { errorCopy } from '../../lib/error-copy';
 import { cn } from '../../lib/utils';
 import { RetryAction } from '../ui/RetryAction';
 
-type RecapEmptyStatus = 'processing' | 'unavailable' | 'not_found';
+type RecapEmptyStatus = 'processing' | 'reviewed' | 'unavailable' | 'not_found';
 
 interface RecapEmptyStateViewsProps {
   status: RecapEmptyStatus;
@@ -59,6 +59,25 @@ export function RecapEmptyStateViews({
         </h3>
         <p className="text-sophia-text2 mb-4">
           This session didn&apos;t generate artifacts. That&apos;s okay — not every session needs a recap.
+        </p>
+      </div>
+    );
+  }
+
+  if (status === 'reviewed') {
+    return (
+      <div className={cn(
+        'bg-sophia-surface rounded-2xl p-8 text-center border border-sophia-surface-border',
+        className
+      )}>
+        <div className="w-12 h-12 mx-auto mb-4 rounded-full bg-sophia-purple/10 flex items-center justify-center">
+          <Sparkles className="w-6 h-6 text-sophia-purple" />
+        </div>
+        <h3 className="text-lg font-medium text-sophia-text mb-2">
+          Memories already reviewed
+        </h3>
+        <p className="text-sophia-text2 mb-4">
+          This session did surface memories, but they were already reviewed and moved into your journal.
         </p>
       </div>
     );

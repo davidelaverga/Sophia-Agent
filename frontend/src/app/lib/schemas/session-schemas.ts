@@ -28,7 +28,7 @@ export const SessionTypeSchema = z.enum(['prepare', 'debrief', 'reset', 'vent', 
 
 export const ContextModeSchema = z.enum(['gaming', 'work', 'life']);
 
-export const SessionStatusSchema = z.enum(['active', 'ended', 'paused', 'pending_debrief']);
+export const SessionStatusSchema = z.enum(['open', 'ended', 'paused', 'pending_debrief']);
 
 // =============================================================================
 // MEMORY HIGHLIGHT
@@ -95,6 +95,19 @@ export const RecapArtifactsSchema = z.object({
     reason: z.string().optional(),
     source: z.string().optional(),
   })).optional(),
+  builder_artifact: z.object({
+    artifactPath: z.string().optional(),
+    artifactType: z.string().default('unknown'),
+    artifactTitle: z.string().default('Builder deliverable'),
+    supportingFiles: z.array(z.string()).optional(),
+    stepsCompleted: z.number().optional(),
+    decisionsMade: z.array(z.string()).default([]),
+    sourcesUsed: z.array(z.string()).optional(),
+    companionSummary: z.string().optional(),
+    companionToneHint: z.string().optional(),
+    userNextAction: z.string().optional(),
+    confidence: z.number().optional(),
+  }).optional(),
   memories_created: z.number().optional(),
   status: z.string().optional(),
 }).nullable().optional();

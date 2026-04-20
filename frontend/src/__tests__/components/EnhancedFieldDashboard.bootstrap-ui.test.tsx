@@ -8,6 +8,7 @@ const useConnectivityStoreMock = vi.fn();
 const useUiStoreMock = vi.fn();
 const showToastMock = vi.fn();
 const startSessionMock = vi.fn();
+const resumeSessionMock = vi.fn();
 const startSessionEntryMock = vi.fn();
 const endSessionMock = vi.fn();
 let sessionStartLoadingMock = false;
@@ -72,10 +73,13 @@ vi.mock('../../app/stores/connectivity-store', () => ({
 vi.mock('../../app/stores/session-store', () => {
   const sessionState = {
     session: null,
+    openSessions: [],
     isInitializing: false,
     isEnding: false,
     error: null,
+    refreshOpenSessions: vi.fn().mockResolvedValue(0),
     createSession: vi.fn(),
+    restoreOpenSession: vi.fn(),
     updateSession: vi.fn(),
     updateFromBackend: vi.fn(),
     pauseSession: vi.fn(),
@@ -95,11 +99,13 @@ vi.mock('../../app/stores/session-store', () => {
   const selectIsSessionActive = (state: typeof sessionState) => state.session?.isActive ?? false;
   const selectSession = (state: typeof sessionState) => state.session;
   const selectSessionSummary = () => null;
+  const selectOpenSessionCount = (state: typeof sessionState) => state.openSessions.length;
 
   return {
     selectIsSessionActive,
     selectSession,
     selectSessionSummary,
+    selectOpenSessionCount,
     useSessionStore: (selector: (state: typeof sessionState) => unknown) => {
       useSessionStoreMock(selector);
       return selector(sessionState);
@@ -110,6 +116,7 @@ vi.mock('../../app/stores/session-store', () => {
 vi.mock('../../app/hooks/useSessionStart', () => ({
   useSessionStart: () => ({
     start: startSessionMock,
+    resumeSession: resumeSessionMock,
     startSessionEntry: startSessionEntryMock,
     checkActiveSession: vi.fn().mockResolvedValue({ has_active_session: false }),
     isLoading: sessionStartLoadingMock,
@@ -149,10 +156,19 @@ vi.mock('../../app/components/dashboard/SettingsDrawer', () => ({
   SettingsDrawer: () => <div data-testid="settings-drawer" />,
 }));
 
+vi.mock('../../app/components/dashboard/DashboardSidebar', () => ({
+  RecentSessionsSidebar: () => <div data-testid="recent-sessions-sidebar" />,
+  MobileBottomSheet: ({ isOpen, children }: { isOpen: boolean; children: React.ReactNode }) => (
+    isOpen ? <div data-testid="mobile-bottom-sheet">{children}</div> : null
+  ),
+  MobileSessionsContent: () => <div data-testid="mobile-sessions-content" />,
+}));
+
 vi.mock('../../app/components/session/ResumeBanner', () => ({
-  ResumeBanner: ({ onStartFresh }: { onStartFresh: () => void }) => (
+  ResumeBanner: ({ onResume, onStartFresh }: { onResume: () => void; onStartFresh: () => void }) => (
     <div data-testid="resume-banner">
       Resume banner visible
+      <button type="button" onClick={onResume}>Continue resume</button>
       <button type="button" onClick={onStartFresh}>Start fresh from resume</button>
     </div>
   ),
@@ -165,6 +181,7 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
     vi.clearAllMocks();
     sessionStartLoadingMock = false;
     startSessionMock.mockReset();
+    resumeSessionMock.mockReset();
     startSessionEntryMock.mockReset();
     endSessionMock.mockReset();
     showToastMock.mockReset();
@@ -211,6 +228,20 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
     expect(screen.queryByTestId('resume-banner')).not.toBeInTheDocument();
   });
 
+  it('does not render the oversized start-guide panel when no resume surface is shown', async () => {
+    resolveDashboardBootstrapStateMock.mockResolvedValue({
+      mode: 'none',
+    });
+
+    render(<EnhancedFieldDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('ritual-orbit')).toBeInTheDocument();
+    });
+
+    expect(screen.queryByText('How To Start')).not.toBeInTheDocument();
+  });
+
   it('keeps ResumeBanner hidden while a session launch is loading', async () => {
     sessionStartLoadingMock = true;
     resolveDashboardBootstrapStateMock.mockResolvedValue({
@@ -231,6 +262,52 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
     });
 
     expect(screen.queryByTestId('resume-banner')).not.toBeInTheDocument();
+  });
+
+  it('resumes the existing backend session instead of starting a new one', async () => {
+    const user = userEvent.setup();
+    resolveDashboardBootstrapStateMock.mockResolvedValue({
+      mode: 'resume-backend',
+      session: {
+        session_id: 'sess-active',
+        session_type: 'prepare',
+        preset_context: 'gaming',
+        started_at: new Date().toISOString(),
+        turn_count: 2,
+        intention: 'Refocus before queueing',
+      },
+    });
+    resumeSessionMock.mockResolvedValue({
+      success: true,
+      sessionId: 'sess-active',
+      threadId: 'thread-active',
+      greetingMessage: '',
+      messageId: 'resume-existing-session',
+      memoryHighlights: [],
+      isResumed: true,
+      hasMemory: false,
+    });
+
+    render(<EnhancedFieldDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('resume-banner')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Continue resume' }));
+
+    await waitFor(() => {
+      expect(resumeSessionMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          session_id: 'sess-active',
+          session_type: 'prepare',
+        }),
+        'user-1',
+      );
+    });
+
+    expect(startSessionMock).not.toHaveBeenCalled();
+    expect(startSessionEntryMock).not.toHaveBeenCalled();
   });
 
   it('asks whether to reuse the ritual before starting fresh from resume', async () => {

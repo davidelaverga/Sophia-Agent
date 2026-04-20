@@ -26,6 +26,30 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-04-13 · [builder-web-research] · PR #[pending]
+**Author:** Codex · **Track:** backend · **Spec:** docs/specs/01_architecture_overview.md, docs/specs/04_backend_integration.md, docs/specs/07_builder_handoff_spec.md
+
+### What Changed
+- Added builder-only guarded web research to `sophia_builder` via `builder_web_search` and `builder_web_fetch`, reusing DeerFlow's configured web providers while enforcing URL allowlists and call budgets.
+- Added `BuilderResearchPolicyMiddleware`, extended builder delegation/state with explicit research permissions and source provenance, and updated builder output guidance to require citations or source appendices when browsing is used.
+- Wired `ToolErrorHandlingMiddleware` into the builder runtime, restored `BuilderSessionMiddleware` to the companion chain so delegated work can synthesize back correctly, and fixed the Mem0 memory-content injection typo uncovered by the touched regression suite.
+- Strengthened `emit_builder_artifact` so `sources_used` can carry structured `{title, url}` entries and documented that Sophia's builder is now a dedicated guarded agent rather than the unmodified lead agent.
+
+### What We Learned
+- DeerFlow already had native web search providers, but Sophia's dedicated builder path had diverged enough that “native support exists” did not mean the builder could use it safely without explicit wrappers.
+- Builder-side browsing needs a provenance channel separate from voice artifacts; otherwise citations either disappear or leak into spoken output where they do not belong.
+- The companion's builder synthesis path silently depended on `BuilderSessionMiddleware` being present in the live chain; importing it without wiring it left delegated-task completion more brittle than the docs implied.
+- Running the touched Sophia suite exposed a small but real Mem0 injection typo, which was cheap to fix once surfaced and worth keeping in the green path.
+
+### CLAUDE.md Updates
+- None
+
+### Skills Created / Modified
+- None
+
+### GEPA Log Entry
+- N/A
+
 ## 2026-04-06 · [memory-review] · PR #[pending]
 **Author:** GitHub Copilot · **Track:** backend + frontend · **Spec:** docs/specs/03_memory_system.md, docs/specs/04_backend_integration.md, docs/specs/05_frontend_ux.md
 
@@ -171,4 +195,3 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 
 ### GEPA Log Entry
 - N/A
-

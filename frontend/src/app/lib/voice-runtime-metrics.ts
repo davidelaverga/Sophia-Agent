@@ -1,3 +1,5 @@
+import type { BuilderTaskV1 } from "../types/builder-task"
+
 import type {
   SophiaCaptureMicrophoneSummary,
   SophiaCaptureSnapshot,
@@ -32,7 +34,7 @@ export type VoiceMetricThreshold = {
 }
 
 export type VoiceRegressionMarker = {
-  key: "microphone" | "turn-segmentation" | "backend-stall" | "commit-boundary"
+  key: "microphone" | "turn-segmentation" | "backend-stall" | "commit-boundary" | "builder-stall"
   title: string
   detail: string
   level: "warn" | "bad"
@@ -73,6 +75,7 @@ export type VoiceEventCounters = {
   voiceRuntime: number
   voiceSession: number
   harnessInput: number
+  builder: number
   duplicateUserTranscriptIgnored: number
   sseErrors: number
   invalidPayloads: number
@@ -93,6 +96,8 @@ export type VoiceRecentTurnSummary = {
   firstAudioMs: number | null
   falseUserEndedCount: number | null
   duplicatePhaseTotal: number
+  userTranscriptChars: number | null
+  assistantTranscriptChars: number | null
 }
 
 export type VoiceBottleneckDiagnosis = {
@@ -133,6 +138,9 @@ export type VoiceTelemetrySummary = {
   rawBackendCompleteMs: number | null
   rawFirstAudioMs: number | null
   responseWindowMs: number | null
+  builderPhase: BuilderTaskV1["phase"] | null
+  builderProgressPercent: number | null
+  builderStuck: boolean
 }
 
 export type VoiceDeveloperMetrics = {
@@ -156,6 +164,7 @@ export type VoiceDeveloperMetrics = {
     assistantTranscripts: number
     artifacts: number
     diagnostics: number
+    builderEvents: number
   }
   timings: {
     joinLatencyMs: number | null
@@ -194,6 +203,27 @@ export type VoiceDeveloperMetrics = {
     totalSampleWindows: number
     errorCount: number
     lastError: string | null
+  }
+  builder: {
+    phase: BuilderTaskV1["phase"] | null
+    taskId: string | null
+    label: string | null
+    detail: string | null
+    progressPercent: number | null
+    progressSource: BuilderTaskV1["progressSource"] | null
+    totalSteps: number | null
+    completedSteps: number | null
+    inProgressSteps: number | null
+    pendingSteps: number | null
+    activeStepTitle: string | null
+    startedAt: string | null
+    completedAt: string | null
+    lastUpdateAt: string | null
+    lastProgressAt: string | null
+    heartbeatMs: number | null
+    idleMs: number | null
+    stuck: boolean
+    stuckReason: string | null
   }
   health: {
     level: VoiceMetricsHealthLevel
@@ -268,6 +298,43 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null
+}
+
+function asBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null
+}
+
+function getBuilderDebugDetail(payload: Record<string, unknown> | null | undefined): string | null {
+  const debug = asRecord(payload?.debug)
+  if (!debug) {
+    return null
+  }
+
+  const blockerDetail = asString(debug.suspected_blocker_detail)
+  if (blockerDetail) {
+    return blockerDetail
+  }
+
+  const lastShellCommand = asRecord(debug.last_shell_command)
+  if (!lastShellCommand) {
+    return null
+  }
+
+  const shellError = asString(lastShellCommand.error)
+  if (shellError) {
+    return shellError
+  }
+
+  const shellStatus = asString(lastShellCommand.status)
+  if (!shellStatus || shellStatus === "ok" || shellStatus === "nonzero_exit") {
+    return null
+  }
+
+  const command = asString(lastShellCommand.requested_command)
+    ?? asString(lastShellCommand.command)
+    ?? asString(lastShellCommand.resolved_command)
+
+  return command ? `Last bash command ${shellStatus}: ${command}` : `Last bash command ${shellStatus}.`
 }
 
 function parseTimestampMs(value: string | null | undefined): number | null {
@@ -585,6 +652,7 @@ function buildThresholds(params: {
 function buildRegressionMarkers(params: {
   stage: VoiceStage
   microphone: VoiceDeveloperMetrics["microphone"]
+  builder: VoiceDeveloperMetrics["builder"]
   userTranscriptCount: number
   falseUserEndedCount: number | null
   duplicatePhaseCounts: Record<string, number>
@@ -596,6 +664,7 @@ function buildRegressionMarkers(params: {
   const {
     stage,
     microphone,
+    builder,
     userTranscriptCount,
     falseUserEndedCount,
     latestReason,
@@ -706,10 +775,28 @@ function buildRegressionMarkers(params: {
     })
   }
 
+  if (builder.phase === "failed" || builder.phase === "timed_out") {
+    markers.push({
+      key: "builder-stall",
+      title: builder.phase === "timed_out" ? "Builder timed out" : "Builder failed",
+      detail: builder.detail ?? builder.stuckReason ?? "Builder stopped before producing the deliverable.",
+      level: "bad",
+    })
+  } else if (builder.phase === "running" && builder.stuck) {
+    markers.push({
+      key: "builder-stall",
+      title: "Builder progress stalled",
+      detail: builder.stuckReason ?? "No visible builder progress has been observed recently.",
+      level: (builder.idleMs ?? 0) >= 240000 ? "bad" : "warn",
+    })
+  }
+
   return markers
 }
 
 function buildEventCounters(events: NormalizedVoiceCaptureEvent[]): VoiceEventCounters {
+  const isBuilderSignalEvent = (event: NormalizedVoiceCaptureEvent) => event.category === "builder" || event.name === "sophia.builder_task"
+
   return {
     total: events.length,
     voiceSse: countWhere(events, (event) => event.category === "voice-sse"),
@@ -717,6 +804,7 @@ function buildEventCounters(events: NormalizedVoiceCaptureEvent[]): VoiceEventCo
     voiceRuntime: countWhere(events, (event) => event.category === "voice-runtime"),
     voiceSession: countWhere(events, (event) => event.category === "voice-session"),
     harnessInput: countWhere(events, (event) => event.category === "harness-input"),
+    builder: countWhere(events, isBuilderSignalEvent),
     duplicateUserTranscriptIgnored: countWhere(events, (event) => event.name === "duplicate-user-transcript-ignored"),
     sseErrors: countWhere(events, (event) => event.category === "voice-sse" && event.name === "stream-error"),
     invalidPayloads: countWhere(events, (event) => event.category === "voice-sse" && event.name === "invalid-event-payload"),
@@ -726,15 +814,108 @@ function buildEventCounters(events: NormalizedVoiceCaptureEvent[]): VoiceEventCo
   }
 }
 
+function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: number): VoiceDeveloperMetrics["builder"] {
+  const isBuilderSignalEvent = (event: NormalizedVoiceCaptureEvent) => event.category === "builder" || event.name === "sophia.builder_task"
+  const latestBuilderEvent = findLast(events, isBuilderSignalEvent)
+  const payload = latestBuilderEvent
+    ? latestBuilderEvent.category === "builder"
+      ? latestBuilderEvent.payloadRecord
+      : eventData(latestBuilderEvent)
+    : null
+  const phaseValue = asString(payload?.phase) ?? asString(payload?.type)?.replace(/^task_/, "")
+  const phase = phaseValue === "running"
+    || phaseValue === "completed"
+    || phaseValue === "failed"
+    || phaseValue === "timed_out"
+    || phaseValue === "cancelled"
+      ? phaseValue
+      : null
+
+  const progressSourceValue = asString(payload?.progressSource) ?? asString(payload?.progress_source)
+  const progressSource = progressSourceValue === "todos" || progressSourceValue === "messages" || progressSourceValue === "iterations" || progressSourceValue === "none"
+    ? progressSourceValue
+    : null
+
+  const lastUpdateAt = asString(payload?.lastUpdateAt) ?? asString(payload?.last_update_at)
+  const lastProgressAt = asString(payload?.lastProgressAt) ?? asString(payload?.last_progress_at)
+  const eventAgeMs = diffMs(latestBuilderEvent?.atMs ?? null, nowMs)
+  const inferredHeartbeatMs = diffMs(parseTimestampMs(lastUpdateAt) ?? latestBuilderEvent?.atMs ?? null, nowMs)
+  const inferredIdleMs = diffMs(parseTimestampMs(lastProgressAt) ?? latestBuilderEvent?.atMs ?? null, nowMs)
+  const payloadHeartbeatMs = asFiniteNumber(payload?.heartbeatMs) ?? asFiniteNumber(payload?.heartbeat_ms)
+  const payloadIdleMs = asFiniteNumber(payload?.idleMs) ?? asFiniteNumber(payload?.idle_ms)
+  const heartbeatMs = payloadHeartbeatMs !== null || inferredHeartbeatMs !== null
+    ? Math.max(
+      payloadHeartbeatMs !== null ? payloadHeartbeatMs + (eventAgeMs ?? 0) : 0,
+      inferredHeartbeatMs ?? 0,
+    )
+    : null
+  const idleMs = payloadIdleMs !== null || inferredIdleMs !== null
+    ? Math.max(
+      payloadIdleMs !== null ? payloadIdleMs + (eventAgeMs ?? 0) : 0,
+      inferredIdleMs ?? 0,
+    )
+    : null
+  const stuck = phase === "running" && ((asBoolean(payload?.stuck) ?? asBoolean(payload?.is_stuck) ?? false) || ((idleMs ?? 0) >= 150000))
+  const stuckReason = asString(payload?.stuckReason)
+    ?? asString(payload?.stuck_reason)
+    ?? (stuck
+      ? `No visible builder progress for ${Math.max(Math.round((idleMs ?? 0) / 1000), 1)}s. It may be blocked on a tool or looping without advancing the deliverable.`
+      : null)
+
+  return {
+    phase,
+    taskId: asString(payload?.taskId) ?? asString(payload?.task_id),
+    label: asString(payload?.label),
+    detail: asString(payload?.detail) ?? getBuilderDebugDetail(payload),
+    progressPercent: asFiniteNumber(payload?.progressPercent) ?? asFiniteNumber(payload?.progress_percent),
+    progressSource,
+    totalSteps: asFiniteNumber(payload?.totalSteps) ?? asFiniteNumber(payload?.total_steps),
+    completedSteps: asFiniteNumber(payload?.completedSteps) ?? asFiniteNumber(payload?.completed_steps),
+    inProgressSteps: asFiniteNumber(payload?.inProgressSteps) ?? asFiniteNumber(payload?.in_progress_steps),
+    pendingSteps: asFiniteNumber(payload?.pendingSteps) ?? asFiniteNumber(payload?.pending_steps),
+    activeStepTitle: asString(payload?.activeStepTitle) ?? asString(payload?.active_step_title),
+    startedAt: asString(payload?.startedAt) ?? asString(payload?.started_at),
+    completedAt: asString(payload?.completedAt) ?? asString(payload?.completed_at),
+    lastUpdateAt,
+    lastProgressAt,
+    heartbeatMs,
+    idleMs,
+    stuck,
+    stuckReason,
+  }
+}
+
 function buildRecentTurns(events: NormalizedVoiceCaptureEvent[]): VoiceRecentTurnSummary[] {
   const completedTurns: VoiceRecentTurnSummary[] = []
   let lastUserTranscriptAtMs: number | null = null
+  let lastUserTranscriptChars: number | null = null
   let lastUserEndedAtMs: number | null = null
   let firstAgentStartedAtMs: number | null = null
+  let lastAssistantTranscriptChars: number | null = null
 
   for (const event of events) {
     if (event.name === "sophia.user_transcript") {
       lastUserTranscriptAtMs = event.atMs
+      const text = asString(eventData(event)?.text)
+      lastUserTranscriptChars = text !== null ? text.length : null
+      continue
+    }
+
+    if (event.name === "sophia.transcript") {
+      const data = eventData(event)
+      const isFinal = data?.is_final === true || data?.final === true
+      const text = asString(data?.text)
+      // Keep a running assistant-transcript length; the final frame wins when
+      // we emit the turn diagnostic below.
+      if (text !== null) {
+        lastAssistantTranscriptChars = text.length
+      }
+      if (isFinal) {
+        // Final frame is the authoritative length for this turn.
+        if (text !== null) {
+          lastAssistantTranscriptChars = text.length
+        }
+      }
       continue
     }
 
@@ -771,14 +952,20 @@ function buildRecentTurns(events: NormalizedVoiceCaptureEvent[]): VoiceRecentTur
       firstAudioMs: asFiniteNumber(data?.first_audio_ms),
       falseUserEndedCount: asFiniteNumber(data?.raw_false_end_count),
       duplicatePhaseTotal,
+      userTranscriptChars: lastUserTranscriptChars,
+      assistantTranscriptChars: lastAssistantTranscriptChars,
     })
 
     lastUserTranscriptAtMs = null
+    lastUserTranscriptChars = null
     lastUserEndedAtMs = null
     firstAgentStartedAtMs = null
+    lastAssistantTranscriptChars = null
   }
 
-  return completedTurns.slice(-4).reverse()
+  // Keep up to 12 turns so a full conversation (typical: 8–12 turns) is
+  // visible in the exported telemetry report.
+  return completedTurns.slice(-12).reverse()
 }
 
 function levelFromThresholdState(
@@ -1125,12 +1312,16 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
       metrics.stage === "thinking"
         ? metrics.timings.currentThinkingMs
         : metrics.lastTurn.responseDurationMs,
+    builderPhase: metrics.builder.phase,
+    builderProgressPercent: metrics.builder.progressPercent,
+    builderStuck: metrics.builder.stuck,
   }
 }
 
 function summarizeHealth(params: {
   stage: VoiceStage
   microphone: VoiceDeveloperMetrics["microphone"]
+  builder: VoiceDeveloperMetrics["builder"]
   runtimeError?: string
   transportSource: VoiceDeveloperMetrics["transport"]["activeSource"]
   currentThinkingMs: number | null
@@ -1144,6 +1335,7 @@ function summarizeHealth(params: {
   const {
     stage,
     microphone,
+    builder,
     runtimeError,
     transportSource,
     currentThinkingMs,
@@ -1160,6 +1352,22 @@ function summarizeHealth(params: {
       level: "bad",
       title: "Voice runtime failed",
       detail: runtimeError ?? "The client entered an error state before the turn could finish.",
+    }
+  }
+
+  if (builder.phase === "failed" || builder.phase === "timed_out") {
+    return {
+      level: "bad",
+      title: builder.phase === "timed_out" ? "Builder timed out" : "Builder failed",
+      detail: builder.detail ?? builder.stuckReason ?? "Builder stopped before producing the deliverable.",
+    }
+  }
+
+  if (builder.phase === "running" && builder.stuck) {
+    return {
+      level: "warn",
+      title: "Builder appears stalled",
+      detail: builder.stuckReason ?? "No visible builder progress has been observed recently.",
     }
   }
 
@@ -1291,12 +1499,57 @@ function summarizeHealth(params: {
   }
 }
 
-function buildTimeline(events: NormalizedVoiceCaptureEvent[], startAtMs: number | null): VoiceMetricsTimelineItem[] {
+function buildTimeline(
+  events: NormalizedVoiceCaptureEvent[],
+  startAtMs: number | null,
+  builder: VoiceDeveloperMetrics["builder"],
+  nowMs: number,
+): VoiceMetricsTimelineItem[] {
   const items = events
     .map((event) => {
       const data = eventData(event)
       const textPreview = asString(data?.text)
       const phase = eventPhase(event)
+
+      if (event.category === "builder" || event.name === "sophia.builder_task") {
+        const builderPayload = event.category === "builder" ? event.payloadRecord : data
+        const builderPhase = asString(builderPayload?.phase) ?? asString(builderPayload?.type)?.replace(/^task_/, "")
+        const progressPercent = asFiniteNumber(builderPayload?.progressPercent)
+          ?? asFiniteNumber(builderPayload?.progress_percent)
+        const activeStepTitle = asString(builderPayload?.activeStepTitle)
+          ?? asString(builderPayload?.active_step_title)
+        const stuck = asBoolean(builderPayload?.stuck)
+          ?? asBoolean(builderPayload?.is_stuck)
+          ?? false
+        const detail = asString(builderPayload?.stuckReason)
+          ?? asString(builderPayload?.stuck_reason)
+          ?? asString(builderPayload?.detail)
+          ?? getBuilderDebugDetail(builderPayload)
+          ?? (activeStepTitle ? `Active step: ${activeStepTitle}` : null)
+          ?? "Builder status updated"
+
+        return {
+          label:
+            builderPhase === "completed"
+              ? "Builder completed"
+              : builderPhase === "failed"
+                ? "Builder failed"
+                : builderPhase === "timed_out"
+                  ? "Builder timed out"
+                  : stuck
+                    ? "Builder stalled"
+                    : "Builder update",
+          detail: progressPercent !== null ? `${detail} (${progressPercent}% complete)` : detail,
+          tone:
+            builderPhase === "failed" || builderPhase === "timed_out"
+              ? "bad"
+              : stuck
+                ? "warn"
+                : builderPhase === "completed"
+                  ? "good"
+                  : "neutral",
+        }
+      }
 
       switch (event.name) {
         case "start-talking-requested":
@@ -1451,6 +1704,27 @@ function buildTimeline(events: NormalizedVoiceCaptureEvent[], startAtMs: number 
     } => Boolean(item))
     .slice(-10)
 
+  const hasExplicitBuilderStall = items.some(({ item }) => item.label === "Builder stalled")
+  if (builder.phase === "running" && builder.stuck && !hasExplicitBuilderStall) {
+    items.push({
+      event: {
+        seq: null,
+        recordedAt: new Date(nowMs).toISOString(),
+        category: "builder",
+        name: "task-running",
+        payload: {},
+        atMs: nowMs,
+        payloadRecord: {},
+        dataRecord: null,
+      },
+      item: {
+        label: "Builder stalled",
+        detail: builder.stuckReason ?? "No visible builder progress detected.",
+        tone: "warn",
+      },
+    })
+  }
+
   return items.map(({ event, item }, index) => ({
     id: `${event.seq ?? index}`,
     at: event.recordedAt,
@@ -1460,7 +1734,6 @@ function buildTimeline(events: NormalizedVoiceCaptureEvent[], startAtMs: number 
     tone: item.tone,
   }))
 }
-
 export function buildVoiceDeveloperMetrics({
   stage,
   events,
@@ -1532,6 +1805,7 @@ export function buildVoiceDeveloperMetrics({
   )
   const artifactCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
   const diagnosticCount = countWhere(activeEvents, (event) => event.name === "sophia.turn_diagnostic")
+  const builderEvents = countWhere(activeEvents, (event) => event.category === "builder" || event.name === "sophia.builder_task")
   const turnCount = Math.max(
     diagnosticCount,
     countWhere(activeEvents, (event) => event.name === "sophia.turn" && eventPhase(event) === "agent_started"),
@@ -1539,6 +1813,7 @@ export function buildVoiceDeveloperMetrics({
   )
 
   const microphone = buildMicrophone(snapshot?.harness?.microphone)
+  const builder = buildBuilderMetrics(activeEvents, nowMs)
   const lastEventAgeMs = diffMs(latestEvent?.atMs ?? null, nowMs)
   const currentThinkingMs = stage === "thinking" ? diffMs(lastUserEndedEvent?.atMs ?? null, nowMs) : null
   const transportSource: VoiceDeveloperMetrics["transport"]["activeSource"] =
@@ -1626,6 +1901,7 @@ export function buildVoiceDeveloperMetrics({
   const regressions = buildRegressionMarkers({
     stage,
     microphone,
+    builder,
     userTranscriptCount,
     falseUserEndedCount,
     duplicatePhaseCounts,
@@ -1656,6 +1932,7 @@ export function buildVoiceDeveloperMetrics({
   const health = summarizeHealth({
     stage,
     microphone,
+    builder,
     runtimeError,
     transportSource,
     currentThinkingMs,
@@ -1688,6 +1965,7 @@ export function buildVoiceDeveloperMetrics({
       assistantTranscripts: assistantTranscriptCount,
       artifacts: artifactCount,
       diagnostics: diagnosticCount,
+      builderEvents,
     },
     timings: {
       joinLatencyMs: thresholds.joinLatency.valueMs,
@@ -1715,6 +1993,7 @@ export function buildVoiceDeveloperMetrics({
       lastAssistantTranscriptAt: lastAssistantTranscriptEvent?.recordedAt ?? null,
     },
     microphone,
+    builder,
     health,
     thresholds,
     startup,
@@ -1723,6 +2002,11 @@ export function buildVoiceDeveloperMetrics({
     recentTurns,
     bottleneck,
     regressions,
-    timeline: buildTimeline(activeEvents, lastStartEvent?.atMs ?? activeEvents[0]?.atMs ?? null),
+    timeline: buildTimeline(
+      activeEvents,
+      lastStartEvent?.atMs ?? activeEvents[0]?.atMs ?? null,
+      builder,
+      nowMs,
+    ),
   }
 }

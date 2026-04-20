@@ -79,6 +79,11 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if runtime and runtime.context:
             thread_id = runtime.context.get("thread_id")
 
+        if thread_id is None and runtime and getattr(runtime, "config", None):
+            thread_id = runtime.config.get("configurable", {}).get("thread_id")
+            if thread_id and runtime.context is not None:
+                runtime.context["thread_id"] = thread_id
+
         if thread_id is None:
             # Subagents may already have thread_data passed from the parent agent.
             # Also check configurable for thread_id (used by SubagentExecutor).

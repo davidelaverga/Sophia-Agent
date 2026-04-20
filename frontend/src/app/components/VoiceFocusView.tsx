@@ -37,7 +37,7 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
     stream, 
     startTalking, 
     stopTalking, 
-    bargeIn 
+    softBargeIn 
   } = voiceState
   
   // Use unified voice toggle hook (start-recording behavior for focus view)
@@ -59,7 +59,9 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
       {/* Chat collapsed indicator - easy switch to chat mode */}
       <ChatCollapsed />
 
-      <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
+      {/* Voice telemetry panel intentionally hidden — diagnostic mission complete. Re-enable by
+          removing the `false &&` guard when investigating latency regressions. */}
+      {false && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
       
       <section 
         className={`rounded-2xl bg-sophia-surface p-6 shadow-soft animate-fadeIn transition-all duration-500 ${
@@ -107,7 +109,7 @@ export function VoiceFocusView({ voiceState }: VoiceFocusViewProps) {
             <button
               type="button"
               className="flex items-center gap-2 rounded-full border border-sophia-surface-border px-3 py-1.5 text-xs font-medium text-sophia-text hover:bg-sophia-purple/10 transition-colors duration-200"
-              onClick={bargeIn}
+              onClick={softBargeIn}
             >
               <Square className="h-3 w-3" />
               {t("voicePanel.interrupt")}

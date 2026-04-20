@@ -1,8 +1,8 @@
-export type CompanionRouteProfileId = 'ritual' | 'chat';
+export type CompanionRouteProfileId = 'ritual';
 
 export type CompanionRouteProfile = {
   id: CompanionRouteProfileId;
-  routePath: '/session' | '/chat';
+  routePath: '/session';
   description: string;
   includeSessionContext: boolean;
   enableBootstrap: boolean;
@@ -19,15 +19,6 @@ export const COMPANION_ROUTE_PROFILES: Record<CompanionRouteProfileId, Companion
     enableBootstrap: true,
     enableDebrief: true,
     freeChatDefaults: false,
-  },
-  chat: {
-    id: 'chat',
-    routePath: '/chat',
-    description: 'Free-chat shell over the canonical companion runtime.',
-    includeSessionContext: false,
-    enableBootstrap: false,
-    enableDebrief: false,
-    freeChatDefaults: true,
   },
 };
 

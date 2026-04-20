@@ -3,17 +3,20 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 const getUserScopedAuthHeaderMock = vi.fn(() => 'Bearer test-token');
 const refreshUserScopedAuthHeaderMock = vi.fn(() => '');
+const getAuthenticatedUserIdMock = vi.fn(() => 'user-123');
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
+  getAuthenticatedUserId: () => getAuthenticatedUserIdMock(),
   getUserScopedAuthHeader: () => getUserScopedAuthHeaderMock(),
   refreshUserScopedAuthHeader: () => refreshUserScopedAuthHeaderMock(),
 }));
 
-import { GET, POST } from '../../app/api/sessions/[...path]/route';
+import { DELETE, GET, POST } from '../../app/api/sessions/[...path]/route';
 
 describe('/api/sessions/[...path] proxy', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    getAuthenticatedUserIdMock.mockReturnValue('user-123');
     getUserScopedAuthHeaderMock.mockReturnValue('Bearer test-token');
     refreshUserScopedAuthHeaderMock.mockReturnValue('');
   });
@@ -39,6 +42,7 @@ describe('/api/sessions/[...path] proxy', () => {
     expect(url).toContain('/api/v1/sessions/active');
     expect(url).toContain('page=2');
     expect(url).toContain('page_size=10');
+    expect(url).toContain('user_id=user-123');
     expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
 
@@ -55,7 +59,7 @@ describe('/api/sessions/[...path] proxy', () => {
       })
     );
 
-    const payload = { session_type: 'prepare' };
+    const payload = { session_type: 'prepare', user_id: 'wrong-user' };
     const req = {
       method: 'POST',
       nextUrl: new URL('http://localhost:3000/api/sessions/start'),
@@ -67,7 +71,7 @@ describe('/api/sessions/[...path] proxy', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(options.method).toBe('POST');
-    expect(options.body).toBe(JSON.stringify(payload));
+    expect(options.body).toBe(JSON.stringify({ session_type: 'prepare', user_id: 'user-123' }));
     expect(response.status).toBe(200);
   });
 
@@ -91,6 +95,27 @@ describe('/api/sessions/[...path] proxy', () => {
     vi.spyOn(global, 'fetch').mockResolvedValueOnce(
       new Response(JSON.stringify({ error: 'Unauthorized' }), {
         status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const req = {
+      method: 'GET',
+      nextUrl: new URL('http://localhost:3000/api/sessions/active'),
+      text: async () => '',
+    } as unknown as NextRequest;
+
+    const response = await GET(req, { params: Promise.resolve({ path: ['active'] }) });
+
+    expect(response.status).toBe(200);
+    const data = await response.json();
+    expect(data).toEqual({ has_active_session: false });
+  });
+
+  it('normalizes backend 404 from active-session lookup into an empty payload', async () => {
+    vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Not found' }), {
+        status: 404,
         headers: { 'Content-Type': 'application/json' },
       })
     );
@@ -165,5 +190,30 @@ describe('/api/sessions/[...path] proxy', () => {
       has_memory: false,
     });
     expect(data.assistant_text).toContain('check-in');
+  });
+
+  it('forwards DELETE requests through the sessions proxy', async () => {
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ ok: true, session_id: 'sess-1' }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    );
+
+    const req = {
+      method: 'DELETE',
+      nextUrl: new URL('http://localhost:3000/api/sessions/sess-1?user_id=dev-user'),
+      text: async () => '',
+    } as unknown as NextRequest;
+
+    const response = await DELETE(req, { params: Promise.resolve({ path: ['sess-1'] }) });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/api/v1/sessions/sess-1');
+    expect(url).toContain('user_id=user-123');
+    expect(options.method).toBe('DELETE');
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, session_id: 'sess-1' });
   });
 });

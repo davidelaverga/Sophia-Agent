@@ -10,14 +10,18 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
+# Apply defensive langchain patches *before* importing anything that builds
+# the agent graph. See deerflow.agents._langchain_patches for details.
+from deerflow.agents import _langchain_patches  # noqa: F401
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
-from deerflow.agents.sophia_agent.middlewares.builder_delivery import BuilderDeliveryMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
 from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
@@ -32,12 +36,51 @@ from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.config.summarization_config import get_summarization_config
+from deerflow.models import create_chat_model
+
+# Re-export SummarizationMiddleware at module scope so
+# ``test_middleware_parity_in_companion_and_builder_chains`` can patch it
+# before ``make_sophia_agent`` constructs the middleware chain. The real
+# subclass (``SophiaSummarizationMiddleware``) is still imported lazily
+# inside ``_create_summarization_middleware`` to avoid startup-time
+# coupling.
+from langchain.agents.middleware import SummarizationMiddleware  # noqa: F401
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
-from deerflow.sophia.tools.share_builder_artifact import share_builder_artifact
-from deerflow.sophia.tools.switch_to_builder import switch_to_builder
+from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _create_summarization_middleware():
+    """Create a SophiaSummarizationMiddleware instance from app config."""
+    from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
+
+    config = get_summarization_config()
+    if not config.enabled:
+        return None
+
+    trigger = None
+    if config.trigger is not None:
+        if isinstance(config.trigger, list):
+            trigger = [item.to_tuple() for item in config.trigger]
+        else:
+            trigger = config.trigger.to_tuple()
+
+    model = config.model_name if config.model_name else create_chat_model(thinking_enabled=False)
+
+    kwargs: dict = {
+        "model": model,
+        "trigger": trigger,
+        "keep": config.keep.to_tuple(),
+    }
+    if config.trim_tokens_to_summarize is not None:
+        kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize
+    if config.summary_prompt is not None:
+        kwargs["summary_prompt"] = config.summary_prompt
+
+    return SophiaSummarizationMiddleware(**kwargs)
 
 
 def make_sophia_agent(config: RunnableConfig):
@@ -63,10 +106,14 @@ def make_sophia_agent(config: RunnableConfig):
         context_mode,
     )
 
+    # Voice needs short responses (1-3 sentences) — lower max_tokens reduces generation time.
+    # Text mode gets more room for longer responses.
+    voice_mode = platform in ("voice", "ios_voice")
     model = ChatAnthropic(
         model="claude-haiku-4-5-20251001",
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
-        max_tokens=4096,
+        max_tokens=512 if voice_mode else 4096,
+        timeout=60.0,
     )
     web_tools = load_sophia_web_tools()
 
@@ -74,9 +121,11 @@ def make_sophia_agent(config: RunnableConfig):
     middlewares = [
         # 1. Infrastructure
         ThreadDataMiddleware(lazy_init=True),
-        # 2. Crisis fast-path (before any expensive middleware)
+        # 2. Normalize message-like dict payloads before middleware inspects them.
+        MessageCoercionMiddleware(),
+        # 3. Crisis fast-path (before any expensive middleware)
         CrisisCheckMiddleware(),
-        # 3. Always-loaded identity files (soul always, voice+techniques skip on crisis)
+        # 4. Always-loaded identity files (soul always, voice+techniques skip on crisis).
         #    AGENTS.md is a small shared companion↔builder building contract.
         #    skip_on_crisis=False because crisis paths never call the builder
         #    and the extra ~500 tokens are negligible at peak.
@@ -86,12 +135,10 @@ def make_sophia_agent(config: RunnableConfig):
             (SKILLS_PATH / "techniques.md", True),
             (SKILLS_PATH / "AGENTS.md", False),
         ),
-        # 4. Platform signal
+        # 5. Platform signal
         PlatformContextMiddleware(),
-        # 5. Derive prior completed turns before first-turn-only middleware runs.
+        # 6. Derive prior completed turns before first-turn-only middleware runs.
         TurnCountMiddleware(),
-        # 6. Clear transient builder delivery payloads before each new turn.
-        BuilderDeliveryMiddleware(),
         # 7-8. User context
         UserIdentityMiddleware(user_id),
         SessionStateMiddleware(user_id),
@@ -103,23 +150,36 @@ def make_sophia_agent(config: RunnableConfig):
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
         # 13. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
-        # 14. Artifact system
+        # 14. Builder session tracking (must run before ArtifactMiddleware synthesis)
+        BuilderSessionMiddleware(),
+        # 15. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
-        # Post-chain: prompt assembly, title
-        PromptAssemblyMiddleware(),
-        # 15. Tool-message integrity — patch dangling tool_use blocks before the
-        # model call so Anthropic does not 400 when a prior tool execution was
-        # interrupted, failed, or produced no ToolMessage (e.g. web_search
-        # network errors or builder handoff interruptions).
-        DanglingToolCallMiddleware(),
-        SophiaTitleMiddleware(),
-        # Note: summarization middleware will be wired during DeerFlow integration (Unit 14)
+        # 16. Deterministic Builder command routing for explicit document requests
+        BuilderCommandMiddleware(),
     ]
     if web_tools:
         middlewares.insert(-2, WebResearchGuidanceMiddleware())
 
+    # 17. Summarization (config-driven trigger/keep policy)
+    summarization_middleware = _create_summarization_middleware()
+    if summarization_middleware is not None:
+        middlewares.append(summarization_middleware)
+
+    # Post-chain: prompt assembly, then caching, then title
+    from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
+    middlewares.extend(
+        [
+            PromptAssemblyMiddleware(),
+            # Prompt caching AFTER assembly — adds cache_control to the assembled
+            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
+            AnthropicPromptCachingMiddleware(ttl="5m"),
+            SophiaTitleMiddleware(),
+        ]
+    )
+
     retrieve_memories = make_retrieve_memories_tool(user_id)
-    tools = [emit_artifact, switch_to_builder, share_builder_artifact, retrieve_memories, *web_tools]
+    switch_to_builder = make_switch_to_builder_tool(user_id)
+    tools = [emit_artifact, switch_to_builder, retrieve_memories, *web_tools]
 
     agent = create_agent(
         model=model,

@@ -44,16 +44,16 @@ _CONTINUATION_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\blet me\s*$", re.I),
     re.compile(r"\bit'?s like\s*$", re.I),
     re.compile(r"\bthe thing is\s*$", re.I),
-    # Trailing prepositions / articles
-    re.compile(r"\b(?:to|for|with|the|a)\s*$", re.I),
+    # Trailing prepositions (only strong mid-sentence ones, not articles)
+    re.compile(r"\b(?:to|for|with)\s*$", re.I),
 ]
 
 # Fragment start patterns — short phrases beginning with function words are often
 # mid-sentence fragments (e.g. "are getting better", "with my friend").
 # Only applied when word_count <= _FRAGMENT_MAX_WORDS, except for a slightly
 # longer conjunction-led restart like "but I still feel off sometimes".
-_FRAGMENT_MAX_WORDS = 5
-_CONJUNCTION_FRAGMENT_MAX_WORDS = 6
+_FRAGMENT_MAX_WORDS = 3
+_CONJUNCTION_FRAGMENT_MAX_WORDS = 4
 _FRAGMENT_CONJUNCTION_START_PATTERN: re.Pattern[str] = re.compile(
     r"^\s*(?:and|but|because|so|or|although|though)\b",
     re.IGNORECASE,
@@ -79,6 +79,11 @@ _NON_FINAL_STABLE_SUBMISSION_MAX_WORDS = 6
 _SUBMISSION_STABILIZATION_RATIO = 0.25
 _MIN_SUBMISSION_STABILIZATION_MS = 120
 
+# Debounce window for TurnStartedEvent. Without this, Silero VAD fires a new
+# "turn started" every time the speaker pauses mid-sentence (", Um, ... "),
+# which triggers redundant agent interrupts during a single user utterance.
+_DEFAULT_TURN_START_DEBOUNCE_MS = 1200
+
 
 class SophiaTurnDetection(SmartTurnDetection):
     """SmartTurnDetection with echo suppression and adaptive silence thresholds."""
@@ -87,12 +92,13 @@ class SophiaTurnDetection(SmartTurnDetection):
         self,
         echo_cooldown_ms: int = DEFAULT_ECHO_COOLDOWN_MS,
         *,
-        adaptive_silence_short_ms: int = 1000,
-        adaptive_silence_medium_ms: int = 1500,
-        adaptive_silence_long_ms: int = 2000,
-        adaptive_silence_ceiling_ms: int = 2800,
-        adaptive_silence_continuation_bonus_ms: int = 800,
-        adaptive_silence_fragment_bonus_ms: int = 1400,
+        adaptive_silence_short_ms: int = 600,
+        adaptive_silence_medium_ms: int = 800,
+        adaptive_silence_long_ms: int = 1200,
+        adaptive_silence_ceiling_ms: int = 1400,
+        adaptive_silence_continuation_bonus_ms: int = 300,
+        adaptive_silence_fragment_bonus_ms: int = 500,
+        turn_start_debounce_ms: int = _DEFAULT_TURN_START_DEBOUNCE_MS,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -106,6 +112,11 @@ class SophiaTurnDetection(SmartTurnDetection):
         self._ceiling_ms = adaptive_silence_ceiling_ms
         self._continuation_bonus_ms = adaptive_silence_continuation_bonus_ms
         self._fragment_bonus_ms = adaptive_silence_fragment_bonus_ms
+
+        # TurnStarted debounce — collapses repeat starts inside a single
+        # utterance into one, preventing triple-interrupts on natural pauses.
+        self._turn_start_debounce_sec = max(0.0, turn_start_debounce_ms / 1000)
+        self._last_turn_start_at: dict[Optional[str], float] = {}
 
         # Mutable state — updated by STT events
         self._current_transcript: str = ""
@@ -308,15 +319,52 @@ class SophiaTurnDetection(SmartTurnDetection):
             and _FRAGMENT_CONJUNCTION_START_PATTERN.match(stripped)
         )
 
+    def _emit_start_turn_event(self, event: Any) -> None:
+        """Debounce TurnStartedEvent inside a single utterance.
+
+        Silero VAD re-triggers on every short silence (commas, "um", mid-sentence
+        pauses), which the agent layer treats as barge-in and calls
+        ``tts.interrupt`` repeatedly. We collapse starts that arrive within the
+        debounce window to a single event per participant.
+        """
+        participant = getattr(event, "participant", None)
+        pid = getattr(participant, "user_id", None)
+        now = time.monotonic()
+        last = self._last_turn_start_at.get(pid)
+        if (
+            self._turn_start_debounce_sec > 0.0
+            and last is not None
+            and (now - last) < self._turn_start_debounce_sec
+        ):
+            logger.info(
+                "[VAD] TURN_START_DEBOUNCED participant=%s since_last_ms=%.0f window_ms=%.0f",
+                pid,
+                (now - last) * 1000,
+                self._turn_start_debounce_sec * 1000,
+            )
+            return
+        self._last_turn_start_at[pid] = now
+        super()._emit_start_turn_event(event)
+
     async def _emit_end_turn_event(self, *args: Any, **kwargs: Any) -> None:
         if self._should_suppress_turn_end():
-            logger.debug("[TURN-GUARD] Suppressing duplicate TurnEndedEvent")
+            logger.info(
+                "[VAD] TURN_END_SUPPRESSED fingerprint=%r transcript_chars=%d",
+                self._turn_end_guard_fingerprint,
+                len(self._current_transcript.strip()),
+            )
             return
 
         self._turn_end_guard_active = True
         self._turn_end_guard_fingerprint = self._normalized_transcript(self._current_transcript)
         self._turn_end_guard_transcript = self._current_transcript.strip()
         self._turn_end_guard_was_final = self._current_transcript_is_final
+        logger.info(
+            "[VAD] TURN_ENDED transcript_chars=%d is_final=%s preview=%r",
+            len(self._turn_end_guard_transcript),
+            self._turn_end_guard_was_final,
+            self._turn_end_guard_transcript[:80],
+        )
         await super()._emit_end_turn_event(*args, **kwargs)
 
     def _should_suppress_turn_end(self) -> bool:

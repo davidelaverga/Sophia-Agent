@@ -4,73 +4,35 @@ Translates the companion's emotional context into behavioral guidance
 for the builder agent. Reads ``delegation_context`` from the runtime
 config and injects a ``<builder_briefing>`` block into
 ``system_prompt_blocks``.
-
-Also injects task-type-aware skill files (e.g. ``chart-visualization``
-for visual_report) so the builder has the domain reference material it
-needs for the requested deliverable type.
 """
 
 import html
 import logging
 import time
-from pathlib import Path
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
-
-# Mapping from task_type (as sent by the companion) to the list of skill
-# directory names under ``skills/public/`` that the builder should have in
-# context. Only SKILL.md is loaded per skill — references/ and scripts/
-# subdirectories stay on disk and can be opened via read_file as needed.
-# ``document`` deliberately maps to no extra skills: the base sandbox tools
-# and the companion-supplied brief are enough for plain document writing.
-TASK_TYPE_SKILLS: dict[str, list[str]] = {
-    "research": ["chart-visualization", "data-analysis", "deep-research"],
-    "visual_report": ["chart-visualization", "data-analysis"],
-    "presentation": ["chart-visualization", "frontend-design"],
-    "frontend": ["frontend-design"],
-    "document": [],
-}
-
-# Default skills root: ``/skills/public/`` — the parent of the sophia
-# skill bundle (``SKILLS_PATH``). Computed lazily so tests can override via
-# ``BuilderTaskMiddleware(skills_root=...)``.
-_DEFAULT_SKILLS_ROOT = SKILLS_PATH.parent
 
 
 class BuilderTaskState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
+    builder_non_artifact_turns: NotRequired[int]
+    builder_last_tool_names: NotRequired[list[str]]
+    builder_search_sources: NotRequired[list[dict]]
+    allow_web_research: NotRequired[bool]
 
 
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
-    """Inject builder briefing derived from companion delegation context.
-
-    When the companion delegates a task with ``task_type="research"`` (for
-    example), the middleware also reads the relevant skill files and
-    prepends them as separate ``system_prompt_blocks`` entries so the
-    builder has the domain guidance it needs (chart conventions,
-    data-analysis patterns, deep-research protocol, etc.).
-    """
+    """Inject builder briefing derived from companion delegation context."""
 
     state_schema = BuilderTaskState
-
-    def __init__(
-        self,
-        *,
-        skills_root: Path | None = None,
-        task_type_skills: dict[str, list[str]] | None = None,
-    ) -> None:
-        super().__init__()
-        self.skills_root = skills_root or _DEFAULT_SKILLS_ROOT
-        self.task_type_skills = task_type_skills if task_type_skills is not None else TASK_TYPE_SKILLS
 
     @override
     def before_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:
@@ -87,35 +49,21 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         relevant_memories: list[str] = delegation_context.get("relevant_memories", [])
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
-        resume_context: dict | None = delegation_context.get("resume_context")
-
-        # --- Load task-type-aware skill files ---
-        # These are injected as their own blocks BEFORE the builder_briefing
-        # so the briefing can reference them by name without the model
-        # scrolling back.
-        skill_blocks: list[str] = []
-        skill_names_loaded: list[str] = []
-        for skill_name in self.task_type_skills.get(task_type, []):
-            content = self._read_skill_file(skill_name)
-            if content is None:
-                continue
-            skill_blocks.append(
-                f"<builder_skill name=\"{html.escape(skill_name, quote=True)}\">\n"
-                f"{content}\n"
-                f"</builder_skill>"
-            )
-            skill_names_loaded.append(skill_name)
+        allow_web_research = bool(
+            state.get("allow_web_research", delegation_context.get("allow_web_research", False))
+        )
+        tracked_sources = [
+            source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
+        ]
+        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        recent_tool_names = [
+            str(name).strip()
+            for name in (state.get("builder_last_tool_names") or [])
+            if str(name).strip()
+        ]
 
         # --- Build briefing sections ---
         sections: list[str] = []
-
-        # Resume-from block (highest priority for the builder's attention)
-        # is rendered first so the model reads it before any other context
-        # and knows not to redo completed work.
-        if resume_context:
-            resume_section = self._resume_from_guidance(resume_context)
-            if resume_section:
-                sections.append(f"<resume_from>\n{resume_section}\n</resume_from>")
 
         # Tone guidance
         tone_estimate: float = companion_artifact.get("tone_estimate", 2.5)
@@ -150,60 +98,124 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
+        sections.append(
+            "<output_contract>\n"
+            "- Write every user-facing deliverable and supporting file under /mnt/user-data/outputs/ using absolute paths.\n"
+            "- Do NOT use relative paths like outputs/report.md or ./outputs/report.md.\n"
+            "- When you call emit_builder_artifact, artifact_path and supporting_files must use the same /mnt/user-data/outputs/... absolute paths.\n"
+            "</output_contract>"
+        )
 
-        # Completion instruction
+        sections.append(
+            "<preinstalled_libraries>\n"
+            "The sandbox already has these Python libraries installed. Import them directly — do NOT run pip install:\n"
+            "- PDF: reportlab, fpdf2 (fpdf), pypdf\n"
+            "- Office: python-pptx (pptx), python-docx (docx), openpyxl\n"
+            "- Images: pillow (PIL)\n"
+            "- Charts / data: matplotlib, seaborn, numpy, pandas, duckdb\n"
+            "- Other: markdown, requests, httpx\n"
+            "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
+            "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
+            "</preinstalled_libraries>"
+        )
+
+        if task_type == "research":
+            sections.append(
+                "<research_output_requirements>\n"
+                "- For factual claims from external sources, use inline citations in the format [citation:Title](URL).\n"
+                "- End the report with a Sources section using [Title](URL) - note format.\n"
+                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
+                "</research_output_requirements>"
+            )
+        elif allow_web_research:
+            sections.append(
+                "<source_output_requirements>\n"
+                "- If you use external sources, include a concise Sources appendix in the deliverable or create a small sidecar markdown file.\n"
+                "- emit_builder_artifact.sources_used must include structured {title, url} entries for the sources you actually used.\n"
+                "</source_output_requirements>"
+            )
+
+        if tracked_sources:
+            source_lines = [
+                f"- {source.get('title', source.get('url', 'Untitled'))} — {source.get('url', '')}"
+                for source in tracked_sources[:8]
+            ]
+            sections.append("<tracked_sources>\n" + "\n".join(source_lines) + "\n</tracked_sources>")
+
+        # Completion instruction — always present, includes budget so the model
+        # plans from turn 0 instead of discovering the limit mid-loop.
+        # MUST stay in sync with BuilderArtifactMiddleware._HARD_CEILING in
+        # builder_artifact.py — otherwise the model's budget math lies and it
+        # over-commits to retries past its advertised limit.
+        _HARD_CEILING = 20
+        remaining = max(_HARD_CEILING - non_artifact_turns, 0)
+
         sections.append(
             "<completion_instruction>\n"
-            "You are not done until the companion has everything needed to share the deliverable.\n"
-            "When the user-facing files are ready, call present_files for every final output in /mnt/user-data/outputs.\n"
-            "Immediately after present_files, call emit_builder_artifact exactly once as your final action.\n"
-            "Do not call bash, read_file, write_file, str_replace, web_search, web_fetch, or any other tool after emit_builder_artifact.\n"
-            "If the files already exist and you know the summary, stop iterating and finish with emit_builder_artifact now.\n"
+            f"You have a STRICT budget of {_HARD_CEILING} tool-call turns total. "
+            f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
+            "Plan your work to fit within this budget:\n"
+            "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
+            "- For text deliverables (markdown, html, plain text, code): write the complete file in a single write_file_tool call. Do NOT split the same file across multiple write_file_tool calls — if output risks exceeding the write budget, ship a tighter draft instead of fragmenting.\n"
+            "- For binary deliverables (pdf, pptx, docx, xlsx, png): the DELIVERABLE IS THE BINARY, NOT THE SCRIPT. You MUST:\n"
+            "    (a) Turn 2: write ONE generator script to /mnt/user-data/outputs/_generate_<name>.py that produces the whole binary end-to-end. Keep the script under 120 lines with minimal styling — a tight script generates 3-5x faster than an elaborate one, and time saved here is time you have to recover from errors. If content risks exceeding ~120 lines, split into data.json + a short generator script in two sequential write_file_tool calls.\n"
+            "    (b) Turn 3: run it with bash_tool (e.g. `python /mnt/user-data/outputs/_generate_<name>.py`). This step is MANDATORY — skipping it leaves the user with a useless .py file.\n"
+            "    (c) Turn 4: verify the binary exists with ls_tool on /mnt/user-data/outputs/. If the binary is missing or bash_tool returned an error, fix the script and re-run — BUT at most 2 fix-and-retry cycles. After 2 failed retries, call emit_builder_artifact with whatever partial deliverable is on disk (the generator .py or a degraded binary), set confidence<=0.5, and put a clear explanation in companion_tone_hint. NEVER exit without calling emit_builder_artifact.\n"
+            "    (d) emit_builder_artifact.artifact_path MUST point to the BINARY file (e.g. .pdf, .pptx, .png) — never to the generator .py script. The .py may appear in supporting_files, but artifact_path must be the final deliverable the user asked for.\n"
+            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
+            "- After each meaningful step (write_file, successful bash run), call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
+            "- Make targeted edits only if critical fixes are needed.\n"
+            "- Final turn: Call emit_builder_artifact. This is MANDATORY — without it your work is lost.\n"
+            "Do NOT iterate endlessly to perfect the output. Ship a complete first draft, then finalize.\n"
             "</completion_instruction>"
         )
+
+        if non_artifact_turns > 0:
+            joined_tools = ", ".join(recent_tool_names) if recent_tool_names else "unknown"
+            escalation = (
+                "<builder_endgame>\n"
+                f"Turn budget: {non_artifact_turns}/{_HARD_CEILING} used. "
+                f"{remaining} turn(s) remaining before forced termination.\n"
+                f"Most recent tool calls: {joined_tools}.\n"
+            )
+            if remaining <= 3:
+                escalation += (
+                    "CRITICAL: You are about to be terminated. "
+                    "Your NEXT action MUST be emit_builder_artifact — DO NOT call write_todos, "
+                    "write_file, bash_tool, or any other tool on this turn. "
+                    "Ship what you have NOW, even if partial. "
+                    "Use artifact_path pointing to the best file that exists on disk; "
+                    "if only a generator .py exists, emit that with confidence<=0.4 and "
+                    "explain in companion_tone_hint.\n"
+                )
+            elif remaining <= 6:
+                escalation += (
+                    "WARNING: Running low on turns. Wrap up edits and call "
+                    "emit_builder_artifact within the next 1-2 turns. "
+                    "Stop re-planning with write_todos; that wastes a turn.\n"
+                )
+            else:
+                escalation += (
+                    "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
+                )
+            escalation += (
+                "Do not end with plain text and do not call any tools after emit_builder_artifact.\n"
+                "</builder_endgame>"
+            )
+            sections.append(escalation)
 
         briefing = "<builder_briefing>\n" + "\n\n".join(sections) + "\n</builder_briefing>"
 
         blocks = list(state.get("system_prompt_blocks", []))
-        # Skill blocks are appended before the briefing so the briefing can
-        # reference them. Both stay grouped after whatever upstream files
-        # (soul, voice, techniques, AGENTS.md) already wrote.
-        blocks.extend(skill_blocks)
         blocks.append(briefing)
 
-        skills_summary = ",".join(skill_names_loaded) if skill_names_loaded else "none"
         log_middleware(
             "BuilderTask",
             f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} "
-            f"skills={skills_summary}",
+            f"non_artifact_turns={non_artifact_turns}",
             _t0,
         )
         return {"system_prompt_blocks": blocks}
-
-    def _read_skill_file(self, skill_name: str) -> str | None:
-        """Return the contents of ``<skills_root>/<skill_name>/SKILL.md``.
-
-        Returns ``None`` and logs a warning if the file is missing so that
-        a packaging gap (e.g. a skill removed from disk) degrades into a
-        smaller prompt rather than crashing the builder.
-        """
-        path = self.skills_root / skill_name / "SKILL.md"
-        if not path.is_file():
-            logger.warning(
-                "[BuilderTask] skill file missing: %s (skill=%s)",
-                path,
-                skill_name,
-            )
-            return None
-        try:
-            return path.read_text(encoding="utf-8")
-        except OSError as exc:
-            logger.warning(
-                "[BuilderTask] failed to read skill file %s: %s",
-                path,
-                exc,
-            )
-            return None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -237,57 +249,6 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "User is high energy. Be ambitious. Add surprise element. "
             "Don't play it safe."
         )
-
-    @staticmethod
-    def _resume_from_guidance(resume_context: dict) -> str | None:
-        """Render a builder-facing briefing from resume_context.
-
-        The block is meant to be read before the main task description and
-        tell the builder:
-          1. You are continuing a paused build — do NOT redo completed work.
-          2. These files already exist in /mnt/user-data/outputs.
-          3. Here is the summary of what was done, as context.
-
-        Returns None when the context is too empty to be worth rendering.
-        """
-        completed_files = resume_context.get("completed_files") or []
-        summary = resume_context.get("summary_of_done")
-        if not completed_files and not summary:
-            return None
-
-        previous_task_id = resume_context.get("previous_task_id")
-        previous_status = resume_context.get("previous_status")
-        turns_used = resume_context.get("turns_used")
-        turn_cap = resume_context.get("turn_cap")
-
-        lines: list[str] = [
-            "You are RESUMING a paused builder run. Read this carefully:",
-            "",
-            "- Do NOT redo work listed below. Open those files with read_file if",
-            "  you need their contents, then continue with what is still missing.",
-            "- Do NOT start from scratch. Build on top of completed_files.",
-            "- Finish with emit_builder_artifact when the deliverable is ready.",
-        ]
-        if previous_task_id:
-            lines.append(f"- previous_task_id: {html.escape(str(previous_task_id), quote=True)}")
-        if previous_status:
-            lines.append(f"- previous_status: {html.escape(str(previous_status), quote=True)}")
-        if turns_used is not None and turn_cap is not None:
-            lines.append(f"- previous_turns: {turns_used}/{turn_cap}")
-
-        if completed_files:
-            lines.append("- completed_files:")
-            for path in completed_files[:25]:
-                lines.append(f"    - {html.escape(str(path), quote=True)}")
-            if len(completed_files) > 25:
-                lines.append(f"    - … and {len(completed_files) - 25} more")
-
-        if summary:
-            safe_summary = html.escape(str(summary), quote=True)
-            lines.append("- summary_of_done:")
-            lines.append(f"    {safe_summary}")
-
-        return "\n".join(lines)
 
     @staticmethod
     def _ritual_guidance(ritual: str, phase: str | None) -> str | None:

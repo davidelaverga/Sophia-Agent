@@ -1,3 +1,6 @@
+import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts';
+import type { BuilderActivityEntryV1, BuilderTaskV1 } from '../../../types/builder-task';
+
 import {
   IS_PRODUCTION,
   secureLog,
@@ -48,6 +51,32 @@ interface SSEToken {
 type LangGraphToolAccumulator = {
   name: string;
   jsonParts: string[];
+};
+
+type BuilderTaskAccumulator = {
+  label?: string;
+  activityLog: BuilderActivityEntryV1[];
+  lastActivitySignature?: string;
+};
+
+type BuilderTodoRecord = NonNullable<BuilderTaskV1['todos']>[number];
+
+const BUILDER_STREAM_ACTIVITY_LIMIT = 8;
+
+const BUILDER_TOOL_ACTIVITY_LABELS: Record<string, string> = {
+  bash: 'Running shell command',
+  shell: 'Running shell command',
+  write_file: 'Writing file',
+  create_file: 'Creating file',
+  edit_file: 'Editing file',
+  read_file: 'Reading file',
+  list_directory: 'Listing directory',
+  web_search: 'Searching the web',
+  web_browse: 'Browsing webpage',
+  crawl_tool: 'Crawling webpage',
+  python_repl: 'Running Python',
+  write_todos: 'Updating plan',
+  emit_builder_artifact: 'Finalizing deliverable',
 };
 
 const LEAK_LEAD_LABELS = [
@@ -265,6 +294,22 @@ function parseAccumulatedArtifact(toolCalls: Record<string, LangGraphToolAccumul
   return null;
 }
 
+function parseAccumulatedBuilderArtifact(toolCalls: Record<string, LangGraphToolAccumulator>) {
+  for (const toolCall of Object.values(toolCalls)) {
+    if (toolCall.name !== 'emit_builder_artifact') continue;
+    const raw = toolCall.jsonParts.join('');
+    if (!raw.trim()) continue;
+
+    try {
+      return JSON.parse(raw);
+    } catch {
+      continue;
+    }
+  }
+
+  return null;
+}
+
 function extractToolCallArtifact(toolCalls: unknown): Record<string, unknown> | null {
   if (!Array.isArray(toolCalls)) return null;
 
@@ -275,6 +320,19 @@ function extractToolCallArtifact(toolCalls: unknown): Record<string, unknown> | 
     if (record.args && typeof record.args === 'object') {
       return record.args as Record<string, unknown>;
     }
+  }
+
+  return null;
+}
+
+function extractToolCallBuilderArtifact(toolCalls: unknown) {
+  if (!Array.isArray(toolCalls)) return null;
+
+  for (const toolCall of toolCalls) {
+    if (!toolCall || typeof toolCall !== 'object') continue;
+    const record = toolCall as Record<string, unknown>;
+    if (record.name !== 'emit_builder_artifact') continue;
+    return record.args;
   }
 
   return null;
@@ -299,10 +357,486 @@ function extractValuesArtifact(data: unknown): Record<string, unknown> | null {
   return null;
 }
 
+function extractValuesBuilderArtifact(data: unknown) {
+  if (!data || typeof data !== 'object') return null;
+
+  const record = data as Record<string, unknown>;
+  if (record.builder_result !== undefined) {
+    return record.builder_result;
+  }
+
+  const values = record.values;
+  if (!values || typeof values !== 'object') return null;
+
+  return (values as Record<string, unknown>).builder_result ?? null;
+}
+
+function isBuilderTaskDescription(description: string | undefined): boolean {
+  if (!description) return false;
+  return description.trim().toLowerCase().includes('builder');
+}
+
+function extractTaskMessageText(message: unknown): string | undefined {
+  if (typeof message === 'string') {
+    const cleaned = stripArtifactsDelimiter(message).trim();
+    return cleaned || undefined;
+  }
+
+  if (!message || typeof message !== 'object') {
+    return undefined;
+  }
+
+  const record = message as Record<string, unknown>;
+  const content = record.content;
+
+  if (typeof content === 'string') {
+    const cleaned = stripArtifactsDelimiter(content).trim();
+    return cleaned || undefined;
+  }
+
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+
+  const text = content
+    .map((part) => {
+      if (!part || typeof part !== 'object') return '';
+      const block = part as Record<string, unknown>;
+      return block.type === 'text' && typeof block.text === 'string' ? block.text : '';
+    })
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!text) return undefined;
+
+  const cleaned = stripArtifactsDelimiter(text).trim();
+  return cleaned || undefined;
+}
+
+function buildRunningTaskDetail(data: Record<string, unknown>): string | undefined {
+  const stuckReason = typeof data.stuck_reason === 'string'
+    ? data.stuck_reason
+    : typeof data.stuckReason === 'string'
+      ? data.stuckReason
+      : undefined;
+  if (stuckReason) return stuckReason;
+
+  const messageText = extractTaskMessageText(data.message);
+  if (messageText) return messageText;
+
+  const activeStepTitle = typeof data.active_step_title === 'string'
+    ? data.active_step_title
+    : typeof data.activeStepTitle === 'string'
+      ? data.activeStepTitle
+      : undefined;
+  if (activeStepTitle) {
+    return `Working on: ${activeStepTitle}.`;
+  }
+
+  const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
+  const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
+  const completedSteps = typeof data.completed_steps === 'number' ? data.completed_steps : undefined;
+  const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;
+
+  if (typeof completedSteps === 'number' && typeof totalSteps === 'number' && totalSteps > 0) {
+    return `Completed ${completedSteps} of ${totalSteps} builder steps.`;
+  }
+
+  if (typeof messageIndex === 'number' && typeof totalMessages === 'number' && totalMessages > 0) {
+    return `Working through step ${messageIndex} of ${totalMessages}.`;
+  }
+
+  if (typeof messageIndex === 'number') {
+    return `Working through step ${messageIndex}.`;
+  }
+
+  return undefined;
+}
+
+function getBuilderToolActivityTitle(toolName: string): string {
+  return BUILDER_TOOL_ACTIVITY_LABELS[toolName] ?? toolName.replace(/_/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function summarizeBuilderToolArgs(args: unknown, toolName: string): string | undefined {
+  if (!args || typeof args !== 'object') {
+    return undefined;
+  }
+
+  const record = args as Record<string, unknown>;
+
+  if (toolName === 'bash' || toolName === 'shell') {
+    const command = typeof record.command === 'string'
+      ? record.command
+      : typeof record.cmd === 'string'
+        ? record.cmd
+        : undefined;
+    return command?.trim() || undefined;
+  }
+
+  if (toolName === 'write_file' || toolName === 'create_file' || toolName === 'edit_file' || toolName === 'read_file') {
+    const path = typeof record.path === 'string'
+      ? record.path
+      : typeof record.file_path === 'string'
+        ? record.file_path
+        : typeof record.filename === 'string'
+          ? record.filename
+          : undefined;
+    return path?.trim() || undefined;
+  }
+
+  if (toolName === 'web_search' || toolName === 'crawl_tool') {
+    const query = typeof record.query === 'string'
+      ? record.query
+      : typeof record.search_query === 'string'
+        ? record.search_query
+        : undefined;
+    return query?.trim() || undefined;
+  }
+
+  if (toolName === 'web_browse' && typeof record.url === 'string') {
+    return record.url.trim() || undefined;
+  }
+
+  if (toolName === 'write_todos' && Array.isArray(record.todos)) {
+    return `${record.todos.length} items`;
+  }
+
+  if (toolName === 'emit_builder_artifact') {
+    const title = typeof record.artifact_title === 'string'
+      ? record.artifact_title
+      : typeof record.title === 'string'
+        ? record.title
+        : undefined;
+    return title?.trim() || undefined;
+  }
+
+  return undefined;
+}
+
+function extractBuilderToolActivityEntries(message: unknown): BuilderActivityEntryV1[] {
+  if (!message || typeof message !== 'object') {
+    return [];
+  }
+
+  const record = message as Record<string, unknown>;
+  if (!Array.isArray(record.tool_calls)) {
+    return [];
+  }
+
+  const entries: BuilderActivityEntryV1[] = [];
+  for (const rawToolCall of record.tool_calls) {
+    if (!rawToolCall || typeof rawToolCall !== 'object') {
+      continue;
+    }
+
+    const toolCall = rawToolCall as Record<string, unknown>;
+    const toolName = typeof toolCall.name === 'string' ? toolCall.name : '';
+    if (!toolName) {
+      continue;
+    }
+
+    const detail = summarizeBuilderToolArgs(toolCall.args, toolName);
+    entries.push({
+      type: 'tool_call',
+      title: getBuilderToolActivityTitle(toolName),
+      tool: toolName,
+      ...(detail ? { detail } : {}),
+      status: 'running',
+    });
+  }
+
+  return entries;
+}
+
+function buildRunningActivityEntries(data: Record<string, unknown>): BuilderActivityEntryV1[] {
+  if (data.heartbeat === true) {
+    return [];
+  }
+
+  const toolEntries = extractBuilderToolActivityEntries(data.message);
+  if (toolEntries.length > 0) {
+    return toolEntries;
+  }
+
+  const messageText = extractTaskMessageText(data.message);
+  if (messageText) {
+    return [{ type: 'thinking', title: messageText, status: 'running' } satisfies BuilderActivityEntryV1];
+  }
+
+  const activeStepTitle = typeof data.active_step_title === 'string'
+    ? data.active_step_title
+    : typeof data.activeStepTitle === 'string'
+      ? data.activeStepTitle
+      : undefined;
+  if (activeStepTitle) {
+    return [{ type: 'thinking', title: `Working on ${activeStepTitle}`, status: 'running' } satisfies BuilderActivityEntryV1];
+  }
+
+  const completedSteps = typeof data.completed_steps === 'number' ? data.completed_steps : undefined;
+  const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;
+  if (typeof completedSteps === 'number' && typeof totalSteps === 'number' && totalSteps > 0) {
+    return [{
+      type: 'thinking',
+      title: `Completed ${completedSteps} of ${totalSteps} steps`,
+      status: 'running',
+    } satisfies BuilderActivityEntryV1];
+  }
+
+  const description = typeof data.description === 'string' ? data.description.trim() : '';
+  return [{
+    type: 'thinking',
+    title: 'Builder started',
+    ...(description ? { detail: description } : {}),
+    status: 'running',
+  } satisfies BuilderActivityEntryV1];
+}
+
+function buildTaskActivityLog(
+  phase: BuilderTaskV1['phase'],
+  data: Record<string, unknown>,
+  accumulator?: BuilderTaskAccumulator,
+): BuilderActivityEntryV1[] | undefined {
+  const existingLog = accumulator?.activityLog ?? [];
+
+  if (phase !== 'running') {
+    if (existingLog.length === 0) {
+      return undefined;
+    }
+
+    const terminalStatus: BuilderActivityEntryV1['status'] = phase === 'completed' ? 'done' : 'error';
+    const finalizedLog: BuilderActivityEntryV1[] = existingLog.map((entry, index) => (
+      index === existingLog.length - 1 && entry.status === 'running'
+        ? { ...entry, status: terminalStatus }
+        : entry
+    ));
+
+    if (accumulator) {
+      accumulator.activityLog = finalizedLog;
+    }
+
+    return finalizedLog;
+  }
+
+  const newEntries = buildRunningActivityEntries(data);
+  if (newEntries.length === 0) {
+    return existingLog.length > 0 ? existingLog : undefined;
+  }
+
+  const nextLog: BuilderActivityEntryV1[] = existingLog.map((entry, index) => (
+    index === existingLog.length - 1 && entry.status === 'running'
+      ? { ...entry, status: 'done' as const }
+      : entry
+  ));
+
+  let lastActivitySignature = accumulator?.lastActivitySignature;
+  for (const entry of newEntries) {
+    const signature = JSON.stringify([entry.type, entry.tool ?? '', entry.title, entry.detail ?? '']);
+    if (signature === lastActivitySignature) {
+      continue;
+    }
+
+    nextLog.push(entry);
+    lastActivitySignature = signature;
+  }
+
+  const trimmedLog = nextLog.slice(-BUILDER_STREAM_ACTIVITY_LIMIT);
+  if (accumulator) {
+    accumulator.activityLog = trimmedLog;
+    accumulator.lastActivitySignature = lastActivitySignature;
+  }
+
+  return trimmedLog.length > 0 ? trimmedLog : undefined;
+}
+
+function parseBuilderTodos(data: unknown): BuilderTaskV1['todos'] | undefined {
+  if (!Array.isArray(data)) {
+    return undefined;
+  }
+
+  const todos = data
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const record = entry as Record<string, unknown>;
+      if (typeof record.title !== 'string') return null;
+      if (record.status !== 'not-started' && record.status !== 'in-progress' && record.status !== 'completed') {
+        return null;
+      }
+
+      return {
+        ...(typeof record.id === 'number' ? { id: record.id } : {}),
+        title: record.title,
+        status: record.status,
+      } satisfies BuilderTodoRecord;
+    })
+    .filter((todo): todo is BuilderTodoRecord => Boolean(todo));
+
+  return todos.length > 0 ? todos : undefined;
+}
+
+function mapBuilderTaskPhase(status: unknown): BuilderTaskV1['phase'] | null {
+  switch (status) {
+    case 'queued':
+    case 'running':
+    case 'started':
+      return 'running';
+    case 'completed':
+    case 'synthesized':
+      return 'completed';
+    case 'failed':
+      return 'failed';
+    case 'timed_out':
+      return 'timed_out';
+    case 'cancelled':
+      return 'cancelled';
+    default:
+      return null;
+  }
+}
+
+function buildBuilderTaskEvent(
+  phase: BuilderTaskV1['phase'],
+  data: Record<string, unknown>,
+  accumulator?: BuilderTaskAccumulator,
+): BuilderTaskV1 {
+  const taskId = typeof data.task_id === 'string' ? data.task_id : undefined;
+  const label = typeof data.description === 'string' ? data.description : accumulator?.label;
+  const messageIndex = typeof data.message_index === 'number' ? data.message_index : undefined;
+  const totalMessages = typeof data.total_messages === 'number' ? data.total_messages : undefined;
+  const progressPercent = typeof data.progress_percent === 'number'
+    ? data.progress_percent
+    : typeof data.progressPercent === 'number'
+      ? data.progressPercent
+      : undefined;
+  const progressSource = data.progress_source === 'todos' || data.progress_source === 'messages' || data.progress_source === 'iterations' || data.progress_source === 'none'
+    ? data.progress_source
+    : data.progressSource === 'todos' || data.progressSource === 'messages' || data.progressSource === 'iterations' || data.progressSource === 'none'
+      ? data.progressSource
+      : undefined;
+  const totalSteps = typeof data.total_steps === 'number' ? data.total_steps : undefined;
+  const completedSteps = typeof data.completed_steps === 'number' ? data.completed_steps : undefined;
+  const inProgressSteps = typeof data.in_progress_steps === 'number' ? data.in_progress_steps : undefined;
+  const pendingSteps = typeof data.pending_steps === 'number' ? data.pending_steps : undefined;
+  const activeStepTitle = typeof data.active_step_title === 'string'
+    ? data.active_step_title
+    : typeof data.activeStepTitle === 'string'
+      ? data.activeStepTitle
+      : undefined;
+  const startedAt = typeof data.started_at === 'string' ? data.started_at : undefined;
+  const completedAt = typeof data.completed_at === 'string' ? data.completed_at : undefined;
+  const lastUpdateAt = typeof data.last_update_at === 'string' ? data.last_update_at : undefined;
+  const lastProgressAt = typeof data.last_progress_at === 'string' ? data.last_progress_at : undefined;
+  const heartbeatMs = typeof data.heartbeat_ms === 'number' ? data.heartbeat_ms : undefined;
+  const idleMs = typeof data.idle_ms === 'number' ? data.idle_ms : undefined;
+  const stuck = typeof data.is_stuck === 'boolean'
+    ? data.is_stuck
+    : typeof data.stuck === 'boolean'
+      ? data.stuck
+      : undefined;
+  const stuckReason = typeof data.stuck_reason === 'string'
+    ? data.stuck_reason
+    : typeof data.stuckReason === 'string'
+      ? data.stuckReason
+      : undefined;
+  const heartbeat = typeof data.heartbeat === 'boolean' ? data.heartbeat : undefined;
+  const pollCount = typeof data.poll_count === 'number' ? data.poll_count : undefined;
+  const todos = parseBuilderTodos(data.todos);
+  const activityLog = buildTaskActivityLog(phase, data, accumulator);
+
+  let detail: string | undefined;
+  switch (phase) {
+    case 'running':
+      detail = buildRunningTaskDetail(data);
+      break;
+    case 'completed':
+      detail = 'Deliverable ready.';
+      break;
+    case 'failed':
+      detail = typeof data.error === 'string'
+        ? data.error
+        : 'Builder failed before finishing the deliverable.';
+      break;
+    case 'timed_out':
+      detail = 'Builder took too long and timed out.';
+      break;
+    case 'cancelled':
+      detail = typeof data.error === 'string'
+        ? data.error
+        : 'Builder was cancelled before finishing the deliverable.';
+      break;
+  }
+
+  return {
+    phase,
+    ...(taskId ? { taskId } : {}),
+    ...(label ? { label } : {}),
+    ...(detail ? { detail } : {}),
+    ...(typeof messageIndex === 'number' ? { messageIndex } : {}),
+    ...(typeof totalMessages === 'number' ? { totalMessages } : {}),
+    ...(typeof progressPercent === 'number' ? { progressPercent } : {}),
+    ...(progressSource ? { progressSource } : {}),
+    ...(typeof totalSteps === 'number' ? { totalSteps } : {}),
+    ...(typeof completedSteps === 'number' ? { completedSteps } : {}),
+    ...(typeof inProgressSteps === 'number' ? { inProgressSteps } : {}),
+    ...(typeof pendingSteps === 'number' ? { pendingSteps } : {}),
+    ...(activeStepTitle ? { activeStepTitle } : {}),
+    ...(todos ? { todos } : {}),
+    ...(startedAt ? { startedAt } : {}),
+    ...(completedAt ? { completedAt } : {}),
+    ...(lastUpdateAt ? { lastUpdateAt } : {}),
+    ...(lastProgressAt ? { lastProgressAt } : {}),
+    ...(typeof heartbeatMs === 'number' ? { heartbeatMs } : {}),
+    ...(typeof idleMs === 'number' ? { idleMs } : {}),
+    ...(typeof stuck === 'boolean' ? { stuck } : {}),
+    ...(stuckReason ? { stuckReason } : {}),
+    ...(typeof heartbeat === 'boolean' ? { heartbeat } : {}),
+    ...(typeof pollCount === 'number' ? { pollCount } : {}),
+    ...(activityLog ? { activityLog } : {}),
+  };
+}
+
+function extractValuesBuilderTask(data: unknown, accumulator?: BuilderTaskAccumulator): BuilderTaskV1 | null {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+
+  const values = data as Record<string, unknown>;
+  const nestedValues = values.values && typeof values.values === 'object'
+    ? values.values as Record<string, unknown>
+    : null;
+  const rawBuilderTask = values.builder_task ?? values.builderTask ?? nestedValues?.builder_task ?? nestedValues?.builderTask;
+  if (!rawBuilderTask || typeof rawBuilderTask !== 'object') {
+    return null;
+  }
+
+  const builderTask = rawBuilderTask as Record<string, unknown>;
+  const phase = mapBuilderTaskPhase(builderTask.status);
+  if (!phase) {
+    return null;
+  }
+
+  const label = typeof builderTask.description === 'string'
+    ? builderTask.description
+    : typeof builderTask.label === 'string'
+      ? builderTask.label
+      : undefined;
+
+  if (accumulator && label) {
+    accumulator.label = label;
+  }
+
+  return buildBuilderTaskEvent(
+    phase,
+    builderTask,
+    accumulator ?? (label ? { label, activityLog: [] } : undefined),
+  );
+}
+
 export function createUIMessageStreamFromText(
   text: string,
   meta?: StreamMeta,
-  artifacts?: Record<string, unknown> | null
+  artifacts?: Record<string, unknown> | null,
+  builderArtifact?: unknown,
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
   const messageId = createStreamId('msg');
@@ -310,7 +844,7 @@ export function createUIMessageStreamFromText(
   let started = false;
 
   return new ReadableStream({
-    async start(controller) {
+    start(controller) {
       const emit = (payload: unknown) => controller.enqueue(encodeSseData(encoder, payload));
 
       const ensureStart = () => {
@@ -330,6 +864,11 @@ export function createUIMessageStreamFromText(
 
       if (artifacts) {
         emit({ type: 'data-artifactsV1', data: artifacts });
+      }
+
+      const normalizedBuilderArtifact = normalizeBuilderArtifactPayload(builderArtifact);
+      if (normalizedBuilderArtifact) {
+        emit({ type: 'data-builderArtifactV1', data: normalizedBuilderArtifact });
       }
 
       if (meta && Object.keys(meta).length > 0) {
@@ -369,15 +908,22 @@ export function createSSEToUIMessageStream(
   const tokenOutputState: TokenOutputState = { hasEmittedText: false, stopped: false };
   const activeToolCalls: Record<string, LangGraphToolAccumulator> = {};
   let sawArtifactTool = false;
+  let sawBuilderArtifactTool = false;
   let finalArtifacts: Record<string, unknown> | null = null;
+  let finalBuilderArtifact = null;
   let initialValuesArtifact: Record<string, unknown> | null = null;
+  let initialValuesBuilderArtifact = null;
+  const activeBuilderTasks = new Map<string, BuilderTaskAccumulator>();
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 
   const meta: StreamMeta = { ...(initialMeta || {}) };
 
   return new ReadableStream({
-    async start(controller) {
-      const reader = upstream.getReader();
+    start(controller) {
+      reader = upstream.getReader();
       let lastArtifactsSignature: string | null = null;
+      let lastBuilderArtifactSignature: string | null = null;
+      let lastBuilderTaskSignature: string | null = null;
 
       const emit = (payload: unknown) => {
         if (isClosed) return;
@@ -396,6 +942,31 @@ export function createSSEToUIMessageStream(
 
         lastArtifactsSignature = signature;
         emit({ type: 'data-artifactsV1', data: artifacts });
+      };
+
+      const emitBuilderArtifact = (builderArtifact: unknown) => {
+        const normalizedBuilderArtifact = normalizeBuilderArtifactPayload(builderArtifact);
+        if (!normalizedBuilderArtifact) {
+          return;
+        }
+
+        const signature = JSON.stringify(normalizedBuilderArtifact);
+        if (signature === lastBuilderArtifactSignature) {
+          return;
+        }
+
+        lastBuilderArtifactSignature = signature;
+        emit({ type: 'data-builderArtifactV1', data: normalizedBuilderArtifact });
+      };
+
+      const emitBuilderTask = (builderTask: BuilderTaskV1) => {
+        const signature = JSON.stringify(builderTask);
+        if (signature === lastBuilderTaskSignature) {
+          return;
+        }
+
+        lastBuilderTaskSignature = signature;
+        emit({ type: 'data-builderTaskV1', data: builderTask });
       };
 
       const ensureStart = () => {
@@ -428,15 +999,28 @@ export function createSSEToUIMessageStream(
         }
       };
 
-      try {
+      const pump = async () => {
+        const activeReader = reader;
+        if (!activeReader) {
+          ensureTextEnd();
+          emit({ type: 'finish' });
+          safeClose();
+          return;
+        }
+
+        try {
         while (true) {
-          const { done, value } = await reader.read();
+          const { done, value } = await activeReader.read();
 
           if (done) {
             ensureTextEnd();
 
             if (finalArtifacts) {
               emitArtifacts(finalArtifacts);
+            }
+
+            if (finalBuilderArtifact) {
+              emitBuilderArtifact(finalBuilderArtifact);
             }
 
             if (meta && Object.keys(meta).length > 0) {
@@ -521,6 +1105,13 @@ export function createSSEToUIMessageStream(
                         finalArtifacts = normalizedArtifact;
                         emitArtifacts(normalizedArtifact);
                       }
+                    } else if (toolName === 'emit_builder_artifact') {
+                      sawBuilderArtifactTool = true;
+                      const builderArtifact = parseAccumulatedBuilderArtifact(activeToolCalls);
+                      if (builderArtifact) {
+                        finalBuilderArtifact = builderArtifact;
+                        emitBuilderArtifact(builderArtifact);
+                      }
                     }
                     break;
                   }
@@ -537,6 +1128,13 @@ export function createSSEToUIMessageStream(
                       finalArtifacts = normalizedArtifact;
                       emitArtifacts(normalizedArtifact);
                     }
+                  }
+
+                  const directBuilderArtifact = extractToolCallBuilderArtifact(record.tool_calls);
+                  if (directBuilderArtifact) {
+                    sawBuilderArtifactTool = true;
+                    finalBuilderArtifact = directBuilderArtifact;
+                    emitBuilderArtifact(directBuilderArtifact);
                   }
 
                   const content = record.content;
@@ -580,6 +1178,8 @@ export function createSSEToUIMessageStream(
                       const toolName = typeof blockRecord.name === 'string' ? blockRecord.name : '';
                       if (toolName === 'emit_artifact') {
                         sawArtifactTool = true;
+                      } else if (toolName === 'emit_builder_artifact') {
+                        sawBuilderArtifactTool = true;
                       }
                       if (toolId) {
                         activeToolCalls[toolId] = { name: toolName, jsonParts: [] };
@@ -600,6 +1200,63 @@ export function createSSEToUIMessageStream(
                   break;
                 }
                 case 'values': {
+                  let valuesBuilderAccumulator: BuilderTaskAccumulator | undefined;
+                  if (data && typeof data === 'object') {
+                    const valuesRecord = data as Record<string, unknown>;
+                    const nestedValues = valuesRecord.values && typeof valuesRecord.values === 'object'
+                      ? valuesRecord.values as Record<string, unknown>
+                      : null;
+                    const rawBuilderTask = valuesRecord.builder_task ?? valuesRecord.builderTask ?? nestedValues?.builder_task ?? nestedValues?.builderTask;
+                    if (rawBuilderTask && typeof rawBuilderTask === 'object') {
+                      const builderTaskRecord = rawBuilderTask as Record<string, unknown>;
+                      const valuesTaskId = typeof builderTaskRecord.task_id === 'string' ? builderTaskRecord.task_id : undefined;
+                      const valuesLabel = typeof builderTaskRecord.description === 'string'
+                        ? builderTaskRecord.description
+                        : typeof builderTaskRecord.label === 'string'
+                          ? builderTaskRecord.label
+                          : undefined;
+
+                      if (valuesTaskId) {
+                        valuesBuilderAccumulator = activeBuilderTasks.get(valuesTaskId);
+                        if (!valuesBuilderAccumulator) {
+                          valuesBuilderAccumulator = {
+                            ...(valuesLabel ? { label: valuesLabel } : {}),
+                            activityLog: [],
+                          };
+                          activeBuilderTasks.set(valuesTaskId, valuesBuilderAccumulator);
+                        } else if (valuesLabel) {
+                          valuesBuilderAccumulator.label = valuesLabel;
+                        }
+                      }
+                    }
+                  }
+
+                  const builderTask = extractValuesBuilderTask(data, valuesBuilderAccumulator);
+                  if (builderTask) {
+                    emitBuilderTask(builderTask);
+                    if (builderTask.taskId && builderTask.phase !== 'running') {
+                      activeBuilderTasks.delete(builderTask.taskId);
+                    }
+                  }
+
+                  const builderArtifact = extractValuesBuilderArtifact(data);
+                  if (builderArtifact !== null) {
+                    const shouldEmitBuilderArtifact =
+                      initialValuesBuilderArtifact === null ||
+                      sawBuilderArtifactTool ||
+                      builderArtifact !== initialValuesBuilderArtifact;
+
+                    if (initialValuesBuilderArtifact === null) {
+                      initialValuesBuilderArtifact = builderArtifact;
+                    }
+
+                    finalBuilderArtifact = builderArtifact;
+
+                    if (shouldEmitBuilderArtifact) {
+                      emitBuilderArtifact(builderArtifact);
+                    }
+                  }
+
                   const artifact = extractValuesArtifact(data);
                   if (!artifact) {
                     break;
@@ -631,6 +1288,124 @@ export function createSSEToUIMessageStream(
                 case 'session_start':
                 case 'agent_thinking':
                   break;
+                case 'task_started': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  const description = typeof taskData.description === 'string' ? taskData.description : undefined;
+                  if (!isBuilderTaskDescription(description)) {
+                    break;
+                  }
+
+                  if (taskId) {
+                    activeBuilderTasks.set(taskId, { label: description, activityLog: [] });
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('running', taskData, taskId ? activeBuilderTasks.get(taskId) : { label: description, activityLog: [] }));
+                  break;
+                }
+                case 'task_running': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('running', taskData, activeTask));
+                  break;
+                }
+                case 'task_completed': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('completed', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
+                case 'task_failed': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('failed', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
+                case 'task_timed_out': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('timed_out', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
+                case 'task_cancelled': {
+                  if (!data || typeof data !== 'object') {
+                    break;
+                  }
+
+                  const taskData = data as Record<string, unknown>;
+                  const taskId = typeof taskData.task_id === 'string' ? taskData.task_id : undefined;
+                  if (!taskId) {
+                    break;
+                  }
+
+                  const activeTask = activeBuilderTasks.get(taskId);
+                  if (!activeTask) {
+                    break;
+                  }
+
+                  emitBuilderTask(buildBuilderTaskEvent('cancelled', taskData, activeTask));
+                  activeBuilderTasks.delete(taskId);
+                  break;
+                }
                 case 'error': {
                   const errorMessage =
                     data && typeof data === 'object'
@@ -762,12 +1537,27 @@ export function createSSEToUIMessageStream(
             }
           }
         }
-      } catch {
-        ensureTextEnd();
-        emit({ type: 'finish' });
-        safeClose();
-      } finally {
-        reader.releaseLock();
+        } catch {
+          ensureTextEnd();
+          emit({ type: 'finish' });
+          safeClose();
+        } finally {
+          activeReader.releaseLock();
+          if (reader === activeReader) {
+            reader = null;
+          }
+        }
+      };
+
+      void pump();
+    },
+
+    cancel() {
+      isClosed = true;
+      if (reader) {
+        void reader.cancel().catch(() => {
+          // ignore
+        });
       }
     },
   });

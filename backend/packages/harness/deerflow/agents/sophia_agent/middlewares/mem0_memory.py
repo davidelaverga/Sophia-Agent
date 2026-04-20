@@ -19,6 +19,13 @@ from deerflow.sophia.mem0_client import search_memories, warm_up
 
 logger = logging.getLogger(__name__)
 
+# Voice fast-cache is module-level so it survives per-request middleware
+# re-instantiation. `make_sophia_agent()` is called for every LangGraph run,
+# which would otherwise reset an instance-local cache and guarantee 0% hits.
+# Keyed by (thread_id, context_mode, tuple(categories)).
+_VOICE_FASTCACHE: dict[tuple[str, str, tuple[str, ...]], dict] = {}
+_VOICE_FASTCACHE_LOCK = threading.Lock()
+
 
 class Mem0MemoryState(AgentState):
     skip_expensive: NotRequired[bool]
@@ -128,8 +135,6 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
     def __init__(self, user_id: str):
         super().__init__()
         self._user_id = user_id
-        self._voice_recent_cache: dict[tuple[str, str, tuple[str, ...]], dict] = {}
-        self._voice_recent_cache_lock = threading.Lock()
         warm_up()
 
     @staticmethod
@@ -192,15 +197,24 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             return None
 
         cache_key = (thread_id, context_mode or "", tuple(categories))
-        with self._voice_recent_cache_lock:
-            cached = self._voice_recent_cache.get(cache_key)
+        with _VOICE_FASTCACHE_LOCK:
+            cached = _VOICE_FASTCACHE.get(cache_key)
+            cache_size = len(_VOICE_FASTCACHE)
+        logger.info(
+            "[Mem0Memory] fastcache_lookup | key_thread=%s | key_ctx=%s | cats=%d | hit=%s | cache_size=%d",
+            thread_id[:8] if thread_id else "-",
+            context_mode or "-",
+            len(categories),
+            "yes" if cached else "no",
+            cache_size,
+        )
         if not cached:
             return None
 
         age_seconds = time.monotonic() - cached["stored_at"]
         if age_seconds > _VOICE_FAST_CACHE_TTL_SECONDS:
-            with self._voice_recent_cache_lock:
-                self._voice_recent_cache.pop(cache_key, None)
+            with _VOICE_FASTCACHE_LOCK:
+                _VOICE_FASTCACHE.pop(cache_key, None)
             return None
 
         if self._is_low_signal_voice_query(query):
@@ -271,11 +285,15 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         turn_count: int | None,
     ) -> None:
         if platform not in ("voice", "ios_voice") or not thread_id or not results:
+            logger.info(
+                "[Mem0Memory] fastcache_store_skipped | platform=%s | thread=%s | results=%d",
+                platform, (thread_id[:8] if thread_id else "-"), len(results) if results else 0,
+            )
             return
 
         cache_key = (thread_id, context_mode or "", tuple(categories))
-        with self._voice_recent_cache_lock:
-            self._voice_recent_cache[cache_key] = {
+        with _VOICE_FASTCACHE_LOCK:
+            _VOICE_FASTCACHE[cache_key] = {
                 "stored_at": time.monotonic(),
                 "turn_count": turn_count,
                 "query": query,
@@ -283,6 +301,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
                 "content_tokens": self._content_tokens(query),
                 "results": results,
             }
+            size_after = len(_VOICE_FASTCACHE)
+        logger.info(
+            "[Mem0Memory] fastcache_stored | thread=%s | results=%d | cache_size=%d",
+            thread_id[:8], len(results), size_after,
+        )
 
     @override
     def before_agent(self, state: Mem0MemoryState, runtime: Runtime) -> dict | None:
@@ -302,6 +325,12 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         thread_id = runtime.context.get("thread_id")
         turn_count = state.get("turn_count")
         messages = state.get("messages", [])
+
+        # Diagnostic: verify cache pre-conditions
+        logger.info(
+            "[Mem0Memory] cache_precheck | platform=%s | thread_id=%s | turn=%s",
+            platform, thread_id, turn_count,
+        )
 
         categories = _select_categories(ritual, active_skill, messages, context_mode)
         memory_limit = _VOICE_MEMORY_LIMIT if platform in ("voice", "ios_voice") else _DEFAULT_MEMORY_LIMIT
@@ -393,8 +422,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         # Format memories for prompt injection
         memory_lines = []
         memory_ids = []
+        memory_contents = []
         for mem in results[:memory_limit]:
-            memory_lines.append(f"- {mem.get('content', '')}")
+            content = mem.get("content", "")
+            memory_contents.append(content)
+            memory_lines.append(f"- {content}")
             if mem.get("id"):
                 memory_ids.append(mem["id"])
 
@@ -403,6 +435,7 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
         log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
         return {
             "injected_memories": memory_ids,
+            "injected_memory_contents": memory_lines,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }
 

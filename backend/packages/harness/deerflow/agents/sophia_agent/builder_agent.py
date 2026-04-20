@@ -12,35 +12,28 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
-from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
+# Apply defensive langchain patches *before* importing anything that builds
+# the agent graph. See deerflow.agents._langchain_patches for details.
+from deerflow.agents import _langchain_patches  # noqa: F401
+from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-from deerflow.agents.sophia_agent.middlewares.web_research import WebResearchGuidanceMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
-from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
+from deerflow.config.app_config import get_app_config
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
+from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
+from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.tools.builtins import present_file_tool, view_image_tool
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
-
-
-def _resolve_builder_model_name(model_name: str | None = None) -> tuple[str, str]:
-    explicit_model = model_name.strip() if isinstance(model_name, str) else ""
-    if explicit_model:
-        return explicit_model, "explicit"
-
-    env_model = (os.getenv("SOPHIA_BUILDER_MODEL") or "").strip()
-    if env_model:
-        return env_model, "env:SOPHIA_BUILDER_MODEL"
-
-    return DEFAULT_BUILDER_MODEL, "default"
 
 
 def make_sophia_builder(config: RunnableConfig):
@@ -55,6 +48,52 @@ def make_sophia_builder(config: RunnableConfig):
     return _create_builder_agent(user_id=user_id, model_name=model_name)
 
 
+def _resolve_builder_model_name(model_name: str | None) -> tuple[str, str]:
+    """Resolve model name and source for builder creation logging."""
+    if model_name:
+        return model_name, "parent"
+
+    env_model = os.environ.get("SOPHIA_BUILDER_MODEL")
+    if env_model:
+        return env_model, "env"
+
+    try:
+        app_config = get_app_config()
+        for model_cfg in app_config.models:
+            provider_model = getattr(model_cfg, "model", None)
+            if isinstance(provider_model, str) and "sonnet" in provider_model.lower():
+                return provider_model, "config-sonnet"
+    except Exception:
+        logger.warning("Could not resolve sonnet builder model from app config; using default", exc_info=True)
+
+    return DEFAULT_BUILDER_MODEL, "default"
+
+
+def _create_builder_todo_middleware() -> TodoMiddleware:
+    """Create Todo middleware configured for always-plan builder execution."""
+    return TodoMiddleware(
+        system_prompt="""
+<builder_todo_system>
+You are the Sophia builder. Keep a live todo list while executing delegated build tasks.
+- Use `write_todos` only for genuinely multi-step work.
+- Create the initial todo list once near the start, then keep working.
+- Do NOT rewrite the todo list after every small tool call.
+- Update todos only when the plan materially changes, a major milestone finishes, or right before the final handoff.
+- Keep at least one item in progress until the task is finished.
+- Mark items completed as soon as a meaningful step is done.
+</builder_todo_system>
+""",
+        tool_description=(
+            "Use this tool to maintain your execution todo list while building. "
+            "Create it once for multi-step work, then update it only at meaningful milestones."
+        ),
+        reminder_instruction=(
+            "Only call `write_todos` again if the plan materially changed, a major milestone finished, "
+            "or you are preparing the final handoff."
+        ),
+    )
+
+
 def _create_builder_agent(user_id: str, model_name: str | None = None):
     """Create the Sophia builder agent with its dedicated middleware chain.
 
@@ -63,76 +102,75 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
 
     Args:
         user_id: User identifier for identity loading.
-        model_name: Explicit model name to use. When omitted, falls back to
-                    SOPHIA_BUILDER_MODEL or the stronger Sonnet default.
+        model_name: Model name inherited from companion if present.
     """
-    resolved_model_name, model_source = _resolve_builder_model_name(model_name)
+    resolved_model, model_source = _resolve_builder_model_name(model_name)
     logger.info(
-        "Creating Sophia builder agent: user_id=%s, model=%s, source=%s",
+        "Creating Sophia builder agent: user_id=%s, model=%s, model_source=%s",
         user_id,
-        resolved_model_name,
+        resolved_model,
         model_source,
     )
 
-    # ``default_request_timeout`` (aliased to ``timeout`` in newer
-    # langchain-anthropic) caps a single HTTP request to Anthropic. Without
-    # it, a stuck connection can keep a builder subagent "running" for many
-    # minutes even though the subagent-level timeout in switch_to_builder has
-    # already fired. 180s leaves room for long tool-heavy turns while still
-    # cutting off genuinely hung requests.
     model = ChatAnthropic(
-        model=resolved_model_name,
+        model=resolved_model,
         api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
         max_tokens=8192,
-        default_request_timeout=180.0,
+        # streaming=True is critical: without it, the Anthropic SDK makes a
+        # synchronous HTTP request and waits for the ENTIRE response before
+        # returning any data.  For Sonnet generating large documents (5k+
+        # tokens) this routinely takes 45-90s of server-side generation,
+        # during which zero bytes flow over the wire — triggering the HTTP
+        # read timeout.  With streaming, tokens arrive incrementally (~100ms
+        # apart) keeping the connection alive regardless of total generation
+        # time.
+        streaming=True,
+        timeout=240.0,
+        max_retries=2,
     )
-    web_tools = load_sophia_web_tools()
-
-    # 6-middleware chain per spec §6 (adapted for Phase 1)
-    # SandboxMiddleware skipped — builder inherits sandbox_state from parent via initial state
-    # TodoListMiddleware deferred to Phase 2
-    middlewares = [
-        # 1. Infrastructure — shares thread with companion
-        ThreadDataMiddleware(lazy_init=True),
-        # 2. Values + shared contract.
+    middlewares = build_subagent_runtime_middlewares(lazy_init=True)
+    middlewares.extend(
+        [
+        # 1. Values + shared contract.
         #    - soul.md: always on.
         #    - AGENTS.md: companion↔builder building contract (injected in
         #      both sides) so the builder and companion share one source of
-        #      truth for delegation / status taxonomy / resume / crash posture.
-        FileInjectionMiddleware(
-            (SKILLS_PATH / "soul.md", False),
-            (SKILLS_PATH / "AGENTS.md", False),
-        ),
-        # 3. User personalization — identity file shapes what builder creates
-        UserIdentityMiddleware(user_id),
-        # 4. Task briefing — translates companion artifact into builder guidance
-        BuilderTaskMiddleware(),
-        # 5. Builder artifact capture — after-model reads emit_builder_artifact
-        BuilderArtifactMiddleware(),
-        # 6. Prompt assembly
-        PromptAssemblyMiddleware(),
-        # 7. Tool-message integrity — patch dangling tool_use blocks so a
-        # failed/interrupted tool call (bash, write_file, web_search, etc.)
-        # never leaves the Anthropic contract in an invalid state.
-        DanglingToolCallMiddleware(),
-    ]
-    if web_tools:
-        middlewares.insert(-1, WebResearchGuidanceMiddleware())
+        #      truth for delegation, status taxonomy, resume, and crash
+        #      posture.
+            FileInjectionMiddleware(
+                (SKILLS_PATH / "soul.md", False),
+                (SKILLS_PATH / "AGENTS.md", False),
+            ),
+        # 2. User personalization — identity file shapes what builder creates
+            UserIdentityMiddleware(user_id),
+        # 3. Task briefing — translates companion artifact into builder guidance
+            BuilderTaskMiddleware(),
+        # 4. Builder-only web research rules and state initialization
+            BuilderResearchPolicyMiddleware(),
+        # 5. Planning — todo list always enabled for delegated build execution
+            _create_builder_todo_middleware(),
+        # 6. Builder artifact capture — after-model reads emit_builder_artifact
+            BuilderArtifactMiddleware(),
+        # 7. Prompt assembly — assembles system_prompt_blocks into system message
+            PromptAssemblyMiddleware(),
+        ]
+    )
 
-    # Sandbox tools (bash, file ops) + present_files + view_image +
-    # emit_builder_artifact. view_image lets the builder read back PNG/SVG
-    # charts, screenshots, or generated visuals while iterating on a
-    # visual_report or presentation.
+    # Guarded builder tools: sandbox/file ops + web research + artifact tools.
     tools = [
         bash_tool,
         ls_tool,
         read_file_tool,
         write_file_tool,
         str_replace_tool,
+        builder_web_search,
+        builder_web_fetch,
         present_file_tool,
+        # view_image lets the builder re-read PNG/SVG charts, screenshots,
+        # and other visuals it has generated while iterating on a
+        # visual_report or presentation.
         view_image_tool,
         emit_builder_artifact,
-        *web_tools,
     ]
 
     agent = create_agent(
@@ -141,13 +179,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         middleware=middlewares,
         state_schema=SophiaState,
     )
-    # Builder needs enough steps for multi-file creation.
-    # Each tool turn costs ~2 super-steps (LLM call + tool node), so 120
-    # super-steps covers ~60 tool turns. We set this above
-    # ``HARD_TURN_CAP = 40`` in BuilderArtifactMiddleware so the turn-cap
-    # pause is the user-visible ceiling while recursion_limit is just
-    # headroom. The per-task-type timeout in switch_to_builder (600–900s)
-    # and cooperative cancellation in subagents/executor.py remain the
-    # backstops for genuinely stuck runs.
-    agent.recursion_limit = 120
+    # Keep a slightly roomier built-agent ceiling for direct invocations.
+    # The delegated Builder path still enforces its runtime budget through
+    # switch_to_builder -> SubagentExecutor.config.max_turns.
+    agent.recursion_limit = 80
     return agent

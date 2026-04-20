@@ -37,6 +37,7 @@ function bindRemoteAudio(call: Call): () => void {
         const audioEl = document.createElement("audio")
         audioEl.autoplay = true
         audioEl.style.display = "none"
+        audioEl.dataset.sophiaRemote = "true"
         document.body.appendChild(audioEl)
         const cleanup = call.bindAudioElement(audioEl, p.sessionId, "audioTrack")
         boundElements.set(p.sessionId, { el: audioEl, cleanup })

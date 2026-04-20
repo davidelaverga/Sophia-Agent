@@ -5,6 +5,7 @@ import { fetchSophiaApi, resolveSophiaUserId } from '../../_lib/sophia';
 
 type GatewayMemory = {
   id?: string;
+  session_id?: string;
   content?: string;
   memory?: string;
   category?: string;
@@ -15,9 +16,11 @@ type GatewayMemory = {
 
 type NormalizedMemory = {
   id: string;
+  sessionId?: string;
   text: string;
   category?: string;
   created_at?: string;
+  updated_at?: string;
   confidence?: number;
   reason?: string;
   metadata?: Record<string, unknown> | null;
@@ -37,11 +40,27 @@ function getMemoryStatus(memory: NormalizedMemory): string | null {
 }
 
 function getMemorySessionId(memory: NormalizedMemory): string | null {
-  return typeof memory.metadata?.session_id === 'string'
+  return typeof memory.sessionId === 'string'
+    ? memory.sessionId
+    : typeof memory.metadata?.session_id === 'string'
     ? memory.metadata.session_id
     : typeof memory.metadata?.source_session_id === 'string'
       ? memory.metadata.source_session_id
       : null;
+}
+
+function matchesRequestedStatus(memory: NormalizedMemory, status: string | null): boolean {
+  const memoryStatus = getMemoryStatus(memory);
+
+  if (!status) {
+    return true;
+  }
+
+  if (status === 'pending_review') {
+    return memoryStatus === null || memoryStatus === 'pending_review';
+  }
+
+  return memoryStatus === status;
 }
 
 function parseIsoTimestamp(value: string | null | undefined): number | null {
@@ -80,13 +99,19 @@ function normalizeGatewayMemory(memory: GatewayMemory): NormalizedMemory | null 
 
   return {
     id: memory.id,
+    sessionId: typeof memory.session_id === 'string' ? memory.session_id : undefined,
     text,
     category: typeof memory.category === 'string'
       ? memory.category
       : typeof metadata?.category === 'string'
         ? metadata.category
         : undefined,
-    created_at: typeof memory.created_at === 'string' ? memory.created_at : undefined,
+    created_at: typeof memory.created_at === 'string'
+      ? memory.created_at
+      : typeof memory.updated_at === 'string'
+        ? memory.updated_at
+        : undefined,
+    updated_at: typeof memory.updated_at === 'string' ? memory.updated_at : undefined,
     confidence,
     reason,
     metadata,
@@ -162,6 +187,7 @@ export async function GET(request: NextRequest) {
     const sessionId = request.nextUrl.searchParams.get('session_id');
     const startedAt = request.nextUrl.searchParams.get('started_at');
     const endedAt = request.nextUrl.searchParams.get('ended_at');
+    const shouldApplyScopedFilter = Boolean(status && (sessionId || startedAt || endedAt));
 
     const filteredResponse = await fetchMemoryList(userId, status);
     const filteredText = await filteredResponse.text();
@@ -187,19 +213,21 @@ export async function GET(request: NextRequest) {
       ? filteredPayload.memories.map(normalizeGatewayMemory).filter((memory): memory is NormalizedMemory => memory !== null)
       : [];
 
-    const scopedFilteredMemories = status === 'pending_review'
-      ? selectFallbackMemories(filteredMemories, sessionId, startedAt, endedAt)
-        .filter((memory) => {
-          const memoryStatus = getMemoryStatus(memory);
-          return memoryStatus === null || memoryStatus === 'pending_review';
-        })
-      : filteredMemories;
-
-    if (status !== 'pending_review' || scopedFilteredMemories.length > 0) {
+    if (!shouldApplyScopedFilter) {
       return NextResponse.json({
-        memories: (status === 'pending_review' ? scopedFilteredMemories : filteredMemories)
-          .map(({ metadata: _metadata, ...memory }) => memory),
-        count: status === 'pending_review' ? scopedFilteredMemories.length : filteredMemories.length,
+        memories: filteredMemories.map(({ metadata: _metadata, ...memory }) => memory),
+        count: filteredMemories.length,
+        fallbackApplied: false,
+      });
+    }
+
+    const scopedFilteredMemories = selectFallbackMemories(filteredMemories, sessionId, startedAt, endedAt)
+      .filter((memory) => matchesRequestedStatus(memory, status));
+
+    if (scopedFilteredMemories.length > 0) {
+      return NextResponse.json({
+        memories: scopedFilteredMemories.map(({ metadata: _metadata, ...memory }) => memory),
+        count: scopedFilteredMemories.length,
         fallbackApplied: false,
       });
     }
@@ -220,10 +248,7 @@ export async function GET(request: NextRequest) {
       : [];
 
     const scopedMemories = selectFallbackMemories(allMemories, sessionId, startedAt, endedAt)
-      .filter((memory) => {
-        const memoryStatus = getMemoryStatus(memory);
-        return memoryStatus === null || memoryStatus === 'pending_review';
-      });
+      .filter((memory) => matchesRequestedStatus(memory, status));
 
     return NextResponse.json({
       memories: scopedMemories.map(({ metadata: _metadata, ...memory }) => memory),

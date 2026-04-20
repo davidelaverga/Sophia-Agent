@@ -53,7 +53,7 @@ describe('OnboardingTipGuard', () => {
 
   it('shows a contextual tip when its real target and trigger are present', async () => {
     const target = document.createElement('button')
-    target.setAttribute('data-onboarding', 'ritual-card-suggested')
+    target.setAttribute('data-onboarding-contextual', 'ritual-card-suggested')
     document.body.appendChild(target)
 
     render(<OnboardingTipGuard tipId="tip-first-ritual-suggestion" isTriggered />)
@@ -67,7 +67,7 @@ describe('OnboardingTipGuard', () => {
 
   it('marks the tip as seen after dismissal', async () => {
     const target = document.createElement('div')
-    target.setAttribute('data-onboarding', 'ritual-card-suggested')
+    target.setAttribute('data-onboarding-contextual', 'ritual-card-suggested')
     document.body.appendChild(target)
 
     render(<OnboardingTipGuard tipId="tip-first-ritual-suggestion" isTriggered />)

@@ -711,12 +711,19 @@ async def create_agent(**kwargs) -> Agent:
     )
 
     original_note_first_text_emitted = llm.note_first_text_emitted
+    original_note_backend_progress = llm.note_backend_progress
 
     def _note_first_text_emitted(user_id: str) -> None:
         coordinator.on_backend_progress()
         original_note_first_text_emitted(user_id)
 
     llm.note_first_text_emitted = _note_first_text_emitted
+
+    def _note_backend_progress(user_id: str) -> None:
+        coordinator.on_backend_progress()
+        original_note_backend_progress(user_id)
+
+    llm.note_backend_progress = _note_backend_progress
 
     async def _handle_backend_stall(participant: object | None) -> None:
         user_id = getattr(participant, "user_id", None)
@@ -772,6 +779,21 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # Drop the per-partial transcript log line emitted by vision_agents.
+    # It fires on every STT partial (multiple times per second) and both
+    # crowds the logs and slows the event loop under load. We keep final
+    # transcripts and all other INFO messages.
+    class _SuppressPartialTranscriptFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+            try:
+                return "[Transcript Partial]" not in record.getMessage()
+            except Exception:
+                return True
+
+    logging.getLogger("vision_agents.core.agents.agents").addFilter(
+        _SuppressPartialTranscriptFilter()
+    )
+
     launcher = AgentLauncher(create_agent=create_agent, join_call=join_call)
     app = create_fastapi_app(launcher)
     Runner(

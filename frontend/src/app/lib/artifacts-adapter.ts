@@ -13,6 +13,8 @@ import type {
 } from '../types/recap';
 import type { PresetType, ContextMode } from '../types/session';
 
+import { normalizeBuilderArtifactPayload } from './builder-artifacts';
+
 
 // =============================================================================
 // ADAPTER FUNCTION
@@ -62,12 +64,17 @@ export function mapBackendArtifactsToRecapV1(
   const memoryCandidates = normalizeMemoryCandidates(
     payload.memory_candidates
   );
+
+  const builderArtifact = normalizeBuilderArtifactPayload(
+    payload.builder_artifact || payload.builderArtifact || payload.builder_result
+  );
   
   // Determine status
   const status = normalizeStatus(payload.status, takeaway, reflectionCandidate, memoryCandidates);
   
   const result = {
     sessionId: payload.session_id || sessionId,
+    threadId: payload.thread_id,
     sessionType,
     contextMode,
     startedAt: payload.started_at,
@@ -75,6 +82,7 @@ export function mapBackendArtifactsToRecapV1(
     takeaway,
     reflectionCandidate,
     memoryCandidates,
+    ...(builderArtifact ? { builderArtifact } : {}),
     status,
   };
   

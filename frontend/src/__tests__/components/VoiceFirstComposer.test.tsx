@@ -57,34 +57,27 @@ describe("VoiceFirstComposer", () => {
       expect(screen.getByRole("button", { name: /tap to speak/i })).toBeInTheDocument()
     })
 
-    it("renders 'or type instead...' toggle", () => {
+    it("keeps text input hidden by default", () => {
       renderComposer()
-      expect(screen.getByText(/or type instead/i)).toBeInTheDocument()
+      expect(screen.queryByRole("textbox")).not.toBeInTheDocument()
     })
 
-    it("shows voice status text by default", () => {
-      renderComposer()
-      expect(screen.getByText(/Sophia — Ready/i)).toBeInTheDocument()
+    it("disables the mic when voice is thinking", () => {
+      renderComposer({ voiceStatus: "thinking" })
+      expect(screen.getByRole("button", { name: /thinking/i })).toBeDisabled()
     })
 
-    it("shows 'Sophia is thinking...' when isTyping", () => {
-      renderComposer({ isTyping: true })
-      expect(screen.getByText(/Sophia is thinking/i)).toBeInTheDocument()
-    })
-
-    it("expands text area when toggle clicked", async () => {
-      const user = userEvent.setup()
-      renderComposer()
-      await user.click(screen.getByText(/or type instead/i))
-      expect(screen.getByRole("textbox")).toBeInTheDocument()
-      expect(screen.getByLabelText(/close typing/i)).toBeInTheDocument()
+    it("renders custom controls above the primary input", () => {
+      renderComposer({ slotBeforeText: <div>mode toggle</div> })
+      expect(screen.getByText(/mode toggle/i)).toBeInTheDocument()
     })
   })
 
   describe("text-only mode (textOnly=true)", () => {
-    it("hides mic button", () => {
+    it("removes the text-mode voice CTA", () => {
       renderComposer({ textOnly: true })
       expect(screen.queryByRole("button", { name: /tap to speak/i })).not.toBeInTheDocument()
+      expect(screen.queryByText(/tap mic to speak/i)).not.toBeInTheDocument()
     })
 
     it("auto-expands text area", () => {
@@ -112,9 +105,9 @@ describe("VoiceFirstComposer", () => {
       expect(screen.getByText(/Sophia is typing/i)).toBeInTheDocument()
     })
 
-    it("shows 'Sophia — Ready' when not typing", () => {
+    it("omits typing copy when Sophia is idle", () => {
       renderComposer({ textOnly: true })
-      expect(screen.getByText(/Sophia — Ready/i)).toBeInTheDocument()
+      expect(screen.queryByText(/Sophia is typing/i)).not.toBeInTheDocument()
     })
 
     it("does not collapse on Enter submit", async () => {

@@ -22,8 +22,11 @@ def test_sophia_state_has_all_required_fields():
         "force_skill", "skip_expensive",
         "active_tone_band", "active_skill", "skill_session_data",
         "current_artifact", "previous_artifact",
-        "injected_memories",
-        "builder_task", "builder_result",
+        "injected_memories", "injected_memory_contents",
+        "builder_task", "builder_result", "delegation_context",
+        "builder_non_artifact_turns", "builder_last_tool_names", "builder_tool_turn_summaries",
+        "last_shell_command", "recent_shell_commands",
+        "todos",
         "system_prompt_blocks",
         "title",
     ]

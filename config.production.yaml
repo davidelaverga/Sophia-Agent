@@ -44,7 +44,13 @@ memory:
   enabled: false
 
 summarization:
-  enabled: false
+  enabled: true
+  trigger:
+    type: messages
+    value: 10
+  keep:
+    type: messages
+    value: 4
 
 # IM channels (used by gateway ChannelService)
 # Note: config values with $VAR are resolved at app startup, so these env vars

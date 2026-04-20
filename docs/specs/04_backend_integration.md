@@ -14,7 +14,7 @@ sophia/  (fork of bytedance/deer-flow)
 ├── backend/
 │   └── src/
 │       ├── agents/
-│       │   ├── lead_agent/              ← DeerFlow UNCHANGED — sophia_builder uses this
+│       │   ├── lead_agent/              ← DeerFlow reference agent (builder no longer reuses this directly)
 │       │   └── sophia_agent/            ← SOPHIA COMPANION
 │       │       ├── graph.py             ← StateGraph definition
 │       │       ├── agent.py             ← make_sophia_agent()
@@ -103,7 +103,7 @@ sophia/  (fork of bytedance/deer-flow)
 {
   "graphs": {
     "sophia_companion": "./backend/src/agents/sophia_agent/graph.py:graph",
-    "sophia_builder": "./backend/src/agents/lead_agent/graph.py:graph"
+    "sophia_builder": "deerflow.agents.sophia_agent.builder_agent:make_sophia_builder"
   },
   "env": ".env",
   "python_version": "3.12",
@@ -111,7 +111,7 @@ sophia/  (fork of bytedance/deer-flow)
 }
 ```
 
-`sophia_builder` points at DeerFlow's unmodified `lead_agent` graph. Different name, different config at invocation time (Sonnet model, full toolset). No code duplication.
+`sophia_builder` now points at Sophia's dedicated builder factory. It keeps a slim builder-only middleware stack, uses guarded sandbox + web tools, and stays separate from the lead-agent orchestration path.
 
 ---
 

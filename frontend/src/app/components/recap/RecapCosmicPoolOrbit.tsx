@@ -11,15 +11,14 @@ import {
 } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
+import { useVisualTier } from '../../hooks/useVisualTier';
 import { logger } from '../../lib/error-logger';
 import {
   getRecapCategoryPresentation,
-  TAG_LABELS,
   type MemoryCandidateV1,
   type MemoryDecision,
 } from '../../lib/recap-types';
 import { cn } from '../../lib/utils';
-import { OnboardingTipGuard } from '../onboarding';
 
 import {
   getOrbitCandidateBuckets,
@@ -33,9 +32,6 @@ interface RecapMemoryOrbitProps {
   candidates?: MemoryCandidateV1[];
   decisions: Record<string, { decision: MemoryDecision; editedText?: string }>;
   onDecisionChange: (candidateId: string, decision: MemoryDecision, editedText?: string) => void;
-  reflectionPrompt?: string;
-  reflectionTag?: string;
-  onReflect?: () => void;
   isLoading?: boolean;
   disabled?: boolean;
   className?: string;
@@ -528,8 +524,8 @@ function getSettledGlowSlot(index: number, color: [number, number, number] = DEF
   };
 }
 
-function createFogWisps(w: number, h: number): FogWisp[] {
-  return Array.from({ length: 40 }, () => {
+function createFogWisps(w: number, h: number, count = 40): FogWisp[] {
+  return Array.from({ length: count }, () => {
     const band = Math.random();
     return {
       x: Math.random() * w * 1.4 - w * 0.2,
@@ -655,6 +651,7 @@ function AuroraBackground() {
   const t0 = useRef(performance.now());
   const lastFrameRef = useRef(0);
   const nextCometRef = useRef(8 + Math.random() * 10);
+  const { tier, dprCap, reducedMotion } = useVisualTier();
 
   useEffect(() => {
     if (IS_TEST_ENV) {
@@ -666,7 +663,7 @@ function AuroraBackground() {
       return;
     }
 
-    const dpr = Math.min(window.devicePixelRatio ?? 1, 2);
+    const dpr = Math.min(window.devicePixelRatio ?? 1, dprCap);
     const resize = () => {
       const w = window.innerWidth;
       const h = window.innerHeight;
@@ -734,12 +731,17 @@ function AuroraBackground() {
 
     rafRef.current = requestAnimationFrame(loop);
 
+    if (reducedMotion || tier === 1) {
+      cancelAnimationFrame(rafRef.current);
+      loop();
+    }
+
     return () => {
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener('resize', resize);
       window.removeEventListener('mousemove', onMove);
     };
-  }, []);
+  }, [dprCap, reducedMotion, tier]);
 
   return (
     <div className="fixed inset-0 z-0" aria-hidden="true">
@@ -769,6 +771,7 @@ function CosmicPool({
   const settledRef = useRef(settledMemories);
   ripplesRef.current = ripples;
   settledRef.current = settledMemories;
+  const { tier, dprCap } = useVisualTier();
 
   useEffect(() => {
     if (IS_TEST_ENV) {
@@ -780,7 +783,7 @@ function CosmicPool({
       return;
     }
 
-    const dpr = Math.min(window.devicePixelRatio ?? 1, 1.5);
+    const dpr = Math.min(window.devicePixelRatio ?? 1, dprCap);
     const resize = () => {
       const rect = canvas.getBoundingClientRect();
       canvas.width = Math.round(rect.width * dpr);
@@ -858,7 +861,7 @@ function CosmicPool({
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener('resize', resize);
     };
-  }, [timeOrigin]);
+  }, [timeOrigin, dprCap, tier]);
 
   return (
     <div
@@ -901,9 +904,10 @@ function PoolFog({ intensity }: { intensity: number }) {
   const t0 = useRef(performance.now());
   const intensityRef = useRef(intensity);
   intensityRef.current = intensity;
+  const { tier, reducedMotion } = useVisualTier();
 
   useEffect(() => {
-    if (IS_TEST_ENV) {
+    if (IS_TEST_ENV || tier === 1) {
       return;
     }
 
@@ -917,7 +921,8 @@ function PoolFog({ intensity }: { intensity: number }) {
       canvas.width = rect.width;
       canvas.height = rect.height;
       if (!wispsRef.current.length) {
-        wispsRef.current = createFogWisps(rect.width, rect.height);
+        const wispCount = tier === 2 ? 20 : 40;
+        wispsRef.current = createFogWisps(rect.width, rect.height, wispCount);
       }
     };
     resize();
@@ -994,7 +999,7 @@ function PoolFog({ intensity }: { intensity: number }) {
       cancelAnimationFrame(rafRef.current);
       window.removeEventListener('resize', resize);
     };
-  }, []);
+  }, [tier, reducedMotion]);
 
   return (
     <div className="fixed left-0 right-0 z-[3] pointer-events-none" style={{ bottom: '30%', height: '28%' }}>
@@ -1155,9 +1160,10 @@ function OrbMistCanvas({ active }: { active: boolean }) {
   const rafRef = useRef(0);
   const particles = useRef<Array<{ x: number; y: number; vx: number; vy: number; r: number; a: number; phase: number }>>([]);
   const t0 = useRef(performance.now());
+  const { tier } = useVisualTier();
 
   useEffect(() => {
-    if (IS_TEST_ENV) {
+    if (IS_TEST_ENV || tier === 1) {
       return;
     }
 
@@ -1173,8 +1179,10 @@ function OrbMistCanvas({ active }: { active: boolean }) {
     const cy = size / 2;
     const radius = size / 2 - 4;
 
+    const baseCount = active ? 24 : 6;
+    const count = tier === 2 ? Math.ceil(baseCount / 2) : baseCount;
     if (!particles.current.length) {
-      particles.current = Array.from({ length: active ? 24 : 6 }, () => {
+      particles.current = Array.from({ length: count }, () => {
         const angle = Math.random() * Math.PI * 2;
         const distance = Math.random() * radius * 0.7;
         return {
@@ -1250,7 +1258,8 @@ function OrbMistCanvas({ active }: { active: boolean }) {
 
       // Orbiting sparks with trails
       if (active) {
-        for (let index = 0; index < 8; index += 1) {
+        const sparkCount = tier === 2 ? 4 : 8;
+        for (let index = 0; index < sparkCount; index += 1) {
           const dir = index % 2 === 0 ? 1 : -1;
           const speed = 0.15 + (index % 3) * 0.04;
           const angle = t * speed * dir + (index / 8) * Math.PI * 2;
@@ -1311,7 +1320,7 @@ function OrbMistCanvas({ active }: { active: boolean }) {
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, [active]);
+  }, [active, tier]);
 
   return <canvas ref={ref} className="pointer-events-none absolute inset-0 h-full w-full rounded-full" style={{ opacity: active ? 0.75 : 0.25 }} />;
 }
@@ -1327,13 +1336,14 @@ function OrbGlassCanvas({ active }: { active: boolean }) {
   const t0 = useRef(performance.now());
   const activeRef = useRef(active);
   activeRef.current = active;
+  const { tier } = useVisualTier();
 
   useEffect(() => {
-    if (IS_TEST_ENV) return;
+    if (IS_TEST_ENV || tier === 1) return;
     const canvas = ref.current;
     if (!canvas) return;
 
-    const size = 512;
+    const size = tier === 2 ? 256 : 512;
     canvas.width = size;
     canvas.height = size;
 
@@ -1374,7 +1384,7 @@ function OrbGlassCanvas({ active }: { active: boolean }) {
 
     rafRef.current = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(rafRef.current);
-  }, []);
+  }, [tier]);
 
   return (
     <canvas
@@ -1394,13 +1404,14 @@ function OrbExitFXCanvas({ type, active }: { type: 'keep' | 'discard'; active: b
     color: number;
   }>>([]);
   const startedRef = useRef(false);
+  const { tier } = useVisualTier();
 
   useEffect(() => {
-    if (!active || IS_TEST_ENV) return;
+    if (!active || IS_TEST_ENV || tier === 1) return;
     const canvas = ref.current;
     if (!canvas) return;
 
-    const size = 512;
+    const size = tier === 2 ? 256 : 512;
     canvas.width = size;
     canvas.height = size;
     const cx = size / 2;
@@ -1408,7 +1419,8 @@ function OrbExitFXCanvas({ type, active }: { type: 'keep' | 'discard'; active: b
 
     if (!startedRef.current) {
       startedRef.current = true;
-      const count = type === 'keep' ? 35 : 45;
+      const baseCount = type === 'keep' ? 35 : 45;
+      const count = tier === 2 ? Math.ceil(baseCount / 2) : baseCount;
       particlesRef.current = Array.from({ length: count }, () => {
         const angle = Math.random() * Math.PI * 2;
         const speed = type === 'keep'
@@ -1494,7 +1506,7 @@ function OrbExitFXCanvas({ type, active }: { type: 'keep' | 'discard'; active: b
       startedRef.current = false;
       particlesRef.current = [];
     };
-  }, [active, type]);
+  }, [active, type, tier]);
 
   if (!active) return null;
 
@@ -1867,57 +1879,6 @@ function MemoryOrb({
   );
 }
 
-function ReflectionCard({
-  prompt,
-  tag,
-  onReflect,
-  visible,
-}: {
-  prompt?: string;
-  tag?: string;
-  onReflect?: () => void;
-  visible: boolean;
-}) {
-  if (!prompt) {
-    return null;
-  }
-
-  return (
-    <div
-      className={cn(
-        'mt-10 flex max-w-xl flex-col items-center text-center transition-all duration-[1200ms] ease-out',
-        visible ? 'translate-y-0 opacity-100' : 'translate-y-6 opacity-0'
-      )}
-      style={{ transitionDelay: '700ms' }}
-    >
-      <div
-        className="relative w-full overflow-hidden rounded-2xl px-6 py-5 backdrop-blur-xl"
-        style={{
-          background: 'var(--cosmic-panel)',
-          border: '1px solid var(--cosmic-border-soft)',
-          boxShadow: 'var(--cosmic-shadow-lg)',
-        }}
-      >
-        <div className="mb-3 flex items-center gap-2">
-          <span className="text-base">💭</span>
-          <p className="font-cormorant italic text-[14px] tracking-[0.04em]" style={{ color: 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' }}>
-            {tag ? TAG_LABELS[tag] ?? 'Something to reflect on' : 'Something to reflect on'}
-          </p>
-        </div>
-        <p className="text-left font-cormorant text-[17px] leading-relaxed" style={{ color: 'var(--cosmic-text)' }}>{prompt}</p>
-        {onReflect && (
-          <button
-            onClick={onReflect}
-            className="cosmic-accent-pill cosmic-focus-ring mt-4 rounded-full px-4 py-1.5 text-[10px] uppercase tracking-[0.08em] transition-all duration-300"
-          >
-            Sit with this for a moment →
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function LoadingState() {
   return (
     <div className="relative min-h-screen overflow-hidden bg-[var(--bg)]">
@@ -1964,16 +1925,10 @@ function EmptyState() {
 
 function CompletedState({
   approvedCount,
-  reflectionPrompt,
-  reflectionTag,
-  onReflect,
   showEntrance,
 }: {
   approvedCount: number;
   approvedMemories: ApprovedMemoryRow[];
-  reflectionPrompt?: string;
-  reflectionTag?: string;
-  onReflect?: () => void;
   showEntrance: boolean;
 }) {
   return (
@@ -2025,13 +1980,6 @@ function CompletedState({
           </div>
         </div>
       </div>
-
-      <ReflectionCard
-        prompt={reflectionPrompt}
-        tag={reflectionTag}
-        onReflect={onReflect}
-        visible={showEntrance}
-      />
     </>
   );
 }
@@ -2041,9 +1989,6 @@ export function RecapCosmicPoolOrbit({
   candidates,
   decisions,
   onDecisionChange,
-  reflectionPrompt,
-  reflectionTag,
-  onReflect,
   isLoading,
   disabled,
   className,
@@ -2248,9 +2193,6 @@ export function RecapCosmicPoolOrbit({
 
   return (
     <div className={cn('relative min-h-screen overflow-hidden bg-[var(--bg)]', className)}>
-      <OnboardingTipGuard tipId="tip-first-recap" isTriggered={Boolean(takeaway || reflectionPrompt || normalizedCandidates.length > 0)} />
-      <OnboardingTipGuard tipId="tip-first-memory-candidate" isTriggered={normalizedCandidates.length > 0} />
-
       <AuroraBackground />
       <CosmicPool
         ripples={ripples}
@@ -2372,19 +2314,7 @@ export function RecapCosmicPoolOrbit({
           <CompletedState
             approvedCount={approvedCount}
             approvedMemories={approvedMemories}
-            reflectionPrompt={reflectionPrompt}
-            reflectionTag={reflectionTag}
-            onReflect={onReflect}
             showEntrance={showEntrance}
-          />
-        )}
-
-        {!allDone && (
-          <ReflectionCard
-            prompt={reflectionPrompt}
-            tag={reflectionTag}
-            onReflect={onReflect}
-            visible={showEntrance}
           />
         )}
       </div>

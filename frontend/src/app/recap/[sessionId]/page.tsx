@@ -17,11 +17,11 @@
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useMemo } from 'react';
 
-import { DevDiagnosticsPanel } from '../../components/DevDiagnosticsPanel';
 import {
   RecapMemoryOrbit,
   RecapEmptyState,
 } from '../../components/recap';
+import { BuilderDeliverableCard } from '../../components/session/ArtifactsPanel';
 import { haptic } from '../../hooks/useHaptics';
 import type { MemoryDecision } from '../../lib/recap-types';
 import { useRecapStore } from '../../stores/recap-store';
@@ -100,13 +100,6 @@ export default function RecapPage() {
     },
   });
   
-  // Handle reflection action
-  const handleReflect = useCallback(() => {
-    haptic('light');
-    // Navigate to new session with reflection context
-    router.push(`/session?mode=reflection&from=${sessionId}`);
-  }, [router, sessionId]);
-  
   // Handle retry
   const handleRetry = useCallback(() => {
     reload();
@@ -124,7 +117,6 @@ export default function RecapPage() {
           decisions={{}}
           onDecisionChange={() => {}}
         />
-        <DevDiagnosticsPanel />
       </div>
     );
   }
@@ -152,7 +144,6 @@ export default function RecapPage() {
             onDismiss={() => router.push('/journal')}
           />
         </main>
-        <DevDiagnosticsPanel />
       </div>
     );
   }
@@ -173,6 +164,15 @@ export default function RecapPage() {
           router.push('/journal');
         }}
       />
+
+      {artifacts.builderArtifact && (
+        <div className="mx-auto max-w-3xl px-4 pt-20">
+          <BuilderDeliverableCard
+            builderArtifact={artifacts.builderArtifact}
+            threadId={artifacts.threadId}
+          />
+        </div>
+      )}
       
       {/* Cinematic Memory Orbit Experience */}
       <RecapMemoryOrbit
@@ -180,9 +180,6 @@ export default function RecapPage() {
         candidates={artifacts.memoryCandidates}
         decisions={decisionsMap}
         onDecisionChange={handleDecisionChange}
-        reflectionPrompt={artifacts.reflectionCandidate?.prompt}
-        reflectionTag={artifacts.reflectionCandidate?.tag}
-        onReflect={handleReflect}
         disabled={isSaving}
       />
       
@@ -200,7 +197,6 @@ export default function RecapPage() {
       />
       
       {saveSuccess && <RecapSaveSuccessOverlay count={saveSuccess.count} />}
-      <DevDiagnosticsPanel />
     </div>
   );
 }

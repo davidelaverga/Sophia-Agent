@@ -8,7 +8,7 @@ import logging
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -25,8 +25,7 @@ from deerflow.sophia.review_metadata_store import (
     remove_review_metadata,
     upsert_review_metadata,
 )
-from deerflow.sophia.tools.switch_to_builder import extract_builder_result_from_subagent_result
-from deerflow.subagents.executor import get_background_task_result
+from deerflow.sophia.session_store import SessionRecord, SessionStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +37,8 @@ router = APIRouter(
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
+_session_store = SessionStore()
+_LEGACY_SESSION_USER_ID = "dev-user"
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +77,22 @@ def _get_mem0_client():
         raise HTTPException(status_code=503, detail="mem0 package not installed")
 
 
+def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, SessionRecord | None]:
+    """Resolve the persisted session owner, including the legacy dev-user fallback."""
+    record = _session_store.get(user_id, session_id)
+    if record is not None:
+        return user_id, record
+
+    if user_id == _LEGACY_SESSION_USER_ID:
+        return user_id, None
+
+    legacy_record = _session_store.get(_LEGACY_SESSION_USER_ID, session_id)
+    if legacy_record is not None:
+        return _LEGACY_SESSION_USER_ID, legacy_record
+
+    return user_id, None
+
+
 # ---------------------------------------------------------------------------
 # Response Models
 # ---------------------------------------------------------------------------
@@ -84,6 +101,7 @@ class MemoryItem(BaseModel):
     id: str = Field(..., description="Memory ID")
     content: str = Field(default="", description="Memory content text")
     category: str | None = Field(default=None, description="Memory category")
+    session_id: str | None = Field(default=None, description="Source session identifier")
     metadata: dict | None = Field(default=None, description="Memory metadata")
     created_at: str | None = Field(default=None, description="Creation timestamp")
     updated_at: str | None = Field(default=None, description="Last update timestamp")
@@ -264,17 +282,6 @@ class SessionEndResponse(BaseModel):
     debrief_prompt: str | None = Field(default=None)
 
 
-class BuilderTaskStatusResponse(BaseModel):
-    task_id: str = Field(..., description="Builder task identifier")
-    status: str = Field(..., description="Current background task status")
-    terminal: bool = Field(default=False, description="Whether the task is in a terminal state")
-    trace_id: str | None = Field(default=None, description="Trace identifier for correlated logs")
-    result: str | None = Field(default=None, description="Best-effort text result from the builder task")
-    error: str | None = Field(default=None, description="Terminal failure detail if available")
-    started_at: str | None = Field(default=None, description="Task start timestamp")
-    completed_at: str | None = Field(default=None, description="Task completion timestamp")
-    builder_result: dict | None = Field(default=None, description="Structured builder artifact summary when available")
-
 class TelegramLinkCreateRequest(BaseModel):
     context_mode: Literal["work", "gaming", "life"] = Field(
         default="life",
@@ -312,6 +319,57 @@ class TelegramLinkRemoveResponse(BaseModel):
     removed: bool = Field(default=False)
 
 
+class TaskCancelResponse(BaseModel):
+    task_id: str = Field(..., description="Background task identifier")
+    status: str = Field(..., description="Cancellation status")
+    detail: str | None = Field(default=None, description="Optional status detail")
+
+
+class TaskStatusDebug(BaseModel):
+    last_tool_names: list[str] = Field(default_factory=list)
+    last_has_emit_builder_artifact: bool | None = Field(default=None)
+    late_tool_names: list[str] = Field(default_factory=list)
+    late_has_emit_builder_artifact: bool | None = Field(default=None)
+    timeout_observed_during_stream: bool = Field(default=False)
+    timed_out_at: str | None = Field(default=None)
+    final_state_present: bool = Field(default=False)
+    builder_result_present: bool = Field(default=False)
+    suspected_blocker: str | None = Field(default=None)
+    suspected_blocker_detail: str | None = Field(default=None)
+    last_shell_command: dict | None = Field(default=None)
+    recent_shell_commands: list[dict] = Field(default_factory=list)
+
+
+class TaskStatusResponse(BaseModel):
+    task_id: str = Field(..., description="Background task identifier")
+    status: str = Field(..., description="Current task status")
+    trace_id: str | None = Field(default=None, description="Trace identifier for task diagnostics")
+    description: str | None = Field(default=None, description="Optional task description")
+    detail: str | None = Field(default=None, description="Human-readable status detail")
+    result: str | None = Field(default=None, description="Terminal result summary")
+    error: str | None = Field(default=None, description="Terminal error detail")
+    builder_result: dict | None = Field(default=None, description="Normalized builder artifact payload when available")
+    message_count: int = Field(default=0, description="Captured AI message count")
+    started_at: str | None = Field(default=None)
+    completed_at: str | None = Field(default=None)
+    last_update_at: str | None = Field(default=None)
+    last_progress_at: str | None = Field(default=None)
+    heartbeat_ms: int | None = Field(default=None)
+    idle_ms: int | None = Field(default=None)
+    is_stuck: bool = Field(default=False)
+    stuck_reason: str | None = Field(default=None)
+    progress_percent: int | None = Field(default=None)
+    progress_source: str | None = Field(default=None)
+    total_steps: int | None = Field(default=None)
+    completed_steps: int | None = Field(default=None)
+    in_progress_steps: int | None = Field(default=None)
+    pending_steps: int | None = Field(default=None)
+    active_step_title: str | None = Field(default=None)
+    todos: list[dict] = Field(default_factory=list)
+    debug: TaskStatusDebug | None = Field(default=None, description="Latest executor-side diagnostics")
+    activity_log: list[dict] = Field(default_factory=list, description="Chronological builder activity entries")
+
+
 # ---------------------------------------------------------------------------
 # Helper: normalize Mem0 memory to MemoryItem
 # ---------------------------------------------------------------------------
@@ -328,11 +386,13 @@ def _get_primary_category(mem: dict) -> str | None:
     return category if isinstance(category, str) and category else None
 
 def _to_memory_item(mem: dict) -> MemoryItem:
+    metadata = mem.get("metadata") if isinstance(mem, dict) else None
     return MemoryItem(
         id=mem.get("id", ""),
         content=mem.get("memory", mem.get("content", "")),
         category=_get_primary_category(mem),
-        metadata=mem.get("metadata"),
+        session_id=mem.get("session_id") or (metadata.get("session_id") if isinstance(metadata, dict) else None),
+        metadata=metadata,
         created_at=mem.get("created_at"),
         updated_at=mem.get("updated_at"),
     )
@@ -1083,36 +1143,529 @@ async def remove_telegram_link(user_id: str) -> TelegramLinkRemoveResponse:
     return TelegramLinkRemoveResponse(linked=False, removed=removed)
 
 
-@router.get(
-    "/{user_id}/tasks/{task_id}",
-    response_model=BuilderTaskStatusResponse,
-    summary="Get retained status for a Sophia builder task",
-)
-async def get_builder_task_status(user_id: str, task_id: str) -> BuilderTaskStatusResponse:
-    _validate_user(user_id)
+def _extract_builder_result_from_task_result(result: object) -> dict | None:
+    final_state = getattr(result, "final_state", None)
+    if isinstance(final_state, dict):
+        builder_result = final_state.get("builder_result")
+        if isinstance(builder_result, dict) and builder_result:
+            return builder_result
 
-    task_result = get_background_task_result(task_id)
-    if task_result is None:
-        raise HTTPException(status_code=404, detail="Builder task not found")
+    ai_messages = getattr(result, "ai_messages", None)
+    if not isinstance(ai_messages, list):
+        return None
 
-    status = _task_status_value(task_result.status)
-    terminal = status in {"completed", "failed", "timed_out"}
-    builder_result = extract_builder_result_from_subagent_result(task_result) if terminal else None
-    return BuilderTaskStatusResponse(
-        task_id=task_id,
-        status=status,
-        terminal=terminal,
-        trace_id=getattr(task_result, "trace_id", None),
-        result=getattr(task_result, "result", None),
-        error=getattr(task_result, "error", None),
-        started_at=_serialize_optional_datetime(getattr(task_result, "started_at", None)),
-        completed_at=_serialize_optional_datetime(getattr(task_result, "completed_at", None)),
-        builder_result=builder_result,
+    for message in reversed(ai_messages):
+        if not isinstance(message, dict):
+            continue
+
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list):
+            continue
+
+        for tool_call in reversed(tool_calls):
+            if not isinstance(tool_call, dict):
+                continue
+            if tool_call.get("name") != "emit_builder_artifact":
+                continue
+
+            args = tool_call.get("args")
+            if isinstance(args, dict) and args:
+                return args
+
+    return None
+
+
+def _task_summary_tool_names(summary: object) -> list[str]:
+    if not isinstance(summary, dict):
+        return []
+
+    tool_names = summary.get("tool_names")
+    if not isinstance(tool_names, list):
+        return []
+
+    return [tool_name for tool_name in tool_names if isinstance(tool_name, str) and tool_name]
+
+
+def _infer_task_blocker(
+    status_value: str,
+    *,
+    builder_result: dict | None,
+    last_summary: object,
+    late_summary: object,
+    message_count: int,
+) -> tuple[str | None, str | None]:
+    if status_value in {"completed", "cancelled"}:
+        return (None, None)
+
+    last_tool_names = _task_summary_tool_names(last_summary)
+    late_tool_names = _task_summary_tool_names(late_summary)
+    last_has_emit = bool(isinstance(last_summary, dict) and last_summary.get("has_emit_builder_artifact"))
+    late_has_emit = bool(isinstance(late_summary, dict) and late_summary.get("has_emit_builder_artifact"))
+
+    if status_value == "timed_out":
+        if late_has_emit:
+            return (
+                "final_artifact_emission",
+                "Builder only reached emit_builder_artifact after the timeout window closed.",
+            )
+        if last_tool_names:
+            return (
+                "tool_call",
+                f"Builder timed out after calling {', '.join(last_tool_names)} before emit_builder_artifact.",
+            )
+        return (
+            "background_agent",
+            "Builder timed out before a terminal artifact or result was captured.",
+        )
+
+    if status_value == "failed":
+        if last_has_emit:
+            return (
+                "final_artifact_emission",
+                "Builder failed after emit_builder_artifact was attempted.",
+            )
+        if last_tool_names:
+            return (
+                "tool_call",
+                f"Latest captured Builder activity called {', '.join(last_tool_names)} before failing.",
+            )
+        return (
+            "background_agent",
+            "Builder failed outside a captured tool call or final artifact emission step.",
+        )
+
+    if isinstance(builder_result, dict) and builder_result:
+        return (
+            "final_artifact_emission",
+            "Builder artifact exists, but the background task has not reported a terminal status yet.",
+        )
+
+    if late_has_emit or last_has_emit:
+        return (
+            "final_artifact_emission",
+            "Latest captured Builder step already called emit_builder_artifact, but task closure is still pending.",
+        )
+
+    if last_tool_names:
+        return (
+            "tool_call",
+            f"Latest captured Builder step called {', '.join(last_tool_names)} and has not reached emit_builder_artifact yet.",
+        )
+
+    if late_tool_names:
+        return (
+            "tool_call",
+            f"Late Builder activity was observed in {', '.join(late_tool_names)} without a final artifact.",
+        )
+
+    if message_count > 0:
+        return (
+            "background_agent",
+            "No recent Builder tool calls were captured; it may be waiting on the model loop or a hidden downstream dependency.",
+        )
+
+    return (
+        "background_agent",
+        "Builder task exists in memory but no AI/tool activity has been captured yet.",
     )
 
 
 # ---------------------------------------------------------------------------
-# 7. Session End Trigger
+# Activity log extraction
+# ---------------------------------------------------------------------------
+
+_TOOL_LABELS: dict[str, str] = {
+    "bash": "Running shell command",
+    "shell": "Running shell command",
+    "write_file": "Writing file",
+    "create_file": "Creating file",
+    "read_file": "Reading file",
+    "edit_file": "Editing file",
+    "list_directory": "Listing directory",
+    "web_search": "Searching the web",
+    "web_browse": "Browsing webpage",
+    "crawl_tool": "Crawling webpage",
+    "python_repl": "Running Python",
+    "write_todos": "Updating plan",
+    "emit_builder_artifact": "Finalizing deliverable",
+}
+
+_MAX_ACTIVITY_LOG_ENTRIES = 30
+
+
+def _tool_activity_title(tool_name: str) -> str:
+    return _TOOL_LABELS.get(tool_name, tool_name.replace("_", " ").title())
+
+
+def _summarize_tool_args(tool_name: str, args: dict[str, Any] | None) -> str | None:
+    if not isinstance(args, dict):
+        return None
+
+    if tool_name in ("bash", "shell"):
+        command = args.get("command") or args.get("cmd")
+        if isinstance(command, str) and command.strip():
+            return command.strip()[:120]
+        return None
+
+    if tool_name in ("write_file", "create_file", "edit_file", "read_file"):
+        path = args.get("path") or args.get("file_path") or args.get("filename")
+        if isinstance(path, str) and path.strip():
+            return path.strip()
+        return None
+
+    if tool_name in ("web_search", "crawl_tool"):
+        query = args.get("query") or args.get("search_query")
+        if isinstance(query, str) and query.strip():
+            return query.strip()[:100]
+        return None
+
+    if tool_name == "web_browse":
+        url = args.get("url")
+        if isinstance(url, str) and url.strip():
+            return url.strip()[:120]
+        return None
+
+    if tool_name == "write_todos":
+        todos = args.get("todos")
+        if isinstance(todos, list):
+            return f"{len(todos)} items"
+        return None
+
+    if tool_name == "emit_builder_artifact":
+        title = args.get("artifact_title") or args.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()[:100]
+        return None
+
+    return None
+
+
+def _build_activity_log(result: object) -> list[dict[str, Any]]:
+    ai_messages = getattr(result, "ai_messages", None) or []
+    if not ai_messages:
+        return []
+
+    entries: list[dict[str, Any]] = []
+
+    for msg_index, message in enumerate(ai_messages):
+        if not isinstance(message, dict):
+            continue
+
+        tool_calls = message.get("tool_calls")
+        if not isinstance(tool_calls, list) or not tool_calls:
+            # AI message with text only — planning/thinking step
+            content = message.get("content")
+            if isinstance(content, str) and content.strip() and msg_index == 0:
+                entries.append({
+                    "type": "thinking",
+                    "title": "Analyzing task",
+                    "status": "done",
+                })
+            continue
+
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+
+            tool_name = tool_call.get("name")
+            if not isinstance(tool_name, str) or not tool_name:
+                continue
+
+            args = tool_call.get("args")
+            detail = _summarize_tool_args(tool_name, args if isinstance(args, dict) else None)
+
+            is_last_message = msg_index == len(ai_messages) - 1
+            is_terminal = getattr(result, "status", None) not in (None,) and (
+                hasattr(result, "status")
+                and getattr(result.status, "value", None) in ("completed", "failed", "timed_out", "cancelled")
+            )
+            status = "done" if not is_last_message or is_terminal else "running"
+
+            entry: dict[str, Any] = {
+                "type": "tool_call",
+                "title": _tool_activity_title(tool_name),
+                "tool": tool_name,
+                "status": status,
+            }
+            if detail:
+                entry["detail"] = detail
+
+            entries.append(entry)
+
+    # Keep only the most recent entries
+    return entries[-_MAX_ACTIVITY_LOG_ENTRIES:]
+
+
+def _build_task_status_debug(result: object, status_value: str, builder_result: dict | None) -> TaskStatusDebug:
+    last_summary = getattr(result, "last_ai_message_summary", None)
+    late_summary = getattr(result, "late_ai_message_summary", None)
+    message_count = len(getattr(result, "ai_messages", None) or [])
+    suspected_blocker, blocker_detail = _infer_task_blocker(
+        status_value,
+        builder_result=builder_result,
+        last_summary=last_summary,
+        late_summary=late_summary,
+        message_count=message_count,
+    )
+
+    return TaskStatusDebug(
+        last_tool_names=_task_summary_tool_names(last_summary),
+        last_has_emit_builder_artifact=(
+            bool(last_summary.get("has_emit_builder_artifact"))
+            if isinstance(last_summary, dict) and "has_emit_builder_artifact" in last_summary
+            else None
+        ),
+        late_tool_names=_task_summary_tool_names(late_summary),
+        late_has_emit_builder_artifact=(
+            bool(late_summary.get("has_emit_builder_artifact"))
+            if isinstance(late_summary, dict) and "has_emit_builder_artifact" in late_summary
+            else None
+        ),
+        timeout_observed_during_stream=bool(getattr(result, "timeout_observed_during_stream", False)),
+        timed_out_at=(
+            getattr(result, "timed_out_at", None).isoformat()
+            if getattr(result, "timed_out_at", None) is not None
+            else None
+        ),
+        final_state_present=isinstance(getattr(result, "final_state", None), dict),
+        builder_result_present=isinstance(builder_result, dict) and bool(builder_result),
+        suspected_blocker=suspected_blocker,
+        suspected_blocker_detail=blocker_detail,
+        last_shell_command=(
+            dict(getattr(result, "live_state", {}).get("last_shell_command"))
+            if isinstance(getattr(result, "live_state", None), dict)
+            and isinstance(getattr(result, "live_state", {}).get("last_shell_command"), dict)
+            else None
+        ),
+        recent_shell_commands=(
+            [
+                dict(entry)
+                for entry in getattr(result, "live_state", {}).get("recent_shell_commands", [])
+                if isinstance(entry, dict)
+            ]
+            if isinstance(getattr(result, "live_state", None), dict)
+            else []
+        ),
+    )
+
+
+def _build_task_status_detail(result: object, progress_payload: dict, builder_result: dict | None) -> str | None:
+    explicit_error = getattr(result, "error", None)
+    if isinstance(explicit_error, str) and explicit_error.strip():
+        return explicit_error.strip()
+
+    stuck_reason = progress_payload.get("stuck_reason")
+    if isinstance(stuck_reason, str) and stuck_reason.strip():
+        return stuck_reason.strip()
+
+    if isinstance(builder_result, dict):
+        companion_summary = builder_result.get("companion_summary")
+        if isinstance(companion_summary, str) and companion_summary.strip():
+            return companion_summary.strip()
+
+    result_text = getattr(result, "result", None)
+    if isinstance(result_text, str) and result_text.strip():
+        return result_text.strip()
+
+    live_state = getattr(result, "live_state", None)
+    if isinstance(live_state, dict):
+        builder_task = live_state.get("builder_task")
+        if isinstance(builder_task, dict):
+            detail = builder_task.get("detail")
+            if isinstance(detail, str) and detail.strip():
+                return detail.strip()
+
+        last_shell_command = live_state.get("last_shell_command")
+        if isinstance(last_shell_command, dict):
+            shell_error = last_shell_command.get("error")
+            if isinstance(shell_error, str) and shell_error.strip():
+                return shell_error.strip()
+
+    return None
+
+
+def _build_task_status_description(result: object, builder_result: dict | None) -> str | None:
+    for state_name in ("live_state", "final_state"):
+        state = getattr(result, state_name, None)
+        if not isinstance(state, dict):
+            continue
+
+        builder_task = state.get("builder_task")
+        if isinstance(builder_task, dict):
+            description = builder_task.get("description")
+            if isinstance(description, str) and description.strip():
+                return description.strip()
+
+    if isinstance(builder_result, dict):
+        artifact_title = builder_result.get("artifact_title")
+        if isinstance(artifact_title, str) and artifact_title.strip():
+            return artifact_title.strip()
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 7. Background Task Control
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/{user_id}/tasks/active",
+    response_model=TaskStatusResponse | None,
+    summary="Get the latest builder task for a thread (if any)",
+)
+async def get_active_task(
+    user_id: str,
+    thread_id: str | None = None,
+) -> TaskStatusResponse | None:
+    """Return the most recent in-memory builder task for *thread_id*.
+
+    The frontend calls this after a voice reconnect to discover builder tasks
+    that may have been started while the SSE stream was disconnected.
+    Returns ``null`` when no matching task exists.
+    """
+    _validate_user(user_id)
+
+    if not thread_id:
+        return None
+
+    from deerflow.subagents.executor import (
+        build_subagent_progress_payload,
+        get_latest_task_for_thread,
+    )
+
+    result = get_latest_task_for_thread(thread_id)
+    if result is None or (result.owner_id and result.owner_id != user_id):
+        return None
+
+    status_value = result.status.value
+    progress_payload = build_subagent_progress_payload(result)
+    builder_result = _extract_builder_result_from_task_result(result)
+    detail = _build_task_status_detail(result, progress_payload, builder_result)
+
+    return TaskStatusResponse(
+        task_id=result.task_id,
+        status=status_value,
+        trace_id=result.trace_id,
+        description=_build_task_status_description(result, builder_result),
+        detail=detail,
+        result=result.result,
+        error=result.error,
+        builder_result=builder_result,
+        message_count=len(result.ai_messages or []),
+        started_at=progress_payload.get("started_at"),
+        completed_at=progress_payload.get("completed_at"),
+        last_update_at=progress_payload.get("last_update_at"),
+        last_progress_at=progress_payload.get("last_progress_at"),
+        heartbeat_ms=progress_payload.get("heartbeat_ms"),
+        idle_ms=progress_payload.get("idle_ms"),
+        is_stuck=bool(progress_payload.get("is_stuck", False)),
+        stuck_reason=progress_payload.get("stuck_reason"),
+        progress_percent=progress_payload.get("progress_percent"),
+        progress_source=progress_payload.get("progress_source"),
+        total_steps=progress_payload.get("total_steps"),
+        completed_steps=progress_payload.get("completed_steps"),
+        in_progress_steps=progress_payload.get("in_progress_steps"),
+        pending_steps=progress_payload.get("pending_steps"),
+        active_step_title=progress_payload.get("active_step_title"),
+        todos=progress_payload.get("todos") or [],
+        debug=_build_task_status_debug(result, status_value, builder_result),
+        activity_log=_build_activity_log(result),
+    )
+
+@router.get(
+    "/{user_id}/tasks/{task_id}",
+    response_model=TaskStatusResponse,
+    summary="Get live status for a Sophia background task",
+)
+async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
+    _validate_user(user_id)
+
+    from deerflow.subagents.executor import (
+        build_subagent_progress_payload,
+        get_background_task_result,
+        read_background_task_status_payload,
+    )
+
+    result = get_background_task_result(task_id)
+    if result is None or (result.owner_id and result.owner_id != user_id):
+        persisted_payload = read_background_task_status_payload(user_id, task_id)
+        if persisted_payload is None:
+            raise HTTPException(status_code=404, detail="Task not found")
+        persisted_payload.pop("owner_id", None)
+        return TaskStatusResponse(**persisted_payload)
+
+    status_value = result.status.value
+    progress_payload = build_subagent_progress_payload(result)
+    builder_result = _extract_builder_result_from_task_result(result)
+    detail = _build_task_status_detail(result, progress_payload, builder_result)
+
+    return TaskStatusResponse(
+        task_id=task_id,
+        status=status_value,
+        trace_id=result.trace_id,
+        description=_build_task_status_description(result, builder_result),
+        detail=detail,
+        result=result.result,
+        error=result.error,
+        builder_result=builder_result,
+        message_count=len(result.ai_messages or []),
+        started_at=progress_payload.get("started_at"),
+        completed_at=progress_payload.get("completed_at"),
+        last_update_at=progress_payload.get("last_update_at"),
+        last_progress_at=progress_payload.get("last_progress_at"),
+        heartbeat_ms=progress_payload.get("heartbeat_ms"),
+        idle_ms=progress_payload.get("idle_ms"),
+        is_stuck=bool(progress_payload.get("is_stuck", False)),
+        stuck_reason=progress_payload.get("stuck_reason"),
+        progress_percent=progress_payload.get("progress_percent"),
+        progress_source=progress_payload.get("progress_source"),
+        total_steps=progress_payload.get("total_steps"),
+        completed_steps=progress_payload.get("completed_steps"),
+        in_progress_steps=progress_payload.get("in_progress_steps"),
+        pending_steps=progress_payload.get("pending_steps"),
+        active_step_title=progress_payload.get("active_step_title"),
+        todos=progress_payload.get("todos") or [],
+        debug=_build_task_status_debug(result, status_value, builder_result),
+        activity_log=_build_activity_log(result),
+    )
+
+@router.post(
+    "/{user_id}/tasks/{task_id}/cancel",
+    response_model=TaskCancelResponse,
+    summary="Cancel a running Sophia background task",
+)
+async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
+    _validate_user(user_id)
+
+    from deerflow.subagents.executor import cancel_background_task, get_background_task_result
+
+    result = get_background_task_result(task_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if result.owner_id and result.owner_id != user_id:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    cancelled = cancel_background_task(task_id)
+    if cancelled is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    if cancelled.status.value != "cancelled":
+        return TaskCancelResponse(
+            task_id=task_id,
+            status=cancelled.status.value,
+            detail=cancelled.error,
+        )
+
+    return TaskCancelResponse(
+        task_id=task_id,
+        status="cancelled",
+        detail=cancelled.error,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 8. Session End Trigger
 # ---------------------------------------------------------------------------
 
 @router.post(
@@ -1150,6 +1703,21 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         )
     except OSError as e:
         logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
+
+    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
+    if record is not None and record.status != "ended":
+        ended_record = _session_store.update(
+            owner_user_id,
+            body.session_id,
+            status="ended",
+            ended_at=ended_at,
+        )
+        if ended_record is None:
+            logger.warning(
+                "session.finalization failed_to_persist_session_end user_id=%s session_id=%s",
+                owner_user_id,
+                body.session_id,
+            )
 
     # Remove from inactivity tracking — session explicitly ended
     try:

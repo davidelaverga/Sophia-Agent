@@ -13,8 +13,6 @@ import { useState, useCallback } from 'react';
 
 import { AuthGate } from './AuthGate';
 import { ConsentGate } from './ConsentGate';
-import { ErrorBoundary } from './ErrorBoundary';
-import { OnboardingOrchestrator } from './onboarding/OnboardingOrchestrator';
 
 interface ProtectedRouteProps {
   children: React.ReactNode;
@@ -47,9 +45,6 @@ export function ProtectedRoute({ children, skipConsent = false }: ProtectedRoute
       {showContent && (
         <>
           {children}
-          <ErrorBoundary componentName="OnboardingOrchestrator">
-            <OnboardingOrchestrator />
-          </ErrorBoundary>
         </>
       )}
     </AuthGate>

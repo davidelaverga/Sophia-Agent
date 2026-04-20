@@ -107,7 +107,7 @@ export const CONTEXTUAL_ONBOARDING_TIPS: readonly ContextualOnboardingTipConfig[
     phase: "contextual",
     route: "/",
     target: {
-      selector: "[data-onboarding='ritual-card-suggested']",
+      selector: "[data-onboarding-contextual='ritual-card-suggested']",
       shape: "rounded-rect",
       padding: 12,
     },

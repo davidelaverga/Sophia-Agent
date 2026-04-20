@@ -214,6 +214,7 @@ describe('useRecapArtifactsLoader', () => {
 
     await flushEffects();
 
+    expect(AbortSignal.timeout).toHaveBeenCalledWith(15000);
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       '/api/memory/recent?status=pending_review&session_id=sess-memory-review&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
@@ -232,6 +233,64 @@ describe('useRecapArtifactsLoader', () => {
       }),
     );
     expect(result.current.status).toBe('ready');
+  });
+
+  it('marks the recap as reviewed when no pending candidates remain but approved memories exist in the journal', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: 'sess-reviewed',
+          started_at: '2026-03-03T19:46:00.000Z',
+          ended_at: '2026-03-03T20:00:00.000Z',
+          takeaway: 'The important part already landed.',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [],
+          count: 0,
+          fallbackApplied: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [
+            {
+              id: 'approved-memory-1',
+              text: 'User already saved the key memory from this session.',
+              category: 'lesson',
+              created_at: '2026-03-03T20:02:00.000Z',
+            },
+          ],
+          count: 1,
+          fallbackApplied: false,
+        }),
+      );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-reviewed',
+        artifacts: null,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/memory/recent?status=approved&session_id=sess-reviewed&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'sess-reviewed',
+      expect.objectContaining({ takeaway: 'The important part already landed.' }),
+    );
+    expect(result.current.status).toBe('reviewed');
   });
 
   it('hydrates stored recap artifacts that were persisted before memories arrived', async () => {
@@ -255,11 +314,18 @@ describe('useRecapArtifactsLoader', () => {
     const hydrated = await hydrateStoredArtifactsWithRecentMemories(
       {
         sessionId: 'sess-stored-artifacts',
+        threadId: 'thread-stored-artifacts',
         sessionType: 'debrief',
         contextMode: 'work',
         startedAt: '2026-03-03T19:46:00.000Z',
         endedAt: '2026-03-03T20:00:00.000Z',
         takeaway: 'The quieter plan was the real plan.',
+        builderArtifact: {
+          artifactTitle: 'Focus memo',
+          artifactType: 'document',
+          artifactPath: 'mnt/user-data/outputs/focus-memo.md',
+          decisionsMade: ['Dropped the redundant context section'],
+        },
         status: 'ready',
         memoryCandidates: [],
       },
@@ -272,7 +338,11 @@ describe('useRecapArtifactsLoader', () => {
     );
     expect(hydrated).toEqual(
       expect.objectContaining({
+        threadId: 'thread-stored-artifacts',
         takeaway: 'The quieter plan was the real plan.',
+        builderArtifact: expect.objectContaining({
+          artifactTitle: 'Focus memo',
+        }),
         memoryCandidates: [
           expect.objectContaining({
             id: 'candidate-memory-1',

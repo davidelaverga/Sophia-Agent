@@ -212,6 +212,16 @@ export async function endSession(page: Page): Promise<void> {
   await expect(confirmEndButton).toBeVisible({ timeout: 5_000 });
   await confirmEndButton.click();
 
+  const leaveAnywayButton = page.getByRole('button', { name: /leave anyway/i }).first();
+  const leaveAnywayVisible = await Promise.race([
+    leaveAnywayButton.waitFor({ state: 'visible', timeout: 4_000 }).then(() => true).catch(() => false),
+    endRequest.then(() => false).catch(() => false),
+  ]);
+
+  if (leaveAnywayVisible) {
+    await leaveAnywayButton.click({ force: true });
+  }
+
   await endRequest;
 
   const feedbackSkipButton = page.getByRole('button', { name: /^skip$/i }).first();

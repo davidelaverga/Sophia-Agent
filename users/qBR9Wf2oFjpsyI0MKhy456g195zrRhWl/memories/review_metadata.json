@@ -1,0 +1,93 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "memory_id": "local:09dd8301de8d470b2ebf2e45d498e0cdaa63516d798f2c0fe0380a05420fd8aa",
+      "content": "User is planning a trip for the week of 2026-04-24 with friends. Trip purpose is to break routine and engage in social activities (skiing, swimming, beaches) after a long time without doing group activities together.",
+      "content_hash": "09dd8301de8d470b2ebf2e45d498e0cdaa63516d798f2c0fe0380a05420fd8aa",
+      "session_id": "8919ac18-fe9c-411d-8b1a-58c318650509",
+      "metadata": {
+        "category": "commitment",
+        "importance": "potential",
+        "importance_score": 0.65,
+        "confidence": 0.95,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "target_date": "2026-04-24",
+        "tags": [
+          "travel",
+          "social",
+          "friend-group"
+        ]
+      },
+      "updated_at": "2026-04-17T02:34:06.723483+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": "local:bb5e28ec42ea1ffbebafecbf46959c89faaf530462c7226c029ea2612bd7afb3",
+      "content": "User is facing a significant work decision or event on or around 2026-04-18 that is causing ongoing stress. The decision involves uncertainty about staying in current role; user must continue showing up to work and interact with coworkers while unresolved about whether to leave.",
+      "content_hash": "bb5e28ec42ea1ffbebafecbf46959c89faaf530462c7226c029ea2612bd7afb3",
+      "session_id": "8919ac18-fe9c-411d-8b1a-58c318650509",
+      "metadata": {
+        "category": "feeling",
+        "importance": "structural",
+        "importance_score": 0.82,
+        "confidence": 0.9,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tone_estimate": -0.8,
+        "tags": [
+          "work-stress",
+          "decision-pending",
+          "role-uncertainty"
+        ]
+      },
+      "updated_at": "2026-04-17T02:34:11.668182+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": "local:e137aaab95061c4f856f1e38a092e91041d44f45415d72b3fb7a12f47f568f1d",
+      "content": "User has not taken a group trip or social outing with friends in a considerable time; work obligations have been the primary barrier to doing so.",
+      "content_hash": "e137aaab95061c4f856f1e38a092e91041d44f45415d72b3fb7a12f47f568f1d",
+      "session_id": "8919ac18-fe9c-411d-8b1a-58c318650509",
+      "metadata": {
+        "category": "pattern",
+        "importance": "potential",
+        "importance_score": 0.58,
+        "confidence": 0.85,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tags": [
+          "work-life-balance",
+          "social-withdrawal"
+        ]
+      },
+      "updated_at": "2026-04-17T02:34:11.668182+00:00",
+      "sync_state": "pending"
+    },
+    {
+      "memory_id": "local:94779965c5f0ba40f06ccf08907394721d7f4e137802f18c4da501bf77507b66",
+      "content": "User prefers to defer deep problem-solving on the work decision until after the trip; explicitly stated they want space and reset time with friends before engaging in analysis.",
+      "content_hash": "94779965c5f0ba40f06ccf08907394721d7f4e137802f18c4da501bf77507b66",
+      "session_id": "8919ac18-fe9c-411d-8b1a-58c318650509",
+      "metadata": {
+        "category": "preference",
+        "importance": "potential",
+        "importance_score": 0.72,
+        "confidence": 0.95,
+        "status": "pending_review",
+        "platform": "text",
+        "context_mode": "gaming",
+        "tags": [
+          "decision-making-style",
+          "boundary-setting"
+        ]
+      },
+      "updated_at": "2026-04-17T02:34:11.668182+00:00",
+      "sync_state": "pending"
+    }
+  ]
+}

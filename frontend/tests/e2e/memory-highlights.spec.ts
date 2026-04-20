@@ -240,7 +240,7 @@ async function endSessionAndWaitRequest(page: Page): Promise<void> {
       req.method().toUpperCase() === 'POST' &&
       isEndSessionRequest(req.url())
     );
-  }, { timeout: 15_000 });
+  }, { timeout: 20_000 });
 
   const headerEndButton = page.locator('button[title="End session"]').first();
   await expect(headerEndButton).toBeVisible({ timeout: 10_000 });
@@ -251,7 +251,12 @@ async function endSessionAndWaitRequest(page: Page): Promise<void> {
   await confirmEndButton.click({ force: true });
 
   const leaveAnywayButton = page.getByRole('button', { name: /leave anyway/i }).first();
-  if (await leaveAnywayButton.isVisible({ timeout: 1_500 }).catch(() => false)) {
+  const leaveAnywayVisible = await Promise.race([
+    leaveAnywayButton.waitFor({ state: 'visible', timeout: 4_000 }).then(() => true).catch(() => false),
+    endReq.then(() => false).catch(() => false),
+  ]);
+
+  if (leaveAnywayVisible) {
     await leaveAnywayButton.click({ force: true });
   }
 

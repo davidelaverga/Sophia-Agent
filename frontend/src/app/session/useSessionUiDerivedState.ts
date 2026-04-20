@@ -3,12 +3,16 @@ import { useMemo } from 'react';
 import type { UIMessage } from '../components/session';
 import type { RitualArtifacts } from '../lib/session-types';
 import { getPresenceDisplay, getContextualPlaceholder } from '../lib/sophia-presence';
+import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { ContextMode, PresetType } from '../types/session';
 
 interface UseSessionUiDerivedStateParams {
   isTyping: boolean;
   messages: UIMessage[];
   artifacts: RitualArtifacts | null;
+  builderArtifact?: BuilderArtifactV1 | null;
+  hasBuilderArtifactLibrary?: boolean;
+  isBuilderRunning?: boolean;
   isStreaming: boolean;
   isReflectionVoiceFlowActive: boolean;
   userOpenedArtifacts: boolean;
@@ -22,6 +26,9 @@ export function useSessionUiDerivedState({
   isTyping,
   messages,
   artifacts,
+  builderArtifact,
+  hasBuilderArtifactLibrary = false,
+  isBuilderRunning = false,
   isStreaming,
   isReflectionVoiceFlowActive,
   userOpenedArtifacts,
@@ -35,8 +42,8 @@ export function useSessionUiDerivedState({
     const takeaway = artifacts?.takeaway?.trim();
     const reflection = artifacts?.reflection_candidate?.prompt?.trim();
     const memoriesCount = artifacts?.memory_candidates?.length ?? 0;
-    return Boolean(takeaway || reflection || memoriesCount > 0);
-  }, [artifacts]);
+    return Boolean(builderArtifact || hasBuilderArtifactLibrary || takeaway || reflection || memoriesCount > 0);
+  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
 
   const isVoiceThinking = voiceStatus === 'thinking';
   const showThinkingIndicator = (isTyping || isVoiceThinking) && !isReflectionTtsActive;
@@ -71,11 +78,12 @@ export function useSessionUiDerivedState({
 
   const isSophiaResponding = useMemo(() => {
     return !isReflectionVoiceFlowActive && (
+      isBuilderRunning ||
       isStreaming ||
       voiceStatus === 'thinking' ||
       (voiceStatus === 'speaking' && !isReflectionTtsActive)
     );
-  }, [isReflectionVoiceFlowActive, isStreaming, voiceStatus, isReflectionTtsActive]);
+  }, [isBuilderRunning, isReflectionVoiceFlowActive, isStreaming, voiceStatus, isReflectionTtsActive]);
 
   const exitProtectionResponseMode = useMemo<'text' | 'voice'>(() => {
     if (isStreaming) return 'text';

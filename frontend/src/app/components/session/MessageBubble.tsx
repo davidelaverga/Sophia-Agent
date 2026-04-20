@@ -11,10 +11,10 @@
 'use client';
 
 import { Sparkles, Clock, Mic, Volume2 } from 'lucide-react';
-import { useState, useEffect, useMemo } from 'react';
+import { memo, useEffect, useMemo, useState } from 'react';
 
 import { humanizeTime } from '../../lib/humanize-time';
-import { parseInlineMarkdown } from '../../lib/parse-inline-markdown';
+import { hasMarkdown, parseInlineMarkdown } from '../../lib/parse-inline-markdown';
 import type { SessionMessage } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
 import type { FeedbackType } from '../../types/sophia-ui-message';
@@ -54,7 +54,7 @@ interface MessageBubbleProps {
 // COMPONENT
 // ============================================================================
 
-export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
+function MessageBubbleComponent({ message, isLatest }: MessageBubbleProps) {
   const [isVisible, setIsVisible] = useState(!message.isNew);
   
   useEffect(() => {
@@ -72,9 +72,12 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
   
   // Parse markdown content for Sophia messages
   const renderedContent = useMemo(() => {
-    if (isUser) return message.content;
+    if (isUser || isIncomplete || !hasMarkdown(message.content)) {
+      return message.content;
+    }
+
     return parseInlineMarkdown(message.content);
-  }, [isUser, message.content]);
+  }, [isIncomplete, isUser, message.content]);
   
   // Format timestamp for display - humanized
   const timeInfo = useMemo(() => {
@@ -124,11 +127,11 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
           'max-w-[85%] sm:max-w-[75%] p-4 rounded-2xl relative group min-w-0',
           isUser
             ? cn(
-                'border',
+                'border sophia-bubble-user',
                 isQueued && 'border-dashed opacity-70'
               )
             : cn(
-                'border font-light'
+                'border font-light sophia-bubble-assistant'
               ),
           // Subtle glow for assistant's latest message
           !isUser && isLatest && 'shadow-[0_0_24px_var(--cosmic-border-soft)]',
@@ -205,3 +208,22 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
     </div>
   );
 }
+
+function areMessageBubblePropsEqual(prev: MessageBubbleProps, next: MessageBubbleProps) {
+  return (
+    prev.isLatest === next.isLatest &&
+    prev.message.id === next.message.id &&
+    prev.message.role === next.message.role &&
+    prev.message.content === next.message.content &&
+    prev.message.createdAt === next.message.createdAt &&
+    prev.message.isNew === next.message.isNew &&
+    prev.message.incomplete === next.message.incomplete &&
+    prev.message.feedback === next.message.feedback &&
+    prev.message.voiceTranscript === next.message.voiceTranscript &&
+    prev.message.voiceResponse === next.message.voiceResponse &&
+    (prev.message.meta?.queued === true) === (next.message.meta?.queued === true)
+  );
+}
+
+export const MessageBubble = memo(MessageBubbleComponent, areMessageBubblePropsEqual);
+MessageBubble.displayName = 'MessageBubble';

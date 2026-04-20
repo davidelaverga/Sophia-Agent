@@ -37,7 +37,8 @@ class SessionStateState(AgentState):
     # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
     # ``messages`` with the ``add_messages`` reducer; shadowing it with a plain
     # ``list`` downgrades the channel to ``LastValue`` and makes parallel tool
-    # calls crash with ``InvalidUpdateError``.
+    # calls crash with ``InvalidUpdateError`` (see
+    # ``tests/test_sophia_state_schema_invariants.py``).
 
 
 class SessionStateMiddleware(AgentMiddleware[SessionStateState]):

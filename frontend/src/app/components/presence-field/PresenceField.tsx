@@ -2,9 +2,9 @@
 
 import { useRef, useEffect, useCallback, useImperativeHandle, type Ref } from "react"
 
-import { useDeviceFidelity } from "../../hooks/useDeviceFidelity"
 import { useEmotionColor } from "../../hooks/useEmotionColor"
 import { useExpression, type ExpressionParams } from "../../hooks/useExpression"
+import { useVisualTier } from "../../hooks/useVisualTier"
 import { usePresenceStore } from "../../stores/presence-store"
 
 import { useNebulaCanvas } from "./NebulaCanvas"
@@ -32,7 +32,7 @@ export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
   const mouseRef = useRef({ x: 0.5, y: 0.5 })
 
   // Device fidelity (R43, R44, R45)
-  const { reducedFidelity, reducedMotion, dprCap } = useDeviceFidelity()
+  const { reducedFidelity, reducedMotion, dprCap } = useVisualTier()
 
   // Stores
   const presenceState = usePresenceStore((s) => s.status)
