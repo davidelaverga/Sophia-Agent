@@ -13,6 +13,7 @@ the real implementation in isolation.
 """
 
 import asyncio
+import logging
 import sys
 import threading
 from datetime import datetime
@@ -572,6 +573,73 @@ class TestSyncExecutionPath:
         assert "Asyncio run error" in result.error
         assert result.completed_at is not None
 
+    def test_execute_classifies_event_loop_closed_runtime_error(self, classes, base_config, caplog):
+        """``execute()`` must record EventLoopClosed without a full traceback.
+
+        Reproduces the Render failure mode in which one subagent's event
+        loop closes while another's async cleanup is still in flight. The
+        outer ``execute()`` wrapper must classify this explicitly so
+        operators can grep ``error_type=EventLoopClosed`` instead of sifting
+        through generic ``FAILED`` records.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_aexecute") as mock_aexecute:
+            mock_aexecute.side_effect = RuntimeError("Event loop is closed")
+            with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+                result = executor.execute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error_type == "EventLoopClosed"
+        assert "Event loop closed" in (result.error or "")
+        # logger.warning must be used — logger.exception would have logged a
+        # traceback that we explicitly want to suppress.
+        assert any(
+            record.levelno == logging.WARNING
+            and "Event loop is closed" in record.getMessage()
+            for record in caplog.records
+        )
+        assert all(record.levelno != logging.ERROR for record in caplog.records)
+
+    @pytest.mark.anyio
+    async def test_aexecute_classifies_event_loop_closed_runtime_error(self, classes, base_config, mock_agent, msg, caplog):
+        """``_aexecute()`` must classify RuntimeError('Event loop is closed')
+        distinctly from ordinary subagent exceptions.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        def _raise_loop_closed(*args, **kwargs):
+            raise RuntimeError("Event loop is closed")
+
+        mock_agent.astream = _raise_loop_closed
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+                result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error_type == "EventLoopClosed"
+        assert "Event loop closed" in (result.error or "")
+        assert any(
+            record.levelno == logging.WARNING
+            and "Event loop is closed" in record.getMessage()
+            for record in caplog.records
+        )
+
     def test_execute_with_result_holder(self, classes, base_config, mock_agent, msg):
         """Test execute() updates provided result_holder in real-time."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -604,6 +672,86 @@ class TestSyncExecutionPath:
         assert result is result_holder
         assert result.task_id == "predefined-id"
         assert result.status == SubagentStatus.COMPLETED
+
+
+class TestLongIterationTelemetry:
+    """``_aexecute`` must record long-iteration telemetry when a single
+    streaming iteration exceeds ``_ITERATION_SOFT_CAP_MS``.
+
+    Guards against silent ``write_file_tool`` loops that push an individual
+    builder subagent past its overall timeout without any visible signal
+    before the task's final status.
+    """
+
+    @pytest.mark.anyio
+    async def test_long_iteration_counter_increments(self, classes, base_config, mock_agent, msg, caplog, monkeypatch):
+        from deerflow.subagents import executor as executor_module
+
+        # Reduce the soft cap so the test does not need to fake a 90s sleep.
+        monkeypatch.setattr(executor_module, "_ITERATION_SOFT_CAP_MS", 5)
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        AIMessage = classes["AIMessage"]
+
+        slow_message = AIMessage(
+            content="Huge write",
+            tool_calls=[{"id": "tc-write", "name": "write_file_tool", "args": {"path": "/x"}}],
+        )
+        chunk_with_write = {"messages": [msg.human("Task"), slow_message]}
+        chunk_final = {"messages": [msg.human("Task"), slow_message, msg.ai("Done", "msg-final")]}
+
+        async def slow_stream(*args, **kwargs):
+            # First yield is fast; the gap before the second yield exceeds
+            # the (monkeypatched) soft cap and must be detected.
+            yield chunk_with_write
+            await asyncio.sleep(0.02)
+            yield chunk_final
+
+        mock_agent.astream = slow_stream
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+                result = await executor._aexecute("Task")
+
+        assert result.long_iteration_count >= 1
+        assert result.last_long_iteration_ms >= 5
+        assert "write_file_tool" in (result.last_long_iteration_tools or [])
+        assert any(
+            "exceeded soft cap" in record.getMessage() for record in caplog.records
+        )
+
+
+class TestRuntimeDirectoryBootstrap:
+    """``_ensure_runtime_directories`` must create the LangGraph/persistence
+    directories at import time to prevent recurring ``FileNotFoundError``
+    noise from masking real failures in production logs.
+    """
+
+    def test_ensure_runtime_directories_creates_override_dir(self, classes, tmp_path, monkeypatch):
+        from deerflow.subagents.executor import _ensure_runtime_directories
+
+        override_dir = tmp_path / "langgraph_api_test"
+        monkeypatch.setenv("LANGGRAPH_API_DIR", str(override_dir))
+
+        assert not override_dir.exists()
+        _ensure_runtime_directories()
+        assert override_dir.exists() and override_dir.is_dir()
+
+    def test_ensure_runtime_directories_is_idempotent(self, classes, tmp_path, monkeypatch):
+        from deerflow.subagents.executor import _ensure_runtime_directories
+
+        override_dir = tmp_path / "langgraph_api_repeat"
+        monkeypatch.setenv("LANGGRAPH_API_DIR", str(override_dir))
+
+        _ensure_runtime_directories()
+        _ensure_runtime_directories()  # second call must not raise
+        assert override_dir.exists()
 
 
 class TestTaskStatusPayload:

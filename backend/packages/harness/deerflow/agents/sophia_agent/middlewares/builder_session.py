@@ -21,19 +21,45 @@ from deerflow.subagents.executor import (
     build_subagent_progress_payload,
     cleanup_background_task,
     get_background_task_result,
+    get_latest_task_for_thread,
+    read_background_task_status_payload,
 )
 
-_NON_TERMINAL_STATUSES = {"queued", "running", "started"}
+_NON_TERMINAL_STATUSES = {"pending", "queued", "running", "started"}
 _TERMINAL_STATUSES = {"completed", "synthesized", "failed", "timed_out"}
+
+# Snapshot progress fields copied into ``builder_task`` when we recover a
+# terminal state from the on-disk status payload (the in-memory task was
+# cleaned up or lost on worker restart).
+_SNAPSHOT_PROGRESS_FIELDS = (
+    "completed_at",
+    "last_update_at",
+    "last_progress_at",
+    "progress_percent",
+    "progress_source",
+    "total_steps",
+    "completed_steps",
+    "in_progress_steps",
+    "pending_steps",
+    "active_step_title",
+    "todos",
+    "debug",
+)
 
 
 class BuilderSessionState(AgentState):
-    messages: NotRequired[list]
+    # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
+    # ``messages`` with the ``add_messages`` reducer; shadowing it with a plain
+    # ``list`` downgrades the LangGraph channel to ``LastValue`` via
+    # ``langchain.agents.create_agent``'s set-based schema merge and makes
+    # parallel tool calls crash with ``InvalidUpdateError``. The guard in
+    # ``tests/test_sophia_state_schema_invariants.py`` enforces this.
     active_mode: NotRequired[str]
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
     system_prompt_blocks: NotRequired[list[str]]
+    user_id: NotRequired[str]
 
 
 class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
@@ -269,6 +295,53 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
         fields.extend(cls._task_log_fields(task))
         return " ".join(fields)
 
+    @staticmethod
+    def _resolve_thread_id(runtime: Runtime) -> str | None:
+        """Read thread_id from runtime.context or runtime.config.configurable."""
+        try:
+            context_thread = runtime.context.get("thread_id") if runtime.context else None
+        except Exception:
+            context_thread = None
+        if isinstance(context_thread, str) and context_thread:
+            return context_thread
+        try:
+            config = getattr(runtime, "config", None) or {}
+            configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+            config_thread = configurable.get("thread_id") if isinstance(configurable, dict) else None
+        except Exception:
+            config_thread = None
+        if isinstance(config_thread, str) and config_thread:
+            return config_thread
+        return None
+
+    def _hydrate_task_from_executor(self, thread_id: str | None) -> dict[str, Any] | None:
+        """Return a ``builder_task`` dict from ``_background_tasks`` if any
+        non-terminal task exists for the thread.
+
+        Used as a fallback when ``state['builder_task']`` is empty but the
+        executor still has an in-flight task for the same thread (Render
+        failure mode: companion state lost the task on a worker cycle while
+        the subagent continued running).
+        """
+        if not thread_id:
+            return None
+        result = get_latest_task_for_thread(thread_id)
+        if result is None:
+            return None
+        status = getattr(result, "status", None)
+        status_value = getattr(status, "value", status) if status is not None else None
+        if status_value not in _NON_TERMINAL_STATUSES:
+            return None
+        started_at = getattr(result, "started_at", None)
+        return {
+            "task_id": result.task_id,
+            "description": getattr(result, "description", None),
+            "task_type": None,
+            "delegated_at": started_at.isoformat() if started_at else None,
+            "status": status_value,
+            "trace_id": result.trace_id,
+        }
+
     @override
     def before_agent(self, state: BuilderSessionState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
@@ -280,6 +353,23 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
         existing_task = state.get("builder_task") or {}
         new_handoff_adopted = False
         background_task_missing = False
+
+        # Executor-level fallback: when the companion graph has no tracked
+        # builder_task AND no fresh handoff payload, consult the process-wide
+        # ``_background_tasks`` store. This catches the Render failure mode
+        # where the companion state lost its builder_task (worker cycle,
+        # summarization, cross-process restart) while the subagent is still
+        # running on the same thread. Adopting the discovered task here
+        # re-enables the existing in-progress-block injection path below and
+        # lets the switch_to_builder tool guard fire without needing its own
+        # fallback code path.
+        if not payload and not existing_task:
+            thread_id = self._resolve_thread_id(runtime)
+            hydrated = self._hydrate_task_from_executor(thread_id)
+            if hydrated is not None:
+                updates["builder_task"] = hydrated
+                existing_task = hydrated
+                new_handoff_adopted = True
 
         if payload:
             payload_task = payload.get("builder_task") or {}
@@ -322,14 +412,61 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
 
             if result is None:
                 background_task_missing = True
-                failed_task = {
-                    **current_task,
-                    "status": "failed",
-                    "error": "Builder task state disappeared before completion.",
-                }
-                updates["builder_task"] = failed_task
-                updates["active_mode"] = "companion"
-                blocks.append(self._failure_block(failed_task))
+                # Fall back to the on-disk snapshot the executor persists on
+                # every progress tick and every terminal transition. The
+                # in-memory _background_tasks dict is cleared on worker
+                # restart and after post-terminal cleanup, so an absence
+                # there does not mean the task never finished. Using the
+                # snapshot lets the companion surface the real terminal
+                # state (e.g. failed with a specific error, or completed
+                # with a builder_result) instead of a blanket
+                # "task state disappeared" notice.
+                snapshot_user_id = state.get("user_id")
+                snapshot_payload = (
+                    read_background_task_status_payload(snapshot_user_id, task_id)
+                    if snapshot_user_id and task_id
+                    else None
+                )
+                recovered_from_snapshot = False
+                if (
+                    isinstance(snapshot_payload, dict)
+                    and isinstance(snapshot_payload.get("status"), str)
+                    and snapshot_payload.get("status")
+                ):
+                    snap_status = str(snapshot_payload["status"])
+                    recovered_task: dict[str, Any] = {
+                        **current_task,
+                        "status": snap_status,
+                    }
+                    snap_error = snapshot_payload.get("error")
+                    if isinstance(snap_error, str) and snap_error:
+                        recovered_task["error"] = snap_error
+                    elif snap_status != "completed":
+                        recovered_task["error"] = (
+                            "Builder task state disappeared before completion."
+                        )
+                    for snap_key in _SNAPSHOT_PROGRESS_FIELDS:
+                        snap_value = snapshot_payload.get(snap_key)
+                        if snap_value is not None:
+                            recovered_task[snap_key] = snap_value
+                    updates["builder_task"] = recovered_task
+                    updates["active_mode"] = "companion"
+                    snap_builder_result = snapshot_payload.get("builder_result")
+                    if snap_status == "completed" and isinstance(snap_builder_result, dict):
+                        updates["builder_result"] = snap_builder_result
+                    if snap_status != "completed":
+                        blocks.append(self._failure_block(recovered_task))
+                    recovered_from_snapshot = True
+
+                if not recovered_from_snapshot:
+                    failed_task = {
+                        **current_task,
+                        "status": "failed",
+                        "error": "Builder task state disappeared before completion.",
+                    }
+                    updates["builder_task"] = failed_task
+                    updates["active_mode"] = "companion"
+                    blocks.append(self._failure_block(failed_task))
             else:
                 mapped_status = self._status_from_result(result)
                 progress_payload = build_subagent_progress_payload(result)

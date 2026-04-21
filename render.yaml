@@ -13,12 +13,31 @@ services:
     dockerContext: .
     plan: standard
     region: oregon
+    numInstances: 1
     healthCheckPath: /ok
+    # Render persistent disks are scoped to a single service; this disk only
+    # backs the LangGraph service's own DEER_FLOW_HOME state.
+    disk:
+      name: sophia-langgraph-state
+      mountPath: /var/lib/deerflow
+      sizeGB: 10
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: JINA_API_KEY
+        sync: false
       - key: MEM0_API_KEY
         sync: false
+      - key: LANGGRAPH_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: DEER_FLOW_HOME
+        value: /var/lib/deerflow
       - key: LANGCHAIN_TRACING_V2
         value: "false"
 
@@ -32,9 +51,20 @@ services:
     dockerContext: .
     plan: starter
     region: oregon
+    numInstances: 1
     healthCheckPath: /health
+    # This disk is separate from sophia-langgraph-state, so channel media that
+    # must reach LangGraph cannot rely on cross-service local file visibility.
+    disk:
+      name: sophia-gateway-state
+      mountPath: /var/lib/deerflow
+      sizeGB: 10
     envVars:
       - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: JINA_API_KEY
         sync: false
       - key: MEM0_API_KEY
         sync: false
@@ -44,7 +74,13 @@ services:
         sync: false
       - key: LANGGRAPH_URL
         sync: false
-      - key: SOPHIA_VOICE_SERVER_URL
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_USERNAME
+        sync: false
+      - key: DEER_FLOW_HOME
+        value: /var/lib/deerflow
+      - key: VOICE_SERVER_URL
         sync: false
 
   # ─────────────────────────────────────────────────────────────────

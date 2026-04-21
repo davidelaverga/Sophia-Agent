@@ -3,14 +3,29 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 import mimetypes
 import time
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
+import httpx
+
+from app.channels.base import InboundFileReader
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from app.channels.session_resolver import resolve_channel_session
 from app.channels.store import ChannelStore
+from deerflow.config.paths import get_paths
+from deerflow.sophia.tools.builder_delivery import (
+    build_builder_delivery_payload,
+    extract_builder_artifact_paths,
+)
+from deerflow.subagents.executor import get_background_task_result
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +40,97 @@ DEFAULT_RUN_CONTEXT: dict[str, Any] = {
     "subagent_enabled": False,
 }
 STREAM_UPDATE_MIN_INTERVAL_SECONDS = 0.35
+THREAD_BUSY_MESSAGE = "I’m still working on your previous message in this chat. Please wait a moment and try again."
+BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS = 2.0
+BUILDER_NOTIFIER_MAX_WAIT_SECONDS = 20 * 60
+_UPLOADS_VIRTUAL_PREFIX = "/mnt/user-data/uploads/"
+_TELEGRAM_INLINE_IMAGE_MIME_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+_TELEGRAM_TEXT_LIKE_MIME_TYPES = {
+    "application/csv",
+    "application/javascript",
+    "application/json",
+    "application/sql",
+    "application/xml",
+    "application/x-javascript",
+    "application/x-yaml",
+    "application/yaml",
+    "image/svg+xml",
+}
+_TELEGRAM_TEXT_LIKE_EXTENSIONS = {
+    ".cjs",
+    ".css",
+    ".csv",
+    ".html",
+    ".htm",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".markdown",
+    ".mjs",
+    ".py",
+    ".sql",
+    ".svg",
+    ".ts",
+    ".tsx",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+_TELEGRAM_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+_TELEGRAM_INLINE_PDF_MAX_BYTES = 10 * 1024 * 1024
+_TELEGRAM_INLINE_TEXT_MAX_CHARS = 60_000
+
+# Terminal statuses the builder notifier treats as "run is over, send closure
+# to the user". ``cancelled`` is explicitly included so that task-cancel calls
+# (from gateway cancel endpoints or runtime cancellation) always surface a
+# user-facing message instead of leaving Telegram silent.
+_TERMINAL_BUILDER_STATUSES = {"completed", "failed", "timed_out", "cancelled"}
+
+_THREAD_MISSING_HINTS = ("thread", "assistant")
+
+
+def _is_thread_missing_error(exc: httpx.HTTPStatusError) -> bool:
+    """Return True when a LangGraph SDK error reports a missing thread/assistant.
+
+    The LangGraph server returns a 404 with a JSON body like
+    ``{"detail": "Thread or assistant not found."}`` after its thread store is
+    wiped (e.g. after a redeploy that uses the in-memory runtime). We guard the
+    self-heal behind the exact shape so we never retry legitimate 404s.
+    """
+    response = getattr(exc, "response", None)
+    if response is None or response.status_code != 404:
+        return False
+
+    detail: str | None = None
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, Mapping):
+        raw_detail = payload.get("detail")
+        if isinstance(raw_detail, str):
+            detail = raw_detail
+
+    if detail is None:
+        try:
+            detail = response.text
+        except Exception:
+            detail = None
+
+    if not isinstance(detail, str) or not detail:
+        return False
+
+    detail_lower = detail.lower()
+    return "not found" in detail_lower and any(hint in detail_lower for hint in _THREAD_MISSING_HINTS)
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -229,6 +335,138 @@ def _format_artifact_text(artifacts: list[str]) -> str:
     return "Created Files: 📎 " + "、".join(filenames)
 
 
+def _human_file_size(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _build_uploaded_files_block(uploaded_files: list[dict[str, Any]]) -> str:
+    if not uploaded_files:
+        return ""
+    lines = [
+        "<uploaded_files>",
+        "The following files were uploaded in this message:",
+        "",
+    ]
+    for file_info in uploaded_files:
+        filename = str(file_info.get("filename", "uploaded_file"))
+        size = int(file_info.get("size", 0) or 0)
+        virtual_path = str(file_info.get("virtual_path", ""))
+        lines.append(f"- {filename} ({_human_file_size(size)})")
+        lines.append(f"  Path: {virtual_path}")
+        lines.append("")
+    lines.append("Use `read_file` for file contents and `view_image` for image analysis when needed.")
+    lines.append("</uploaded_files>")
+    return "\n".join(lines)
+
+
+def _compose_inbound_content(text: str, uploaded_files: list[dict[str, Any]]) -> str:
+    upload_block = _build_uploaded_files_block(uploaded_files)
+    if not upload_block:
+        return text
+    if text:
+        return f"{upload_block}\n\n{text}"
+    return upload_block
+
+
+def _extract_builder_handoff_task(result: dict | list) -> tuple[str | None, str | None]:
+    if isinstance(result, list):
+        messages = result
+    elif isinstance(result, dict):
+        messages = result.get("messages", [])
+    else:
+        return None, None
+
+    for msg in reversed(messages):
+        if not isinstance(msg, dict):
+            continue
+        if msg.get("type") == "human":
+            break
+        if msg.get("type") != "tool":
+            continue
+        if msg.get("name") != "switch_to_builder":
+            continue
+        content = msg.get("content", "")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") != "builder_handoff":
+            continue
+        task_id = payload.get("task_id")
+        status = payload.get("status")
+        if isinstance(task_id, str) and task_id:
+            return task_id, status if isinstance(status, str) else None
+    return None, None
+
+
+def _to_builder_status(value: Any) -> str:
+    status_value = getattr(value, "value", value)
+    return str(status_value).strip().lower()
+
+
+def _extract_builder_result_payload(task_result: Any) -> dict[str, Any] | None:
+    final_state = getattr(task_result, "final_state", None)
+    if isinstance(final_state, dict):
+        builder_result = final_state.get("builder_result")
+        if isinstance(builder_result, dict):
+            return builder_result
+
+    ai_messages = getattr(task_result, "ai_messages", None)
+    if isinstance(ai_messages, list):
+        for msg in reversed(ai_messages):
+            if not isinstance(msg, dict):
+                continue
+            tool_calls = msg.get("tool_calls", [])
+            if not isinstance(tool_calls, list):
+                continue
+            for tool_call in reversed(tool_calls):
+                if not isinstance(tool_call, dict):
+                    continue
+                if tool_call.get("name") != "emit_builder_artifact":
+                    continue
+                args = tool_call.get("args")
+                if isinstance(args, dict):
+                    return args
+    return None
+
+
+
+def _extract_builder_artifacts(builder_result: dict[str, Any]) -> list[str]:
+    return extract_builder_artifact_paths(builder_result)
+
+
+def _extract_builder_delivery(result: dict | list) -> dict[str, Any] | None:
+    if not isinstance(result, dict):
+        return None
+    builder_delivery = result.get("builder_delivery")
+    return builder_delivery if isinstance(builder_delivery, dict) else None
+
+
+def _extract_builder_delivery_artifacts(builder_delivery: dict[str, Any]) -> list[str]:
+    attachments = builder_delivery.get("attachments")
+    if not isinstance(attachments, list):
+        return []
+    artifacts: list[str] = []
+    seen: set[str] = set()
+    for attachment in attachments:
+        if not isinstance(attachment, Mapping):
+            continue
+        virtual_path = attachment.get("virtual_path")
+        if not isinstance(virtual_path, str) or not virtual_path or virtual_path in seen:
+            continue
+        seen.add(virtual_path)
+        artifacts.append(virtual_path)
+    return artifacts
+
+
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
@@ -281,18 +519,93 @@ def _resolve_attachments(thread_id: str, artifacts: list[str]) -> list[ResolvedA
     return attachments
 
 
+def _materialize_builder_delivery(thread_id: str, builder_delivery: dict[str, Any]) -> list[ResolvedAttachment]:
+    attachments_payload = builder_delivery.get("attachments")
+    if not isinstance(attachments_payload, list):
+        return []
+
+    paths = get_paths()
+    paths.ensure_thread_dirs(thread_id)
+    outputs_dir = paths.sandbox_outputs_dir(thread_id).resolve()
+    attachments: list[ResolvedAttachment] = []
+
+    for index, payload in enumerate(attachments_payload, start=1):
+        if not isinstance(payload, Mapping):
+            continue
+
+        content_base64 = payload.get("content_base64")
+        if not isinstance(content_base64, str) or not content_base64:
+            continue
+
+        try:
+            content = base64.b64decode(content_base64.encode("ascii"), validate=True)
+        except (ValueError, binascii.Error):
+            logger.warning("[Manager] invalid builder delivery payload for thread=%s", thread_id, exc_info=True)
+            continue
+
+        raw_virtual_path = payload.get("virtual_path")
+        virtual_path = raw_virtual_path if isinstance(raw_virtual_path, str) and raw_virtual_path else None
+
+        filename = payload.get("filename")
+        if not isinstance(filename, str) or not filename.strip():
+            filename = Path(virtual_path).name if virtual_path else f"builder_output_{index}"
+
+        mime_type = payload.get("mime_type")
+        if not isinstance(mime_type, str) or not mime_type:
+            mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+        is_image = payload.get("is_image")
+        if not isinstance(is_image, bool):
+            is_image = mime_type.startswith("image/")
+
+        try:
+            if virtual_path and virtual_path.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+                actual_path = paths.resolve_virtual_path(thread_id, virtual_path)
+                actual_path.resolve().relative_to(outputs_dir)
+            else:
+                safe_filename = ChannelManager._make_safe_upload_filename(filename, index)
+                actual_path = ChannelManager._reserve_upload_path(outputs_dir, safe_filename)
+                virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{actual_path.name}"
+        except ValueError:
+            safe_filename = ChannelManager._make_safe_upload_filename(filename, index)
+            actual_path = ChannelManager._reserve_upload_path(outputs_dir, safe_filename)
+            virtual_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{actual_path.name}"
+
+        actual_path.parent.mkdir(parents=True, exist_ok=True)
+        actual_path.write_bytes(content)
+
+        attachments.append(
+            ResolvedAttachment(
+                virtual_path=virtual_path,
+                actual_path=actual_path,
+                filename=filename,
+                mime_type=mime_type,
+                size=len(content),
+                is_image=is_image,
+            )
+        )
+    return attachments
+
+
 def _prepare_artifact_delivery(
     thread_id: str,
     response_text: str,
     artifacts: list[str],
+    *,
+    builder_delivery: dict[str, Any] | None = None,
 ) -> tuple[str, list[ResolvedAttachment]]:
     """Resolve attachments and append filename fallbacks to the text response."""
     attachments: list[ResolvedAttachment] = []
-    if not artifacts:
+    if builder_delivery:
+        attachments.extend(_materialize_builder_delivery(thread_id, builder_delivery))
+    if not artifacts and not attachments:
         return response_text, attachments
 
-    attachments = _resolve_attachments(thread_id, artifacts)
     resolved_virtuals = {attachment.virtual_path for attachment in attachments}
+    unresolved_artifacts = [path for path in artifacts if path not in resolved_virtuals]
+    if unresolved_artifacts:
+        attachments.extend(_resolve_attachments(thread_id, unresolved_artifacts))
+        resolved_virtuals = {attachment.virtual_path for attachment in attachments}
     unresolved = [path for path in artifacts if path not in resolved_virtuals]
 
     if unresolved:
@@ -327,6 +640,8 @@ class ChannelManager:
         assistant_id: str = DEFAULT_ASSISTANT_ID,
         default_session: dict[str, Any] | None = None,
         channel_sessions: dict[str, Any] | None = None,
+        session_resolver: Any | None = None,
+        inbound_file_readers: dict[str, InboundFileReader] | None = None,
     ) -> None:
         self.bus = bus
         self.store = store
@@ -336,8 +651,12 @@ class ChannelManager:
         self._assistant_id = assistant_id
         self._default_session = _as_dict(default_session)
         self._channel_sessions = dict(channel_sessions or {})
+        self._session_resolver = session_resolver or resolve_channel_session
+        self._inbound_file_readers: dict[str, InboundFileReader] = dict(inbound_file_readers or {})
         self._client = None  # lazy init — langgraph_sdk async client
         self._semaphore: asyncio.Semaphore | None = None
+        self._conversation_locks: dict[str, asyncio.Lock] = {}
+        self._builder_notifier_tasks: dict[str, asyncio.Task] = {}
         self._running = False
         self._task: asyncio.Task | None = None
 
@@ -349,8 +668,20 @@ class ChannelManager:
 
     def _resolve_run_params(self, msg: InboundMessage, thread_id: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
         channel_layer, user_layer = self._resolve_session_layer(msg)
+        dynamic_layer: dict[str, Any] = {}
+        if self._session_resolver:
+            try:
+                dynamic_layer = _as_dict(self._session_resolver(msg, thread_id))
+            except Exception:
+                logger.warning("[Manager] session_resolver failed for channel=%s chat_id=%s", msg.channel_name, msg.chat_id, exc_info=True)
 
-        assistant_id = user_layer.get("assistant_id") or channel_layer.get("assistant_id") or self._default_session.get("assistant_id") or self._assistant_id
+        assistant_id = (
+            dynamic_layer.get("assistant_id")
+            or user_layer.get("assistant_id")
+            or channel_layer.get("assistant_id")
+            or self._default_session.get("assistant_id")
+            or self._assistant_id
+        )
         if not isinstance(assistant_id, str) or not assistant_id.strip():
             assistant_id = self._assistant_id
 
@@ -359,6 +690,7 @@ class ChannelManager:
             self._default_session.get("config"),
             channel_layer.get("config"),
             user_layer.get("config"),
+            dynamic_layer.get("config"),
         )
 
         run_context = _merge_dicts(
@@ -366,10 +698,215 @@ class ChannelManager:
             self._default_session.get("context"),
             channel_layer.get("context"),
             user_layer.get("context"),
+            dynamic_layer.get("context"),
             {"thread_id": thread_id},
         )
 
+        # LangGraph API ≥0.6 rejects requests containing both configurable
+        # and context.  When configurable is present, fold context into it so
+        # the caller can omit the separate context parameter.
+        if isinstance(run_config.get("configurable"), Mapping):
+            run_config["configurable"] = dict(run_config["configurable"])
+            for key, value in run_context.items():
+                run_config["configurable"].setdefault(key, value)
+            run_context = {}
+
         return assistant_id, run_config, run_context
+
+    @staticmethod
+    def _conversation_key(msg: InboundMessage) -> str:
+        topic_part = msg.topic_id if msg.topic_id is not None else "__root__"
+        return f"{msg.channel_name}:{msg.chat_id}:{topic_part}"
+
+    def _get_conversation_lock(self, msg: InboundMessage) -> asyncio.Lock:
+        key = self._conversation_key(msg)
+        lock = self._conversation_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._conversation_locks[key] = lock
+        return lock
+
+    @staticmethod
+    def _build_message_files_metadata(uploaded_files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {
+                "filename": str(file_info.get("filename", "")),
+                "size": int(file_info.get("size", 0) or 0),
+                "path": str(file_info.get("virtual_path", "")),
+                "status": "uploaded",
+            }
+            for file_info in uploaded_files
+            if isinstance(file_info, dict)
+        ]
+
+    @staticmethod
+    def _is_text_like_telegram_attachment(filename: str, mime_type: str) -> bool:
+        lower_mime = mime_type.lower()
+        if lower_mime.startswith("text/") or lower_mime in _TELEGRAM_TEXT_LIKE_MIME_TYPES:
+            return True
+        return Path(filename).suffix.lower() in _TELEGRAM_TEXT_LIKE_EXTENSIONS
+
+    @staticmethod
+    def _truncate_telegram_document_text(text: str) -> str:
+        normalized = text.strip()
+        if len(normalized) <= _TELEGRAM_INLINE_TEXT_MAX_CHARS:
+            return normalized
+        truncated = normalized[:_TELEGRAM_INLINE_TEXT_MAX_CHARS].rstrip()
+        return f"{truncated}\n\n[Truncated after {_TELEGRAM_INLINE_TEXT_MAX_CHARS} characters for inline Telegram delivery.]"
+
+    @staticmethod
+    def _build_telegram_text_document_block(*, filename: str, text: str) -> dict[str, Any]:
+        return {
+            "type": "document",
+            "title": filename,
+            "source": {
+                "type": "text",
+                "media_type": "text/plain",
+                "data": text,
+            },
+        }
+
+    @staticmethod
+    def _build_telegram_pdf_document_block(*, filename: str, content: bytes) -> dict[str, Any]:
+        return {
+            "type": "document",
+            "title": filename,
+            "source": {
+                "type": "base64",
+                "media_type": "application/pdf",
+                "data": base64.b64encode(content).decode("ascii"),
+            },
+        }
+
+    @staticmethod
+    def _build_telegram_image_block(*, mime_type: str, content: bytes) -> dict[str, Any]:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime_type,
+                "data": base64.b64encode(content).decode("ascii"),
+            },
+        }
+
+    @classmethod
+    def _build_telegram_attachment_note_block(cls, *, filename: str, mime_type: str, note: str) -> dict[str, Any]:
+        return cls._build_telegram_text_document_block(
+            filename=filename,
+            text=(
+                f"Telegram attachment: {filename}\n"
+                f"MIME type: {mime_type}\n\n"
+                f"{note}"
+            ),
+        )
+
+    async def _build_telegram_attachment_blocks(
+        self,
+        *,
+        filename: str,
+        mime_type: str,
+        content: bytes,
+        target_path: Path,
+    ) -> list[dict[str, Any]]:
+        lower_mime = mime_type.lower()
+
+        if lower_mime in _TELEGRAM_INLINE_IMAGE_MIME_TYPES:
+            if len(content) <= _TELEGRAM_INLINE_IMAGE_MAX_BYTES:
+                return [self._build_telegram_image_block(mime_type=lower_mime, content=content)]
+            return [
+                self._build_telegram_attachment_note_block(
+                    filename=filename,
+                    mime_type=mime_type,
+                    note=(
+                        "This image was too large to transport inline from Telegram. "
+                        "Ask the user for a smaller image if direct inspection is required."
+                    ),
+                )
+            ]
+
+        if lower_mime == "application/pdf" or target_path.suffix.lower() == ".pdf":
+            if len(content) <= _TELEGRAM_INLINE_PDF_MAX_BYTES:
+                return [self._build_telegram_pdf_document_block(filename=filename, content=content)]
+
+            md_path = await convert_file_to_markdown(target_path)
+            if md_path is not None:
+                try:
+                    markdown_text = md_path.read_text(encoding="utf-8")
+                except OSError:
+                    logger.warning("[Manager] failed reading converted Telegram PDF markdown: %s", md_path, exc_info=True)
+                else:
+                    normalized = self._truncate_telegram_document_text(markdown_text)
+                    if normalized:
+                        return [self._build_telegram_text_document_block(filename=filename, text=normalized)]
+
+            return [
+                self._build_telegram_attachment_note_block(
+                    filename=filename,
+                    mime_type=mime_type,
+                    note=(
+                        "This PDF was too large to transport inline from Telegram and could not be converted "
+                        "to text for this request."
+                    ),
+                )
+            ]
+
+        if target_path.suffix.lower() in CONVERTIBLE_EXTENSIONS:
+            md_path = await convert_file_to_markdown(target_path)
+            if md_path is not None:
+                try:
+                    markdown_text = md_path.read_text(encoding="utf-8")
+                except OSError:
+                    logger.warning("[Manager] failed reading converted Telegram attachment markdown: %s", md_path, exc_info=True)
+                else:
+                    normalized = self._truncate_telegram_document_text(markdown_text)
+                    if normalized:
+                        return [self._build_telegram_text_document_block(filename=filename, text=normalized)]
+
+            return [
+                self._build_telegram_attachment_note_block(
+                    filename=filename,
+                    mime_type=mime_type,
+                    note="This document could not be converted to inline text for this request.",
+                )
+            ]
+
+        if self._is_text_like_telegram_attachment(filename, lower_mime):
+            decoded_text = self._truncate_telegram_document_text(content.decode("utf-8", errors="replace"))
+            if decoded_text:
+                return [self._build_telegram_text_document_block(filename=filename, text=decoded_text)]
+
+        return [
+            self._build_telegram_attachment_note_block(
+                filename=filename,
+                mime_type=mime_type,
+                note=(
+                    "This binary attachment could not be transported inline from Telegram. "
+                    "Ask the user for a text-exportable version if direct inspection is required."
+                ),
+            )
+        ]
+
+    def _build_telegram_human_message_payload(self, text: str, uploaded_files: list[dict[str, Any]]) -> dict[str, Any]:
+        content_blocks: list[dict[str, Any]] = [{"type": "text", "text": text or "Please process the attached file."}]
+        for file_info in uploaded_files:
+            blocks = file_info.get("telegram_blocks")
+            if isinstance(blocks, list):
+                content_blocks.extend(block for block in blocks if isinstance(block, Mapping))
+        return {"role": "human", "content": content_blocks}
+
+    def _build_human_message_payload(self, msg: InboundMessage, uploaded_files: list[dict[str, Any]]) -> dict[str, Any]:
+        if msg.channel_name == "telegram" and uploaded_files:
+            return self._build_telegram_human_message_payload(msg.text, uploaded_files)
+        content = _compose_inbound_content(msg.text, uploaded_files)
+        payload: dict[str, Any] = {"role": "human", "content": content}
+        if uploaded_files:
+            payload["additional_kwargs"] = {
+                "files": self._build_message_files_metadata(uploaded_files),
+            }
+        return payload
+
+    def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
+        self._inbound_file_readers[channel_name] = reader
 
     # -- LangGraph SDK client (lazy) ----------------------------------------
 
@@ -395,6 +932,12 @@ class ChannelManager:
     async def stop(self) -> None:
         """Stop the dispatch loop."""
         self._running = False
+        notifier_tasks = list(self._builder_notifier_tasks.values())
+        for notifier_task in notifier_tasks:
+            notifier_task.cancel()
+        if notifier_tasks:
+            await asyncio.gather(*notifier_tasks, return_exceptions=True)
+        self._builder_notifier_tasks.clear()
         if self._task:
             self._task.cancel()
             try:
@@ -466,70 +1009,400 @@ class ChannelManager:
         logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
+    async def _heal_stale_thread(
+        self,
+        client,
+        msg: InboundMessage,
+        stale_thread_id: str,
+    ) -> tuple[str, str, dict[str, Any], dict[str, Any]]:
+        """Drop a stale LangGraph mapping and provision a fresh thread.
+
+        Returns the new ``(thread_id, assistant_id, run_config, run_context)``
+        tuple so the caller can rebuild the run kwargs before retrying.
+        """
+        logger.warning(
+            "[Manager] LangGraph reported thread missing; clearing stale mapping and retrying once "
+            "(event=langgraph_thread_self_heal channel=%s chat_id=%s topic_id=%s stale_thread_id=%s)",
+            msg.channel_name,
+            msg.chat_id,
+            msg.topic_id,
+            stale_thread_id,
+        )
+        self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        new_thread_id = await self._create_thread(client, msg)
+        new_assistant_id, new_run_config, new_run_context = self._resolve_run_params(msg, new_thread_id)
+        return new_thread_id, new_assistant_id, new_run_config, new_run_context
+
+    async def _resync_uploads_after_heal(
+        self,
+        msg: InboundMessage,
+        healed_thread_id: str,
+    ) -> dict[str, Any]:
+        """Re-store inbound uploads under the healed thread and rebuild payload.
+
+        ``_read_and_store_inbound_files`` is keyed on ``thread_id`` — the
+        uploads we stored before the heal live under the stale thread's
+        uploads dir, which the healed run cannot see. Call this after
+        ``_heal_stale_thread`` so virtual paths in the retried
+        ``human_message_payload`` point at files the new thread actually
+        owns.
+        """
+        if not msg.files:
+            # No inbound files — the default text-only payload is still correct.
+            return self._build_human_message_payload(msg, [])
+
+        logger.info(
+            "[Manager] re-syncing %d inbound file refs under healed thread_id=%s "
+            "(event=langgraph_thread_self_heal_resync channel=%s chat_id=%s)",
+            len(msg.files),
+            healed_thread_id,
+            msg.channel_name,
+            msg.chat_id,
+        )
+        uploaded_files = await self._read_and_store_inbound_files(msg, healed_thread_id)
+        return self._build_human_message_payload(msg, uploaded_files)
+
+    @staticmethod
+    def _make_safe_upload_filename(filename: str, fallback_index: int) -> str:
+        safe = Path(filename).name.strip()
+        if not safe or safe in {".", ".."}:
+            safe = f"upload_{fallback_index}.bin"
+        return safe
+
+    @staticmethod
+    def _reserve_upload_path(uploads_dir: Path, filename: str) -> Path:
+        candidate = uploads_dir / filename
+        if not candidate.exists():
+            return candidate
+        stem = candidate.stem or "upload"
+        suffix = candidate.suffix
+        for idx in range(1, 1000):
+            candidate = uploads_dir / f"{stem}_{idx}{suffix}"
+            if not candidate.exists():
+                return candidate
+        return uploads_dir / f"{stem}_{int(time.time())}{suffix}"
+
+    async def _read_and_store_inbound_files(self, msg: InboundMessage, thread_id: str) -> list[dict[str, Any]]:
+        if not msg.files:
+            return []
+
+        reader = self._inbound_file_readers.get(msg.channel_name)
+        if reader is None:
+            logger.info("[Manager] no inbound file reader for channel=%s; skipping %d file refs", msg.channel_name, len(msg.files))
+            return []
+
+        try:
+            inbound_files = await reader(msg)
+        except Exception:
+            logger.exception("[Manager] inbound file reader failed for channel=%s", msg.channel_name)
+            return []
+
+        if not inbound_files:
+            return []
+
+        paths = get_paths()
+        paths.ensure_thread_dirs(thread_id)
+        uploads_dir = paths.sandbox_uploads_dir(thread_id)
+        sandbox_provider = None
+
+        sandbox_id = None
+        sandbox = None
+        try:
+            from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+            sandbox_provider = get_sandbox_provider()
+            sandbox_id = sandbox_provider.acquire(thread_id)
+            sandbox = sandbox_provider.get(sandbox_id)
+        except Exception:
+            logger.warning("[Manager] unable to acquire sandbox for inbound file sync; files will stay host-local", exc_info=True)
+
+        stored_files: list[dict[str, Any]] = []
+        try:
+            for idx, file_info in enumerate(inbound_files, start=1):
+                if not isinstance(file_info, dict):
+                    continue
+
+                raw_content = file_info.get("content")
+                if isinstance(raw_content, str):
+                    content = raw_content.encode("utf-8")
+                elif isinstance(raw_content, (bytes, bytearray)):
+                    content = bytes(raw_content)
+                else:
+                    continue
+
+                safe_filename = self._make_safe_upload_filename(str(file_info.get("filename", "")), idx)
+                target_path = self._reserve_upload_path(uploads_dir, safe_filename)
+                target_path.write_bytes(content)
+
+                virtual_path = f"{_UPLOADS_VIRTUAL_PREFIX}{target_path.name}"
+                mime_type = file_info.get("mime_type")
+                if not isinstance(mime_type, str) or not mime_type:
+                    mime_type = mimetypes.guess_type(target_path.name)[0] or "application/octet-stream"
+
+                if sandbox is not None and sandbox_id and sandbox_id != "local":
+                    try:
+                        sandbox.update_file(virtual_path, content)
+                    except Exception:
+                        logger.warning("[Manager] failed to sync inbound upload to sandbox: %s", virtual_path, exc_info=True)
+
+                stored_files.append(
+                    {
+                        "filename": target_path.name,
+                        "size": len(content),
+                        "virtual_path": virtual_path,
+                        "path": virtual_path,
+                        "extension": target_path.suffix,
+                        "mime_type": mime_type,
+                        "status": "uploaded",
+                    }
+                )
+                if msg.channel_name == "telegram":
+                    stored_files[-1]["telegram_blocks"] = await self._build_telegram_attachment_blocks(
+                        filename=target_path.name,
+                        mime_type=mime_type,
+                        content=content,
+                        target_path=target_path,
+                    )
+        finally:
+            if sandbox_provider is not None and isinstance(sandbox_id, str) and sandbox_id:
+                try:
+                    sandbox_provider.release(sandbox_id)
+                except Exception:
+                    logger.warning("[Manager] failed to release sandbox after inbound file sync: %s", sandbox_id, exc_info=True)
+
+        logger.info("[Manager] stored inbound files: channel=%s chat_id=%s count=%d", msg.channel_name, msg.chat_id, len(stored_files))
+        return stored_files
+
+    def _schedule_builder_notifier(self, *, msg: InboundMessage, thread_id: str, task_id: str) -> None:
+        if not task_id or task_id in self._builder_notifier_tasks:
+            return
+
+        task = asyncio.create_task(
+            self._run_builder_notifier(
+                msg=msg,
+                thread_id=thread_id,
+                task_id=task_id,
+            )
+        )
+        self._builder_notifier_tasks[task_id] = task
+        task.add_done_callback(self._log_task_error)
+        task.add_done_callback(lambda _task: self._builder_notifier_tasks.pop(task_id, None))
+
+    async def _run_builder_notifier(self, *, msg: InboundMessage, thread_id: str, task_id: str) -> None:
+        started_at = time.monotonic()
+        while self._running and (time.monotonic() - started_at) <= BUILDER_NOTIFIER_MAX_WAIT_SECONDS:
+            await asyncio.sleep(BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS)
+            task_result = get_background_task_result(task_id)
+            if task_result is None:
+                continue
+
+            status = _to_builder_status(getattr(task_result, "status", None))
+            if status in {"pending", "queued", "running", "started"}:
+                continue
+
+            if status == "completed":
+                builder_result = _extract_builder_result_payload(task_result) or {}
+                summary = builder_result.get("companion_summary")
+                response_text = summary.strip() if isinstance(summary, str) and summary.strip() else "Your builder task is complete."
+                next_action = builder_result.get("user_next_action")
+                if isinstance(next_action, str) and next_action.strip():
+                    response_text = f"{response_text}\n\nNext step: {next_action.strip()}"
+                artifacts = _extract_builder_artifacts(builder_result)
+                # Hydrate an inline ``builder_delivery`` payload from the
+                # builder_result so ``_prepare_artifact_delivery`` can
+                # materialise attachments from embedded bytes rather than
+                # resolving virtual paths on the gateway host's filesystem.
+                # On Render's split-disk topology the builder writes files on
+                # the LangGraph host, which the gateway cannot see, so raw
+                # paths silently drop the attachment. This mirrors the same
+                # delivery contract used by the synchronous ``_handle_chat``
+                # path after ``runs.wait``.
+                builder_delivery = build_builder_delivery_payload(
+                    thread_id=thread_id,
+                    builder_result=builder_result,
+                )
+                if builder_delivery is not None:
+                    for artifact in _extract_builder_delivery_artifacts(builder_delivery):
+                        if artifact not in artifacts:
+                            artifacts.append(artifact)
+                response_text, attachments = _prepare_artifact_delivery(
+                    thread_id,
+                    response_text,
+                    artifacts,
+                    builder_delivery=builder_delivery,
+                )
+
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel_name=msg.channel_name,
+                        chat_id=msg.chat_id,
+                        thread_id=thread_id,
+                        text=response_text,
+                        artifacts=artifacts,
+                        attachments=attachments,
+                        thread_ts=msg.thread_ts,
+                        metadata={"builder_task_id": task_id, "builder_notification": True},
+                    )
+                )
+                return
+
+            if status in _TERMINAL_BUILDER_STATUSES:
+                error = getattr(task_result, "error", None)
+                if status == "cancelled":
+                    base_text = (
+                        "The build was cancelled. Let me know if you'd like to try something else."
+                    )
+                elif status == "timed_out":
+                    base_text = "Builder task timed out."
+                else:
+                    base_text = "Builder task failed."
+                if status != "cancelled" and isinstance(error, str) and error.strip():
+                    base_text = f"{base_text}\n\n{error.strip()}"
+                await self.bus.publish_outbound(
+                    OutboundMessage(
+                        channel_name=msg.channel_name,
+                        chat_id=msg.chat_id,
+                        thread_id=thread_id,
+                        text=base_text,
+                        thread_ts=msg.thread_ts,
+                        metadata={
+                            "builder_task_id": task_id,
+                            "builder_notification": True,
+                            "builder_terminal_status": status,
+                        },
+                    )
+                )
+                return
+
+            logger.info("[Manager] builder notifier observed unknown status=%s task_id=%s", status, task_id)
+            return
+
+        logger.info("[Manager] builder notifier timeout reached for task_id=%s", task_id)
+
     async def _handle_chat(self, msg: InboundMessage) -> None:
         client = self._get_client()
-
-        # Look up existing DeerFlow thread.
-        # topic_id may be None (e.g. Telegram private chats) — the store
-        # handles this by using the "channel:chat_id" key without a topic suffix.
-        thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
-        if thread_id:
-            logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
-
-        # No existing thread found — create a new one
-        if thread_id is None:
-            thread_id = await self._create_thread(client, msg)
-
-        assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
-        if msg.channel_name == "feishu":
-            await self._handle_streaming_chat(
-                client,
-                msg,
-                thread_id,
-                assistant_id,
-                run_config,
-                run_context,
+        conversation_lock = self._get_conversation_lock(msg)
+        if conversation_lock.locked():
+            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id) or ""
+            await self.bus.publish_outbound(
+                OutboundMessage(
+                    channel_name=msg.channel_name,
+                    chat_id=msg.chat_id,
+                    thread_id=thread_id,
+                    text=THREAD_BUSY_MESSAGE,
+                    thread_ts=msg.thread_ts,
+                )
             )
             return
 
-        logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+        async with conversation_lock:
+            # Look up existing DeerFlow thread.
+            # topic_id may be None (e.g. Telegram private chats) — the store
+            # handles this by using the "channel:chat_id" key without a topic suffix.
+            thread_id = self.store.get_thread_id(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+            if thread_id:
+                logger.info("[Manager] reusing thread: thread_id=%s for topic_id=%s", thread_id, msg.topic_id)
 
-        response_text = _extract_response_text(result)
-        artifacts = _extract_artifacts(result)
+            # No existing thread found — create a new one
+            if thread_id is None:
+                thread_id = await self._create_thread(client, msg)
 
-        logger.info(
-            "[Manager] agent response received: thread_id=%s, response_len=%d, artifacts=%d",
-            thread_id,
-            len(response_text) if response_text else 0,
-            len(artifacts),
-        )
+            uploaded_files = await self._read_and_store_inbound_files(msg, thread_id)
+            human_message_payload = self._build_human_message_payload(msg, uploaded_files)
+            assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+            if msg.channel_name == "feishu":
+                await self._handle_streaming_chat(
+                    client,
+                    msg,
+                    thread_id,
+                    assistant_id,
+                    run_config,
+                    run_context,
+                    human_message_payload,
+                )
+                return
 
-        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+            run_kwargs: dict[str, Any] = {
+                "input": {"messages": [human_message_payload]},
+                "config": run_config,
+            }
+            if run_context:
+                run_kwargs["context"] = run_context
+            try:
+                result = await client.runs.wait(
+                    thread_id,
+                    assistant_id,
+                    **run_kwargs,
+                )
+            except httpx.HTTPStatusError as exc:
+                if not _is_thread_missing_error(exc):
+                    raise
+                (
+                    thread_id,
+                    assistant_id,
+                    run_config,
+                    run_context,
+                ) = await self._heal_stale_thread(client, msg, thread_id)
+                # Uploads staged under the stale thread are invisible from
+                # the healed run. Re-read inbound files under the new
+                # thread_id and rebuild the payload so tool reads resolve.
+                human_message_payload = await self._resync_uploads_after_heal(msg, thread_id)
+                run_kwargs = {
+                    "input": {"messages": [human_message_payload]},
+                    "config": run_config,
+                }
+                if run_context:
+                    run_kwargs["context"] = run_context
+                result = await client.runs.wait(
+                    thread_id,
+                    assistant_id,
+                    **run_kwargs,
+                )
 
-        if not response_text:
-            if attachments:
-                response_text = _format_artifact_text([a.virtual_path for a in attachments])
-            else:
-                response_text = "(No response from agent)"
+            response_text = _extract_response_text(result)
+            artifacts = _extract_artifacts(result)
+            builder_delivery = _extract_builder_delivery(result)
+            if builder_delivery is not None:
+                for artifact in _extract_builder_delivery_artifacts(builder_delivery):
+                    if artifact not in artifacts:
+                        artifacts.append(artifact)
+            builder_task_id, _builder_status = _extract_builder_handoff_task(result)
 
-        outbound = OutboundMessage(
-            channel_name=msg.channel_name,
-            chat_id=msg.chat_id,
-            thread_id=thread_id,
-            text=response_text,
-            artifacts=artifacts,
-            attachments=attachments,
-            thread_ts=msg.thread_ts,
-        )
-        logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
-        await self.bus.publish_outbound(outbound)
+            logger.info(
+                "[Manager] agent response received: thread_id=%s, response_len=%d, artifacts=%d",
+                thread_id,
+                len(response_text) if response_text else 0,
+                len(artifacts),
+            )
+
+            response_text, attachments = _prepare_artifact_delivery(
+                thread_id,
+                response_text,
+                artifacts,
+                builder_delivery=builder_delivery,
+            )
+
+            if not response_text:
+                if attachments:
+                    response_text = _format_artifact_text([a.virtual_path for a in attachments])
+                else:
+                    response_text = "(No response from agent)"
+
+            outbound = OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text=response_text,
+                artifacts=artifacts,
+                attachments=attachments,
+                thread_ts=msg.thread_ts,
+            )
+            logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
+            await self.bus.publish_outbound(outbound)
+
+            if msg.channel_name == "telegram" and builder_task_id:
+                self._schedule_builder_notifier(msg=msg, thread_id=thread_id, task_id=builder_task_id)
 
     async def _handle_streaming_chat(
         self,
@@ -539,6 +1412,7 @@ class ChannelManager:
         assistant_id: str,
         run_config: dict[str, Any],
         run_context: dict[str, Any],
+        human_message_payload: dict[str, Any],
     ) -> None:
         logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
 
@@ -549,16 +1423,28 @@ class ChannelManager:
         last_published_text = ""
         last_publish_at = 0.0
         stream_error: BaseException | None = None
+        chunks_received = 0
 
-        try:
-            async for chunk in client.runs.stream(
-                thread_id,
-                assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
-            ):
+        # ``human_message_payload`` is captured by reference so it can be
+        # swapped out by the self-heal path below without redeclaring the
+        # inner helper.
+        current_payload: dict[str, Any] = human_message_payload
+
+        def _build_stream_kwargs() -> dict[str, Any]:
+            payload: dict[str, Any] = {
+                "input": {"messages": [current_payload]},
+                "config": run_config,
+                "stream_mode": ["messages-tuple", "values"],
+            }
+            if run_context:
+                payload["context"] = run_context
+            return payload
+
+        async def _iterate_stream(stream_iter) -> None:
+            nonlocal last_values, current_message_id, latest_text
+            nonlocal last_published_text, last_publish_at, chunks_received
+            async for chunk in stream_iter:
+                chunks_received += 1
                 event = getattr(chunk, "event", "")
                 data = getattr(chunk, "data", None)
 
@@ -591,6 +1477,25 @@ class ChannelManager:
                 )
                 last_published_text = latest_text
                 last_publish_at = now
+
+        try:
+            stream_kwargs = _build_stream_kwargs()
+            try:
+                await _iterate_stream(client.runs.stream(thread_id, assistant_id, **stream_kwargs))
+            except httpx.HTTPStatusError as exc:
+                if chunks_received or not _is_thread_missing_error(exc):
+                    raise
+                (
+                    thread_id,
+                    assistant_id,
+                    run_config,
+                    run_context,
+                ) = await self._heal_stale_thread(client, msg, thread_id)
+                # Re-stage uploads + rebuild the payload under the new
+                # thread_id so downstream tool reads hit the right paths.
+                current_payload = await self._resync_uploads_after_heal(msg, thread_id)
+                stream_kwargs = _build_stream_kwargs()
+                await _iterate_stream(client.runs.stream(thread_id, assistant_id, **stream_kwargs))
         except Exception as exc:
             stream_error = exc
             logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
@@ -598,7 +1503,17 @@ class ChannelManager:
             result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
             response_text = _extract_response_text(result)
             artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+            builder_delivery = _extract_builder_delivery(result)
+            if builder_delivery is not None:
+                for artifact in _extract_builder_delivery_artifacts(builder_delivery):
+                    if artifact not in artifacts:
+                        artifacts.append(artifact)
+            response_text, attachments = _prepare_artifact_delivery(
+                thread_id,
+                response_text,
+                artifacts,
+                builder_delivery=builder_delivery,
+            )
 
             if not response_text:
                 if attachments:

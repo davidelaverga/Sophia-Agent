@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from app.channels.base import Channel
@@ -60,6 +62,59 @@ class TestMessageBus:
             assert result.chat_id == "chat1"
 
         _run(go())
+
+    def test_handle_chat_materializes_builder_delivery_payload(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            run_result = {
+                "messages": [
+                    {"type": "human", "content": "build this"},
+                    {"type": "ai", "content": "Your document is ready."},
+                ],
+                "builder_delivery": {
+                    "attachments": [
+                        {
+                            "virtual_path": "/mnt/user-data/outputs/report.txt",
+                            "filename": "report.txt",
+                            "mime_type": "text/plain",
+                            "is_image": False,
+                            "content_base64": base64.b64encode(b"hello from builder").decode("ascii"),
+                        }
+                    ]
+                },
+            }
+            mock_client = _make_mock_langgraph_client(run_result=run_result)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="build this"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert len(outbound_received) == 1
+            assert len(outbound_received[0].attachments) == 1
+            attachment = outbound_received[0].attachments[0]
+            assert attachment.virtual_path == "/mnt/user-data/outputs/report.txt"
+            assert attachment.actual_path.read_bytes() == b"hello from builder"
+            assert "Created File: 📎 report.txt" in outbound_received[0].text
+
+        _run(go())
+
 
     def test_inbound_queue_is_fifo(self):
         bus = MessageBus()
@@ -561,6 +616,547 @@ class TestChannelManager:
             assert call_args[1]["context"]["thinking_enabled"] is True
             assert call_args[1]["context"]["subagent_enabled"] is True
             assert call_args[1]["context"]["is_plan_mode"] is True
+
+        _run(go())
+
+    def test_handle_chat_applies_dynamic_session_resolver(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                session_resolver=lambda _msg, _thread_id: {
+                    "assistant_id": "dynamic_agent",
+                    "config": {"recursion_limit": 13},
+                    "context": {"context_mode": "gaming"},
+                },
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            assert call_args[0][1] == "dynamic_agent"
+            assert call_args[1]["config"]["recursion_limit"] == 13
+            assert call_args[1]["context"]["context_mode"] == "gaming"
+
+        _run(go())
+
+    def test_resolve_run_params_clones_configurable_before_merging_context(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        shared_configurable = {"model_name": "claude-haiku-4-5-20251001"}
+        manager = ChannelManager(
+            bus=bus,
+            store=store,
+            default_session={"config": {"configurable": shared_configurable}},
+        )
+
+        msg1 = InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi")
+        _assistant1, run_config1, run_context1 = manager._resolve_run_params(msg1, "thread-1")
+
+        msg2 = InboundMessage(channel_name="telegram", chat_id="chat2", user_id="user2", text="hi again")
+        _assistant2, run_config2, run_context2 = manager._resolve_run_params(msg2, "thread-2")
+
+        assert run_context1 == {}
+        assert run_context2 == {}
+        assert run_config1["configurable"]["thread_id"] == "thread-1"
+        assert run_config2["configurable"]["thread_id"] == "thread-2"
+        assert run_config1["configurable"] is not shared_configurable
+        assert run_config2["configurable"] is not shared_configurable
+        assert shared_configurable == {"model_name": "claude-haiku-4-5-20251001"}
+
+    def test_handle_chat_sends_busy_message_for_concurrent_same_conversation(self):
+        from app.channels.manager import THREAD_BUSY_MESSAGE, ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store, max_concurrency=5)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            release_first_run = asyncio.Event()
+            first_run_started = asyncio.Event()
+
+            async def slow_wait(*_args, **_kwargs):
+                first_run_started.set()
+                await release_first_run.wait()
+                return {
+                    "messages": [
+                        {"type": "human", "content": "hello"},
+                        {"type": "ai", "content": "done"},
+                    ]
+                }
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.wait = AsyncMock(side_effect=slow_wait)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hello"))
+            await _wait_for(lambda: first_run_started.is_set())
+
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="second"))
+            await _wait_for(lambda: any(m.text == THREAD_BUSY_MESSAGE for m in outbound_received))
+
+            release_first_run.set()
+            await _wait_for(lambda: any(m.text == "done" for m in outbound_received))
+            await manager.stop()
+
+            assert mock_client.runs.wait.call_count == 1
+
+        _run(go())
+
+    def test_handle_chat_inlines_telegram_pdf_attachments(self, monkeypatch, tmp_path):
+
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            pdf_bytes = b"%PDF-1.4 fake telegram pdf"
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "brief.pdf",
+                        "mime_type": "application/pdf",
+                        "content": pdf_bytes,
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="please inspect file",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            message_payload = call_args[1]["input"]["messages"][0]
+            assert "additional_kwargs" not in message_payload
+            assert message_payload["content"][0] == {"type": "text", "text": "please inspect file"}
+            assert message_payload["content"][1] == {
+                "type": "document",
+                "title": "brief.pdf",
+                "source": {
+                    "type": "base64",
+                    "media_type": "application/pdf",
+                    "data": base64.b64encode(pdf_bytes).decode("ascii"),
+                },
+            }
+
+        _run(go())
+
+    def test_handle_chat_inlines_telegram_images_as_native_image_blocks(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            image_bytes = b"\x89PNG\r\n\x1a\nfake-image"
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "photo.png",
+                        "mime_type": "image/png",
+                        "content": image_bytes,
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="what's in this image?",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            message_payload = call_args[1]["input"]["messages"][0]
+            assert message_payload["content"][0] == {"type": "text", "text": "what's in this image?"}
+            assert message_payload["content"][1] == {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": base64.b64encode(image_bytes).decode("ascii"),
+                },
+            }
+
+        _run(go())
+
+    def test_handle_chat_converts_telegram_documents_to_inline_text_documents(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            async def fake_convert(path: Path) -> Path:
+                md_path = path.with_suffix(".md")
+                md_path.write_text("# Converted brief\n\nImportant points.", encoding="utf-8")
+                return md_path
+
+            monkeypatch.setattr("app.channels.manager.convert_file_to_markdown", fake_convert)
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "brief.docx",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        "content": b"fake-docx-content",
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="summarize the attached brief",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            call_args = mock_client.runs.wait.call_args
+            message_payload = call_args[1]["input"]["messages"][0]
+            assert message_payload["content"][0] == {"type": "text", "text": "summarize the attached brief"}
+            assert message_payload["content"][1] == {
+                "type": "document",
+                "title": "brief.docx",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": "# Converted brief\n\nImportant points.",
+                },
+            }
+
+        _run(go())
+
+    def test_handle_chat_releases_sandbox_after_inbound_file_sync(self, monkeypatch, tmp_path):
+        from app.channels.manager import ChannelManager
+        from deerflow.config.paths import Paths
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.get_paths", lambda: Paths(str(tmp_path)))
+
+            provider = MagicMock()
+            provider.acquire = MagicMock(return_value="sandbox-1")
+            provider.release = MagicMock()
+            provider.get = MagicMock(return_value=MagicMock())
+            monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: provider)
+
+            bus = MessageBus()
+            store = ChannelStore(path=tmp_path / "store.json")
+
+            async def fake_reader(_msg):
+                return [
+                    {
+                        "filename": "input.txt",
+                        "mime_type": "text/plain",
+                        "content": b"hello from telegram",
+                    }
+                ]
+
+            manager = ChannelManager(
+                bus=bus,
+                store=store,
+                inbound_file_readers={"telegram": fake_reader},
+            )
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            mock_client = _make_mock_langgraph_client()
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="please inspect file",
+                    files=[{"file_id": "f1"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            provider.acquire.assert_called_once_with("test-thread-123")
+            provider.release.assert_called_once_with("sandbox-1")
+
+        _run(go())
+
+    def test_builder_notifier_publishes_follow_up_message(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS", 0.01)
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_MAX_WAIT_SECONDS", 0.5)
+
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            handoff_payload = json.dumps({"type": "builder_handoff", "task_id": "task-123", "status": "queued"})
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "build this"},
+                        {"type": "tool", "name": "switch_to_builder", "content": handoff_payload},
+                        {"type": "ai", "content": "Builder task queued."},
+                    ]
+                }
+            )
+            manager._client = mock_client
+
+            class _TaskResult:
+                status = "completed"
+                error = None
+                final_state = {"builder_result": {"companion_summary": "Builder finished your request."}}
+                ai_messages = []
+
+            monkeypatch.setattr("app.channels.manager.get_background_task_result", lambda _task_id: _TaskResult())
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="build this"))
+            await _wait_for(lambda: len(outbound_received) >= 2)
+            await manager.stop()
+
+            assert any(msg.metadata.get("builder_notification") for msg in outbound_received)
+            assert any("Builder finished your request." in msg.text for msg in outbound_received)
+
+        _run(go())
+
+    def test_builder_notifier_emits_inline_delivery_payload(self, monkeypatch):
+        """Regression for the Render split-disk topology: on a completed task,
+        the notifier must hydrate a ``builder_delivery`` inline payload and
+        hand it to ``_prepare_artifact_delivery`` so the attachment is built
+        from embedded ``content_base64`` bytes rather than by resolving the
+        virtual path against the gateway's local outputs directory (which is
+        a different disk from LangGraph on Render, so the file isn't there).
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS", 0.01)
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_MAX_WAIT_SECONDS", 0.5)
+
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            handoff_payload = json.dumps({"type": "builder_handoff", "task_id": "task-inline", "status": "queued"})
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "build this"},
+                        {"type": "tool", "name": "switch_to_builder", "content": handoff_payload},
+                        {"type": "ai", "content": "Builder task queued."},
+                    ]
+                }
+            )
+            manager._client = mock_client
+
+            class _TaskResult:
+                status = "completed"
+                error = None
+                final_state = {
+                    "builder_result": {
+                        "companion_summary": "Builder finished your deck.",
+                        "artifact_path": "/mnt/user-data/outputs/deck.md",
+                    }
+                }
+                ai_messages = []
+
+            monkeypatch.setattr(
+                "app.channels.manager.get_background_task_result",
+                lambda _task_id: _TaskResult(),
+            )
+
+            # build_builder_delivery_payload normally reads from local disk;
+            # stub it to assert the notifier routes through the inline path.
+            inline_payload = {
+                "source": "builder_result",
+                "attachments": [
+                    {
+                        "virtual_path": "/mnt/user-data/outputs/deck.md",
+                        "filename": "deck.md",
+                        "mime_type": "text/markdown",
+                        "is_image": False,
+                        "size": 20,
+                        "content_base64": base64.b64encode(b"# Inline builder deck").decode("ascii"),
+                    }
+                ],
+            }
+            monkeypatch.setattr(
+                "app.channels.manager.build_builder_delivery_payload",
+                lambda *, thread_id, builder_result: inline_payload,
+            )
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(channel_name="telegram", chat_id="chat-inline", user_id="user1", text="build this"),
+            )
+            await _wait_for(lambda: any(m.metadata.get("builder_notification") for m in outbound_received))
+            await manager.stop()
+
+            notifier_msgs = [m for m in outbound_received if m.metadata.get("builder_notification")]
+            assert notifier_msgs, "builder notifier did not publish a follow-up message"
+            notifier_msg = notifier_msgs[-1]
+            assert len(notifier_msg.attachments) == 1, (
+                "notifier must materialise the inline delivery payload into an attachment"
+            )
+            attachment = notifier_msg.attachments[0]
+            assert attachment.virtual_path == "/mnt/user-data/outputs/deck.md"
+            assert attachment.filename == "deck.md"
+            assert attachment.actual_path.read_bytes() == b"# Inline builder deck"
+            assert "Builder finished your deck." in notifier_msg.text
+
+        _run(go())
+
+    def test_builder_notifier_handles_cancelled_status(self, monkeypatch):
+        """Cancelled tasks must be treated as a terminal state so Telegram
+        users get a closure message. Before this fix the notifier's
+        terminal-status set omitted ``cancelled`` and the background task
+        fell into the "unknown status" branch, exiting silently.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS", 0.01)
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_MAX_WAIT_SECONDS", 0.5)
+
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            handoff_payload = json.dumps({"type": "builder_handoff", "task_id": "task-cancel", "status": "queued"})
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "build this"},
+                        {"type": "tool", "name": "switch_to_builder", "content": handoff_payload},
+                        {"type": "ai", "content": "Builder task queued."},
+                    ]
+                }
+            )
+            manager._client = mock_client
+
+            class _TaskResult:
+                status = "cancelled"
+                error = "user requested cancellation"
+                final_state = None
+                ai_messages = []
+
+            monkeypatch.setattr(
+                "app.channels.manager.get_background_task_result",
+                lambda _task_id: _TaskResult(),
+            )
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(channel_name="telegram", chat_id="chat-cancel", user_id="user1", text="build this"),
+            )
+            await _wait_for(lambda: any(m.metadata.get("builder_notification") for m in outbound_received))
+            await manager.stop()
+
+            notifier_msgs = [m for m in outbound_received if m.metadata.get("builder_notification")]
+            assert notifier_msgs, "notifier must publish a closure message on cancellation"
+            notifier_msg = notifier_msgs[-1]
+            assert notifier_msg.metadata.get("builder_terminal_status") == "cancelled"
+            assert "cancelled" in notifier_msg.text.lower()
+            # Cancellation is intentional; we do NOT want the raw error appended
+            # after the friendly closure line.
+            assert "user requested cancellation" not in notifier_msg.text
 
         _run(go())
 
@@ -1225,6 +1821,368 @@ class TestHandleChatWithArtifacts:
 
         _run(go())
 
+    def test_handle_chat_heals_stale_langgraph_thread(self):
+        """A 404 'Thread or assistant not found.' on runs.wait triggers a one-shot self-heal."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            # Pre-seed a stale mapping that still survives from before a LangGraph redeploy.
+            store.set_thread_id("telegram", "chat-stale", "stale-thread-xyz", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/stale-thread-xyz/runs/wait",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Thread or assistant not found."},
+            )
+            thread_missing_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+            successful_result = {
+                "messages": [
+                    {"type": "human", "content": "hello"},
+                    {"type": "ai", "content": "Back online."},
+                ]
+            }
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread-123")
+            mock_client.runs.wait = AsyncMock(side_effect=[thread_missing_error, successful_result])
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat-stale",
+                    user_id="user-1",
+                    text="hello",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # The stale mapping is replaced with the new thread.
+            assert store.get_thread_id("telegram", "chat-stale") == "fresh-thread-123"
+
+            # threads.create was called exactly once (self-heal path).
+            mock_client.threads.create.assert_called_once()
+
+            # runs.wait was retried exactly once after healing.
+            assert mock_client.runs.wait.call_count == 2
+            first_call_thread_id = mock_client.runs.wait.call_args_list[0][0][0]
+            second_call_thread_id = mock_client.runs.wait.call_args_list[1][0][0]
+            assert first_call_thread_id == "stale-thread-xyz"
+            assert second_call_thread_id == "fresh-thread-123"
+
+            # The user received the real response, not the generic error reply.
+            assert len(outbound_received) == 1
+            assert outbound_received[0].text == "Back online."
+            assert outbound_received[0].thread_id == "fresh-thread-123"
+
+        _run(go())
+
+    def test_handle_chat_does_not_heal_on_unrelated_404(self):
+        """A 404 with an unrelated body must not trigger a thread rebuild."""
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            store.set_thread_id("telegram", "chat-stable", "persistent-thread", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/persistent-thread/runs/wait",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Run not found."},
+            )
+            unrelated_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+
+            mock_client = _make_mock_langgraph_client()
+            mock_client.runs.wait = AsyncMock(side_effect=unrelated_error)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="telegram",
+                    chat_id="chat-stable",
+                    user_id="user-1",
+                    text="hello",
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # runs.wait was NOT retried.
+            assert mock_client.runs.wait.call_count == 1
+
+            # The stale mapping is preserved since we did not heal.
+            assert store.get_thread_id("telegram", "chat-stable") == "persistent-thread"
+
+            # threads.create was NOT called.
+            mock_client.threads.create.assert_not_called()
+
+            # The outer error handler reported a generic internal-error message.
+            assert len(outbound_received) == 1
+            assert "internal error" in outbound_received[0].text.lower()
+
+        _run(go())
+
+    def test_is_thread_missing_error_matches_live_langgraph_payload(self):
+        from app.channels.manager import _is_thread_missing_error
+
+        request = httpx.Request("POST", "http://langgraph.test/threads/x/runs/wait")
+        thread_missing = httpx.HTTPStatusError(
+            "404 Not Found",
+            request=request,
+            response=httpx.Response(404, request=request, json={"detail": "Thread or assistant not found."}),
+        )
+        other_404 = httpx.HTTPStatusError(
+            "404 Not Found",
+            request=request,
+            response=httpx.Response(404, request=request, json={"detail": "Run not found."}),
+        )
+        server_error = httpx.HTTPStatusError(
+            "500 Internal Server Error",
+            request=request,
+            response=httpx.Response(500, request=request, json={"detail": "Thread or assistant not found."}),
+        )
+
+        assert _is_thread_missing_error(thread_missing) is True
+        assert _is_thread_missing_error(other_404) is False
+        assert _is_thread_missing_error(server_error) is False
+
+    def test_handle_chat_heal_rebuilds_uploads_under_new_thread(self):
+        """On 404 self-heal, inbound files are re-read under the healed thread_id
+        and the retried runs.wait uses a fresh human_message_payload that points
+        at the new thread's uploads.
+
+        Uses channel "test" (not "telegram") so the payload goes through the
+        generic ``_compose_inbound_content`` path, which renders virtual_path
+        into the content block and the additional_kwargs.files metadata —
+        both of which we can then assert on without reaching into telegram-
+        specific block builders.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            store.set_thread_id("test", "chat-heal-uploads", "stale-thread-xyz", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            captured_read_thread_ids: list[str] = []
+
+            async def fake_read_and_store(msg, thread_id):
+                captured_read_thread_ids.append(thread_id)
+                # Embed the thread_id in the virtual_path so the payload
+                # content makes the provenance obvious at assert time.
+                return [
+                    {
+                        "filename": "pic.png",
+                        "size": 3,
+                        "virtual_path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "extension": ".png",
+                        "mime_type": "image/png",
+                        "status": "uploaded",
+                    }
+                ]
+
+            manager._read_and_store_inbound_files = fake_read_and_store  # type: ignore[assignment]
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/stale-thread-xyz/runs/wait",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Thread or assistant not found."},
+            )
+            thread_missing_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+            success_result = {
+                "messages": [
+                    {"type": "human", "content": "describe the image"},
+                    {"type": "ai", "content": "Healed and processed."},
+                ]
+            }
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread-777")
+            mock_client.runs.wait = AsyncMock(side_effect=[thread_missing_error, success_result])
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="test",
+                    chat_id="chat-heal-uploads",
+                    user_id="user-1",
+                    text="describe the image",
+                    files=[{"kind": "image", "ref": "some-image-ref"}],
+                )
+            )
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            # Upload storage ran twice: once pre-heal, once post-heal.
+            assert captured_read_thread_ids == ["stale-thread-xyz", "fresh-thread-777"]
+
+            # Two runs.wait calls: first fails with 404, second succeeds.
+            assert mock_client.runs.wait.call_count == 2
+            first_payload = mock_client.runs.wait.call_args_list[0][1]["input"]["messages"][0]
+            second_payload = mock_client.runs.wait.call_args_list[1][1]["input"]["messages"][0]
+
+            first_serialized = json.dumps(first_payload)
+            second_serialized = json.dumps(second_payload)
+
+            # Pre-heal payload references the stale thread's uploads.
+            assert "stale-thread-xyz" in first_serialized
+            # Post-heal payload references ONLY the fresh thread's uploads.
+            assert "fresh-thread-777" in second_serialized
+            assert "stale-thread-xyz" not in second_serialized, (
+                "retried payload must not reference the stale thread's uploads"
+            )
+            assert outbound_received[0].thread_id == "fresh-thread-777"
+
+        _run(go())
+
+    def test_handle_streaming_chat_heal_rebuilds_uploads_under_new_thread(self):
+        """The Feishu streaming path has the same self-heal retry; its payload
+        must also be rebuilt against the healed thread's uploads.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store_path = Path(tempfile.mkdtemp()) / "store.json"
+            store = ChannelStore(path=store_path)
+            store.set_thread_id("feishu", "chat-heal-stream", "stale-thread-stream", user_id="user-1")
+
+            manager = ChannelManager(bus=bus, store=store)
+
+            captured_read_thread_ids: list[str] = []
+
+            async def fake_read_and_store(msg, thread_id):
+                captured_read_thread_ids.append(thread_id)
+                return [
+                    {
+                        "filename": "pic.png",
+                        "size": 3,
+                        "virtual_path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "path": f"/mnt/user-data/uploads/{thread_id}/pic.png",
+                        "extension": ".png",
+                        "mime_type": "image/png",
+                        "status": "uploaded",
+                    }
+                ]
+
+            manager._read_and_store_inbound_files = fake_read_and_store  # type: ignore[assignment]
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            request = httpx.Request(
+                "POST",
+                "http://langgraph.test/threads/stale-thread-stream/runs/stream",
+            )
+            response = httpx.Response(
+                404,
+                request=request,
+                json={"detail": "Thread or assistant not found."},
+            )
+            thread_missing_error = httpx.HTTPStatusError(
+                "404 Not Found",
+                request=request,
+                response=response,
+            )
+
+            success_stream_parts = [
+                _make_stream_part(
+                    "values",
+                    {"messages": [
+                        {"type": "human", "content": "describe the image"},
+                        {"type": "ai", "content": "Healed streaming reply."},
+                    ]},
+                ),
+            ]
+
+            def stream_side_effect(thread_id, assistant_id, **kwargs):
+                if mock_client.runs.stream.call_count == 1:
+                    async def _raiser():
+                        raise thread_missing_error
+                        yield  # pragma: no cover
+                    return _raiser()
+                return _make_async_iterator(success_stream_parts)
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread-stream-999")
+            mock_client.runs.stream = MagicMock(side_effect=stream_side_effect)
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat-heal-stream",
+                    user_id="user-1",
+                    text="describe the image",
+                    files=[{"kind": "image", "ref": "feishu-image-id"}],
+                )
+            )
+            # Streaming path publishes at least one outbound (the final one).
+            await _wait_for(lambda: any(msg.is_final for msg in outbound_received))
+            await manager.stop()
+
+            # Upload storage ran twice: once pre-heal, once post-heal.
+            assert captured_read_thread_ids == ["stale-thread-stream", "fresh-thread-stream-999"]
+
+            # runs.stream was called twice (initial + retry).
+            assert mock_client.runs.stream.call_count == 2
+            second_stream_kwargs = mock_client.runs.stream.call_args_list[1][1]
+            second_payload = second_stream_kwargs["input"]["messages"][0]
+
+            serialized = json.dumps(second_payload)
+            assert "fresh-thread-stream-999" in serialized
+            assert "stale-thread-stream" not in serialized
+
+        _run(go())
+
 
 class TestFeishuChannel:
     def test_prepare_inbound_publishes_without_waiting_for_running_card(self):
@@ -1579,8 +2537,12 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
     update.effective_chat.type = chat_type
     update.effective_chat.id = 100
     update.effective_user.id = 42
+    update.effective_user.username = "tg-user"
+    update.effective_user.first_name = "TG"
+    update.effective_user.last_name = "User"
     update.message.text = text
     update.message.message_id = message_id
+    update.message.reply_text = AsyncMock()
     if reply_to_message_id is not None:
         reply_msg = MagicMock()
         reply_msg.message_id = reply_to_message_id
@@ -1593,6 +2555,11 @@ def _make_telegram_update(chat_type: str, message_id: int, *, reply_to_message_i
 class TestTelegramPrivateChatThread:
     """Verify that private chats use topic_id=None (single thread per chat)."""
 
+    @staticmethod
+    def _configure_linked_channel(ch):
+        ch._resolve_link_for_chat = AsyncMock(return_value={"user_id": "linked-user"})  # type: ignore[method-assign]
+        ch._send_link_required_message = AsyncMock()  # type: ignore[method-assign]
+
     def test_private_chat_no_reply_uses_none_topic(self):
         from app.channels.telegram import TelegramChannel
 
@@ -1600,6 +2567,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("private", message_id=10)
             await ch._on_text(update, None)
@@ -1616,6 +2584,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("private", message_id=11, reply_to_message_id=5)
             await ch._on_text(update, None)
@@ -1632,6 +2601,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=20)
             await ch._on_text(update, None)
@@ -1648,6 +2618,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=21, reply_to_message_id=15)
             await ch._on_text(update, None)
@@ -1664,6 +2635,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("supergroup", message_id=25)
             await ch._on_text(update, None)
@@ -1680,6 +2652,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("private", message_id=30, text="/new")
             await ch._cmd_generic(update, None)
@@ -1697,6 +2670,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=31, text="/status")
             await ch._cmd_generic(update, None)
@@ -1714,6 +2688,7 @@ class TestTelegramPrivateChatThread:
             bus = MessageBus()
             ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
             ch._main_loop = asyncio.get_event_loop()
+            self._configure_linked_channel(ch)
 
             update = _make_telegram_update("group", message_id=32, reply_to_message_id=20, text="/status")
             await ch._cmd_generic(update, None)
@@ -1724,6 +2699,74 @@ class TestTelegramPrivateChatThread:
 
         _run(go())
 
+
+class TestTelegramLinkingAndMedia:
+    def test_unlinked_text_prompts_for_link_and_skips_publish(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._resolve_link_for_chat = AsyncMock(return_value=None)  # type: ignore[method-assign]
+            ch._send_link_required_message = AsyncMock()  # type: ignore[method-assign]
+
+            update = _make_telegram_update("private", message_id=40, text="hello")
+            await ch._on_text(update, None)
+
+            ch._send_link_required_message.assert_awaited_once()
+            assert bus.inbound_queue.empty()
+
+        _run(go())
+
+    def test_start_with_token_redeems_link(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._link_store = MagicMock()
+            ch._link_store.redeem_link_token.return_value = {"context_mode": "work"}
+
+            update = _make_telegram_update("private", message_id=41, text="/start abc-token")
+            context = MagicMock()
+            context.args = ["abc-token"]
+            await ch._cmd_start(update, context)
+
+            ch._link_store.redeem_link_token.assert_called_once()
+            update.message.reply_text.assert_awaited_once()
+            assert "linked successfully" in update.message.reply_text.call_args.args[0]
+
+        _run(go())
+
+    def test_media_message_creates_chat_inbound_with_files(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+            ch._resolve_link_for_chat = AsyncMock(return_value={"user_id": "linked-user"})  # type: ignore[method-assign]
+            ch._send_link_required_message = AsyncMock()  # type: ignore[method-assign]
+
+            update = _make_telegram_update("private", message_id=42, text="")
+            update.message.caption = "analyze this"
+            photo = MagicMock()
+            photo.file_id = "photo-file-id"
+            photo.file_unique_id = "photo-unique-id"
+            update.message.photo = [photo]
+            update.message.document = None
+
+            await ch._on_media(update, None)
+
+            inbound = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert inbound.msg_type == InboundMessageType.CHAT
+            assert inbound.user_id == "linked-user"
+            assert inbound.topic_id is None
+            assert len(inbound.files) == 1
+            assert inbound.files[0]["file_id"] == "photo-file-id"
+
+        _run(go())
 
 # ---------------------------------------------------------------------------
 # Slack markdown-to-mrkdwn conversion tests (via markdown_to_mrkdwn library)

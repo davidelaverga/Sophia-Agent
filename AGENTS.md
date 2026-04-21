@@ -1,4 +1,4 @@
-# Sophia — Claude Code Context
+# Sophia — Codex Context
 **Spec version:** 7.0 · March 2026
 **Repo:** fork of bytedance/deer-flow
 **Team:** Davide (product/architecture) · Jorge (backend) · Luis (voice + frontend)
@@ -22,7 +22,7 @@ Three platforms, one intelligence layer: web voice, web text, iOS voice.
 5. **`runs/stream` always for companion turns. Never `runs/wait` for voice.** Text tokens pipe to Cartesia immediately. `runs/wait` adds ~1.2s latency. This is the difference between hitting or missing the 3-second voice target.
 6. **Platform signal is mandatory in every DeerFlow request.** Pass `platform` in `configurable` on every call. The entire middleware chain adapts on this signal.
 7. **`lead_agent/` is never modified.** `sophia_builder` reuses it as-is. Sophia lives in `sophia_agent/` and `sophia/` only.
-8. **Pipeline prompt templates are not skill files.** Files in `backend/src/sophia/prompts/` are pipeline inputs. They go to Claude Haiku in offline processing. They must never appear in the agent's per-turn context.
+8. **Pipeline prompt templates are not skill files.** Files in `backend/src/sophia/prompts/` are pipeline inputs. They go to Codex Haiku in offline processing. They must never appear in the agent's per-turn context.
 9. **RitualMiddleware must be at position 11 (before SkillRouter at 12).** Order is load-bearing. SkillRouter reads `active_ritual` from state — if Ritual hasn't run first, skill routing has no ritual context.
 10. **The offline pipeline is idempotent.** Use the `processed_sessions` set to prevent double processing.
 ---
@@ -155,7 +155,6 @@ class SophiaState(TypedDict):
     # Builder
     builder_task: dict | None
     builder_result: dict | None
-    builder_delivery: dict | None   # transient current-turn attachment payload for channel uploads
 ```
 ---
 ## Mem0 — 9 Categories and Rules
@@ -221,10 +220,7 @@ if ritual:
 tools = [
     emit_artifact,       # REQUIRED every turn — carries TTS emotion + session continuity
     switch_to_builder,   # delegates to sophia_builder (lead_agent) via task()
-    share_builder_artifact,  # re-attach the latest built file on a later turn
     retrieve_memories,   # targeted deep retrieval (reflect flow, specific queries)
-    web_search,          # loaded from DeerFlow config when configured
-    web_fetch,           # loaded from DeerFlow config when configured
 ]
 ```
 ### emit_artifact — 13 required fields
@@ -232,7 +228,7 @@ tools = [
 Voice speeds → Cartesia values: slow=0.8, gentle=0.9, normal=1.0, engaged=1.05, energetic=1.15.
 Artifact arrives **after** the text stream completes. It updates the emotion for the **next** TTS call.
 ### switch_to_builder
-Companion asks all clarifying questions first, then calls `switch_to_builder` with complete specs. Builder cannot interrupt the parent graph for clarification. The current implementation blocks until the builder finishes, stores `builder_result` plus a transient `builder_delivery` payload in Sophia state, and lets channels upload the finished file immediately in the same turn. Later resend requests should use `share_builder_artifact`.
+Companion asks all clarifying questions first, then calls `switch_to_builder` with complete specs. Builder cannot interrupt the parent graph for clarification. Companion stays live and relays progress while builder works asynchronously.
 ---
 ## Platform Values and Effects
 | Value | Who sets it | What adapts downstream |
@@ -265,11 +261,11 @@ config = {"configurable": {
 | Previous artifact (conditional) | ~200 |
 | Active skill file | ~650 |
 | **Peak total** | **~9,144** |
-4.6% of Claude Haiku's 200k context. No compression needed at normal operation.
+4.6% of Codex Haiku's 200k context. No compression needed at normal operation.
 Models:
-- Companion: `claude-haiku-4-5-20251001`
-- Builder: `claude-sonnet-4-6`
-- Offline pipeline (all steps): `claude-haiku-4-5-20251001`
+- Companion: `Codex-haiku-4-5-20251001`
+- Builder: `Codex-sonnet-4-6`
+- Offline pipeline (all steps): `Codex-haiku-4-5-20251001`
 ---
 ## Offline Pipeline — 7 Steps
 Fires on WebRTC disconnect or 10-minute inactivity. Idempotent — safe to run twice.
@@ -406,6 +402,6 @@ Format per entry:
 ```
 ## YYYY-MM-DD · [component] · PR #[N]
 Author / Track / Spec reference
-What changed · What we learned · CLAUDE.md updates · Skills created · GEPA log entry
+What changed · What we learned · AGENTS.md updates · Skills created · GEPA log entry
 ```
 If a prompt file changed, write a GEPA log entry with: before behavior, after behavior, tone_delta if measurable, and whether a trace pair is available.

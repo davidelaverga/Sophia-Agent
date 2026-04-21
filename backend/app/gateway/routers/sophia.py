@@ -13,6 +13,10 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.channels.telegram_linking import (
+    DEFAULT_LINK_TOKEN_TTL_SECONDS,
+    get_telegram_link_store,
+)
 from app.gateway.auth import require_authorized_user_scope
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
@@ -48,6 +52,17 @@ def _validate_user(user_id: str) -> str:
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+
+def _serialize_optional_datetime(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
+
+
+def _task_status_value(value: object) -> str:
+    status_value = getattr(value, "value", value)
+    return str(status_value).strip().lower()
 
 
 def _get_mem0_client():
@@ -267,6 +282,43 @@ class SessionEndResponse(BaseModel):
     debrief_prompt: str | None = Field(default=None)
 
 
+class TelegramLinkCreateRequest(BaseModel):
+    context_mode: Literal["work", "gaming", "life"] = Field(
+        default="life",
+        description="Default Sophia context mode to apply on Telegram runs.",
+    )
+    ttl_seconds: int = Field(
+        default=DEFAULT_LINK_TOKEN_TTL_SECONDS,
+        ge=60,
+        le=86400,
+        description="One-time Telegram link token TTL in seconds.",
+    )
+
+
+class TelegramLinkCreateResponse(BaseModel):
+    linked: bool = Field(default=False)
+    token: str = Field(..., description="One-time token used in Telegram deep-linking.")
+    deep_link: str | None = Field(default=None)
+    expires_at: str
+    context_mode: str = Field(default="life")
+
+
+class TelegramLinkStatusResponse(BaseModel):
+    linked: bool = Field(default=False)
+    user_id: str
+    telegram_chat_id: str | None = None
+    telegram_user_id: str | None = None
+    telegram_username: str | None = None
+    context_mode: str | None = None
+    linked_at: str | None = None
+    last_seen_at: str | None = None
+
+
+class TelegramLinkRemoveResponse(BaseModel):
+    linked: bool = Field(default=False)
+    removed: bool = Field(default=False)
+
+
 class TaskCancelResponse(BaseModel):
     task_id: str = Field(..., description="Background task identifier")
     status: str = Field(..., description="Cancellation status")
@@ -344,6 +396,28 @@ def _to_memory_item(mem: dict) -> MemoryItem:
         created_at=mem.get("created_at"),
         updated_at=mem.get("updated_at"),
     )
+
+
+def _get_telegram_bot_username() -> str | None:
+    env_username = os.environ.get("TELEGRAM_BOT_USERNAME")
+    if isinstance(env_username, str) and env_username.strip():
+        return env_username.strip().lstrip("@")
+
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        app_config = get_app_config()
+        extra = app_config.model_extra or {}
+        channels = extra.get("channels", {})
+        if isinstance(channels, dict):
+            telegram_cfg = channels.get("telegram", {})
+            if isinstance(telegram_cfg, dict):
+                candidate = telegram_cfg.get("bot_username")
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip().lstrip("@")
+    except Exception:
+        logger.warning("Unable to resolve Telegram bot username from config", exc_info=True)
+    return None
 
 
 def _merge_memory_detail(summary: dict, detail: dict | None) -> dict:
@@ -1002,6 +1076,71 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
     except Exception as e:
         logger.warning("Visual commitments failed: %s", e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+# ---------------------------------------------------------------------------
+# 6b. Telegram linking
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/telegram/link",
+    response_model=TelegramLinkCreateResponse,
+    summary="Create a one-time Telegram deep-link token",
+)
+async def create_telegram_link_token(
+    user_id: str,
+    body: TelegramLinkCreateRequest,
+) -> TelegramLinkCreateResponse:
+    user_id = _validate_user(user_id)
+    store = get_telegram_link_store()
+    issued = store.issue_link_token(
+        sophia_user_id=user_id,
+        context_mode=body.context_mode,
+        ttl_seconds=body.ttl_seconds,
+    )
+    bot_username = _get_telegram_bot_username()
+    deep_link = f"https://t.me/{bot_username}?start={issued['token']}" if bot_username else None
+    return TelegramLinkCreateResponse(
+        linked=False,
+        token=issued["token"],
+        deep_link=deep_link,
+        expires_at=issued["expires_at"],
+        context_mode=issued["context_mode"],
+    )
+
+
+@router.get(
+    "/{user_id}/telegram/link",
+    response_model=TelegramLinkStatusResponse,
+    summary="Get Telegram link status for the Sophia user",
+)
+async def get_telegram_link_status(user_id: str) -> TelegramLinkStatusResponse:
+    user_id = _validate_user(user_id)
+    store = get_telegram_link_store()
+    link = store.get_link_by_user(user_id)
+    if not link:
+        return TelegramLinkStatusResponse(linked=False, user_id=user_id)
+    return TelegramLinkStatusResponse(
+        linked=True,
+        user_id=user_id,
+        telegram_chat_id=link.get("telegram_chat_id"),
+        telegram_user_id=link.get("telegram_user_id"),
+        telegram_username=link.get("telegram_username"),
+        context_mode=link.get("context_mode"),
+        linked_at=link.get("linked_at"),
+        last_seen_at=link.get("last_seen_at"),
+    )
+
+
+@router.delete(
+    "/{user_id}/telegram/link",
+    response_model=TelegramLinkRemoveResponse,
+    summary="Unlink Telegram from the Sophia user",
+)
+async def remove_telegram_link(user_id: str) -> TelegramLinkRemoveResponse:
+    user_id = _validate_user(user_id)
+    store = get_telegram_link_store()
+    removed = store.unlink_user(user_id)
+    return TelegramLinkRemoveResponse(linked=False, removed=removed)
 
 
 def _extract_builder_result_from_task_result(result: object) -> dict | None:
