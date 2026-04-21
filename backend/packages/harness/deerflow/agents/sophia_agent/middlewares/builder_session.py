@@ -21,10 +21,29 @@ from deerflow.subagents.executor import (
     build_subagent_progress_payload,
     cleanup_background_task,
     get_background_task_result,
+    read_background_task_status_payload,
 )
 
 _NON_TERMINAL_STATUSES = {"queued", "running", "started"}
 _TERMINAL_STATUSES = {"completed", "synthesized", "failed", "timed_out"}
+
+# Snapshot progress fields copied into ``builder_task`` when we recover a
+# terminal state from the on-disk status payload (the in-memory task was
+# cleaned up or lost on worker restart).
+_SNAPSHOT_PROGRESS_FIELDS = (
+    "completed_at",
+    "last_update_at",
+    "last_progress_at",
+    "progress_percent",
+    "progress_source",
+    "total_steps",
+    "completed_steps",
+    "in_progress_steps",
+    "pending_steps",
+    "active_step_title",
+    "todos",
+    "debug",
+)
 
 
 class BuilderSessionState(AgentState):
@@ -322,14 +341,61 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
 
             if result is None:
                 background_task_missing = True
-                failed_task = {
-                    **current_task,
-                    "status": "failed",
-                    "error": "Builder task state disappeared before completion.",
-                }
-                updates["builder_task"] = failed_task
-                updates["active_mode"] = "companion"
-                blocks.append(self._failure_block(failed_task))
+                # Fall back to the on-disk snapshot the executor persists on
+                # every progress tick and every terminal transition. The
+                # in-memory _background_tasks dict is cleared on worker
+                # restart and after post-terminal cleanup, so an absence
+                # there does not mean the task never finished. Using the
+                # snapshot lets the companion surface the real terminal
+                # state (e.g. failed with a specific error, or completed
+                # with a builder_result) instead of a blanket
+                # "task state disappeared" notice.
+                snapshot_user_id = state.get("user_id")
+                snapshot_payload = (
+                    read_background_task_status_payload(snapshot_user_id, task_id)
+                    if snapshot_user_id and task_id
+                    else None
+                )
+                recovered_from_snapshot = False
+                if (
+                    isinstance(snapshot_payload, dict)
+                    and isinstance(snapshot_payload.get("status"), str)
+                    and snapshot_payload.get("status")
+                ):
+                    snap_status = str(snapshot_payload["status"])
+                    recovered_task: dict[str, Any] = {
+                        **current_task,
+                        "status": snap_status,
+                    }
+                    snap_error = snapshot_payload.get("error")
+                    if isinstance(snap_error, str) and snap_error:
+                        recovered_task["error"] = snap_error
+                    elif snap_status != "completed":
+                        recovered_task["error"] = (
+                            "Builder task state disappeared before completion."
+                        )
+                    for snap_key in _SNAPSHOT_PROGRESS_FIELDS:
+                        snap_value = snapshot_payload.get(snap_key)
+                        if snap_value is not None:
+                            recovered_task[snap_key] = snap_value
+                    updates["builder_task"] = recovered_task
+                    updates["active_mode"] = "companion"
+                    snap_builder_result = snapshot_payload.get("builder_result")
+                    if snap_status == "completed" and isinstance(snap_builder_result, dict):
+                        updates["builder_result"] = snap_builder_result
+                    if snap_status != "completed":
+                        blocks.append(self._failure_block(recovered_task))
+                    recovered_from_snapshot = True
+
+                if not recovered_from_snapshot:
+                    failed_task = {
+                        **current_task,
+                        "status": "failed",
+                        "error": "Builder task state disappeared before completion.",
+                    }
+                    updates["builder_task"] = failed_task
+                    updates["active_mode"] = "companion"
+                    blocks.append(self._failure_block(failed_task))
             else:
                 mapped_status = self._status_from_result(result)
                 progress_payload = build_subagent_progress_payload(result)

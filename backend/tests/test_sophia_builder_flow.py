@@ -728,6 +728,159 @@ def test_builder_session_logs_missing_background_task(monkeypatch):
     )
 
 
+def _make_handoff_state(task_id: str, trace_id: str, *, user_id: str | None = None) -> dict:
+    """Build a minimal companion-turn state with a fresh builder handoff.
+
+    Mirrors the shape produced by ``switch_to_builder`` so the session
+    middleware adopts the handoff and treats the task as non-terminal
+    (``queued``) before checking for its background record.
+    """
+    handoff_payload = {
+        "type": "builder_handoff",
+        "status": "queued",
+        "task_id": task_id,
+        "task_type": "document",
+        "trace_id": trace_id,
+        "builder_task": {
+            "task_id": task_id,
+            "description": "Build deck",
+            "task_type": "document",
+            "status": "queued",
+            "delegated_at": "2026-04-09T00:00:00Z",
+            "trace_id": trace_id,
+        },
+    }
+    ai_msg = AIMessage(
+        content="Delegating to builder",
+        tool_calls=[{"id": "tool-snapshot", "name": "switch_to_builder", "args": {"task_type": "document"}}],
+    )
+    tool_msg = ToolMessage(
+        content=json.dumps(handoff_payload),
+        tool_call_id="tool-snapshot",
+        name="switch_to_builder",
+    )
+    state: dict = {"messages": [ai_msg, tool_msg], "system_prompt_blocks": []}
+    if user_id is not None:
+        state["user_id"] = user_id
+    return state
+
+
+def test_builder_session_recovers_failed_state_from_snapshot(monkeypatch):
+    """When get_background_task_result returns None but the on-disk snapshot
+    carries a terminal payload, the middleware surfaces the snapshot's
+    status + error (and progress fields) instead of the generic
+    "Builder task state disappeared before completion" message.
+
+    Regression guard for the user-reported case where Sophia had no
+    awareness of the real builder status after an interrupted run.
+    """
+    task_id = "task-snap-failed"
+    state = _make_handoff_state(task_id, "trace-snap-failed", user_id="user_abc")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-snap-failed"}
+
+    snapshot_payload = {
+        "task_id": task_id,
+        "status": "failed",
+        "trace_id": "trace-snap-failed",
+        "description": "Build deck",
+        "error": "builder_web_budget reducer error",
+        "progress_percent": 90,
+        "progress_source": "iterations",
+        "debug": {"iteration_count": 16, "slowest_iteration_ms": 155_688},
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.read_background_task_status_payload",
+        lambda user_id, tid: snapshot_payload if user_id == "user_abc" and tid == task_id else None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda *args, **kwargs: None,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    recovered = state["builder_task"]
+    assert recovered["status"] == "failed"
+    assert recovered["error"] == "builder_web_budget reducer error"
+    assert recovered["progress_percent"] == 90
+    assert recovered["progress_source"] == "iterations"
+    assert recovered["debug"] == {"iteration_count": 16, "slowest_iteration_ms": 155_688}
+    assert state["active_mode"] == "companion"
+    # Failure block must still be emitted so the companion can narrate the
+    # outcome to the user instead of pretending the build is still running.
+    assert any(
+        "Latest builder task ended with status=failed" in block
+        for block in state["system_prompt_blocks"]
+    )
+
+
+def test_builder_session_recovers_completed_state_from_snapshot(monkeypatch):
+    """When the snapshot shows the task already COMPLETED (common after a
+    post-terminal cleanup or a worker restart that wiped the in-memory
+    dict), the middleware must surface the completion + builder_result
+    instead of marking the task failed.
+    """
+    task_id = "task-snap-completed"
+    state = _make_handoff_state(task_id, "trace-snap-completed", user_id="user_abc")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-snap-completed"}
+
+    builder_result = {
+        "artifact_path": "outputs/deck.md",
+        "artifact_type": "document",
+        "artifact_title": "Investor deck",
+        "companion_summary": "Deck drafted.",
+        "confidence": 0.88,
+    }
+    snapshot_payload = {
+        "task_id": task_id,
+        "status": "completed",
+        "trace_id": "trace-snap-completed",
+        "description": "Build deck",
+        "completed_at": "2026-04-21T19:35:30+00:00",
+        "progress_percent": 100,
+        "progress_source": "todos",
+        "builder_result": builder_result,
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.read_background_task_status_payload",
+        lambda _user_id, _task_id: snapshot_payload,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda *args, **kwargs: None,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    recovered = state["builder_task"]
+    assert recovered["status"] == "completed"
+    assert recovered["progress_percent"] == 100
+    assert recovered["completed_at"] == "2026-04-21T19:35:30+00:00"
+    # Error field must NOT be synthesized on completed snapshots.
+    assert "error" not in recovered
+    assert state["builder_result"] == builder_result
+    # No failure block on completed snapshots — the ArtifactMiddleware
+    # synthesis path takes over from here.
+    assert not any(
+        "Latest builder task ended with status=failed" in block
+        for block in state["system_prompt_blocks"]
+    )
+
+
 def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
