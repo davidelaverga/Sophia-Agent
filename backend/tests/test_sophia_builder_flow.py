@@ -842,3 +842,101 @@ def test_companion_registers_share_builder_artifact_tool(monkeypatch):
     assert "share_builder_artifact" in tool_names, (
         f"share_builder_artifact not registered on companion; got tools={tool_names}"
     )
+
+
+def _capture_companion_middlewares(monkeypatch, *, async_builder: bool) -> dict[str, list]:
+    """Shared helper for the async_builder wiring tests: patches the same
+    set of side-effectful companion imports that ``make_sophia_agent``
+    touches, invokes the factory, and returns whatever ``create_agent`` was
+    called with so the test can assert on middlewares / tools.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured: dict[str, list] = {"middleware": [], "tools": []}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    class FakeSummarizationMiddleware:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    FakeSummarizationMiddleware.__name__ = "SummarizationMiddleware"
+
+    monkeypatch.setattr(companion_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(companion_module, "create_chat_model", lambda **kwargs: "summary-model")
+    monkeypatch.setattr(companion_module, "SummarizationMiddleware", FakeSummarizationMiddleware)
+    monkeypatch.setattr(
+        companion_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(
+            enabled=False,
+            trigger=[ContextSize(type="tokens", value=2000)],
+            keep=ContextSize(type="messages", value=20),
+        ),
+    )
+    monkeypatch.setattr(companion_module, "make_retrieve_memories_tool", lambda user_id: MagicMock(name="retrieve_memories"))
+    monkeypatch.setattr(companion_module, "load_sophia_web_tools", lambda: [])
+
+    def _capture(**kwargs):
+        captured["middleware"] = list(kwargs["middleware"])
+        captured["tools"] = list(kwargs["tools"])
+        return DummyAgent()
+
+    monkeypatch.setattr(companion_module, "create_agent", _capture)
+    companion_module.make_sophia_agent(
+        {"configurable": {"user_id": "user_123", "async_builder": async_builder}}
+    )
+    return captured
+
+
+def test_async_builder_flag_attaches_async_subagent_middleware(monkeypatch):
+    """When ``configurable.async_builder=True``, the companion registers the
+    deepagents AsyncSubAgentMiddleware and surfaces the five async-task
+    management tools. This is the Phase 1 wiring guarantee for the
+    deepagents v0.5 migration.
+    """
+    captured = _capture_companion_middlewares(monkeypatch, async_builder=True)
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "AsyncSubAgentMiddleware" in middleware_types, (
+        f"AsyncSubAgentMiddleware missing from companion chain when flag=True; "
+        f"got middlewares={middleware_types}"
+    )
+
+    # All five async-task tools must be reachable from the model. They come
+    # from the middleware's ``tools`` property, which ``create_agent``
+    # merges with the supplied ``tools`` list.
+    async_mw = next(mw for mw in captured["middleware"] if type(mw).__name__ == "AsyncSubAgentMiddleware")
+    advertised = {getattr(t, "name", None) for t in async_mw.tools}
+    expected_tools = {
+        "start_async_task",
+        "check_async_task",
+        "update_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
+    }
+    assert expected_tools.issubset(advertised), (
+        f"expected async tools missing; middleware advertises {advertised}"
+    )
+
+    # Legacy sync tool must still coexist during the rollout window so the
+    # flip between sync and async is a one-config change.
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "switch_to_builder" in tool_names
+
+
+def test_async_builder_flag_default_keeps_sync_only(monkeypatch):
+    """When ``configurable.async_builder`` is absent (default False), the
+    companion must NOT attach AsyncSubAgentMiddleware. The sync
+    ``switch_to_builder`` path is the production default for the rollout.
+    """
+    captured = _capture_companion_middlewares(monkeypatch, async_builder=False)
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "AsyncSubAgentMiddleware" not in middleware_types, (
+        f"AsyncSubAgentMiddleware should be absent when flag=False; "
+        f"got middlewares={middleware_types}"
+    )
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "switch_to_builder" in tool_names
+    assert "start_async_task" not in tool_names

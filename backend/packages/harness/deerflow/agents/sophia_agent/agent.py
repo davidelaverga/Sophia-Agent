@@ -6,6 +6,13 @@ Creates the Sophia companion agent with its middleware chain.
 import logging
 import os
 
+# deepagents v0.5 async subagents (Phase 1 of the migration). The middleware
+# is attached only when ``configurable.async_builder`` is truthy, so the
+# sync ``switch_to_builder`` path stays the default for the rollout window.
+from deepagents.middleware.async_subagents import (  # noqa: E402
+    AsyncSubAgent,
+    AsyncSubAgentMiddleware,
+)
 from langchain.agents import create_agent
 
 # Re-export SummarizationMiddleware at module scope so
@@ -54,6 +61,59 @@ from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 logger = logging.getLogger(__name__)
 
 
+# System-prompt preface injected alongside the five async-subagent tools.
+# Kept short; the heavy contract lives in ``skills/public/sophia/AGENTS.md``
+# (already injected by FileInjectionMiddleware). This block just teaches the
+# companion the async vocabulary so it picks the right tool for the user's
+# intent.
+_ASYNC_BUILDER_SYSTEM_PROMPT = """\
+You can delegate long builds to the Sophia builder as a background task.
+- To start a build, call ``start_async_task`` with
+  ``subagent_type="sophia_builder"`` and a complete, self-contained task
+  description that includes the task_type as a prefix (for example
+  ``[presentation] Build a 5-slide investor deck...``). The task returns
+  a task_id immediately; keep talking to the user while the build runs.
+- When the user asks "how's it going?" or enough time has passed, call
+  ``check_async_task`` with the task_id.
+- If the user course-corrects ("actually, make it 2 slides not 5"), call
+  ``update_async_task`` with the task_id and the new instruction. This
+  preserves the existing thread so the builder keeps its progress.
+- If the user asks you to stop, call ``cancel_async_task``.
+- Use ``list_async_tasks`` when the user references "that document we
+  started" and you need to recall recent task_ids.
+Do not poll on a timer. Only check when the user asks or when you know
+enough time has passed that a check is worth offering.
+"""
+
+
+def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
+    """Build the deepagents AsyncSubAgentMiddleware that exposes the five
+    async-task management tools (``start_async_task``, ``check_async_task``,
+    ``update_async_task``, ``cancel_async_task``, ``list_async_tasks``) and
+    maintains the ``async_tasks`` state channel.
+
+    The ``AsyncSubAgent`` spec omits ``url`` on purpose: this selects the
+    ASGI (co-deployed) transport, which routes SDK calls in-process through
+    our existing ``langgraph.json`` registration of ``sophia_builder``. Zero
+    network hop, zero extra auth configuration. Deploying the builder on a
+    separate host later is a one-line change (add ``url=``).
+    """
+    sophia_builder_spec: AsyncSubAgent = {
+        "name": "sophia_builder",
+        "description": (
+            "Sophia's builder graph. Delegate file-creation, research, "
+            "presentation, visual_report, frontend, and document tasks. The "
+            "description you send becomes the builder's task brief, so "
+            "include all specs the user gave you."
+        ),
+        "graph_id": "sophia_builder",
+    }
+    return AsyncSubAgentMiddleware(
+        async_subagents=[sophia_builder_spec],
+        system_prompt=_ASYNC_BUILDER_SYSTEM_PROMPT,
+    )
+
+
 def _create_summarization_middleware():
     """Create a SophiaSummarizationMiddleware instance from app config."""
     from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
@@ -98,6 +158,7 @@ def make_sophia_agent(config: RunnableConfig):
     platform = cfg.get("platform", "voice")
     ritual = cfg.get("ritual", None)
     context_mode = cfg.get("context_mode", "life")
+    async_builder_enabled = bool(cfg.get("async_builder", False))
 
     logger.info(
         "Creating Sophia companion agent: user_id=%s, platform=%s, ritual=%s, context_mode=%s",
@@ -160,6 +221,18 @@ def make_sophia_agent(config: RunnableConfig):
     ]
     if web_tools:
         middlewares.insert(-2, WebResearchGuidanceMiddleware())
+
+    if async_builder_enabled:
+        # Append AFTER the builder-session/command middlewares so those still
+        # see every turn even when the companion uses the async tools. The
+        # middleware adds its five tools (start/check/update/cancel/list
+        # async_task) via ``AsyncSubAgentMiddleware.tools`` and prepends the
+        # system prompt via ``wrap_model_call``.
+        middlewares.append(_build_async_subagent_middleware())
+        logger.info(
+            "Sophia companion: async_builder flag enabled; "
+            "AsyncSubAgentMiddleware attached with graph_id=sophia_builder"
+        )
 
     # 17. Summarization (config-driven trigger/keep policy)
     summarization_middleware = _create_summarization_middleware()

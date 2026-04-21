@@ -6,6 +6,10 @@ requires-python = ">=3.12"
 dependencies = [
     "agent-sandbox>=0.0.19",
     "cachetools>=5.3.0",
+    # Async subagents (AsyncSubAgent + AsyncSubAgentMiddleware) used by the
+    # companion to launch the builder as a non-blocking background task via
+    # the Agent Protocol / LangGraph SDK. See docs/sophia/deepagents-async.md.
+    "deepagents>=0.5.0",
     "dotenv>=0.9.9",
     "httpx>=0.28.0",
     "kubernetes>=30.0.0",
