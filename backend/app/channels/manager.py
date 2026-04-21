@@ -20,7 +20,10 @@ from app.channels.message_bus import InboundMessage, InboundMessageType, Message
 from app.channels.session_resolver import resolve_channel_session
 from app.channels.store import ChannelStore
 from deerflow.config.paths import get_paths
-from deerflow.sophia.tools.builder_delivery import extract_builder_artifact_paths
+from deerflow.sophia.tools.builder_delivery import (
+    build_builder_delivery_payload,
+    extract_builder_artifact_paths,
+)
 from deerflow.subagents.executor import get_background_task_result
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 
@@ -86,7 +89,11 @@ _TELEGRAM_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 _TELEGRAM_INLINE_PDF_MAX_BYTES = 10 * 1024 * 1024
 _TELEGRAM_INLINE_TEXT_MAX_CHARS = 60_000
 
-_TERMINAL_BUILDER_STATUSES = {"completed", "failed", "timed_out"}
+# Terminal statuses the builder notifier treats as "run is over, send closure
+# to the user". ``cancelled`` is explicitly included so that task-cancel calls
+# (from gateway cancel endpoints or runtime cancellation) always surface a
+# user-facing message instead of leaving Telegram silent.
+_TERMINAL_BUILDER_STATUSES = {"completed", "failed", "timed_out", "cancelled"}
 
 _THREAD_MISSING_HINTS = ("thread", "assistant")
 
@@ -1201,7 +1208,29 @@ class ChannelManager:
                 if isinstance(next_action, str) and next_action.strip():
                     response_text = f"{response_text}\n\nNext step: {next_action.strip()}"
                 artifacts = _extract_builder_artifacts(builder_result)
-                response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+                # Hydrate an inline ``builder_delivery`` payload from the
+                # builder_result so ``_prepare_artifact_delivery`` can
+                # materialise attachments from embedded bytes rather than
+                # resolving virtual paths on the gateway host's filesystem.
+                # On Render's split-disk topology the builder writes files on
+                # the LangGraph host, which the gateway cannot see, so raw
+                # paths silently drop the attachment. This mirrors the same
+                # delivery contract used by the synchronous ``_handle_chat``
+                # path after ``runs.wait``.
+                builder_delivery = build_builder_delivery_payload(
+                    thread_id=thread_id,
+                    builder_result=builder_result,
+                )
+                if builder_delivery is not None:
+                    for artifact in _extract_builder_delivery_artifacts(builder_delivery):
+                        if artifact not in artifacts:
+                            artifacts.append(artifact)
+                response_text, attachments = _prepare_artifact_delivery(
+                    thread_id,
+                    response_text,
+                    artifacts,
+                    builder_delivery=builder_delivery,
+                )
 
                 await self.bus.publish_outbound(
                     OutboundMessage(
@@ -1219,8 +1248,15 @@ class ChannelManager:
 
             if status in _TERMINAL_BUILDER_STATUSES:
                 error = getattr(task_result, "error", None)
-                base_text = "Builder task timed out." if status == "timed_out" else "Builder task failed."
-                if isinstance(error, str) and error.strip():
+                if status == "cancelled":
+                    base_text = (
+                        "The build was cancelled. Let me know if you'd like to try something else."
+                    )
+                elif status == "timed_out":
+                    base_text = "Builder task timed out."
+                else:
+                    base_text = "Builder task failed."
+                if status != "cancelled" and isinstance(error, str) and error.strip():
                     base_text = f"{base_text}\n\n{error.strip()}"
                 await self.bus.publish_outbound(
                     OutboundMessage(
@@ -1229,7 +1265,11 @@ class ChannelManager:
                         thread_id=thread_id,
                         text=base_text,
                         thread_ts=msg.thread_ts,
-                        metadata={"builder_task_id": task_id, "builder_notification": True},
+                        metadata={
+                            "builder_task_id": task_id,
+                            "builder_notification": True,
+                            "builder_terminal_status": status,
+                        },
                     )
                 )
                 return

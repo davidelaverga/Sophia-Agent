@@ -1010,6 +1010,156 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_builder_notifier_emits_inline_delivery_payload(self, monkeypatch):
+        """Regression for the Render split-disk topology: on a completed task,
+        the notifier must hydrate a ``builder_delivery`` inline payload and
+        hand it to ``_prepare_artifact_delivery`` so the attachment is built
+        from embedded ``content_base64`` bytes rather than by resolving the
+        virtual path against the gateway's local outputs directory (which is
+        a different disk from LangGraph on Render, so the file isn't there).
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS", 0.01)
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_MAX_WAIT_SECONDS", 0.5)
+
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            handoff_payload = json.dumps({"type": "builder_handoff", "task_id": "task-inline", "status": "queued"})
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "build this"},
+                        {"type": "tool", "name": "switch_to_builder", "content": handoff_payload},
+                        {"type": "ai", "content": "Builder task queued."},
+                    ]
+                }
+            )
+            manager._client = mock_client
+
+            class _TaskResult:
+                status = "completed"
+                error = None
+                final_state = {
+                    "builder_result": {
+                        "companion_summary": "Builder finished your deck.",
+                        "artifact_path": "/mnt/user-data/outputs/deck.md",
+                    }
+                }
+                ai_messages = []
+
+            monkeypatch.setattr(
+                "app.channels.manager.get_background_task_result",
+                lambda _task_id: _TaskResult(),
+            )
+
+            # build_builder_delivery_payload normally reads from local disk;
+            # stub it to assert the notifier routes through the inline path.
+            inline_payload = {
+                "source": "builder_result",
+                "attachments": [
+                    {
+                        "virtual_path": "/mnt/user-data/outputs/deck.md",
+                        "filename": "deck.md",
+                        "mime_type": "text/markdown",
+                        "is_image": False,
+                        "size": 20,
+                        "content_base64": base64.b64encode(b"# Inline builder deck").decode("ascii"),
+                    }
+                ],
+            }
+            monkeypatch.setattr(
+                "app.channels.manager.build_builder_delivery_payload",
+                lambda *, thread_id, builder_result: inline_payload,
+            )
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(channel_name="telegram", chat_id="chat-inline", user_id="user1", text="build this"),
+            )
+            await _wait_for(lambda: any(m.metadata.get("builder_notification") for m in outbound_received))
+            await manager.stop()
+
+            notifier_msgs = [m for m in outbound_received if m.metadata.get("builder_notification")]
+            assert notifier_msgs, "builder notifier did not publish a follow-up message"
+            notifier_msg = notifier_msgs[-1]
+            assert len(notifier_msg.attachments) == 1, (
+                "notifier must materialise the inline delivery payload into an attachment"
+            )
+            attachment = notifier_msg.attachments[0]
+            assert attachment.virtual_path == "/mnt/user-data/outputs/deck.md"
+            assert attachment.filename == "deck.md"
+            assert attachment.actual_path.read_bytes() == b"# Inline builder deck"
+            assert "Builder finished your deck." in notifier_msg.text
+
+        _run(go())
+
+    def test_builder_notifier_handles_cancelled_status(self, monkeypatch):
+        """Cancelled tasks must be treated as a terminal state so Telegram
+        users get a closure message. Before this fix the notifier's
+        terminal-status set omitted ``cancelled`` and the background task
+        fell into the "unknown status" branch, exiting silently.
+        """
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS", 0.01)
+            monkeypatch.setattr("app.channels.manager.BUILDER_NOTIFIER_MAX_WAIT_SECONDS", 0.5)
+
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+            bus.subscribe_outbound(lambda msg: outbound_received.append(msg))
+
+            handoff_payload = json.dumps({"type": "builder_handoff", "task_id": "task-cancel", "status": "queued"})
+            mock_client = _make_mock_langgraph_client(
+                run_result={
+                    "messages": [
+                        {"type": "human", "content": "build this"},
+                        {"type": "tool", "name": "switch_to_builder", "content": handoff_payload},
+                        {"type": "ai", "content": "Builder task queued."},
+                    ]
+                }
+            )
+            manager._client = mock_client
+
+            class _TaskResult:
+                status = "cancelled"
+                error = "user requested cancellation"
+                final_state = None
+                ai_messages = []
+
+            monkeypatch.setattr(
+                "app.channels.manager.get_background_task_result",
+                lambda _task_id: _TaskResult(),
+            )
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(channel_name="telegram", chat_id="chat-cancel", user_id="user1", text="build this"),
+            )
+            await _wait_for(lambda: any(m.metadata.get("builder_notification") for m in outbound_received))
+            await manager.stop()
+
+            notifier_msgs = [m for m in outbound_received if m.metadata.get("builder_notification")]
+            assert notifier_msgs, "notifier must publish a closure message on cancellation"
+            notifier_msg = notifier_msgs[-1]
+            assert notifier_msg.metadata.get("builder_terminal_status") == "cancelled"
+            assert "cancelled" in notifier_msg.text.lower()
+            # Cancellation is intentional; we do NOT want the raw error appended
+            # after the friendly closure line.
+            assert "user requested cancellation" not in notifier_msg.text
+
+        _run(go())
+
     def test_handle_feishu_chat_streams_multiple_outbound_updates(self, monkeypatch):
         from app.channels.manager import ChannelManager
 

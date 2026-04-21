@@ -794,3 +794,51 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names
     assert "builder_web_fetch" in builder_tool_names
+
+
+def test_companion_registers_share_builder_artifact_tool(monkeypatch):
+    """The companion must expose ``share_builder_artifact`` so users asking
+    Sophia to "send it again" can reach the re-share path the builder-delivery
+    plumbing already supports. Without it, the resend flow is unreachable and
+    the delivery mechanism added alongside the tool is effectively dead code.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured = {}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    class FakeSummarizationMiddleware:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    FakeSummarizationMiddleware.__name__ = "SummarizationMiddleware"
+
+    monkeypatch.setattr(companion_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(companion_module, "create_chat_model", lambda **kwargs: "summary-model")
+    monkeypatch.setattr(companion_module, "SummarizationMiddleware", FakeSummarizationMiddleware)
+    monkeypatch.setattr(
+        companion_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(
+            enabled=False,
+            trigger=[ContextSize(type="tokens", value=2000)],
+            keep=ContextSize(type="messages", value=20),
+        ),
+    )
+    monkeypatch.setattr(companion_module, "make_retrieve_memories_tool", lambda user_id: MagicMock(name="retrieve_memories"))
+    # Skip web tool loading (pulls in AppConfig which requires a populated
+    # config.yaml when tests run in isolation).
+    monkeypatch.setattr(companion_module, "load_sophia_web_tools", lambda: [])
+
+    def _capture(**kwargs):
+        captured["tools"] = kwargs["tools"]
+        return DummyAgent()
+
+    monkeypatch.setattr(companion_module, "create_agent", _capture)
+    companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
+
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "share_builder_artifact" in tool_names, (
+        f"share_builder_artifact not registered on companion; got tools={tool_names}"
+    )

@@ -7,6 +7,14 @@ import logging
 import os
 
 from langchain.agents import create_agent
+
+# Re-export SummarizationMiddleware at module scope so
+# ``test_middleware_parity_in_companion_and_builder_chains`` can patch it
+# before ``make_sophia_agent`` constructs the middleware chain. The real
+# subclass (``SophiaSummarizationMiddleware``) is still imported lazily
+# inside ``_create_summarization_middleware`` to avoid startup-time
+# coupling.
+from langchain.agents.middleware import SummarizationMiddleware  # noqa: F401
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
@@ -38,16 +46,9 @@ from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
-
-# Re-export SummarizationMiddleware at module scope so
-# ``test_middleware_parity_in_companion_and_builder_chains`` can patch it
-# before ``make_sophia_agent`` constructs the middleware chain. The real
-# subclass (``SophiaSummarizationMiddleware``) is still imported lazily
-# inside ``_create_summarization_middleware`` to avoid startup-time
-# coupling.
-from langchain.agents.middleware import SummarizationMiddleware  # noqa: F401
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+from deerflow.sophia.tools.share_builder_artifact import share_builder_artifact
 from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 
 logger = logging.getLogger(__name__)
@@ -179,7 +180,17 @@ def make_sophia_agent(config: RunnableConfig):
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
     switch_to_builder = make_switch_to_builder_tool(user_id)
-    tools = [emit_artifact, switch_to_builder, retrieve_memories, *web_tools]
+    # share_builder_artifact is the re-share-only tool: it re-attaches the most
+    # recent builder deliverable for the current thread when the user explicitly
+    # asks to resend. Its docstring forbids calling it in the same turn as
+    # switch_to_builder, so the model only reaches for it on resend requests.
+    tools = [
+        emit_artifact,
+        switch_to_builder,
+        share_builder_artifact,
+        retrieve_memories,
+        *web_tools,
+    ]
 
     agent = create_agent(
         model=model,
