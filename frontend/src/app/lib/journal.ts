@@ -198,6 +198,10 @@ export function getJournalStatus(entry: JournalEntry): string | null {
   return status
 }
 
+export function isJournalFavorite(entry: Pick<JournalEntry, 'metadata'>): boolean {
+  return entry.metadata?.favorite === true
+}
+
 export function isSavedJournalEntry(entry: JournalEntry): boolean {
   const status = getJournalStatus(entry)
   return status !== 'pending_review' && status !== 'discarded'
