@@ -17,20 +17,23 @@ fields written by parallel builder tool calls (``builder_web_budget``,
 ``builder_allowed_urls``, ``builder_search_sources``). Without reducers
 those fields would 500 on any builder turn where the model emits more than
 one ``builder_web_search`` / ``builder_web_fetch`` in a single AI message.
+
+Both guard families run against every ``AgentState`` subclass discovered
+under ``deerflow.agents.sophia_agent.middlewares`` so a newly added
+middleware picks up the regression test for free.
 """
 
 from __future__ import annotations
 
+import importlib
+import inspect
+import pkgutil
 import typing
 
 import pytest
 from langchain.agents import AgentState
 
-from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
-    BuilderArtifactState,
-)
-from deerflow.agents.sophia_agent.middlewares.session_state import SessionStateState
-from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountState
+from deerflow.agents.sophia_agent import middlewares as _middlewares_pkg
 from deerflow.agents.sophia_agent.state import (
     SophiaState,
     _merge_builder_web_budget,
@@ -43,17 +46,104 @@ _AGENT_STATE_MESSAGES = typing.get_type_hints(AgentState, include_extras=True)[
 ]
 
 
+def _transitively_extends_agent_state(cls: type) -> bool:
+    """Return ``True`` when ``cls`` is (possibly transitively) a subclass of
+    ``AgentState``. ``AgentState`` is a ``TypedDict`` which means it does
+    **not** appear in ``__mro__`` or ``__bases__`` — only in
+    ``__orig_bases__``. Walk the origin bases chain so the guard picks up
+    future middleware states that choose to subclass another AgentState
+    extension rather than AgentState directly.
+    """
+    queue: list[type] = list(getattr(cls, "__orig_bases__", ()))
+    seen: set[int] = set()
+    while queue:
+        base = queue.pop()
+        base_id = id(base)
+        if base_id in seen:
+            continue
+        seen.add(base_id)
+        if base is AgentState:
+            return True
+        queue.extend(getattr(base, "__orig_bases__", ()))
+    return False
+
+
+def _discover_middleware_state_classes() -> list[type]:
+    """Import every Sophia middleware submodule and return the classes that
+    extend ``AgentState`` (directly or transitively via ``__orig_bases__``).
+
+    Auto-discovery is what makes this suite load-bearing: a newly added
+    middleware cannot silently ship a schema that shadows a reducer-gated
+    field because its state class is picked up here automatically.
+    """
+    discovered: dict[str, type] = {}
+    for module_info in pkgutil.iter_modules(_middlewares_pkg.__path__):
+        if module_info.ispkg or module_info.name.startswith("_"):
+            continue
+        module = importlib.import_module(
+            f"{_middlewares_pkg.__name__}.{module_info.name}"
+        )
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj is AgentState:
+                continue
+            if obj.__module__ != module.__name__:
+                continue
+            if not _transitively_extends_agent_state(obj):
+                continue
+            discovered[f"{obj.__module__}.{obj.__name__}"] = obj
+    return list(discovered.values())
+
+
+_MIDDLEWARE_STATE_CLASSES = _discover_middleware_state_classes()
+
+
+def test_middleware_state_classes_were_discovered():
+    """Sanity check the auto-discovery so the parametrized guards below are
+    not silently empty after a refactor. If discovery returns nothing (for
+    example because ``__init__.py`` is missing or a module fails to import),
+    the parametrized tests below would pass trivially and hide regressions.
+    """
+    assert _MIDDLEWARE_STATE_CLASSES, (
+        "No Sophia middleware state classes discovered; the schema invariant "
+        "guards would pass trivially. Check that "
+        "``deerflow.agents.sophia_agent.middlewares`` is importable and that "
+        "every middleware module defines a state class extending AgentState."
+    )
+    names = {cls.__name__ for cls in _MIDDLEWARE_STATE_CLASSES}
+    # Spot-check the state classes known to be susceptible to schema
+    # shadowing. If any of these drop off the list the broader parametrized
+    # guards lose their bite — this assertion makes that failure explicit.
+    for expected in (
+        "BuilderArtifactState",
+        "BuilderResearchPolicyState",
+        "BuilderSessionState",
+        "BuilderTaskState",
+        "SessionStateState",
+        "TurnCountState",
+    ):
+        assert expected in names, (
+            f"Expected middleware state class `{expected}` is missing from "
+            "the auto-discovered list; did the module move or rename?"
+        )
+
+
 @pytest.mark.parametrize(
     "state_cls",
-    [
-        BuilderArtifactState,
-        SessionStateState,
-        TurnCountState,
-    ],
+    _MIDDLEWARE_STATE_CLASSES,
     ids=lambda cls: cls.__name__,
 )
 def test_state_class_does_not_downgrade_messages_channel(state_cls):
-    """Sophia middleware state classes must preserve the AgentState messages reducer."""
+    """Sophia middleware state classes must preserve the AgentState messages reducer.
+
+    ``langchain.agents.create_agent`` merges middleware state schemas via a
+    ``set``-based iteration that last-wins on repeated fields. A middleware
+    state that redeclares ``messages: NotRequired[list]`` wipes the
+    ``add_messages`` reducer inherited from ``AgentState``, downgrades the
+    LangGraph channel to ``LastValue``, and makes parallel tool calls crash
+    with ``InvalidUpdateError`` (for example two ``web_search`` calls in one
+    AI message, or a companion turn that emits ``emit_artifact`` and
+    ``switch_to_builder`` together).
+    """
     hints = typing.get_type_hints(state_cls, include_extras=True)
     messages = hints.get("messages")
     assert messages is not None, (
@@ -91,13 +181,16 @@ def _extract_reducers_from_annotation(annotation: object) -> list[object]:
     return reducers
 
 
+_REDUCER_GATED_BUILDER_FIELDS: tuple[tuple[str, object], ...] = (
+    ("builder_web_budget", _merge_builder_web_budget),
+    ("builder_allowed_urls", _union_string_list),
+    ("builder_search_sources", _merge_search_sources),
+)
+
+
 @pytest.mark.parametrize(
     ("field_name", "expected_reducer"),
-    [
-        ("builder_web_budget", _merge_builder_web_budget),
-        ("builder_allowed_urls", _union_string_list),
-        ("builder_search_sources", _merge_search_sources),
-    ],
+    _REDUCER_GATED_BUILDER_FIELDS,
 )
 def test_sophia_state_field_has_reducer(field_name, expected_reducer):
     """SophiaState fields written by parallel builder tool calls must carry a reducer.
@@ -121,6 +214,52 @@ def test_sophia_state_field_has_reducer(field_name, expected_reducer):
         f"SophiaState.{field_name} lost its reducer; parallel builder tool "
         "calls will crash with INVALID_CONCURRENT_GRAPH_UPDATE. Restore the "
         "`Annotated[..., reducer]` annotation (see state.py)."
+    )
+
+
+@pytest.mark.parametrize(
+    ("state_cls", "field_name", "expected_reducer"),
+    [
+        (state_cls, field_name, expected_reducer)
+        for state_cls in _MIDDLEWARE_STATE_CLASSES
+        for field_name, expected_reducer in _REDUCER_GATED_BUILDER_FIELDS
+    ],
+    ids=lambda value: getattr(value, "__name__", str(value)),
+)
+def test_middleware_state_does_not_shadow_reducer_gated_builder_fields(
+    state_cls, field_name, expected_reducer
+):
+    """Middleware states must not redeclare reducer-gated builder fields as plain ``NotRequired[...]``.
+
+    ``langchain.agents.create_agent`` collects every ``middleware.state_schema``
+    plus the explicit ``state_schema=`` into a ``set`` and merges them with a
+    last-wins loop. If a middleware redeclares ``builder_web_budget`` (or any
+    other reducer-gated field) without carrying the reducer metadata, that
+    plain declaration can overwrite the ``Annotated[..., reducer]`` coming
+    from ``SophiaState``. The LangGraph channel then becomes a ``LastValue``
+    and parallel ``builder_web_search`` / ``builder_web_fetch`` tool calls
+    crash with ``INVALID_CONCURRENT_GRAPH_UPDATE`` at runtime.
+
+    Because set iteration order is non-deterministic across processes, the
+    bug reproduces intermittently in production — exactly why we need a
+    type-level guard here.
+    """
+    hints = typing.get_type_hints(state_cls, include_extras=True)
+    annotation = hints.get(field_name)
+    if annotation is None:
+        # The middleware does not touch this field — nothing to shadow.
+        pytest.skip(
+            f"{state_cls.__name__} does not declare `{field_name}`; no shadow risk."
+        )
+    reducers = _extract_reducers_from_annotation(annotation)
+    assert expected_reducer in reducers, (
+        f"{state_cls.__name__}.{field_name} is declared without the "
+        f"`{expected_reducer.__name__}` reducer. That shadows the reducer-"
+        f"annotated field on SophiaState when create_agent merges state "
+        "schemas, downgrades the runtime channel to LastValue, and causes "
+        "INVALID_CONCURRENT_GRAPH_UPDATE on parallel builder tool calls. "
+        "Drop the redeclaration so the SophiaState annotation survives, or "
+        "carry the reducer through explicitly."
     )
 
 

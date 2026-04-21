@@ -47,12 +47,18 @@ _SNAPSHOT_PROGRESS_FIELDS = (
 
 
 class BuilderSessionState(AgentState):
-    messages: NotRequired[list]
+    # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
+    # ``messages`` with the ``add_messages`` reducer; shadowing it with a plain
+    # ``list`` downgrades the LangGraph channel to ``LastValue`` via
+    # ``langchain.agents.create_agent``'s set-based schema merge and makes
+    # parallel tool calls crash with ``InvalidUpdateError``. The guard in
+    # ``tests/test_sophia_state_schema_invariants.py`` enforces this.
     active_mode: NotRequired[str]
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
     system_prompt_blocks: NotRequired[list[str]]
+    user_id: NotRequired[str]
 
 
 class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):

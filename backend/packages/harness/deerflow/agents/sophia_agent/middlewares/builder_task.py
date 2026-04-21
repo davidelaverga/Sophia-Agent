@@ -25,8 +25,11 @@ class BuilderTaskState(AgentState):
     delegation_context: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
-    builder_search_sources: NotRequired[list[dict]]
     allow_web_research: NotRequired[bool]
+    # NOTE: `builder_search_sources` is intentionally NOT redeclared here.
+    # See ``BuilderResearchPolicyState`` and ``SophiaState`` for the reducer
+    # annotation and the tests/test_sophia_state_schema_invariants.py guard
+    # that prevents this shadow from coming back.
 
 
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
