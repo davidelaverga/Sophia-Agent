@@ -940,3 +940,87 @@ def test_async_builder_flag_default_keeps_sync_only(monkeypatch):
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
     assert "switch_to_builder" in tool_names
     assert "start_async_task" not in tool_names
+
+
+def test_companion_chain_includes_dangling_tool_call_middleware(monkeypatch):
+    """DanglingToolCallMiddleware must stay wired into the companion chain.
+
+    It self-heals tool_use/tool_result pairings immediately before the
+    Anthropic call. Without it, any sequence where a prior turn's
+    ToolMessage ends up displaced (summarization, state churn after a
+    checkpointer hiccup, etc.) surfaces as an Anthropic 400:
+    ``messages.N.content.M: unexpected `tool_use_id` found in `tool_result`
+    blocks``. This was originally wired in 4383dba7 and was silently
+    dropped by the main-merge 31cabe9d; this test exists so a future merge
+    cannot drop it again without a red test.
+
+    Position requirement: must run inside ``wrap_model_call`` AFTER
+    PromptAssemblyMiddleware (so the patched messages reflect the final
+    assembled shape) and BEFORE AnthropicPromptCachingMiddleware (so the
+    cache keys off the patched shape rather than the pre-patch shape).
+    """
+    captured = _capture_companion_middlewares(monkeypatch, async_builder=False)
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+
+    assert "DanglingToolCallMiddleware" in middleware_types, (
+        "DanglingToolCallMiddleware missing from companion chain; Anthropic will "
+        "reject any turn where the message history contains a ToolMessage "
+        "without its preceding AIMessage tool_use. Got middlewares="
+        f"{middleware_types}"
+    )
+
+    # Position invariant: PromptAssembly < DanglingToolCall < AnthropicPromptCaching.
+    prompt_idx = middleware_types.index("PromptAssemblyMiddleware")
+    dangling_idx = middleware_types.index("DanglingToolCallMiddleware")
+    caching_idx = middleware_types.index("AnthropicPromptCachingMiddleware")
+    assert prompt_idx < dangling_idx < caching_idx, (
+        "DanglingToolCallMiddleware must sit between PromptAssemblyMiddleware "
+        "and AnthropicPromptCachingMiddleware so the cache keys off patched "
+        f"messages. Got order={middleware_types}"
+    )
+
+
+def test_builder_chain_includes_dangling_tool_call_middleware(monkeypatch):
+    """DanglingToolCallMiddleware must stay wired into the builder chain.
+
+    Builder tool calls (bash, web_search, write_file, ...) can fail mid-flight
+    (sandbox crashes, network errors, user cancel). Without this middleware,
+    the very next Anthropic call inside the builder 400s with the same
+    ``tool_use ids were found without tool_result blocks`` signature.
+    Wired in 4383dba7, dropped in 31cabe9d merge, restored alongside the
+    companion counterpart. Same merge-drop guard rationale.
+    """
+    builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
+    captured: dict[str, list] = {"middleware": []}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+
+    def _capture(**kwargs):
+        captured["middleware"] = list(kwargs["middleware"])
+        return DummyAgent()
+
+    monkeypatch.setattr(builder_module, "create_agent", _capture)
+    builder_module._create_builder_agent(user_id="user_123")
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "DanglingToolCallMiddleware" in middleware_types, (
+        "DanglingToolCallMiddleware missing from builder chain; any mid-task "
+        "tool failure will turn the next Anthropic call into a 400. Got "
+        f"middlewares={middleware_types}"
+    )
+    # Must run AFTER PromptAssemblyMiddleware so it patches the final
+    # message list that is about to be sent to the model.
+    prompt_idx = middleware_types.index("PromptAssemblyMiddleware")
+    dangling_idx = middleware_types.index("DanglingToolCallMiddleware")
+    assert prompt_idx < dangling_idx, (
+        "DanglingToolCallMiddleware must run after PromptAssemblyMiddleware "
+        f"in the builder chain; got order={middleware_types}"
+    )

@@ -15,6 +15,7 @@ from langchain_core.runnables import RunnableConfig
 # Apply defensive langchain patches *before* importing anything that builds
 # the agent graph. See deerflow.agents._langchain_patches for details.
 from deerflow.agents import _langchain_patches  # noqa: F401
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -153,6 +154,12 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
             BuilderArtifactMiddleware(),
         # 7. Prompt assembly — assembles system_prompt_blocks into system message
             PromptAssemblyMiddleware(),
+        # 8. Tool-message integrity — patch dangling tool_use blocks so a
+        #    failed/interrupted tool call (bash, write_file, web_search, etc.)
+        #    never leaves the Anthropic contract in an invalid state. Wired in
+        #    4383dba7, dropped in main merge (31cabe9d), restored here with a
+        #    chain-membership test to prevent future regressions.
+            DanglingToolCallMiddleware(),
         ]
     )
 
