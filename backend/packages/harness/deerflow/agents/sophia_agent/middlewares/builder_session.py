@@ -21,10 +21,11 @@ from deerflow.subagents.executor import (
     build_subagent_progress_payload,
     cleanup_background_task,
     get_background_task_result,
+    get_latest_task_for_thread,
     read_background_task_status_payload,
 )
 
-_NON_TERMINAL_STATUSES = {"queued", "running", "started"}
+_NON_TERMINAL_STATUSES = {"pending", "queued", "running", "started"}
 _TERMINAL_STATUSES = {"completed", "synthesized", "failed", "timed_out"}
 
 # Snapshot progress fields copied into ``builder_task`` when we recover a
@@ -294,6 +295,53 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
         fields.extend(cls._task_log_fields(task))
         return " ".join(fields)
 
+    @staticmethod
+    def _resolve_thread_id(runtime: Runtime) -> str | None:
+        """Read thread_id from runtime.context or runtime.config.configurable."""
+        try:
+            context_thread = runtime.context.get("thread_id") if runtime.context else None
+        except Exception:
+            context_thread = None
+        if isinstance(context_thread, str) and context_thread:
+            return context_thread
+        try:
+            config = getattr(runtime, "config", None) or {}
+            configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+            config_thread = configurable.get("thread_id") if isinstance(configurable, dict) else None
+        except Exception:
+            config_thread = None
+        if isinstance(config_thread, str) and config_thread:
+            return config_thread
+        return None
+
+    def _hydrate_task_from_executor(self, thread_id: str | None) -> dict[str, Any] | None:
+        """Return a ``builder_task`` dict from ``_background_tasks`` if any
+        non-terminal task exists for the thread.
+
+        Used as a fallback when ``state['builder_task']`` is empty but the
+        executor still has an in-flight task for the same thread (Render
+        failure mode: companion state lost the task on a worker cycle while
+        the subagent continued running).
+        """
+        if not thread_id:
+            return None
+        result = get_latest_task_for_thread(thread_id)
+        if result is None:
+            return None
+        status = getattr(result, "status", None)
+        status_value = getattr(status, "value", status) if status is not None else None
+        if status_value not in _NON_TERMINAL_STATUSES:
+            return None
+        started_at = getattr(result, "started_at", None)
+        return {
+            "task_id": result.task_id,
+            "description": getattr(result, "description", None),
+            "task_type": None,
+            "delegated_at": started_at.isoformat() if started_at else None,
+            "status": status_value,
+            "trace_id": result.trace_id,
+        }
+
     @override
     def before_agent(self, state: BuilderSessionState, runtime: Runtime) -> dict | None:
         _t0 = time.perf_counter()
@@ -305,6 +353,23 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
         existing_task = state.get("builder_task") or {}
         new_handoff_adopted = False
         background_task_missing = False
+
+        # Executor-level fallback: when the companion graph has no tracked
+        # builder_task AND no fresh handoff payload, consult the process-wide
+        # ``_background_tasks`` store. This catches the Render failure mode
+        # where the companion state lost its builder_task (worker cycle,
+        # summarization, cross-process restart) while the subagent is still
+        # running on the same thread. Adopting the discovered task here
+        # re-enables the existing in-progress-block injection path below and
+        # lets the switch_to_builder tool guard fire without needing its own
+        # fallback code path.
+        if not payload and not existing_task:
+            thread_id = self._resolve_thread_id(runtime)
+            hydrated = self._hydrate_task_from_executor(thread_id)
+            if hydrated is not None:
+                updates["builder_task"] = hydrated
+                existing_task = hydrated
+                new_handoff_adopted = True
 
         if payload:
             payload_task = payload.get("builder_task") or {}

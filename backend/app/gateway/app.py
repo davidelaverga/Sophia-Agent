@@ -1,5 +1,6 @@
 import logging
 import os
+import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -21,6 +22,18 @@ from app.gateway.routers import (
     voice,
 )
 from deerflow.config.app_config import get_app_config
+
+# Narrow suppression: LangChain middleware emits a recurring
+# ``PydanticSerializationUnexpectedValue`` warning on the ``context``
+# RunnableConfig field (harmless — the field is serialised elsewhere with
+# ``exclude=None``). The warning fires on every turn and drowns real
+# log signal. Suppress ONLY messages that match the ``context`` field
+# pattern; unrelated Pydantic warnings are left intact.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PydanticSerializationUnexpectedValue.*context.*",
+    category=UserWarning,
+)
 
 # Configure logging
 logging.basicConfig(

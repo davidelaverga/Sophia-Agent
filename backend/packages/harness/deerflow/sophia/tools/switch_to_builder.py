@@ -30,7 +30,13 @@ from deerflow.sophia.builder_web_policy import (
     should_allow_builder_web_research,
 )
 from deerflow.subagents import SubagentExecutor, get_subagent_config
-from deerflow.subagents.executor import SubagentStatus, cleanup_background_task, get_background_task_result
+from deerflow.subagents.executor import (
+    SubagentResult,
+    SubagentStatus,
+    cleanup_background_task,
+    get_background_task_result,
+    get_latest_task_for_thread,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +45,19 @@ __all__ = [
     "SubagentStatus",
     "cleanup_background_task",
     "get_background_task_result",
+    "get_latest_task_for_thread",
     "get_subagent_config",
     "make_switch_to_builder_tool",
     "switch_to_builder",
     "time",
 ]
 
-_NON_TERMINAL_TASK_STATUSES = {"queued", "running", "started"}
+# Non-terminal builder task statuses. The tool-level guard uses this set to
+# suppress duplicate launches on both the companion-state path (via
+# ``state['builder_task']``) and the executor-level fallback (via
+# ``get_latest_task_for_thread`` when the state is empty but the executor
+# still has an in-flight task for the thread).
+_NON_TERMINAL_TASK_STATUSES = {"pending", "queued", "running", "started"}
 
 _BUILDER_DEMO_MARKERS = (
     "test builder",
@@ -202,8 +214,35 @@ def _latest_emit_artifact_payload(messages: list[Any]) -> dict[str, Any] | None:
     return None
 
 
+_COLD_START_COMPANION_ARTIFACT: dict[str, Any] = {
+    # Neutral baseline used when the companion launches the builder before
+    # ``emit_artifact`` has run at least once in this session. Gives downstream
+    # middleware (``ToneGuidanceMiddleware``, ``ContextAdaptationMiddleware``)
+    # coherent calibration context instead of an empty dict that starves the
+    # builder chain of tone hints.
+    "tone_estimate": 2.5,
+    "tone_target": 3.0,
+    "active_tone_band": "engagement",
+    "voice_speed": "normal",
+    "session_goal": None,
+    "active_goal": None,
+    "takeaway": None,
+    "reflection": None,
+    "companion_tone_hint": "Neutral — cold-start default",
+}
+
+
 def _resolve_companion_artifact(state: SophiaState) -> tuple[dict[str, Any], str, dict[str, bool]]:
-    """Resolve freshest companion artifact and provenance diagnostics."""
+    """Resolve freshest companion artifact and provenance diagnostics.
+
+    When none of the usual sources exist (first turn, crisis short-circuit,
+    or deliberate artifact reset) we synthesize a neutral baseline rather
+    than pass an empty dict downstream. The baseline gives the builder chain
+    enough calibration context to avoid cold-start UX degradation while
+    leaving ``latest_emit_artifact_present``/``current_artifact_present``/
+    ``previous_artifact_present`` diagnostics untouched so observability can
+    still distinguish the synthesized path from the hydrated paths.
+    """
     latest_emit_artifact = _latest_emit_artifact_payload(state.get("messages", []) or [])
     current_artifact = state.get("current_artifact")
     previous_artifact = state.get("previous_artifact")
@@ -222,7 +261,8 @@ def _resolve_companion_artifact(state: SophiaState) -> tuple[dict[str, Any], str
     if isinstance(previous_artifact, dict) and previous_artifact:
         return previous_artifact, "previous_artifact_state", diagnostics
 
-    return {}, "default_empty", diagnostics
+    logger.info("[Builder] synthesized default companion_artifact for cold-start")
+    return dict(_COLD_START_COMPANION_ARTIFACT), "cold_start_default", diagnostics
 
 
 def _build_duplicate_payload(existing_task: dict, task_type: str, trace_id: str) -> dict:
@@ -237,6 +277,60 @@ def _build_duplicate_payload(existing_task: dict, task_type: str, trace_id: str)
         "acknowledgement": "A builder task is already in progress. Continuing with the existing task.",
         "builder_task": existing_task,
     }
+
+
+def _subagent_result_to_task_dict(result: SubagentResult) -> dict:
+    """Project a :class:`SubagentResult` into the ``builder_task`` state shape.
+
+    Used by the executor-level duplicate-launch fallback. Mirrors the field set
+    produced by ``_switch_to_builder_impl`` so downstream consumers
+    (``BuilderSessionMiddleware``, logs, tests) can treat both sources uniformly.
+    """
+    status_value = getattr(result.status, "value", str(result.status)) if result.status else "running"
+    started_at = getattr(result, "started_at", None)
+    return {
+        "task_id": result.task_id,
+        "description": getattr(result, "description", None),
+        "task_type": None,
+        "delegated_at": started_at.isoformat() if started_at else None,
+        "status": status_value,
+        "trace_id": result.trace_id,
+        "handoff_resolution": None,
+    }
+
+
+def _find_duplicate_builder_task(
+    state: SophiaState,
+    thread_id: str | None,
+) -> tuple[dict | None, str]:
+    """Return an in-flight builder task + detection source, or (None, "none").
+
+    Primary source is ``state['builder_task']`` (populated by
+    ``BuilderSessionMiddleware`` on the companion graph). Fallback source is
+    the process-wide ``_background_tasks`` store keyed by ``thread_id`` — this
+    catches the Render failure mode in which the companion graph has not yet
+    hydrated ``builder_task`` but the executor still has an in-flight task for
+    the same thread.
+    """
+    existing_task = state.get("builder_task") or {}
+    if (
+        existing_task.get("status") in _NON_TERMINAL_TASK_STATUSES
+        and existing_task.get("task_id")
+    ):
+        return existing_task, "state.builder_task"
+
+    if not thread_id:
+        return None, "none"
+
+    result = get_latest_task_for_thread(thread_id)
+    if result is None:
+        return None, "none"
+
+    status_value = getattr(result.status, "value", str(result.status)) if result.status else None
+    if status_value not in _NON_TERMINAL_TASK_STATUSES:
+        return None, "none"
+
+    return _subagent_result_to_task_dict(result), "executor.get_latest_task_for_thread"
 
 
 def _normalize_background_status(status: Any) -> str:
@@ -399,13 +493,23 @@ def _switch_to_builder_impl(
         metadata = runtime.config.get("metadata", {})
         trace_id = metadata.get("trace_id") or trace_id
 
-    # Duplicate-launch protection: never start a second builder task while one is active.
-    existing_task = state.get("builder_task") or {}
-    if existing_task.get("status") in _NON_TERMINAL_TASK_STATUSES and existing_task.get("task_id"):
+    # Resolve thread_id once so both the duplicate-launch guard and the
+    # subagent executor share the same identifier.
+    thread_id = _resolve_thread_id(runtime)
+
+    # Duplicate-launch protection: never start a second builder task while one
+    # is active. Primary source is companion state; fallback is the executor's
+    # process-wide ``_background_tasks`` store keyed by thread_id (handles the
+    # case where state.builder_task has not yet been hydrated but the executor
+    # already has an in-flight task for the same thread).
+    existing_task, duplicate_source = _find_duplicate_builder_task(state, thread_id)
+    if existing_task is not None:
         logger.info(
-            "[Builder] duplicate switch_to_builder suppressed: task_id=%s status=%s",
+            "[Builder] duplicate switch_to_builder suppressed: task_id=%s status=%s source=%s thread_id=%s",
             existing_task.get("task_id"),
             existing_task.get("status"),
+            duplicate_source,
+            thread_id,
         )
         return json.dumps(_build_duplicate_payload(existing_task, task_type, trace_id))
 
@@ -434,7 +538,8 @@ def _switch_to_builder_impl(
     builder_web_budget = make_builder_web_budget(task_type)
     sandbox_state = state.get("sandbox")
     thread_data = state.get("thread_data")
-    thread_id = _resolve_thread_id(runtime)
+    # ``thread_id`` resolved at top of function so the duplicate-launch guard
+    # can use it; reuse the same value here.
     parent_model = None
     if runtime is not None and runtime.config:
         parent_model = (runtime.config.get("metadata", {}) or {}).get("model_name")

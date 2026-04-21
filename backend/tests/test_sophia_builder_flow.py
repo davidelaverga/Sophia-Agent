@@ -8,12 +8,32 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
 from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 from deerflow.subagents.config import SubagentConfig
+
+
+@pytest.fixture(autouse=True)
+def _clear_executor_task_lookup(monkeypatch):
+    """Neutralize the executor-level duplicate-launch fallback by default.
+
+    ``switch_to_builder`` consults ``get_latest_task_for_thread`` on every
+    call to detect in-flight builder tasks that were launched but never
+    wrote through to companion state. For most tests in this module that
+    lookup should return ``None`` so the queue path is deterministic;
+    individual tests that want to exercise the fallback override this
+    monkeypatch explicitly.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    monkeypatch.setattr(
+        switch_module,
+        "get_latest_task_for_thread",
+        lambda _thread_id: None,
+    )
 
 
 def _make_runtime(state: dict, thread_id: str = "thread-1", user_id: str | None = None, context_user_id: str | None = None) -> SimpleNamespace:
@@ -139,6 +159,255 @@ def test_switch_to_builder_suppresses_duplicate_launch(monkeypatch):
 
     assert payload["status"] == "already_running"
     assert payload["task_id"] == "task-existing"
+
+
+def test_switch_to_builder_suppresses_duplicate_via_executor_fallback(monkeypatch):
+    """When ``state.builder_task`` is empty but the executor still holds an
+    in-flight task for the same thread, the guard must fire via
+    ``get_latest_task_for_thread`` and prevent a second launch.
+
+    This is the Render failure mode from the post-reducer-hotfix logs: the
+    companion graph lost its ``builder_task`` across a worker cycle while
+    the subagent was still running. Without this fallback, two builder
+    tasks ran concurrently on the same thread.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    class FailIfCalledExecutor:
+        def __init__(self, **kwargs):  # pragma: no cover - should never run
+            raise AssertionError(
+                "SubagentExecutor must not be constructed when executor-level duplicate is detected"
+            )
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", FailIfCalledExecutor)
+
+    inflight_result = SimpleNamespace(
+        task_id="task-inflight",
+        trace_id="trace-inflight",
+        status=SimpleNamespace(value="running"),
+        started_at=datetime(2026, 4, 21, 18, 0, 0),
+        description="Builder: running deliverable",
+    )
+    monkeypatch.setattr(
+        switch_module,
+        "get_latest_task_for_thread",
+        lambda thread_id: inflight_result if thread_id == "thread-1" else None,
+    )
+
+    # state has no builder_task — this is the failure mode we guard against.
+    runtime = _make_runtime({"user_id": "user_abc"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a second deck",
+        task_type="presentation",
+        tool_call_id="tc-builder-dup-via-executor",
+    )
+    payload = json.loads(response)
+
+    assert payload["status"] == "already_running"
+    assert payload["task_id"] == "task-inflight"
+    assert payload["builder_task"]["task_id"] == "task-inflight"
+    assert payload["builder_task"]["status"] == "running"
+
+
+def test_switch_to_builder_synthesizes_cold_start_companion_artifact(monkeypatch):
+    """When no prior artifact exists, ``switch_to_builder`` must pass a
+    neutral synthesized companion_artifact to the builder chain instead of
+    an empty dict.
+
+    Regression guard for the cold-start UX degradation: when the user
+    kicks off a build on their first turn (no emit_artifact yet,
+    current_artifact/previous_artifact absent), downstream middleware
+    would otherwise receive an empty artifact and skip tone calibration.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    # First-turn state: no messages, no artifacts.
+    runtime = _make_runtime({"user_id": "user_cold_start"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a short explainer about supply chain resilience.",
+        task_type="document",
+        tool_call_id="tc-cold-start",
+    )
+    payload = json.loads(response)
+
+    delegation_context = payload["delegation_context"]
+    companion_artifact = delegation_context["companion_artifact"]
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert handoff_resolution["artifact_source"] == "cold_start_default"
+    assert handoff_resolution["latest_emit_artifact_present"] is False
+    assert handoff_resolution["current_artifact_present"] is False
+    assert handoff_resolution["previous_artifact_present"] is False
+    assert companion_artifact["tone_estimate"] == 2.5
+    assert companion_artifact["tone_target"] == 3.0
+    assert companion_artifact["active_tone_band"] == "engagement"
+    assert companion_artifact["voice_speed"] == "normal"
+
+
+def test_switch_to_builder_does_not_synthesize_when_prior_artifact_present(monkeypatch):
+    """Synthesis must be silent when any of the three usual artifact sources
+    are populated — the existing artifact is always preferred."""
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            "user_id": "user_with_artifact",
+            "current_artifact": {
+                "tone_estimate": 3.2,
+                "active_tone_band": "engagement",
+                "voice_speed": "engaged",
+            },
+        }
+    )
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a follow-up deliverable.",
+        task_type="document",
+        tool_call_id="tc-has-artifact",
+    )
+    payload = json.loads(response)
+
+    handoff_resolution = payload["handoff_resolution"]
+    companion_artifact = payload["delegation_context"]["companion_artifact"]
+
+    assert handoff_resolution["artifact_source"] == "current_artifact_state"
+    assert companion_artifact["tone_estimate"] == 3.2
+    assert companion_artifact["voice_speed"] == "engaged"
+
+
+def test_switch_to_builder_queues_when_executor_has_only_terminal_task(monkeypatch):
+    """Terminal executor results MUST NOT block a new launch.
+
+    Guards against over-eager duplicate suppression: completed/failed/timed_out
+    tasks in ``_background_tasks`` should not be mistaken for in-flight ones.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    terminal_result = SimpleNamespace(
+        task_id="task-done",
+        trace_id="trace-done",
+        status=SimpleNamespace(value="completed"),
+        started_at=datetime(2026, 4, 21, 17, 0, 0),
+        description="Builder: prior completed task",
+    )
+    monkeypatch.setattr(
+        switch_module,
+        "get_latest_task_for_thread",
+        lambda _thread_id: terminal_result,
+    )
+
+    runtime = _make_runtime({"user_id": "user_abc"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Kick off a new build",
+        task_type="document",
+        tool_call_id="tc-builder-new",
+    )
+    payload = json.loads(response)
+
+    # Queued (not already_running) because the only visible task is terminal.
+    assert payload["status"] == "queued"
+    assert payload["task_id"] == "tc-builder-new"
 
 
 def test_switch_to_builder_prefers_runtime_config_user_id(monkeypatch):
@@ -469,7 +738,11 @@ def test_switch_to_builder_reports_default_resolution_sources(monkeypatch):
     handoff_resolution = payload["handoff_resolution"]
 
     assert handoff_resolution["user_id_source"] == "default_user"
-    assert handoff_resolution["artifact_source"] == "default_empty"
+    # ``cold_start_default`` marks the synthesized neutral artifact that
+    # replaces the empty-dict fallback. The three *_present diagnostics
+    # must all remain False so observability can still distinguish the
+    # synthesized path from hydrated ones.
+    assert handoff_resolution["artifact_source"] == "cold_start_default"
     assert handoff_resolution["config_user_id_present"] is False
     assert handoff_resolution["context_user_id_present"] is False
     assert handoff_resolution["state_user_id_present"] is False
