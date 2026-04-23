@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const updatePersistedSessionMock = vi.fn();
@@ -213,5 +213,49 @@ describe('useSessionPageContext', () => {
     );
 
     expect(result.current.isReadOnly).toBe(false);
+  });
+
+  it('keeps the last session user id stable during teardown before unmount', () => {
+    useSessionStore.setState({
+      session: {
+        sessionId: '550e8400-e29b-41d4-a716-446655440003',
+        threadId: 'thread-teardown',
+        userId: 'real-user-42',
+        presetType: 'prepare',
+        contextMode: 'life',
+        status: 'active',
+        voiceMode: true,
+        startedAt: '2026-03-03T19:46:00.000Z',
+        lastActivityAt: '2026-03-03T19:46:00.000Z',
+        activeElapsedSeconds: 0,
+        activeSegmentStartedAt: '2026-03-03T19:46:00.000Z',
+        isActive: true,
+        companionInvokesCount: 0,
+      },
+      isInitializing: false,
+      isEnding: false,
+      error: null,
+    });
+
+    const { result } = renderHook(() =>
+      useSessionPageContext({
+        bootstrapSessionId: undefined,
+        bootstrapMessageId: undefined,
+        bootstrapMemoryHighlights: undefined,
+      }),
+    );
+
+    expect(result.current.userId).toBe('real-user-42');
+
+    act(() => {
+      useSessionStore.setState({
+        session: null,
+        isInitializing: false,
+        isEnding: true,
+        error: null,
+      });
+    });
+
+    expect(result.current.userId).toBe('real-user-42');
   });
 });

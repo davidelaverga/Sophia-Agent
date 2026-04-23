@@ -42,6 +42,9 @@ const mockCall = {
         }
       ),
     },
+    callStatsReport$: {
+      subscribe: vi.fn(() => ({ unsubscribe: vi.fn() })),
+    },
   },
 }
 

@@ -248,8 +248,12 @@ export async function cancelBuilderTask(taskId: string): Promise<CancelBuilderTa
 
 export async function getActiveBuilderTask(
   threadId: string,
+  sessionId?: string,
 ): Promise<BuilderTaskStatusResponse | null> {
   const params = new URLSearchParams({ thread_id: threadId });
+  if (sessionId) {
+    params.set('session_id', sessionId);
+  }
   const response = await fetch(
     `/api/sophia/tasks/active?${params.toString()}`,
     { method: 'GET', cache: 'no-store' },

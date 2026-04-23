@@ -6,9 +6,10 @@
 
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import { useVisualTier } from '../../hooks/useVisualTier';
+import { getRitualThreadProfile, shouldSkipTierFrame } from '../../lib/visual-tier-profiles';
 
 interface RitualThreadProps {
   /** data-ritual attribute value of the selected node, or null */
@@ -33,7 +34,9 @@ const PALETTE = {
 
 export function RitualThread({ selectedRitual, isActive }: RitualThreadProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const { reducedMotion, dprCap } = useVisualTier();
+  const { tier, reducedMotion, dprCap } = useVisualTier();
+  const renderProfile = useMemo(() => getRitualThreadProfile(tier), [tier]);
+  const shouldAnimate = Boolean(selectedRitual && !isActive && !reducedMotion);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -44,6 +47,15 @@ export function RitualThread({ selectedRitual, isActive }: RitualThreadProps) {
     let raf = 0;
     let width = 0;
     let height = 0;
+    let lastFrameTime = 0;
+
+    const stopLoop = () => {
+      window.cancelAnimationFrame(raf);
+      raf = 0;
+      lastFrameTime = 0;
+    };
+
+    const isDocumentHidden = () => document.visibilityState === 'hidden';
 
     const handleResize = () => {
       width = window.innerWidth;
@@ -56,6 +68,15 @@ export function RitualThread({ selectedRitual, isActive }: RitualThreadProps) {
     };
 
     const draw = (ts: number) => {
+      if (shouldAnimate && shouldSkipTierFrame(ts, lastFrameTime, renderProfile.frameIntervalMs)) {
+        raf = window.requestAnimationFrame(draw);
+        return;
+      }
+
+      if (shouldAnimate) {
+        lastFrameTime = ts;
+      }
+
       ctx.clearRect(0, 0, width, height);
       const time = ts * 0.001;
 
@@ -115,25 +136,48 @@ export function RitualThread({ selectedRitual, isActive }: RitualThreadProps) {
         }
       }
 
-      if (!reducedMotion) {
+      if (shouldAnimate) {
         raf = window.requestAnimationFrame(draw);
       }
     };
 
+    const startLoop = () => {
+      if (!shouldAnimate || raf || isDocumentHidden()) {
+        return;
+      }
+
+      raf = window.requestAnimationFrame(draw);
+    };
+
+    const handleVisibilityChange = () => {
+      if (!shouldAnimate) {
+        return;
+      }
+
+      if (isDocumentHidden()) {
+        stopLoop();
+        return;
+      }
+
+      startLoop();
+    };
+
     handleResize();
     window.addEventListener('resize', handleResize);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
-    if (reducedMotion) {
-      draw(0);
+    if (shouldAnimate) {
+      startLoop();
     } else {
-      raf = window.requestAnimationFrame(draw);
+      draw(0);
     }
 
     return () => {
       window.removeEventListener('resize', handleResize);
-      window.cancelAnimationFrame(raf);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopLoop();
     };
-  }, [selectedRitual, isActive, reducedMotion, dprCap]);
+  }, [dprCap, isActive, renderProfile, selectedRitual, shouldAnimate]);
 
   return (
     <canvas

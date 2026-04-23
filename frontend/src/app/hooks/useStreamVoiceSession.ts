@@ -307,6 +307,7 @@ export function useStreamVoiceSession(
   const backendWarmupKeyRef = useRef<string | null>(null)
   const backendWarmupControllerRef = useRef<AbortController | null>(null)
   const autoPreconnectEnabledRef = useRef(true)
+  const reconnectStartedAtRef = useRef<number | null>(null)
 
   // Keep refs current without re-binding effects
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
@@ -318,6 +319,7 @@ export function useStreamVoiceSession(
   useEffect(() => { isSophiaReadyRef.current = isSophiaReady }, [isSophiaReady])
   useEffect(() => {
     autoPreconnectEnabledRef.current = true
+    reconnectStartedAtRef.current = null
   }, [sessionId, threadId, userId])
   useEffect(() => {
     if (credentials?.callId && credentials?.sessionId) {
@@ -328,6 +330,7 @@ export function useStreamVoiceSession(
     backendWarmupControllerRef.current?.abort()
     backendWarmupControllerRef.current = null
     backendWarmupKeyRef.current = null
+    reconnectStartedAtRef.current = null
   }, [sessionId, threadId, userId])
 
   // --- Platform signal ------------------------------------------------------
@@ -442,6 +445,7 @@ export function useStreamVoiceSession(
 
     const controller = new AbortController()
     backendWarmupControllerRef.current = controller
+    const warmupStartedAt = Date.now()
 
     recordSophiaCaptureEvent({
       category: "voice-session",
@@ -463,11 +467,21 @@ export function useStreamVoiceSession(
           backendWarmupControllerRef.current = null
         }
 
+        const durationMs = Date.now() - warmupStartedAt
+
+        logger.debug("StreamVoiceSession", "Voice backend warmup ready", {
+          userId,
+          callId: nextCredentials.callId,
+          voiceAgentSessionId: nextCredentials.sessionId,
+          durationMs,
+        })
+
         recordSophiaCaptureEvent({
           category: "voice-session",
           name: "backend-warmup-completed",
           payload: {
             callId: nextCredentials.callId,
+            durationMs,
             sessionId: sessionIdRef.current ?? null,
             voiceAgentSessionId: nextCredentials.sessionId,
           },
@@ -485,9 +499,12 @@ export function useStreamVoiceSession(
           backendWarmupKeyRef.current = null
         }
 
+        const durationMs = Date.now() - warmupStartedAt
+
         logger.debug("StreamVoiceSession", "Voice backend warmup failed", {
           userId,
           callId: nextCredentials.callId,
+          durationMs,
           voiceAgentSessionId: nextCredentials.sessionId,
           error: err instanceof Error ? err.message : String(err),
         })
@@ -496,6 +513,7 @@ export function useStreamVoiceSession(
           name: "backend-warmup-failed",
           payload: {
             callId: nextCredentials.callId,
+            durationMs,
             error: err instanceof Error ? err.message : String(err),
             sessionId: sessionIdRef.current ?? null,
             voiceAgentSessionId: nextCredentials.sessionId,
@@ -602,6 +620,16 @@ export function useStreamVoiceSession(
     const controller = new AbortController()
     preparedVoiceConnectControllerRef.current = controller
     preparedVoiceConnectKeyRef.current = connectKey
+    const preconnectStartedAt = Date.now()
+
+    logger.debug("StreamVoiceSession", "Preparing voice session", {
+      userId,
+      platform,
+      contextMode,
+      ritual: voiceRitual,
+      threadId: threadId ?? null,
+    })
+
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "preconnect-started",
@@ -647,11 +675,21 @@ export function useStreamVoiceSession(
       preparedVoiceCredentialsRef.current = creds
       preparedVoiceCredentialsAtRef.current = Date.now()
       scheduleBackendWarmup(creds)
+      const durationMs = Date.now() - preconnectStartedAt
+
+      logger.debug("StreamVoiceSession", "Voice session preconnected", {
+        userId,
+        callId: creds.callId,
+        durationMs,
+        voiceAgentSessionId: creds.sessionId ?? null,
+      })
+
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "preconnect-ready",
         payload: {
           callId: creds.callId,
+          durationMs,
           sessionId: sessionIdRef.current ?? null,
           voiceAgentSessionId: creds.sessionId ?? null,
         },
@@ -668,6 +706,7 @@ export function useStreamVoiceSession(
             category: "voice-session",
             name: "preconnect-failed",
             payload: {
+              durationMs: Date.now() - preconnectStartedAt,
               error: err instanceof Error ? err.message : String(err),
               sessionId: sessionIdRef.current ?? null,
             },
@@ -718,12 +757,15 @@ export function useStreamVoiceSession(
       && preparedCredentials
       && Date.now() - preparedVoiceCredentialsAtRef.current < PREPARED_VOICE_CONNECT_TTL_MS
     ) {
+      const preparedCredentialAgeMs = Date.now() - preparedVoiceCredentialsAtRef.current
+
       clearPreparedVoiceConnectRefs()
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "preconnect-reused",
         payload: {
           callId: preparedCredentials.callId,
+          preparedCredentialAgeMs,
           sessionId: sessionIdRef.current ?? null,
           voiceAgentSessionId: preparedCredentials.sessionId ?? null,
         },
@@ -745,12 +787,15 @@ export function useStreamVoiceSession(
         && preparedVoiceCredentialsRef.current?.callId === prefetchedCredentials.callId
         && preparedVoiceCredentialsRef.current?.sessionId === prefetchedCredentials.sessionId
       ) {
+        const preparedCredentialAgeMs = Date.now() - preparedVoiceCredentialsAtRef.current
+
         clearPreparedVoiceConnectRefs()
         recordSophiaCaptureEvent({
           category: "voice-session",
           name: "preconnect-reused",
           payload: {
             callId: prefetchedCredentials.callId,
+            preparedCredentialAgeMs,
             sessionId: sessionIdRef.current ?? null,
             voiceAgentSessionId: prefetchedCredentials.sessionId ?? null,
           },
@@ -987,10 +1032,58 @@ export function useStreamVoiceSession(
 
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
   useEffect(() => {
+    const previousCallingState = prevCallingStateRef.current
+    const previousSophiaReady = prevSophiaReadyRef.current
+
     if (
-      callingState === prevCallingStateRef.current
-      && isSophiaReady === prevSophiaReadyRef.current
+      callingState === previousCallingState
+      && isSophiaReady === previousSophiaReady
     ) return
+
+    if (callingState === CallingState.RECONNECTING && previousCallingState !== CallingState.RECONNECTING) {
+      reconnectStartedAtRef.current = Date.now()
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "reconnect-started",
+        payload: {
+          previousCallingState,
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: credentials?.sessionId ?? null,
+          wasSophiaReady: previousSophiaReady,
+        },
+      })
+    } else if (
+      previousCallingState === CallingState.RECONNECTING
+      && reconnectStartedAtRef.current !== null
+    ) {
+      const durationMs = Date.now() - reconnectStartedAtRef.current
+
+      if (callingState === CallingState.JOINED) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "reconnect-recovered",
+          payload: {
+            durationMs,
+            remoteParticipantCount: remoteParticipantSessionIds.length,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: credentials?.sessionId ?? null,
+          },
+        })
+        reconnectStartedAtRef.current = null
+      } else if (callingState === CallingState.IDLE || callingState === CallingState.LEFT) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "reconnect-failed",
+          payload: {
+            durationMs,
+            nextCallingState: callingState,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: credentials?.sessionId ?? null,
+          },
+        })
+        reconnectStartedAtRef.current = null
+      }
+    }
 
     prevCallingStateRef.current = callingState
     prevSophiaReadyRef.current = isSophiaReady
@@ -1022,6 +1115,7 @@ export function useStreamVoiceSession(
         callingState,
         mappedStage: mapped,
         isSophiaReady,
+        previousCallingState,
         sessionId: sessionIdRef.current ?? null,
       },
     })
@@ -1046,6 +1140,7 @@ export function useStreamVoiceSession(
     callingState,
     credentials,
     isSophiaReady,
+    remoteParticipantSessionIds,
     setListeningPresence,
     setMetaPresence,
     setSpeakingPresence,
@@ -1118,6 +1213,20 @@ export function useStreamVoiceSession(
   useEffect(() => {
     if (streamError) {
       clearStartupReadyTimeout()
+      if (reconnectStartedAtRef.current !== null) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "reconnect-failed",
+          payload: {
+            durationMs: Date.now() - reconnectStartedAtRef.current,
+            error: streamError,
+            nextCallingState: callingState,
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: credentials?.sessionId ?? null,
+          },
+        })
+        reconnectStartedAtRef.current = null
+      }
       setStage("error")
       setError(streamError)
       setVoiceFailed(streamError)
@@ -1130,7 +1239,7 @@ export function useStreamVoiceSession(
         },
       })
     }
-  }, [clearStartupReadyTimeout, setVoiceFailed, streamError])
+  }, [callingState, clearStartupReadyTimeout, credentials?.sessionId, setVoiceFailed, streamError])
 
   // --- Stream custom event fallback ---------------------------------------
   useEffect(() => {
@@ -1372,6 +1481,7 @@ export function useStreamVoiceSession(
     closeEventSource()
     clearStartupReadyTimeout()
     isSophiaReadyRef.current = false
+    reconnectStartedAtRef.current = null
     recentUserTranscriptIdsRef.current = []
     currentTurnUserTranscriptRef.current = null
     setIsSophiaReady(false)
@@ -1391,6 +1501,7 @@ export function useStreamVoiceSession(
     })
 
     try {
+      let credentialsSource: "prefetched" | "fresh" = "fresh"
       let creds = await consumePreparedVoiceConnect()
 
       if (connectPrewarmPromiseRef.current !== null) {
@@ -1414,6 +1525,7 @@ export function useStreamVoiceSession(
           controller.signal,
         )
       } else {
+        credentialsSource = "prefetched"
         logger.debug("StreamVoiceSession", "Using prefetched voice credentials", {
           userId,
           callId: creds.callId,
@@ -1459,6 +1571,8 @@ export function useStreamVoiceSession(
       }
       logger.debug("StreamVoiceSession", "Credentials received", {
         callId: creds.callId,
+        source: credentialsSource,
+        voiceAgentSessionId: creds.sessionId ?? null,
       })
       scheduleBackendWarmup(creds)
       recordSophiaCaptureEvent({
@@ -1467,7 +1581,9 @@ export function useStreamVoiceSession(
         payload: {
           callId: creds.callId,
           callType: creds.callType,
+          source: credentialsSource,
           sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: creds.sessionId ?? null,
         },
       })
       setCredentials(creds)
@@ -1521,6 +1637,7 @@ export function useStreamVoiceSession(
     clearStartupReadyTimeout()
     backendWarmupControllerRef.current?.abort()
     backendWarmupControllerRef.current = null
+    reconnectStartedAtRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "stop-talking-requested",
@@ -1599,6 +1716,7 @@ export function useStreamVoiceSession(
     clearStartupReadyTimeout()
     backendWarmupControllerRef.current?.abort()
     backendWarmupControllerRef.current = null
+    reconnectStartedAtRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "barge-in",
@@ -1644,6 +1762,7 @@ export function useStreamVoiceSession(
     clearStartupReadyTimeout()
     backendWarmupControllerRef.current?.abort()
     backendWarmupControllerRef.current = null
+    reconnectStartedAtRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "reset-voice-state",
@@ -1746,6 +1865,7 @@ export function useStreamVoiceSession(
       })
       destroyedRef.current = true
       autoPreconnectEnabledRef.current = false
+      reconnectStartedAtRef.current = null
       clearAutoPreconnectTimer()
       backendWarmupControllerRef.current?.abort()
       backendWarmupControllerRef.current = null

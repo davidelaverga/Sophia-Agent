@@ -26,6 +26,15 @@ def _make_detector(**overrides) -> SophiaTurnDetection:
         speech_probability_threshold=0.75,
         pre_speech_buffer_ms=200,
         vad_reset_interval_seconds=5.0,
+        # Pin adaptive silence values for these unit tests so they validate
+        # the algorithmic bonuses/ceilings rather than whatever production
+        # tuning is currently shipping.
+        adaptive_silence_short_ms=1000,
+        adaptive_silence_medium_ms=1500,
+        adaptive_silence_long_ms=2000,
+        adaptive_silence_ceiling_ms=2800,
+        adaptive_silence_continuation_bonus_ms=800,
+        adaptive_silence_fragment_bonus_ms=1400,
     )
     defaults.update(overrides)
     return SophiaTurnDetection(**defaults)
@@ -171,6 +180,12 @@ async def test_tts_signals_echo_guard():
     tts._has_real_artifact = False
     tts._hint_emotion = None
     tts._hint_speed = None
+    tts._hint_transcript = None
+    tts._active_response_user_id = None
+    tts._first_audio_reported = False
+    tts._last_resolved_delivery = None
+    tts._active_response = None
+    tts._synthesis_count = 0
     tts._echo_guard = MagicMock()
 
     # Mock the Cartesia client
@@ -346,8 +361,8 @@ class TestContinuationSignals:
     async def test_trailing_filler_you_know(self):
         td = _make_detector()
         td.update_transcript("the thing is you know")
-        # 5 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Ends in "you know" → continuation bonus only.
+        assert td._trailing_silence_ms == 2300
 
     async def test_trailing_incomplete_i_think(self):
         td = _make_detector()
@@ -358,8 +373,8 @@ class TestContinuationSignals:
     async def test_trailing_article_the(self):
         td = _make_detector()
         td.update_transcript("I want to find the")
-        # 6 words → medium (1500) + continuation (+800) = 2300
-        assert td._trailing_silence_ms == 2300
+        # Trailing article is no longer treated as a continuation signal.
+        assert td._trailing_silence_ms == 1500
 
     async def test_no_continuation_after_complete_word(self):
         td = _make_detector()
@@ -466,8 +481,8 @@ class TestFragmentDetection:
     async def test_subordinate_when_she_said(self):
         td = _make_detector()
         td.update_transcript("when she said that")
-        # 4 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Subordinate-clause fragment detection is limited to <= 3 words.
+        assert td._trailing_silence_ms == 1500
 
     async def test_participle_getting_closer(self):
         td = _make_detector()
@@ -484,14 +499,14 @@ class TestFragmentDetection:
     async def test_fragment_at_five_words(self):
         td = _make_detector()
         td.update_transcript("is really hard to say")
-        # 5 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Fragment-start bonus is limited to short phrases.
+        assert td._trailing_silence_ms == 1500
 
     async def test_conjunction_fragment_at_six_words(self):
         td = _make_detector()
         td.update_transcript("but I still feel off sometimes")
-        # 6 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Conjunction-led fragment bonus is limited to <= 4 words.
+        assert td._trailing_silence_ms == 1500
 
     async def test_final_fragment_uses_lighter_bonus(self):
         td = _make_detector()

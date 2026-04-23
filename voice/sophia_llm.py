@@ -19,6 +19,7 @@ from voice.adapters.base import (
     BackendEvent,
     BackendRequest,
     BackendStageError,
+    ARTIFACT_CALIBRATION_DEFAULTS,
     ARTIFACT_VOICE_DELIVERY_DEFAULTS,
     REQUIRED_ARTIFACT_FIELDS,
 )
@@ -989,6 +990,24 @@ class SophiaLLM(LLM):
                 "backend emitted artifact without voice delivery metadata — "
                 "applied neutral defaults so the turn can complete",
                 ",".join(defaulted),
+            )
+
+        # Calibration fields (tone, skill, ritual). Same defensive strategy:
+        # Haiku occasionally drops these on long tool_use responses. Losing
+        # them per-turn is better than cutting TTS mid-sentence — the next
+        # turn reverts to a well-formed artifact and `_normalize_artifact`
+        # can still reclassify from the user/response signal below.
+        calibration_defaulted: list[str] = []
+        for field, default in ARTIFACT_CALIBRATION_DEFAULTS.items():
+            if field not in artifact_filled:
+                artifact_filled[field] = default
+                calibration_defaulted.append(field)
+        if calibration_defaulted:
+            logger.warning(
+                "[VOICE:LLM] ARTIFACT_CALIBRATION_DEFAULTED | fields=%s | "
+                "backend emitted artifact without calibration metadata — "
+                "applied neutral defaults so the turn can complete",
+                ",".join(calibration_defaulted),
             )
 
         missing = sorted(REQUIRED_ARTIFACT_FIELDS.difference(artifact_filled))

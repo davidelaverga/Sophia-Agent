@@ -362,7 +362,14 @@ export const useSessionStore = create<SessionState>()(
 
         const latestSession = await getSession(sessionInfo.session_id, resolvedUserId);
         if (!isError(latestSession)) {
-          resolvedSessionInfo = latestSession.data;
+          const latestStatus = normalizeBackendSessionStatus(latestSession.data.status);
+          const incomingStatus = normalizeBackendSessionStatus(sessionInfo.status);
+
+          // Keep the interactive snapshot when /sessions/active has already told us
+          // the session is resumable but the detail endpoint briefly lags behind.
+          if (!(incomingStatus !== 'ended' && latestStatus === 'ended')) {
+            resolvedSessionInfo = latestSession.data;
+          }
         }
 
         const resolvedStatus = normalizeBackendSessionStatus(resolvedSessionInfo.status);

@@ -1,3 +1,5 @@
+import Script from 'next/script'
+
 import "./globals.css"
 import { CapacitorInit } from "./components/CapacitorInit"
 import { LocaleProvider } from "./components/LocaleProvider"
@@ -64,35 +66,33 @@ export default async function RootLayout({
         {/* DNS prefetch for external resources */}
         <link rel="dns-prefetch" href="https://api.openai.com" />
         <link rel="preconnect" href="https://api.openai.com" crossOrigin="anonymous" />
-        
+
         {/* Preload critical theme script */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html: `
-              (function() {
-                try {
-                  var STORAGE_KEY = ${JSON.stringify(SOPHIA_THEME_STORAGE_KEY)};
-                  var DARK_THEMES = ${JSON.stringify(DARK_THEMES)};
-                  var LEGACY_THEME_ALIASES = ${JSON.stringify(LEGACY_THEME_ALIASES)};
-                  var storedTheme = localStorage.getItem(STORAGE_KEY);
-                  var theme = LEGACY_THEME_ALIASES[storedTheme] || storedTheme || ${JSON.stringify(COSMIC_THEME_ID)};
-                  document.documentElement.dataset.sophiaTheme = theme;
-                  if (storedTheme !== theme) {
-                    localStorage.setItem(STORAGE_KEY, theme);
-                  }
-                  if (DARK_THEMES.indexOf(theme) !== -1) {
-                    document.documentElement.classList.add('dark');
-                  } else {
-                    document.documentElement.classList.remove('dark');
-                  }
-                } catch {
-                  // localStorage may be unavailable (private browsing, SSR)
-                  // Fallback to light theme is already applied via || 'light'
+        <Script id="sophia-theme-bootstrap" strategy="beforeInteractive">
+          {`
+            (function() {
+              try {
+                var STORAGE_KEY = ${JSON.stringify(SOPHIA_THEME_STORAGE_KEY)};
+                var DARK_THEMES = ${JSON.stringify(DARK_THEMES)};
+                var LEGACY_THEME_ALIASES = ${JSON.stringify(LEGACY_THEME_ALIASES)};
+                var storedTheme = localStorage.getItem(STORAGE_KEY);
+                var theme = LEGACY_THEME_ALIASES[storedTheme] || storedTheme || ${JSON.stringify(COSMIC_THEME_ID)};
+                document.documentElement.dataset.sophiaTheme = theme;
+                if (storedTheme !== theme) {
+                  localStorage.setItem(STORAGE_KEY, theme);
                 }
-              })();
-            `,
-          }}
-        />
+                if (DARK_THEMES.indexOf(theme) !== -1) {
+                  document.documentElement.classList.add('dark');
+                } else {
+                  document.documentElement.classList.remove('dark');
+                }
+              } catch (error) {
+                document.documentElement.dataset.sophiaTheme = ${JSON.stringify(COSMIC_THEME_ID)};
+                document.documentElement.classList.add('dark');
+              }
+            })();
+          `}
+        </Script>
       </head>
       <body className="bg-sophia-bg text-sophia-text antialiased">
         <LocaleProvider initialLocale={locale}>

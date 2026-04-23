@@ -3,16 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { haptic } from "../../hooks/useHaptics"
-import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
+import { buildThreadArtifactHref, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
 import { cn } from "../../lib/utils"
 import { usePresenceStore } from "../../stores/presence-store"
-import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
+import type { BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
 
 interface PresenceArtifactPanelProps {
   artifacts: RitualArtifacts | null | undefined
   builderArtifact?: BuilderArtifactV1 | null
-  builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
   threadId?: string
   isVisible: boolean
   onDismiss: () => void
@@ -36,7 +35,6 @@ interface PresenceArtifactPanelProps {
 export function PresenceArtifactPanel({
   artifacts,
   builderArtifact,
-  builderArtifactLibrary = [],
   threadId,
   isVisible,
   onDismiss,
@@ -51,11 +49,10 @@ export function PresenceArtifactPanel({
   const autoCollapseRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const staggerRef = useRef<ReturnType<typeof setTimeout>[]>([])
   const status = usePresenceStore((s) => s.status)
-  const hasBuilderLibrary = builderArtifactLibrary.length > 0
 
   // Phase lifecycle
   useEffect(() => {
-    if (isVisible && (artifacts || builderArtifact || hasBuilderLibrary)) {
+    if (isVisible && (artifacts || builderArtifact)) {
       setPhase("entering")
       setRevealStep(0)
       setReflectionTapped(false)
@@ -66,7 +63,7 @@ export function PresenceArtifactPanel({
       return () => clearTimeout(t)
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVisible, artifacts, builderArtifact, hasBuilderLibrary])
+  }, [isVisible, artifacts, builderArtifact])
 
   // Staggered reveal — each piece fades in like a star brightening
   useEffect(() => {
@@ -92,7 +89,7 @@ export function PresenceArtifactPanel({
       clearTimeout(autoCollapseRef.current)
       autoCollapseRef.current = null
     }
-    if (phase === "visible" && isVoiceMode && !builderArtifact && !hasBuilderLibrary) {
+    if (phase === "visible" && isVoiceMode && !builderArtifact) {
       autoCollapseRef.current = setTimeout(() => {
         autoCollapseRef.current = null
         onDismiss()
@@ -101,7 +98,7 @@ export function PresenceArtifactPanel({
     return () => {
       if (autoCollapseRef.current) clearTimeout(autoCollapseRef.current)
     }
-  }, [phase, isVoiceMode, onDismiss, builderArtifact, hasBuilderLibrary])
+  }, [phase, isVoiceMode, onDismiss, builderArtifact])
 
   const handleDismiss = useCallback(() => {
     haptic("light")
@@ -118,7 +115,7 @@ export function PresenceArtifactPanel({
     })
   }, [artifacts?.reflection_candidate, reflectionTapped, onReflectionTap])
 
-  if ((!artifacts && !builderArtifact && !hasBuilderLibrary) || phase === "hidden") return null
+  if ((!artifacts && !builderArtifact) || phase === "hidden") return null
 
   const takeaway = artifacts?.takeaway
   const reflection_candidate = artifacts?.reflection_candidate
@@ -128,7 +125,7 @@ export function PresenceArtifactPanel({
   const hasReflection = !!reflection_candidate?.prompt
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
-  const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories
+  const hasContent = hasBuilder || hasTakeaway || hasReflection || hasMemories
 
   if (!hasContent) return null
 
@@ -309,84 +306,6 @@ export function PresenceArtifactPanel({
           </div>
         )}
 
-        {hasBuilderLibrary && (
-          <div
-            className={cn(
-              "mb-4 transition-all duration-[1400ms] ease-out",
-              revealStep >= 1 ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2"
-            )}
-          >
-            <p
-              className="mb-2 text-center text-[9px] tracking-[0.18em] uppercase"
-              style={{ color: 'var(--cosmic-text-faint)' }}
-            >
-              Session files
-            </p>
-
-            <div className="flex flex-col items-center gap-2">
-              {builderArtifactLibrary.map((file) => {
-                const downloadHref = buildThreadArtifactHref(threadId, file.path, { download: true })
-                const openHref = buildThreadArtifactHref(threadId, file.path)
-                const meta = [formatBuilderArtifactFileSize(file.sizeBytes), file.mimeType]
-                  .filter(Boolean)
-                  .join(' • ')
-
-                return (
-                  <div
-                    key={file.path}
-                    className="flex items-center gap-2"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div className="text-center">
-                      <span className="block text-[10px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-                        {file.name}
-                      </span>
-                      {meta && (
-                        <span className="block text-[9px]" style={{ color: 'var(--cosmic-text-faint)' }}>
-                          {meta}
-                        </span>
-                      )}
-                    </div>
-                    <div className="flex gap-1.5">
-                      {openHref && (
-                        <a
-                          href={openHref}
-                          target="_blank"
-                          rel="noreferrer"
-                          aria-label={`Open ${file.name}`}
-                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                          style={{
-                            borderColor: 'var(--cosmic-border-soft)',
-                            color: 'var(--cosmic-text-whisper)',
-                          }}
-                          onClick={() => haptic('light')}
-                        >
-                          open
-                        </a>
-                      )}
-                      {downloadHref && (
-                        <a
-                          href={downloadHref}
-                          aria-label={`Download ${file.name}`}
-                          className="inline-flex h-7 items-center gap-1 rounded-lg border px-2.5 text-[10px] transition-colors"
-                          style={{
-                            borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                            color: 'var(--sophia-purple)',
-                            background: 'color-mix(in srgb, var(--sophia-purple) 8%, transparent)',
-                          }}
-                          onClick={() => haptic('medium')}
-                        >
-                          download
-                        </a>
-                      )}
-                    </div>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
         {/* === TAKEAWAY === emerges like a fading-in constellation */}
         {hasTakeaway && (
           <div
@@ -555,45 +474,46 @@ export function ArtifactToggleIcon({
 }) {
   if (!hasArtifacts) return null
 
+  // Outer shell mirrors ModeToggle exactly so the two capsules read as a matched pair.
+  // Inner pseudo-segment mirrors ModeToggle's active-tab styling with a leading bloom dot.
   return (
-    <button
-      onClick={() => { haptic("light"); onClick() }}
-      className={cn(
-        "group flex items-center gap-2 px-3 py-1.5 rounded-full",
-        "transition-all duration-500 cursor-pointer",
-        isNew && "animate-[insightPulse_2.5s_ease-in-out_infinite]",
-      )}
+    <div
+      className="inline-flex items-center gap-1 px-2 py-1.5 rounded-full border"
       style={{
-        color: isNew ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text)',
-        background: isNew
-          ? 'color-mix(in srgb, var(--sophia-purple) 18%, var(--cosmic-panel))'
-          : 'var(--cosmic-panel-soft)',
-        border: isNew
-          ? '1px solid color-mix(in srgb, var(--sophia-purple) 35%, transparent)'
-          : '1px solid var(--cosmic-border-soft)',
+        background: 'var(--cosmic-panel-soft)',
+        borderColor: isNew
+          ? 'color-mix(in srgb, var(--sophia-purple) 22%, var(--cosmic-border-soft))'
+          : 'var(--cosmic-border-soft)',
         backdropFilter: 'blur(12px)',
         WebkitBackdropFilter: 'blur(12px)',
+        transition: 'border-color 0.6s ease',
       }}
-      aria-label={isNew ? "New insights available" : "Show insights"}
     >
-      {/* Bloom dot */}
-      <span
+      <button
+        type="button"
+        onClick={() => { haptic("light"); onClick() }}
+        aria-label={isNew ? "New insights available" : "Show insights"}
         className={cn(
-          "w-2 h-2 rounded-full transition-all duration-700",
-          isNew && "shadow-[0_0_10px_var(--sophia-glow)]",
+          "group inline-flex items-center gap-1.5 px-3 py-0.5 rounded-full",
+          "text-[11px] tracking-[0.14em] lowercase",
+          "cursor-pointer transition-all duration-300",
+          "focus:outline-none focus-visible:ring-1 focus-visible:ring-white/20",
+          isNew && "bg-white/[0.1]",
         )}
         style={{
-          background: isNew
-            ? 'var(--sophia-glow)'
-            : 'color-mix(in srgb, var(--sophia-purple) 50%, var(--cosmic-panel-soft))',
+          color: isNew ? 'var(--cosmic-text)' : 'var(--cosmic-text-muted)',
         }}
-      />
-      <span className={cn(
-        "text-[11px] tracking-[0.1em] lowercase font-medium",
-        isNew && "text-[12px]",
-      )}>
+      >
+        <span
+          className="h-1.5 w-1.5 rounded-full transition-colors duration-300"
+          style={{
+            background: isNew
+              ? 'color-mix(in srgb, var(--sophia-purple) 70%, white 20%)'
+              : 'color-mix(in srgb, var(--sophia-purple) 40%, var(--cosmic-text-faint))',
+          }}
+        />
         {isNew ? 'new insight' : 'insights'}
-      </span>
-    </button>
+      </button>
+    </div>
   )
 }

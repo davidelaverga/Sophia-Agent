@@ -35,6 +35,7 @@ def _load_config() -> SupabaseConfig | None:
     url = os.getenv("SUPABASE_URL")
     service_role_key = (
         os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        or os.getenv("SUPABASE_SERVICE_KEY")
         or os.getenv("SUPABASE_KEY")
     )
     bucket = os.getenv("SUPABASE_BUILDER_BUCKET", DEFAULT_BUCKET)

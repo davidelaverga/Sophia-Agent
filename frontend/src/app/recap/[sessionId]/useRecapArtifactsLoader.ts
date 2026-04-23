@@ -5,6 +5,7 @@ import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
 import { logger } from '../../lib/error-logger';
 import type { RecapArtifactsV1 } from '../../lib/recap-types';
 import { clearRecentSessionEndHint, getRecentSessionEndHint } from '../../lib/recent-session-end';
+import { useRecapStore } from '../../stores/recap-store';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 
 const RECENT_END_RETRY_DELAY_MS = 1500;
@@ -12,7 +13,7 @@ const RECENT_END_MAX_RETRIES = 6;
 const RECENT_END_CONTEXT_WINDOW_MS = 2 * 60 * 1000;
 const RECENT_MEMORIES_FETCH_TIMEOUT_MS = 15000;
 
-type RecentMemoryStatus = 'pending_review' | 'approved';
+type RecentMemoryStatus = 'pending_review' | 'approved' | 'discarded';
 
 export type RecapPageStatus = 'loading' | 'ready' | 'processing' | 'reviewed' | 'unavailable' | 'not_found';
 
@@ -189,7 +190,17 @@ async function sessionHasReviewedMemories(
   sessionId: string,
 ): Promise<boolean> {
   const reviewedMemories = await fetchSessionRecentMemories(payload, sessionId, 'approved');
-  return reviewedMemories.length > 0;
+  if (reviewedMemories.length > 0) {
+    return true;
+  }
+
+  const discardedMemories = await fetchSessionRecentMemories(payload, sessionId, 'discarded');
+  return discardedMemories.length > 0;
+}
+
+function sessionHasLocalReviewedDecisions(sessionId: string): boolean {
+  const decisions = useRecapStore.getState().getDecisions(sessionId);
+  return decisions.some((decision) => decision.decision !== 'idle');
 }
 
 export function useRecapArtifactsLoader({
@@ -197,14 +208,16 @@ export function useRecapArtifactsLoader({
   artifacts,
   setArtifacts,
 }: UseRecapArtifactsLoaderParams): UseRecapArtifactsLoaderResult {
-  const [status, setStatus] = useState<RecapPageStatus>('loading');
+  const [status, setStatus] = useState<RecapPageStatus>(() => (artifacts ? 'ready' : 'loading'));
   const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
     const loadArtifacts = async () => {
-      setStatus('loading');
+      if (!artifacts) {
+        setStatus('loading');
+      }
 
       const recentEndHint = getRecentSessionEndHint();
       const hasRecentEndHint = recentEndHint?.sessionId === sessionId;
@@ -265,6 +278,13 @@ export function useRecapArtifactsLoader({
               clearRecentSessionEndHint();
             }
             setArtifacts(sessionId, hydratedStoredArtifacts);
+          } else if (sessionHasLocalReviewedDecisions(sessionId)) {
+            if (hasRecentEndHint) {
+              clearRecentSessionEndHint();
+            }
+            useSessionHistoryStore.getState().markRecapViewed(sessionId);
+            setStatus('ready');
+            return;
           } else if (await sessionHasReviewedMemories(storedPayload, sessionId)) {
             if (hasRecentEndHint) {
               clearRecentSessionEndHint();
@@ -336,6 +356,16 @@ export function useRecapArtifactsLoader({
             const shouldRetryFetchedMemories = shouldRetryMemories(mapped.endedAt || (typeof data?.ended_at === 'string' ? data.ended_at : null));
 
             if (!hasMappedMemories && shouldRetryFetchedMemories) {
+              if (sessionHasLocalReviewedDecisions(sessionId)) {
+                if (hasRecentEndHint) {
+                  clearRecentSessionEndHint();
+                }
+                setArtifacts(sessionId, mapped);
+                useSessionHistoryStore.getState().markRecapViewed(sessionId);
+                setStatus('ready');
+                return;
+              }
+
               if (await sessionHasReviewedMemories(artifactsPayload, sessionId)) {
                 if (hasRecentEndHint) {
                   clearRecentSessionEndHint();

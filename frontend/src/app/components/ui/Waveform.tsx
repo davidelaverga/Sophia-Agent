@@ -1,6 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
+
+import { useVisualTier } from "../../hooks/useVisualTier";
+import { getWaveformProfile, shouldSkipTierFrame } from "../../lib/visual-tier-profiles";
 
 /**
  * Visual presence states for the Waveform component.
@@ -53,8 +56,11 @@ export function Waveform({
   const analyserRef = useRef<AnalyserNode | undefined>(undefined);
   const dataArrayRef = useRef<Uint8Array | null>(null);
   const smoothedVolumeRef = useRef(0);
+  const { tier, reducedMotion, dprCap } = useVisualTier();
+  const renderProfile = useMemo(() => getWaveformProfile(tier), [tier]);
 
   const isListening = state === "listening";
+  const shouldAnimate = !reducedMotion || isListening;
 
   useEffect(() => {
     if (!stream || !isListening) {
@@ -96,17 +102,40 @@ export function Waveform({
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    const dpr = window.devicePixelRatio || 1;
-    const rect = canvas.getBoundingClientRect();
+    let width = 0;
+    let canvasHeight = 0;
+    let centerX = 0;
+    let centerY = 0;
+    let baseRadius = 0;
+    let lastFrameTime = 0;
 
-    // Set canvas size accounting for device pixel ratio
-    canvas.width = rect.width * dpr;
-    canvas.height = rect.height * dpr;
-    ctx.scale(dpr, dpr);
+    const stopLoop = () => {
+      if (animationFrameRef.current) {
+        cancelAnimationFrame(animationFrameRef.current);
+        animationFrameRef.current = undefined;
+      }
+      lastFrameTime = 0;
+    };
 
-    const centerX = rect.width / 2;
-    const centerY = rect.height / 2;
-    const baseRadius = Math.min(rect.width, rect.height) * 0.15;
+    const isDocumentHidden = () => document.visibilityState === "hidden";
+
+    const handleResize = () => {
+      const rect = canvas.getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCap);
+
+      width = rect.width;
+      canvasHeight = rect.height;
+      centerX = width / 2;
+      centerY = canvasHeight / 2;
+      baseRadius = Math.min(width, canvasHeight) * 0.15;
+
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(canvasHeight * dpr);
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    };
+
+    handleResize();
+    window.addEventListener("resize", handleResize);
 
     // Dynamic emotion colors
     const [eR, eG, eB] = emotionRgb;
@@ -117,12 +146,20 @@ export function Waveform({
 
     let animationTime = 0;
 
-    const draw = () => {
-      ctx.clearRect(0, 0, rect.width, rect.height);
+    const draw = (ts: number) => {
+      if (shouldAnimate && shouldSkipTierFrame(ts, lastFrameTime, renderProfile.frameIntervalMs)) {
+        animationFrameRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      const deltaSeconds = lastFrameTime === 0 ? 1 / 60 : Math.min(0.05, (ts - lastFrameTime) / 1000);
+      lastFrameTime = ts;
+
+      ctx.clearRect(0, 0, width, canvasHeight);
 
       if (state === "thinking") {
         // Thinking: Gentle breathing presence - calm, alive, ready to help
-        animationTime += 0.015;
+        animationTime += deltaSeconds * 0.9;
         
         // Gentle breathing cycle
         const breathingPhase = Math.sin(animationTime * 0.5);
@@ -167,7 +204,7 @@ export function Waveform({
         ctx.fill();
         
         // Layer 4: Subtle orbiting particles
-        const particleCount = 4;
+        const particleCount = renderProfile.thinkingParticleCount;
         for (let i = 0; i < particleCount; i++) {
           const particleAngle = (animationTime * 0.3 + (i / particleCount) * Math.PI * 2);
           const particleOrbitRadius = baseRadius * (1.1 + breathingIntensity * 0.2);
@@ -195,10 +232,10 @@ export function Waveform({
 
       } else if (state === "reflecting") {
         // Reflecting: gentle spiral
-        animationTime += 0.02;
+        animationTime += deltaSeconds * 1.2;
         
         const spiralTurns = 2;
-        const spiralPoints = 60;
+        const spiralPoints = renderProfile.reflectingSpiralPoints;
         
         ctx.beginPath();
         for (let i = 0; i < spiralPoints; i++) {
@@ -234,9 +271,9 @@ export function Waveform({
 
       } else if (state === "speaking") {
         // Speaking: concentric ripples
-        animationTime += 0.02;
+        animationTime += deltaSeconds * 1.2;
         
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < renderProfile.speakingRippleCount; i++) {
           const offset = i * 0.8;
           const ripplePhase = (animationTime + offset) % 2;
           const rippleRadius = baseRadius + (ripplePhase * baseRadius * 1.5);
@@ -281,7 +318,7 @@ export function Waveform({
         const currentRadius = baseRadius * (1 + pulseAmount * 0.5);
 
         // Draw frequency bars around the circle
-        const barCount = 32;
+        const barCount = renderProfile.listeningBarCount;
         const barWidth = (Math.PI * 2) / barCount;
         const innerRadius = baseRadius * 0.6;
         const maxBarHeight = baseRadius * 0.8;
@@ -360,7 +397,7 @@ export function Waveform({
 
       } else {
         // Resting state: subtle pulsing dot
-        animationTime += 0.01;
+        animationTime += deltaSeconds * 0.6;
         const pulseScale = 1 + Math.sin(animationTime) * 0.1;
         const pulseRadius = baseRadius * 0.5 * pulseScale;
         
@@ -373,17 +410,45 @@ export function Waveform({
         ctx.fill();
       }
 
+      if (shouldAnimate) {
+        animationFrameRef.current = requestAnimationFrame(draw);
+      }
+    };
+
+    const startLoop = () => {
+      if (!shouldAnimate || animationFrameRef.current !== undefined || isDocumentHidden()) {
+        return;
+      }
+
       animationFrameRef.current = requestAnimationFrame(draw);
     };
 
-    draw();
+    const handleVisibilityChange = () => {
+      if (!shouldAnimate) {
+        return;
+      }
+
+      if (isDocumentHidden()) {
+        stopLoop();
+        return;
+      }
+
+      startLoop();
+    };
+
+    if (shouldAnimate) {
+      document.addEventListener("visibilitychange", handleVisibilityChange);
+      startLoop();
+    } else {
+      draw(performance.now());
+    }
 
     return () => {
-      if (animationFrameRef.current) {
-        cancelAnimationFrame(animationFrameRef.current);
-      }
+      window.removeEventListener("resize", handleResize);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      stopLoop();
     };
-  }, [state, emotionRgb]);
+  }, [dprCap, emotionRgb, renderProfile, shouldAnimate, state]);
 
   return (
     <canvas

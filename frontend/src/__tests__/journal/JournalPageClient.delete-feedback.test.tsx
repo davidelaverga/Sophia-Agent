@@ -1,6 +1,20 @@
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+vi.mock('next/navigation', () => ({
+  useRouter: () => ({
+    push: vi.fn(),
+    replace: vi.fn(),
+    back: vi.fn(),
+    forward: vi.fn(),
+    refresh: vi.fn(),
+    prefetch: vi.fn(),
+  }),
+  usePathname: () => '/journal',
+  useSearchParams: () => new URLSearchParams('highlight=mem-1'),
+  useParams: () => ({}),
+}))
+
 import { JournalPageClient } from '@/app/journal/JournalPageClient'
 
 const originalGetContext = HTMLCanvasElement.prototype.getContext
@@ -52,7 +66,7 @@ describe('JournalPageClient delete feedback', () => {
     vi.restoreAllMocks()
   })
 
-  it.skip('shows a success toast after deleting a memory from the pool view', async () => {
+  it('shows a success toast after deleting a memory from the pool view', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = typeof input === 'string' ? input : input.toString()
 
@@ -92,10 +106,6 @@ describe('JournalPageClient delete feedback', () => {
     await flushAsyncWork()
 
     expect(screen.queryByText('Loading journal')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: 'List view' }))
-    fireEvent.click(screen.getByRole('button', { name: /I feel calmer after the walk and want to keep that rhythm going\./i }))
-    fireEvent.click(screen.getByRole('button', { name: 'Pool view' }))
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     fireEvent.click(screen.getByRole('button', { name: 'Delete memory' }))

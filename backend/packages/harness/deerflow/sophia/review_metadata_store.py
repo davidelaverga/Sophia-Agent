@@ -96,6 +96,10 @@ def _entry_category(entry: dict) -> str | None:
     return None
 
 
+def _is_local_memory_id(memory_id: str | None) -> bool:
+    return isinstance(memory_id, str) and memory_id.startswith("local:")
+
+
 def _overlay_timestamp(value: dict) -> str:
     updated_at = value.get("updated_at")
     if isinstance(updated_at, str) and updated_at:
@@ -301,11 +305,14 @@ def reconcile_review_metadata_entries(user_id: str, memories: list[dict]) -> int
     used_memory_ids = {
         entry.get("memory_id")
         for entry in entries
-        if isinstance(entry.get("memory_id"), str) and entry.get("memory_id")
+        if isinstance(entry.get("memory_id"), str)
+        and entry.get("memory_id")
+        and not _is_local_memory_id(entry.get("memory_id"))
     }
 
     for entry in entries:
-        if entry.get("memory_id"):
+        entry_memory_id = entry.get("memory_id")
+        if isinstance(entry_memory_id, str) and entry_memory_id and not _is_local_memory_id(entry_memory_id):
             continue
 
         entry_content = entry.get("content")

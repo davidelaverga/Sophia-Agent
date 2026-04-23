@@ -19,6 +19,10 @@ import {
   type MemoryDecision,
 } from '../../lib/recap-types';
 import { cn } from '../../lib/utils';
+import {
+  getRecapOrbitProfile,
+  shouldSkipTierFrame,
+} from '../../lib/visual-tier-profiles';
 
 import {
   getOrbitCandidateBuckets,
@@ -95,6 +99,38 @@ const KEEP_ANIMATION_MS = 700;
 const DISCARD_ANIMATION_MS = 600;
 const DROP_DURATION_MS = 420;
 const IS_TEST_ENV = process.env.NODE_ENV === 'test';
+
+function isDocumentHidden() {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+function bindVisibilityAwareAnimation(params: {
+  start: () => void;
+  stop: () => void;
+}) {
+  const { start, stop } = params;
+
+  if (typeof document === 'undefined') {
+    start();
+    return () => stop();
+  }
+
+  const handleVisibilityChange = () => {
+    if (isDocumentHidden()) {
+      stop();
+      return;
+    }
+
+    start();
+  };
+
+  document.addEventListener('visibilitychange', handleVisibilityChange);
+  handleVisibilityChange();
+
+  return () => {
+    document.removeEventListener('visibilitychange', handleVisibilityChange);
+  };
+}
 
 const VERT = `attribute vec2 pos;void main(){gl_Position=vec4(pos,0,1);}`;
 
@@ -598,6 +634,12 @@ const MAX_COMETS = 3;
 type CometState = { x: number; y: number; dx: number; dy: number; angle: number; life: number; maxLife: number; peak: number };
 
 const sharedCometData = { comets: [] as CometState[], uniform: new Float32Array(MAX_COMETS * 4) };
+const EMPTY_COMET_UNIFORM = new Float32Array(MAX_COMETS * 4);
+
+function clearComets() {
+  sharedCometData.comets.length = 0;
+  sharedCometData.uniform.fill(0);
+}
 
 function spawnComet() {
   const side = Math.random();
@@ -652,6 +694,7 @@ function AuroraBackground() {
   const lastFrameRef = useRef(0);
   const nextCometRef = useRef(8 + Math.random() * 10);
   const { tier, dprCap, reducedMotion } = useVisualTier();
+  const renderProfile = useMemo(() => getRecapOrbitProfile(tier), [tier]);
 
   useEffect(() => {
     if (IS_TEST_ENV) {
@@ -702,21 +745,38 @@ function AuroraBackground() {
       mouseRef.current.y = event.clientY / window.innerHeight;
     };
     window.addEventListener('mousemove', onMove);
+    lastFrameRef.current = 0;
+    let lastRenderTime = 0;
 
-    const loop = () => {
-      rafRef.current = requestAnimationFrame(loop);
-      const now = performance.now();
+    const stopLoop = () => {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      lastRenderTime = 0;
+      lastFrameRef.current = 0;
+    };
+
+    const draw = (now: number) => {
+      if (!reducedMotion && shouldSkipTierFrame(now, lastRenderTime, renderProfile.auroraFrameIntervalMs)) {
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      lastRenderTime = now;
       const t = (now - t0.current) / 1000;
       const dt = Math.min(0.05, lastFrameRef.current > 0 ? (now - lastFrameRef.current) * 0.001 : 0.016);
       lastFrameRef.current = now;
       const { x, y } = mouseRef.current;
 
-      nextCometRef.current -= dt;
-      if (nextCometRef.current <= 0) {
-        spawnComet();
-        nextCometRef.current = 12 + Math.random() * 18;
+      if (renderProfile.allowComets && !reducedMotion) {
+        nextCometRef.current -= dt;
+        if (nextCometRef.current <= 0) {
+          spawnComet();
+          nextCometRef.current = 12 + Math.random() * 18;
+        }
+        updateComets(dt);
+      } else {
+        clearComets();
       }
-      updateComets(dt);
 
       if (stateRef.current) {
         const { gl: g, uniforms } = stateRef.current;
@@ -727,21 +787,39 @@ function AuroraBackground() {
         if (uniforms.comet) g.uniform4fv(uniforms.comet, sharedCometData.uniform);
         g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
       }
+
+      if (!reducedMotion) {
+        rafRef.current = requestAnimationFrame(draw);
+      }
     };
 
-    rafRef.current = requestAnimationFrame(loop);
+    const startLoop = () => {
+      if (reducedMotion || rafRef.current || isDocumentHidden()) {
+        return;
+      }
 
-    if (reducedMotion || tier === 1) {
-      cancelAnimationFrame(rafRef.current);
-      loop();
+      rafRef.current = requestAnimationFrame(draw);
+    };
+
+    let cleanupVisibility = () => {};
+
+    if (reducedMotion) {
+      draw(performance.now());
+    } else {
+      cleanupVisibility = bindVisibilityAwareAnimation({
+        start: startLoop,
+        stop: stopLoop,
+      });
     }
 
     return () => {
-      cancelAnimationFrame(rafRef.current);
+      cleanupVisibility();
+      stopLoop();
+      clearComets();
       window.removeEventListener('resize', resize);
       window.removeEventListener('mousemove', onMove);
     };
-  }, [dprCap, reducedMotion, tier]);
+  }, [dprCap, reducedMotion, renderProfile]);
 
   return (
     <div className="fixed inset-0 z-0" aria-hidden="true">
@@ -771,7 +849,8 @@ function CosmicPool({
   const settledRef = useRef(settledMemories);
   ripplesRef.current = ripples;
   settledRef.current = settledMemories;
-  const { tier, dprCap } = useVisualTier();
+  const { tier, dprCap, reducedMotion } = useVisualTier();
+  const renderProfile = useMemo(() => getRecapOrbitProfile(tier), [tier]);
 
   useEffect(() => {
     if (IS_TEST_ENV) {
@@ -823,10 +902,22 @@ function CosmicPool({
     }
     uniforms.comet = gl.getUniformLocation(program, 'u_comet[0]');
     glState.current = { gl, uniforms };
+    let lastFrameTime = 0;
 
-    const loop = () => {
-      rafRef.current = requestAnimationFrame(loop);
-      const t = (performance.now() - timeOrigin) / 1000;
+    const stopLoop = () => {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      lastFrameTime = 0;
+    };
+
+    const draw = (now: number) => {
+      if (!reducedMotion && shouldSkipTierFrame(now, lastFrameTime, renderProfile.poolFrameIntervalMs)) {
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      lastFrameTime = now;
+      const t = (now - timeOrigin) / 1000;
       const state = glState.current;
       if (!state) {
         return;
@@ -852,16 +943,40 @@ function CosmicPool({
         g.uniform3f(loc[`gc${index}`], sc[0], sc[1], sc[2]);
       }
       g.uniform1f(loc.gc, Math.min(settled.length, 4));
-      if (loc.comet) g.uniform4fv(loc.comet, sharedCometData.uniform);
+      if (loc.comet) {
+        g.uniform4fv(loc.comet, renderProfile.allowComets ? sharedCometData.uniform : EMPTY_COMET_UNIFORM);
+      }
       g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
+
+      if (!reducedMotion) {
+        rafRef.current = requestAnimationFrame(draw);
+      }
     };
 
-    rafRef.current = requestAnimationFrame(loop);
+    const startLoop = () => {
+      if (reducedMotion || rafRef.current || isDocumentHidden()) {
+        return;
+      }
+
+      rafRef.current = requestAnimationFrame(draw);
+    };
+
+    let cleanupVisibility = () => {};
+
+    if (reducedMotion) {
+      draw(performance.now());
+    } else {
+      cleanupVisibility = bindVisibilityAwareAnimation({
+        start: startLoop,
+        stop: stopLoop,
+      });
+    }
     return () => {
-      cancelAnimationFrame(rafRef.current);
+      cleanupVisibility();
+      stopLoop();
       window.removeEventListener('resize', resize);
     };
-  }, [timeOrigin, dprCap, tier]);
+  }, [timeOrigin, dprCap, reducedMotion, renderProfile]);
 
   return (
     <div
@@ -905,9 +1020,10 @@ function PoolFog({ intensity }: { intensity: number }) {
   const intensityRef = useRef(intensity);
   intensityRef.current = intensity;
   const { tier, reducedMotion } = useVisualTier();
+  const renderProfile = useMemo(() => getRecapOrbitProfile(tier), [tier]);
 
   useEffect(() => {
-    if (IS_TEST_ENV || tier === 1) {
+    if (IS_TEST_ENV || reducedMotion || !renderProfile.allowFog) {
       return;
     }
 
@@ -921,15 +1037,26 @@ function PoolFog({ intensity }: { intensity: number }) {
       canvas.width = rect.width;
       canvas.height = rect.height;
       if (!wispsRef.current.length) {
-        const wispCount = tier === 2 ? 20 : 40;
-        wispsRef.current = createFogWisps(rect.width, rect.height, wispCount);
+        wispsRef.current = createFogWisps(rect.width, rect.height, renderProfile.fogWispCount);
       }
     };
     resize();
     window.addEventListener('resize', resize);
+    let lastFrameTime = 0;
 
-    const loop = () => {
-      rafRef.current = requestAnimationFrame(loop);
+    const stopLoop = () => {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      lastFrameTime = 0;
+    };
+
+    const loop = (now: number) => {
+      if (shouldSkipTierFrame(now, lastFrameTime, renderProfile.fogFrameIntervalMs)) {
+        rafRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
+      lastFrameTime = now;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         return;
@@ -937,7 +1064,7 @@ function PoolFog({ intensity }: { intensity: number }) {
 
       const w = canvas.width;
       const h = canvas.height;
-      const t = (performance.now() - t0.current) / 1000;
+      const t = (now - t0.current) / 1000;
       const currentIntensity = intensityRef.current;
 
       ctx.clearRect(0, 0, w, h);
@@ -992,14 +1119,29 @@ function PoolFog({ intensity }: { intensity: number }) {
       ctx.fillRect(0, 0, w, h);
 
       ctx.globalCompositeOperation = 'source-over';
+
+      rafRef.current = requestAnimationFrame(loop);
     };
 
-    rafRef.current = requestAnimationFrame(loop);
+    const startLoop = () => {
+      if (rafRef.current || isDocumentHidden()) {
+        return;
+      }
+
+      rafRef.current = requestAnimationFrame(loop);
+    };
+
+    const cleanupVisibility = bindVisibilityAwareAnimation({
+      start: startLoop,
+      stop: stopLoop,
+    });
+
     return () => {
-      cancelAnimationFrame(rafRef.current);
+      cleanupVisibility();
+      stopLoop();
       window.removeEventListener('resize', resize);
     };
-  }, [tier, reducedMotion]);
+  }, [reducedMotion, renderProfile]);
 
   return (
     <div className="fixed left-0 right-0 z-[3] pointer-events-none" style={{ bottom: '30%', height: '28%' }}>
@@ -1161,6 +1303,7 @@ function OrbMistCanvas({ active }: { active: boolean }) {
   const particles = useRef<Array<{ x: number; y: number; vx: number; vy: number; r: number; a: number; phase: number }>>([]);
   const t0 = useRef(performance.now());
   const { tier } = useVisualTier();
+  const renderProfile = useMemo(() => getRecapOrbitProfile(tier), [tier]);
 
   useEffect(() => {
     if (IS_TEST_ENV || tier === 1) {
@@ -1196,15 +1339,27 @@ function OrbMistCanvas({ active }: { active: boolean }) {
         };
       });
     }
+    let lastFrameTime = 0;
 
-    const loop = () => {
-      rafRef.current = requestAnimationFrame(loop);
+    const stopLoop = () => {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      lastFrameTime = 0;
+    };
+
+    const loop = (now: number) => {
+      if (shouldSkipTierFrame(now, lastFrameTime, renderProfile.poolFrameIntervalMs)) {
+        rafRef.current = requestAnimationFrame(loop);
+        return;
+      }
+
+      lastFrameTime = now;
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         return;
       }
 
-      const t = (performance.now() - t0.current) / 1000;
+      const t = (now - t0.current) / 1000;
       ctx.clearRect(0, 0, size, size);
       ctx.save();
       ctx.beginPath();
@@ -1316,11 +1471,28 @@ function OrbMistCanvas({ active }: { active: boolean }) {
       }
 
       ctx.restore();
+
+      rafRef.current = requestAnimationFrame(loop);
     };
 
-    rafRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [active, tier]);
+    const startLoop = () => {
+      if (rafRef.current || isDocumentHidden()) {
+        return;
+      }
+
+      rafRef.current = requestAnimationFrame(loop);
+    };
+
+    const cleanupVisibility = bindVisibilityAwareAnimation({
+      start: startLoop,
+      stop: stopLoop,
+    });
+
+    return () => {
+      cleanupVisibility();
+      stopLoop();
+    };
+  }, [active, renderProfile, tier]);
 
   return <canvas ref={ref} className="pointer-events-none absolute inset-0 h-full w-full rounded-full" style={{ opacity: active ? 0.75 : 0.25 }} />;
 }
@@ -1336,7 +1508,8 @@ function OrbGlassCanvas({ active }: { active: boolean }) {
   const t0 = useRef(performance.now());
   const activeRef = useRef(active);
   activeRef.current = active;
-  const { tier } = useVisualTier();
+  const { tier, reducedMotion } = useVisualTier();
+  const renderProfile = useMemo(() => getRecapOrbitProfile(tier), [tier]);
 
   useEffect(() => {
     if (IS_TEST_ENV || tier === 1) return;
@@ -1366,10 +1539,22 @@ function OrbGlassCanvas({ active }: { active: boolean }) {
         a: gl.getUniformLocation(program, 'u_active'),
       },
     };
+    let lastFrameTime = 0;
 
-    const loop = () => {
-      rafRef.current = requestAnimationFrame(loop);
-      const t = (performance.now() - t0.current) / 1000;
+    const stopLoop = () => {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = 0;
+      lastFrameTime = 0;
+    };
+
+    const draw = (now: number) => {
+      if (!reducedMotion && shouldSkipTierFrame(now, lastFrameTime, renderProfile.poolFrameIntervalMs)) {
+        rafRef.current = requestAnimationFrame(draw);
+        return;
+      }
+
+      lastFrameTime = now;
+      const t = (now - t0.current) / 1000;
       const s = stateRef.current;
       if (!s) return;
       const { gl: g, uniforms } = s;
@@ -1380,11 +1565,35 @@ function OrbGlassCanvas({ active }: { active: boolean }) {
       g.uniform2f(uniforms.r, g.canvas.width, g.canvas.height);
       g.uniform1f(uniforms.a, activeRef.current ? 1.0 : 0.0);
       g.drawArrays(g.TRIANGLE_STRIP, 0, 4);
+
+      if (!reducedMotion) {
+        rafRef.current = requestAnimationFrame(draw);
+      }
     };
 
-    rafRef.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafRef.current);
-  }, [tier]);
+    const startLoop = () => {
+      if (reducedMotion || rafRef.current || isDocumentHidden()) {
+        return;
+      }
+
+      rafRef.current = requestAnimationFrame(draw);
+    };
+
+    let cleanupVisibility = () => {};
+
+    if (reducedMotion) {
+      draw(performance.now());
+    } else {
+      cleanupVisibility = bindVisibilityAwareAnimation({
+        start: startLoop,
+        stop: stopLoop,
+      });
+    }
+    return () => {
+      cleanupVisibility();
+      stopLoop();
+    };
+  }, [reducedMotion, renderProfile, tier]);
 
   return (
     <canvas
@@ -1994,6 +2203,10 @@ export function RecapCosmicPoolOrbit({
   className,
 }: RecapMemoryOrbitProps) {
   const normalizedCandidates = useMemo(() => normalizeOrbitCandidates(candidates), [candidates]);
+  const hasReviewedDecisions = useMemo(
+    () => Object.values(decisions).some((record) => record.decision !== 'idle'),
+    [decisions],
+  );
   const approvedMemories = useMemo<ApprovedMemoryRow[]>(() => {
     return normalizedCandidates.flatMap((candidate) => {
       const record = decisions[candidate.id];
@@ -2186,6 +2399,21 @@ export function RecapCosmicPoolOrbit({
   }
 
   if (normalizedCandidates.length === 0) {
+    if (hasReviewedDecisions) {
+      return (
+        <div className={cn('relative min-h-screen overflow-hidden bg-[var(--bg)]', className)}>
+          <AuroraBackground />
+          <div className="relative z-10 flex min-h-screen flex-col items-center justify-center px-4 pb-8 pt-20">
+            <CompletedState
+              approvedCount={0}
+              approvedMemories={[]}
+              showEntrance={showEntrance}
+            />
+          </div>
+        </div>
+      );
+    }
+
     return <EmptyState />;
   }
 

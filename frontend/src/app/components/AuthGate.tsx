@@ -1,8 +1,12 @@
 "use client"
 
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
+import { useEffect, useMemo, useRef, useState, type MouseEvent, type ReactNode } from "react"
 
 import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
+import {
+  getAuthGateVisualProfile,
+  shouldSkipTierFrame,
+} from "@/app/lib/visual-tier-profiles"
 import { authClient } from "@/server/better-auth/client"
 
 import { useCopy, useTranslation } from "../copy"
@@ -311,6 +315,7 @@ export function AuthGate({
   const copy = useCopy()
   const { t } = useTranslation()
   const { reducedMotion: prefersReducedMotion, tier, dprCap } = useVisualTier()
+  const renderProfile = useMemo(() => getAuthGateVisualProfile(tier), [tier])
   const skyCanvasRef = useRef<HTMLCanvasElement>(null)
   const starsCanvasRef = useRef<HTMLCanvasElement>(null)
 
@@ -463,42 +468,85 @@ export function AuthGate({
 
     let animationFrameId = 0
     let startTime = 0
+    let lastFrameTime = 0
+
+    const stopLoop = () => {
+      if (animationFrameId) {
+        window.cancelAnimationFrame(animationFrameId)
+        animationFrameId = 0
+      }
+      startTime = 0
+      lastFrameTime = 0
+    }
+
+    const isDocumentHidden = () => document.visibilityState === "hidden"
 
     const render = (frameTime: number) => {
+      if (
+        renderProfile.animateSky &&
+        !prefersReducedMotion &&
+        shouldSkipTierFrame(frameTime, lastFrameTime, renderProfile.skyFrameIntervalMs)
+      ) {
+        animationFrameId = window.requestAnimationFrame(render)
+        return
+      }
+
       if (startTime === 0) {
         startTime = frameTime
       }
+      lastFrameTime = frameTime
 
-      const elapsed = prefersReducedMotion ? 0 : (frameTime - startTime) * 0.001
+      const elapsed = prefersReducedMotion || !renderProfile.animateSky ? 0 : (frameTime - startTime) * 0.001
       gl.uniform1f(timeLocation, elapsed)
       gl.uniform2f(resolutionLocation, canvas.width, canvas.height)
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 
-      if (!prefersReducedMotion) {
+      if (!prefersReducedMotion && renderProfile.animateSky) {
         animationFrameId = window.requestAnimationFrame(render)
       }
     }
 
-    resize()
-    window.addEventListener("resize", resize)
+    const startLoop = () => {
+      if (prefersReducedMotion || !renderProfile.animateSky || animationFrameId || isDocumentHidden()) {
+        return
+      }
 
-    if (prefersReducedMotion || tier === 1) {
-      render(0)
-    } else {
       animationFrameId = window.requestAnimationFrame(render)
     }
 
-    return () => {
-      if (animationFrameId) {
-        window.cancelAnimationFrame(animationFrameId)
+    const handleVisibilityChange = () => {
+      if (prefersReducedMotion || !renderProfile.animateSky) {
+        return
       }
+
+      if (isDocumentHidden()) {
+        stopLoop()
+        return
+      }
+
+      startLoop()
+    }
+
+    resize()
+    window.addEventListener("resize", resize)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    if (prefersReducedMotion || !renderProfile.animateSky) {
+      render(0)
+    } else {
+      startLoop()
+    }
+
+    return () => {
+      stopLoop()
       window.removeEventListener("resize", resize)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
       gl.deleteBuffer(buffer)
       gl.deleteProgram(program)
       gl.deleteShader(vertexShader)
       gl.deleteShader(fragmentShader)
     }
-  }, [authState, prefersReducedMotion, tier, dprCap])
+  }, [authState, prefersReducedMotion, dprCap, renderProfile])
 
   useEffect(() => {
     if (authState !== "unauthenticated") {
@@ -803,10 +851,10 @@ export function AuthGate({
       }
     }
 
-    const shootingStarCount = tier === 1 ? 2 : tier === 2 ? 4 : 6
-    const dustCount = tier === 1 ? 20 : tier === 2 ? 40 : 80
+    const shootingStarCount = renderProfile.shootingStarCount
+    const dustCount = renderProfile.dustCount
     const shootingStars = Array.from({ length: shootingStarCount }, () => new ShootingStar())
-    const satellite = new Satellite()
+    const satellite = renderProfile.satelliteEnabled ? new Satellite() : null
     const dust: DustMote[] = Array.from({ length: dustCount }, () => ({
       x: Math.random() * 2 - 0.5,
       y: Math.random() * 2 - 0.5,
@@ -818,12 +866,24 @@ export function AuthGate({
       speed: 0.3 + Math.random() * 1.0,
       color: Math.random() < 0.4 ? [218, 197, 160] : Math.random() < 0.6 ? [184, 164, 232] : [200, 198, 210],
     }))
-    const nightFlyers = tier === 1 ? [] : [new NightFlyer(), new NightFlyer()]
+    const nightFlyers = Array.from({ length: renderProfile.nightFlyerCount }, () => new NightFlyer())
 
     let windX = 0
     let windTargetX = 0
     let windTimer = 0
     let previousTime = 0
+    let lastFrameTime = 0
+
+    const stopLoop = () => {
+      if (animationFrameId) {
+        window.cancelAnimationFrame(animationFrameId)
+        animationFrameId = 0
+      }
+      previousTime = 0
+      lastFrameTime = 0
+    }
+
+    const isDocumentHidden = () => document.visibilityState === "hidden"
 
     const updateWind = (dt: number) => {
       windTimer -= dt
@@ -837,8 +897,17 @@ export function AuthGate({
     }
 
     const drawFrame = (frameTime: number) => {
+      if (
+        !prefersReducedMotion &&
+        shouldSkipTierFrame(frameTime, lastFrameTime, renderProfile.starsFrameIntervalMs)
+      ) {
+        animationFrameId = window.requestAnimationFrame(drawFrame)
+        return
+      }
+
       const dt = prefersReducedMotion ? 0 : Math.min((frameTime - previousTime) / 1000, 0.05)
       previousTime = frameTime
+      lastFrameTime = frameTime
       const t = frameTime * 0.001
 
       context.clearRect(0, 0, width, height)
@@ -848,8 +917,8 @@ export function AuthGate({
         star.draw(context)
       }
 
-      satellite.update(dt)
-      satellite.draw(context)
+      satellite?.update(dt)
+      satellite?.draw(context)
 
       for (const flyer of nightFlyers) {
         flyer.update(dt)
@@ -885,22 +954,43 @@ export function AuthGate({
       }
     }
 
-    resize()
-    window.addEventListener("resize", resize)
+    const startLoop = () => {
+      if (prefersReducedMotion || animationFrameId || isDocumentHidden()) {
+        return
+      }
 
-    if (prefersReducedMotion || tier === 1) {
-      drawFrame(0)
-    } else {
       animationFrameId = window.requestAnimationFrame(drawFrame)
     }
 
-    return () => {
-      if (animationFrameId) {
-        window.cancelAnimationFrame(animationFrameId)
+    const handleVisibilityChange = () => {
+      if (prefersReducedMotion) {
+        return
       }
-      window.removeEventListener("resize", resize)
+
+      if (isDocumentHidden()) {
+        stopLoop()
+        return
+      }
+
+      startLoop()
     }
-  }, [authState, prefersReducedMotion, tier, dprCap])
+
+    resize()
+    window.addEventListener("resize", resize)
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    if (prefersReducedMotion) {
+      drawFrame(0)
+    } else {
+      startLoop()
+    }
+
+    return () => {
+      stopLoop()
+      window.removeEventListener("resize", resize)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
+    }
+  }, [authState, prefersReducedMotion, dprCap, renderProfile])
 
   const handleGoogleLogin = async () => {
     setIsLoggingIn(true)

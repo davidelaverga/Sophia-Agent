@@ -48,21 +48,21 @@ import {
 } from '../lib/journal'
 import { useUiStore } from '../stores/ui-store'
 
-import {
-  JOURNAL_POOL_FRAGMENT_SHADER,
-  JOURNAL_POOL_VERTEX_SHADER,
-} from './journalPoolShaders'
+import { buildConstellationEntries } from './journalCollection'
 import {
   getDetailPanelPosition,
   getHoverLabelPosition,
 } from './journalFloatingLayout'
-import { buildConstellationEntries } from './journalCollection'
+import {
+  getJournalPoolFragmentShaderSource,
+  JOURNAL_POOL_VERTEX_SHADER,
+} from './journalPoolShaders'
+import { getJournalRenderProfile } from './journalRenderProfile'
 
 import styles from './journal.module.css'
 
 const MAX_TIMELINE_DAYS = 180
 const HIT_RADIUS = 28
-const MAX_SHADER_MEMORIES = 16
 const MAX_COMETS = 4
 const CAMERA_POSITION = [0, 1.05, -1.4] as const
 const CAMERA_TARGET = [0, -0.05, 0.15] as const
@@ -327,9 +327,9 @@ function createShader(gl: WebGLRenderingContext, shaderType: number, source: str
   return shader
 }
 
-function createProgram(gl: WebGLRenderingContext) {
+function createProgram(gl: WebGLRenderingContext, tier: 1 | 2 | 3) {
   const vertexShader = createShader(gl, gl.VERTEX_SHADER, JOURNAL_POOL_VERTEX_SHADER)
-  const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, JOURNAL_POOL_FRAGMENT_SHADER)
+  const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, getJournalPoolFragmentShaderSource(tier))
   if (!vertexShader || !fragmentShader) {
     return null
   }
@@ -518,7 +518,6 @@ export function JournalPageClient() {
   const [activePeriod, setActivePeriod] = useState<JournalPeriod>('all')
   const [timelinePosition, setTimelinePosition] = useState(INITIAL_TIMELINE_POSITION)
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [hoveredId, setHoveredId] = useState<string | null>(null)
   const [periodMenuOpen, setPeriodMenuOpen] = useState(false)
   const [typeMenuOpen, setTypeMenuOpen] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -534,18 +533,19 @@ export function JournalPageClient() {
   const typeMenuRef = useRef<HTMLDivElement>(null)
   const detailRef = useRef<HTMLDivElement>(null)
   const hoverLabelRef = useRef<HTMLDivElement>(null)
+  const hoverLabelCategoryRef = useRef<HTMLSpanElement>(null)
+  const hoverLabelTextRef = useRef<HTMLSpanElement>(null)
+  const orbHintRef = useRef<HTMLDivElement>(null)
   const poolCanvasRef = useRef<HTMLCanvasElement>(null)
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null)
   const hitCanvasRef = useRef<HTMLCanvasElement>(null)
 
   const { tier: visualTier, dprCap, reducedMotion: prefersReducedMotion } = useVisualTier()
-  const tierRef = useRef(visualTier)
-  const dprCapRef = useRef(dprCap)
-  tierRef.current = visualTier
-  dprCapRef.current = dprCap
+  const renderProfile = useMemo(() => getJournalRenderProfile(visualTier), [visualTier])
 
   const positionsRef = useRef<Record<string, ScreenPosition>>({})
   const constellationEntriesRef = useRef<SceneEntry[]>([])
+  const hoveredEntryByIdRef = useRef<Map<string, SceneEntry>>(new Map())
   const visibleIdsRef = useRef<Set<string>>(new Set())
   const selectedIdRef = useRef<string | null>(null)
   const hoveredIdRef = useRef<string | null>(null)
@@ -554,15 +554,43 @@ export function JournalPageClient() {
 
   const { sceneEntries, maxTimelineDays } = useMemo(() => decorateEntries(entries), [entries])
 
-  const maxConstellationEntries = visualTier === 1 ? 14 : visualTier === 2 ? 24 : 36
+  const maxConstellationEntries = renderProfile.maxConstellationEntries
+  const totalCount = sceneEntries.length
+
+  const syncHoverChrome = useCallback(() => {
+    const hoverLabelElement = hoverLabelRef.current
+    const hoverLabelCategoryElement = hoverLabelCategoryRef.current
+    const hoverLabelTextElement = hoverLabelTextRef.current
+    const orbHintElement = orbHintRef.current
+    const hoveredEntryId = hoveredIdRef.current
+    const hoveredEntry = hoveredEntryId ? hoveredEntryByIdRef.current.get(hoveredEntryId) ?? null : null
+    const shouldShowHoverLabel = Boolean(hoveredEntry && hoveredEntry.id !== selectedIdRef.current)
+
+    if (hoverLabelElement && hoverLabelCategoryElement && hoverLabelTextElement) {
+      hoverLabelElement.classList.toggle(styles.hoverLabelVisible, shouldShowHoverLabel)
+
+      if (shouldShowHoverLabel && hoveredEntry) {
+        hoverLabelCategoryElement.textContent = hoveredEntry.presentation.shortLabel
+        hoverLabelCategoryElement.style.background = hoveredEntry.presentation.pillBackground
+        hoverLabelCategoryElement.style.color = hoveredEntry.presentation.color
+        hoverLabelTextElement.textContent = hoveredEntry.content
+      } else {
+        hoverLabelCategoryElement.textContent = ''
+        hoverLabelCategoryElement.removeAttribute('style')
+        hoverLabelTextElement.textContent = ''
+      }
+    }
+
+    if (orbHintElement) {
+      const shouldShowOrbHint = !selectedIdRef.current && !hoveredEntryId && hoveredEntryByIdRef.current.size > 0
+      orbHintElement.classList.toggle(styles.orbHintHidden, !shouldShowOrbHint)
+    }
+  }, [])
 
   useEffect(() => {
     selectedIdRef.current = selectedId
-  }, [selectedId])
-
-  useEffect(() => {
-    hoveredIdRef.current = hoveredId
-  }, [hoveredId])
+    syncHoverChrome()
+  }, [selectedId, syncHoverChrome])
 
   useEffect(() => {
     highlightIdsRef.current = highlightSet
@@ -755,6 +783,8 @@ export function JournalPageClient() {
     [effectiveTimelinePosition, filteredEntries],
   )
 
+  const visibleCount = visibleEntries.length
+
   useEffect(() => {
     visibleIdsRef.current = new Set(visibleEntries.map((entry) => entry.id))
   }, [visibleEntries])
@@ -769,7 +799,14 @@ export function JournalPageClient() {
 
   useEffect(() => {
     constellationEntriesRef.current = constellationEntries
-  }, [constellationEntries])
+    hoveredEntryByIdRef.current = new Map(constellationEntries.map((entry) => [entry.id, entry]))
+
+    if (hoveredIdRef.current && !hoveredEntryByIdRef.current.has(hoveredIdRef.current)) {
+      hoveredIdRef.current = null
+    }
+
+    syncHoverChrome()
+  }, [constellationEntries, syncHoverChrome])
 
   const selectedEntry = useMemo(
     () => visibleEntries.find((entry) => entry.id === selectedId) ?? sceneEntries.find((entry) => entry.id === selectedId) ?? null,
@@ -791,12 +828,13 @@ export function JournalPageClient() {
 
     if (!visibleEntries.some((entry) => entry.id === selectedEntry.id)) {
       setSelectedId(null)
-      setHoveredId(null)
+      hoveredIdRef.current = null
+      syncHoverChrome()
       setEditingId(null)
       setDraftText('')
       setDeleteConfirmId(null)
     }
-  }, [selectedEntry, visibleEntries])
+  }, [selectedEntry, syncHoverChrome, visibleEntries])
 
   useEffect(() => {
     if (editingId && !entries.some((entry) => entry.id === editingId)) {
@@ -1054,7 +1092,7 @@ export function JournalPageClient() {
       return
     }
 
-    const program = createProgram(gl)
+    const program = createProgram(gl, visualTier)
     if (!program) {
       return
     }
@@ -1079,8 +1117,9 @@ export function JournalPageClient() {
     const uMemColorLocation = gl.getUniformLocation(program, 'uMemCol[0]')
     const uCometLocation = gl.getUniformLocation(program, 'uComet[0]')
 
-    const memUniformData = new Float32Array(MAX_SHADER_MEMORIES * 4)
-    const memColorUniformData = new Float32Array(MAX_SHADER_MEMORIES * 3)
+    const shaderMemoryLimit = renderProfile.maxShaderMemories
+    const memUniformData = new Float32Array(shaderMemoryLimit * 4)
+    const memColorUniformData = new Float32Array(shaderMemoryLimit * 3)
     const cometUniformData = new Float32Array(MAX_COMETS * 4)
 
     let viewportWidth = window.innerWidth
@@ -1099,11 +1138,11 @@ export function JournalPageClient() {
     function resetParticles(width: number, height: number) {
       particles.length = 0
       const aspect = width / Math.max(height, 1)
-      const t = tierRef.current
+      const { layer0, layer1, layer2 } = renderProfile.particleCounts
 
-      if (t === 1) return
+      if (layer0 === 0 && layer1 === 0 && layer2 === 0) return
 
-      const layer0Count = t === 2 ? 50 : 110
+      const layer0Count = layer0
       for (let index = 0; index < layer0Count; index += 1) {
         const angle = Math.random() * Math.PI * 2
         const radius = Math.pow(Math.random(), 0.42) * 0.55
@@ -1122,7 +1161,7 @@ export function JournalPageClient() {
         })
       }
 
-      const layer1Count = t === 2 ? 80 : 160
+      const layer1Count = layer1
       for (let index = 0; index < layer1Count; index += 1) {
         const angle = Math.random() * Math.PI * 2
         const radius = Math.pow(Math.random(), 0.35) * 0.70
@@ -1141,7 +1180,7 @@ export function JournalPageClient() {
         })
       }
 
-      const layer2Count = t === 2 ? 60 : 130
+      const layer2Count = layer2
       for (let index = 0; index < layer2Count; index += 1) {
         particles.push({
           x: Math.random(),
@@ -1160,7 +1199,7 @@ export function JournalPageClient() {
     }
 
     function resize() {
-      const dpr = Math.min(window.devicePixelRatio || 1, dprCapRef.current)
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCap)
       viewportWidth = window.innerWidth
       viewportHeight = window.innerHeight
 
@@ -1259,7 +1298,7 @@ export function JournalPageClient() {
         })
         .sort((left, right) => right.priority - left.priority || right.strength - left.strength)
 
-      for (let slot = 0; slot < Math.min(MAX_SHADER_MEMORIES, candidates.length); slot += 1) {
+      for (let slot = 0; slot < Math.min(shaderMemoryLimit, candidates.length); slot += 1) {
         const { entry, strength } = candidates[slot]
         const shaderPoint = worldToShaderPoint(entry.worldX, entry.worldZ, viewportWidth, viewportHeight)
         memUniformData[slot * 4] = shaderPoint[0]
@@ -1721,8 +1760,27 @@ export function JournalPageClient() {
     }
 
     let staticMode = false
+    let lastTierRender = 0
+
+    const stopLoop = () => {
+      window.cancelAnimationFrame(animationFrame)
+      animationFrame = 0
+      lastFrameTime = 0
+      lastTierRender = 0
+    }
+
+    const isDocumentHidden = () => document.visibilityState === 'hidden'
 
     function renderFrame(now: number) {
+      // Tier-2 and Tier-1 intentionally run below full rAF cadence to cut
+      // fragment and overlay cost without freezing the scene entirely.
+      if (!staticMode && renderProfile.frameIntervalMs != null && !prefersReducedMotion) {
+        if (now - lastTierRender < renderProfile.frameIntervalMs) {
+          animationFrame = window.requestAnimationFrame(renderFrame)
+          return
+        }
+        lastTierRender = now
+      }
       const time = now / 1000
       smoothPointerX += (pointerX - smoothPointerX) * 0.025
       smoothPointerY += (pointerY - smoothPointerY) * 0.025
@@ -1730,12 +1788,17 @@ export function JournalPageClient() {
       const deltaSeconds = Math.min(0.05, lastFrameTime > 0 ? (now - lastFrameTime) * 0.001 : 0.016)
       lastFrameTime = now
       nextCometSpawn -= deltaSeconds
-      const maxCometsForTier = tierRef.current === 1 ? 0 : tierRef.current === 2 ? 2 : MAX_COMETS
+      const maxCometsForTier = renderProfile.maxComets
       if (nextCometSpawn <= 0 && comets.length < maxCometsForTier) {
         spawnComet()
         nextCometSpawn = 2.5 + Math.random() * 5
       }
       updateComets(deltaSeconds)
+      // Compute overlay positions first so `positionsRef.current` is populated
+      // before `updateMemoryUniforms` reads it. Without this, the first frame
+      // (especially Tier-1 static mode) writes an empty memory-light uniform
+      // set and the orbs render dark. Also fixes a ~16ms lag at Tier 2/3.
+      drawOverlay(time)
       updateMemoryUniforms()
 
       gl.useProgram(program)
@@ -1754,10 +1817,30 @@ export function JournalPageClient() {
       if (uCometLocation !== null) gl.uniform4fv(uCometLocation, cometUniformData)
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
-      drawOverlay(time)
       if (!staticMode) {
         animationFrame = window.requestAnimationFrame(renderFrame)
       }
+    }
+
+    const startLoop = () => {
+      if (staticMode || animationFrame || isDocumentHidden()) {
+        return
+      }
+
+      animationFrame = window.requestAnimationFrame(renderFrame)
+    }
+
+    const handleVisibilityChange = () => {
+      if (staticMode) {
+        return
+      }
+
+      if (isDocumentHidden()) {
+        stopLoop()
+        return
+      }
+
+      startLoop()
     }
 
     staticSceneRenderRef.current = null
@@ -1769,35 +1852,43 @@ export function JournalPageClient() {
 
     resize()
 
-    if (prefersReducedMotion || tierRef.current === 1) {
+    // Accessibility: OS reduced-motion → true single-frame static. Tier-1
+    // without reduced-motion uses the throttled rAF loop above (~12 fps) so
+    // the pool still flows and pointer-driven caustics still respond.
+    if (prefersReducedMotion) {
       staticMode = true
       staticSceneRenderRef.current = () => renderFrame(performance.now())
       renderFrame(performance.now())
     } else {
-      animationFrame = window.requestAnimationFrame(renderFrame)
+      startLoop()
     }
 
     window.addEventListener('resize', resize)
     window.addEventListener('pointermove', handlePointerMove)
+    document.addEventListener('visibilitychange', handleVisibilityChange)
 
     return () => {
-      window.cancelAnimationFrame(animationFrame)
+      stopLoop()
       window.removeEventListener('resize', resize)
       window.removeEventListener('pointermove', handlePointerMove)
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
       positionsRef.current = {}
       staticSceneRenderRef.current = null
       gl.deleteBuffer(quadBuffer)
       gl.deleteProgram(program)
     }
-  }, [showInteractiveScene, prefersReducedMotion])
+  }, [dprCap, prefersReducedMotion, renderProfile, showInteractiveScene, visualTier])
 
   useEffect(() => {
-    if (!showInteractiveScene || (!prefersReducedMotion && visualTier !== 1)) {
+    // Re-paint the single static frame when state changes (reduced-motion
+    // path only). At Tier 1 without reduced-motion the throttled rAF loop
+    // already keeps the pool live, so no manual re-paint is needed.
+    if (!showInteractiveScene || !prefersReducedMotion) {
       return
     }
 
     staticSceneRenderRef.current?.()
-  }, [constellationEntries, hoveredId, prefersReducedMotion, selectedId, showInteractiveScene, visualTier])
+  }, [constellationEntries, prefersReducedMotion, selectedId, showInteractiveScene])
 
   useEffect(() => {
     if (!showInteractiveScene) {
@@ -1836,13 +1927,19 @@ export function JournalPageClient() {
       }
 
       hoveredIdRef.current = hoveredEntryId
-      setHoveredId(hoveredEntryId)
+      syncHoverChrome()
+      if (prefersReducedMotion) {
+        staticSceneRenderRef.current?.()
+      }
     }
 
     const handlePointerLeave = () => {
       hitCanvas.style.cursor = 'default'
       hoveredIdRef.current = null
-      setHoveredId(null)
+      syncHoverChrome()
+      if (prefersReducedMotion) {
+        staticSceneRenderRef.current?.()
+      }
     }
 
     const handleClick = (event: PointerEvent) => {
@@ -1866,16 +1963,9 @@ export function JournalPageClient() {
       hitCanvas.removeEventListener('click', handleClick)
       hitCanvas.style.cursor = 'default'
     }
-  }, [showInteractiveScene])
+  }, [prefersReducedMotion, showInteractiveScene, syncHoverChrome])
 
-  const hoveredEntry = hoveredId
-    ? constellationEntries.find((entry) => entry.id === hoveredId) ?? null
-    : null
-
-  const visibleCount = visibleEntries.length
-  const totalCount = sceneEntries.length
-  const showOrbHint =
-    !selectedId && !hoveredId && constellationEntries.length > 0 && visibleCount > 0
+  const showOrbHint = !selectedId && constellationEntries.length > 0 && visibleCount > 0
   const hasActiveNarrowing = activeFilter !== 'all' || activePeriod !== 'all' || deferredSearchQuery.trim().length > 0
 
   if (isLoading) {
@@ -2147,7 +2237,7 @@ export function JournalPageClient() {
           </div>
         </div>
 
-        <div className={classNames(styles.orbHint, !showOrbHint && styles.orbHintHidden)}>Click a memory to explore</div>
+        <div ref={orbHintRef} className={classNames(styles.orbHint, !showOrbHint && styles.orbHintHidden)}>Click a memory to explore</div>
 
         {totalCount > 0 && visibleCount === 0 && (
           <div className={styles.sceneEmptyHint}>
@@ -2161,19 +2251,10 @@ export function JournalPageClient() {
 
         <div
           ref={hoverLabelRef}
-          className={classNames(styles.hoverLabel, hoveredEntry && hoveredEntry.id !== selectedId && styles.hoverLabelVisible)}
+          className={styles.hoverLabel}
         >
-          {hoveredEntry && hoveredEntry.id !== selectedId && (
-            <>
-              <span
-                className={styles.hoverLabelCategory}
-                style={{ background: hoveredEntry.presentation.pillBackground, color: hoveredEntry.presentation.color }}
-              >
-                {hoveredEntry.presentation.shortLabel}
-              </span>
-              {hoveredEntry.content}
-            </>
-          )}
+          <span ref={hoverLabelCategoryRef} className={styles.hoverLabelCategory} />
+          <span ref={hoverLabelTextRef} />
         </div>
 
         <div

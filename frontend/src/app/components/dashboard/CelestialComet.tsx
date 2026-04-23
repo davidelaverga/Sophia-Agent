@@ -8,12 +8,22 @@
  */
 'use client';
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import { useVisualTier } from '../../hooks/useVisualTier';
+import {
+  getCelestialCometProfile,
+  shouldSkipTierFrame,
+} from '../../lib/visual-tier-profiles';
 import type { ContextMode } from '../../types/session';
 
-import { sweepLight } from './sweepLight';
+import {
+  clearSweepLight,
+  isSweepLightVisible,
+  publishSweepLightFrame,
+  subscribeSweepLightActive,
+  sweepLight,
+} from './sweepLight';
 
 /* ─── Palettes ──────────────────────────────────────────────── */
 
@@ -270,7 +280,8 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const contextRef = useRef(contextMode);
   contextRef.current = contextMode;
-  const { reducedMotion, reducedFidelity, tier } = useVisualTier();
+  const { reducedMotion, tier } = useVisualTier();
+  const renderProfile = useMemo(() => getCelestialCometProfile(tier), [tier]);
 
   useEffect(() => {
     if (reducedMotion) return;
@@ -278,8 +289,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    // Higher resolution keeps rays crisp — low-end still gets 0.45
-    const RENDER_SCALE = tier === 1 ? 0.35 : tier === 2 ? 0.5 : 0.75;
+    const RENDER_SCALE = renderProfile.renderScale;
 
     const gl = canvas.getContext('webgl', {
       alpha: true,
@@ -315,6 +325,18 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
 
     let raf = 0;
     let w = 0, h = 0;
+    let lastFrameTime = 0;
+
+    const stopLoop = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      lastFrameTime = 0;
+      clearSweepLight();
+    };
+
+    const isDocumentHidden = () => document.visibilityState === 'hidden';
 
     /* ── Drift state machine ── */
     // The light never enters the viewport; it drifts between off-screen anchors.
@@ -350,6 +372,13 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
     };
 
     const draw = (ts: number) => {
+      if (shouldSkipTierFrame(ts, lastFrameTime, renderProfile.frameIntervalMs)) {
+        raf = requestAnimationFrame(draw);
+        return;
+      }
+
+      lastFrameTime = ts;
+
       if (phaseStart === 0) phaseStart = ts;
       const elapsed = ts - phaseStart;
       const time = ts * 0.001;
@@ -363,8 +392,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       if (phase === 'idle') {
         gl.clearColor(0, 0, 0, 0);
         gl.clear(gl.COLOR_BUFFER_BIT);
-        sweepLight.active = false;
-        sweepLight.intensity = 0;
+        clearSweepLight();
         if (elapsed >= idleDur) {
           phase = 'drift';
           phaseStart = ts;
@@ -392,10 +420,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       const ly = from[1] + (to[1] - from[1]) * posT;
 
       // Publish position (off-screen coords, in px) for UI elements
-      sweepLight.x = lx * w;
-      sweepLight.y = ly * h;
-      sweepLight.active = true;
-      sweepLight.intensity = fade;
+  publishSweepLightFrame(lx * w, ly * h, fade);
 
       gl.uniform2f(uRes, canvas.width, canvas.height);
       gl.uniform1f(uTime, time);
@@ -404,7 +429,7 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       gl.uniform3fv(uRayCol,  cur.rays);
       gl.uniform3fv(uCoreCol, cur.core);
       gl.uniform3fv(uAmbCol,  cur.ambient);
-      gl.uniform1f(uQuality, tier === 1 ? 0.4 : tier === 2 ? 0.7 : 1.0);
+      gl.uniform1f(uQuality, renderProfile.quality);
 
       // Pass element positions as light occluders
       for (let i = 0; i < 8; i++) {
@@ -429,19 +454,36 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
       raf = requestAnimationFrame(draw);
     };
 
+    const startLoop = () => {
+      if (raf || isDocumentHidden()) {
+        return;
+      }
+
+      raf = requestAnimationFrame(draw);
+    };
+
+    const handleVisibilityChange = () => {
+      if (isDocumentHidden()) {
+        stopLoop();
+        return;
+      }
+
+      startLoop();
+    };
+
     resize();
     window.addEventListener('resize', resize);
-    raf = requestAnimationFrame(draw);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    startLoop();
 
     return () => {
       window.removeEventListener('resize', resize);
-      cancelAnimationFrame(raf);
-      sweepLight.active = false;
-      sweepLight.intensity = 0;
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      stopLoop();
       gl.deleteProgram(prog);
       gl.deleteBuffer(buf);
     };
-  }, [reducedMotion, reducedFidelity, tier]);
+  }, [reducedMotion, renderProfile]);
 
   if (reducedMotion) return null;
 
@@ -453,7 +495,9 @@ export function CelestialComet({ contextMode }: { contextMode: ContextMode }) {
         className="pointer-events-none fixed inset-0"
         style={{ zIndex: 1, mixBlendMode: 'screen', imageRendering: 'pixelated' }}
       />
-      <LensFlare />
+      {renderProfile.showLensFlare ? (
+        <LensFlare frameIntervalMs={renderProfile.lensFlareFrameIntervalMs} />
+      ) : null}
     </>
   );
 }
@@ -471,7 +515,7 @@ const FLARE_STOPS: { t: number; size: number; alpha: number; hue: number }[] = [
   { t: 0.75, size: 22, alpha: 0.06, hue: 210 },   // far — teal
 ];
 
-function LensFlare() {
+function LensFlare({ frameIntervalMs }: { frameIntervalMs: number | null }) {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -479,11 +523,27 @@ function LensFlare() {
     if (!el) return;
     const children = el.children;
     let raf = 0;
+    let lastFrameTime = 0;
 
-    const tick = () => {
-      if (!sweepLight.active || sweepLight.intensity < 0.01) {
-        el.style.opacity = '0';
+    const stopLoop = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      lastFrameTime = 0;
+    };
+
+    const tick = (ts: number) => {
+      if (shouldSkipTierFrame(ts, lastFrameTime, frameIntervalMs)) {
         raf = requestAnimationFrame(tick);
+        return;
+      }
+
+      lastFrameTime = ts;
+
+      if (!isSweepLightVisible()) {
+        el.style.opacity = '0';
+        stopLoop();
         return;
       }
 
@@ -509,9 +569,33 @@ function LensFlare() {
       raf = requestAnimationFrame(tick);
     };
 
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+    const startLoop = () => {
+      if (raf) {
+        return;
+      }
+
+      tick(performance.now());
+    };
+
+    const handleSweepLightActiveChange = (isActive: boolean) => {
+      if (!isActive) {
+        el.style.opacity = '0';
+        stopLoop();
+        return;
+      }
+
+      startLoop();
+    };
+
+    const unsubscribe = subscribeSweepLightActive(handleSweepLightActiveChange);
+    handleSweepLightActiveChange(isSweepLightVisible());
+
+    return () => {
+      unsubscribe();
+      stopLoop();
+      el.style.opacity = '0';
+    };
+  }, [frameIntervalMs]);
 
   return (
     <div

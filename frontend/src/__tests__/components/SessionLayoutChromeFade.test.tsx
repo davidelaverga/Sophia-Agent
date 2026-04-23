@@ -51,6 +51,26 @@ const MINIMAL_STORE = {
   companionInvokesCount: 0,
 }
 
+function getNavElement(container: HTMLElement) {
+  const nav = container.querySelector<HTMLElement>("nav")
+  expect(nav).toBeTruthy()
+  if (!nav) {
+    throw new Error("Expected SessionLayout to render a nav element")
+  }
+
+  return nav
+}
+
+function getRootElement(container: HTMLElement) {
+  const root = container.firstElementChild
+  expect(root).toBeTruthy()
+  if (!(root instanceof HTMLElement)) {
+    throw new Error("Expected SessionLayout to render a root element")
+  }
+
+  return root
+}
+
 describe("SessionLayout Chrome Fade", () => {
   beforeEach(() => {
     vi.useFakeTimers()
@@ -73,19 +93,18 @@ describe("SessionLayout Chrome Fade", () => {
     document.documentElement.classList.remove("dark")
   })
 
-  it("header starts at full opacity", () => {
+  it("nav starts at full opacity", () => {
     const { container } = render(
       <SessionLayout store={MINIMAL_STORE}>
         <div>session content</div>
       </SessionLayout>
     )
 
-    const header = container.querySelector("header")
-    expect(header).toBeTruthy()
-    expect(header.style.opacity).toBe("1")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("1")
   })
 
-  it("header fades when presence enters 'listening' after 500ms", () => {
+  it("nav fades when presence enters 'listening' after 500ms", () => {
     const { container } = render(
       <SessionLayout store={MINIMAL_STORE}>
         <div>session content</div>
@@ -96,19 +115,18 @@ describe("SessionLayout Chrome Fade", () => {
       usePresenceStore.setState({ status: "listening", isListening: true })
     })
 
-    // Not yet faded
-    const header = container.querySelector("header")
-    expect(header.style.opacity).toBe("1")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("1")
 
     // After 500ms
     act(() => {
       vi.advanceTimersByTime(500)
     })
 
-    expect(header.style.opacity).toBe("0.08")
+    expect(nav.style.opacity).toBe("0.58")
   })
 
-  it("footer also fades during voice activity", () => {
+  it("nav also fades during speaking voice activity", () => {
     const { container } = render(
       <SessionLayout store={MINIMAL_STORE}>
         <div>session content</div>
@@ -122,12 +140,11 @@ describe("SessionLayout Chrome Fade", () => {
       vi.advanceTimersByTime(500)
     })
 
-    const footer = container.querySelector("footer")
-    expect(footer).toBeTruthy()
-    expect(footer.style.opacity).toBe("0.08")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("0.58")
   })
 
-  it("header/footer restore to full opacity on resting", () => {
+  it("nav restores to full opacity on resting", () => {
     const { container } = render(
       <SessionLayout store={MINIMAL_STORE}>
         <div>session content</div>
@@ -142,15 +159,15 @@ describe("SessionLayout Chrome Fade", () => {
       vi.advanceTimersByTime(500)
     })
 
-    const header = container.querySelector("header")
-    expect(header.style.opacity).toBe("0.08")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("0.58")
 
     // Restore
     act(() => {
       usePresenceStore.setState({ status: "resting", isListening: false })
     })
 
-    expect(header.style.opacity).toBe("1")
+    expect(nav.style.opacity).toBe("1")
   })
 
   it("does not fade when kill switch is enabled", () => {
@@ -171,8 +188,8 @@ describe("SessionLayout Chrome Fade", () => {
       vi.advanceTimersByTime(500)
     })
 
-    const header = container.querySelector("header")
-    expect(header.style.opacity).toBe("1")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("1")
   })
 
   it("tap on empty space unfades chrome", () => {
@@ -190,18 +207,18 @@ describe("SessionLayout Chrome Fade", () => {
       vi.advanceTimersByTime(500)
     })
 
-    const header = container.querySelector("header")
-    expect(header.style.opacity).toBe("0.08")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("0.58")
 
     // Tap on the root div (empty space)
-    const rootDiv = container.firstElementChild as HTMLElement
+    const rootDiv = getRootElement(container)
     act(() => {
       rootDiv.dispatchEvent(
         new PointerEvent("pointerdown", { bubbles: true })
       )
     })
 
-    expect(header.style.opacity).toBe("1")
+    expect(nav.style.opacity).toBe("1")
   })
 
   it("does not fade in text mode", () => {
@@ -222,7 +239,7 @@ describe("SessionLayout Chrome Fade", () => {
       vi.advanceTimersByTime(500)
     })
 
-    const header = container.querySelector("header")
-    expect(header.style.opacity).toBe("1")
+    const nav = getNavElement(container)
+    expect(nav.style.opacity).toBe("1")
   })
 })

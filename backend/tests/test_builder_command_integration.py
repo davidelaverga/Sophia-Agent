@@ -203,3 +203,105 @@ def test_document_command_middleware_routes_after_conversational_preamble():
     assert tool_call["name"] == "switch_to_builder"
     assert tool_call["args"]["task_type"] == "document"
     assert "Create a document about the dangers of war" in tool_call["args"]["task"]
+
+
+def test_document_command_middleware_routes_explicit_pdf_request():
+    middleware = BuilderCommandMiddleware()
+    user_message = HumanMessage(
+        content=(
+            "Sophia, give me a 3-page PDF titled 'Pear Reference Atlas'. "
+            "Page 1: overview of pears. Page 2: common pear varieties. Page 3: storage and serving tips."
+        )
+    )
+    request = _make_request([user_message])
+
+    direct_response = middleware.wrap_model_call(request, lambda _request: AIMessage(content="This should not run"))
+
+    assert isinstance(direct_response, AIMessage)
+    assert len(direct_response.tool_calls) == 1
+    tool_call = direct_response.tool_calls[0]
+    task = tool_call["args"]["task"]
+
+    assert tool_call["name"] == "switch_to_builder"
+    assert tool_call["args"]["task_type"] == "document"
+    assert "Create exactly one PDF at /mnt/user-data/outputs/pear-reference-atlas.pdf." in task
+    assert "Length: exactly 3 pages." in task
+    assert "verify with pypdf that the final PDF has exactly 3 pages" in task
+    assert "single short reportlab.pdfgen.canvas generator script" in task
+    assert "one showPage() call per required page" in task
+    assert "do NOT create Python helper modules or packages" in task
+    assert 'artifact_path="/mnt/user-data/outputs/pear-reference-atlas.pdf"' in task
+    assert 'artifact_title="Pear Reference Atlas"' in task
+
+
+def test_document_command_middleware_routes_need_a_pdf_phrase():
+    middleware = BuilderCommandMiddleware()
+    user_message = HumanMessage(
+        content=(
+            "I need a real 3-page PDF called 'Stress Prompt Atlas 1'. "
+            "Keep it polished and make sure page 1 covers pear basics, "
+            "page 2 compares common pear varieties, and page 3 covers storage and serving guidance."
+        )
+    )
+    request = _make_request([user_message])
+
+    direct_response = middleware.wrap_model_call(request, lambda _request: AIMessage(content="This should not run"))
+
+    assert isinstance(direct_response, AIMessage)
+    assert len(direct_response.tool_calls) == 1
+    tool_call = direct_response.tool_calls[0]
+    task = tool_call["args"]["task"]
+
+    assert tool_call["name"] == "switch_to_builder"
+    assert tool_call["args"]["task_type"] == "document"
+    assert "Create exactly one PDF at /mnt/user-data/outputs/stress-prompt-atlas-1.pdf." in task
+    assert "Length: exactly 3 pages." in task
+    assert 'artifact_title="Stress Prompt Atlas 1"' in task
+
+
+def test_document_command_middleware_routes_explicit_markdown_request():
+    middleware = BuilderCommandMiddleware()
+    user_message = HumanMessage(
+        content=(
+            "Sophia, give me a markdown document titled 'Pear Notes' with a heading and exactly six bullet points "
+            "about buying and storing pears."
+        )
+    )
+    request = _make_request([user_message])
+
+    direct_response = middleware.wrap_model_call(request, lambda _request: AIMessage(content="This should not run"))
+
+    assert isinstance(direct_response, AIMessage)
+    assert len(direct_response.tool_calls) == 1
+    tool_call = direct_response.tool_calls[0]
+    task = tool_call["args"]["task"]
+
+    assert tool_call["name"] == "switch_to_builder"
+    assert tool_call["args"]["task_type"] == "document"
+    assert "Create exactly one markdown file at /mnt/user-data/outputs/pear-notes.md." in task
+    assert 'artifact_path="/mnt/user-data/outputs/pear-notes.md"' in task
+    assert 'artifact_title="Pear Notes"' in task
+
+
+def test_document_command_middleware_routes_explicit_html_request():
+    middleware = BuilderCommandMiddleware()
+    user_message = HumanMessage(
+        content=(
+            "Sophia, send me a standalone HTML file titled 'Fruit Quick View' with a title, one short intro paragraph, "
+            "and two short unordered lists comparing pears and apples."
+        )
+    )
+    request = _make_request([user_message])
+
+    direct_response = middleware.wrap_model_call(request, lambda _request: AIMessage(content="This should not run"))
+
+    assert isinstance(direct_response, AIMessage)
+    assert len(direct_response.tool_calls) == 1
+    tool_call = direct_response.tool_calls[0]
+    task = tool_call["args"]["task"]
+
+    assert tool_call["name"] == "switch_to_builder"
+    assert tool_call["args"]["task_type"] == "document"
+    assert "Create exactly one standalone HTML file at /mnt/user-data/outputs/fruit-quick-view.html." in task
+    assert 'artifact_path="/mnt/user-data/outputs/fruit-quick-view.html"' in task
+    assert 'artifact_title="Fruit Quick View"' in task

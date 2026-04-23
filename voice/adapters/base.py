@@ -5,12 +5,15 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator, Literal
 
 
+# Structural fields that must be present in the artifact. Missing structural
+# fields indicate the backend never produced a coherent companion turn and the
+# run should fail loudly. Calibration and voice-delivery fields are handled
+# separately below so a partial tool_use call does not cut TTS mid-sentence.
 REQUIRED_ARTIFACT_FIELDS = {
     "session_goal",
     "active_goal",
     "next_step",
     "takeaway",
-    "reflection",
     "tone_estimate",
     "tone_target",
     "active_tone_band",
@@ -31,6 +34,26 @@ ARTIFACT_VOICE_DELIVERY_DEFAULTS: dict[str, str] = {
     "voice_emotion_primary": "content",
     "voice_emotion_secondary": "calm",
     "voice_speed": "normal",
+}
+
+# Defaults for calibration fields (tone, skill, ritual). Observed on
+# 2026-04-21: Claude Haiku occasionally omits these on long-response turns
+# even though the tool call itself succeeds. Failing the whole turn meant the
+# UI showed the full transcript but Cartesia was cut mid-sentence because the
+# adapter raised `BackendStageError` after ~6s of playback. These neutrals let
+# `_normalize_artifact` re-derive calibration from the user/response signal;
+# when that also has no signal, the frontend falls back to the previous
+# artifact's emotion, which is correct per the CLAUDE.md handoff rule
+# ("artifact updates the emotion for the *next* TTS call").
+#
+# `reflection` is intentionally absent from REQUIRED_ARTIFACT_FIELDS per
+# CLAUDE.md: "reflection (nullable)". It does not need a default.
+ARTIFACT_CALIBRATION_DEFAULTS: dict[str, Any] = {
+    "tone_estimate": 2.5,
+    "tone_target": 3.0,
+    "active_tone_band": "engagement",
+    "skill_loaded": "active_listening",
+    "ritual_phase": None,
 }
 
 

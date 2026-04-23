@@ -1,10 +1,11 @@
 "use client"
 
-import { useRef, useEffect, useCallback, useImperativeHandle, type Ref } from "react"
+import { useRef, useEffect, useCallback, useImperativeHandle, useMemo, type Ref } from "react"
 
 import { useEmotionColor } from "../../hooks/useEmotionColor"
 import { useExpression, type ExpressionParams } from "../../hooks/useExpression"
 import { useVisualTier } from "../../hooks/useVisualTier"
+import { getPresenceFieldProfile, shouldSkipTierFrame } from "../../lib/visual-tier-profiles"
 import { usePresenceStore } from "../../stores/presence-store"
 
 import { useNebulaCanvas } from "./NebulaCanvas"
@@ -32,7 +33,8 @@ export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
   const mouseRef = useRef({ x: 0.5, y: 0.5 })
 
   // Device fidelity (R43, R44, R45)
-  const { reducedFidelity, reducedMotion, dprCap } = useVisualTier()
+  const { reducedMotion, dprCap, tier } = useVisualTier()
+  const renderProfile = useMemo(() => getPresenceFieldProfile(tier), [tier])
 
   // Stores
   const presenceState = usePresenceStore((s) => s.status)
@@ -45,9 +47,15 @@ export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
   useImperativeHandle(ref, () => ({ fireImpulse }), [fireImpulse])
 
   // Canvas layers — pass fidelity for count adjustments
-  const nebula = useNebulaCanvas({ reducedFidelity })
-  const ribbon = useRibbonCanvas({ reducedFidelity })
-  const spark = useSparkCanvas({ reducedFidelity })
+  const nebula = useNebulaCanvas({ octaves: renderProfile.nebulaOctaves })
+  const ribbon = useRibbonCanvas({
+    ribbonCount: renderProfile.ribbonCount,
+    segments: renderProfile.ribbonSegments,
+  })
+  const spark = useSparkCanvas({
+    sparkCount: renderProfile.sparkCount,
+    speakingBurstCount: renderProfile.speakingBurstCount,
+  })
 
   // ── Resize ──────────────────────────────────────────────────────────────
   const handleResize = useCallback(() => {
@@ -84,6 +92,17 @@ export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
 
     window.addEventListener("resize", handleResize)
     document.addEventListener("mousemove", handleMouseMove)
+    let lastFrameTime = 0
+
+    const stopLoop = () => {
+      if (rafRef.current) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = 0
+      }
+      lastFrameTime = 0
+    }
+
+    const isDocumentHidden = () => document.visibilityState === "hidden"
 
     // Set data attribute for CSS targeting (R45)
     if (reducedMotion) {
@@ -91,6 +110,12 @@ export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
     }
 
     const frame = (ts: number) => {
+      if (!reducedMotion && shouldSkipTierFrame(ts, lastFrameTime, renderProfile.frameIntervalMs)) {
+        rafRef.current = requestAnimationFrame(frame)
+        return
+      }
+
+      lastFrameTime = ts
       const time = ts * 0.001
       const params = tick(presenceRef.current, emotionRef.current, time)
       const palette = expressionRef.current.palette
@@ -113,17 +138,46 @@ export function PresenceField({ ref }: { ref?: Ref<PresenceFieldHandle> }) {
         rafRef.current = requestAnimationFrame(frame)
       }
     }
-    rafRef.current = requestAnimationFrame(frame)
+
+    const startLoop = () => {
+      if (reducedMotion || rafRef.current || isDocumentHidden()) {
+        return
+      }
+
+      rafRef.current = requestAnimationFrame(frame)
+    }
+
+    const handleVisibilityChange = () => {
+      if (reducedMotion) {
+        return
+      }
+
+      if (isDocumentHidden()) {
+        stopLoop()
+        return
+      }
+
+      startLoop()
+    }
+
+    document.addEventListener("visibilitychange", handleVisibilityChange)
+
+    if (reducedMotion) {
+      frame(0)
+    } else {
+      startLoop()
+    }
 
     return () => {
-      cancelAnimationFrame(rafRef.current)
+      stopLoop()
       window.removeEventListener("resize", handleResize)
       document.removeEventListener("mousemove", handleMouseMove)
+      document.removeEventListener("visibilitychange", handleVisibilityChange)
       document.documentElement.removeAttribute("data-reduced-motion")
     }
     // Stable refs only — no reactive deps needed
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reducedMotion, reducedFidelity, dprCap])
+  }, [reducedMotion, dprCap, renderProfile])
 
   return (
     <div

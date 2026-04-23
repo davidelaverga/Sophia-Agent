@@ -169,7 +169,7 @@ interface WebGLHandles {
  * Call `render(time, params, palette, mouseX, mouseY)` from the parent
  * composite component's shared loop.
  */
-export function useNebulaCanvas({ reducedFidelity = false }: { reducedFidelity?: boolean } = {}) {
+export function useNebulaCanvas({ octaves = 6 }: { octaves?: number } = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const handlesRef = useRef<WebGLHandles | null>(null)
 
@@ -183,8 +183,7 @@ export function useNebulaCanvas({ reducedFidelity = false }: { reducedFidelity?:
       return false
     }
 
-    // R44: 4 octaves on low-end, 6 on desktop
-    const FRAG = makeFrag(reducedFidelity ? 4 : 6)
+    const FRAG = makeFrag(octaves)
 
     function compile(src: string, type: number): WebGLShader | null {
       const s = gl.createShader(type)
@@ -235,7 +234,7 @@ export function useNebulaCanvas({ reducedFidelity = false }: { reducedFidelity?:
       uBreathRate: gl.getUniformLocation(prog, "u_breathRate"),
     }
     return true
-  }, [reducedFidelity])
+  }, [octaves])
 
   const resize = useCallback((w: number, h: number, dprCap = 2) => {
     const canvas = canvasRef.current
