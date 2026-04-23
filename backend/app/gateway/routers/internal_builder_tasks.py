@@ -17,6 +17,7 @@ the same shared ``SOPHIA_INTERNAL_SECRET`` as the artifact router.
 
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 import threading
@@ -50,9 +51,12 @@ def _load_secret() -> str | None:
 
 
 def _constant_time_compare(a: str, b: str) -> bool:
-    if len(a) != len(b):
-        return False
-    return sum(x != y for x, y in zip(a, b)) == 0
+    """Constant-time string equality backed by :func:`hmac.compare_digest`.
+
+    ``hmac.compare_digest`` is the standard hardened comparator in the
+    stdlib and avoids timing side-channels a naive Python loop can leak.
+    """
+    return hmac.compare_digest(a, b)
 
 
 def _require_secret(request: Request) -> None:

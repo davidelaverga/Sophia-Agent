@@ -58,6 +58,89 @@ class TestConstantTimeCompare:
         assert internal_artifacts._constant_time_compare("abc", "abd") is False
 
 
+class TestResolveSafePath:
+    """Traversal rejection: paths must stay under outputs/."""
+
+    def test_accepts_normal_relative_path(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(str(tmp_path))
+        monkeypatch.setattr(internal_artifacts, "get_paths", lambda: paths)
+        monkeypatch.setattr(
+            "app.gateway.path_utils.get_paths", lambda: paths
+        )
+        thread_id = "t-normal"
+        paths.ensure_thread_dirs(thread_id)
+
+        resolved = internal_artifacts._resolve_safe_path(thread_id, "report.md")
+        assert resolved == paths.sandbox_outputs_dir(thread_id).resolve() / "report.md"
+
+    def test_rejects_traversal_escaping_outputs_to_uploads(self, tmp_path, monkeypatch):
+        """``../uploads/foo`` resolves under user-data but outside outputs/;
+        must be rejected with 403."""
+        from deerflow.config.paths import Paths
+
+        paths = Paths(str(tmp_path))
+        monkeypatch.setattr(internal_artifacts, "get_paths", lambda: paths)
+        monkeypatch.setattr(
+            "app.gateway.path_utils.get_paths", lambda: paths
+        )
+        thread_id = "t-traverse"
+        paths.ensure_thread_dirs(thread_id)
+
+        with pytest.raises(HTTPException) as exc:
+            internal_artifacts._resolve_safe_path(thread_id, "../uploads/foo")
+        assert exc.value.status_code == 403
+        assert "outputs" in exc.value.detail.lower()
+
+    def test_rejects_traversal_escaping_user_data(self, tmp_path, monkeypatch):
+        """``../../../etc/passwd`` escapes user-data entirely; path_utils
+        raises and we propagate the HTTPException."""
+        from deerflow.config.paths import Paths
+
+        paths = Paths(str(tmp_path))
+        monkeypatch.setattr(internal_artifacts, "get_paths", lambda: paths)
+        monkeypatch.setattr(
+            "app.gateway.path_utils.get_paths", lambda: paths
+        )
+        thread_id = "t-deep-traverse"
+        paths.ensure_thread_dirs(thread_id)
+
+        with pytest.raises(HTTPException) as exc:
+            internal_artifacts._resolve_safe_path(thread_id, "../../../../etc/passwd")
+        assert exc.value.status_code in (400, 403)
+
+    def test_rejects_traversal_to_workspace(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(str(tmp_path))
+        monkeypatch.setattr(internal_artifacts, "get_paths", lambda: paths)
+        monkeypatch.setattr(
+            "app.gateway.path_utils.get_paths", lambda: paths
+        )
+        thread_id = "t-workspace"
+        paths.ensure_thread_dirs(thread_id)
+
+        with pytest.raises(HTTPException) as exc:
+            internal_artifacts._resolve_safe_path(thread_id, "../workspace/evil")
+        assert exc.value.status_code == 403
+
+    def test_accepts_nested_subdirectory(self, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(str(tmp_path))
+        monkeypatch.setattr(internal_artifacts, "get_paths", lambda: paths)
+        monkeypatch.setattr(
+            "app.gateway.path_utils.get_paths", lambda: paths
+        )
+        thread_id = "t-nested"
+        paths.ensure_thread_dirs(thread_id)
+
+        resolved = internal_artifacts._resolve_safe_path(thread_id, "charts/bar.png")
+        expected = paths.sandbox_outputs_dir(thread_id).resolve() / "charts" / "bar.png"
+        assert resolved == expected
+
+
 class TestReplicateArtifact:
     def test_returns_204_and_writes_file(self, tmp_path, monkeypatch, secret_env):
         monkeypatch.setattr(

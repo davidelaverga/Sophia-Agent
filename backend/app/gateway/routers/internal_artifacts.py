@@ -8,6 +8,7 @@ end-users; authentication is via a shared secret.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import logging
 import os
 from pathlib import Path
@@ -16,6 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import PlainTextResponse
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +46,14 @@ def _require_secret(request: Request) -> None:
 
 
 def _constant_time_compare(a: str, b: str) -> bool:
-    if len(a) != len(b):
-        return False
-    return sum(x != y for x, y in zip(a, b)) == 0
+    """Constant-time string equality backed by :func:`hmac.compare_digest`.
+
+    ``hmac.compare_digest`` is the standard hardened comparator in the
+    stdlib and avoids the timing side-channels a naive Python loop can
+    leak. Kept as a thin wrapper so tests and callers continue to use the
+    same name.
+    """
+    return hmac.compare_digest(a, b)
 
 
 def _sha256(path: Path) -> str:
@@ -59,13 +66,27 @@ def _resolve_safe_path(thread_id: str, tail_path: str) -> Path:
     """Resolve a path relative to the thread's outputs directory.
 
     Rejects anything that does not resolve under ``outputs/`` to prevent
-    writing to arbitrary filesystem locations.
+    writing to arbitrary filesystem locations. ``resolve_thread_virtual_path``
+    only guarantees the resolved path stays under ``user-data/``; a crafted
+    tail like ``../uploads/foo`` would otherwise escape the outputs
+    subtree and land on uploads/workspace. We re-check the final resolved
+    path is under ``sandbox_outputs_dir(thread_id)`` to close that gap.
     """
     virtual = f"/mnt/user-data/outputs/{tail_path.lstrip('/')}"
     try:
         actual = resolve_thread_virtual_path(thread_id, virtual)
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid path: {exc}") from exc
+
+    outputs_root = get_paths().sandbox_outputs_dir(thread_id).resolve()
+    try:
+        actual.resolve().relative_to(outputs_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403, detail="Access denied: path escapes outputs directory"
+        ) from exc
 
     return actual
 
