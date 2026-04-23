@@ -69,7 +69,15 @@ function MessageBubbleComponent({ message, isLatest }: MessageBubbleProps) {
   const isQueued = message.meta?.queued === true;
   const isVoiceTranscript = isUser && message.voiceTranscript === true;
   const isVoiceResponse = !isUser && message.voiceResponse === true;
-  
+
+  // Suppress empty assistant bubbles.
+  // These appear when Sophia emits a tool-only turn (for example
+  // `switch_to_builder`) — the message has no text content yet, so rendering
+  // the avatar + an empty capsule looks like a broken reply. The bubble
+  // re-mounts naturally as soon as text streams in.
+  const hasAssistantText = typeof message.content === 'string' && message.content.trim().length > 0;
+  const shouldSuppressEmptyAssistant = !isUser && !isIncomplete && !hasAssistantText;
+
   // Parse markdown content for Sophia messages
   const renderedContent = useMemo(() => {
     if (isUser || isIncomplete || !hasMarkdown(message.content)) {
@@ -91,7 +99,11 @@ function MessageBubbleComponent({ message, isLatest }: MessageBubbleProps) {
     const timer = setInterval(() => forceUpdate(n => n + 1), 30000); // Update every 30s
     return () => clearInterval(timer);
   }, [timeInfo.shouldUpdate]);
-  
+
+  if (shouldSuppressEmptyAssistant) {
+    return null;
+  }
+
   return (
     <div
       role="article"

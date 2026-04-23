@@ -401,6 +401,7 @@ export interface SessionClientStore {
   // Artifacts (populated on session end)
   artifacts?: RitualArtifacts;
   builderArtifact?: BuilderArtifactV1;
+  dismissedBuilderArtifactKey?: string;
   summary?: string;
 }
 

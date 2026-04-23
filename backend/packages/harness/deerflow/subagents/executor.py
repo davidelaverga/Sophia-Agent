@@ -4,9 +4,11 @@ import asyncio
 import json
 import logging
 import re
+import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from concurrent.futures import CancelledError as FuturesCancelledError
 from concurrent.futures import Future, ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeoutError
@@ -41,6 +43,11 @@ _SYNTHETIC_PROGRESS_CAP = 90
 # How often the heartbeat loop bumps last_update_at while the agent streams.
 # Only touches heartbeat (liveness), never last_progress_at (real progress).
 _HEARTBEAT_INTERVAL_SECONDS = 5.0
+
+# Windows file readers can briefly hold the target snapshot open while polling,
+# so replace() needs a few quick retries to stay reliable under load.
+_SNAPSHOT_REPLACE_RETRIES = 6
+_SNAPSHOT_REPLACE_SLEEP_SECONDS = 0.02
 
 
 class SubagentStatus(Enum):
@@ -309,22 +316,49 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent.parent.pare
 _BACKGROUND_TASKS_DIR = _PROJECT_ROOT / "users"
 
 
-def _background_task_snapshot_path(owner_id: str, task_id: str) -> Path | None:
+def _background_task_snapshots_dir(owner_id: str) -> Path | None:
     if not isinstance(owner_id, str) or not _BACKGROUND_TASK_OWNER_PATTERN.match(owner_id):
-        logger.warning("Skipping background task snapshot for invalid owner_id=%r task_id=%s", owner_id, task_id)
+        logger.warning("Skipping background task snapshots for invalid owner_id=%r", owner_id)
         return None
 
+    snapshots_dir = _BACKGROUND_TASKS_DIR / owner_id / "builder_tasks"
+    resolved = snapshots_dir.resolve()
+    if not resolved.is_relative_to(_BACKGROUND_TASKS_DIR.resolve()):
+        logger.warning("Skipping background task snapshots outside users dir for owner_id=%s", owner_id)
+        return None
+
+    return snapshots_dir
+
+
+def _background_task_snapshot_path(owner_id: str, task_id: str) -> Path | None:
     if not isinstance(task_id, str) or not _BACKGROUND_TASK_ID_PATTERN.match(task_id):
         logger.warning("Skipping background task snapshot for invalid task_id=%r", task_id)
         return None
 
-    snapshot_path = _BACKGROUND_TASKS_DIR / owner_id / "builder_tasks" / f"{task_id}.json"
-    resolved = snapshot_path.resolve()
-    if not resolved.is_relative_to(_BACKGROUND_TASKS_DIR.resolve()):
-        logger.warning("Skipping background task snapshot outside users dir for task_id=%s", task_id)
+    snapshots_dir = _background_task_snapshots_dir(owner_id)
+    if snapshots_dir is None:
         return None
 
-    return snapshot_path
+    return snapshots_dir / f"{task_id}.json"
+
+
+def _background_task_status_timestamp(value: object) -> float:
+    if not isinstance(value, str) or not value.strip():
+        return float("-inf")
+
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return float("-inf")
+
+
+def _background_task_status_sort_key(payload: dict[str, Any]) -> tuple[float, float, float, str]:
+    return (
+        _background_task_status_timestamp(payload.get("started_at")),
+        _background_task_status_timestamp(payload.get("last_update_at")),
+        _background_task_status_timestamp(payload.get("completed_at")),
+        str(payload.get("task_id") or ""),
+    )
 
 
 def _extract_builder_result_from_task_result(result: SubagentResult) -> dict[str, Any] | None:
@@ -516,6 +550,7 @@ def build_background_task_status_payload(result: SubagentResult) -> dict[str, An
         "task_id": result.task_id,
         "status": status_value,
         "trace_id": result.trace_id,
+        "thread_id": result.thread_id,
         "description": description.strip() if isinstance(description, str) and description.strip() else None,
         "detail": detail,
         "result": result.result,
@@ -595,9 +630,59 @@ def persist_background_task_status_payload(result: SubagentResult) -> None:
         snapshot_path.parent.mkdir(parents=True, exist_ok=True)
         temp_path = snapshot_path.with_name(f"{snapshot_path.name}.tmp")
         temp_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
-        temp_path.replace(snapshot_path)
+        _replace_snapshot_file(temp_path, snapshot_path)
     except Exception:
         logger.warning("Failed to persist background task snapshot for %s", result.task_id, exc_info=True)
+
+
+def _replace_snapshot_file(temp_path: Path, snapshot_path: Path) -> None:
+    last_error: PermissionError | None = None
+
+    for attempt in range(_SNAPSHOT_REPLACE_RETRIES):
+        try:
+            temp_path.replace(snapshot_path)
+            return
+        except PermissionError as exc:
+            last_error = exc
+            if attempt == _SNAPSHOT_REPLACE_RETRIES - 1:
+                break
+            time.sleep(_SNAPSHOT_REPLACE_SLEEP_SECONDS)
+
+    try:
+        temp_path.unlink(missing_ok=True)
+    except Exception:
+        logger.debug("Failed to clean up temp snapshot %s", temp_path, exc_info=True)
+
+    if last_error is not None:
+        raise last_error
+
+
+def _run_coroutine_in_worker_loop(coroutine):
+    """Run a coroutine in a dedicated worker-thread event loop.
+
+    On Windows, thread-pool builder execution is more stable with a selector
+    loop than the default proactor loop, which can surface "Event loop is
+    closed" during streaming HTTP cleanup under concurrent load. Reusing a
+    persistent loop per worker thread also avoids loop-churn races when the
+    thread pool schedules multiple builder tasks on the same thread.
+    """
+    if sys.platform != "win32":
+        return asyncio.run(coroutine)
+
+    selector_loop_factory = getattr(asyncio, "SelectorEventLoop", None)
+    if selector_loop_factory is None:
+        return asyncio.run(coroutine)
+
+    worker_loop = getattr(_worker_loop_local, "loop", None)
+    if worker_loop is None or worker_loop.is_closed():
+        worker_loop = selector_loop_factory()
+        _worker_loop_local.loop = worker_loop
+
+    asyncio.set_event_loop(worker_loop)
+    try:
+        return worker_loop.run_until_complete(coroutine)
+    finally:
+        worker_loop.run_until_complete(worker_loop.shutdown_asyncgens())
 
 
 def read_background_task_status_payload(user_id: str, task_id: str) -> dict[str, Any] | None:
@@ -617,6 +702,40 @@ def read_background_task_status_payload(user_id: str, task_id: str) -> dict[str,
     return payload
 
 
+def read_latest_background_task_status_payload(user_id: str, thread_id: str) -> dict[str, Any] | None:
+    if not isinstance(thread_id, str) or not thread_id.strip():
+        return None
+
+    snapshots_dir = _background_task_snapshots_dir(user_id)
+    if snapshots_dir is None or not snapshots_dir.exists():
+        return None
+
+    matching_payloads: list[dict[str, Any]] = []
+    for snapshot_path in snapshots_dir.glob("*.json"):
+        try:
+            payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to read background task snapshot %s", snapshot_path, exc_info=True)
+            continue
+
+        if not isinstance(payload, dict):
+            continue
+
+        if payload.get("thread_id") != thread_id:
+            continue
+
+        payload_owner_id = payload.get("owner_id")
+        if isinstance(payload_owner_id, str) and payload_owner_id != user_id:
+            continue
+
+        matching_payloads.append(payload)
+
+    if not matching_payloads:
+        return None
+
+    return max(matching_payloads, key=_background_task_status_sort_key)
+
+
 # Global storage for background task results
 _background_tasks: dict[str, SubagentResult] = {}
 _background_tasks_lock = threading.Lock()
@@ -629,6 +748,7 @@ _scheduler_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent
 # Thread pool for actual subagent execution (with timeout support)
 # Larger pool to avoid blocking when scheduler submits execution tasks
 _execution_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="subagent-exec-")
+_worker_loop_local = threading.local()
 
 
 def _filter_tools(
@@ -689,6 +809,7 @@ class SubagentExecutor:
         thread_id: str | None = None,
         trace_id: str | None = None,
         pre_built_agent=None,
+        agent_factory: Callable[[], Any] | None = None,
         extra_configurable: dict[str, Any] | None = None,
         stream_messages: bool = True,
     ):
@@ -703,6 +824,8 @@ class SubagentExecutor:
             thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
             pre_built_agent: Pre-built agent instance — bypasses _create_agent().
+            agent_factory: Lazy agent factory used to construct loop-bound async
+                clients inside the execution worker thread.
             extra_configurable: Additional configurable dict merged into run_config.
             stream_messages: When True, execute via agent.astream() and collect AI
                 messages incrementally. When False, execute via agent.ainvoke() and
@@ -716,6 +839,7 @@ class SubagentExecutor:
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.pre_built_agent = pre_built_agent
+        self.agent_factory = agent_factory
         self.extra_configurable = extra_configurable
         self.stream_messages = stream_messages
 
@@ -729,7 +853,12 @@ class SubagentExecutor:
         # Log tool count truthfully — when a pre_built_agent is provided, the
         # executor's own `tools` list is irrelevant (the agent has its tools
         # baked in). Logging "0 tools" in that case misleads debugging.
-        if self.pre_built_agent is not None:
+        if self.agent_factory is not None:
+            logger.info(
+                f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} "
+                f"with lazy agent factory"
+            )
+        elif self.pre_built_agent is not None:
             logger.info(
                 f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} "
                 f"with pre-built agent (executor tools={len(self.tools)} ignored)"
@@ -771,6 +900,9 @@ class SubagentExecutor:
 
     def _create_agent(self):
         """Create the agent instance. Uses pre_built_agent if provided."""
+        if self.agent_factory is not None:
+            return self.agent_factory()
+
         if self.pre_built_agent is not None:
             return self.pre_built_agent
 
@@ -894,7 +1026,7 @@ class SubagentExecutor:
                             timeout=_HEARTBEAT_INTERVAL_SECONDS,
                         )
                         return
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
                     if result.status != SubagentStatus.RUNNING:
                         return
@@ -1156,11 +1288,10 @@ class SubagentExecutor:
         # 2. We're running inside a ThreadPoolExecutor which doesn't have an event loop
         #
         # Note: _aexecute() catches all exceptions internally, so this outer
-        # try-except only handles asyncio.run() failures (e.g., if called from
-        # an async context where an event loop already exists). Subagent execution
-        # errors are handled within _aexecute() and returned as FAILED status.
+        # try-except only handles event-loop bootstrap failures. Subagent
+        # execution errors are handled within _aexecute() and returned as FAILED status.
         try:
-            return asyncio.run(self._aexecute(task, result_holder, cancel_event))
+            return _run_coroutine_in_worker_loop(self._aexecute(task, result_holder, cancel_event))
         except Exception as e:
             if result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} execute() raised after timeout; preserving terminal TIMED_OUT")

@@ -18,6 +18,7 @@ from typing import Annotated, Any, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END
 from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
@@ -476,7 +477,8 @@ def _switch_to_builder_impl(
 
     from deerflow.agents.sophia_agent.builder_agent import _create_builder_agent
 
-    builder_agent = _create_builder_agent(user_id=user_id, model_name=parent_model)
+    def _builder_agent_factory():
+        return _create_builder_agent(user_id=user_id, model_name=parent_model)
 
     config = get_subagent_config("general-purpose")
     if config is None:
@@ -510,7 +512,7 @@ def _switch_to_builder_impl(
         thread_data=thread_data,
         thread_id=thread_id,
         trace_id=trace_id,
-        pre_built_agent=builder_agent,
+        agent_factory=_builder_agent_factory,
         extra_configurable={"delegation_context": delegation_context},
     )
 
@@ -568,10 +570,45 @@ def _switch_to_builder_impl(
         "delegation_context": delegation_context,
         "handoff_resolution": handoff_resolution,
     }
+
+    # Update state in the SAME turn so the `values` stream surfaces the new
+    # builder_task (and clears any stale builder_result from a prior task).
+    # Without this, state.builder_task still points at the previous task until
+    # the next middleware pass adopts the handoff from the tool message — which
+    # can be minutes later and leaves the UI with no visible progress for the
+    # newly-queued task. The ToolMessage payload is preserved verbatim so the
+    # existing handoff-adoption logic in BuilderSessionMiddleware continues to
+    # work as a safety net (e.g. after a resumed run).
+    #
+    # IMPORTANT: only emit a Command with an explicit ToolMessage when we have
+    # the real injected tool_call_id. Otherwise the ToolMessage we build would
+    # not match the AIMessage's tool_call and LangGraph would raise
+    # "Every tool call in the message history MUST have a corresponding
+    # ToolMessage". In that case fall back to returning the JSON payload as a
+    # plain string and let LangChain wrap it with the correct id.
+    if tool_call_id:
+        return Command(
+            update={
+                "builder_task": builder_task,
+                "builder_result": None,
+                "delegation_context": delegation_context,
+                "active_mode": "builder",
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(payload),
+                        tool_call_id=tool_call_id,
+                        name="switch_to_builder",
+                    )
+                ],
+            }
+            ,
+            goto=END,
+        )
+
     return json.dumps(payload)
 
 
-@tool(args_schema=SwitchToBuilderInput)
+@tool(args_schema=SwitchToBuilderInput, return_direct=True)
 def switch_to_builder(
     task: str,
     task_type: str,
@@ -595,7 +632,7 @@ def switch_to_builder(
 def make_switch_to_builder_tool(configured_user_id: str):
     bound_user_id = validate_user_id(configured_user_id)
 
-    @tool("switch_to_builder", args_schema=SwitchToBuilderInput)
+    @tool("switch_to_builder", args_schema=SwitchToBuilderInput, return_direct=True)
     def configured_switch_to_builder(
         task: str,
         task_type: str,

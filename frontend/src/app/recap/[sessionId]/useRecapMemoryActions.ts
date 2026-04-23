@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { errorCopy } from '../../lib/error-copy';
@@ -50,6 +50,11 @@ function buildDiscardMetadata(category?: string): { status: 'discarded'; categor
   return { status: 'discarded' };
 }
 
+type CandidateSnapshot = {
+  candidate: NonNullable<RecapArtifactsV1['memoryCandidates']>[number];
+  index: number;
+};
+
 export function useRecapMemoryActions({
   artifacts,
   decisions,
@@ -65,25 +70,66 @@ export function useRecapMemoryActions({
   const [actionRetry, setActionRetry] = useState<(() => void) | null>(null);
   const [deletingIds, setDeletingIds] = useState<Record<string, boolean>>({});
   const [saveSuccess, setSaveSuccess] = useState<{ count: number } | null>(null);
+  const artifactsRef = useRef<RecapArtifactsV1 | null>(artifacts);
+
+  artifactsRef.current = artifacts;
+
+  const getCandidateSnapshot = useCallback((candidateId: string): CandidateSnapshot | null => {
+    const memoryCandidates = artifacts?.memoryCandidates || [];
+    const index = memoryCandidates.findIndex((candidate) => candidate.id === candidateId);
+    if (index < 0) {
+      return null;
+    }
+
+    const candidate = memoryCandidates[index];
+    if (!candidate) {
+      return null;
+    }
+
+    return { candidate, index };
+  }, [artifacts?.memoryCandidates]);
 
   const removeCandidateFromArtifacts = useCallback((candidateId: string) => {
-    if (!artifacts) return;
-    const nextCandidates = (artifacts.memoryCandidates || []).filter((candidate) => candidate.id !== candidateId);
+    const currentArtifacts = artifactsRef.current;
+    if (!currentArtifacts) return;
+
+    const nextCandidates = (currentArtifacts.memoryCandidates || []).filter((candidate) => candidate.id !== candidateId);
     setArtifacts(sessionId, {
-      ...artifacts,
+      ...currentArtifacts,
       memoryCandidates: nextCandidates,
     });
-  }, [artifacts, sessionId, setArtifacts]);
+  }, [sessionId, setArtifacts]);
+
+  const restoreCandidateInArtifacts = useCallback((snapshot: CandidateSnapshot) => {
+    const currentArtifacts = artifactsRef.current;
+    if (!currentArtifacts) return;
+
+    const currentCandidates = currentArtifacts.memoryCandidates || [];
+    if (currentCandidates.some((candidate) => candidate.id === snapshot.candidate.id)) {
+      return;
+    }
+
+    const nextCandidates = [...currentCandidates];
+    const insertIndex = Math.max(0, Math.min(snapshot.index, nextCandidates.length));
+    nextCandidates.splice(insertIndex, 0, snapshot.candidate);
+
+    setArtifacts(sessionId, {
+      ...currentArtifacts,
+      memoryCandidates: nextCandidates,
+    });
+  }, [sessionId, setArtifacts]);
 
   const handleDiscardCandidate = useCallback(async (candidateId: string) => {
     if (deletingIds[candidateId]) {
       return;
     }
 
-    const candidate = artifacts?.memoryCandidates?.find((item) => item.id === candidateId);
-    if (!candidate) {
+    const candidateSnapshot = getCandidateSnapshot(candidateId);
+    if (!candidateSnapshot) {
       return;
     }
+
+    const { candidate } = candidateSnapshot;
 
     setActionError(null);
     setActionRetry(null);
@@ -100,6 +146,8 @@ export function useRecapMemoryActions({
     }
 
     setDeletingIds((prev) => ({ ...prev, [candidateId]: true }));
+    setDecision(sessionId, candidateId, 'discarded');
+    removeCandidateFromArtifacts(candidateId);
 
     try {
       const response = await fetch(`/api/memories/${encodeURIComponent(candidateId)}`, {
@@ -116,8 +164,6 @@ export function useRecapMemoryActions({
         throw new Error(`Discard failed: ${response.status}`);
       }
 
-      setDecision(sessionId, candidateId, 'discarded');
-      removeCandidateFromArtifacts(candidateId);
       showToast({
         message: 'Memory discarded.',
         variant: 'info',
@@ -133,6 +179,7 @@ export function useRecapMemoryActions({
       };
       setActionError("Couldn't remove this memory. Try again?");
       setActionRetry(() => retry);
+      restoreCandidateInArtifacts(candidateSnapshot);
       setDecision(sessionId, candidateId, 'idle');
     } finally {
       setDeletingIds((prev) => {
@@ -141,7 +188,7 @@ export function useRecapMemoryActions({
         return next;
       });
     }
-  }, [artifacts?.memoryCandidates, deletingIds, removeCandidateFromArtifacts, sessionId, setDecision, showToast]);
+  }, [deletingIds, getCandidateSnapshot, removeCandidateFromArtifacts, restoreCandidateInArtifacts, sessionId, setDecision, showToast]);
 
   const handleDecisionChange = useCallback((candidateId: string, decision: MemoryDecision, editedText?: string) => {
     if (decision === 'discarded') {

@@ -5,11 +5,15 @@ import type { UIMessage } from '../components/session';
 interface UseSessionUiInteractionsParams {
   messages: UIMessage[];
   isTyping: boolean;
+  isConversationVisible?: boolean;
   isReadOnly: boolean;
   showArtifacts: boolean;
   showArtifactsUi: boolean;
+  hasSessionFiles: boolean;
+  showSessionFiles: boolean;
   mobileDrawerOpen: boolean;
   setShowArtifacts: (show: boolean) => void;
+  setShowSessionFiles: (value: boolean | ((prev: boolean) => boolean)) => void;
   setMobileDrawerOpen: (value: boolean | ((prev: boolean) => boolean)) => void;
   setUserOpenedArtifacts: (opened: boolean) => void;
   setShowScaffold: (show: boolean) => void;
@@ -20,11 +24,15 @@ interface UseSessionUiInteractionsParams {
 export function useSessionUiInteractions({
   messages,
   isTyping,
+  isConversationVisible = true,
   isReadOnly,
   showArtifacts,
   showArtifactsUi,
+  hasSessionFiles,
+  showSessionFiles,
   mobileDrawerOpen,
   setShowArtifacts,
+  setShowSessionFiles,
   setMobileDrawerOpen,
   setUserOpenedArtifacts,
   setShowScaffold,
@@ -39,6 +47,7 @@ export function useSessionUiInteractions({
     lastMessageId: string | null;
     lastMessageContent: string | null;
   } | null>(null);
+  const wasConversationVisibleRef = useRef(isConversationVisible);
 
   useEffect(() => {
     const latestMessage = messages[messages.length - 1];
@@ -48,6 +57,18 @@ export function useSessionUiInteractions({
       lastMessageContent: latestMessage?.content ?? null,
     };
     const previousSnapshot = previousScrollSnapshotRef.current;
+    const becameVisible = isConversationVisible && !wasConversationVisibleRef.current;
+    wasConversationVisibleRef.current = isConversationVisible;
+
+    const hasSnapshotChanged =
+      previousSnapshot?.count !== nextSnapshot.count
+      || previousSnapshot?.lastMessageId !== nextSnapshot.lastMessageId
+      || previousSnapshot?.lastMessageContent !== nextSnapshot.lastMessageContent;
+
+    if (!isConversationVisible) {
+      return;
+    }
+
     previousScrollSnapshotRef.current = nextSnapshot;
 
     if (!latestMessage) {
@@ -62,7 +83,11 @@ export function useSessionUiInteractions({
       && previousSnapshot?.lastMessageId === nextSnapshot.lastMessageId
       && previousSnapshot?.lastMessageContent !== nextSnapshot.lastMessageContent;
 
-    if (!isNewMessage && !isStreamingUpdate) {
+    const shouldScroll = becameVisible
+      ? hasSnapshotChanged
+      : isNewMessage || isStreamingUpdate;
+
+    if (!shouldScroll) {
       return;
     }
 
@@ -74,7 +99,7 @@ export function useSessionUiInteractions({
     });
 
     return () => cancelAnimationFrame(frame);
-  }, [messages, isTyping]);
+  }, [isConversationVisible, messages, isTyping]);
 
   useEffect(() => {
     const handleKeyDown = (event: globalThis.KeyboardEvent) => {
@@ -95,6 +120,12 @@ export function useSessionUiInteractions({
     }
   }, [showArtifactsUi, showArtifacts, setShowArtifacts]);
 
+  useEffect(() => {
+    if (!hasSessionFiles && showSessionFiles) {
+      setShowSessionFiles(false);
+    }
+  }, [hasSessionFiles, showSessionFiles, setShowSessionFiles]);
+
   const handleMicClick = useCallback(() => {
     if (isReadOnly) return;
     setShowScaffold(false);
@@ -113,10 +144,27 @@ export function useSessionUiInteractions({
   }, [setShowArtifacts, setUserOpenedArtifacts, triggerLightHaptic]);
 
   const handleOpenArtifactsPanel = useCallback(() => {
+    setShowSessionFiles(false);
     setShowArtifacts(true);
     setUserOpenedArtifacts(true);
     triggerLightHaptic();
-  }, [setShowArtifacts, setUserOpenedArtifacts, triggerLightHaptic]);
+  }, [setShowArtifacts, setShowSessionFiles, setUserOpenedArtifacts, triggerLightHaptic]);
+
+  const handleCloseSessionFilesPanel = useCallback(() => {
+    triggerLightHaptic();
+    setShowSessionFiles(false);
+  }, [setShowSessionFiles, triggerLightHaptic]);
+
+  const handleToggleSessionFilesPanel = useCallback(() => {
+    if (!hasSessionFiles) {
+      return;
+    }
+
+    setShowArtifacts(false);
+    setUserOpenedArtifacts(false);
+    setShowSessionFiles((prev) => !prev);
+    triggerLightHaptic();
+  }, [hasSessionFiles, setShowArtifacts, setShowSessionFiles, setUserOpenedArtifacts, triggerLightHaptic]);
 
   const handleToggleMobileArtifactsTab = useCallback(() => {
     const next = !mobileDrawerOpen;
@@ -142,6 +190,8 @@ export function useSessionUiInteractions({
     focusComposer,
     handleCloseArtifactsPanel,
     handleOpenArtifactsPanel,
+    handleCloseSessionFilesPanel,
+    handleToggleSessionFilesPanel,
     handleToggleMobileArtifactsTab,
     handleToggleMobileDrawer,
   };

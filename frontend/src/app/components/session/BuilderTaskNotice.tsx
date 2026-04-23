@@ -269,182 +269,113 @@ function getSecondaryMeta(task: BuilderTaskV1): string | null {
   return activeStep;
 }
 
-/* ── Constellation spinner ── 3 tiny particles orbiting a breathing core */
-function BuilderConstellation() {
-  const particles = [
-    { delay: '0s',    duration: '3s',   radius: '14px', size: 3,   opacity: 0.6 },
-    { delay: '0.9s',  duration: '4.2s', radius: '10px', size: 2,   opacity: 0.4 },
-    { delay: '1.8s',  duration: '5.4s', radius: '18px', size: 2.5, opacity: 0.5 },
-  ];
-
-  return (
-    <div className="relative flex items-center justify-center" style={{ width: 40, height: 40 }}>
-      {/* Core — breathing glow */}
-      <div
-        className="absolute rounded-full"
-        style={{
-          width: 6,
-          height: 6,
-          background: 'var(--sophia-purple)',
-          animation: 'builder-core-breath 2.4s ease-in-out infinite',
-        }}
-      />
-      {/* Orbiting particles */}
-      {particles.map((p, i) => (
-        <div
-          key={i}
-          className="absolute inset-0 flex items-center justify-center"
-          style={{
-            ['--orbit-r' as string]: p.radius,
-            animation: `builder-orbit ${p.duration} linear ${p.delay} infinite`,
-          }}
-        >
-          <div
-            className="rounded-full"
-            style={{
-              width: p.size,
-              height: p.size,
-              background: 'var(--sophia-purple)',
-              opacity: p.opacity,
-            }}
-          />
-        </div>
-      ))}
-    </div>
-  );
+function hasSupplementalBuilderNotes(task: BuilderTaskV1): boolean {
+  return Boolean((task.todos && task.todos.length > 0) || (task.activityLog && task.activityLog.length > 0));
 }
 
-function BuilderStatusGlyph({
-  isRunning,
-  accentVar,
-  compact,
-}: {
-  isRunning: boolean;
-  accentVar: string;
-  compact?: boolean;
-}) {
-  if (isRunning) {
-    return <BuilderConstellation />;
+function getBuilderNotesLabel(task: BuilderTaskV1): string {
+  const todoCount = task.todos?.length ?? 0;
+  const activityCount = task.activityLog?.length ?? 0;
+
+  if (activityCount > 0 && todoCount > 0) {
+    return `${activityCount} live updates · ${todoCount} tasks`;
   }
 
+  if (activityCount > 0) {
+    return `${activityCount} live updates`;
+  }
+
+  if (todoCount > 0) {
+    return `${todoCount} tasks`;
+  }
+
+  return 'field notes';
+}
+
+/* ── Slim presence dot ── 5px breathing core, no orbiting particles. */
+function BuilderBreathingDot({
+  accentVar,
+  active,
+}: {
+  accentVar: string;
+  active: boolean;
+}) {
   return (
-    <div
-      className={cn(
-        'flex items-center justify-center rounded-full border',
-        compact ? 'h-9 w-9' : 'h-10 w-10',
-      )}
-      style={{
-        borderColor: `color-mix(in srgb, ${accentVar} 28%, transparent)`,
-        background: `color-mix(in srgb, ${accentVar} 8%, transparent)`,
-        boxShadow: `0 0 18px color-mix(in srgb, ${accentVar} 16%, transparent)`,
-      }}
+    <span
+      aria-hidden="true"
+      className="relative shrink-0"
+      style={{ width: 8, height: 8 }}
     >
       <span
-        className="h-2.5 w-2.5 rounded-full"
+        className="absolute inset-0 rounded-full"
         style={{
           background: accentVar,
-          boxShadow: `0 0 12px color-mix(in srgb, ${accentVar} 40%, transparent)`,
+          opacity: active ? 0.9 : 0.7,
+          animation: active ? 'builder-core-breath 2.4s ease-in-out infinite' : undefined,
         }}
       />
-    </div>
+      {active && (
+        <span
+          className="absolute inset-[-3px] rounded-full"
+          style={{
+            border: `1px solid color-mix(in srgb, ${accentVar} 40%, transparent)`,
+            opacity: 0.45,
+            animation: 'builder-core-breath 2.4s ease-in-out infinite',
+          }}
+        />
+      )}
+    </span>
   );
 }
 
-function BuilderProgressTrack({
+/* ── Slim hairline progress ── 2px line under the header row. */
+function BuilderHairlineProgress({
   task,
   accentVar,
-  compact,
   elapsedMs,
 }: {
   task: BuilderTaskV1;
   accentVar: string;
-  compact?: boolean;
   elapsedMs?: number;
 }) {
   const ratio = getProgressRatio(task, elapsedMs);
   const isDeterminate = ratio !== null;
-  const progressWidth = isDeterminate ? Math.round(ratio * 100) : 38;
-  const progressMeta = getProgressMeta(task, elapsedMs);
-  const secondaryMeta = getSecondaryMeta(task);
+  const widthPercent = isDeterminate ? Math.round(ratio * 100) : 38;
 
   return (
-    <div className="space-y-1.5">
-      <div
-        role="progressbar"
-        aria-label={PROGRESSBAR_LABEL}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        {...(isDeterminate
-          ? { 'aria-valuenow': Math.round(ratio * 100) }
-          : { 'aria-valuetext': 'Builder progress is in motion' })}
-        className={cn('relative overflow-hidden rounded-full border', compact ? 'h-2' : 'h-2.5')}
-        style={{
-          borderColor: `color-mix(in srgb, ${accentVar} 22%, var(--cosmic-border-soft))`,
-          background: 'color-mix(in srgb, var(--cosmic-panel-soft) 72%, transparent)',
-        }}
-      >
+    <div
+      role="progressbar"
+      aria-label={PROGRESSBAR_LABEL}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      {...(isDeterminate
+        ? { 'aria-valuenow': Math.round(ratio * 100) }
+        : { 'aria-valuetext': 'Builder progress is in motion' })}
+      className="relative mt-2 h-[2px] overflow-hidden rounded-full"
+      style={{ background: 'color-mix(in srgb, var(--cosmic-text-faint) 12%, transparent)' }}
+    >
+      {isDeterminate ? (
         <div
-          className="absolute inset-0 opacity-40"
+          className={cn(
+            'absolute inset-y-0 left-0 rounded-full transition-[width,background] duration-500 ease-out',
+            task.phase === 'completed' && 'animate-[builder-complete-surge_700ms_ease-out_1]',
+          )}
           style={{
-            background: 'repeating-linear-gradient(90deg, transparent 0 10px, color-mix(in srgb, var(--cosmic-text-faint) 10%, transparent) 10px 18px)',
+            width: `${widthPercent}%`,
+            background: accentVar,
+            boxShadow: `0 0 10px color-mix(in srgb, ${accentVar} 30%, transparent)`,
           }}
         />
-
-        {isDeterminate ? (
-          <div
-            className={cn(
-              'absolute inset-y-0 left-0 rounded-full transition-[width,background,box-shadow,filter] duration-700 ease-out',
-              task.phase === 'completed' && 'animate-[builder-complete-surge_900ms_ease-out_1]',
-            )}
-            style={{
-              width: `${progressWidth}%`,
-              background: `linear-gradient(90deg, color-mix(in srgb, ${accentVar} 58%, white 6%), ${accentVar})`,
-              boxShadow: `0 0 16px color-mix(in srgb, ${accentVar} 20%, transparent)`,
-            }}
-          >
-            <div
-              className="absolute inset-y-0 left-[-40%] w-[40%]"
-              style={{
-                background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.45), transparent)',
-                animation: 'builder-progress-sheen 1.8s linear infinite',
-              }}
-            />
-          </div>
-        ) : (
-          <div
-            className="absolute inset-y-0 left-0 rounded-full"
-            style={{
-              width: '38%',
-              background: `linear-gradient(90deg, color-mix(in srgb, ${accentVar} 50%, white 8%), ${accentVar})`,
-              boxShadow: `0 0 14px color-mix(in srgb, ${accentVar} 18%, transparent)`,
-              animation: 'builder-progress-indeterminate 1.8s ease-in-out infinite',
-            }}
-          />
-        )}
-
-        {task.phase === 'completed' && (
-          <div
-            className="absolute inset-0"
-            style={{
-              background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.22), transparent)',
-              animation: 'builder-progress-spark 900ms ease-out 1',
-            }}
-          />
-        )}
-      </div>
-
-      <div className={cn('flex items-center justify-between gap-3 tracking-[0.08em] lowercase', compact ? 'text-[9px]' : 'text-[10px]')} style={{ color: 'var(--cosmic-text-faint)' }}>
-        <span>{progressMeta.leading}</span>
-        <span>{progressMeta.trailing}</span>
-      </div>
-
-      {secondaryMeta && (
-        <p
-          className={cn(compact ? 'text-[9px] leading-4' : 'text-[10px] leading-4.5')}
-          style={{ color: 'var(--cosmic-text-whisper)' }}
-        >
-          {secondaryMeta}
-        </p>
+      ) : (
+        <div
+          className="absolute inset-y-0 left-0 rounded-full"
+          style={{
+            width: '38%',
+            background: accentVar,
+            boxShadow: `0 0 10px color-mix(in srgb, ${accentVar} 30%, transparent)`,
+            animation: 'builder-progress-indeterminate 1.8s ease-in-out infinite',
+          }}
+        />
       )}
     </div>
   );
@@ -508,9 +439,11 @@ export function BuilderTaskNotice({
   className,
 }: BuilderTaskNoticeProps) {
   const [isFreshCompletion, setIsFreshCompletion] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(task.phase !== 'running');
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
   const taskFirstSeenMsRef = useRef(Date.now());
+  const expansionIdentityRef = useRef(task.taskId ?? task.label ?? '__builder__');
   const previousTaskStateRef = useRef<{ phase: BuilderTaskV1['phase']; identity: string }>({
     phase: task.phase,
     identity: task.taskId ?? task.label ?? '__builder__',
@@ -520,11 +453,16 @@ export function BuilderTaskNotice({
   const elapsedMs = Math.max(nowMs - taskStartMs, 0);
   const meta = getDisplayMeta(liveTask);
   const detail = getDetail(liveTask, elapsedMs);
+  const progressMeta = getProgressMeta(liveTask, elapsedMs);
+  const secondaryLine = getSecondaryMeta(liveTask) ?? detail;
   const showDismiss = Boolean(onDismiss && task.phase !== 'running');
   const showCancel = Boolean(onCancel && task.phase === 'running');
   const isRunning = liveTask.phase === 'running';
   const taskIdentity = task.taskId ?? task.label ?? '__builder__';
   const showReadyPill = task.phase === 'completed' && Boolean(artifactTitle && onOpenArtifact);
+  const hasSupplementalNotes = hasSupplementalBuilderNotes(liveTask);
+  const notesLabel = getBuilderNotesLabel(liveTask);
+  const notesPanelId = `${taskIdentity.replace(/[^a-zA-Z0-9_-]/g, '-')}-builder-notes`;
 
   useEffect(() => {
     setTaskReceivedAtMs(Date.now());
@@ -575,6 +513,21 @@ export function BuilderTaskNotice({
     };
   }, [task.phase, taskIdentity, compact]);
 
+  useEffect(() => {
+    const autoExpand = task.phase !== 'running' || Boolean(liveTask.stuck);
+    const isNewTask = expansionIdentityRef.current !== taskIdentity;
+
+    if (isNewTask) {
+      expansionIdentityRef.current = taskIdentity;
+      setIsExpanded(autoExpand);
+      return;
+    }
+
+    if (autoExpand) {
+      setIsExpanded(true);
+    }
+  }, [liveTask.stuck, task.phase, taskIdentity]);
+
   if (showReadyPill && artifactTitle && onOpenArtifact) {
     return (
       <div
@@ -587,24 +540,11 @@ export function BuilderTaskNotice({
           onOpen={onOpenArtifact}
           downloadHref={downloadHref}
           onDownload={onDownload}
+          onDismiss={showDismiss ? onDismiss : undefined}
           isNew={isFreshCompletion}
           compact={compact}
           className="w-full"
         />
-
-        {showDismiss && onDismiss && (
-          <button
-            type="button"
-            onClick={onDismiss}
-            className="absolute right-2.5 top-2.5 rounded-full p-1 transition-all duration-300"
-            style={{ color: 'var(--cosmic-text-faint)' }}
-            aria-label="Dismiss"
-          >
-            <svg className="h-3 w-3" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1">
-              <path d="M3 3l6 6M9 3l-6 6" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
       </div>
     );
   }
@@ -614,68 +554,112 @@ export function BuilderTaskNotice({
       role="status"
       aria-live={isRunning ? 'polite' : 'assertive'}
       className={cn(
-        compact
-          ? 'w-[min(340px,calc(100vw-40px))] rounded-[20px] border px-3 py-2.5 backdrop-blur-xl transition-all duration-500 animate-[builder-reveal_0.45s_ease-out]'
-          : 'w-[min(340px,calc(100vw-48px))] rounded-[22px] border px-3.5 py-3 backdrop-blur-xl transition-all duration-700 animate-[builder-reveal_0.6s_ease-out]',
+        'relative w-[min(300px,calc(100vw-40px))] overflow-hidden rounded-2xl border backdrop-blur-md transition-opacity duration-300 animate-[builder-reveal_0.35s_ease-out]',
+        compact ? 'px-3 py-2' : 'px-3.5 py-2.5',
         className,
       )}
       style={{
-        borderColor: `color-mix(in srgb, ${meta.accentVar} 20%, var(--cosmic-border-soft))`,
-        background: 'color-mix(in srgb, var(--cosmic-panel) 84%, transparent)',
-        boxShadow: `0 16px 36px color-mix(in srgb, ${meta.accentVar} 8%, transparent)`,
+        borderColor: `color-mix(in srgb, ${meta.accentVar} 14%, var(--cosmic-border-soft))`,
+        background: 'color-mix(in srgb, var(--cosmic-panel) 70%, transparent)',
       }}
     >
-      <div className={cn('flex items-start', compact ? 'gap-2.5' : 'gap-3')}>
-        <div className="shrink-0">
-          <BuilderStatusGlyph isRunning={isRunning} accentVar={meta.accentVar} compact={compact} />
-        </div>
-
-        <div className="min-w-0 flex-1">
-          <div className={cn('flex items-center', compact ? 'gap-1.5' : 'gap-2')}>
-            <span
-              className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.14em] lowercase')}
-              style={{ color: 'var(--cosmic-text-whisper)' }}
+      {/* Header row: dot · phase · leading meta · percent · notes toggle */}
+      <div className="flex items-center gap-2">
+        <BuilderBreathingDot accentVar={meta.accentVar} active={isRunning} />
+        <span
+          className="text-[10px] tracking-[0.16em] lowercase shrink-0"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          {meta.label}
+        </span>
+        <span aria-hidden="true" style={{ color: 'var(--cosmic-text-faint)' }}>·</span>
+        <span
+          className="min-w-0 flex-1 truncate text-[10px]"
+          style={{ color: 'var(--cosmic-text-faint)' }}
+          title={progressMeta.leading}
+        >
+          {progressMeta.leading}
+        </span>
+        <span
+          className="text-[10px] tabular-nums shrink-0"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          {progressMeta.trailing}
+        </span>
+        {hasSupplementalNotes && (
+          <button
+            type="button"
+            onClick={() => setIsExpanded((current) => !current)}
+            aria-expanded={isExpanded}
+            aria-controls={notesPanelId}
+            aria-label={isExpanded ? 'hide notes' : 'field notes'}
+            title={isExpanded ? 'hide notes' : `field notes (${notesLabel})`}
+            className="shrink-0 -mr-1 inline-flex h-5 w-5 items-center justify-center rounded-full transition-colors duration-200 hover:bg-white/[0.04]"
+            style={{ color: 'var(--cosmic-text-whisper)' }}
+          >
+            <svg
+              className={cn('h-3 w-3 transition-transform duration-300', isExpanded && 'rotate-180')}
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1"
             >
-              {meta.label}
-            </span>
-            <span
-              className={cn('rounded-full tracking-[0.1em] lowercase', compact ? 'px-1.5 py-0.5 text-[8px]' : 'px-2 py-0.5 text-[9px]')}
-              style={{
-                color: meta.accentVar,
-                background: `color-mix(in srgb, ${meta.accentVar} 12%, transparent)`,
-              }}
-            >
-              builder
-            </span>
-          </div>
-
-          {detail && (
-            <p
-              className={cn(compact ? 'mt-0.5 text-[10px] leading-4.5' : 'mt-1 text-[11px] leading-5')}
-              style={{ color: 'var(--cosmic-text-faint)' }}
-            >
-              {detail}
-            </p>
-          )}
-        </div>
-      </div>
-
-      <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
-        <BuilderTodoPreview task={liveTask} compact={compact} />
-        {liveTask.activityLog && liveTask.activityLog.length > 0 && (
-          <BuilderActivityLog entries={liveTask.activityLog} compact={compact} />
+              <path d="M2.5 4.5 6 8l3.5-3.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
         )}
       </div>
 
+      {/* Hairline progress */}
+      <BuilderHairlineProgress
+        task={liveTask}
+        accentVar={meta.accentVar}
+        elapsedMs={elapsedMs}
+      />
+
+      {/* Optional secondary detail line (active step, stuck reason) */}
+      {secondaryLine && (
+        <p
+          className="mt-1.5 text-[10px] leading-4 truncate"
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+          title={secondaryLine}
+        >
+          {secondaryLine}
+        </p>
+      )}
+
+      {hasSupplementalNotes && (
+        <div
+          id={notesPanelId}
+          className={cn(
+            'overflow-hidden transition-[max-height,opacity,margin] duration-400 ease-out',
+            isExpanded
+              ? 'visible mt-2 max-h-[360px] opacity-100'
+              : 'invisible pointer-events-none max-h-0 opacity-0',
+          )}
+          aria-hidden={!isExpanded}
+        >
+          <div
+            className="h-px w-full mb-2"
+            style={{
+              background: `linear-gradient(90deg, transparent, color-mix(in srgb, ${meta.accentVar} 18%, var(--cosmic-border-soft)), transparent)`,
+            }}
+          />
+          <BuilderTodoPreview task={liveTask} compact={compact} />
+          {liveTask.activityLog && liveTask.activityLog.length > 0 && (
+            <BuilderActivityLog entries={liveTask.activityLog} compact={compact} />
+          )}
+        </div>
+      )}
+
       {(showCancel || showDismiss) && (
-        <div className={cn('flex items-center justify-end gap-2', compact ? 'mt-1.5' : 'mt-2')}>
+        <div className="mt-2 flex items-center justify-end gap-2">
           {showCancel && onCancel && (
             <button
               type="button"
               onClick={onCancel}
               disabled={isCancelling}
-              className={cn(compact ? 'text-[9px]' : 'text-[10px]', 'tracking-[0.08em] lowercase transition-all duration-300 disabled:opacity-40')}
+              className="rounded-full px-2 py-0.5 text-[9px] lowercase tracking-[0.08em] transition-colors duration-200 disabled:opacity-40 hover:bg-white/[0.04]"
               style={{ color: 'var(--cosmic-text-faint)' }}
             >
               {isCancelling ? 'cancelling…' : 'cancel'}
@@ -686,7 +670,7 @@ export function BuilderTaskNotice({
             <button
               type="button"
               onClick={onDismiss}
-              className="transition-all duration-300"
+              className="rounded-full p-1 transition-colors duration-200 hover:bg-white/[0.04]"
               style={{ color: 'var(--cosmic-text-faint)' }}
               aria-label="Dismiss"
             >

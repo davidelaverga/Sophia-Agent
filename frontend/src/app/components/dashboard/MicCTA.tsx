@@ -39,105 +39,52 @@ export function MicCTA({
   const ritualLabel = selectedRitual
     ? RITUALS.find((r) => r.type === selectedRitual)?.labels[context].title
     : null;
-  const idlePrimaryLabel = ritualLabel ? `start ${ritualLabel.toLowerCase()}` : 'start open';
-  const idleSecondaryLabel = ritualLabel ? 'ritual selected' : 'or choose a ritual first';
 
   const isActive = micState !== 'idle' || isStartingSession;
   const sweepRef = useSweepGlow();
 
   return (
-    <div className="flex flex-col items-center gap-[10px]">
-      {/* mic-outer — 88×88 visual stage; only the 60×60 core is interactive */}
-      <div
-        className="relative flex h-[88px] w-[88px] items-center justify-center"
-      >
-        <span
-          data-onboarding="mic-cta"
-          className="pointer-events-none absolute inset-0"
-          aria-hidden="true"
-        />
-
-        {/* Breathing rings — prototype: inset 0 / -10px / -20px */}
-        <span
-          className={cn(
-            'pointer-events-none absolute inset-0 rounded-full border transition-colors duration-1000',
-            isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
-          )}
-          aria-hidden="true"
-          style={{
-            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
-            boxShadow: [
-              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
-              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
-              'calc(6px * var(--sweep-glow, 0))',
-              '0px',
-              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.12))',
-            ].join(' '),
-          }}
-        />
-        <span
-          className={cn(
-            'pointer-events-none absolute inset-[-10px] rounded-full border transition-colors duration-1000',
-            isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
-          )}
-          aria-hidden="true"
-          style={{
-            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
-            animationDelay: isActive ? '0.3s' : '0.8s',
-            boxShadow: [
-              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
-              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
-              'calc(5px * var(--sweep-glow, 0))',
-              '0px',
-              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.08))',
-            ].join(' '),
-          }}
-        />
-        <span
-          className={cn(
-            'pointer-events-none absolute inset-[-20px] rounded-full border transition-colors duration-1000',
-            isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
-          )}
-          aria-hidden="true"
-          style={{
-            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
-            animationDelay: isActive ? '0.6s' : '1.6s',
-            boxShadow: [
-              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
-              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
-              'calc(4px * var(--sweep-glow, 0))',
-              '0px',
-              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.05))',
-            ].join(' '),
-          }}
-        />
-
-        <button
-          ref={sweepRef as React.RefObject<HTMLButtonElement>}
-          type="button"
-          disabled={isStartingSession}
-          onClick={() => {
+    <div
+      className="group flex flex-col items-center gap-[10px]"
+      role="button"
+      tabIndex={0}
+      onClick={() => {
+        if (isStartingSession) return;
+        haptic('medium');
+        onCall();
+      }}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          if (!isStartingSession) {
             haptic('medium');
             onCall();
-          }}
-          aria-label={
-            isStartingSession
-              ? 'Connecting to Sophia'
-              : micState === 'listening'
-                ? 'Stop listening'
-                : micState === 'thinking'
-                  ? 'Sophia is processing'
-                  : micState === 'speaking'
-                    ? 'Interrupt Sophia'
-                    : selectedRitual
-                      ? `Start ${ritualLabel?.toLowerCase() ?? 'session'}`
-                      : 'Start open session'
           }
-          className={cn(
-            'group cosmic-focus-ring relative z-10 flex h-[60px] w-[60px] items-center justify-center rounded-full transition-all duration-300',
-            'hover:scale-[1.04] focus-visible:outline-none',
-            isStartingSession ? 'cursor-wait' : 'cursor-pointer',
-          )}
+        }
+      }}
+      aria-label={
+        isStartingSession
+          ? 'Connecting to Sophia'
+          : micState === 'listening'
+            ? 'Stop listening'
+            : micState === 'thinking'
+              ? 'Sophia is processing'
+              : micState === 'speaking'
+                ? 'Interrupt Sophia'
+                : selectedRitual
+                  ? `Start ${ritualLabel?.toLowerCase() ?? 'session'}`
+                  : 'Talk to Sophia'
+      }
+    >
+      {/* mic-outer — 88×88, contains rings + core */}
+      <div
+        ref={sweepRef as React.RefObject<HTMLDivElement>}
+        data-onboarding="mic-cta"
+        className={cn(
+          'relative flex h-[88px] w-[88px] items-center justify-center rounded-full transition-transform duration-300',
+          'cursor-pointer hover:scale-[1.04]',
+          isStartingSession && 'cursor-wait',
+        )}
         style={{
           filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.18))',
           boxShadow: [
@@ -166,11 +113,63 @@ export function MicCTA({
             'rgba(220, 200, 255, calc(var(--sweep-glow, 0) * 0.10))',
           ].join(' '),
         }}
-        >
-          {/* mic-core fill */}
-          <span
+      >
+        {/* Breathing rings — prototype: inset 0 / -10px / -20px */}
+        <span
           className={cn(
-            'cosmic-surface-panel relative flex h-full w-full items-center justify-center rounded-full transition-all duration-500',
+            'absolute inset-0 rounded-full border transition-colors duration-1000',
+            isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
+          )}
+          style={{
+            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
+            boxShadow: [
+              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(6px * var(--sweep-glow, 0))',
+              '0px',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.12))',
+            ].join(' '),
+          }}
+        />
+        <span
+          className={cn(
+            'absolute inset-[-10px] rounded-full border transition-colors duration-1000',
+            isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
+          )}
+          style={{
+            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
+            animationDelay: isActive ? '0.3s' : '0.8s',
+            boxShadow: [
+              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(5px * var(--sweep-glow, 0))',
+              '0px',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.08))',
+            ].join(' '),
+          }}
+        />
+        <span
+          className={cn(
+            'absolute inset-[-20px] rounded-full border transition-colors duration-1000',
+            isActive ? 'animate-mic-active-breathe' : 'animate-mic-breathe',
+          )}
+          style={{
+            borderColor: isActive ? 'var(--cosmic-border)' : 'var(--cosmic-border-soft)',
+            animationDelay: isActive ? '0.6s' : '1.6s',
+            boxShadow: [
+              'calc(-2px * var(--sweep-sx, 0) * var(--sweep-glow, 0))',
+              'calc(-2px * var(--sweep-sy, 0) * var(--sweep-glow, 0))',
+              'calc(4px * var(--sweep-glow, 0))',
+              '0px',
+              'rgba(200, 180, 255, calc(var(--sweep-glow, 0) * 0.05))',
+            ].join(' '),
+          }}
+        />
+
+        {/* mic-core — 60×60 glass circle */}
+        <span
+          className={cn(
+            'cosmic-surface-panel relative z-10 flex h-[60px] w-[60px] items-center justify-center rounded-full transition-all duration-500',
           )}
           style={isActive ? {
             background: 'color-mix(in srgb, var(--sophia-purple) 5%, var(--cosmic-panel-strong))',
@@ -180,9 +179,9 @@ export function MicCTA({
             borderColor: 'var(--cosmic-border)',
             boxShadow: '0 0 40px color-mix(in srgb, var(--sophia-purple) 12%, transparent)',
           } : undefined}
-          >
-            {/* Status dot — top-right */}
-            <span
+        >
+          {/* Status dot — top-right */}
+          <span
             className={cn(
               'absolute right-[2px] top-[2px] z-20 h-2 w-2 rounded-full transition-all duration-500',
               isActive ? 'animate-pulse' : '',
@@ -194,51 +193,44 @@ export function MicCTA({
               background: 'color-mix(in srgb, var(--cosmic-teal) 70%, transparent)',
               boxShadow: '0 0 8px color-mix(in srgb, var(--cosmic-teal) 30%, transparent)',
             }}
-            />
+          />
 
-            {/* Icon — mic or stop */}
-            {isActive && micState !== 'idle' ? (
-              <Square className="h-[22px] w-[22px] stroke-[1.5]" style={{ color: 'var(--sophia-purple)' }} />
-            ) : (
-              <Mic
-                className={cn(
-                  'h-[22px] w-[22px] stroke-[1.5] transition-colors duration-300',
-                  isActive ? '' : 'group-hover:text-[var(--cosmic-text)]',
-                )}
-                style={{ color: isActive ? 'var(--sophia-purple)' : 'var(--cosmic-text-muted)' }}
-              />
-            )}
-          </span>
-        </button>
+          {/* Icon — mic or stop */}
+          {isActive && micState !== 'idle' ? (
+            <Square className="h-[22px] w-[22px] stroke-[1.5]" style={{ color: 'var(--sophia-purple)' }} />
+          ) : (
+            <Mic
+              className={cn(
+                'h-[22px] w-[22px] stroke-[1.5] transition-colors duration-300',
+                isActive ? '' : 'group-hover:text-[var(--cosmic-text)]',
+              )}
+              style={{ color: isActive ? 'var(--sophia-purple)' : 'var(--cosmic-text-muted)' }}
+            />
+          )}
+        </span>
       </div>
 
       {/* Label — prototype: .mic-label */}
-      <div className="flex min-h-[28px] flex-col items-center gap-[2px] text-center" role="status" aria-live="polite">
-        <span
-          className={cn(
-            'text-[10px] lowercase tracking-[0.12em] transition-colors duration-500',
-          )}
-          style={{ color: isActive ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-faint)' }}
-        >
-          {isStartingSession
-            ? 'connecting...'
-            : micState === 'listening'
-              ? 'listening...'
-              : micState === 'thinking'
-                ? 'processing...'
-                : micState === 'speaking'
-                  ? 'sophia is here'
-                  : idlePrimaryLabel}
-        </span>
-        {!isActive ? (
-          <span
-            className="text-[9px] lowercase tracking-[0.08em] transition-colors duration-500"
-            style={{ color: 'var(--cosmic-text-whisper)' }}
-          >
-            {idleSecondaryLabel}
-          </span>
-        ) : null}
-      </div>
+      <span
+        className={cn(
+          'min-h-[14px] text-center text-[10px] lowercase tracking-[0.12em] transition-colors duration-500',
+        )}
+        style={{ color: isActive ? 'color-mix(in srgb, var(--sophia-purple) 50%, transparent)' : 'var(--cosmic-text-faint)' }}
+        role="status"
+        aria-live="polite"
+      >
+        {isStartingSession
+          ? 'connecting...'
+          : micState === 'listening'
+            ? 'listening...'
+            : micState === 'thinking'
+              ? 'processing...'
+              : micState === 'speaking'
+                ? 'sophia is here'
+                : ritualLabel
+                  ? `start ${ritualLabel.toLowerCase()}`
+                  : 'just talk'}
+      </span>
     </div>
   );
 }

@@ -50,8 +50,6 @@ export function EnhancedFieldDashboard() {
     activeSession,
     sessionSummary,
     isStartingSession,
-    showSettingsDrawer,
-    setShowSettingsDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     showFreshStartPrompt,
@@ -85,6 +83,7 @@ export function EnhancedFieldDashboard() {
   const [tabsVisible, setTabsVisible] = useState(false);
   const [sidebarExpanded, setSidebarExpanded] = useState(() => openSessionCount > 0);
   const [showMobileSessions, setShowMobileSessions] = useState(false);
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const resolvedUserId = user?.id || activeSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   useEffect(() => {
@@ -163,6 +162,12 @@ export function EnhancedFieldDashboard() {
       <CelestialComet contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
+      {/*
+        Navigation contract:
+        - NavRail exposes the compact entry points for Sessions, Journal, and Settings.
+        - RecentSessionsSidebar renders the expanded Sessions browser after the rail opens it.
+        Keep these responsibilities separate so desktop never shows two session-history triggers.
+      */}
       {/* Desktop nav rail — left edge */}
       <NavRail
         onToggleSessions={() => setSidebarExpanded((v) => !v)}

@@ -84,6 +84,26 @@ class TestUserScopedAuthorization:
 
         assert _get_legacy_auth_base_url() == "http://frontend-auth-bridge:3000"
 
+    def test_prefers_loopback_auth_override_header_for_auth_validation(self, monkeypatch):
+        from app.gateway.auth import _get_legacy_auth_base_url
+
+        monkeypatch.setenv("SOPHIA_AUTH_BACKEND_URL", "http://frontend-auth-bridge:3000")
+
+        request = MagicMock()
+        request.headers = {"x-sophia-auth-backend-url": "http://127.0.0.1:3101"}
+
+        assert _get_legacy_auth_base_url(request) == "http://127.0.0.1:3101"
+
+    def test_ignores_non_loopback_auth_override_header(self, monkeypatch):
+        from app.gateway.auth import _get_legacy_auth_base_url
+
+        monkeypatch.setenv("SOPHIA_AUTH_BACKEND_URL", "http://frontend-auth-bridge:3000")
+
+        request = MagicMock()
+        request.headers = {"x-sophia-auth-backend-url": "https://evil.example"}
+
+        assert _get_legacy_auth_base_url(request) == "http://frontend-auth-bridge:3000"
+
     def test_missing_bearer_token_returns_401(self, secure_client):
         resp = secure_client.get("/api/sophia/test_user/memories/recent")
         assert resp.status_code == 401
@@ -419,6 +439,11 @@ class TestDeleteMemory:
 
 class TestBulkReview:
     def test_bulk_review_updates_local_store(self, client, mock_mem0, mock_review_store):
+        mock_mem0.get.return_value = {
+            "id": "m2",
+            "memory": "Discard me",
+            "metadata": {"category": "fact"},
+        }
         resp = client.post(
             "/api/sophia/test_user/memories/bulk-review",
             json={
@@ -430,16 +455,25 @@ class TestBulkReview:
         )
 
         assert resp.status_code == 200
-        mock_mem0.update.assert_called_once_with(memory_id="m1", metadata={"status": "approved"})
-        mock_mem0.delete.assert_called_once_with(memory_id="m2")
-        mock_review_store["upsert"].assert_called_once_with(
+        assert mock_mem0.get.call_count == 1
+        assert mock_mem0.update.call_count == 2
+        mock_mem0.update.assert_any_call(memory_id="m1", metadata={"status": "approved"})
+        mock_mem0.update.assert_any_call(memory_id="m2", metadata={"category": "fact", "status": "discarded"})
+        mock_review_store["upsert"].assert_any_call(
             "test_user",
             memory_id="m1",
             content_hash=None,
             metadata={"status": "approved"},
             sync_state="manual",
         )
-        mock_review_store["remove"].assert_called_once_with("test_user", memory_id="m2")
+        mock_review_store["upsert"].assert_any_call(
+            "test_user",
+            memory_id="m2",
+            content="Discard me",
+            metadata={"category": "fact", "status": "discarded"},
+            sync_state="manual",
+        )
+        mock_review_store["remove"].assert_not_called()
 
     def test_delete_invalidates_cache(self, client, mock_mem0):
         mock_mem0.delete.return_value = None
@@ -449,8 +483,8 @@ class TestBulkReview:
         mock_invalidate.assert_called_once_with("test_user")
 
     def test_approve_and_discard(self, client, mock_mem0):
+        mock_mem0.get.return_value = {}
         mock_mem0.update.return_value = {}
-        mock_mem0.delete.return_value = None
         resp = client.post(
             "/api/sophia/test_user/memories/bulk-review",
             json={"items": [
@@ -466,7 +500,8 @@ class TestBulkReview:
 
     def test_partial_failure(self, client, mock_mem0):
         mock_mem0.update.return_value = {}
-        mock_mem0.delete.side_effect = Exception("Failed")
+        mock_mem0.get.return_value = {}
+        mock_mem0.update.side_effect = [{}, Exception("Failed")]
         resp = client.post(
             "/api/sophia/test_user/memories/bulk-review",
             json={"items": [
@@ -572,6 +607,21 @@ class TestJournal:
         assert data["count"] == 1
         assert data["entries"][0]["id"] == "m1"
 
+    def test_default_journal_excludes_pending_and_discarded_memories(self, client, mock_mem0):
+        mock_mem0.get_all.return_value = [
+            {"id": "m1", "memory": "Approved memory", "metadata": {"status": "approved"}},
+            {"id": "m2", "memory": "Pending memory", "metadata": {"status": "pending_review"}},
+            {"id": "m3", "memory": "Discarded memory", "metadata": {"status": "discarded"}},
+            {"id": "m4", "memory": "Legacy saved memory"},
+        ]
+
+        resp = client.get("/api/sophia/test_user/journal")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 2
+        assert [entry["id"] for entry in data["entries"]] == ["m1", "m4"]
+
     def test_empty_journal(self, client, mock_mem0):
         mock_mem0.get_all.return_value = []
         resp = client.get("/api/sophia/test_user/journal")
@@ -663,6 +713,174 @@ class TestVisualCategories:
 # ---------------------------------------------------------------------------
 # Background Task Control
 # ---------------------------------------------------------------------------
+
+class TestActiveTaskStatus:
+    def test_returns_persisted_latest_task_snapshot_for_thread_when_in_memory_state_is_unavailable(self, client):
+        persisted_payload = {
+            "task_id": "task-active-1",
+            "status": "running",
+            "trace_id": "trace-active-1",
+            "thread_id": "thread-1",
+            "description": "Builder: concise draft document",
+            "detail": "Draft the summary",
+            "result": None,
+            "error": None,
+            "builder_result": None,
+            "message_count": 2,
+            "started_at": "2026-04-05T10:00:00+00:00",
+            "completed_at": None,
+            "last_update_at": "2026-04-05T10:00:28+00:00",
+            "last_progress_at": "2026-04-05T10:00:27+00:00",
+            "heartbeat_ms": 2000,
+            "idle_ms": 3000,
+            "is_stuck": False,
+            "stuck_reason": None,
+            "progress_percent": 50,
+            "progress_source": "todos",
+            "total_steps": 2,
+            "completed_steps": 1,
+            "in_progress_steps": 1,
+            "pending_steps": 0,
+            "active_step_title": "Draft the summary",
+            "todos": [
+                {"id": 1, "title": "Research sources", "status": "completed"},
+                {"id": 2, "title": "Draft the summary", "status": "in-progress"},
+            ],
+            "debug": {
+                "last_tool_names": ["write_todos"],
+                "last_has_emit_builder_artifact": False,
+                "late_tool_names": [],
+                "late_has_emit_builder_artifact": None,
+                "timeout_observed_during_stream": False,
+                "timed_out_at": None,
+                "final_state_present": False,
+                "builder_result_present": False,
+                "suspected_blocker": "tool_call",
+                "suspected_blocker_detail": "Latest captured Builder step called write_todos and has not reached emit_builder_artifact yet.",
+                "last_shell_command": {
+                    "tool": "bash",
+                    "status": "timed_out",
+                    "requested_command": "python /mnt/user-data/workspace/script.py",
+                    "error": "Command exceeded 600 seconds",
+                },
+                "recent_shell_commands": [
+                    {
+                        "tool": "bash",
+                        "status": "timed_out",
+                        "requested_command": "python /mnt/user-data/workspace/script.py",
+                        "error": "Command exceeded 600 seconds",
+                    }
+                ],
+            },
+            "owner_id": "test_user",
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_latest_task_for_thread", return_value=None),
+            patch("deerflow.subagents.executor.read_latest_background_task_status_payload", return_value=persisted_payload),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/active?thread_id=thread-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-active-1"
+        assert data["status"] == "running"
+        assert data["description"] == "Builder: concise draft document"
+        assert data["progress_percent"] == 50
+        assert data["debug"]["last_tool_names"] == ["write_todos"]
+
+    def test_resolves_legacy_session_owner_and_thread_from_session_id(self, client, tmp_path):
+        from types import SimpleNamespace
+
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-legacy",
+                thread_id="thread-legacy",
+                user_id="dev-user",
+                status="open",
+            )
+        )
+
+        task_result = SimpleNamespace(
+            task_id="task-legacy",
+            trace_id="trace-legacy",
+            status=SimpleNamespace(value="running"),
+            started_at=None,
+            completed_at=None,
+            last_update_at=None,
+            last_progress_at=None,
+            result=None,
+            error=None,
+            ai_messages=[{"content": "working"}],
+            owner_id="dev-user",
+            timeout_observed_during_stream=False,
+            timed_out_at=None,
+            final_state=None,
+            last_ai_message_summary=None,
+            late_ai_message_summary=None,
+            live_state={},
+        )
+
+        with (
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("deerflow.subagents.executor.build_subagent_progress_payload", return_value={}),
+            patch("deerflow.subagents.executor.get_latest_task_for_thread", return_value=task_result),
+            patch("deerflow.subagents.executor.read_latest_background_task_status_payload", return_value=None),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/active?session_id=sess-legacy")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-legacy"
+        assert data["status"] == "running"
+
+    def test_resolves_actual_session_owner_when_request_user_differs(self, client, tmp_path):
+        from types import SimpleNamespace
+
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-owner-swap",
+                thread_id="thread-owner-swap",
+                user_id="opaque-backend-owner",
+                status="open",
+            )
+        )
+
+        task_result = SimpleNamespace(
+            task_id="task-owner-swap",
+            trace_id="trace-owner-swap",
+            status=SimpleNamespace(value="running"),
+            started_at=None,
+            completed_at=None,
+            last_update_at=None,
+            last_progress_at=None,
+            result=None,
+            error=None,
+            ai_messages=[{"content": "working"}],
+            owner_id="opaque-backend-owner",
+            timeout_observed_during_stream=False,
+            timed_out_at=None,
+            final_state=None,
+            last_ai_message_summary=None,
+            late_ai_message_summary=None,
+            live_state={},
+        )
+
+        with (
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("deerflow.subagents.executor.build_subagent_progress_payload", return_value={}),
+            patch("deerflow.subagents.executor.get_latest_task_for_thread", return_value=task_result),
+            patch("deerflow.subagents.executor.read_latest_background_task_status_payload", return_value=None),
+        ):
+            resp = client.get("/api/sophia/canonical-user/tasks/active?session_id=sess-owner-swap")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-owner-swap"
+        assert data["status"] == "running"
+
 
 class TestTaskStatus:
     def test_returns_running_task_progress_and_diagnostics(self, client):

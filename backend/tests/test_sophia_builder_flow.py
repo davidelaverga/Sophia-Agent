@@ -9,6 +9,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END
+from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
@@ -40,6 +42,22 @@ def _apply_update(state: dict, update: dict | None) -> dict:
     for key, value in update.items():
         state[key] = value
     return state
+
+
+def _extract_switch_payload(response):
+    """Normalize a switch_to_builder return value into a parsed JSON payload.
+
+    The queued path returns a ``Command`` whose ToolMessage content is the JSON
+    payload; the duplicate/failed paths still return a raw JSON string.
+    """
+    if isinstance(response, str):
+        return json.loads(response)
+    update = getattr(response, "update", None) or {}
+    messages = update.get("messages") or []
+    if not messages:
+        raise AssertionError(f"Command has no messages to extract payload from: {response!r}")
+    content = getattr(messages[-1], "content", messages[-1])
+    return json.loads(content)
 
 
 def test_switch_to_builder_queues_background_task(monkeypatch):
@@ -91,13 +109,15 @@ def test_switch_to_builder_queues_background_task(monkeypatch):
         task_type="presentation",
         tool_call_id="tc-builder-1",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
 
+    assert getattr(switch_module.switch_to_builder, "return_direct", False) is True
     assert payload["type"] == "builder_handoff"
     assert payload["status"] == "queued"
     assert payload["task_id"] == "tc-builder-1"
     assert payload["task_type"] == "presentation"
     assert payload["builder_task"]["status"] == "queued"
+    assert getattr(response, "goto", None) is not None
     assert captured["task"] == "Build a 5-slide investor deck for tomorrow."
     assert captured["task_id"] == "tc-builder-1"
     assert captured["kwargs"]["extra_configurable"]["delegation_context"]["relevant_memories"] == [
@@ -108,6 +128,28 @@ def test_switch_to_builder_queues_background_task(monkeypatch):
     assert captured["kwargs"]["extra_configurable"]["delegation_context"]["search_mode"] == "autonomous"
     assert events[-1]["type"] == "task_started"
     assert events[-1]["task_id"] == "tc-builder-1"
+
+
+def test_builder_session_wrap_tool_call_interrupts_switch_to_builder():
+    middleware = BuilderSessionMiddleware()
+    request = SimpleNamespace(tool_call={"name": "switch_to_builder", "id": "tc-builder-wrap"})
+    expected = Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    content='{"type":"builder_handoff","status":"queued"}',
+                    tool_call_id="tc-builder-wrap",
+                    name="switch_to_builder",
+                )
+            ]
+        }
+    )
+
+    result = middleware.wrap_tool_call(request, lambda _req: expected)
+
+    assert isinstance(result, Command)
+    assert getattr(result, "goto", None) == END
+    assert result.update == expected.update
 
 
 def test_switch_to_builder_suppresses_duplicate_launch(monkeypatch):
@@ -135,7 +177,7 @@ def test_switch_to_builder_suppresses_duplicate_launch(monkeypatch):
         task_type="presentation",
         tool_call_id="tc-builder-2",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
 
     assert payload["status"] == "already_running"
     assert payload["task_id"] == "task-existing"
@@ -184,10 +226,10 @@ def test_switch_to_builder_prefers_runtime_config_user_id(monkeypatch):
         task_type="document",
         tool_call_id="tc-builder-runtime-user-id",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
     handoff_resolution = payload["handoff_resolution"]
 
-    assert captured["builder_agent"]["user_id"] == "jorge_test"
+    assert captured["kwargs"]["agent_factory"]() == {"user_id": "jorge_test", "model_name": "claude-haiku-4-5-20251001"}
     assert handoff_resolution["user_id_source"] == "runtime.config.configurable.user_id"
     assert handoff_resolution["config_user_id_present"] is True
     assert handoff_resolution["state_user_id_present"] is False
@@ -245,10 +287,10 @@ def test_make_switch_to_builder_tool_uses_bound_user_id_when_runtime_sources_mis
         task_type="document",
         tool_call_id="tc-builder-bound-user-id",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
     handoff_resolution = payload["handoff_resolution"]
 
-    assert captured["builder_agent"]["user_id"] == "bound_user"
+    assert captured["kwargs"]["agent_factory"]() == {"user_id": "bound_user", "model_name": "claude-haiku-4-5-20251001"}
     assert captured["owner_id"] == "bound_user"
     assert handoff_resolution["user_id_source"] == "configured_builder_user_id"
     assert handoff_resolution["configured_user_id_present"] is True
@@ -312,7 +354,7 @@ def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
         task_type="document",
         tool_call_id="tc-builder-artifact-freshness",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
 
     delegation_context = payload["delegation_context"]
     assert delegation_context["companion_artifact"]["tone_estimate"] == 3.5
@@ -360,7 +402,7 @@ def test_switch_to_builder_enables_web_research_for_research_task(monkeypatch):
         task_type="research",
         tool_call_id="tc-builder-research",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
     delegation_context = payload["delegation_context"]
 
     assert delegation_context["allow_web_research"] is True
@@ -417,7 +459,7 @@ def test_switch_to_builder_ignores_empty_emit_artifact_payload(monkeypatch):
         task_type="document",
         tool_call_id="tc-builder-empty-emit-artifact",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
 
     delegation_context = payload["delegation_context"]
     assert delegation_context["companion_artifact"]["tone_estimate"] == 2.4
@@ -465,7 +507,7 @@ def test_switch_to_builder_reports_default_resolution_sources(monkeypatch):
         task_type="document",
         tool_call_id="tc-builder-default-resolution",
     )
-    payload = json.loads(response)
+    payload = _extract_switch_payload(response)
     handoff_resolution = payload["handoff_resolution"]
 
     assert handoff_resolution["user_id_source"] == "default_user"

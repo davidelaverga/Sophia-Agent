@@ -29,8 +29,8 @@ import {
   VoiceCaption,
   VoiceMetricsPanel,
   BuilderReadyPill,
+  SessionFilesPanel,
   PresenceArtifactPanel,
-  ArtifactToggleIcon,
   WhisperIndicator,
   ReflectionOverlay,
   EmergenceOverlay,
@@ -45,8 +45,8 @@ import { useChromeFade } from '../hooks/useChromeFade';
 import { haptic } from '../hooks/useHaptics';
 import { useIdleTimeout } from '../hooks/useIdleTimeout';
 import { useSessionBootstrap } from '../hooks/useSessionBootstrap';
-import { useSessionPersistence } from '../hooks/useSessionPersistence';
-import { buildThreadArtifactHref, getBuilderArtifactFiles } from '../lib/builder-artifacts';
+import { restoreSessionRouteState, useSessionPersistence } from '../hooks/useSessionPersistence';
+import { buildThreadArtifactHref, getBuilderArtifactFiles, getSessionBuilderFileItems, pickBuilderPillLibraryItem } from '../lib/builder-artifacts';
 import { debugLog } from '../lib/debug-logger';
 import { errorCopy } from '../lib/error-copy';
 import { cn } from '../lib/utils';
@@ -148,6 +148,7 @@ function SessionPageContent() {
     session,
     artifacts,
     builderArtifact: storedBuilderArtifact,
+    dismissedBuilderArtifactKey: storedDismissedBuilderArtifactKey,
     storedMessages,
     updateMessages,
     updateSession,
@@ -163,6 +164,7 @@ function SessionPageContent() {
     userId,
     resolvedThreadId,
     safeSessionId,
+    recoverySessionId,
     sessionPresetType,
     sessionContextMode,
     isReadOnly,
@@ -190,6 +192,8 @@ function SessionPageContent() {
     setInput,
     showArtifacts,
     setShowArtifacts,
+    showSessionFiles,
+    setShowSessionFiles,
     mobileDrawerOpen,
     setMobileDrawerOpen,
     userOpenedArtifacts,
@@ -264,7 +268,7 @@ function SessionPageContent() {
     setVoiceStatusCompat,
   } = useSessionRouteExperience({
     sessionId,
-    activeSessionId: session?.sessionId,
+    activeSessionId: recoverySessionId,
     activeThreadId: resolvedThreadId,
     chatRequestBody,
     hasValidBackendSessionId,
@@ -272,6 +276,7 @@ function SessionPageContent() {
     userId,
     artifacts,
     storedBuilderArtifact,
+    storedDismissedBuilderArtifactKey,
     storeArtifacts,
     storeBuilderArtifact,
     updateSession,
@@ -442,7 +447,11 @@ function SessionPageContent() {
     builderArtifact?.artifactTitle ?? '',
     builderArtifact?.artifactPath ?? '',
     (builderArtifact?.supportingFiles ?? []).join('|'),
-  ].join('::'), [builderArtifact]);
+    // Also refresh when a builder task transitions phases so newly-finished
+    // deliverables appear in the library without needing another stream event.
+    builderTask?.taskId ?? '',
+    builderTask?.phase ?? '',
+  ].join('::'), [builderArtifact, builderTask?.phase, builderTask?.taskId]);
 
   const {
     items: builderArtifactLibrary,
@@ -451,7 +460,11 @@ function SessionPageContent() {
     refreshToken: builderArtifactRefreshToken,
   });
 
-  const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
+  const sessionFileItems = useMemo(
+    () => getSessionBuilderFileItems(builderArtifactLibrary, builderArtifact),
+    [builderArtifact, builderArtifactLibrary],
+  );
+  const hasSessionFiles = sessionFileItems.length > 0;
 
   const {
     showArtifactsUi,
@@ -466,7 +479,6 @@ function SessionPageContent() {
     messages,
     artifacts,
     builderArtifact,
-    hasBuilderArtifactLibrary,
     isBuilderRunning: builderTask?.phase === 'running',
     isStreaming,
     isReflectionVoiceFlowActive,
@@ -484,18 +496,18 @@ function SessionPageContent() {
   const previousArtifactSignatureRef = useRef('');
 
   const artifactContentCount = useMemo(() => {
-    const hasBuilderArtifact = Boolean(builderArtifact) || hasBuilderArtifactLibrary;
+    const hasBuilderArtifact = Boolean(builderArtifact);
     const hasTakeaway = Boolean(artifacts?.takeaway?.trim());
     const hasReflection = Boolean(artifacts?.reflection_candidate?.prompt?.trim());
     const memoryCount = artifacts?.memory_candidates?.length ?? 0;
     return (hasBuilderArtifact ? 1 : 0) + (hasTakeaway ? 1 : 0) + (hasReflection ? 1 : 0) + Math.min(1, memoryCount);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
+  }, [artifacts, builderArtifact]);
 
   const readyArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
       (status) => status === 'ready'
-    ).length + ((builderArtifact || hasBuilderArtifactLibrary) ? 1 : 0);
-  }, [artifactStatus, builderArtifact, hasBuilderArtifactLibrary]);
+    ).length + (builderArtifact ? 1 : 0);
+  }, [artifactStatus, builderArtifact]);
 
   const waitingArtifactCount = useMemo(() => {
     return [artifactStatus.takeaway, artifactStatus.reflection, artifactStatus.memories].filter(
@@ -516,7 +528,7 @@ function SessionPageContent() {
       ? [
           builderArtifact.artifactTitle,
           builderArtifact.artifactPath ?? '',
-          (builderArtifact.supportingFiles ?? []).join('|'),
+          [...(builderArtifact.supportingFiles ?? [])].sort().join('|'),
         ].join('::')
       : '';
     const takeaway = artifacts?.takeaway?.trim() ?? '';
@@ -524,11 +536,11 @@ function SessionPageContent() {
     const memories = (artifacts?.memory_candidates ?? [])
       .map((candidate) => candidate?.memory?.trim() ?? '')
       .filter((memory) => memory.length > 0)
+      .sort()
       .join('|');
-    const library = builderArtifactLibrary.map((item) => item.path).join('|');
 
-    return `${builder}::${library}::${takeaway}::${reflection}::${memories}`;
-  }, [artifacts, builderArtifact, builderArtifactLibrary]);
+    return `${builder}::${takeaway}::${reflection}::${memories}`;
+  }, [artifacts, builderArtifact]);
 
   const hasDesktopStyleBadge = hasPendingArtifacts || waitingArtifactCount > 0;
   const showBuilderTaskNotice = Boolean(builderTask);
@@ -540,9 +552,31 @@ function SessionPageContent() {
     () => buildThreadArtifactHref(resolvedThreadId, builderPrimaryFile?.path, { download: true }),
     [builderPrimaryFile?.path, resolvedThreadId],
   );
+
+  // Prefer the builder's primary artifact when available so auxiliary files
+  // (for example __pycache__/*.pyc) never displace the actual deliverable.
+  const latestLibraryItem = useMemo(
+    () => pickBuilderPillLibraryItem(builderArtifactLibrary, builderArtifact),
+    [builderArtifact, builderArtifactLibrary],
+  );
+  const pillTitle = useMemo(
+    () => latestLibraryItem?.name ?? builderArtifact?.artifactTitle ?? '',
+    [builderArtifact?.artifactTitle, latestLibraryItem?.name],
+  );
+  const pillDownloadHref = useMemo(
+    () => (latestLibraryItem
+      ? buildThreadArtifactHref(resolvedThreadId, latestLibraryItem.path, { download: true })
+      : builderDownloadHref),
+    [builderDownloadHref, latestLibraryItem, resolvedThreadId],
+  );
+  const sessionFilesCount = sessionFileItems.length;
   const voiceBuilderChromeOpacity = Math.max(chromeOpacity, 0.94);
   const voiceBuilderAccessoryOpacity = Math.max(chromeOpacity, 0.62);
   const voiceArtifactToggleBottom = 'calc(9.25rem + env(safe-area-inset-bottom, 0px))';
+  const dismissBuilderDeliverable = useCallback(() => {
+    clearBuilderTask();
+    clearBuilderArtifact();
+  }, [clearBuilderArtifact, clearBuilderTask]);
 
   const handleVoiceDownloadBuilderArtifact = useCallback(() => {
     if (!builderDownloadHref || typeof document === 'undefined') {
@@ -594,10 +628,10 @@ function SessionPageContent() {
   }, [artifactContentCount, readyArtifactCount, hasPendingArtifacts, artifactSignature, userOpenedArtifacts]);
 
   useEffect(() => {
-    if (showArtifacts || mobileDrawerOpen || userOpenedArtifacts) {
+    if (showArtifacts || showSessionFiles || mobileDrawerOpen || userOpenedArtifacts) {
       setHasNewArtifacts(false);
     }
-  }, [showArtifacts, mobileDrawerOpen, userOpenedArtifacts]);
+  }, [showArtifacts, showSessionFiles, mobileDrawerOpen, userOpenedArtifacts]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -742,21 +776,27 @@ function SessionPageContent() {
     focusComposer,
     handleCloseArtifactsPanel,
     handleOpenArtifactsPanel,
+    handleCloseSessionFilesPanel,
+    handleToggleSessionFilesPanel,
   } = useSessionUiInteractions({
     messages,
     isTyping,
+    isConversationVisible: focusMode === 'text',
     isReadOnly,
     showArtifacts,
     showArtifactsUi,
+    hasSessionFiles,
+    showSessionFiles,
     mobileDrawerOpen,
     setShowArtifacts,
+    setShowSessionFiles,
     setMobileDrawerOpen,
     setUserOpenedArtifacts,
     setShowScaffold,
     triggerLightHaptic: () => haptic('light'),
     onBaseMicClick: baseHandleMicClick,
   });
-  
+
   const { shouldShowLoading, navigateHome } = useSessionPageGuards({
     hasSession: !!session,
     isEnding,
@@ -764,6 +804,7 @@ function SessionPageContent() {
     navigateTo: (href) => {
       void router.push(href);
     },
+    attemptRestore: restoreSessionRouteState,
   });
 
   const {
@@ -844,6 +885,64 @@ function SessionPageContent() {
     queueMemoryApproval,
     backendSessionIdForMemory: session?.sessionId,
   });
+
+  const liveConversationPaneProps = {
+    messages,
+    isInitializingChat,
+    sessionPresetType,
+    sessionContextMode,
+    onPromptSelect: handlePromptSelect,
+    reflectionPrefix: SESSION_REFLECTION_PREFIX,
+    getReflectionWhy,
+    feedbackByMessage,
+    onFeedback: handleMessageFeedback,
+    greetingAnchorId,
+    memoryHighlights,
+    resolvedInterrupts,
+    pendingInterrupt,
+    isTyping,
+    isReadOnly,
+    onInterruptSelectWithRetry: handleInterruptSelectWithRetry,
+    onInterruptSnooze: handleInterruptSnooze,
+    onInterruptDismiss: handleInterruptDismiss,
+    isResuming,
+    resumeError,
+    resumeRetryOptionId,
+    onResumeRetry: handleResumeRetryPress,
+    onDismissResumeError: clearResumeError,
+    interruptQueueLength: interruptQueue.length,
+    showScaffold,
+    showThinkingIndicator,
+    isVoiceThinking,
+    onCancelThinking: handleCancelThinking,
+    cancelledMessageId,
+    cancelledRetryMessage: isInterruptedByRefresh ? errorCopy.responseInterrupted : errorCopy.responseCancelled,
+    onRetryCancelled: handleCancelledRetryPress,
+    onDismissCancelled: handleDismissCancelled,
+    voiceRetryState,
+    onRetryVoice: handleVoiceRetryPress,
+    onDismissVoiceRetry: handleDismissVoiceRetry,
+    chatError,
+    dismissedError,
+    onRetryStreamError: handleStreamErrorRetry,
+    onDismissStreamError: handleDismissStreamError,
+    messagesEndRef,
+    nudgeSuggestion,
+    onNudgeAccept: handleNudgeAccept,
+    onNudgeDismiss: handleNudgeDismiss,
+    onImpulse: handleImpulse,
+    onGoToDashboard: handleGoToDashboard,
+  };
+
+  const frozenConversationPanePropsRef = useRef<typeof liveConversationPaneProps | null>(null);
+
+  if (focusMode === 'text' || !frozenConversationPanePropsRef.current) {
+    frozenConversationPanePropsRef.current = liveConversationPaneProps;
+  }
+
+  const conversationPaneProps = focusMode === 'text'
+    ? liveConversationPaneProps
+    : (frozenConversationPanePropsRef.current ?? liveConversationPaneProps);
   
   // Scroll conversation to bottom when artifact panel opens in text mode
   // so the latest messages stay visible above the panel
@@ -876,14 +975,28 @@ function SessionPageContent() {
       isSophiaResponding={isSophiaResponding}
       isReadOnly={isReadOnly}
       presenceRef={presenceRef}
+      onToggleSessionFiles={hasSessionFiles ? handleToggleSessionFilesPanel : undefined}
+      isSessionFilesOpen={showSessionFiles}
+      sessionFilesCount={sessionFilesCount}
     >
       <div className="relative flex h-full animate-fadeIn">
+        {hasSessionFiles && (
+          <div className="pointer-events-none fixed left-4 right-4 top-[72px] z-40 sm:left-auto sm:right-4 sm:w-[388px] lg:w-[396px]">
+            <SessionFilesPanel
+              items={sessionFileItems}
+              threadId={resolvedThreadId}
+              isVisible={showSessionFiles}
+              onDismiss={handleCloseSessionFilesPanel}
+              className="pointer-events-auto"
+            />
+          </div>
+        )}
+
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Voice telemetry panel is intentionally hidden in production sessions. It served its
-              diagnostic purpose during the voice transport migration. Keep the component mounted
-              path commented for quick re-enable when benchmarking regressions. */}
-          {false && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
+          {/* Keep the diagnostics overlay available in development so voice responsiveness
+            regressions can be benchmarked without shipping debug chrome to production. */}
+          {debugEnabled && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
 
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
               A radial vignette that darkens the center (where text lives) and fades to
@@ -896,53 +1009,7 @@ function SessionPageContent() {
 
           {/* Conversation pane — hidden in voice mode but stays mounted to preserve scroll */}
           <div className={focusMode !== 'text' ? 'hidden' : 'flex-1 flex flex-col min-h-0 text-mode-elevated'}>
-            <SessionConversationPane
-            messages={messages}
-            isInitializingChat={isInitializingChat}
-            sessionPresetType={sessionPresetType}
-            sessionContextMode={sessionContextMode}
-            onPromptSelect={handlePromptSelect}
-            reflectionPrefix={SESSION_REFLECTION_PREFIX}
-            getReflectionWhy={getReflectionWhy}
-            feedbackByMessage={feedbackByMessage}
-            onFeedback={handleMessageFeedback}
-            greetingAnchorId={greetingAnchorId}
-            memoryHighlights={memoryHighlights}
-            resolvedInterrupts={resolvedInterrupts}
-            pendingInterrupt={pendingInterrupt}
-            isTyping={isTyping}
-            isReadOnly={isReadOnly}
-            onInterruptSelectWithRetry={handleInterruptSelectWithRetry}
-            onInterruptSnooze={handleInterruptSnooze}
-            onInterruptDismiss={handleInterruptDismiss}
-            isResuming={isResuming}
-            resumeError={resumeError}
-            resumeRetryOptionId={resumeRetryOptionId}
-            onResumeRetry={handleResumeRetryPress}
-            onDismissResumeError={clearResumeError}
-            interruptQueueLength={interruptQueue.length}
-            showScaffold={showScaffold}
-            showThinkingIndicator={showThinkingIndicator}
-            isVoiceThinking={isVoiceThinking}
-            onCancelThinking={handleCancelThinking}
-            cancelledMessageId={cancelledMessageId}
-            cancelledRetryMessage={isInterruptedByRefresh ? errorCopy.responseInterrupted : errorCopy.responseCancelled}
-            onRetryCancelled={handleCancelledRetryPress}
-            onDismissCancelled={handleDismissCancelled}
-            voiceRetryState={voiceRetryState}
-            onRetryVoice={handleVoiceRetryPress}
-            onDismissVoiceRetry={handleDismissVoiceRetry}
-            chatError={chatError}
-            dismissedError={dismissedError}
-            onRetryStreamError={handleStreamErrorRetry}
-            onDismissStreamError={handleDismissStreamError}
-            messagesEndRef={messagesEndRef}
-            nudgeSuggestion={nudgeSuggestion}
-            onNudgeAccept={handleNudgeAccept}
-            onNudgeDismiss={handleNudgeDismiss}
-            onImpulse={handleImpulse}
-            onGoToDashboard={handleGoToDashboard}
-          />
+            <SessionConversationPane {...conversationPaneProps} />
           </div>
           
           {/* Voice Caption — ephemeral text overlay in voice mode.
@@ -980,7 +1047,6 @@ function SessionPageContent() {
             <PresenceArtifactPanel
               artifacts={artifacts}
               builderArtifact={builderArtifact}
-              builderArtifactLibrary={builderArtifactLibrary}
               threadId={resolvedThreadId}
               isVisible={showArtifacts && showArtifactsUi}
               onDismiss={handleCloseArtifactsPanel}
@@ -995,64 +1061,57 @@ function SessionPageContent() {
             <BuilderTaskNotice
               task={builderTask}
               artifactTitle={builderArtifact?.artifactTitle}
-              onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+              onOpenArtifact={hasSessionFiles ? handleToggleSessionFilesPanel : undefined}
               downloadHref={builderArtifact ? builderDownloadHref : undefined}
               onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
-              onDismiss={clearBuilderTask}
+              onDismiss={dismissBuilderDeliverable}
               onCancel={cancelBuilderTask}
               isCancelling={isCancellingBuilderTask}
             />
           )}
 
-          {/* Artifact toggle pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
-            builderArtifact && !builderTask ? (
-              <div className="mb-2 flex justify-center">
-                <BuilderReadyPill
-                  title={builderArtifact.artifactTitle}
-                  onOpen={handleOpenArtifactsPanel}
-                  downloadHref={builderDownloadHref}
-                  onDownload={() => haptic('medium')}
-                  onDismiss={clearBuilderArtifact}
-                  itemCount={builderArtifactLibrary.length || undefined}
-                  isNew={hasNewArtifacts}
-                />
-              </div>
-            ) : (
-              <div className="flex justify-center mb-2">
-                <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                  onClick={handleOpenArtifactsPanel}
-                  isNew={hasNewArtifacts}
-                />
-              </div>
-            )
+          {/* Artifact toggle pill — text mode: inline above composer.
+              Plain insights are now fused into the ModeToggle as a third segment;
+              only the rich BuilderReadyPill renders standalone here. */}
+          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderArtifact && !builderTask && (
+            <div className="mb-2 flex justify-center">
+              <BuilderReadyPill
+                title={pillTitle}
+                onOpen={handleToggleSessionFilesPanel}
+                downloadHref={pillDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={clearBuilderArtifact}
+                itemCount={sessionFilesCount || undefined}
+                isNew={hasNewArtifacts}
+              />
+            </div>
           )}
 
-          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && (
+          {/* Artifact pill — voice mode: only the rich BuilderReadyPill remains standalone.
+              Plain insights are fused into the ModeToggle below as a third segment.
+              Stays mounted while captions are visible so it doesn't remount/flash —
+              we just dim it and disable pointer events instead. */}
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !builderTask && builderArtifact && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
-              style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
+              style={{
+                bottom: voiceArtifactToggleBottom,
+                opacity: isVoiceCaptionVisible ? 0 : voiceBuilderAccessoryOpacity,
+                pointerEvents: isVoiceCaptionVisible ? 'none' : 'auto',
+                transition: 'opacity 0.3s ease',
+              }}
+              aria-hidden={isVoiceCaptionVisible}
             >
-              {builderArtifact && !builderTask ? (
-                <BuilderReadyPill
-                  title={builderArtifact.artifactTitle}
-                  onOpen={handleOpenArtifactsPanel}
-                  downloadHref={builderDownloadHref}
-                  onDownload={() => haptic('medium')}
-                  onDismiss={clearBuilderArtifact}
-                  itemCount={builderArtifactLibrary.length || undefined}
-                  isNew={hasNewArtifacts}
-                  compact={true}
-                />
-              ) : (
-                <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                  onClick={handleOpenArtifactsPanel}
-                  isNew={hasNewArtifacts}
-                />
-              )}
+              <BuilderReadyPill
+                title={pillTitle}
+                onOpen={handleToggleSessionFilesPanel}
+                downloadHref={pillDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={clearBuilderArtifact}
+                itemCount={sessionFilesCount || undefined}
+                isNew={hasNewArtifacts}
+                compact={true}
+              />
             </div>
           )}
 
@@ -1064,11 +1123,11 @@ function SessionPageContent() {
               <BuilderTaskNotice
                 task={builderTask}
                 artifactTitle={builderArtifact?.artifactTitle}
-                onOpenArtifact={builderArtifact ? handleOpenArtifactsPanel : undefined}
+                onOpenArtifact={hasSessionFiles ? handleToggleSessionFilesPanel : undefined}
                 downloadHref={builderArtifact ? builderDownloadHref : undefined}
                 onDownload={builderArtifact ? () => { haptic('medium'); setTimeout(clearBuilderTask, 1500); } : undefined}
                 compact={false}
-                onDismiss={clearBuilderTask}
+                onDismiss={dismissBuilderDeliverable}
                 onCancel={cancelBuilderTask}
                 isCancelling={isCancellingBuilderTask}
               />
@@ -1080,7 +1139,13 @@ function SessionPageContent() {
               className="mb-3 flex justify-center"
               style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
             >
-              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+              <ModeToggle
+                opacity={chromeOpacity}
+                isBusy={isTyping}
+                insight={(!showArtifacts && showArtifactsUi && !builderTask && !builderArtifact && (artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length))
+                  ? { hasArtifacts: true, isNew: hasNewArtifacts, onClick: handleOpenArtifactsPanel }
+                  : undefined}
+              />
             </div>
           )}
           
@@ -1108,7 +1173,13 @@ function SessionPageContent() {
                       className="flex justify-center"
                       style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
                     >
-                      <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                      <ModeToggle
+                        opacity={chromeOpacity}
+                        isBusy={isTyping}
+                        insight={(!showArtifacts && showArtifactsUi && !builderTask && !builderArtifact && (artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length))
+                          ? { hasArtifacts: true, isNew: hasNewArtifacts, onClick: handleOpenArtifactsPanel }
+                          : undefined}
+                      />
                     </div>
                   )
                 : undefined}
@@ -1121,7 +1192,6 @@ function SessionPageContent() {
           <PresenceArtifactPanel
             artifacts={artifacts}
             builderArtifact={builderArtifact}
-            builderArtifactLibrary={builderArtifactLibrary}
             threadId={resolvedThreadId}
             isVisible={showArtifacts && showArtifactsUi}
             onDismiss={handleCloseArtifactsPanel}

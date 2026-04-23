@@ -1,8 +1,12 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { useVisualTier } from '../../hooks/useVisualTier';
+import {
+  getEnhancedFieldBackgroundProfile,
+  shouldSkipTierFrame,
+} from '../../lib/visual-tier-profiles';
 import type { ContextMode } from '../../types/session';
 
 import { sweepLight } from './sweepLight';
@@ -130,7 +134,8 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const mouseRef = useRef({ x: 0.5, y: 0.5 });
   const [themeKind, setThemeKind] = useState<ThemeKind>('dark');
-  const { reducedFidelity, reducedMotion, dprCap } = useVisualTier();
+  const { reducedMotion, dprCap, tier } = useVisualTier();
+  const renderProfile = useMemo(() => getEnhancedFieldBackgroundProfile(tier), [tier]);
 
   useEffect(() => {
     setThemeKind(readThemeKind());
@@ -154,10 +159,21 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    const particles = makeParticles(reducedFidelity ? 84 : 140);
+    const particles = makeParticles(renderProfile.particleCount);
     let raf = 0;
     let width = 0;
     let height = 0;
+    let lastFrameTime = 0;
+
+    const stopLoop = () => {
+      if (raf) {
+        window.cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      lastFrameTime = 0;
+    };
+
+    const isDocumentHidden = () => document.visibilityState === 'hidden';
 
     const currentBg: Rgb = [...THEME_COLORS[themeKind].bg];
     const currentParticle: Rgb = [...THEME_COLORS[themeKind].particle];
@@ -187,6 +203,13 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
     };
 
     const draw = (ts: number) => {
+      if (!reducedMotion && shouldSkipTierFrame(ts, lastFrameTime, renderProfile.frameIntervalMs)) {
+        raf = window.requestAnimationFrame(draw);
+        return;
+      }
+
+      lastFrameTime = ts;
+
       const theme = THEME_COLORS[themeKind];
       const targetPalette = CONTEXT_PALETTES[contextMode];
       const lerpRate = reducedMotion ? 1 : 0.018;
@@ -204,9 +227,21 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
       currentVig = lerp(currentVig, theme.vigStrength, lerpRate);
       currentIntensity = lerp(currentIntensity, theme.nebulaIntensity, lerpRate);
       currentBoost = lerp(currentBoost, theme.nebulaBoost, lerpRate);
-      currentIridescence = lerp(currentIridescence, theme.iridescence, lerpRate);
-      currentCaustics = lerp(currentCaustics, theme.caustics, lerpRate);
-      currentAurora = lerp(currentAurora, theme.auroraStrength, lerpRate);
+      currentIridescence = lerp(
+        currentIridescence,
+        theme.iridescence * renderProfile.iridescenceMultiplier,
+        lerpRate,
+      );
+      currentCaustics = lerp(
+        currentCaustics,
+        theme.caustics * renderProfile.causticsMultiplier,
+        lerpRate,
+      );
+      currentAurora = lerp(
+        currentAurora,
+        theme.auroraStrength * renderProfile.auroraMultiplier,
+        lerpRate,
+      );
       currentParticleIri = lerp(currentParticleIri, theme.particleIridescence, lerpRate);
 
       const cx = width * 0.5;
@@ -417,22 +452,45 @@ export function EnhancedFieldBackground({ contextMode }: { contextMode: ContextM
       }
     };
 
+    const startLoop = () => {
+      if (reducedMotion || raf || isDocumentHidden()) {
+        return;
+      }
+
+      raf = window.requestAnimationFrame(draw);
+    };
+
+    const handleVisibilityChange = () => {
+      if (reducedMotion) {
+        return;
+      }
+
+      if (isDocumentHidden()) {
+        stopLoop();
+        return;
+      }
+
+      startLoop();
+    };
+
     handleResize();
     window.addEventListener('resize', handleResize);
     window.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     if (reducedMotion) {
       draw(0);
     } else {
-      raf = window.requestAnimationFrame(draw);
+      startLoop();
     }
 
     return () => {
+      stopLoop();
       window.removeEventListener('resize', handleResize);
       window.removeEventListener('mousemove', handleMouseMove);
-      window.cancelAnimationFrame(raf);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [contextMode, themeKind, reducedFidelity, reducedMotion, dprCap]);
+  }, [contextMode, dprCap, reducedMotion, renderProfile, themeKind]);
 
   return (
     <canvas

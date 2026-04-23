@@ -49,14 +49,24 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ status: 'discarded' });
       }
 
+      const discardMetadata = {
+        status: 'discarded',
+        ...(body.category ? { category: body.category } : {}),
+        ...(body.session_id ? { session_id: body.session_id } : {}),
+        ...(body.reason ? { reason: body.reason } : {}),
+      };
+
       const backendResponse = await fetchSophiaApi(
         `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(body.original_memory_id)}`,
         {
-          method: 'DELETE',
+          method: 'PUT',
+          body: JSON.stringify({
+            metadata: discardMetadata,
+          }),
         }
       );
 
-      if (backendResponse.status === 204) {
+      if (backendResponse.ok) {
         return NextResponse.json({ status: 'discarded' });
       }
 

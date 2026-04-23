@@ -97,7 +97,11 @@ function getTooltipPosition(
   }
 }
 
-export function OnboardingSpotlight() {
+interface OnboardingSpotlightProps {
+  disabled?: boolean;
+}
+
+export function OnboardingSpotlight({ disabled = false }: OnboardingSpotlightProps) {
   const [active, setActive] = useState(false);
   const [step, setStep] = useState(0);
   const [targetRect, setTargetRect] = useState<Rect | null>(null);
@@ -106,12 +110,17 @@ export function OnboardingSpotlight() {
 
   // Only show on first visit — defer check to avoid SSR mismatch
   useEffect(() => {
+    if (disabled) {
+      setActive(false);
+      return;
+    }
+
     if (!localStorage.getItem(STORAGE_KEY)) {
       // Wait for orbit reveal animations to finish (~1.5s)
       const t = setTimeout(() => setActive(true), 1800);
       return () => clearTimeout(t);
     }
-  }, []);
+  }, [disabled]);
 
   // Measure target element whenever step changes
   useEffect(() => {

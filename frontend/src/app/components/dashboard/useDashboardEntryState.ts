@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useConnectivity } from '../../hooks/useConnectivity';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { haptic } from '../../hooks/useHaptics';
+import { restorePersistedActiveSession } from '../../hooks/useSessionPersistence';
 import { useSessionStart } from '../../hooks/useSessionStart';
 import { fetchBootstrapOpener, type BootstrapOpenerResponse } from '../../lib/api/bootstrap-api';
 import { endSession as endSessionAPI, isSuccess } from '../../lib/api/sessions-api';
@@ -86,7 +87,6 @@ export function useDashboardEntryState() {
   const { containerRef: freshStartModalRef } = useFocusTrap(showFreshStartPrompt);
   const [pendingStart, setPendingStart] = useState<PendingStart | null>(null);
   const [isLaunchingSession, setIsLaunchingSession] = useState(false);
-  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const [showResumeBanner, setShowResumeBanner] = useState(false);
   const [backendActiveSession, setBackendActiveSession] = useState<SessionInfo | null>(null);
   const [bootstrapOpener, setBootstrapOpener] = useState<BootstrapOpenerResponse | null>(null);
@@ -355,10 +355,29 @@ export function useDashboardEntryState() {
     return () => document.removeEventListener('keydown', handleEsc);
   }, [showReplaceSessionConfirm, handleCancelReplaceSession]);
 
+  const resumeExistingSession = useCallback(async () => {
+    const fallbackUserId = resolvedUserId || activeSession?.userId || 'anonymous';
+    const latestActiveSession = backendActiveSession
+      ? { has_active_session: true, session: backendActiveSession }
+      : await checkActiveSession(true, resolvedUserId);
+
+    if (latestActiveSession?.has_active_session && latestActiveSession.session) {
+      await resumeSessionAPI(latestActiveSession.session, fallbackUserId);
+      return;
+    }
+
+    await restorePersistedActiveSession();
+
+    router.push('/session');
+  }, [activeSession, backendActiveSession, checkActiveSession, resolvedUserId, resumeSessionAPI, router]);
+
   const handleContinueSession = useCallback(() => {
     haptic('light');
-    router.push('/session');
-  }, [router]);
+    setIsLaunchingSession(true);
+    void resumeExistingSession().finally(() => {
+      setIsLaunchingSession(false);
+    });
+  }, [resumeExistingSession]);
 
   const handleDismissResumeBanner = useCallback(() => {
     haptic('light');
@@ -367,19 +386,13 @@ export function useDashboardEntryState() {
 
   const handleResumeBanner = useCallback(async () => {
     haptic('light');
-
-    if (backendActiveSession) {
-      setIsLaunchingSession(true);
-      try {
-        await resumeSessionAPI(backendActiveSession, resolvedUserId || 'anonymous');
-      } finally {
-        setIsLaunchingSession(false);
-      }
-      return;
+    setIsLaunchingSession(true);
+    try {
+      await resumeExistingSession();
+    } finally {
+      setIsLaunchingSession(false);
     }
-
-    router.push('/session');
-  }, [backendActiveSession, resumeSessionAPI, resolvedUserId, router]);
+  }, [resumeExistingSession]);
 
   const buildFreshStartSeed = useCallback((): FreshStartSeed => ({
     userId: resolvedUserId || 'anonymous',
@@ -550,8 +563,6 @@ export function useDashboardEntryState() {
     sessionSummary,
     isLaunchingSession,
     isStartingSession,
-    showSettingsDrawer,
-    setShowSettingsDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     showFreshStartPrompt,

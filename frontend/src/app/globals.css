@@ -1044,15 +1044,6 @@ a {
   }
 }
 
-@keyframes insightPulse {
-  0%, 100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--sophia-purple) 30%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 16px 4px color-mix(in srgb, var(--sophia-purple) 20%, transparent);
-  }
-}
-
 @keyframes waveform {
   0% { transform: scaleY(0.4); }
   100% { transform: scaleY(1); }
@@ -1909,6 +1900,14 @@ html[data-visual-tier="1"] .animate-pulse-gentle {
 html[data-visual-tier="1"] *:not(.animate-spin):not(.animate-pulse) {
   animation-duration: 0.3s !important;
   transition-duration: 0.15s !important;
+}
+
+/* Free VRAM on low-end devices: stop every element from holding a GPU
+   promotion for transforms/opacity it no longer animates. will-change is a
+   hint to the compositor — at Tier 1 we've killed most of those animations
+   above, so the hint is pure overhead. */
+html[data-visual-tier="1"] * {
+  will-change: auto !important;
 }
 
 /* --- Message bubble fidelity adaptations -------------------------------- */

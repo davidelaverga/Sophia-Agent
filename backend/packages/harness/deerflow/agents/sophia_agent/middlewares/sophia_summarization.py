@@ -15,13 +15,14 @@ from __future__ import annotations
 import json
 import logging
 import time
-import uuid
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, RemoveMessage, ToolMessage
+from langchain_core.messages import AnyMessage, HumanMessage, RemoveMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 # Legacy summary prefix used by LangChain's default SummarizationMiddleware.
 # Older checkpointer state may contain HumanMessages with this prefix that
@@ -40,8 +41,6 @@ def _is_legacy_summary_message(msg: AnyMessage) -> bool:
         return False
     content = msg.content.lstrip()
     return any(content.startswith(p) for p in _LEGACY_SUMMARY_PREFIXES)
-
-from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 

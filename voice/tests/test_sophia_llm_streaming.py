@@ -900,3 +900,56 @@ async def test_validate_artifact_normalizes_stuck_loop_language_to_challenging_p
     assert artifact["voice_emotion_primary"] == "determined"
     assert artifact["voice_emotion_secondary"] in {"curious", "calm"}
     assert artifact["voice_speed"] == "normal"
+
+
+@pytest.mark.anyio
+async def test_validate_artifact_fills_missing_calibration_fields() -> None:
+    """Regression: 2026-04-21 session 12207dab had 4 turns fail with
+    `backend-contract: missing required fields: active_tone_band, reflection,
+    ritual_phase, skill_loaded, tone_estimate, tone_target`. Haiku emits the
+    tool call but occasionally drops calibration metadata on long responses.
+    Failing the whole turn cut TTS mid-sentence; the adapter now fills
+    neutrals so the turn completes and the next artifact can recalibrate.
+    """
+    llm = SophiaLLM(make_settings())
+
+    partial_artifact: dict[str, object] = {
+        "session_goal": "Keep the user grounded.",
+        "active_goal": "Answer the reciprocity question honestly.",
+        "next_step": "Listen for the next user turn.",
+        "takeaway": "The user pushed back on the one-way dynamic.",
+    }
+
+    artifact = llm._validate_artifact(
+        partial_artifact,
+        response_text="That's a real question. I'll answer honestly.",
+        user_text="Would you like to have a continuous memory?",
+    )
+
+    # Calibration fields were filled.
+    assert artifact["tone_estimate"] == 2.5
+    assert artifact["tone_target"] == 3.0
+    assert artifact["skill_loaded"] in {"active_listening", "trust_building"}
+    assert artifact["active_tone_band"] == "engagement"
+    assert artifact["ritual_phase"] is None
+    # Voice delivery fields were filled.
+    assert "voice_emotion_primary" in artifact
+    assert "voice_emotion_secondary" in artifact
+    assert "voice_speed" in artifact
+    # reflection is nullable per CLAUDE.md — never required.
+    assert artifact.get("reflection") is None
+
+
+@pytest.mark.anyio
+async def test_validate_artifact_still_rejects_structural_gaps() -> None:
+    """Structural fields (session_goal, takeaway, next_step, active_goal)
+    indicate the backend never produced a coherent turn. Missing them must
+    still fail loudly so we do not silently ship empty companion turns.
+    """
+    llm = SophiaLLM(make_settings())
+
+    with pytest.raises(BackendStageError) as exc:
+        llm._validate_artifact({"tone_estimate": 2.0, "tone_target": 2.5})
+
+    assert exc.value.stage == "backend-contract"
+    assert "session_goal" in str(exc.value)

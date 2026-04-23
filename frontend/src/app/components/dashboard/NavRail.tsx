@@ -4,6 +4,11 @@
  * Borderless, transparent overlay — lets the cosmic background breathe through.
  * Follows the same text-first / sweep-light design language as DashboardSidebar.
  *
+ * Ownership contract:
+ * - NavRail owns the compact navigation entry points.
+ * - The desktop Sessions icon is the only collapsed trigger for opening session history.
+ * - DashboardSidebar owns the expanded sessions content once that trigger is opened.
+ *
  * Desktop: 56px fixed rail on the left edge with icon tooltips
  * Mobile: bottom bar with icon + label (like native iOS tab bar)
  */

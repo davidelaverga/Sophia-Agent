@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import HTTPException, Request
@@ -13,6 +14,8 @@ from deerflow.agents.sophia_agent.utils import validate_user_id
 logger = logging.getLogger(__name__)
 
 AUTH_ME_TIMEOUT_SECONDS = 5.0
+_AUTH_BACKEND_OVERRIDE_HEADER = "x-sophia-auth-backend-url"
+_LOOPBACK_AUTH_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
 def _is_explicit_bypass_enabled() -> bool:
@@ -24,7 +27,30 @@ def _get_bypass_user_id() -> str:
     return (os.getenv("SOPHIA_USER_ID") or "local-dev-user").strip()
 
 
-def _get_legacy_auth_base_url() -> str:
+def _normalize_loopback_auth_base_url(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+
+    trimmed = value.strip().rstrip("/")
+    if not trimmed:
+        return None
+
+    parsed = urlparse(trimmed)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+
+    if parsed.hostname not in _LOOPBACK_AUTH_HOSTS:
+        return None
+
+    return trimmed
+
+
+def _get_legacy_auth_base_url(request: Request | None = None) -> str:
+    if request is not None:
+        override_url = _normalize_loopback_auth_base_url(request.headers.get(_AUTH_BACKEND_OVERRIDE_HEADER))
+        if override_url is not None:
+            return override_url
+
     return (
         os.getenv("SOPHIA_AUTH_BACKEND_URL")
         or os.getenv("BACKEND_API_URL")
@@ -41,8 +67,8 @@ def _extract_bearer_token(request: Request) -> str:
     return token.strip()
 
 
-async def _get_authenticated_user(token: str) -> dict:
-    auth_url = f"{_get_legacy_auth_base_url()}/api/v1/auth/me"
+async def _get_authenticated_user(token: str, request: Request) -> dict:
+    auth_url = f"{_get_legacy_auth_base_url(request)}/api/v1/auth/me"
 
     try:
         async with httpx.AsyncClient(timeout=AUTH_ME_TIMEOUT_SECONDS) as client:
@@ -105,7 +131,7 @@ async def require_authorized_user_scope(request: Request) -> str:
         return user_id
 
     token = _extract_bearer_token(request)
-    authenticated_user = await _get_authenticated_user(token)
+    authenticated_user = await _get_authenticated_user(token, request)
     authenticated_user_id = authenticated_user["id"].strip()
 
     if authenticated_user_id != user_id:

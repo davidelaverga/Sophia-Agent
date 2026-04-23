@@ -18,8 +18,8 @@ interface Spark {
   depth: number
 }
 
-const SPARK_COUNT = 200
-const SPARK_COUNT_MOBILE = 120
+const DEFAULT_SPARK_COUNT = 200
+const DEFAULT_SPEAKING_BURST_COUNT = 4
 
 function createSparks(w: number, h: number, count: number): Spark[] {
   const sparks: Spark[] = []
@@ -47,15 +47,20 @@ function lerp(a: number, b: number, t: number): number {
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
-export function useSparkCanvas({ reducedFidelity = false }: { reducedFidelity?: boolean } = {}) {
+export function useSparkCanvas({
+  sparkCount = DEFAULT_SPARK_COUNT,
+  speakingBurstCount = DEFAULT_SPEAKING_BURST_COUNT,
+}: {
+  sparkCount?: number
+  speakingBurstCount?: number
+} = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const sparksRef = useRef<Spark[]>([])
   const lastBurstRef = useRef(0)
 
   const init = useCallback((w: number, h: number) => {
-    const count = reducedFidelity ? SPARK_COUNT_MOBILE : SPARK_COUNT
-    sparksRef.current = createSparks(w, h, count)
-  }, [reducedFidelity])
+    sparksRef.current = createSparks(w, h, sparkCount)
+  }, [sparkCount])
 
   const resize = useCallback((w: number, h: number) => {
     const canvas = canvasRef.current
@@ -68,10 +73,9 @@ export function useSparkCanvas({ reducedFidelity = false }: { reducedFidelity?: 
       if (s.y > h) s.y = Math.random() * h
     }
     if (sparksRef.current.length === 0) {
-      const count = reducedFidelity ? SPARK_COUNT_MOBILE : SPARK_COUNT
-      sparksRef.current = createSparks(w, h, count)
+      sparksRef.current = createSparks(w, h, sparkCount)
     }
-  }, [reducedFidelity])
+  }, [sparkCount])
 
   const render = useCallback(
     (
@@ -98,7 +102,7 @@ export function useSparkCanvas({ reducedFidelity = false }: { reducedFidelity?: 
       // Speaking rhythm — periodic spark bursts near center
       if (isSpeaking && time - lastBurstRef.current > 0.6) {
         lastBurstRef.current = time
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < speakingBurstCount; i++) {
           const idx = Math.floor(Math.random() * sparks.length)
           const s = sparks[idx]
           s.x = w * 0.5 + (Math.random() - 0.5) * w * 0.3
@@ -191,7 +195,7 @@ export function useSparkCanvas({ reducedFidelity = false }: { reducedFidelity?: 
 
       ctx.globalCompositeOperation = "source-over"
     },
-    []
+    [speakingBurstCount]
   )
 
   return { canvasRef, init, resize, render }

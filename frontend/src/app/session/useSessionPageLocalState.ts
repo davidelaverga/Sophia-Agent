@@ -11,6 +11,7 @@ export function useSessionPageLocalState({
 
   const [input, setInput] = useState('');
   const [showArtifacts, setShowArtifacts] = useState(false);
+  const [showSessionFiles, setShowSessionFiles] = useState(false);
   const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
   const [userOpenedArtifacts, setUserOpenedArtifacts] = useState(false);
   const [justSent, setJustSent] = useState(false);
@@ -25,6 +26,7 @@ export function useSessionPageLocalState({
   useEffect(() => {
     setUserOpenedArtifacts(false);
     setShowArtifacts(false);
+    setShowSessionFiles(false);
     setMobileDrawerOpen(false);
   }, [sessionId]);
 
@@ -34,6 +36,8 @@ export function useSessionPageLocalState({
     setInput,
     showArtifacts,
     setShowArtifacts,
+    showSessionFiles,
+    setShowSessionFiles,
     mobileDrawerOpen,
     setMobileDrawerOpen,
     userOpenedArtifacts,

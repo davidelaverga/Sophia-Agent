@@ -1,9 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-import { getUserScopedAuthToken, getAuthenticatedUserId } from '../../../../../lib/auth/server-auth';
-import { getPrimaryGatewayUrl } from '../../../../_lib/gateway-url';
-
-const BACKEND_URL = getPrimaryGatewayUrl();
+import { fetchSophiaApi, resolveSophiaUserId } from '../../../../_lib/sophia';
 
 export async function POST(
   _request: NextRequest,
@@ -15,21 +12,15 @@ export async function POST(
     return NextResponse.json({ error: 'Task ID is required' }, { status: 400 });
   }
 
-  const [userId, apiKey] = await Promise.all([
-    getAuthenticatedUserId(),
-    getUserScopedAuthToken(),
-  ]);
+  const userId = await resolveSophiaUserId();
 
-  if (!userId || !apiKey) {
+  if (!userId) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
   try {
-    const response = await fetch(`${BACKEND_URL}/api/sophia/${userId}/tasks/${taskId}/cancel`, {
+    const response = await fetchSophiaApi(`/api/sophia/${encodeURIComponent(userId)}/tasks/${encodeURIComponent(taskId)}/cancel`, {
       method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
       cache: 'no-store',
     });
 

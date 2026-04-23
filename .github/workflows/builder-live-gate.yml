@@ -1,0 +1,171 @@
+name: Builder Live Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Which live builder suite to run
+        required: true
+        type: choice
+        default: stress
+        options:
+          - stress
+          - soak
+          - both
+  schedule:
+    - cron: '0 13 * * 1-5'
+    - cron: '0 15 * * 1'
+
+concurrency:
+  group: builder-live-gate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  builder-live-stress:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && (inputs.mode == 'stress' || inputs.mode == 'both'))
+      ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 13 * * 1-5')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      BUILDER_STRESS_LOG_PATH: ../logs/langgraph.log
+      BUILDER_STRESS_REQUESTS: '8'
+      BUILDER_STRESS_MAX_IN_FLIGHT: '4'
+      BUILDER_STRESS_PAGE_COUNT: '4'
+      BUILDER_LIVE_VALIDATE_QUALITY: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies
+        run: uv sync --group dev
+
+      - name: Validate required secrets
+        run: test -n "$ANTHROPIC_API_KEY"
+
+      - name: Start LangGraph
+        run: |
+          mkdir -p ../logs
+          BG_JOB_ISOLATED_LOOPS=true uv run langgraph dev --no-browser --allow-blocking --no-reload --n-jobs-per-worker 4 > ../logs/langgraph.log 2>&1 &
+          echo $! > ../logs/langgraph.pid
+
+      - name: Wait for LangGraph
+        working-directory: .
+        run: bash ./scripts/wait-for-port.sh 2024 90 LangGraph
+
+      - name: Run live builder stress gate
+        run: make test-live-builder-stress
+        env:
+          RUN_LIVE_BUILDER_STRESS: '1'
+
+      - name: Upload stress artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-live-stress-${{ github.run_id }}
+          path: |
+            logs/langgraph.log
+            users/builder-stress-*/builder_tasks/*.json
+            backend/.deer-flow/threads/**/user-data/outputs/**
+          if-no-files-found: ignore
+
+      - name: Stop LangGraph
+        if: always()
+        run: |
+          if [ -f ../logs/langgraph.pid ]; then
+            kill "$(cat ../logs/langgraph.pid)" || true
+          fi
+
+  builder-live-soak:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && (inputs.mode == 'soak' || inputs.mode == 'both'))
+      ||
+      (github.event_name == 'schedule' && github.event.schedule == '0 15 * * 1')
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    defaults:
+      run:
+        working-directory: backend
+
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+      BUILDER_STRESS_LOG_PATH: ../logs/langgraph.log
+      BUILDER_SOAK_REQUESTS: '18'
+      BUILDER_SOAK_MAX_IN_FLIGHT: '4'
+      BUILDER_SOAK_PDF_PAGE_COUNT: '4'
+      BUILDER_LIVE_VALIDATE_QUALITY: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install backend dependencies
+        run: uv sync --group dev
+
+      - name: Validate required secrets
+        run: test -n "$ANTHROPIC_API_KEY"
+
+      - name: Start LangGraph
+        run: |
+          mkdir -p ../logs
+          BG_JOB_ISOLATED_LOOPS=true uv run langgraph dev --no-browser --allow-blocking --no-reload --n-jobs-per-worker 4 > ../logs/langgraph.log 2>&1 &
+          echo $! > ../logs/langgraph.pid
+
+      - name: Wait for LangGraph
+        working-directory: .
+        run: bash ./scripts/wait-for-port.sh 2024 90 LangGraph
+
+      - name: Run live builder mixed-format soak
+        run: make test-live-builder-soak
+        env:
+          RUN_LIVE_BUILDER_SOAK: '1'
+
+      - name: Upload soak artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-live-soak-${{ github.run_id }}
+          path: |
+            logs/langgraph.log
+            users/builder-soak-*/builder_tasks/*.json
+            backend/.deer-flow/threads/**/user-data/outputs/**
+          if-no-files-found: ignore
+
+      - name: Stop LangGraph
+        if: always()
+        run: |
+          if [ -f ../logs/langgraph.pid ]; then
+            kill "$(cat ../logs/langgraph.pid)" || true
+          fi
