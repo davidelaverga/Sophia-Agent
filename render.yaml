@@ -45,8 +45,15 @@ services:
           name: sophia-gateway
           type: web
           property: url
+      # NOTE: the secret is generated on the gateway (see below) and
+      # referenced here via fromService.envVarKey so both services
+      # authenticate against an identical value. Do NOT use generateValue
+      # here — Render would produce a different random string per service.
       - key: SOPHIA_INTERNAL_SECRET
-        generateValue: true
+        fromService:
+          name: sophia-gateway
+          type: web
+          envVarKey: SOPHIA_INTERNAL_SECRET
 
   # ─────────────────────────────────────────────────────────────────
   # 2. Gateway API (REST + SSE proxy)
@@ -89,13 +96,11 @@ services:
         value: /var/lib/deerflow
       - key: VOICE_SERVER_URL
         sync: false
+      # Canonical generator for SOPHIA_INTERNAL_SECRET. sophia-langgraph
+      # pulls the same value via fromService.envVarKey above so both
+      # services authenticate against an identical shared secret.
       - key: SOPHIA_INTERNAL_SECRET
         generateValue: true
-
-  # NOTE: SOPHIA_INTERNAL_SECRET is generated on the gateway and consumed
-  # by sophia-langgraph via the fromService reference above. Do NOT set
-  # it manually or via env group — the generated value must be identical
-  # on both sides.
 
   # ─────────────────────────────────────────────────────────────────
   # 3. Voice Server (Vision Agents — STT + TTS + WebRTC)

@@ -617,12 +617,62 @@ def build_background_task_status_payload(result: SubagentResult) -> dict[str, An
     }
 
 
+_TERMINAL_SUBAGENT_STATUSES = {
+    SubagentStatus.COMPLETED,
+    SubagentStatus.FAILED,
+    SubagentStatus.TIMED_OUT,
+    SubagentStatus.CANCELLED,
+}
+
+
+def _maybe_notify_gateway_of_terminal(result: SubagentResult) -> None:
+    """Push a terminal status snapshot to the Gateway's internal registry.
+
+    Best-effort bridge for Render's split-process topology: the Gateway's
+    channel notifier cannot see subagent results in the LangGraph process,
+    so terminal transitions are mirrored over HTTP. No-op when the
+    ``SOPHIA_GATEWAY_INTERNAL_URL`` / ``SOPHIA_INTERNAL_SECRET`` env vars
+    are absent (single-process / local dev), and any exception is
+    swallowed so subagent execution never regresses on notify failures.
+    """
+    if result.status not in _TERMINAL_SUBAGENT_STATUSES:
+        return
+    try:
+        from deerflow.sophia.storage import gateway_notify
+
+        if not gateway_notify.is_configured():
+            return
+
+        builder_result = _extract_builder_result_from_task_result(result)
+        payload: dict[str, Any] = {
+            "task_id": result.task_id,
+            "status": result.status.value,
+            "error": result.error,
+            "error_type": result.error_type,
+            "trace_id": result.trace_id,
+            "owner_id": result.owner_id,
+            "completed_at": _iso_or_none(result.completed_at),
+            "started_at": _iso_or_none(result.started_at),
+            "timed_out_at": _iso_or_none(result.timed_out_at),
+            "builder_result": builder_result,
+        }
+        gateway_notify.notify_builder_task_status(result.task_id, payload)
+    except Exception:  # noqa: BLE001 — must never break subagent execution
+        logger.warning(
+            "Gateway notify (terminal push) failed for task_id=%s",
+            result.task_id,
+            exc_info=True,
+        )
+
+
 def persist_background_task_status_payload(result: SubagentResult) -> None:
     if not result.owner_id:
+        _maybe_notify_gateway_of_terminal(result)
         return
 
     snapshot_path = _background_task_snapshot_path(result.owner_id, result.task_id)
     if snapshot_path is None:
+        _maybe_notify_gateway_of_terminal(result)
         return
 
     try:
@@ -633,6 +683,8 @@ def persist_background_task_status_payload(result: SubagentResult) -> None:
         temp_path.replace(snapshot_path)
     except Exception:
         logger.warning("Failed to persist background task snapshot for %s", result.task_id, exc_info=True)
+
+    _maybe_notify_gateway_of_terminal(result)
 
 
 def read_background_task_status_payload(user_id: str, task_id: str) -> dict[str, Any] | None:

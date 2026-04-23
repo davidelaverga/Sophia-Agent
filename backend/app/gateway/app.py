@@ -13,6 +13,7 @@ from app.gateway.routers import (
     bootstrap,
     channels,
     internal_artifacts,
+    internal_builder_tasks,
     mcp,
     memory,
     models,
@@ -218,6 +219,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Only active when SOPHIA_INTERNAL_SECRET is set (Render split-disk topology).
     if internal_artifacts._load_secret():
         app.include_router(internal_artifacts.router)
+        # Companion internal registry — terminal builder-task status
+        # snapshots pushed from the LangGraph subagent executor so the
+        # channel notifier can observe completion across processes.
+        app.include_router(internal_builder_tasks.router)
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)

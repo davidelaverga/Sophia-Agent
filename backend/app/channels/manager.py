@@ -19,6 +19,7 @@ from app.channels.base import InboundFileReader
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.session_resolver import resolve_channel_session
 from app.channels.store import ChannelStore
+from app.gateway.routers.internal_builder_tasks import get_pushed_builder_task
 from deerflow.config.paths import get_paths
 from deerflow.sophia.tools.builder_delivery import (
     build_builder_delivery_payload,
@@ -437,6 +438,34 @@ def _extract_builder_result_payload(task_result: Any) -> dict[str, Any] | None:
                     return args
     return None
 
+
+class _PushedTaskView:
+    """Adapter that makes a pushed builder-task status dict quack like a
+    ``SubagentResult`` for the fields that ``_run_builder_notifier``
+    inspects. Pre-extracted ``builder_result`` is surfaced via
+    ``final_state`` so ``_extract_builder_result_payload`` works without
+    changes. See ``internal_builder_tasks`` + ``gateway_notify`` for the
+    push side of this contract.
+    """
+
+    __slots__ = ("status", "error", "final_state", "ai_messages", "completed_at", "_payload")
+
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self._payload = payload
+        self.status = payload.get("status")
+        self.error = payload.get("error")
+        builder_result = payload.get("builder_result")
+        self.final_state = (
+            {"builder_result": builder_result}
+            if isinstance(builder_result, dict) and builder_result
+            else None
+        )
+        self.ai_messages = []
+        self.completed_at = payload.get("completed_at")
+
+
+def _pushed_task_view(pushed: dict[str, Any]) -> _PushedTaskView:
+    return _PushedTaskView(pushed)
 
 
 def _extract_builder_artifacts(builder_result: dict[str, Any]) -> list[str]:
@@ -1192,7 +1221,15 @@ class ChannelManager:
         started_at = time.monotonic()
         while self._running and (time.monotonic() - started_at) <= BUILDER_NOTIFIER_MAX_WAIT_SECONDS:
             await asyncio.sleep(BUILDER_NOTIFIER_POLL_INTERVAL_SECONDS)
-            task_result = get_background_task_result(task_id)
+            # Prefer the pushed registry populated by LangGraph's subagent
+            # executor over the Gateway's in-memory _background_tasks dict.
+            # In Render's split-process topology the dict is always empty
+            # here (the subagent ran inside LangGraph), so the local lookup
+            # would never observe terminal status. Single-process (local
+            # dev, docker-compose) falls back to get_background_task_result
+            # and keeps the existing behavior.
+            pushed = get_pushed_builder_task(task_id)
+            task_result = _pushed_task_view(pushed) if pushed is not None else get_background_task_result(task_id)
             if task_result is None:
                 continue
 
