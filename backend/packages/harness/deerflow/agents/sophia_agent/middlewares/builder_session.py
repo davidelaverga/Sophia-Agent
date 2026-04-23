@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
 from deerflow.subagents.executor import (
     SubagentStatus,
     build_subagent_progress_payload,
@@ -454,6 +455,12 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     snap_builder_result = snapshot_payload.get("builder_result")
                     if snap_status == "completed" and isinstance(snap_builder_result, dict):
                         updates["builder_result"] = snap_builder_result
+                        _thread_id = self._resolve_thread_id(runtime)
+                        if _thread_id:
+                            updates["builder_delivery"] = build_builder_delivery_payload(
+                                thread_id=_thread_id,
+                                builder_result=snap_builder_result,
+                            )
                     if snap_status != "completed":
                         blocks.append(self._failure_block(recovered_task))
                     recovered_from_snapshot = True
@@ -488,6 +495,12 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     updates["builder_task"] = completed_task
                     updates["builder_result"] = self._extract_builder_result(result)
                     updates["active_mode"] = "companion"
+                    _thread_id = self._resolve_thread_id(runtime)
+                    if _thread_id and updates.get("builder_result"):
+                        updates["builder_delivery"] = build_builder_delivery_payload(
+                            thread_id=_thread_id,
+                            builder_result=updates["builder_result"],
+                        )
                     cleanup_background_task(task_id)
                 else:
                     failed_task = {

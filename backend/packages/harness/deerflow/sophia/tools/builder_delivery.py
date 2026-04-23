@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from deerflow.config.paths import get_paths
+from deerflow.sophia.storage import supabase_artifact_store
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,55 @@ def build_builder_delivery_payload(
                 logger.warning("[BuilderDelivery] resolved path escaped outputs dir: %s -> %s", virtual_path, actual)
                 continue
             if not actual.is_file():
+                # Supabase fallback for split-process topologies (e.g. Render)
+                # where the builder wrote the file on the LangGraph host and the
+                # Gateway host cannot see the local disk.
+                relative = virtual_path.removeprefix(OUTPUTS_VIRTUAL_PREFIX).lstrip("/")
+                supabase_result = None
+                if supabase_artifact_store.is_configured() and relative:
+                    try:
+                        supabase_result = supabase_artifact_store.download_artifact(
+                            thread_id=thread_id,
+                            filename=relative,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[BuilderDelivery] Supabase fallback failed for %s",
+                            virtual_path,
+                            exc_info=True,
+                        )
+                if supabase_result is not None:
+                    content, supabase_mime = supabase_result
+                    size = len(content)
+                    if size > max_inline_bytes:
+                        logger.warning(
+                            "[BuilderDelivery] skipping %s (%d bytes > %d inline limit)",
+                            virtual_path,
+                            size,
+                            max_inline_bytes,
+                        )
+                        continue
+                    mime_type = (
+                        supabase_mime
+                        or mimetypes.guess_type(relative)[0]
+                        or "application/octet-stream"
+                    )
+                    attachments.append(
+                        {
+                            "virtual_path": virtual_path,
+                            "filename": Path(relative).name,
+                            "mime_type": mime_type,
+                            "size": size,
+                            "is_image": mime_type.startswith("image/"),
+                            "content_base64": base64.b64encode(content).decode("ascii"),
+                        }
+                    )
+                    logger.info(
+                        "[BuilderDelivery] Supabase fallback succeeded: %s (%d bytes)",
+                        virtual_path,
+                        size,
+                    )
+                    continue
                 logger.warning("[BuilderDelivery] artifact not found on disk: %s -> %s", virtual_path, actual)
                 continue
             size = actual.stat().st_size

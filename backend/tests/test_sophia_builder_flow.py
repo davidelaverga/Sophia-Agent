@@ -1,5 +1,6 @@
 """End-to-end regression tests for Sophia builder handoff flow."""
 
+import base64
 import importlib
 import json
 import tempfile
@@ -1450,3 +1451,157 @@ def test_builder_chain_includes_dangling_tool_call_middleware(monkeypatch):
         "DanglingToolCallMiddleware must run after PromptAssemblyMiddleware "
         f"in the builder chain; got order={middleware_types}"
     )
+
+
+def test_builder_session_emits_delivery_on_completed(monkeypatch):
+    """When the background task reports COMPLETED, BuilderSessionMiddleware
+    must also set ``builder_delivery`` so the channel manager can attach
+    the artifact inline on the next ``runs.wait`` turn."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    class _FakeSubagentStatus:
+        PENDING = "pending"
+        RUNNING = "running"
+        COMPLETED = "completed"
+
+    task_id = "task-delivery-1"
+    handoff_payload = {
+        "type": "builder_handoff",
+        "status": "queued",
+        "task_id": task_id,
+        "trace_id": "trace-d1",
+        "builder_task": {
+            "task_id": task_id,
+            "description": "Build doc",
+            "status": "queued",
+            "delegated_at": "2026-04-09T00:00:00Z",
+        },
+    }
+    ai_msg = AIMessage(
+        content="Delegating",
+        tool_calls=[{"id": "tool-d1", "name": "switch_to_builder", "args": {}}],
+    )
+    tool_msg = ToolMessage(
+        content=json.dumps(handoff_payload), tool_call_id="tool-d1", name="switch_to_builder"
+    )
+    state: dict = {"messages": [ai_msg, tool_msg], "system_prompt_blocks": []}
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-d1"}
+
+    completed_result = SimpleNamespace(
+        task_id=task_id,
+        trace_id="trace-d1",
+        status=_FakeSubagentStatus.COMPLETED,
+        result="done",
+        completed_at=datetime.now(),
+        error=None,
+        ai_messages=[],
+        final_state={
+            "builder_result": {
+                "artifact_path": "outputs/doc.md",
+                "artifact_type": "document",
+                "artifact_title": "Doc",
+                "companion_summary": "Done.",
+                "confidence": 0.9,
+            }
+        },
+    )
+
+    delivery_payload = {
+        "source": "builder_result",
+        "attachments": [
+            {
+                "virtual_path": "/mnt/user-data/outputs/doc.md",
+                "filename": "doc.md",
+                "mime_type": "text/markdown",
+                "size": 8,
+                "is_image": False,
+                "content_base64": base64.b64encode(b"content").decode("ascii"),
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.SubagentStatus",
+        _FakeSubagentStatus,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: completed_result,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.cleanup_background_task",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.build_builder_delivery_payload",
+        lambda *, thread_id, builder_result: delivery_payload,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    assert state["builder_task"]["status"] == "completed"
+    assert state["builder_delivery"] == delivery_payload
+
+
+def test_builder_session_emits_delivery_on_snapshot_recovery(monkeypatch):
+    """When recovering a COMPLETED task from the on-disk snapshot,
+    BuilderSessionMiddleware must also build ``builder_delivery``."""
+    task_id = "task-snap-delivery"
+    state = _make_handoff_state(task_id, "trace-snap-d", user_id="user_abc")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-snap-d"}
+
+    builder_result = {
+        "artifact_path": "outputs/report.pdf",
+        "artifact_type": "document",
+        "artifact_title": "Report",
+        "companion_summary": "Recovered.",
+        "confidence": 0.85,
+    }
+    snapshot_payload = {
+        "task_id": task_id,
+        "status": "completed",
+        "trace_id": "trace-snap-d",
+        "builder_result": builder_result,
+    }
+
+    delivery_payload = {
+        "source": "builder_result",
+        "attachments": [
+            {
+                "virtual_path": "/mnt/user-data/outputs/report.pdf",
+                "filename": "report.pdf",
+                "mime_type": "application/pdf",
+                "size": 1024,
+                "is_image": False,
+                "content_base64": base64.b64encode(b"pdf").decode("ascii"),
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.read_background_task_status_payload",
+        lambda _user_id, _task_id: snapshot_payload,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.build_builder_delivery_payload",
+        lambda *, thread_id, builder_result: delivery_payload,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    assert state["builder_task"]["status"] == "completed"
+    assert state["builder_result"] == builder_result
+    assert state["builder_delivery"] == delivery_payload

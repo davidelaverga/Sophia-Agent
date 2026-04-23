@@ -138,3 +138,13 @@ def mirror_artifact(
             len(content),
         )
     return ok
+
+
+# Startup diagnostic — makes Render env-var propagation immediately observable.
+_startup_cfg = _load_config()
+logger.info(
+    "gateway_mirror startup: configured=%s base_url=%s secret=%s",
+    _startup_cfg is not None,
+    getattr(_startup_cfg, "base_url", None),
+    "set" if (_startup_cfg is not None and getattr(_startup_cfg, "secret", None)) else "missing",
+)
