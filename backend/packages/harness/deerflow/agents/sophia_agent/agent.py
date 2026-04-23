@@ -30,6 +30,9 @@ from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssem
 from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
 from deerflow.agents.sophia_agent.middlewares.session_state import SessionStateMiddleware
 from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+from deerflow.agents.sophia_agent.middlewares.sophia_summarization import (
+    SophiaSummarizationMiddleware as SummarizationMiddleware,
+)
 from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
@@ -48,8 +51,6 @@ logger = logging.getLogger(__name__)
 
 def _create_summarization_middleware():
     """Create a SophiaSummarizationMiddleware instance from app config."""
-    from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
-
     config = get_summarization_config()
     if not config.enabled:
         return None
@@ -73,7 +74,7 @@ def _create_summarization_middleware():
     if config.summary_prompt is not None:
         kwargs["summary_prompt"] = config.summary_prompt
 
-    return SophiaSummarizationMiddleware(**kwargs)
+    return SummarizationMiddleware(**kwargs)
 
 
 def make_sophia_agent(config: RunnableConfig):
