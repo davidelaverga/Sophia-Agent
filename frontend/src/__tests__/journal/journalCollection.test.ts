@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { isJournalFavorite } from '@/app/lib/journal'
 import { buildConstellationEntries, isFavoriteMetadata } from '@/app/journal/journalCollection'
+import { isJournalFavorite } from '@/app/lib/journal'
 
 describe('journalCollection helpers', () => {
   it('detects favorite metadata consistently', () => {

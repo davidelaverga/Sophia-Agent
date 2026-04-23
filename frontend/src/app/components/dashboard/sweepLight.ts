@@ -6,7 +6,13 @@
  * illumination and shadow angle without triggering React re-renders.
  */
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
+
+import { useVisualTier } from '../../hooks/useVisualTier';
+import {
+  getCelestialCometProfile,
+  shouldSkipTierFrame,
+} from '../../lib/visual-tier-profiles';
 
 /* ─── Global light state (no React, no re-renders) ─────────── */
 
@@ -18,6 +24,50 @@ export const sweepLight = {
   /** Registered UI element occluders — shader blocks rays through these */
   occluders: [] as Array<{ cx: number; cy: number; r: number }>,
 };
+
+type SweepLightActiveListener = (isActive: boolean) => void;
+
+const sweepLightActiveListeners = new Set<SweepLightActiveListener>();
+
+export function isSweepLightVisible() {
+  return sweepLight.active && sweepLight.intensity > 0.01;
+}
+
+function notifySweepLightActiveListeners(isActive: boolean) {
+  sweepLightActiveListeners.forEach((listener) => listener(isActive));
+}
+
+export function subscribeSweepLightActive(listener: SweepLightActiveListener) {
+  sweepLightActiveListeners.add(listener);
+  return () => {
+    sweepLightActiveListeners.delete(listener);
+  };
+}
+
+export function publishSweepLightFrame(x: number, y: number, intensity: number) {
+  const wasActive = isSweepLightVisible();
+  const nextActive = intensity > 0.01;
+
+  sweepLight.x = x;
+  sweepLight.y = y;
+  sweepLight.active = nextActive;
+  sweepLight.intensity = intensity;
+
+  if (wasActive !== nextActive) {
+    notifySweepLightActiveListeners(nextActive);
+  }
+}
+
+export function clearSweepLight() {
+  const wasActive = isSweepLightVisible();
+
+  sweepLight.active = false;
+  sweepLight.intensity = 0;
+
+  if (wasActive) {
+    notifySweepLightActiveListeners(false);
+  }
+}
 
 /* ─── Hook: directional glow for any element ────────────────── */
 
@@ -33,6 +83,8 @@ export const sweepLight = {
  */
 export function useSweepGlow() {
   const elRef = useRef<HTMLElement>(null);
+  const { tier, reducedMotion } = useVisualTier();
+  const renderProfile = useMemo(() => getCelestialCometProfile(tier), [tier]);
 
   useEffect(() => {
     const el = elRef.current;
@@ -40,31 +92,54 @@ export function useSweepGlow() {
 
     let raf = 0;
     let lastGlow = -1;
+    let lastFrameTime = 0;
 
     // Register as a light occluder so the shader blocks rays through this element
     const occ = { cx: 0, cy: 0, r: 0 };
     sweepLight.occluders.push(occ);
 
-    const update = () => {
+    const stopLoop = () => {
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
+      lastFrameTime = 0;
+    };
+
+    const resetGlow = () => {
+      if (lastGlow !== 0) {
+        el.style.setProperty('--sweep-glow', '0');
+        el.style.setProperty('--sweep-angle', '0rad');
+        el.style.setProperty('--sweep-sx', '0');
+        el.style.setProperty('--sweep-sy', '0');
+        el.style.setProperty('--sweep-proximity', '0');
+        lastGlow = 0;
+      }
+    };
+
+    const syncOccluder = () => {
       const rect = el.getBoundingClientRect();
+      occ.cx = rect.left + rect.width / 2;
+      occ.cy = rect.top + rect.height / 2;
+      occ.r = Math.max(rect.width, rect.height) / 2;
+      return rect;
+    };
+
+    const update = (now: number) => {
+      const rect = syncOccluder();
+
+      if (!reducedMotion && shouldSkipTierFrame(now, lastFrameTime, renderProfile.frameIntervalMs)) {
+        raf = requestAnimationFrame(update);
+        return;
+      }
+
+      lastFrameTime = now;
       const cx = rect.left + rect.width / 2;
       const cy = rect.top + rect.height / 2;
 
-      // Keep occluder position current every frame
-      occ.cx = cx;
-      occ.cy = cy;
-      occ.r = Math.max(rect.width, rect.height) / 2;
-
-      if (!sweepLight.active || sweepLight.intensity < 0.01) {
-        if (lastGlow !== 0) {
-          el.style.setProperty('--sweep-glow', '0');
-          el.style.setProperty('--sweep-angle', '0rad');
-          el.style.setProperty('--sweep-sx', '0');
-          el.style.setProperty('--sweep-sy', '0');
-          el.style.setProperty('--sweep-proximity', '0');
-          lastGlow = 0;
-        }
-        raf = requestAnimationFrame(update);
+      if (!isSweepLightVisible()) {
+        resetGlow();
+        stopLoop();
         return;
       }
 
@@ -99,9 +174,33 @@ export function useSweepGlow() {
       raf = requestAnimationFrame(update);
     };
 
-    raf = requestAnimationFrame(update);
+    const startLoop = () => {
+      if (reducedMotion || raf) {
+        return;
+      }
+
+      update(performance.now());
+    };
+
+    const handleSweepLightActiveChange = (isActive: boolean) => {
+      syncOccluder();
+
+      if (!isActive || reducedMotion) {
+        stopLoop();
+        resetGlow();
+        return;
+      }
+
+      startLoop();
+    };
+
+    const unsubscribe = subscribeSweepLightActive(handleSweepLightActiveChange);
+
+    handleSweepLightActiveChange(isSweepLightVisible());
+
     return () => {
-      cancelAnimationFrame(raf);
+      unsubscribe();
+      stopLoop();
       // Unregister occluder
       const idx = sweepLight.occluders.indexOf(occ);
       if (idx !== -1) sweepLight.occluders.splice(idx, 1);
@@ -111,7 +210,7 @@ export function useSweepGlow() {
       el.style.setProperty('--sweep-sy', '0');
       el.style.setProperty('--sweep-proximity', '0');
     };
-  }, []);
+  }, [reducedMotion, renderProfile]);
 
   return elRef;
 }

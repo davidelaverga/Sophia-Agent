@@ -197,7 +197,7 @@ describe('ActiveSessionResponseSchema', () => {
         thread_id: '123e4567-e89b-12d3-a456-426614174001',
         session_type: 'gaming_prepare',
         preset_context: 'gaming',
-        status: 'active',
+        status: 'open',
         started_at: '2024-01-15T10:00:00Z',
         turn_count: 5,
       },
@@ -207,7 +207,7 @@ describe('ActiveSessionResponseSchema', () => {
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.has_active_session).toBe(true);
-      expect(result.data.session?.status).toBe('active');
+      expect(result.data.session?.status).toBe('open');
     }
   });
 });

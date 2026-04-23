@@ -13,6 +13,7 @@ the real implementation in isolation.
 """
 
 import asyncio
+import json
 import sys
 import threading
 from datetime import datetime
@@ -484,10 +485,10 @@ class TestAsyncExecutionPath:
 
 
 class TestSyncExecutionPath:
-    """Test execute() synchronous execution path with asyncio.run()."""
+    """Test execute() synchronous execution path with the worker loop runner."""
 
     def test_execute_runs_async_in_event_loop(self, classes, base_config, mock_agent, msg):
-        """Test that execute() runs _aexecute() in a new event loop via asyncio.run()."""
+        """Test that execute() runs _aexecute() in a dedicated event loop."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 
@@ -552,10 +553,64 @@ class TestSyncExecutionPath:
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "Thread pool result"
 
-    def test_execute_handles_asyncio_run_failure(self, classes, base_config):
-        """Test handling when asyncio.run() itself fails."""
+    def test_execute_in_thread_pool_builds_lazy_agent_inside_worker_context(self, classes, base_config, msg):
+        """Test that a lazy agent factory is constructed inside the worker execution context."""
+        from concurrent.futures import ThreadPoolExecutor
+
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
+
+        caller_thread = threading.current_thread().name
+        factory_threads: list[str] = []
+        stream_threads: list[str] = []
+        running_loop_seen = {"value": False}
+
+        final_state = {
+            "messages": [
+                msg.human("Task"),
+                msg.ai("Lazy factory result", "lazy-msg-1"),
+            ]
+        }
+
+        def agent_factory():
+            factory_threads.append(threading.current_thread().name)
+            running_loop_seen["value"] = asyncio.get_running_loop() is not None
+
+            def make_astream(*args, **kwargs):
+                stream_threads.append(threading.current_thread().name)
+                return async_iterator([final_state])
+
+            mock_agent = MagicMock()
+            mock_agent.astream = make_astream
+            return mock_agent
+
+        def run_in_thread():
+            executor = SubagentExecutor(
+                config=base_config,
+                tools=[],
+                thread_id="lazy-thread",
+                agent_factory=agent_factory,
+            )
+            return executor.execute("Task")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            result = pool.submit(run_in_thread).result(timeout=5)
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "Lazy factory result"
+        assert factory_threads == stream_threads
+        assert factory_threads[0] != caller_thread
+        assert running_loop_seen["value"] is True
+
+    def test_execute_handles_worker_loop_failure(self, classes, base_config):
+        """Test handling when the worker loop bootstrap itself fails."""
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        from deerflow.subagents import executor as executor_module
+
+        def fail_worker_loop(coroutine):
+            coroutine.close()
+            raise Exception("Worker loop error")
 
         executor = SubagentExecutor(
             config=base_config,
@@ -563,13 +618,11 @@ class TestSyncExecutionPath:
             thread_id="test-thread",
         )
 
-        with patch.object(executor, "_aexecute") as mock_aexecute:
-            mock_aexecute.side_effect = Exception("Asyncio run error")
-
+        with patch.object(executor_module, "_run_coroutine_in_worker_loop", side_effect=fail_worker_loop):
             result = executor.execute("Task")
 
         assert result.status == SubagentStatus.FAILED
-        assert "Asyncio run error" in result.error
+        assert "Worker loop error" in result.error
         assert result.completed_at is not None
 
     def test_execute_with_result_holder(self, classes, base_config, mock_agent, msg):
@@ -651,6 +704,139 @@ class TestTaskStatusPayload:
         assert payload["debug"]["recent_shell_commands"][0]["error"] == "No suitable shell executable found."
         assert payload["detail"] == "No suitable shell executable found."
 
+    def test_background_task_payload_includes_thread_id(self, classes):
+        from deerflow.subagents.executor import build_background_task_status_payload
+
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        result = SubagentResult(
+            task_id="task-thread-1",
+            trace_id="trace-thread-1",
+            status=SubagentStatus.RUNNING,
+            thread_id="thread-1",
+            started_at=datetime.now(),
+        )
+
+        payload = build_background_task_status_payload(result)
+
+        assert payload["thread_id"] == "thread-1"
+
+
+class TestWorkerLoopAndSnapshotResilience:
+    def test_create_agent_uses_lazy_factory(self, classes, base_config):
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        sentinel_agent = object()
+        factory_calls = {"value": 0}
+
+        def agent_factory():
+            factory_calls["value"] += 1
+            return sentinel_agent
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            agent_factory=agent_factory,
+        )
+
+        assert factory_calls["value"] == 0
+        assert executor._create_agent() is sentinel_agent
+        assert factory_calls["value"] == 1
+
+    def test_worker_loop_reuses_selector_loop_on_windows(self):
+        from deerflow.subagents import executor as executor_module
+
+        async def sample():
+            return id(asyncio.get_running_loop())
+
+        test_loop_local = threading.local()
+
+        with patch.object(executor_module.sys, "platform", "win32"):
+            with patch.object(executor_module, "_worker_loop_local", test_loop_local):
+                with patch.object(executor_module.asyncio, "run") as mock_asyncio_run:
+                    first_loop_id = executor_module._run_coroutine_in_worker_loop(sample())
+                    second_loop_id = executor_module._run_coroutine_in_worker_loop(sample())
+
+        loop = getattr(test_loop_local, "loop")
+        try:
+            assert isinstance(loop, executor_module.asyncio.SelectorEventLoop)
+            assert first_loop_id == second_loop_id
+            mock_asyncio_run.assert_not_called()
+        finally:
+            loop.close()
+
+    def test_persist_background_task_status_payload_retries_permission_error(self, classes, tmp_path):
+        from deerflow.subagents import executor as executor_module
+
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        snapshot_path = tmp_path / "task.json"
+        result = SubagentResult(
+            task_id="task-retry",
+            trace_id="trace-retry",
+            status=SubagentStatus.RUNNING,
+            owner_id="user_retry",
+        )
+
+        original_replace = executor_module.Path.replace
+        call_count = {"value": 0}
+
+        def flaky_replace(self, target):
+            call_count["value"] += 1
+            if target == snapshot_path and call_count["value"] < 3:
+                raise PermissionError("sharing violation")
+            return original_replace(self, target)
+
+        with patch.object(executor_module, "_background_task_snapshot_path", return_value=snapshot_path):
+            with patch.object(executor_module.Path, "replace", new=flaky_replace):
+                executor_module.persist_background_task_status_payload(result)
+
+        assert snapshot_path.exists()
+        assert call_count["value"] == 3
+        payload = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        assert payload["task_id"] == "task-retry"
+        assert payload["status"] == "running"
+
+    def test_read_latest_background_task_status_payload_returns_latest_matching_thread_snapshot(self, tmp_path):
+        from deerflow.subagents import executor as executor_module
+
+        user_dir = tmp_path / "user_1" / "builder_tasks"
+        user_dir.mkdir(parents=True)
+
+        older_payload = {
+            "task_id": "task-older",
+            "thread_id": "thread-1",
+            "owner_id": "user_1",
+            "started_at": "2026-04-05T10:00:00+00:00",
+            "status": "running",
+        }
+        latest_payload = {
+            "task_id": "task-latest",
+            "thread_id": "thread-1",
+            "owner_id": "user_1",
+            "started_at": "2026-04-05T10:01:00+00:00",
+            "status": "completed",
+        }
+        other_thread_payload = {
+            "task_id": "task-other-thread",
+            "thread_id": "thread-2",
+            "owner_id": "user_1",
+            "started_at": "2026-04-05T10:02:00+00:00",
+            "status": "running",
+        }
+
+        (user_dir / "task-older.json").write_text(json.dumps(older_payload), encoding="utf-8")
+        (user_dir / "task-latest.json").write_text(json.dumps(latest_payload), encoding="utf-8")
+        (user_dir / "task-other-thread.json").write_text(json.dumps(other_thread_payload), encoding="utf-8")
+
+        with patch.object(executor_module, "_BACKGROUND_TASKS_DIR", tmp_path):
+            payload = executor_module.read_latest_background_task_status_payload("user_1", "thread-1")
+
+        assert payload is not None
+        assert payload["task_id"] == "task-latest"
+
 
 # -----------------------------------------------------------------------------
 # Async Tool Support Tests (MCP Tools)
@@ -704,7 +890,7 @@ class TestAsyncToolSupport:
         assert result.status == SubagentStatus.COMPLETED
 
     def test_sync_execute_with_async_tools(self, classes, base_config, msg):
-        """Test that sync execute() properly runs async tools via asyncio.run()."""
+        """Test that sync execute() properly runs async tools via the worker loop runner."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentStatus = classes["SubagentStatus"]
 

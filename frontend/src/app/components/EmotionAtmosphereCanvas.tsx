@@ -3,6 +3,7 @@
 import { useRef, useEffect, useCallback } from "react"
 
 import { useEmotionColor, getEmotionColor } from "../hooks/useEmotionColor"
+import { useVisualTier } from "../hooks/useVisualTier"
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -56,23 +57,12 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
   const transitionStartRef = useRef<number>(0)
   const transitionFromRef = useRef<[number, number, number]>(DEFAULT_RGB)
   const isTransitioningRef = useRef(false)
+  const isAnimatingRef = useRef(false)
   const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const reducedMotionRef = useRef(false)
 
   // Active emotion from store (live during sessions)
   const emotionColor = useEmotionColor()
-
-  // Check prefers-reduced-motion on mount
-  useEffect(() => {
-    if (typeof window === "undefined") return
-    const mql = window.matchMedia("(prefers-reduced-motion: reduce)")
-    reducedMotionRef.current = mql.matches
-    const handler = (e: MediaQueryListEvent) => {
-      reducedMotionRef.current = e.matches
-    }
-    mql.addEventListener("change", handler)
-    return () => mql.removeEventListener("change", handler)
-  }, [])
+  const { reducedMotion, dprCap } = useVisualTier()
 
   // Draw the radial gradient on canvas
   const drawGradient = useCallback((ctx: CanvasRenderingContext2D, rgb: [number, number, number]) => {
@@ -107,6 +97,79 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
     ctx.fillRect(0, 0, w, h)
   }, [])
 
+  const drawCurrent = useCallback(() => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!ctx) {
+      return
+    }
+
+    drawGradient(ctx, currentRgbRef.current)
+  }, [drawGradient])
+
+  const stopAnimation = useCallback(() => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current)
+      animFrameRef.current = 0
+    }
+    isAnimatingRef.current = false
+  }, [])
+
+  const isDocumentHidden = useCallback(() => {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  }, [])
+
+  const tick = useCallback((frameTime: number) => {
+    const canvas = canvasRef.current
+    const ctx = canvas?.getContext("2d")
+    if (!ctx) {
+      stopAnimation()
+      return
+    }
+
+    if (!isTransitioningRef.current) {
+      stopAnimation()
+      return
+    }
+
+    const elapsed = frameTime - transitionStartRef.current
+    const t = Math.min(elapsed / TRANSITION_MS, 1)
+    const eased = easeInOutCubic(t)
+
+    currentRgbRef.current = lerpRgb(transitionFromRef.current, targetRgbRef.current, eased)
+    drawGradient(ctx, currentRgbRef.current)
+
+    if (t >= 1) {
+      isTransitioningRef.current = false
+      currentRgbRef.current = [...targetRgbRef.current]
+      stopAnimation()
+      return
+    }
+
+    animFrameRef.current = requestAnimationFrame(tick)
+  }, [drawGradient, stopAnimation])
+
+  const ensureAnimation = useCallback(() => {
+    if (reducedMotion) {
+      isTransitioningRef.current = false
+      stopAnimation()
+      drawCurrent()
+      return
+    }
+
+    if (isDocumentHidden()) {
+      stopAnimation()
+      return
+    }
+
+    if (isAnimatingRef.current) {
+      return
+    }
+
+    isAnimatingRef.current = true
+    animFrameRef.current = requestAnimationFrame(tick)
+  }, [drawCurrent, isDocumentHidden, reducedMotion, stopAnimation, tick])
+
   // Start a color transition
   const startTransition = useCallback((newRgb: [number, number, number]) => {
     if (
@@ -121,9 +184,10 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
     targetRgbRef.current = newRgb
     transitionStartRef.current = performance.now()
     isTransitioningRef.current = true
-  }, [])
+    ensureAnimation()
+  }, [ensureAnimation])
 
-  // Animation loop
+  // Canvas setup and resize handling
   useEffect(() => {
     const canvas = canvasRef.current
     if (!canvas) return
@@ -133,11 +197,11 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
 
     // Resize observer
     const resizeCanvas = () => {
-      const dpr = window.devicePixelRatio || 1
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCap)
       const rect = canvas.getBoundingClientRect()
       canvas.width = rect.width * dpr
       canvas.height = rect.height * dpr
-      ctx.scale(dpr, dpr)
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       canvas.style.width = `${rect.width}px`
       canvas.style.height = `${rect.height}px`
       // Redraw immediately after resize
@@ -148,40 +212,50 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
     observer.observe(canvas)
     resizeCanvas()
 
-    // For reduced motion: just draw once, no loop
-    if (reducedMotionRef.current) {
-      drawGradient(ctx, currentRgbRef.current)
-      return () => observer.disconnect()
-    }
-
-    // Animation frame loop
-    const tick = () => {
-      if (isTransitioningRef.current) {
-        const elapsed = performance.now() - transitionStartRef.current
-        const t = Math.min(elapsed / TRANSITION_MS, 1)
-        const eased = easeInOutCubic(t)
-
-        currentRgbRef.current = lerpRgb(transitionFromRef.current, targetRgbRef.current, eased)
-        drawGradient(ctx, currentRgbRef.current)
-
-        if (t >= 1) {
-          isTransitioningRef.current = false
-          currentRgbRef.current = [...targetRgbRef.current]
-        }
-      }
-
-      animFrameRef.current = requestAnimationFrame(tick)
-    }
-
     // Initial draw
     drawGradient(ctx, currentRgbRef.current)
-    animFrameRef.current = requestAnimationFrame(tick)
 
     return () => {
-      cancelAnimationFrame(animFrameRef.current)
+      stopAnimation()
       observer.disconnect()
     }
-  }, [drawGradient])
+  }, [dprCap, drawGradient, stopAnimation])
+
+  useEffect(() => {
+    if (!reducedMotion) {
+      return
+    }
+
+    isTransitioningRef.current = false
+    currentRgbRef.current = [...targetRgbRef.current]
+    stopAnimation()
+    drawCurrent()
+  }, [drawCurrent, reducedMotion, stopAnimation])
+
+  useEffect(() => {
+    if (typeof document === 'undefined') {
+      return
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        stopAnimation()
+        return
+      }
+
+      if (isTransitioningRef.current) {
+        ensureAnimation()
+        return
+      }
+
+      drawCurrent()
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [drawCurrent, ensureAnimation, stopAnimation])
 
   // React to emotion color changes
   useEffect(() => {
@@ -193,16 +267,17 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
       idleTimerRef.current = null
     }
 
-    if (reducedMotionRef.current) {
+    if (reducedMotion) {
       // No animation — update immediately
       currentRgbRef.current = newRgb
+      targetRgbRef.current = newRgb
       const canvas = canvasRef.current
       const ctx = canvas?.getContext("2d")
       if (ctx) drawGradient(ctx, newRgb)
     } else {
       startTransition(newRgb)
     }
-  }, [emotionColor.rgb, startTransition, drawGradient])
+  }, [drawGradient, emotionColor.rgb, reducedMotion, startTransition])
 
   // Dashboard: apply last session emotion, then fade to WARM after idle
   useEffect(() => {
@@ -211,6 +286,8 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
     const lastColor = getEmotionColor(lastSessionEmotion)
     currentRgbRef.current = lastColor.rgb
     targetRgbRef.current = lastColor.rgb
+    isTransitioningRef.current = false
+    stopAnimation()
 
     const canvas = canvasRef.current
     const ctx = canvas?.getContext("2d")
@@ -227,7 +304,7 @@ export function EmotionAtmosphereCanvas({ lastSessionEmotion }: EmotionAtmospher
         idleTimerRef.current = null
       }
     }
-  }, [lastSessionEmotion, startTransition, drawGradient])
+  }, [drawGradient, lastSessionEmotion, startTransition, stopAnimation])
 
   return (
     <canvas

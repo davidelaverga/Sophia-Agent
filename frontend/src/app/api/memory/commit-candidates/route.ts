@@ -90,12 +90,25 @@ export async function POST(request: NextRequest) {
     const outcome = await Promise.allSettled(body.decisions.map(async (decision) => {
       if (decision.decision === 'discard') {
         if (!isSyntheticMemoryId(decision.candidate_id)) {
+          const discardMetadata = {
+            status: 'discarded',
+            source: decision.source,
+            session_id: body.session_id,
+            ...(decision.category ? { category: decision.category } : {}),
+            ...(decision.metadata || {}),
+          };
+
           const response = await fetchSophiaApi(
             `/api/sophia/${encodeURIComponent(userId)}/memories/${encodeURIComponent(decision.candidate_id)}`,
-            { method: 'DELETE' }
+            {
+              method: 'PUT',
+              body: JSON.stringify({
+                metadata: discardMetadata,
+              }),
+            }
           );
 
-          if (!response.ok && response.status !== 204) {
+          if (!response.ok) {
             throw new Error(`Discard failed: ${response.status}`);
           }
         }

@@ -15,13 +15,12 @@ interface Ribbon {
   opacity: number
 }
 
-const RIBBON_COUNT = 5
-const SEGMENTS = 80
-const SEGMENTS_MOBILE = 50
+const DEFAULT_RIBBON_COUNT = 5
+const DEFAULT_SEGMENTS = 80
 
-function createRibbons(w: number, h: number, segments: number): Ribbon[] {
+function createRibbons(w: number, h: number, ribbonCount: number, segments: number): Ribbon[] {
   const ribbons: Ribbon[] = []
-  for (let i = 0; i < RIBBON_COUNT; i++) {
+  for (let i = 0; i < ribbonCount; i++) {
     const pts = []
     const baseY = (0.25 + i * 0.12) * h
     for (let j = 0; j < segments; j++) {
@@ -41,23 +40,27 @@ function createRibbons(w: number, h: number, segments: number): Ribbon[] {
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
-export function useRibbonCanvas({ reducedFidelity = false }: { reducedFidelity?: boolean } = {}) {
+export function useRibbonCanvas({
+  ribbonCount = DEFAULT_RIBBON_COUNT,
+  segments = DEFAULT_SEGMENTS,
+}: {
+  ribbonCount?: number
+  segments?: number
+} = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const ribbonsRef = useRef<Ribbon[]>([])
 
-  const segments = reducedFidelity ? SEGMENTS_MOBILE : SEGMENTS
-
   const init = useCallback((w: number, h: number) => {
-    ribbonsRef.current = createRibbons(w, h, segments)
-  }, [segments])
+    ribbonsRef.current = createRibbons(w, h, ribbonCount, segments)
+  }, [ribbonCount, segments])
 
   const resize = useCallback((w: number, h: number) => {
     const canvas = canvasRef.current
     if (!canvas) return
     canvas.width = w
     canvas.height = h
-    ribbonsRef.current = createRibbons(w, h, segments)
-  }, [segments])
+    ribbonsRef.current = createRibbons(w, h, ribbonCount, segments)
+  }, [ribbonCount, segments])
 
   const render = useCallback(
     (

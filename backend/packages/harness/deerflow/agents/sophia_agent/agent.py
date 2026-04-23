@@ -1,3 +1,5 @@
+# ruff: noqa: I001
+
 """Sophia companion agent factory.
 
 Creates the Sophia companion agent with its middleware chain.

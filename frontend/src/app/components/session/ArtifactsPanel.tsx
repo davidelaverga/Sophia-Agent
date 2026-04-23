@@ -24,13 +24,12 @@ import React from 'react';
 import { haptic } from '../../hooks/useHaptics';
 import {
   buildThreadArtifactHref,
-  formatBuilderArtifactFileSize,
   formatBuilderArtifactTypeLabel,
   getBuilderArtifactFiles,
 } from '../../lib/builder-artifacts';
 import type { RitualArtifacts, PresetType, ContextMode } from '../../lib/session-types';
 import { cn } from '../../lib/utils';
-import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from '../../types/builder-artifact';
+import type { BuilderArtifactV1 } from '../../types/builder-artifact';
 
 function formatMemoryCategoryLabel(category: string): string {
   const cleaned = category
@@ -69,7 +68,6 @@ type ArtifactStatus = 'waiting' | 'capturing' | 'ready';
 interface ArtifactsPanelProps {
   artifacts?: RitualArtifacts | null;
   builderArtifact?: BuilderArtifactV1 | null;
-  builderArtifactLibrary?: BuilderArtifactLibraryItemV1[];
   presetType?: PresetType;
   contextMode?: ContextMode;
   sessionId?: string;
@@ -720,112 +718,6 @@ export function BuilderDeliverableCard({
   );
 }
 
-function BuilderDocumentLibrary({
-  items,
-  threadId,
-}: {
-  items: BuilderArtifactLibraryItemV1[];
-  threadId?: string;
-}) {
-  if (items.length === 0) {
-    return null;
-  }
-
-  return (
-    <div
-      className="relative overflow-hidden rounded-2xl border transition-all duration-700"
-      style={{
-        background: 'color-mix(in srgb, var(--cosmic-panel-soft) 72%, transparent)',
-        borderColor: 'var(--cosmic-border-soft)',
-      }}
-    >
-      <div className="px-5 pt-4 pb-5">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <p className="text-[9px] tracking-[0.16em] uppercase" style={{ color: 'var(--cosmic-text-faint)' }}>
-              Session Files
-            </p>
-            <h3 className="mt-1 font-cormorant text-[20px] leading-[1.3] font-light" style={{ color: 'var(--cosmic-text-strong)' }}>
-              Builder outputs saved in this session
-            </h3>
-          </div>
-          <span className="text-[11px]" style={{ color: 'var(--cosmic-text-whisper)' }}>
-            {items.length}
-          </span>
-        </div>
-
-        <div className="space-y-2">
-          {items.map((item) => {
-            const openHref = buildThreadArtifactHref(threadId, item.path);
-            const downloadHref = buildThreadArtifactHref(threadId, item.path, { download: true });
-            const meta = [formatBuilderArtifactFileSize(item.sizeBytes), item.mimeType]
-              .filter(Boolean)
-              .join(' • ');
-
-            return (
-              <div
-                key={item.path}
-                className="flex items-center gap-3 rounded-xl border px-3.5 py-2.5"
-                style={{
-                  borderColor: 'var(--cosmic-border-soft)',
-                  background: 'color-mix(in srgb, var(--cosmic-panel-soft) 36%, transparent)',
-                }}
-              >
-                <FileText className="h-4 w-4 shrink-0" style={{ color: 'var(--cosmic-text-faint)' }} />
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-[12px]" style={{ color: 'var(--cosmic-text)' }}>
-                    {item.name}
-                  </p>
-                  {meta && (
-                    <p className="text-[9px] tracking-[0.08em] lowercase" style={{ color: 'var(--cosmic-text-faint)' }}>
-                      {meta}
-                    </p>
-                  )}
-                </div>
-                <div className="flex items-center gap-2">
-                  {openHref && (
-                    <a
-                      href={openHref}
-                      target="_blank"
-                      rel="noreferrer"
-                      aria-label={`Open ${item.name}`}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
-                      style={{
-                        borderColor: 'var(--cosmic-border-soft)',
-                        color: 'var(--cosmic-text-whisper)',
-                      }}
-                      onClick={() => haptic('light')}
-                    >
-                      <ExternalLink className="h-3.5 w-3.5" />
-                      Open
-                    </a>
-                  )}
-                  {downloadHref && (
-                    <a
-                      href={downloadHref}
-                      aria-label={`Download ${item.name}`}
-                      className="inline-flex h-8 items-center gap-1.5 rounded-lg border px-3 text-[11px] transition-colors"
-                      style={{
-                        borderColor: 'color-mix(in srgb, var(--sophia-purple) 25%, var(--cosmic-border-soft))',
-                        color: 'var(--sophia-purple)',
-                        background: 'color-mix(in srgb, var(--sophia-purple) 6%, transparent)',
-                      }}
-                      onClick={() => haptic('medium')}
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      Download
-                    </a>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 // ============================================================================
 // MAIN ARTIFACTS PANEL
 // ============================================================================
@@ -833,7 +725,6 @@ function BuilderDocumentLibrary({
 export function ArtifactsPanel({
   artifacts,
   builderArtifact,
-  builderArtifactLibrary = [],
   presetType,
   sessionId: _sessionId,
   threadId,
@@ -897,10 +788,6 @@ export function ArtifactsPanel({
         <div className="flex-1 overflow-y-auto p-3 space-y-2">
           {builderArtifact && (
             <BuilderDeliverableCard builderArtifact={builderArtifact} threadId={threadId} />
-          )}
-
-          {builderArtifactLibrary.length > 0 && (
-            <BuilderDocumentLibrary items={builderArtifactLibrary} threadId={threadId} />
           )}
 
           <ArtifactSection

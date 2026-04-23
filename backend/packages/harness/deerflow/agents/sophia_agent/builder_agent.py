@@ -10,7 +10,7 @@ import os
 
 # Apply defensive langchain patches *before* importing anything that builds
 # the agent graph. See deerflow.agents._langchain_patches for details.
-from deerflow.agents import _langchain_patches  # noqa: F401
+from deerflow.agents import _langchain_patches  # noqa: F401  # isort: skip
 
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic

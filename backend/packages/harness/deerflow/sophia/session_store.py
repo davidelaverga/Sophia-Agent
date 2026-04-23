@@ -95,6 +95,21 @@ class SessionStore:
         """Load a single session by ID."""
         return self._read(self._session_path(user_id, session_id))
 
+    def find_by_session_id(self, session_id: str) -> SessionRecord | None:
+        """Load a session by ID across all persisted user directories."""
+        if not session_id or not self._base.is_dir():
+            return None
+
+        for user_root in self._base.iterdir():
+            if not user_root.is_dir():
+                continue
+
+            record = self._read(user_root / "sessions" / f"{session_id}.json")
+            if record is not None:
+                return record
+
+        return None
+
     def update(self, user_id: str, session_id: str, **updates: object) -> SessionRecord | None:
         """Patch fields on an existing session. Returns updated record or None."""
         record = self.get(user_id, session_id)

@@ -153,7 +153,20 @@ vi.mock('../../app/components/HistoryDrawer', () => ({
 }));
 
 vi.mock('../../app/components/dashboard/SettingsDrawer', () => ({
-  SettingsDrawer: () => <div data-testid="settings-drawer" />,
+  SettingsDrawer: ({ isOpen }: { isOpen: boolean }) => (
+    isOpen ? <div data-testid="settings-drawer" /> : null
+  ),
+}));
+
+vi.mock('../../app/components/dashboard/NavRail', () => ({
+  NavRail: ({ onOpenSettings }: { onOpenSettings: () => void }) => (
+    <div data-testid="nav-rail">
+      <button type="button" aria-label="Open settings" onClick={onOpenSettings}>
+        Rail settings
+      </button>
+    </div>
+  ),
+  MobileNavBar: () => <div data-testid="mobile-nav-bar" />,
 }));
 
 vi.mock('../../app/components/dashboard/DashboardSidebar', () => ({
@@ -239,7 +252,27 @@ describe('EnhancedFieldDashboard bootstrap UI precedence', () => {
       expect(screen.getByTestId('ritual-orbit')).toBeInTheDocument();
     });
 
+    expect(screen.getByTestId('nav-rail')).toBeInTheDocument();
+    expect(screen.getByTestId('mobile-nav-bar')).toBeInTheDocument();
+    expect(screen.getByTestId('recent-sessions-sidebar')).toBeInTheDocument();
     expect(screen.queryByText('How To Start')).not.toBeInTheDocument();
+  });
+
+  it('wires nav rail settings to the settings drawer', async () => {
+    const user = userEvent.setup();
+    resolveDashboardBootstrapStateMock.mockResolvedValue({
+      mode: 'none',
+    });
+
+    render(<EnhancedFieldDashboard />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('ritual-orbit')).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole('button', { name: 'Open settings' }));
+
+    expect(screen.getByTestId('settings-drawer')).toBeInTheDocument();
   });
 
   it('keeps ResumeBanner hidden while a session launch is loading', async () => {

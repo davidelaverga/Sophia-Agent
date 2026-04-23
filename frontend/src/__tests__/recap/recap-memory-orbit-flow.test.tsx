@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import React, { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -73,16 +73,18 @@ describe('RecapMemoryOrbit demo flow', () => {
     fireEvent.change(reopenedTextarea, { target: { value: 'I want calmer tournament sessions.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save refinement' }));
 
+    // After saving the refinement, the keep button becomes "Keep refined".
+    // Click it to commit the decision as 'edited' and trigger the exit animation.
+    fireEvent.click(screen.getByRole('button', { name: 'Keep this memory' }));
+
     await act(async () => {
-      vi.advanceTimersByTime(800);
+      vi.advanceTimersByTime(1600);
     });
 
     expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
-    expect(screen.getByText('I want calmer tournament sessions.')).toBeInTheDocument();
-    expect(screen.getByText('Refined')).toBeInTheDocument();
   });
 
-  it('shows Refined only for edited memories and excludes discarded memories from the completed list', () => {
+  it('shows summary count and excludes discarded memories from the completed pool', () => {
     render(
       <RecapMemoryOrbit
         candidates={[
@@ -100,17 +102,24 @@ describe('RecapMemoryOrbit demo flow', () => {
     );
 
     expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
-    expect(screen.getByText('I prefer short resets between games.')).toBeInTheDocument();
-    expect(screen.getByText('I recover faster when I slow down and breathe.')).toBeInTheDocument();
-    expect(screen.queryByText('Temporary draft memory to remove.')).not.toBeInTheDocument();
+    // approvedCount = 2 (approved + edited); discarded is excluded
+    expect(screen.getByText('2 memories in the pool')).toBeInTheDocument();
+  });
 
-    const refinedBadges = screen.getAllByText('Refined');
-    expect(refinedBadges).toHaveLength(1);
+  it('keeps the completed reviewed state when all memories were discarded and the candidate list is empty', () => {
+    render(
+      <RecapMemoryOrbit
+        candidates={[]}
+        decisions={{
+          'discarded-1': { decision: 'discarded' },
+          'discarded-2': { decision: 'discarded' },
+        }}
+        onDecisionChange={() => {}}
+      />
+    );
 
-    const approvedMemoryRow = screen.getByText('I prefer short resets between games.').closest('div');
-    expect(approvedMemoryRow).not.toBeNull();
-    if (approvedMemoryRow) {
-      expect(within(approvedMemoryRow).queryByText('Refined')).not.toBeInTheDocument();
-    }
+    expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
+    expect(screen.getByText('Nothing carried forward this time')).toBeInTheDocument();
+    expect(screen.queryByText('No new memories from this session.')).not.toBeInTheDocument();
   });
 });

@@ -9,15 +9,140 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react"
 
 import { logger } from "../lib/error-logger"
-import { recordSophiaCaptureEvent } from "../lib/session-capture"
+import { recordSophiaCaptureEvent, recordSophiaCaptureWebRTCStats } from "../lib/session-capture"
+
+function describeMediaReadyState(value: number): string {
+  switch (value) {
+    case HTMLMediaElement.HAVE_NOTHING:
+      return "have_nothing"
+    case HTMLMediaElement.HAVE_METADATA:
+      return "have_metadata"
+    case HTMLMediaElement.HAVE_CURRENT_DATA:
+      return "have_current_data"
+    case HTMLMediaElement.HAVE_FUTURE_DATA:
+      return "have_future_data"
+    case HTMLMediaElement.HAVE_ENOUGH_DATA:
+      return "have_enough_data"
+    default:
+      return `unknown:${value}`
+  }
+}
+
+function describeMediaNetworkState(value: number): string {
+  switch (value) {
+    case HTMLMediaElement.NETWORK_EMPTY:
+      return "network_empty"
+    case HTMLMediaElement.NETWORK_IDLE:
+      return "network_idle"
+    case HTMLMediaElement.NETWORK_LOADING:
+      return "network_loading"
+    case HTMLMediaElement.NETWORK_NO_SOURCE:
+      return "network_no_source"
+    default:
+      return `unknown:${value}`
+  }
+}
+
+function describeMediaError(error: MediaError | null): string | null {
+  if (!error) {
+    return null
+  }
+
+  switch (error.code) {
+    case MediaError.MEDIA_ERR_ABORTED:
+      return "aborted"
+    case MediaError.MEDIA_ERR_NETWORK:
+      return "network"
+    case MediaError.MEDIA_ERR_DECODE:
+      return "decode"
+    case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
+      return "src_not_supported"
+    default:
+      return error.message || `unknown:${error.code}`
+  }
+}
+
+function buildRemoteAudioPayload(audioEl: HTMLAudioElement) {
+  return {
+    autoplay: audioEl.autoplay,
+    currentTimeMs: Number.isFinite(audioEl.currentTime)
+      ? Math.round(audioEl.currentTime * 1000)
+      : null,
+    ended: audioEl.ended,
+    muted: audioEl.muted,
+    networkState: describeMediaNetworkState(audioEl.networkState),
+    paused: audioEl.paused,
+    readyState: describeMediaReadyState(audioEl.readyState),
+  }
+}
+
+function subscribeToWebRTCStats(
+  call: Call,
+  metadata: {
+    callId: string | null
+    callType: string | null
+    voiceAgentSessionId: string | null
+  },
+): () => void {
+  const subscription = call.state.callStatsReport$.subscribe({
+    next: (report) => {
+      recordSophiaCaptureWebRTCStats({
+        callId: metadata.callId,
+        voiceAgentSessionId: metadata.voiceAgentSessionId,
+        report,
+      })
+    },
+    error: (error) => {
+      recordSophiaCaptureEvent({
+        category: "voice-runtime",
+        name: "webrtc-stats-error",
+        payload: {
+          callId: metadata.callId,
+          callType: metadata.callType,
+          error: error instanceof Error ? error.message : String(error),
+          voiceAgentSessionId: metadata.voiceAgentSessionId,
+        },
+      })
+    },
+  })
+
+  return () => {
+    subscription.unsubscribe()
+  }
+}
 
 /**
  * Binds audio elements for remote participants using the SDK's own
  * call.bindAudioElement() API so the AudioBindingsWatchdog is satisfied.
  * Returns a cleanup function.
  */
-function bindRemoteAudio(call: Call): () => void {
-  const boundElements = new Map<string, { el: HTMLAudioElement; cleanup: (() => void) | undefined }>()
+function bindRemoteAudio(
+  call: Call,
+  metadata: {
+    callId: string | null
+    callType: string | null
+    voiceAgentSessionId: string | null
+  },
+): () => void {
+  const boundElements = new Map<string, {
+    el: HTMLAudioElement
+    cleanup: (() => void) | undefined
+    removeListeners: () => void
+    playbackTimeoutId: number | null
+  }>()
+
+  const recordRemoteAudioEvent = (name: string, payload: Record<string, unknown>) => {
+    recordSophiaCaptureEvent({
+      category: "voice-runtime",
+      name,
+      payload: {
+        callId: metadata.callId,
+        callType: metadata.callType,
+        voiceAgentSessionId: metadata.voiceAgentSessionId,
+        ...payload,
+      },
+    })
+  }
 
   const sub = call.state.remoteParticipants$.subscribe((participants) => {
     const currentSessionIds = new Set(participants.map((p) => p.sessionId))
@@ -25,6 +150,10 @@ function bindRemoteAudio(call: Call): () => void {
     // Remove elements for participants who left
     for (const [sessionId, entry] of boundElements) {
       if (!currentSessionIds.has(sessionId)) {
+        if (entry.playbackTimeoutId !== null) {
+          window.clearTimeout(entry.playbackTimeoutId)
+        }
+        entry.removeListeners()
         entry.cleanup?.()
         entry.el.remove()
         boundElements.delete(sessionId)
@@ -34,13 +163,118 @@ function bindRemoteAudio(call: Call): () => void {
     // Add elements for new participants
     for (const p of participants) {
       if (!boundElements.has(p.sessionId)) {
+        const boundAtMs = Date.now()
         const audioEl = document.createElement("audio")
         audioEl.autoplay = true
         audioEl.style.display = "none"
         audioEl.dataset.sophiaRemote = "true"
         document.body.appendChild(audioEl)
-        const cleanup = call.bindAudioElement(audioEl, p.sessionId, "audioTrack")
-        boundElements.set(p.sessionId, { el: audioEl, cleanup })
+
+        let hasRecordedCanPlay = false
+        let hasRecordedPlaying = false
+
+        const emitPlaybackEvent = (name: string, payload: Record<string, unknown> = {}) => {
+          recordRemoteAudioEvent(name, {
+            participantSessionId: p.sessionId,
+            ...buildRemoteAudioPayload(audioEl),
+            ...payload,
+          })
+        }
+
+        const handleCanPlay = () => {
+          if (hasRecordedCanPlay) {
+            return
+          }
+
+          hasRecordedCanPlay = true
+          emitPlaybackEvent("remote-audio-canplay", {
+            durationMs: Date.now() - boundAtMs,
+          })
+        }
+
+        const handlePlaying = () => {
+          if (hasRecordedPlaying) {
+            return
+          }
+
+          hasRecordedPlaying = true
+          const entry = boundElements.get(p.sessionId)
+          if (entry?.playbackTimeoutId !== null) {
+            window.clearTimeout(entry.playbackTimeoutId)
+            entry.playbackTimeoutId = null
+          }
+
+          emitPlaybackEvent("remote-audio-playing", {
+            durationMs: Date.now() - boundAtMs,
+          })
+        }
+
+        const handleWaiting = () => {
+          emitPlaybackEvent("remote-audio-waiting", {
+            durationMs: Date.now() - boundAtMs,
+          })
+        }
+
+        const handleStalled = () => {
+          emitPlaybackEvent("remote-audio-stalled", {
+            durationMs: Date.now() - boundAtMs,
+          })
+        }
+
+        const handleError = () => {
+          emitPlaybackEvent("remote-audio-error", {
+            durationMs: Date.now() - boundAtMs,
+            error: describeMediaError(audioEl.error),
+          })
+        }
+
+        audioEl.addEventListener("canplay", handleCanPlay)
+        audioEl.addEventListener("playing", handlePlaying)
+        audioEl.addEventListener("waiting", handleWaiting)
+        audioEl.addEventListener("stalled", handleStalled)
+        audioEl.addEventListener("error", handleError)
+
+        const removeListeners = () => {
+          audioEl.removeEventListener("canplay", handleCanPlay)
+          audioEl.removeEventListener("playing", handlePlaying)
+          audioEl.removeEventListener("waiting", handleWaiting)
+          audioEl.removeEventListener("stalled", handleStalled)
+          audioEl.removeEventListener("error", handleError)
+        }
+
+        let cleanup: (() => void) | undefined
+        try {
+          cleanup = call.bindAudioElement(audioEl, p.sessionId, "audioTrack")
+        } catch (error) {
+          removeListeners()
+          audioEl.remove()
+          emitPlaybackEvent("remote-audio-bind-failed", {
+            durationMs: Date.now() - boundAtMs,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          continue
+        }
+
+        const playbackTimeoutId = window.setTimeout(() => {
+          if (hasRecordedPlaying) {
+            return
+          }
+
+          emitPlaybackEvent("remote-audio-playback-timeout", {
+            durationMs: Date.now() - boundAtMs,
+          })
+        }, 2500)
+
+        emitPlaybackEvent("remote-participant-audio-bound", {
+          durationMs: 0,
+        })
+
+        boundElements.set(p.sessionId, {
+          el: audioEl,
+          cleanup,
+          removeListeners,
+          playbackTimeoutId,
+        })
       }
     }
   })
@@ -48,6 +282,10 @@ function bindRemoteAudio(call: Call): () => void {
   return () => {
     sub.unsubscribe()
     for (const [, entry] of boundElements) {
+      if (entry.playbackTimeoutId !== null) {
+        window.clearTimeout(entry.playbackTimeoutId)
+      }
+      entry.removeListeners()
       entry.cleanup?.()
       entry.el.remove()
     }
@@ -142,6 +380,12 @@ export function useStreamVoice({
     callRef.current = streamCall
     setCall(streamCall)
 
+    const statsCleanup = subscribeToWebRTCStats(streamCall, {
+      callId: credentials.callId,
+      callType: credentials.callType,
+      voiceAgentSessionId: credentials.sessionId ?? null,
+    })
+
     // Subscribe to calling state changes
     const unsubscribe = streamCall.state.callingState$.subscribe((state) => {
       setCallingState(state)
@@ -152,6 +396,7 @@ export function useStreamVoice({
     })
 
     return () => {
+      statsCleanup()
       unsubscribe.unsubscribe()
       remoteParticipantsSubscription.unsubscribe()
       audioCleanupRef.current?.()
@@ -209,7 +454,11 @@ export function useStreamVoice({
 
       // Bind remote audio since we're outside <StreamCall> context
       audioCleanupRef.current?.()
-      audioCleanupRef.current = bindRemoteAudio(call)
+      audioCleanupRef.current = bindRemoteAudio(call, {
+        callId: credentials?.callId ?? null,
+        callType: credentials?.callType ?? null,
+        voiceAgentSessionId: credentials?.sessionId ?? null,
+      })
       logger.debug("StreamVoice", "Remote audio bound")
       recordSophiaCaptureEvent({
         category: "voice-runtime",

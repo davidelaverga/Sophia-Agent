@@ -1,5 +1,6 @@
 import type {
   BuilderArtifactFileV1,
+  BuilderArtifactLibraryItemV1,
   BuilderArtifactV1,
 } from '../types/builder-artifact';
 
@@ -30,6 +31,17 @@ function coerceNumber(record: Record<string, unknown>, snakeKey: string, camelKe
 
 function sanitizeArtifactPath(value: string): string {
   return value.trim().replace(/\\/g, '/').replace(/^file:\/\//, '');
+}
+
+export function isIgnorableBuilderArtifactPath(path: string | null | undefined): boolean {
+  if (typeof path !== 'string' || !path.trim()) {
+    return false;
+  }
+
+  const normalized = normalizeBuilderArtifactPath(path) ?? sanitizeArtifactPath(path).replace(/^\/+/, '');
+  const lower = normalized.toLowerCase();
+
+  return lower.includes('/__pycache__/') || lower.endsWith('.pyc');
 }
 
 export function normalizeBuilderArtifactPath(path: string | null | undefined): string | null {
@@ -165,6 +177,54 @@ export function getBuilderArtifactFiles(builderArtifact: BuilderArtifactV1 | nul
   }
 
   return files;
+}
+
+export function getSessionBuilderFileItems(
+  builderArtifactLibrary: BuilderArtifactLibraryItemV1[] | null | undefined,
+  builderArtifact: BuilderArtifactV1 | null | undefined,
+): BuilderArtifactLibraryItemV1[] {
+  const persistedItems = Array.isArray(builderArtifactLibrary)
+    ? builderArtifactLibrary.filter((item) => !isIgnorableBuilderArtifactPath(item.path))
+    : [];
+  const currentArtifactFiles = getBuilderArtifactFiles(builderArtifact)
+    .filter((file) => !isIgnorableBuilderArtifactPath(file.path));
+
+  if (persistedItems.length === 0 && currentArtifactFiles.length === 0) {
+    return [];
+  }
+
+  const mergedItems = [...persistedItems];
+  const seenPaths = new Set(persistedItems.map((item) => item.path));
+
+  for (const file of currentArtifactFiles) {
+    if (seenPaths.has(file.path)) {
+      continue;
+    }
+
+    seenPaths.add(file.path);
+    mergedItems.push({
+      path: file.path,
+      name: file.name,
+    });
+  }
+
+  return mergedItems;
+}
+
+export function pickBuilderPillLibraryItem(
+  builderArtifactLibrary: BuilderArtifactLibraryItemV1[] | null | undefined,
+  builderArtifact: BuilderArtifactV1 | null | undefined,
+): BuilderArtifactLibraryItemV1 | null {
+  const persistedItems = Array.isArray(builderArtifactLibrary)
+    ? builderArtifactLibrary.filter((item) => !isIgnorableBuilderArtifactPath(item.path))
+    : [];
+  const primaryArtifactPath = normalizeBuilderArtifactPath(builderArtifact?.artifactPath);
+
+  if (primaryArtifactPath) {
+    return persistedItems.find((item) => normalizeBuilderArtifactPath(item.path) === primaryArtifactPath) ?? null;
+  }
+
+  return persistedItems[0] ?? null;
 }
 
 export function buildThreadArtifactHref(

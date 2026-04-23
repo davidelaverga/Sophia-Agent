@@ -8,7 +8,7 @@
 
 'use client';
 
-import { ArrowLeft, LogOut, Settings, WifiOff } from 'lucide-react';
+import { ArrowLeft, FileText, LogOut, Settings, WifiOff } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { type ReactNode, useState, useEffect, type RefObject } from 'react';
 
@@ -33,6 +33,9 @@ interface SessionLayoutProps {
   /** Read-only mode for ended sessions */
   isReadOnly?: boolean;
   presenceRef?: RefObject<PresenceFieldHandle | null>;
+  onToggleSessionFiles?: () => void;
+  isSessionFilesOpen?: boolean;
+  sessionFilesCount?: number;
 }
 
 function SessionHeaderTooltip({
@@ -78,6 +81,9 @@ export function SessionLayout({
   isSophiaResponding = false,
   isReadOnly = false,
   presenceRef,
+  onToggleSessionFiles,
+  isSessionFilesOpen = false,
+  sessionFilesCount = 0,
 }: SessionLayoutProps) {
   const router = useRouter();
   const [showConfirm, setShowConfirm] = useState(false);
@@ -98,6 +104,36 @@ export function SessionLayout({
     sessionIconButtonClass,
     'border-[color:color-mix(in_srgb,var(--sophia-error)_28%,var(--cosmic-border-soft))] text-[color:color-mix(in_srgb,var(--sophia-error)_68%,white_12%)] hover:border-[color:color-mix(in_srgb,var(--sophia-error)_40%,var(--cosmic-border))] hover:bg-[color:color-mix(in_srgb,var(--sophia-error)_9%,var(--cosmic-panel))] hover:text-[color:color-mix(in_srgb,var(--sophia-error)_78%,white_12%)]',
   );
+  const showSessionFilesButton = sessionFilesCount > 0 && typeof onToggleSessionFiles === 'function';
+  const sessionModalPanelClass = cn(
+    'cosmic-surface-panel-strong relative w-full max-w-sm overflow-hidden rounded-[18px] border p-5 animate-scaleIn sm:p-6',
+    'border-[color:var(--cosmic-border-soft)] shadow-[var(--cosmic-shadow-lg)]',
+  );
+  const sessionModalSecondaryButtonClass = cn(
+    'cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300',
+    'hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.985]',
+  );
+  const sessionModalAccentButtonClass = cn(
+    'cosmic-accent-pill cosmic-focus-ring flex-1 rounded-full px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300',
+    'hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.985]',
+  );
+  const sessionModalDangerButtonClass = cn(
+    'cosmic-focus-ring flex-1 rounded-full border px-4 py-2.5 text-[12px] font-medium tracking-[0.02em] transition-all duration-300',
+    'hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.985]',
+    'border-[color:color-mix(in_srgb,var(--sophia-error)_28%,var(--cosmic-border-soft))]',
+    'bg-[color:color-mix(in_srgb,var(--sophia-error)_8%,var(--cosmic-panel-strong))]',
+    'text-[color:color-mix(in_srgb,var(--sophia-error)_78%,white_12%)]',
+    'shadow-[0_14px_32px_color-mix(in_srgb,var(--sophia-error)_10%,transparent)]',
+    'hover:border-[color:color-mix(in_srgb,var(--sophia-error)_44%,var(--cosmic-border))]',
+    'hover:bg-[color:color-mix(in_srgb,var(--sophia-error)_14%,var(--cosmic-panel-strong))]',
+    'hover:text-[color:color-mix(in_srgb,var(--sophia-error)_92%,white_8%)]',
+    'hover:shadow-[0_18px_38px_color-mix(in_srgb,var(--sophia-error)_14%,transparent)]',
+  );
+  const sessionModalTitleClass = 'font-cormorant text-[1.35rem] font-light leading-snug';
+  const sessionModalBodyClass = 'mt-1.5 text-[13px] font-light leading-6';
+  const modalBackdropStyle = {
+    background: 'radial-gradient(circle at top, color-mix(in srgb, var(--sophia-purple) 5%, transparent) 0%, transparent 34%), color-mix(in srgb, var(--bg) 76%, black 24%)',
+  };
   
   // Focus traps for modal dialogs
   const { containerRef: endConfirmRef } = useFocusTrap(showConfirm);
@@ -217,6 +253,39 @@ export function SessionLayout({
 
         {/* Right: End + Settings */}
         <div className="flex items-center gap-1 pointer-events-auto">
+          {showSessionFilesButton ? (
+            <div className="group relative flex">
+              <button
+                onClick={() => {
+                  haptic('light');
+                  onToggleSessionFiles?.();
+                }}
+                aria-label={isSessionFilesOpen ? 'Hide session files' : 'Show session files'}
+                aria-pressed={isSessionFilesOpen}
+                className={cn(
+                  sessionIconButtonClass,
+                  'relative',
+                  isSessionFilesOpen && 'border-[color:var(--cosmic-border)] text-[color:var(--cosmic-text-strong)]'
+                )}
+              >
+                <span className="relative inline-flex">
+                  <FileText className="h-4 w-4" />
+                  <span
+                    className="absolute -right-1 -top-1 inline-flex min-h-3.5 min-w-3.5 items-center justify-center rounded-full px-1 text-[8px] font-medium"
+                    style={{
+                      background: 'color-mix(in srgb, var(--cosmic-panel-strong) 92%, transparent)',
+                      color: isSessionFilesOpen ? 'var(--cosmic-text)' : 'var(--cosmic-text-muted)',
+                      border: '1px solid color-mix(in srgb, var(--cosmic-border-soft) 82%, transparent)',
+                    }}
+                  >
+                    {sessionFilesCount}
+                  </span>
+                </span>
+              </button>
+              <SessionHeaderTooltip label="Files" />
+            </div>
+          ) : null}
+
           {!isReadOnly ? (
             <div className="group relative flex">
               <button
@@ -261,56 +330,65 @@ export function SessionLayout({
 
       {/* End Confirmation Modal */}
       {showConfirm && (
-        <div
-          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
-          onClick={handleCancelEnd}
-        >
+        <div className="fixed inset-0 z-[100] flex items-center justify-center px-6">
+          <button
+            type="button"
+            aria-label="Close"
+            className="cosmic-modal-backdrop absolute inset-0 animate-fadeIn"
+            style={modalBackdropStyle}
+            onClick={handleCancelEnd}
+          />
           <div
             ref={endConfirmRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="end-confirm-title"
-            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
+            className={sessionModalPanelClass}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex flex-col items-center gap-4 text-center">
-              <div
-                className="flex h-12 w-12 items-center justify-center rounded-full"
-                style={{ background: 'color-mix(in srgb, var(--sophia-error) 12%, transparent)' }}
-              >
-                <LogOut
-                  className="h-6 w-6"
-                  style={{ color: 'color-mix(in srgb, var(--sophia-error) 78%, white 12%)' }}
-                />
-              </div>
+            <div
+              className="pointer-events-none absolute inset-0 opacity-30"
+              style={{
+                background: 'linear-gradient(135deg, color-mix(in srgb, var(--sophia-error) 18%, transparent) 0%, transparent 58%)',
+              }}
+            />
 
-              <div className="space-y-2">
-                <h3 id="end-confirm-title" className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
-                  End session?
-                </h3>
-                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
-                  This will close the current session and move it to your session history.
-                </p>
-              </div>
-
-              <div className="mt-2 flex w-full gap-3">
-                <button
-                  onClick={handleCancelEnd}
-                  className="cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
+            <div className="relative">
+              <div className="flex items-start gap-3">
+                <div
+                  className="cosmic-surface-panel flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl"
+                  style={{ color: 'color-mix(in srgb, var(--sophia-error) 74%, white 14%)' }}
                 >
-                  Stay
+                  <LogOut className="h-4.5 w-4.5" />
+                </div>
+
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                    Session close-out
+                  </p>
+                  <h3 id="end-confirm-title" className={sessionModalTitleClass} style={{ color: 'var(--cosmic-text-strong)' }}>
+                    End and review?
+                  </h3>
+                  <p className={sessionModalBodyClass} style={{ color: 'var(--cosmic-text-muted)' }}>
+                    We&apos;ll close this conversation and take you straight into recap. Once you review it, the session will live in your history.
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-5 flex gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleCancelEnd}
+                  className={sessionModalSecondaryButtonClass}
+                >
+                  Keep talking
                 </button>
                 <button
+                  type="button"
                   onClick={handleConfirmEnd}
-                  className="cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
-                  style={{
-                    color: 'color-mix(in srgb, var(--sophia-error) 78%, white 12%)',
-                    border: '1px solid color-mix(in srgb, var(--sophia-error) 28%, var(--cosmic-border-soft))',
-                    background: 'color-mix(in srgb, var(--cosmic-panel-strong) 82%, transparent)',
-                    boxShadow: 'var(--cosmic-shadow-sm)',
-                  }}
+                  className={sessionModalDangerButtonClass}
                 >
-                  End session
+                  End and review
                 </button>
               </div>
             </div>
@@ -320,43 +398,60 @@ export function SessionLayout({
       
       {/* Back Confirmation Modal - when Sophia is responding */}
       {showBackConfirm && (
-        <div 
-          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
-          onClick={handleCancelBack}
-        >
+        <div className="fixed inset-0 z-[100] flex items-center justify-center px-6">
+          <button
+            type="button"
+            aria-label="Close"
+            className="cosmic-modal-backdrop absolute inset-0 animate-fadeIn"
+            style={modalBackdropStyle}
+            onClick={handleCancelBack}
+          />
           <div 
             ref={backConfirmRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="back-confirm-title"
-            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
+            className={sessionModalPanelClass}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex flex-col items-center text-center gap-4">
-              {/* Thinking indicator */}
-              <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: 'var(--cosmic-panel-soft)' }}>
-                <div className="h-6 w-6 animate-spin rounded-full border-2" style={{ borderColor: 'var(--cosmic-border-soft)', borderTopColor: 'var(--cosmic-text-whisper)' }} />
+            <div
+              className="pointer-events-none absolute inset-0 opacity-30"
+              style={{
+                background: 'linear-gradient(135deg, color-mix(in srgb, var(--sophia-purple) 16%, transparent) 0%, transparent 58%)',
+              }}
+            />
+
+            <div className="relative">
+              <div className="flex items-start gap-3">
+                <div className="cosmic-surface-panel flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-[var(--cosmic-text-whisper)]">
+                  <div className="h-4.5 w-4.5 animate-spin rounded-full border-2" style={{ borderColor: 'var(--cosmic-border-soft)', borderTopColor: 'var(--cosmic-text)' }} />
+                </div>
+
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                    Response in progress
+                  </p>
+                  <h3 id="back-confirm-title" className={sessionModalTitleClass} style={{ color: 'var(--cosmic-text-strong)' }}>
+                    Sophia is still responding
+                  </h3>
+                  <p className={sessionModalBodyClass} style={{ color: 'var(--cosmic-text-muted)' }}>
+                    If you leave now, her response will be saved, but it may be incomplete.
+                  </p>
+                </div>
               </div>
-              
-              <div className="space-y-2">
-                <h3 id="back-confirm-title" className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
-                  Sophia is still responding
-                </h3>
-                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
-                  If you leave now, her response will be saved but may be incomplete.
-                </p>
-              </div>
-              
-              <div className="flex gap-3 w-full mt-2">
+
+              <div className="mt-5 flex gap-2.5">
                 <button
+                  type="button"
                   onClick={handleCancelBack}
-                  className="cosmic-ghost-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
+                  className={sessionModalSecondaryButtonClass}
                 >
-                  Stay
+                  Stay here
                 </button>
                 <button
+                  type="button"
                   onClick={handleConfirmBack}
-                  className="cosmic-accent-pill cosmic-focus-ring flex-1 rounded-xl px-4 py-2.5 font-medium transition-colors"
+                  className={sessionModalAccentButtonClass}
                 >
                   Leave anyway
                 </button>
@@ -368,37 +463,52 @@ export function SessionLayout({
       
       {/* Offline Warning Modal - prevents ending session while offline */}
       {showOfflineWarning && (
-        <div 
-          className="cosmic-modal-backdrop fixed inset-0 z-[100] flex items-center justify-center animate-fadeIn"
-          onClick={() => setShowOfflineWarning(false)}
-        >
+        <div className="fixed inset-0 z-[100] flex items-center justify-center px-6">
+          <button
+            type="button"
+            aria-label="Close"
+            className="cosmic-modal-backdrop absolute inset-0 animate-fadeIn"
+            style={modalBackdropStyle}
+            onClick={() => setShowOfflineWarning(false)}
+          />
           <div 
             ref={offlineWarningRef}
             role="dialog"
             aria-modal="true"
             aria-labelledby="offline-warning-title"
-            className="cosmic-surface-panel-strong w-[90%] max-w-sm rounded-2xl p-6 animate-scaleIn"
+            className={sessionModalPanelClass}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex flex-col items-center text-center gap-4">
-              {/* Offline indicator */}
-              <div className="flex h-12 w-12 items-center justify-center rounded-full" style={{ background: 'color-mix(in srgb, var(--cosmic-amber) 12%, transparent)' }}>
-                <WifiOff className="h-6 w-6" style={{ color: 'var(--cosmic-amber)' }} />
+            <div
+              className="pointer-events-none absolute inset-0 opacity-30"
+              style={{
+                background: 'linear-gradient(135deg, color-mix(in srgb, var(--cosmic-amber) 18%, transparent) 0%, transparent 58%)',
+              }}
+            />
+
+            <div className="relative">
+              <div className="flex items-start gap-3">
+                <div className="cosmic-surface-panel flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl text-[var(--cosmic-amber)]">
+                  <WifiOff className="h-4.5 w-4.5" />
+                </div>
+
+                <div className="min-w-0 flex-1 text-left">
+                  <p className="text-[10px] uppercase tracking-[0.16em]" style={{ color: 'var(--cosmic-text-whisper)' }}>
+                    Connection required
+                  </p>
+                  <h3 id="offline-warning-title" className={sessionModalTitleClass} style={{ color: 'var(--cosmic-text-strong)' }}>
+                    You&apos;re offline
+                  </h3>
+                  <p className={sessionModalBodyClass} style={{ color: 'var(--cosmic-text-muted)' }}>
+                    Wait until your connection returns before ending the session so the conversation and recap can be saved cleanly.
+                  </p>
+                </div>
               </div>
-              
-              <div className="space-y-2">
-                <h3 id="offline-warning-title" className="text-lg font-semibold" style={{ color: 'var(--cosmic-text-strong)' }}>
-                  You&apos;re offline
-                </h3>
-                <p className="text-sm" style={{ color: 'var(--cosmic-text-muted)' }}>
-                  Please wait until your connection is restored before ending the session. 
-                  This ensures your conversation is saved properly.
-                </p>
-              </div>
-              
+
               <button
+                type="button"
                 onClick={() => setShowOfflineWarning(false)}
-                className="cosmic-accent-pill cosmic-focus-ring w-full rounded-xl px-4 py-2.5 font-medium transition-colors"
+                className={cn(sessionModalAccentButtonClass, 'mt-5 w-full flex-none')}
               >
                 Got it
               </button>

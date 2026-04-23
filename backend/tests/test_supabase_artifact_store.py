@@ -13,6 +13,7 @@ def _clear_supabase_env(monkeypatch):
     for var in (
         "SUPABASE_URL",
         "SUPABASE_SERVICE_ROLE_KEY",
+        "SUPABASE_SERVICE_KEY",
         "SUPABASE_KEY",
         "SUPABASE_BUILDER_BUCKET",
     ):
@@ -30,6 +31,13 @@ def test_is_configured_false_when_env_missing() -> None:
 
 def test_is_configured_true_when_env_present(monkeypatch) -> None:
     _configure(monkeypatch)
+    assert supabase_artifact_store.is_configured() is True
+
+
+def test_is_configured_true_with_service_key_alias(monkeypatch) -> None:
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_KEY", "svc-role-key")
+
     assert supabase_artifact_store.is_configured() is True
 
 

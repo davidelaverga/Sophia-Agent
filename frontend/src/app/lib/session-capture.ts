@@ -10,6 +10,7 @@ import { getDebugSnapshot, type DebugSnapshot } from './debug-tools';
 
 const CAPTURE_FLAG_STORAGE_KEY = 'sophia.capture.enabled';
 const MAX_CAPTURE_EVENTS = 500;
+const MAX_WEBRTC_CAPTURE_SAMPLES = 24;
 const CAPTURED_STORAGE_KEYS = [
   'sophia-session-store',
   'sophia-recap',
@@ -76,6 +77,61 @@ type SophiaCaptureMicrophoneStreamSummary = {
   trackIds: string[];
 };
 
+type SophiaCaptureNetworkSummary = {
+  online: boolean | null;
+  effectiveType: string | null;
+  rttMs: number | null;
+  downlinkMbps: number | null;
+  saveData: boolean | null;
+};
+
+type SophiaCaptureWebRTCDirection = 'publisher' | 'subscriber';
+
+export type SophiaCaptureWebRTCSample = {
+  recordedAt: string;
+  direction: SophiaCaptureWebRTCDirection;
+  datacenter: string | null;
+  roundTripTimeMs: number | null;
+  jitterMs: number | null;
+  packetLossPct: number | null;
+  packetsLost: number | null;
+  packetsReceived: number | null;
+  totalBytesSent: number | null;
+  totalBytesReceived: number | null;
+  codec: string | null;
+};
+
+export type SophiaCaptureWebRTCDirectionSummary = {
+  sampleCount: number;
+  lastRecordedAt: string | null;
+  lastRoundTripTimeMs: number | null;
+  averageRoundTripTimeMs: number | null;
+  maxRoundTripTimeMs: number | null;
+  lastJitterMs: number | null;
+  averageJitterMs: number | null;
+  maxJitterMs: number | null;
+  lastPacketLossPct: number | null;
+  averagePacketLossPct: number | null;
+  maxPacketLossPct: number | null;
+  lastPacketsLost: number | null;
+  lastPacketsReceived: number | null;
+  totalBytesSent: number | null;
+  totalBytesReceived: number | null;
+  codec: string | null;
+};
+
+export type SophiaCaptureWebRTCSummary = {
+  activeCallId: string | null;
+  voiceAgentSessionId: string | null;
+  datacenter: string | null;
+  sampleCount: number;
+  firstSampleAt: string | null;
+  lastSampleAt: string | null;
+  recentSamples: SophiaCaptureWebRTCSample[];
+  publisher: SophiaCaptureWebRTCDirectionSummary;
+  subscriber: SophiaCaptureWebRTCDirectionSummary;
+};
+
 export type SophiaCaptureMicrophoneSummary = {
   audioTrackCount: number;
   detectedAudio: boolean;
@@ -95,6 +151,7 @@ export type SophiaCaptureMicrophoneSummary = {
 
 type SophiaCaptureState = {
   microphone: SophiaCaptureMicrophoneSummary;
+  webrtc: SophiaCaptureWebRTCSummary;
   startedAt: string;
   seq: number;
   events: SophiaCaptureEvent[];
@@ -160,6 +217,7 @@ export type SophiaCaptureSnapshot = {
   };
   harness: {
     microphone: SophiaCaptureMicrophoneSummary;
+    webrtc: SophiaCaptureWebRTCSummary;
   };
   metadata: {
     currentSessionId: string | null;
@@ -170,6 +228,7 @@ export type SophiaCaptureSnapshot = {
   presence: {
     labels: string[];
   };
+  network?: SophiaCaptureNetworkSummary;
   storage: Record<string, unknown>;
 };
 
@@ -225,9 +284,45 @@ function createEmptyMicrophoneSummary(
   };
 }
 
+function createEmptyWebRTCDirectionSummary(): SophiaCaptureWebRTCDirectionSummary {
+  return {
+    sampleCount: 0,
+    lastRecordedAt: null,
+    lastRoundTripTimeMs: null,
+    averageRoundTripTimeMs: null,
+    maxRoundTripTimeMs: null,
+    lastJitterMs: null,
+    averageJitterMs: null,
+    maxJitterMs: null,
+    lastPacketLossPct: null,
+    averagePacketLossPct: null,
+    maxPacketLossPct: null,
+    lastPacketsLost: null,
+    lastPacketsReceived: null,
+    totalBytesSent: null,
+    totalBytesReceived: null,
+    codec: null,
+  };
+}
+
+function createEmptyWebRTCSummary(): SophiaCaptureWebRTCSummary {
+  return {
+    activeCallId: null,
+    voiceAgentSessionId: null,
+    datacenter: null,
+    sampleCount: 0,
+    firstSampleAt: null,
+    lastSampleAt: null,
+    recentSamples: [],
+    publisher: createEmptyWebRTCDirectionSummary(),
+    subscriber: createEmptyWebRTCDirectionSummary(),
+  };
+}
+
 function createCaptureState(): SophiaCaptureState {
   return {
     microphone: createEmptyMicrophoneSummary(window.__sophiaCaptureMicProbeInstalled__ === true),
+    webrtc: createEmptyWebRTCSummary(),
     startedAt: new Date().toISOString(),
     seq: 0,
     events: [],
@@ -280,6 +375,7 @@ function clearCaptureState(): void {
   state.seq = 0;
   state.events = [];
   state.microphone = createEmptyMicrophoneSummary(window.__sophiaCaptureMicProbeInstalled__ === true);
+  state.webrtc = createEmptyWebRTCSummary();
 }
 
 function clonePayload(payload: unknown): unknown {
@@ -294,6 +390,20 @@ function clonePayload(payload: unknown): unknown {
       return String(payload);
     }
   }
+}
+
+function asFiniteNumber(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function asString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
 }
 
 function parseStoredValue(raw: string | null): unknown {
@@ -319,6 +429,238 @@ function formatProbeError(error: unknown): string {
   }
 
   return String(error);
+}
+
+function calculatePacketLossPct(params: {
+  packetsLost: number | null;
+  packetsReceived: number | null;
+}): number | null {
+  const { packetsLost, packetsReceived } = params;
+  if (packetsLost === null || packetsReceived === null) {
+    return null;
+  }
+
+  const totalPackets = packetsLost + packetsReceived;
+  if (!Number.isFinite(totalPackets) || totalPackets <= 0) {
+    return null;
+  }
+
+  return (packetsLost / totalPackets) * 100;
+}
+
+function averageRecentSampleValue(
+  samples: SophiaCaptureWebRTCSample[],
+  direction: SophiaCaptureWebRTCDirection,
+  selector: (sample: SophiaCaptureWebRTCSample) => number | null,
+): number | null {
+  let total = 0;
+  let count = 0;
+
+  for (const sample of samples) {
+    if (sample.direction !== direction) {
+      continue;
+    }
+
+    const value = selector(sample);
+    if (value === null) {
+      continue;
+    }
+
+    total += value;
+    count += 1;
+  }
+
+  return count > 0 ? total / count : null;
+}
+
+function maxRecentSampleValue(
+  samples: SophiaCaptureWebRTCSample[],
+  direction: SophiaCaptureWebRTCDirection,
+  selector: (sample: SophiaCaptureWebRTCSample) => number | null,
+): number | null {
+  let maxValue: number | null = null;
+
+  for (const sample of samples) {
+    if (sample.direction !== direction) {
+      continue;
+    }
+
+    const value = selector(sample);
+    if (value === null) {
+      continue;
+    }
+
+    maxValue = maxValue === null ? value : Math.max(maxValue, value);
+  }
+
+  return maxValue;
+}
+
+function summarizeWebRTCDirection(
+  samples: SophiaCaptureWebRTCSample[],
+  direction: SophiaCaptureWebRTCDirection,
+): SophiaCaptureWebRTCDirectionSummary {
+  const directionSamples = samples.filter((sample) => sample.direction === direction);
+  const latestSample = directionSamples.at(-1) ?? null;
+
+  return {
+    sampleCount: directionSamples.length,
+    lastRecordedAt: latestSample?.recordedAt ?? null,
+    lastRoundTripTimeMs: latestSample?.roundTripTimeMs ?? null,
+    averageRoundTripTimeMs: averageRecentSampleValue(samples, direction, (sample) => sample.roundTripTimeMs),
+    maxRoundTripTimeMs: maxRecentSampleValue(samples, direction, (sample) => sample.roundTripTimeMs),
+    lastJitterMs: latestSample?.jitterMs ?? null,
+    averageJitterMs: averageRecentSampleValue(samples, direction, (sample) => sample.jitterMs),
+    maxJitterMs: maxRecentSampleValue(samples, direction, (sample) => sample.jitterMs),
+    lastPacketLossPct: latestSample?.packetLossPct ?? null,
+    averagePacketLossPct: averageRecentSampleValue(samples, direction, (sample) => sample.packetLossPct),
+    maxPacketLossPct: maxRecentSampleValue(samples, direction, (sample) => sample.packetLossPct),
+    lastPacketsLost: latestSample?.packetsLost ?? null,
+    lastPacketsReceived: latestSample?.packetsReceived ?? null,
+    totalBytesSent: latestSample?.totalBytesSent ?? null,
+    totalBytesReceived: latestSample?.totalBytesReceived ?? null,
+    codec: latestSample?.codec ?? null,
+  };
+}
+
+function rebuildWebRTCSummary(summary: SophiaCaptureWebRTCSummary): void {
+  summary.sampleCount = summary.recentSamples.length;
+  summary.firstSampleAt = summary.recentSamples[0]?.recordedAt ?? null;
+  summary.lastSampleAt = summary.recentSamples.at(-1)?.recordedAt ?? null;
+  summary.datacenter = summary.recentSamples.at(-1)?.datacenter ?? summary.datacenter;
+  summary.publisher = summarizeWebRTCDirection(summary.recentSamples, 'publisher');
+  summary.subscriber = summarizeWebRTCDirection(summary.recentSamples, 'subscriber');
+}
+
+function resetWebRTCSummaryForCall(
+  state: SophiaCaptureState,
+  params: {
+    callId: string | null;
+    voiceAgentSessionId: string | null;
+  },
+): void {
+  state.webrtc = createEmptyWebRTCSummary();
+  state.webrtc.activeCallId = params.callId;
+  state.webrtc.voiceAgentSessionId = params.voiceAgentSessionId;
+}
+
+function normalizeWebRTCSample(params: {
+  direction: SophiaCaptureWebRTCDirection;
+  audioStats: Record<string, unknown> | null;
+  datacenter: string | null;
+  recordedAt: string;
+}): SophiaCaptureWebRTCSample | null {
+  const { direction, audioStats, datacenter, recordedAt } = params;
+  if (!audioStats) {
+    return null;
+  }
+
+  const packetsLost = asFiniteNumber(audioStats.totalPacketsLost);
+  const packetsReceived = asFiniteNumber(audioStats.totalPacketsReceived);
+
+  return {
+    recordedAt,
+    direction,
+    datacenter,
+    roundTripTimeMs: asFiniteNumber(audioStats.averageRoundTripTimeInMs),
+    jitterMs: asFiniteNumber(audioStats.averageJitterInMs),
+    packetLossPct: calculatePacketLossPct({ packetsLost, packetsReceived }),
+    packetsLost,
+    packetsReceived,
+    totalBytesSent: asFiniteNumber(audioStats.totalBytesSent),
+    totalBytesReceived: asFiniteNumber(audioStats.totalBytesReceived),
+    codec: asString(audioStats.codec),
+  };
+}
+
+export function recordSophiaCaptureWebRTCStats(params: {
+  callId?: string | null;
+  voiceAgentSessionId?: string | null;
+  report: unknown;
+}): void {
+  if (!isCaptureEnabled()) {
+    return;
+  }
+
+  const state = getCaptureState();
+  if (!state) {
+    return;
+  }
+
+  const report = asRecord(params.report);
+  if (!report) {
+    return;
+  }
+
+  const nextCallId = params.callId ?? null;
+  const nextVoiceAgentSessionId = params.voiceAgentSessionId ?? null;
+  const currentSummary = state.webrtc;
+
+  if (
+    (nextCallId && currentSummary.activeCallId && currentSummary.activeCallId !== nextCallId)
+    || (nextVoiceAgentSessionId
+      && currentSummary.voiceAgentSessionId
+      && currentSummary.voiceAgentSessionId !== nextVoiceAgentSessionId)
+  ) {
+    resetWebRTCSummaryForCall(state, {
+      callId: nextCallId,
+      voiceAgentSessionId: nextVoiceAgentSessionId,
+    });
+  }
+
+  if (!state.webrtc.activeCallId && nextCallId) {
+    state.webrtc.activeCallId = nextCallId;
+  }
+
+  if (!state.webrtc.voiceAgentSessionId && nextVoiceAgentSessionId) {
+    state.webrtc.voiceAgentSessionId = nextVoiceAgentSessionId;
+  }
+
+  const recordedAt = new Date().toISOString();
+  const datacenter = asString(report.datacenter);
+  const publisherSample = normalizeWebRTCSample({
+    direction: 'publisher',
+    audioStats: asRecord(report.publisherAudioStats),
+    datacenter,
+    recordedAt,
+  });
+  const subscriberSample = normalizeWebRTCSample({
+    direction: 'subscriber',
+    audioStats: asRecord(report.subscriberAudioStats),
+    datacenter,
+    recordedAt,
+  });
+  const nextSamples = [publisherSample, subscriberSample].filter(
+    (sample): sample is SophiaCaptureWebRTCSample => sample !== null,
+  );
+
+  if (nextSamples.length === 0) {
+    return;
+  }
+
+  const isFirstSampleForCall = state.webrtc.recentSamples.length === 0;
+  if (datacenter) {
+    state.webrtc.datacenter = datacenter;
+  }
+
+  state.webrtc.recentSamples.push(...nextSamples);
+  if (state.webrtc.recentSamples.length > MAX_WEBRTC_CAPTURE_SAMPLES) {
+    state.webrtc.recentSamples.splice(0, state.webrtc.recentSamples.length - MAX_WEBRTC_CAPTURE_SAMPLES);
+  }
+
+  rebuildWebRTCSummary(state.webrtc);
+
+  if (isFirstSampleForCall) {
+    recordSophiaCaptureEvent({
+      category: 'voice-runtime',
+      name: 'webrtc-stats-started',
+      payload: {
+        callId: state.webrtc.activeCallId,
+        datacenter: state.webrtc.datacenter,
+        voiceAgentSessionId: state.webrtc.voiceAgentSessionId,
+      },
+    });
+  }
 }
 
 function summarizeMediaConstraints(
@@ -771,6 +1113,50 @@ function readArtifactsDom(): SophiaCaptureSnapshot['artifacts']['dom'] {
   };
 }
 
+function readNetworkSummary(): SophiaCaptureNetworkSummary {
+  const networkNavigator = navigator as Navigator & {
+    connection?: {
+      effectiveType?: unknown;
+      rtt?: unknown;
+      downlink?: unknown;
+      saveData?: unknown;
+    };
+    mozConnection?: {
+      effectiveType?: unknown;
+      rtt?: unknown;
+      downlink?: unknown;
+      saveData?: unknown;
+    };
+    webkitConnection?: {
+      effectiveType?: unknown;
+      rtt?: unknown;
+      downlink?: unknown;
+      saveData?: unknown;
+    };
+  };
+
+  const connection = networkNavigator.connection
+    ?? networkNavigator.mozConnection
+    ?? networkNavigator.webkitConnection;
+
+  return {
+    online: typeof navigator.onLine === 'boolean' ? navigator.onLine : null,
+    effectiveType:
+      typeof connection?.effectiveType === 'string' && connection.effectiveType.trim().length > 0
+        ? connection.effectiveType
+        : null,
+    rttMs:
+      typeof connection?.rtt === 'number' && Number.isFinite(connection.rtt)
+        ? connection.rtt
+        : null,
+    downlinkMbps:
+      typeof connection?.downlink === 'number' && Number.isFinite(connection.downlink)
+        ? connection.downlink
+        : null,
+    saveData: typeof connection?.saveData === 'boolean' ? connection.saveData : null,
+  };
+}
+
 function serializeChatMessages(): SophiaCaptureSnapshot['transcript']['chatMessages'] {
   return useChatStore.getState().messages.map((message) => {
     const rawMessage = message as unknown as Record<string, unknown>;
@@ -852,6 +1238,9 @@ export function buildSophiaCaptureSnapshot(): SophiaCaptureSnapshot {
         getCaptureState()?.microphone ??
           createEmptyMicrophoneSummary(window.__sophiaCaptureMicProbeInstalled__ === true)
       ) as SophiaCaptureMicrophoneSummary,
+      webrtc: clonePayload(
+        getCaptureState()?.webrtc ?? createEmptyWebRTCSummary()
+      ) as SophiaCaptureWebRTCSummary,
     },
     metadata: {
       currentSessionId: metadata.currentSessionId,
@@ -864,6 +1253,7 @@ export function buildSophiaCaptureSnapshot(): SophiaCaptureSnapshot {
         .map((element) => element.getAttribute('aria-label'))
         .filter((label): label is string => Boolean(label)),
     },
+    network: readNetworkSummary(),
     storage,
   };
 }
