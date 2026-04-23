@@ -16,7 +16,7 @@ from langchain.agents.middleware.types import ModelRequest, hook_config
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
-from deerflow.sophia.storage import supabase_artifact_store
+from deerflow.sophia.storage import gateway_mirror, supabase_artifact_store
 
 logger = logging.getLogger(__name__)
 
@@ -35,26 +35,25 @@ def _extract_output_relative_path(artifact_path: str | None) -> str | None:
     return relative or None
 
 
-def _upload_builder_outputs_to_supabase(
+def _replicate_builder_outputs(
     thread_id: str | None,
     outputs_host_path: str | None,
     artifact_args: dict[str, Any],
-) -> None:
-    """Best-effort upload of the builder's outputs to Supabase Storage.
+) -> dict[str, Any]:
+    """Best-effort replication of builder outputs to Gateway disk + Supabase.
 
-    Silently no-ops when Supabase is not configured, when thread_id or the
-    outputs host path are missing, or when individual files cannot be read.
-    Any failure is logged and swallowed so builder flow never regresses.
+    Returns a diagnostics dict with ``{"mirror": "ok|skipped|failed",
+    "supabase": "ok|skipped|failed"}`` for each file processed.
+    Failures are logged and swallowed so builder flow never regresses.
     """
-    if not supabase_artifact_store.is_configured():
-        return
+    diagnostics: dict[str, str] = {"mirror": "skipped", "supabase": "skipped"}
     if not thread_id or not outputs_host_path:
         logger.debug(
-            "Skipping Supabase upload; missing thread_id=%s outputs_host_path=%s",
+            "Skipping builder output replication; missing thread_id=%s outputs_host_path=%s",
             thread_id,
             outputs_host_path,
         )
-        return
+        return diagnostics
 
     candidates: list[str] = []
     primary = artifact_args.get("artifact_path")
@@ -65,6 +64,11 @@ def _upload_builder_outputs_to_supabase(
         candidates.extend(path for path in supporting if isinstance(path, str))
 
     outputs_root = Path(outputs_host_path)
+    any_mirror_ok = False
+    any_mirror_failed = False
+    any_supabase_ok = False
+    any_supabase_failed = False
+
     for candidate in candidates:
         relative = _extract_output_relative_path(candidate)
         if relative is None:
@@ -74,33 +78,70 @@ def _upload_builder_outputs_to_supabase(
             content = host_file.read_bytes()
         except FileNotFoundError:
             logger.warning(
-                "Supabase upload skipped; local file missing thread_id=%s path=%s",
+                "Builder replication skipped; local file missing thread_id=%s path=%s",
                 thread_id,
                 host_file,
             )
             continue
         except OSError as exc:
             logger.warning(
-                "Supabase upload skipped; read error thread_id=%s path=%s error=%s",
+                "Builder replication skipped; read error thread_id=%s path=%s error=%s",
                 thread_id,
                 host_file,
                 exc,
             )
             continue
 
-        try:
-            supabase_artifact_store.upload_artifact(
-                thread_id=thread_id,
-                filename=relative,
-                content=content,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort upload
-            logger.warning(
-                "Supabase upload failed; continuing without remote copy thread_id=%s path=%s error=%s",
-                thread_id,
-                relative,
-                exc,
-            )
+        # Primary: push to Gateway's internal replicate endpoint
+        if gateway_mirror.is_configured():
+            try:
+                if gateway_mirror.mirror_artifact(
+                    thread_id=thread_id,
+                    virtual_path=candidate,
+                    content=content,
+                ):
+                    any_mirror_ok = True
+                else:
+                    any_mirror_failed = True
+            except Exception:  # noqa: BLE001 — best-effort
+                any_mirror_failed = True
+                logger.warning(
+                    "Gateway mirror failed for thread_id=%s path=%s",
+                    thread_id,
+                    relative,
+                    exc_info=True,
+                )
+
+        # Fallback / DR: Supabase
+        if supabase_artifact_store.is_configured():
+            try:
+                result = supabase_artifact_store.upload_artifact(
+                    thread_id=thread_id,
+                    filename=relative,
+                    content=content,
+                )
+                if result is not None:
+                    any_supabase_ok = True
+                else:
+                    any_supabase_failed = True
+            except Exception as exc:  # noqa: BLE001 — best-effort upload
+                any_supabase_failed = True
+                logger.warning(
+                    "Supabase upload failed; continuing without remote copy thread_id=%s path=%s error=%s",
+                    thread_id,
+                    relative,
+                    exc,
+                )
+
+    if any_mirror_ok:
+        diagnostics["mirror"] = "ok"
+    elif any_mirror_failed:
+        diagnostics["mirror"] = "failed"
+    if any_supabase_ok:
+        diagnostics["supabase"] = "ok"
+    elif any_supabase_failed:
+        diagnostics["supabase"] = "failed"
+    return diagnostics
 
 
 class BuilderArtifactState(AgentState):
@@ -223,15 +264,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
                     )
                     thread_id = runtime.context.get("thread_id") if runtime.context else None
-                    _upload_builder_outputs_to_supabase(
+                    replication = _replicate_builder_outputs(
                         thread_id=thread_id,
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
                     )
+                    args["replication"] = replication
                     log_middleware(
                         "BuilderArtifact",
                         f"builder artifact captured: type={args.get('artifact_type')}, "
-                        f"confidence={args.get('confidence')}",
+                        f"confidence={args.get('confidence')} mirror={replication.get('mirror')} supabase={replication.get('supabase')}",
                         _t0,
                     )
                     return {
@@ -350,6 +392,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "user_next_action": "Open the file and let me know if it lands.",
                             "confidence": 0.5,
                         }
+                        # Best-effort replicate the promoted file to the Gateway
+                        # disk so the user can download it even on a force-stop.
+                        thread_data_local = state.get("thread_data") or {}
+                        outputs_host_path_local = (
+                            thread_data_local.get("outputs_path")
+                            if isinstance(thread_data_local, dict)
+                            else None
+                        )
+                        thread_id_local = runtime.context.get("thread_id") if runtime.context else None
+                        replication = _replicate_builder_outputs(
+                            thread_id=thread_id_local,
+                            outputs_host_path=outputs_host_path_local,
+                            artifact_args=fallback,
+                        )
+                        fallback["replication"] = replication
                     else:
                         fallback = {
                             "artifact_path": None,

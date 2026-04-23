@@ -29,6 +29,7 @@ from deerflow.sophia.builder_web_policy import (
     make_builder_web_budget,
     should_allow_builder_web_research,
 )
+from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
 from deerflow.subagents import SubagentExecutor, get_subagent_config
 from deerflow.subagents.executor import (
     SubagentResult,
@@ -397,6 +398,7 @@ def _build_terminal_command(
     delegation_context: dict[str, Any],
     handoff_resolution: dict[str, Any],
     result: Any,
+    thread_id: str | None = None,
 ) -> Command:
     status = _normalize_background_status(getattr(result, "status", None))
     builder_result = _extract_builder_result(result) if status == "completed" else None
@@ -417,21 +419,31 @@ def _build_terminal_command(
     if error:
         builder_task["error"] = error
 
-    return Command(
-        update={
-            "builder_task": builder_task,
-            "builder_result": builder_result,
-            "delegation_context": delegation_context,
-            "active_mode": "companion",
-            "messages": [
-                ToolMessage(
-                    content=_build_terminal_tool_message(status, builder_result, error),
-                    tool_call_id=tool_call_id or task_id,
-                    name="switch_to_builder",
-                )
-            ],
-        }
-    )
+    update: dict[str, Any] = {
+        "builder_task": builder_task,
+        "builder_result": builder_result,
+        "delegation_context": delegation_context,
+        "active_mode": "companion",
+        "messages": [
+            ToolMessage(
+                content=_build_terminal_tool_message(status, builder_result, error),
+                tool_call_id=tool_call_id or task_id,
+                name="switch_to_builder",
+            )
+        ],
+    }
+
+    # Populate builder_delivery inline so channel/IM paths have immediate
+    # access to the file bytes regardless of cross-service disk visibility.
+    if builder_result and thread_id:
+        builder_delivery = build_builder_delivery_payload(
+            thread_id=thread_id,
+            builder_result=builder_result,
+        )
+        if builder_delivery is not None:
+            update["builder_delivery"] = builder_delivery
+
+    return Command(update=update)
 
 
 def _maybe_return_terminal_command(
@@ -444,6 +456,7 @@ def _maybe_return_terminal_command(
     delegated_at: str,
     delegation_context: dict[str, Any],
     handoff_resolution: dict[str, Any],
+    thread_id: str | None = None,
 ) -> Command | None:
     result = get_background_task_result(task_id)
     if result is None:
@@ -471,6 +484,7 @@ def _maybe_return_terminal_command(
         delegation_context=delegation_context,
         handoff_resolution=handoff_resolution,
         result=result,
+        thread_id=thread_id,
     )
 
 
@@ -647,6 +661,7 @@ def _switch_to_builder_impl(
         delegated_at=delegated_at,
         delegation_context=delegation_context,
         handoff_resolution=handoff_resolution,
+        thread_id=thread_id,
     )
     if terminal_command is not None:
         return terminal_command

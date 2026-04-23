@@ -12,6 +12,7 @@ from app.gateway.routers import (
     artifacts,
     bootstrap,
     channels,
+    internal_artifacts,
     mcp,
     memory,
     models,
@@ -212,6 +213,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
+
+    # Internal artifact replication endpoint (LangGraph → Gateway)
+    # Only active when SOPHIA_INTERNAL_SECRET is set (Render split-disk topology).
+    if internal_artifacts._load_secret():
+        app.include_router(internal_artifacts.router)
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)

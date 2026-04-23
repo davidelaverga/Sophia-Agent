@@ -40,6 +40,13 @@ services:
         value: /var/lib/deerflow
       - key: LANGCHAIN_TRACING_V2
         value: "false"
+      - key: SOPHIA_GATEWAY_INTERNAL_URL
+        fromService:
+          name: sophia-gateway
+          type: web
+          property: url
+      - key: SOPHIA_INTERNAL_SECRET
+        generateValue: true
 
   # ─────────────────────────────────────────────────────────────────
   # 2. Gateway API (REST + SSE proxy)
@@ -82,6 +89,13 @@ services:
         value: /var/lib/deerflow
       - key: VOICE_SERVER_URL
         sync: false
+      - key: SOPHIA_INTERNAL_SECRET
+        generateValue: true
+
+  # NOTE: SOPHIA_INTERNAL_SECRET is generated on the gateway and consumed
+  # by sophia-langgraph via the fromService reference above. Do NOT set
+  # it manually or via env group — the generated value must be identical
+  # on both sides.
 
   # ─────────────────────────────────────────────────────────────────
   # 3. Voice Server (Vision Agents — STT + TTS + WebRTC)
