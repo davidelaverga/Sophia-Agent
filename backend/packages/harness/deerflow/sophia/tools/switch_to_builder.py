@@ -99,11 +99,12 @@ class SwitchToBuilderInput(BaseModel):
     user_id: str | None = Field(
         default=None,
         description=(
-            "Optional: explicit authenticated user identifier. Pass this when "
-            "you know the user_id (e.g. from user_identity context) so the "
-            "builder's Mem0 / identity / ownership checks use the correct user. "
-            "Leave as None to fall back to runtime config / state / agent-bound "
-            "default."
+            "Optional diagnostic hint. NEVER trusted to override authenticated "
+            "identity: if the gateway/runtime already supplies a user_id, that "
+            "trusted value is used and this field is ignored (a mismatch is "
+            "logged for audit). Accepted only as a last-resort fallback when "
+            "every trusted source is missing, strictly to avoid 'default_user'. "
+            "Leave as None in normal operation."
         ),
     )
 
@@ -159,22 +160,32 @@ def _resolve_user_id(
     state: SophiaState,
     configured_user_id: str | None = None,
     explicit_tool_arg: str | None = None,
-) -> tuple[str, str, dict[str, bool]]:
+) -> tuple[str, str, dict[str, Any]]:
     """Resolve user_id and return source diagnostics.
 
+    The LLM's tool-call arguments are NEVER trusted to override an
+    authenticated identity — a prompt-injected or hallucinated ``user_id``
+    must not swap the builder into another user's Mem0 / identity /
+    ownership scope. Trusted sources (gateway-propagated runtime config,
+    runtime context, state populated from those, and the closure bound at
+    companion construction) always win.
+
     Priority order (highest first):
-      1. ``explicit_tool_arg`` — explicit ``user_id`` passed as tool arg by the
-         companion LLM. Highest priority so an authenticated caller can override
-         any stale runtime/state value.
-      2. ``runtime.config.configurable.user_id``
-      3. ``runtime.context.user_id``
-      4. ``state.user_id``
-      5. ``configured_user_id`` — closure-bound user_id set at companion
-         construction time (``make_switch_to_builder_tool(user_id)``). In normal
-         operation this equals the authenticated user; only falls back to
-         ``"default_user"`` if the companion was built without one.
-      6. ``"default_user"`` literal — hard failure mode; logged as WARNING so
-         regressions are visible.
+      1. ``runtime.config.configurable.user_id`` (TRUSTED — set by gateway)
+      2. ``runtime.context.user_id`` (TRUSTED — set by gateway)
+      3. ``state.user_id`` (TRUSTED — propagated from authenticated runtime)
+      4. ``configured_user_id`` (TRUSTED — closure bound at companion
+         construction time via ``make_switch_to_builder_tool(user_id)``; this
+         is the authenticated user when the companion is built per-request)
+      5. ``explicit_tool_arg`` (UNTRUSTED — LLM-supplied; accepted ONLY as a
+         last-resort fallback when every trusted source is empty, to avoid
+         hitting ``default_user``). Emits WARNING on use.
+      6. ``"default_user"`` literal — hard failure; WARNING logged.
+
+    Audit path: whenever ``explicit_tool_arg`` is supplied but a trusted
+    source wins AND the two values differ, a WARNING is logged. This
+    surfaces possible prompt-injection attempts even though they are
+    neutralised (ignored) by the precedence rule above.
     """
     tool_arg_user_id: str | None = None
     configurable_user_id: str | None = None
@@ -200,29 +211,77 @@ def _resolve_user_id(
     if isinstance(candidate, str) and candidate.strip():
         state_user_id = candidate
 
-    diagnostics = {
+    # Select the trusted resolution first (ignoring the tool arg).
+    trusted_resolved: str | None = None
+    trusted_source: str | None = None
+    if configurable_user_id:
+        trusted_resolved = validate_user_id(configurable_user_id)
+        trusted_source = "runtime.config.configurable.user_id"
+    elif context_user_id:
+        trusted_resolved = validate_user_id(context_user_id)
+        trusted_source = "runtime.context.user_id"
+    elif state_user_id:
+        trusted_resolved = validate_user_id(state_user_id)
+        trusted_source = "state.user_id"
+    elif configured_user_id:
+        trusted_resolved = validate_user_id(configured_user_id)
+        trusted_source = "configured_builder_user_id"
+
+    # Record whether the LLM's tool arg agrees with the trusted identity (for
+    # audit / prompt-injection detection). When no trusted source exists,
+    # ``tool_arg_user_id_matches_trusted`` is None.
+    tool_arg_matches_trusted: bool | None = None
+    if tool_arg_user_id is not None and trusted_resolved is not None:
+        tool_arg_matches_trusted = (
+            validate_user_id(tool_arg_user_id) == trusted_resolved
+        )
+
+    diagnostics: dict[str, Any] = {
         "tool_arg_user_id_present": bool(tool_arg_user_id),
+        "tool_arg_user_id_matches_trusted": tool_arg_matches_trusted,
         "configured_user_id_present": bool(configured_user_id),
         "config_user_id_present": bool(configurable_user_id),
         "context_user_id_present": bool(context_user_id),
         "state_user_id_present": bool(state_user_id),
     }
 
+    # If a trusted source won AND the tool arg disagrees with it, flag it.
+    # The tool arg is NOT used — the trusted source wins — but we surface the
+    # discrepancy because it may indicate a prompt-injection attempt.
+    if trusted_resolved is not None and tool_arg_matches_trusted is False:
+        logger.warning(
+            "[Builder] tool-arg user_id mismatch with trusted source — "
+            "tool_arg=%r trusted_source=%s trusted=%r. Ignoring tool_arg "
+            "(trusted identity wins); verify caller for possible prompt "
+            "injection.",
+            tool_arg_user_id,
+            trusted_source,
+            trusted_resolved,
+        )
+
+    if trusted_resolved is not None:
+        return trusted_resolved, trusted_source, diagnostics
+
+    # No trusted source — only now may we fall back to the LLM-supplied arg,
+    # strictly to avoid hitting ``default_user``. Log WARNING because this
+    # path means gateway identity propagation AND the agent-construction
+    # closure both failed — an ops signal.
     if tool_arg_user_id:
-        return validate_user_id(tool_arg_user_id), "tool_arg_explicit", diagnostics
-    if configurable_user_id:
-        return validate_user_id(configurable_user_id), "runtime.config.configurable.user_id", diagnostics
-    if context_user_id:
-        return validate_user_id(context_user_id), "runtime.context.user_id", diagnostics
-    if state_user_id:
-        return validate_user_id(state_user_id), "state.user_id", diagnostics
-    if configured_user_id:
-        return validate_user_id(configured_user_id), "configured_builder_user_id", diagnostics
+        logger.warning(
+            "[Builder] user_id falling back to LLM-supplied tool arg (%r) — "
+            "all trusted sources empty (runtime.config, runtime.context, "
+            "state, configured_builder_user_id). This value is NOT "
+            "authenticated; verify gateway is propagating user_id into "
+            "configurable and that make_switch_to_builder_tool is bound.",
+            tool_arg_user_id,
+        )
+        return validate_user_id(tool_arg_user_id), "tool_arg_fallback", diagnostics
+
     logger.warning(
         "[Builder] user_id resolution fell back to 'default_user' — no source "
-        "provided an authenticated user. This is a hard failure signal; "
-        "verify tool args, runtime.config.configurable, runtime.context, "
-        "state, and make_switch_to_builder_tool binding."
+        "(trusted or LLM-supplied) provided a user identifier. This is a "
+        "hard failure signal; verify runtime.config.configurable, "
+        "runtime.context, state, and make_switch_to_builder_tool binding."
     )
     return validate_user_id("default_user"), "default_user", diagnostics
 
@@ -629,8 +688,8 @@ def switch_to_builder(
     Do NOT call for emotional conversation, reflection, or memory tasks.
     Before calling this, ensure you have complete specs — ask any clarifying
     questions first, then delegate with the complete brief.
-    Pass ``user_id`` when known so the builder uses the correct authenticated
-    user for Mem0 / identity / ownership checks."""
+    ``user_id`` is a diagnostic-only hint — it is NEVER used when the runtime
+    supplies an authenticated user. Leave it as None in normal operation."""
 
     return _switch_to_builder_impl(
         task=task,
@@ -657,8 +716,8 @@ def make_switch_to_builder_tool(configured_user_id: str):
         Do NOT call for emotional conversation, reflection, or memory tasks.
         Before calling this, ensure you have complete specs — ask any clarifying
         questions first, then delegate with the complete brief.
-        Pass ``user_id`` when known so the builder uses the correct authenticated
-        user for Mem0 / identity / ownership checks."""
+        ``user_id`` is a diagnostic-only hint — it is NEVER used when the runtime
+        supplies an authenticated user. Leave it as None in normal operation."""
 
         return _switch_to_builder_impl(
             task=task,

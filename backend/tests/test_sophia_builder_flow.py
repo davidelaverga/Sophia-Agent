@@ -258,11 +258,13 @@ def test_make_switch_to_builder_tool_uses_bound_user_id_when_runtime_sources_mis
     assert handoff_resolution["tool_arg_user_id_present"] is False
 
 
-def test_switch_to_builder_explicit_user_id_tool_arg_beats_runtime_config(monkeypatch):
-    """PR-B: an explicit ``user_id`` tool arg must take priority over every
-    other source, including ``runtime.config.configurable.user_id``. This is
-    the escape hatch for companions whose runtime config is stale or missing
-    — the LLM can pass the authenticated user directly."""
+def test_switch_to_builder_tool_arg_user_id_does_not_override_runtime_config(monkeypatch, caplog):
+    """PR-B / security hardening: the LLM's ``user_id`` tool arg must NEVER
+    override an authenticated ``runtime.config.configurable.user_id``. When
+    the two differ, a WARNING is logged (possible prompt-injection audit
+    trail) but the trusted runtime identity wins."""
+    import logging
+
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
     captured = {}
 
@@ -295,41 +297,47 @@ def test_switch_to_builder_explicit_user_id_tool_arg_beats_runtime_config(monkey
 
     runtime = _make_runtime(
         {
-            "user_id": "state_user",
             "current_artifact": {"tone_estimate": 2.0, "active_tone_band": "anger_antagonism"},
         },
-        user_id="runtime_config_user",
-        context_user_id="runtime_context_user",
+        user_id="authenticated_user",  # trusted runtime.config.configurable.user_id
     )
 
-    response = switch_module.switch_to_builder.func(
-        runtime=runtime,
-        task="Build a test doc with explicit user_id tool arg.",
-        task_type="document",
-        user_id="explicit_tool_arg_user",
-        tool_call_id="tc-builder-explicit-user-id",
-    )
+    with caplog.at_level(logging.WARNING, logger=switch_module.logger.name):
+        response = switch_module.switch_to_builder.func(
+            runtime=runtime,
+            task="Build a test doc — attacker supplies different user_id in tool args.",
+            task_type="document",
+            user_id="attacker_supplied_user",  # UNTRUSTED — must be ignored
+            tool_call_id="tc-builder-tool-arg-no-override",
+        )
     payload = json.loads(response)
     handoff_resolution = payload["handoff_resolution"]
 
-    # Explicit tool arg wins over every other source
-    assert captured["builder_agent"]["user_id"] == "explicit_tool_arg_user"
-    assert captured["owner_id"] == "explicit_tool_arg_user"
-    assert handoff_resolution["user_id_source"] == "tool_arg_explicit"
+    # Trusted runtime identity wins — builder gets authenticated_user.
+    assert captured["builder_agent"]["user_id"] == "authenticated_user"
+    assert captured["owner_id"] == "authenticated_user"
+    assert handoff_resolution["user_id_source"] == "runtime.config.configurable.user_id"
+    # Tool arg is recorded in diagnostics but was NOT used.
     assert handoff_resolution["tool_arg_user_id_present"] is True
-    # Diagnostics still record that the other sources were present — we just
-    # chose the explicit arg.
-    assert handoff_resolution["config_user_id_present"] is True
-    assert handoff_resolution["context_user_id_present"] is True
-    assert handoff_resolution["state_user_id_present"] is True
+    assert handoff_resolution["tool_arg_user_id_matches_trusted"] is False
+    # Mismatch must emit WARNING so prompt-injection attempts are visible in ops.
+    mismatch = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "tool-arg user_id mismatch" in r.getMessage()
+    ]
+    assert mismatch, (
+        f"Expected a WARNING on tool-arg/trusted mismatch. "
+        f"Got: {[r.getMessage() for r in caplog.records]}"
+    )
 
 
-def test_make_switch_to_builder_tool_explicit_user_id_arg_beats_bound_user(monkeypatch):
-    """PR-B: an explicit ``user_id`` tool arg must also override the closure-
-    bound user_id created by ``make_switch_to_builder_tool``. In the normal
-    companion-delegation path where the bound user is correct this is a no-op;
-    it matters in edge cases where the LLM has more reliable user context
-    than the agent-construction closure (e.g. mid-session handoff)."""
+def test_make_switch_to_builder_tool_arg_does_not_override_bound_user(monkeypatch, caplog):
+    """PR-B / security hardening: the LLM's ``user_id`` tool arg must NEVER
+    override the closure-bound authenticated user set at companion
+    construction via ``make_switch_to_builder_tool(user_id)``. Closure-bound
+    identity is trusted; the tool arg is not."""
+    import logging
+
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
     captured = {}
 
@@ -360,25 +368,163 @@ def test_make_switch_to_builder_tool_explicit_user_id_arg_beats_bound_user(monke
     )
     monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
 
-    runtime = _make_runtime({})  # no runtime / state user_id
-    bound_tool = switch_module.make_switch_to_builder_tool("bound_user")
+    # No runtime / context / state user_id — the only trusted source is the
+    # closure-bound one.
+    runtime = _make_runtime({})
+    bound_tool = switch_module.make_switch_to_builder_tool("bound_authenticated_user")
 
-    response = bound_tool.func(
-        runtime=runtime,
-        task="Build with explicit user_id overriding bound user.",
-        task_type="document",
-        user_id="explicit_tool_arg_user",
-        tool_call_id="tc-builder-explicit-over-bound",
-    )
+    with caplog.at_level(logging.WARNING, logger=switch_module.logger.name):
+        response = bound_tool.func(
+            runtime=runtime,
+            task="Build — attacker supplies different user_id via tool args.",
+            task_type="document",
+            user_id="attacker_supplied_user",
+            tool_call_id="tc-builder-tool-arg-no-override-bound",
+        )
     payload = json.loads(response)
     handoff_resolution = payload["handoff_resolution"]
 
-    assert captured["builder_agent"]["user_id"] == "explicit_tool_arg_user"
-    assert captured["owner_id"] == "explicit_tool_arg_user"
-    assert handoff_resolution["user_id_source"] == "tool_arg_explicit"
+    # Closure-bound identity wins.
+    assert captured["builder_agent"]["user_id"] == "bound_authenticated_user"
+    assert captured["owner_id"] == "bound_authenticated_user"
+    assert handoff_resolution["user_id_source"] == "configured_builder_user_id"
     assert handoff_resolution["tool_arg_user_id_present"] is True
-    # Closure-bound user is still tracked in diagnostics even though not used
-    assert handoff_resolution["configured_user_id_present"] is True
+    assert handoff_resolution["tool_arg_user_id_matches_trusted"] is False
+    mismatch = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "tool-arg user_id mismatch" in r.getMessage()
+    ]
+    assert mismatch, "Expected mismatch WARNING on tool-arg vs bound user."
+
+
+def test_tool_arg_user_id_matches_trusted_source_no_warning(monkeypatch, caplog):
+    """If the LLM supplies the same user_id that the trusted source reports,
+    no mismatch WARNING should fire — ``tool_arg_user_id_matches_trusted``
+    is True and we use the trusted source silently."""
+    import logging
+
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, task: str, task_id: str | None = None, **_kwargs):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime({}, user_id="authenticated_user")
+
+    with caplog.at_level(logging.WARNING, logger=switch_module.logger.name):
+        response = switch_module.switch_to_builder.func(
+            runtime=runtime,
+            task="Build.",
+            task_type="document",
+            user_id="authenticated_user",  # Same as trusted source.
+            tool_call_id="tc-builder-tool-arg-match",
+        )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert handoff_resolution["user_id_source"] == "runtime.config.configurable.user_id"
+    assert handoff_resolution["tool_arg_user_id_matches_trusted"] is True
+    mismatch = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING and "tool-arg user_id mismatch" in r.getMessage()
+    ]
+    assert not mismatch, (
+        f"Did not expect a mismatch WARNING when tool arg matches trusted. "
+        f"Got: {[r.getMessage() for r in caplog.records]}"
+    )
+
+
+def test_tool_arg_user_id_used_as_last_resort_fallback_with_warning(monkeypatch, caplog):
+    """PR-B / security hardening: when every trusted source is empty, the LLM-
+    supplied ``user_id`` tool arg is used as the last-resort fallback (strictly
+    better than ``default_user``), but a WARNING is logged so ops can detect
+    that gateway identity propagation AND the closure binding both failed."""
+    import logging
+
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(self, task: str, task_id: str | None = None, owner_id: str | None = None, description: str | None = None):
+            captured["owner_id"] = owner_id
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: captured.setdefault("builder_agent", {"user_id": user_id, "model_name": model_name}),
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    # No trusted source: no runtime.config.user_id, no context.user_id, no
+    # state.user_id, no bound closure (using unbound ``switch_to_builder``).
+    runtime = _make_runtime({}, user_id=None)
+
+    with caplog.at_level(logging.WARNING, logger=switch_module.logger.name):
+        response = switch_module.switch_to_builder.func(
+            runtime=runtime,
+            task="Build with only a tool-arg user_id (all trusted sources empty).",
+            task_type="document",
+            user_id="llm_supplied_user",
+            tool_call_id="tc-builder-tool-arg-last-resort",
+        )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    # Fallback uses the LLM-supplied value (better than default_user) but
+    # labels the source clearly and flags it.
+    assert captured["builder_agent"]["user_id"] == "llm_supplied_user"
+    assert captured["owner_id"] == "llm_supplied_user"
+    assert handoff_resolution["user_id_source"] == "tool_arg_fallback"
+    assert handoff_resolution["tool_arg_user_id_present"] is True
+    # No trusted source existed — so there's nothing to match against.
+    assert handoff_resolution["tool_arg_user_id_matches_trusted"] is None
+    fallback_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "falling back to LLM-supplied tool arg" in r.getMessage()
+    ]
+    assert fallback_warnings, (
+        f"Expected a WARNING on tool-arg fallback. "
+        f"Got: {[r.getMessage() for r in caplog.records]}"
+    )
 
 
 def test_switch_to_builder_default_user_fallback_emits_warning(monkeypatch, caplog):
