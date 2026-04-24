@@ -113,9 +113,17 @@ def notify_builder_task_status(
 
 # Startup diagnostic — makes Render env-var propagation immediately observable.
 _startup_cfg = _load_config()
-logger.info(
-    "gateway_notify startup: configured=%s base_url=%s secret=%s",
-    _startup_cfg is not None,
-    getattr(_startup_cfg, "base_url", None),
-    "set" if (_startup_cfg is not None and getattr(_startup_cfg, "secret", None)) else "missing",
-)
+if _startup_cfg is None and os.getenv("RENDER_SERVICE_NAME"):
+    logger.warning(
+        "gateway_notify startup: UNCONFIGURED on Render service=%s — "
+        "SOPHIA_GATEWAY_INTERNAL_URL and/or SOPHIA_INTERNAL_SECRET are missing. "
+        "Builder task terminal pushes and artifact mirroring to the Gateway will be silent.",
+        os.getenv("RENDER_SERVICE_NAME"),
+    )
+else:
+    logger.info(
+        "gateway_notify startup: configured=%s base_url=%s secret=%s",
+        _startup_cfg is not None,
+        getattr(_startup_cfg, "base_url", None),
+        "set" if (_startup_cfg is not None and getattr(_startup_cfg, "secret", None)) else "missing",
+    )

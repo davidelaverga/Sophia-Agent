@@ -6,7 +6,7 @@ import { getPrimaryGatewayUrl } from '../../../_lib/gateway-url';
 const BACKEND_URL = getPrimaryGatewayUrl();
 
 export async function GET(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: Promise<{ taskId: string }> },
 ) {
   const { taskId } = await params;
@@ -24,8 +24,14 @@ export async function GET(
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
+  const upstreamUrl = new URL(`${BACKEND_URL}/api/sophia/${userId}/tasks/${taskId}`);
+  const threadId = request.nextUrl.searchParams.get('thread_id');
+  if (threadId) {
+    upstreamUrl.searchParams.set('thread_id', threadId);
+  }
+
   try {
-    const response = await fetch(`${BACKEND_URL}/api/sophia/${userId}/tasks/${taskId}`, {
+    const response = await fetch(upstreamUrl.toString(), {
       method: 'GET',
       headers: {
         Authorization: `Bearer ${apiKey}`,

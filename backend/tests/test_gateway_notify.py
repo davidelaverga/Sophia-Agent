@@ -1,3 +1,5 @@
+import importlib
+import logging
 from unittest.mock import MagicMock
 
 import httpx
@@ -108,3 +110,50 @@ class TestNotifyBuilderTaskStatus:
         url = mock_client.post.call_args.args[0]
         # quote with safe='' encodes both spaces and slashes
         assert "task%20id%2Fwith%20slash" in url
+
+
+class TestStartupDiagnostic:
+    def test_warns_when_render_env_present_but_unconfigured(self, monkeypatch, caplog):
+        monkeypatch.delenv("SOPHIA_GATEWAY_INTERNAL_URL", raising=False)
+        monkeypatch.delenv("SOPHIA_INTERNAL_SECRET", raising=False)
+        monkeypatch.setenv("RENDER_SERVICE_NAME", "sophia-langgraph")
+        caplog.set_level(logging.WARNING, logger="deerflow.sophia.storage.gateway_notify")
+
+        importlib.reload(gateway_notify)
+
+        assert any(
+            record.levelno == logging.WARNING
+            and "UNCONFIGURED on Render" in record.message
+            and "sophia-langgraph" in record.message
+            for record in caplog.records
+        )
+
+    def test_info_when_not_render(self, monkeypatch, caplog):
+        monkeypatch.delenv("SOPHIA_GATEWAY_INTERNAL_URL", raising=False)
+        monkeypatch.delenv("SOPHIA_INTERNAL_SECRET", raising=False)
+        monkeypatch.delenv("RENDER_SERVICE_NAME", raising=False)
+        caplog.set_level(logging.INFO, logger="deerflow.sophia.storage.gateway_notify")
+
+        importlib.reload(gateway_notify)
+
+        assert any(
+            record.levelno == logging.INFO
+            and "gateway_notify startup:" in record.message
+            and "configured=False" in record.message
+            for record in caplog.records
+        )
+
+    def test_info_when_configured(self, monkeypatch, caplog):
+        monkeypatch.setenv("SOPHIA_GATEWAY_INTERNAL_URL", "http://gw:8001")
+        monkeypatch.setenv("SOPHIA_INTERNAL_SECRET", "secret")
+        monkeypatch.delenv("RENDER_SERVICE_NAME", raising=False)
+        caplog.set_level(logging.INFO, logger="deerflow.sophia.storage.gateway_notify")
+
+        importlib.reload(gateway_notify)
+
+        assert any(
+            record.levelno == logging.INFO
+            and "gateway_notify startup:" in record.message
+            and "configured=True" in record.message
+            for record in caplog.records
+        )

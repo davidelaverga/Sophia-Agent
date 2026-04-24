@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -282,6 +283,42 @@ class SessionEndResponse(BaseModel):
     debrief_prompt: str | None = Field(default=None)
 
 
+def _get_langgraph_base_url() -> str:
+    return (
+        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("SOPHIA_BACKEND_BASE_URL")
+        or "http://127.0.0.1:2024"
+    ).strip().rstrip("/")
+
+
+async def _fetch_langgraph_thread_state(thread_id: str) -> dict[str, Any]:
+    """Fetch the current thread state from LangGraph REST API."""
+    base_url = _get_langgraph_base_url()
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{base_url}/threads/{thread_id}/state")
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _hydrate_builder_delivery(thread_id: str, builder_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build a builder_delivery payload from a builder_result so the frontend can display the artifact inline."""
+    if not builder_result or not isinstance(builder_result, dict):
+        return None
+    try:
+        from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
+        return build_builder_delivery_payload(
+            thread_id=thread_id,
+            builder_result=builder_result,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to hydrate builder_delivery for thread_id=%s",
+            thread_id,
+            exc_info=True,
+        )
+        return None
+
+
 class TelegramLinkCreateRequest(BaseModel):
     context_mode: Literal["work", "gaming", "life"] = Field(
         default="life",
@@ -368,6 +405,7 @@ class TaskStatusResponse(BaseModel):
     todos: list[dict] = Field(default_factory=list)
     debug: TaskStatusDebug | None = Field(default=None, description="Latest executor-side diagnostics")
     activity_log: list[dict] = Field(default_factory=list, description="Chronological builder activity entries")
+    builder_delivery: dict | None = Field(default=None, description="Inline artifact payload for channel delivery (populated when builder_result is available)")
 
 
 # ---------------------------------------------------------------------------
@@ -1577,7 +1615,11 @@ async def get_active_task(
     response_model=TaskStatusResponse,
     summary="Get live status for a Sophia background task",
 )
-async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
+async def get_task_status(
+    user_id: str,
+    task_id: str,
+    thread_id: str | None = Query(default=None, description="Optional LangGraph thread ID for fallback state query"),
+) -> TaskStatusResponse:
     _validate_user(user_id)
 
     from deerflow.subagents.executor import (
@@ -1590,8 +1632,57 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
     if result is None or (result.owner_id and result.owner_id != user_id):
         persisted_payload = read_background_task_status_payload(user_id, task_id)
         if persisted_payload is None:
+            # Fallback 1: pushed registry populated by gateway_notify from LangGraph process
+            from app.gateway.routers.internal_builder_tasks import get_pushed_builder_task
+            pushed = get_pushed_builder_task(task_id)
+            if pushed is not None:
+                pushed_status = pushed.get("status", "unknown")
+                pushed_builder_result = pushed.get("builder_result")
+                response = TaskStatusResponse(
+                    task_id=task_id,
+                    status=pushed_status,
+                    trace_id=pushed.get("trace_id"),
+                    error=pushed.get("error"),
+                    builder_result=pushed_builder_result if isinstance(pushed_builder_result, dict) else None,
+                    completed_at=pushed.get("completed_at"),
+                    started_at=pushed.get("started_at"),
+                )
+                if thread_id and response.builder_result:
+                    response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
+                return response
+
+            # Fallback 2: query LangGraph thread state directly (useful when gateway_notify push failed)
+            if thread_id:
+                try:
+                    thread_state = await _fetch_langgraph_thread_state(thread_id)
+                    values = thread_state.get("values", {})
+                    builder_task = values.get("builder_task")
+                    builder_result = values.get("builder_result")
+                    if builder_task and isinstance(builder_task, dict):
+                        task_status = builder_task.get("status", "unknown")
+                        response = TaskStatusResponse(
+                            task_id=task_id,
+                            status=task_status,
+                            builder_result=builder_result if isinstance(builder_result, dict) else None,
+                        )
+                        if thread_id and response.builder_result:
+                            response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
+                        return response
+                except Exception:
+                    logger.warning(
+                        "LangGraph thread state fallback failed for task_id=%s thread_id=%s",
+                        task_id,
+                        thread_id,
+                        exc_info=True,
+                    )
+
             raise HTTPException(status_code=404, detail="Task not found")
+
         persisted_payload.pop("owner_id", None)
+        if thread_id and persisted_payload.get("builder_result"):
+            persisted_payload["builder_delivery"] = _hydrate_builder_delivery(
+                thread_id, persisted_payload["builder_result"]
+            )
         return TaskStatusResponse(**persisted_payload)
 
     status_value = result.status.value
@@ -1599,7 +1690,7 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
     builder_result = _extract_builder_result_from_task_result(result)
     detail = _build_task_status_detail(result, progress_payload, builder_result)
 
-    return TaskStatusResponse(
+    response = TaskStatusResponse(
         task_id=task_id,
         status=status_value,
         trace_id=result.trace_id,
@@ -1628,6 +1719,9 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
         debug=_build_task_status_debug(result, status_value, builder_result),
         activity_log=_build_activity_log(result),
     )
+    if thread_id and builder_result:
+        response.builder_delivery = _hydrate_builder_delivery(thread_id, builder_result)
+    return response
 
 @router.post(
     "/{user_id}/tasks/{task_id}/cancel",
