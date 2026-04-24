@@ -1120,3 +1120,35 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names
     assert "builder_web_fetch" in builder_tool_names
+
+
+def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
+    """PR-F (Phase 2.3): builder agent uses 120s timeout and 1 retry.
+
+    The builder generates large documents (5k+ tokens) which can take 45-90s.
+    A 120s timeout gives headroom without letting a stalled connection hang
+    indefinitely. 1 retry recovers from transient blips without burning
+    extra budget when the model is genuinely struggling.
+    """
+    import deerflow.agents.sophia_agent.builder_agent as builder_module
+
+    captured: dict[str, object] = {}
+
+    def _capture_chat_anthropic(**kwargs):
+        captured["kwargs"] = kwargs
+        return MagicMock()
+
+    monkeypatch.setattr(builder_module, "ChatAnthropic", _capture_chat_anthropic)
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+    monkeypatch.setattr(builder_module, "create_agent", lambda **kwargs: MagicMock())
+
+    builder_module._create_builder_agent(user_id="user_123")
+
+    assert captured["kwargs"]["timeout"] == 120.0
+    assert captured["kwargs"]["max_retries"] == 1
+    assert captured["kwargs"]["streaming"] is True
+    assert captured["kwargs"]["max_tokens"] == 8192
