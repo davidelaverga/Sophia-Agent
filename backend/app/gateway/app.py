@@ -17,6 +17,7 @@ from app.gateway.routers import (
     sessions,
     skills,
     suggestions,
+    telegram_link,
     uploads,
     voice,
 )
@@ -217,6 +218,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Voice API is mounted at /api/sophia/{user_id}/voice/*
     app.include_router(voice.router)
+
+    # Telegram link API is mounted at /api/sophia/{user_id}/telegram/*
+    app.include_router(telegram_link.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

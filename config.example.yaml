@@ -461,6 +461,7 @@ checkpointer:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
+#     bot_username: $TELEGRAM_BOT_USERNAME  # e.g. Sophia_EI_bot; needed for t.me deep-link flow
 #     allowed_users: []               # empty = allow all
 #
 #     # Optional: channel-level session overrides
