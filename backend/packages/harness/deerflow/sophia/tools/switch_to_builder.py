@@ -16,13 +16,14 @@ import uuid
 from dataclasses import replace
 from typing import Annotated, Any, Literal
 
+from deepagents import AsyncSubAgent
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
 
-from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.state import SophiaState, merge_async_tasks
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
@@ -44,6 +45,8 @@ __all__ = [
     "switch_to_builder",
     "time",
 ]
+
+_ASYNC_BUILDER_AGENT_NAME = "sophia_builder"
 
 _NON_TERMINAL_TASK_STATUSES = {"queued", "running", "started"}
 
@@ -337,144 +340,91 @@ def _build_duplicate_payload(existing_task: dict, task_type: str, trace_id: str)
     }
 
 
-def _normalize_background_status(status: Any) -> str:
-    value = getattr(status, "value", status)
-    return value.lower() if isinstance(value, str) else "unknown"
+def _build_builder_async_subagent_spec() -> AsyncSubAgent:
+    """Return the Deep Agents v0.5 async-subagent spec for Sophia Builder.
+
+    PR-H keeps the current in-process SubagentExecutor runtime for production
+    execution, but records task metadata in the same `async_tasks` shape used
+    by Deep Agents v0.5. This lets PR-I add polling/progress behavior without
+    changing the public switch_to_builder handoff contract again.
+    """
+    return AsyncSubAgent(
+        name=_ASYNC_BUILDER_AGENT_NAME,
+        description="Runs Sophia builder deliverable tasks in the background.",
+        graph_id="sophia_builder",
+    )
 
 
-def _extract_builder_result(result: Any) -> dict[str, Any]:
-    final_state = getattr(result, "final_state", None)
-    if isinstance(final_state, dict):
-        builder_result = final_state.get("builder_result")
-        if isinstance(builder_result, dict) and builder_result:
-            return builder_result
-
-    for message in reversed(getattr(result, "ai_messages", []) or []):
-        tool_calls = message.get("tool_calls", []) if isinstance(message, dict) else []
-        for tool_call in reversed(tool_calls):
-            if tool_call.get("name") != "emit_builder_artifact":
-                continue
-            args = tool_call.get("args")
-            if isinstance(args, dict) and args:
-                return args
-
-    return {
-        "artifact_path": None,
-        "artifact_type": "unknown",
-        "artifact_title": "Build task completed",
-        "steps_completed": 0,
-        "decisions_made": [],
-        "companion_summary": getattr(result, "result", None) or "The build task was completed.",
-        "companion_tone_hint": "Neutral",
-        "user_next_action": None,
-        "confidence": 0.3,
-    }
-
-
-def _build_terminal_tool_message(status: str, builder_result: dict[str, Any] | None, error: str | None) -> str:
-    if status == "completed":
-        title = builder_result.get("artifact_title") if isinstance(builder_result, dict) else None
-        payload = json.dumps(builder_result or {}, ensure_ascii=True, sort_keys=True)
-        lines = ["Builder completed successfully."]
-        if title:
-            lines.append(f"Artifact title: {title}")
-        lines.append(f"Artifact payload: {payload}")
-        return "\n".join(lines)
-
-    if status == "timed_out":
-        return f"Builder timed out. {error or 'The delegated task exceeded its time budget.'}"
-
-    if status == "cancelled":
-        return f"Builder was cancelled. {error or 'The delegated task did not complete.'}"
-
-    return f"Builder failed. {error or 'The delegated task did not complete successfully.'}"
-
-
-def _build_terminal_command(
+def _build_async_task_metadata(
     *,
     task_id: str,
-    tool_call_id: str,
-    task_type: str,
-    progress_description: str,
-    trace_id: str,
+    thread_id: str | None,
     delegated_at: str,
+) -> dict[str, str]:
+    """Build a Deep Agents v0.5-compatible async task state entry."""
+    spec = _build_builder_async_subagent_spec()
+    return {
+        "task_id": task_id,
+        "agent_name": spec["name"],
+        # Deep Agents async task_id is a remote thread_id. Our PR-H bridge uses
+        # the parent thread_id when available and falls back to the builder
+        # task_id; PR-I can replace this with native Agent Protocol IDs.
+        "thread_id": thread_id or task_id,
+        "run_id": task_id,
+        "status": "running",
+        "created_at": delegated_at,
+        "last_checked_at": delegated_at,
+        "last_updated_at": delegated_at,
+    }
+
+
+def _build_queued_payload(
+    *,
+    task_id: str,
+    task_type: str,
+    trace_id: str,
+    builder_task: dict[str, Any],
     delegation_context: dict[str, Any],
     handoff_resolution: dict[str, Any],
-    result: Any,
-) -> Command:
-    status = _normalize_background_status(getattr(result, "status", None))
-    builder_result = _extract_builder_result(result) if status == "completed" else None
-    builder_task = {
+) -> dict[str, Any]:
+    return {
+        "type": "builder_handoff",
+        "status": "queued",
         "task_id": task_id,
-        "description": progress_description,
         "task_type": task_type,
-        "delegated_at": delegated_at,
-        "status": status,
         "trace_id": trace_id,
+        "queued_at": builder_task["delegated_at"],
+        "acknowledgement": "Builder task queued and running in the background.",
+        "builder_task": builder_task,
+        "delegation_context": delegation_context,
         "handoff_resolution": handoff_resolution,
     }
-    completed_at = getattr(result, "completed_at", None)
-    if completed_at is not None:
-        builder_task["completed_at"] = completed_at.isoformat()
 
-    error = getattr(result, "error", None)
-    if error:
-        builder_task["error"] = error
 
+def _build_queued_command(
+    *,
+    payload: dict[str, Any],
+    tool_call_id: str,
+    async_task: dict[str, str],
+    existing_async_tasks: dict[str, dict] | None = None,
+) -> Command:
+    """Return control immediately with state updated for async builder tracking."""
+    task_id = payload["task_id"]
     return Command(
         update={
-            "builder_task": builder_task,
-            "builder_result": builder_result,
-            "delegation_context": delegation_context,
-            "active_mode": "companion",
+            "builder_task": payload["builder_task"],
+            "builder_result": None,
+            "delegation_context": payload["delegation_context"],
+            "active_mode": "builder",
+            "async_tasks": merge_async_tasks(existing_async_tasks, {task_id: async_task}),
             "messages": [
                 ToolMessage(
-                    content=_build_terminal_tool_message(status, builder_result, error),
+                    content=json.dumps(payload),
                     tool_call_id=tool_call_id or task_id,
                     name="switch_to_builder",
                 )
             ],
         }
-    )
-
-
-def _maybe_return_terminal_command(
-    *,
-    task_id: str,
-    tool_call_id: str,
-    task_type: str,
-    progress_description: str,
-    trace_id: str,
-    delegated_at: str,
-    delegation_context: dict[str, Any],
-    handoff_resolution: dict[str, Any],
-) -> Command | None:
-    result = get_background_task_result(task_id)
-    if result is None:
-        return None
-
-    raw_status = getattr(result, "status", None)
-    known_statuses = {
-        getattr(SubagentStatus, "COMPLETED", None): "completed",
-        getattr(SubagentStatus, "FAILED", None): "failed",
-        getattr(SubagentStatus, "TIMED_OUT", None): "timed_out",
-        getattr(SubagentStatus, "CANCELLED", None): "cancelled",
-    }
-    status = known_statuses.get(raw_status) or _normalize_background_status(raw_status)
-    if status not in {"completed", "failed", "timed_out", "cancelled"}:
-        return None
-
-    cleanup_background_task(task_id)
-    return _build_terminal_command(
-        task_id=task_id,
-        tool_call_id=tool_call_id,
-        task_type=task_type,
-        progress_description=progress_description,
-        trace_id=trace_id,
-        delegated_at=delegated_at,
-        delegation_context=delegation_context,
-        handoff_resolution=handoff_resolution,
-        result=result,
     )
 
 
@@ -637,19 +587,6 @@ def _switch_to_builder_impl(
     except Exception:
         pass
 
-    terminal_command = _maybe_return_terminal_command(
-        task_id=task_id,
-        tool_call_id=tool_call_id,
-        task_type=task_type,
-        progress_description=progress_description,
-        trace_id=trace_id,
-        delegated_at=delegated_at,
-        delegation_context=delegation_context,
-        handoff_resolution=handoff_resolution,
-    )
-    if terminal_command is not None:
-        return terminal_command
-
     builder_task = {
         "task_id": task_id,
         "description": progress_description,
@@ -660,19 +597,25 @@ def _switch_to_builder_impl(
         "handoff_resolution": handoff_resolution,
     }
 
-    payload = {
-        "type": "builder_handoff",
-        "status": "queued",
-        "task_id": task_id,
-        "task_type": task_type,
-        "trace_id": trace_id,
-        "queued_at": builder_task["delegated_at"],
-        "acknowledgement": "Builder task queued and running in the background.",
-        "builder_task": builder_task,
-        "delegation_context": delegation_context,
-        "handoff_resolution": handoff_resolution,
-    }
-    return json.dumps(payload)
+    payload = _build_queued_payload(
+        task_id=task_id,
+        task_type=task_type,
+        trace_id=trace_id,
+        builder_task=builder_task,
+        delegation_context=delegation_context,
+        handoff_resolution=handoff_resolution,
+    )
+    async_task = _build_async_task_metadata(
+        task_id=task_id,
+        thread_id=thread_id,
+        delegated_at=delegated_at,
+    )
+    return _build_queued_command(
+        payload=payload,
+        tool_call_id=tool_call_id,
+        async_task=async_task,
+        existing_async_tasks=state.get("async_tasks"),
+    )
 
 
 @tool(args_schema=SwitchToBuilderInput)
