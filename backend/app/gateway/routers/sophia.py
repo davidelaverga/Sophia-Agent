@@ -285,7 +285,8 @@ class SessionEndResponse(BaseModel):
 
 def _get_langgraph_base_url() -> str:
     return (
-        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        os.getenv("LANGGRAPH_URL")
+        or os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
         or os.getenv("SOPHIA_BACKEND_BASE_URL")
         or "http://127.0.0.1:2024"
     ).strip().rstrip("/")
@@ -1636,20 +1637,26 @@ async def get_task_status(
             from app.gateway.routers.internal_builder_tasks import get_pushed_builder_task
             pushed = get_pushed_builder_task(task_id)
             if pushed is not None:
-                pushed_status = pushed.get("status", "unknown")
-                pushed_builder_result = pushed.get("builder_result")
-                response = TaskStatusResponse(
-                    task_id=task_id,
-                    status=pushed_status,
-                    trace_id=pushed.get("trace_id"),
-                    error=pushed.get("error"),
-                    builder_result=pushed_builder_result if isinstance(pushed_builder_result, dict) else None,
-                    completed_at=pushed.get("completed_at"),
-                    started_at=pushed.get("started_at"),
-                )
-                if thread_id and response.builder_result:
-                    response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
-                return response
+                pushed_owner = pushed.get("owner_id")
+                if pushed_owner and pushed_owner != user_id:
+                    # Ownership mismatch — refuse to return this user's builder_result to another user.
+                    # Fall through to thread-state fallback / 404.
+                    pushed = None
+                else:
+                    pushed_status = pushed.get("status", "unknown")
+                    pushed_builder_result = pushed.get("builder_result")
+                    response = TaskStatusResponse(
+                        task_id=task_id,
+                        status=pushed_status,
+                        trace_id=pushed.get("trace_id"),
+                        error=pushed.get("error"),
+                        builder_result=pushed_builder_result if isinstance(pushed_builder_result, dict) else None,
+                        completed_at=pushed.get("completed_at"),
+                        started_at=pushed.get("started_at"),
+                    )
+                    if thread_id and response.builder_result:
+                        response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
+                    return response
 
             # Fallback 2: query LangGraph thread state directly (useful when gateway_notify push failed)
             if thread_id:
@@ -1659,15 +1666,21 @@ async def get_task_status(
                     builder_task = values.get("builder_task")
                     builder_result = values.get("builder_result")
                     if builder_task and isinstance(builder_task, dict):
-                        task_status = builder_task.get("status", "unknown")
-                        response = TaskStatusResponse(
-                            task_id=task_id,
-                            status=task_status,
-                            builder_result=builder_result if isinstance(builder_result, dict) else None,
-                        )
-                        if thread_id and response.builder_result:
-                            response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
-                        return response
+                        bt_task_id = builder_task.get("task_id")
+                        if bt_task_id and bt_task_id != task_id:
+                            # Thread has moved on to a different builder task — refuse to map the
+                            # caller's task_id to whatever is currently on the thread. Fall through to 404.
+                            pass
+                        else:
+                            task_status = builder_task.get("status", "unknown")
+                            response = TaskStatusResponse(
+                                task_id=task_id,
+                                status=task_status,
+                                builder_result=builder_result if isinstance(builder_result, dict) else None,
+                            )
+                            if thread_id and response.builder_result:
+                                response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
+                            return response
                 except Exception:
                     logger.warning(
                         "LangGraph thread state fallback failed for task_id=%s thread_id=%s",
