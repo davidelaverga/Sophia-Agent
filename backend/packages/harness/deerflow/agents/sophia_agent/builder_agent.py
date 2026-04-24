@@ -126,8 +126,13 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         # apart) keeping the connection alive regardless of total generation
         # time.
         streaming=True,
-        timeout=240.0,
-        max_retries=2,
+        # PR-F (Phase 2.3): 120s timeout + 1 retry.
+        # Sonnet can take 45-90s for large documents; 120s gives headroom while
+        # preventing the builder from hanging indefinitely on a stalled connection.
+        # 1 retry (not 2) balances recovery from transient blips without burning
+        # extra budget when the model is genuinely struggling.
+        timeout=120.0,
+        max_retries=1,
     )
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     middlewares.extend(
