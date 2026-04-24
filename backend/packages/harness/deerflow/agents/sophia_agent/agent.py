@@ -6,14 +6,13 @@ Creates the Sophia companion agent with its middleware chain.
 import logging
 import os
 
-# Apply defensive langchain patches *before* importing anything that builds
-# the agent graph. See deerflow.agents._langchain_patches for details.
-from deerflow.agents import _langchain_patches  # noqa: F401
-
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
+# Apply defensive langchain patches *before* importing anything that builds
+# the agent graph. See deerflow.agents._langchain_patches for details.
+from deerflow.agents import _langchain_patches  # noqa: F401
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
@@ -21,8 +20,8 @@ from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSess
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
-from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
 from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
