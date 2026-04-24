@@ -3,9 +3,16 @@
 After-model: captures emit_builder_artifact tool call output from the
 builder agent and stores it in state["builder_result"]. Falls back to a
 minimal result when the builder ends with plain text (no tool call).
+
+PR-D (2026-04-24): adds file-existence verification before accepting an
+emit_builder_artifact call. When the referenced file is missing on disk
+and in Supabase, the emit is rejected via wrap_tool_call with a
+Command(goto="model") so the builder gets another turn to retry instead
+of completing with a phantom artifact.
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, NotRequired, override
@@ -13,7 +20,10 @@ from typing import Any, Awaitable, Callable, NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, hook_config
+from langchain_core.messages import ToolMessage
+from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.storage import supabase_artifact_store
@@ -159,6 +169,72 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """Anthropic tool_choice payload that forces emit_builder_artifact."""
         return {"type": "tool", "name": "emit_builder_artifact"}
 
+    @staticmethod
+    def _artifact_files_exist(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> bool:
+        """Verify that every file referenced in the emit args exists on disk or in Supabase.
+
+        PR-D (2026-04-24): prevents phantom artifacts where the builder calls
+        emit_builder_artifact before the file has actually been written.
+        Returns ``True`` only when ALL referenced paths resolve to an existing
+        local file OR an existing Supabase object.
+        """
+        candidates: list[str] = []
+        primary = artifact_args.get("artifact_path")
+        if isinstance(primary, str) and primary.strip():
+            candidates.append(primary.strip())
+        supporting = artifact_args.get("supporting_files")
+        if isinstance(supporting, list):
+            candidates.extend(
+                path for path in supporting
+                if isinstance(path, str) and path.strip()
+            )
+
+        if not candidates:
+            # No files referenced — nothing to verify. Accept (builder may be
+            # emitting a text-only or conceptual result).
+            return True
+
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path")
+            if isinstance(thread_data, dict)
+            else None
+        )
+        thread_id = runtime.context.get("thread_id") if runtime.context else None
+
+        for candidate in candidates:
+            relative = _extract_output_relative_path(candidate)
+            if relative is None:
+                # Non-virtual path — we can't verify it against the sandbox
+                # outputs dir. Accept it and let downstream consumers decide.
+                continue
+
+            # 1. Check local disk
+            if outputs_host_path:
+                host_file = Path(outputs_host_path) / relative
+                if host_file.is_file():
+                    continue
+
+            # 2. Check Supabase
+            if thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative):
+                continue
+
+            # Neither local nor remote — missing.
+            logger.warning(
+                "BuilderArtifact: file missing for emit verification: "
+                "path=%s local=%s supabase=%s",
+                candidate,
+                bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
+                bool(thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative)),
+            )
+            return False
+
+        return True
+
     @override
     def wrap_model_call(
         self,
@@ -193,6 +269,90 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request = request.override(tool_choice=self._forced_tool_choice())
         return await handler(request)
 
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        """Intercept emit_builder_artifact to verify the file exists before executing.
+
+        PR-D (2026-04-24): when the referenced file is missing, we bypass the
+        normal tool execution (which has ``return_direct=True`` and would end the
+        builder graph) and instead return a ``Command(goto=\"model\")`` with an
+        error ToolMessage. This lets the model see the rejection and retry.
+        """
+        if request.tool_call.get("name") != "emit_builder_artifact":
+            return handler(request)
+
+        args = request.tool_call.get("args", {})
+        if self._artifact_files_exist(args, request.state, request.runtime):
+            return handler(request)
+
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "BuilderArtifact: emit rejected in wrap_tool_call — "
+            "artifact_path %s not found. Routing back to model for retry.",
+            args.get("artifact_path"),
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: emit_builder_artifact rejected — the referenced "
+                            f"artifact file ({args.get('artifact_path')}) does not exist "
+                            "on disk or in remote storage. Please write the file first, "
+                            "then call emit_builder_artifact again."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="emit_builder_artifact",
+                        status="error",
+                    ),
+                ],
+            },
+            goto="model",
+        )
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        """Async variant — same logic as wrap_tool_call."""
+        if request.tool_call.get("name") != "emit_builder_artifact":
+            return await handler(request)
+
+        args = request.tool_call.get("args", {})
+        if self._artifact_files_exist(args, request.state, request.runtime):
+            return await handler(request)
+
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "BuilderArtifact: emit rejected in awrap_tool_call — "
+            "artifact_path %s not found. Routing back to model for retry.",
+            args.get("artifact_path"),
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=(
+                            "Error: emit_builder_artifact rejected — the referenced "
+                            f"artifact file ({args.get('artifact_path')}) does not exist "
+                            "on disk or in remote storage. Please write the file first, "
+                            "then call emit_builder_artifact again."
+                        ),
+                        tool_call_id=tool_call_id,
+                        name="emit_builder_artifact",
+                        status="error",
+                    ),
+                ],
+            },
+            goto="model",
+        )
+
     @hook_config(can_jump_to=["end"])
     @override
     def after_model(self, state: BuilderArtifactState, runtime: Runtime) -> dict | None:
@@ -220,6 +380,42 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
                 if artifact_calls and len(artifact_calls) == len(tool_calls):
                     args = artifact_calls[-1].get("args", {})
+
+                    # PR-D (2026-04-24): verify the referenced file exists before
+                    # accepting the emit. If missing, let wrap_tool_call handle the
+                    # retry (Command(goto="model")) instead of completing with a
+                    # phantom artifact.
+                    #
+                    # Codex fix (2026-04-24): on rejection we MUST still increment
+                    # builder_non_artifact_turns. If the builder is in the forced-emit
+                    # window (_should_force_emit is True) and the counter stays
+                    # frozen, the model is trapped: tool_choice forces emit →
+                    # emit is rejected → tool_choice forces emit again → loop.
+                    # Incrementing lets the hard ceiling (10) trigger after a few
+                    # retries and terminate the run instead of spinning forever.
+                    if not self._artifact_files_exist(args, state, runtime):
+                        logger.warning(
+                            "BuilderArtifact: emit rejected in after_model — "
+                            "artifact_path %s not found on disk or in Supabase. "
+                            "Builder will retry via wrap_tool_call.",
+                            args.get("artifact_path"),
+                        )
+                        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+                        history = self._append_turn_summary(
+                            state,
+                            {
+                                "turn": non_artifact_turns,
+                                "tool_names": tool_names,
+                                "has_emit_builder_artifact": True,
+                                "emit_rejected": True,
+                            },
+                        )
+                        return {
+                            "builder_non_artifact_turns": non_artifact_turns,
+                            "builder_last_tool_names": tool_names,
+                            "builder_tool_turn_summaries": history,
+                        }
+
                     history = self._append_turn_summary(
                         state,
                         {
