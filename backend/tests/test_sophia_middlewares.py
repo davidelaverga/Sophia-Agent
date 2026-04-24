@@ -2237,6 +2237,105 @@ class TestBuilderArtifactMiddleware:
         result = mw.after_model(state, _make_runtime())
         assert result is None
 
+    def test_builder_artifact_warns_at_turn_6(self, caplog):
+        """PR-C F6: a soft warning is logged at the ``_SOFT_WARN_AT`` turn
+        (6) so the builder (and ops watchers) get an early wrap-up signal
+        before tool_choice forcing and the hard ceiling kick in."""
+        import logging
+
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as mod
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
+        # At turn 5 → after processing this non-artifact turn, counter = 6.
+        state = {"messages": [msg], "builder_non_artifact_turns": 5}
+
+        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+            result = mw.after_model(state, _make_runtime())
+
+        assert result is not None
+        assert result["builder_non_artifact_turns"] == 6
+        # builder_result should NOT be set yet — this is still a normal turn.
+        assert "builder_result" not in result
+        soft_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()
+        ]
+        assert soft_warnings, (
+            f"Expected a soft-ceiling WARNING at turn 6. Got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+        # Warning is emitted exactly once (only at the soft-warn turn).
+        assert len(soft_warnings) == 1
+
+    def test_builder_artifact_does_not_warn_before_turn_6(self, caplog):
+        """Ensure the soft warning does not fire on earlier or later turns."""
+        import logging
+
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as mod
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
+        # Turn 3 → next counter = 4 (no warning).
+        state = {"messages": [msg], "builder_non_artifact_turns": 3}
+
+        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+            mw.after_model(state, _make_runtime())
+
+        soft_warnings = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()
+        ]
+        assert not soft_warnings, (
+            f"Did not expect a soft-ceiling WARNING before turn 6. Got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_builder_artifact_forces_at_turn_10(self):
+        """PR-C F6: at the hard ceiling (10) the middleware force-ends the
+        build with a fallback builder_result instead of letting the agent
+        loop burn more turns. This is the final safety net."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
+        # Turn 9 → next counter = 10 → triggers hard ceiling.
+        state = {"messages": [msg], "builder_non_artifact_turns": 9}
+
+        result = mw.after_model(state, _make_runtime())
+        assert result is not None
+        # Hard ceiling must produce a builder_result and jump_to=end, even if
+        # no file is on disk to promote.
+        assert result.get("jump_to") == "end"
+        assert "builder_result" in result
+        builder_result = result["builder_result"]
+        assert builder_result["steps_completed"] == 10
+        # Without a promotable file, we get the explicit force-stop fallback.
+        assert builder_result["artifact_title"] == "Build task force-stopped"
+        assert builder_result["confidence"] == 0.2
+        assert result["builder_non_artifact_turns"] == 0
+
+    def test_builder_artifact_forces_tool_choice_near_ceiling(self):
+        """PR-C F6: when within ``_FORCE_EMIT_REMAINING`` of the ceiling, the
+        model call is forced to tool_choice=emit_builder_artifact. Verify
+        via the static helper so we don't need a full model-call harness."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        # ceiling=10, remaining=2 → force at turn >= 8.
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 7}) is False
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 8}) is True
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 9}) is True
+        # Never force on turn 0 (guard against empty state resetting).
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 0}) is False
+
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---
 

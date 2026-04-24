@@ -135,8 +135,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     # many turns of termination, we force Anthropic tool_choice to emit so the
     # model literally cannot call any other tool. Prompt-level escalation is
     # not reliable mid-retry-loop; the API-level constraint is.
+    #
+    # PR-C F6 (2026-04-24): lowered ceiling 20 → 10. The previous ceiling was
+    # set high to give bash room to recover from failing runs, but in practice
+    # long-running builds rarely recovered — they just burnt the budget on
+    # pathological retries. 10 turns is enough for a clean end-to-end build
+    # (write_todos → write_file → bash run → bash verify → emit) plus one or
+    # two retry rounds, and it halves the worst-case duration users wait for
+    # a stuck build. A soft WARN at turn 6 (``_SOFT_WARN_AT``) gives the model
+    # an early signal to start wrapping up before tool_choice forcing kicks in.
     _FORCE_EMIT_REMAINING = 2
-    _CEILING_FOR_FORCE = 20
+    _CEILING_FOR_FORCE = 10
+    _SOFT_WARN_AT = 6
 
     @staticmethod
     def _should_force_emit(state: BuilderArtifactState) -> bool:
@@ -266,17 +276,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 )
                 joined_names = ", ".join(tool_names) if tool_names else "none"
 
+                # PR-C F6 (2026-04-24): soft-warn halfway so the model sees
+                # an early wrap-up signal in logs (and future trace events).
+                # Emitted exactly once per task, at the ``_SOFT_WARN_AT`` turn.
+                if non_artifact_turns == self._SOFT_WARN_AT:
+                    logger.warning(
+                        "BuilderArtifact: soft ceiling warning at turn=%d "
+                        "(hard_ceiling=%d, remaining=%d). Builder should wrap up "
+                        "— emit_builder_artifact with what's on disk instead of "
+                        "continuing to iterate.",
+                        non_artifact_turns,
+                        self._CEILING_FOR_FORCE,
+                        self._CEILING_FOR_FORCE - non_artifact_turns,
+                    )
+
                 # Hard ceiling: force end before hitting the recursion limit.
-                # Binary deliverables (PDF/PPTX/DOCX) frequently need:
-                #   1. write_todos
-                #   2. write_file (generator script)
-                #   3. bash (run) — may fail and need retries
-                #   4. bash (verify / ls)
-                #   5. emit_builder_artifact
-                # On a tricky script, retries can eat 6-8 turns easily.
-                # 20 gives bash room to recover; below that we were force-stopping
-                # on healthy builds that just had one or two failed runs.
-                _HARD_CEILING = 20
+                # Builds that haven't emitted by this point almost never recover
+                # — the budget is better spent recovering whatever file is
+                # already on disk than letting bash thrash.
+                _HARD_CEILING = self._CEILING_FOR_FORCE
                 if non_artifact_turns >= _HARD_CEILING:
                     logger.warning(
                         "BuilderArtifact: hard ceiling reached at turn=%d, tools=%s — forcing end with fallback",

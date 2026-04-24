@@ -42,7 +42,16 @@ def extract_explicit_user_urls(text: str) -> list[str]:
 
 
 def should_allow_builder_web_research(task_type: str, task: str) -> bool:
-    """Gate autonomous browsing for the builder's phase-1 rollout."""
+    """Gate autonomous browsing for the builder's phase-1 rollout.
+
+    PR-C F5 (2026-04-24): ``document`` task types default to research-ON
+    because users typically request docs that require researched content
+    (reports, summaries, competitor analyses, briefs). This removes the
+    freshness-cue heuristic for documents — the gate was too restrictive
+    and frequently left doc builds without any sources. ``presentation``
+    and ``visual_report`` keep the freshness-cue heuristic; ``frontend``
+    (code) stays off; ``research`` stays on.
+    """
     normalized_type = (task_type or "").strip().lower()
     task_text = (task or "").lower()
 
@@ -50,6 +59,10 @@ def should_allow_builder_web_research(task_type: str, task: str) -> bool:
         return True
     if normalized_type in _DISALLOWED_TASK_TYPES:
         return False
+
+    # Documents always default to research-on (PR-C F5).
+    if normalized_type == "document":
+        return True
 
     explicit_urls = extract_explicit_user_urls(task)
     if explicit_urls:
