@@ -1,6 +1,22 @@
-from typing import NotRequired
+from typing import Annotated, NotRequired
 
 from langchain.agents import AgentState
+
+
+def merge_async_tasks(
+    existing: dict[str, dict] | None,
+    update: dict[str, dict] | None,
+) -> dict[str, dict]:
+    """Merge async task metadata by task_id.
+
+    Deep Agents v0.5 stores async subagent task IDs in a dedicated state
+    channel so they survive message compaction. The channel must merge updates
+    instead of replacing the whole mapping when a new task is launched.
+    """
+    merged = dict(existing or {})
+    if update:
+        merged.update(update)
+    return merged
 
 
 class SophiaState(AgentState):
@@ -44,6 +60,7 @@ class SophiaState(AgentState):
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
+    async_tasks: Annotated[NotRequired[dict[str, dict]], merge_async_tasks]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]

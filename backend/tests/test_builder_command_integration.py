@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -84,21 +85,6 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     assert "/mnt/user-data/outputs/the-dangers-of-war.md" in tool_call["args"]["task"]
 
     captured: dict = {}
-    cleaned_task_ids: list[str] = []
-    expected_result = {
-        "artifact_path": "/mnt/user-data/outputs/the-dangers-of-war.md",
-        "artifact_type": "document",
-        "artifact_title": "One-Page Document: the dangers of war",
-        "steps_completed": 3,
-        "decisions_made": [
-            "Used default audience and tone",
-            "Created a single markdown deliverable",
-        ],
-        "companion_summary": "Created the requested one-page document about the dangers of war.",
-        "companion_tone_hint": "Confident",
-        "user_next_action": "Open or download the document and tell me what to revise next.",
-        "confidence": 0.86,
-    }
 
     class DummyExecutor:
         def __init__(self, **kwargs):
@@ -130,15 +116,8 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     monkeypatch.setattr(
         switch_module,
         "get_background_task_result",
-        lambda _: SimpleNamespace(
-            status=FakeSubagentStatus.COMPLETED,
-            final_state={"builder_result": expected_result},
-            ai_messages=[],
-            result="done",
-            error=None,
-        ),
+        lambda _: (_ for _ in ()).throw(AssertionError("switch_to_builder must not immediately poll")),
     )
-    monkeypatch.setattr(switch_module, "cleanup_background_task", cleaned_task_ids.append)
     monkeypatch.setattr(switch_module.time, "sleep", lambda _: None)
 
     output = switch_module.switch_to_builder.func(
@@ -149,15 +128,20 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     )
 
     assert isinstance(output, Command)
-    assert output.update["builder_result"] == expected_result
-    assert output.update["builder_task"]["status"] == "completed"
+    assert output.update["builder_result"] is None
+    assert output.update["active_mode"] == "builder"
+    assert output.update["builder_task"]["status"] == "queued"
     assert output.update["builder_task"]["task_type"] == "document"
+    assert output.update["async_tasks"][tool_call["id"]]["agent_name"] == "sophia_builder"
+    assert output.update["async_tasks"][tool_call["id"]]["status"] == "running"
+    assert output.update["async_tasks"][tool_call["id"]]["thread_id"] == "thread-direct-doc"
     tool_message = output.update["messages"][0]
     assert isinstance(tool_message, ToolMessage)
     assert tool_message.tool_call_id == tool_call["id"]
-    assert "Builder completed successfully." in tool_message.content
-    assert "One-Page Document: the dangers of war" in tool_message.content
-    assert '"artifact_path": "/mnt/user-data/outputs/the-dangers-of-war.md"' in tool_message.content
+    payload = json.loads(tool_message.content)
+    assert payload["type"] == "builder_handoff"
+    assert payload["status"] == "queued"
+    assert payload["builder_task"]["task_id"] == tool_call["id"]
     assert captured["prompt"] == tool_call["args"]["task"]
     assert captured["task_id"] == tool_call["id"]
     assert captured["owner_id"] == "builder-user"
@@ -166,7 +150,6 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     assert captured["executor_kwargs"]["config"].max_turns == 150
     assert captured["executor_kwargs"]["config"].timeout_seconds == 600
     assert captured["executor_kwargs"]["extra_configurable"]["delegation_context"]["task_type"] == "document"
-    assert cleaned_task_ids == [tool_call["id"]]
 
 
 def test_document_command_middleware_leaves_normal_chat_to_model():

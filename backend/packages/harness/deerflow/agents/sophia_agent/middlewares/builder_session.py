@@ -8,13 +8,14 @@ subagent status into companion state fields (`builder_task`, `builder_result`,
 import json
 import time
 from datetime import datetime
-from typing import Any, NotRequired, override
+from typing import Annotated, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.state import merge_async_tasks
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.subagents.executor import (
     SubagentStatus,
@@ -33,6 +34,7 @@ class BuilderSessionState(AgentState):
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
+    async_tasks: Annotated[NotRequired[dict[str, dict]], merge_async_tasks]
     system_prompt_blocks: NotRequired[list[str]]
 
 
