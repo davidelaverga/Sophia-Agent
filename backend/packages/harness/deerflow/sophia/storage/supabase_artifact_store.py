@@ -109,6 +109,59 @@ def upload_artifact(
     return object_path
 
 
+def check_artifact_exists(
+    thread_id: str,
+    filename: str,
+    *,
+    client: httpx.Client | None = None,
+) -> bool:
+    """Return ``True`` if the object exists in the Supabase bucket.
+
+    Uses a lightweight HEAD request. Returns ``False`` when Supabase is
+    not configured, when the object is missing (404), or on transport
+    errors (logged but swallowed so the builder flow never regresses).
+    """
+    config = _load_config()
+    if config is None:
+        return False
+
+    object_path = _object_path(thread_id, filename)
+    url = _object_url(config, object_path)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.head(url, headers=headers)
+        if response.status_code == 404:
+            return False
+        # Any non-2xx is treated as "not exists" to keep the builder flow
+        # resilient against transient Supabase hiccups.
+        if not response.is_success:
+            logger.warning(
+                "Supabase HEAD check failed for thread_id=%s filename=%s status=%s; treating as missing",
+                thread_id,
+                filename,
+                response.status_code,
+            )
+            return False
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Supabase HEAD check error for thread_id=%s filename=%s error=%s; treating as missing",
+            thread_id,
+            filename,
+            exc,
+        )
+        return False
+    finally:
+        if owns_client:
+            http.close()
+
+
 def download_artifact(
     thread_id: str,
     filename: str,

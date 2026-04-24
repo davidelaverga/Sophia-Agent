@@ -2336,6 +2336,315 @@ class TestBuilderArtifactMiddleware:
         # Never force on turn 0 (guard against empty state resetting).
         assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 0}) is False
 
+    def test_emit_accepted_when_file_on_disk(self, tmp_path):
+        """PR-D: when the referenced artifact file exists on disk,
+        emit_builder_artifact is accepted normally."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/report.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Report",
+                    "steps_completed": 3,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.9,
+                },
+            },
+        ]
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_tool_turn_summaries": [],
+        }
+        result = mw.after_model(state, runtime)
+
+        assert result is not None
+        assert result.get("builder_result") is not None
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/report.md"
+        assert result.get("jump_to") == "end"
+        assert result["builder_non_artifact_turns"] == 0
+
+    def test_emit_accepted_when_file_in_supabase_only(self, monkeypatch, tmp_path):
+        """PR-D: when the file is NOT on disk but IS in Supabase, the emit
+        is still accepted (user can download from Supabase)."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        # File NOT on disk
+
+        monkeypatch.setattr(
+            supabase_artifact_store,
+            "check_artifact_exists",
+            lambda _tid, _fname: True,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/report.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Report",
+                    "steps_completed": 3,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.9,
+                },
+            },
+        ]
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_tool_turn_summaries": [],
+        }
+        result = mw.after_model(state, runtime)
+
+        assert result is not None
+        assert result.get("builder_result") is not None
+        assert result.get("jump_to") == "end"
+
+    def test_emit_rejected_and_retry_when_file_missing(self, monkeypatch, tmp_path, caplog):
+        """PR-D: when the referenced file is missing both locally and in
+        Supabase, after_model rejects the emit (returns None) and
+        wrap_tool_call routes back to the model for retry."""
+        import logging
+
+        from langgraph.prebuilt.tool_node import ToolCallRequest
+        from langgraph.types import Command
+
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as mod
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        # File NOT on disk
+
+        monkeypatch.setattr(
+            supabase_artifact_store,
+            "check_artifact_exists",
+            lambda _tid, _fname: False,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/missing.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Missing",
+                    "steps_completed": 2,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.5,
+                },
+            },
+        ]
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_tool_turn_summaries": [],
+        }
+
+        with caplog.at_level(logging.WARNING, logger=mod.logger.name):
+            after_result = mw.after_model(state, runtime)
+
+        # after_model must reject the emit but STILL return a state update
+        # (incremented counter) so the hard ceiling eventually triggers.
+        assert after_result is not None
+        assert after_result["builder_non_artifact_turns"] == 1
+        assert after_result["builder_last_tool_names"] == ["emit_builder_artifact"]
+        assert after_result["builder_tool_turn_summaries"][-1]["emit_rejected"] is True
+        # builder_result must NOT be set, and no jump_to end
+        assert "builder_result" not in after_result
+        assert "jump_to" not in after_result
+        warning_records = [
+            r for r in caplog.records
+            if r.levelno == logging.WARNING and "emit rejected" in r.getMessage()
+        ]
+        assert warning_records, (
+            f"Expected an 'emit rejected' WARNING. Got: "
+            f"{[r.getMessage() for r in caplog.records]}"
+        )
+
+        # wrap_tool_call must return a Command routing back to model
+        request = ToolCallRequest(
+            tool_call={
+                "id": "tc-emit-missing",
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/missing.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Missing",
+                    "steps_completed": 2,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.5,
+                },
+            },
+            tool=None,
+            state={"thread_data": {"outputs_path": str(outputs_dir)}, "messages": []},
+            runtime=MagicMock(),
+        )
+
+        tool_result = mw.wrap_tool_call(request, lambda _req: None)  # type: ignore[return-value]
+        assert isinstance(tool_result, Command)
+        assert tool_result.goto == "model"
+        assert "messages" in tool_result.update
+        added_msg = tool_result.update["messages"][0]
+        assert "does not exist" in added_msg.content
+        assert added_msg.tool_call_id == "tc-emit-missing"
+
+    def test_emit_rejection_increments_counter_to_avoid_forced_emit_trap(self, monkeypatch, tmp_path):
+        """Codex fix (2026-04-24): when a forced emit is rejected because the
+        file is missing, builder_non_artifact_turns MUST still be incremented.
+        Otherwise the builder gets trapped: tool_choice forces emit → emit is
+        rejected → counter never advances → tool_choice forces emit again →
+        infinite loop. Incrementing lets the hard ceiling (10) trigger after a
+        few retries and terminate the run."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        monkeypatch.setattr(
+            supabase_artifact_store,
+            "check_artifact_exists",
+            lambda _tid, _fname: False,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/missing.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Missing",
+                    "steps_completed": 2,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.5,
+                },
+            },
+        ]
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 4,
+            "builder_tool_turn_summaries": [],
+        }
+        result = mw.after_model(state, runtime)
+
+        # Rejection returns state update (not None) so the counter advances
+        assert result is not None
+        assert result["builder_non_artifact_turns"] == 5
+        assert result["builder_last_tool_names"] == ["emit_builder_artifact"]
+        assert result["builder_tool_turn_summaries"][-1]["emit_rejected"] is True
+        # builder_result must NOT be set
+        assert "builder_result" not in result
+        assert "jump_to" not in result
+
+    def test_rejected_emit_advances_to_hard_ceiling_and_terminates(self, monkeypatch, tmp_path):
+        """Codex fix: simulate two consecutive rejected forced emits at turns
+        8 and 9. The counter advances to 10 on the second rejection, so a
+        subsequent non-emit turn triggers the hard ceiling fallback."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        monkeypatch.setattr(
+            supabase_artifact_store,
+            "check_artifact_exists",
+            lambda _tid, _fname: False,
+        )
+
+        mw = BuilderArtifactMiddleware()
+
+        # Turn 8: forced emit, rejected → counter becomes 9
+        msg1 = MagicMock()
+        msg1.type = "ai"
+        msg1.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/missing.md",
+                    "artifact_type": "document",
+                    "artifact_title": "Missing",
+                    "steps_completed": 2,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.5,
+                },
+            },
+        ]
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "messages": [msg1],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 8,
+            "builder_tool_turn_summaries": [],
+        }
+        result1 = mw.after_model(state, runtime)
+        assert result1 is not None
+        assert result1["builder_non_artifact_turns"] == 9
+        assert result1["builder_tool_turn_summaries"][-1]["emit_rejected"] is True
+
+        # Turn 9: forced emit again, rejected → counter becomes 10
+        state["messages"] = [msg1]
+        state["builder_non_artifact_turns"] = 9
+        state["builder_tool_turn_summaries"] = result1["builder_tool_turn_summaries"]
+        result2 = mw.after_model(state, runtime)
+        assert result2 is not None
+        assert result2["builder_non_artifact_turns"] == 10
+
+        # Turn 10: a non-emit turn (e.g. bash) — hard ceiling triggers
+        msg2 = MagicMock()
+        msg2.type = "ai"
+        msg2.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
+        state["messages"] = [msg2]
+        state["builder_non_artifact_turns"] = 10
+        state["builder_tool_turn_summaries"] = result2["builder_tool_turn_summaries"]
+        result3 = mw.after_model(state, runtime)
+        assert result3 is not None
+        assert result3.get("jump_to") == "end"
+        assert "builder_result" in result3
+        assert result3["builder_result"]["artifact_title"] == "Build task force-stopped"
+
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---
 

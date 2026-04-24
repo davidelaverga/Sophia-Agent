@@ -12,7 +12,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
-from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 from deerflow.subagents.config import SubagentConfig
 
 
@@ -1073,16 +1072,15 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     FakeSummarizationMiddleware.__name__ = "SummarizationMiddleware"
 
     monkeypatch.setattr(companion_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
-    monkeypatch.setattr(companion_module, "create_chat_model", lambda **kwargs: "summary-model")
-    monkeypatch.setattr(companion_module, "SummarizationMiddleware", FakeSummarizationMiddleware)
+    # agent.py now constructs summarization via the _create_summarization_middleware
+    # helper (which lazily imports SophiaSummarizationMiddleware). Patch that
+    # helper directly — this is the public seam exposed by the refactor.
+    # FakeSummarizationMiddleware.__name__ = "SummarizationMiddleware" ensures
+    # the parity assertion below still matches type(mw).__name__.
     monkeypatch.setattr(
         companion_module,
-        "get_summarization_config",
-        lambda: SummarizationConfig(
-            enabled=True,
-            trigger=[ContextSize(type="tokens", value=2000)],
-            keep=ContextSize(type="messages", value=20),
-        ),
+        "_create_summarization_middleware",
+        lambda: FakeSummarizationMiddleware(),
     )
     monkeypatch.setattr(companion_module, "make_retrieve_memories_tool", lambda user_id: {"tool": user_id})
 
