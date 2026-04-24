@@ -53,12 +53,12 @@ describe('Sophia active tasks route', () => {
 
     const response = await activeTasksGET(
       {
-        nextUrl: new URL('http://localhost:3000/api/sophia/tasks/active?thread_id=thread-1'),
+        nextUrl: new URL('http://localhost:3000/api/sophia/tasks/active?thread_id=thread-1&session_id=session-1'),
       } as unknown as NextRequest,
     );
 
     expect(fetchSophiaApiMock).toHaveBeenCalledWith(
-      '/api/sophia/user-123/tasks/active?thread_id=thread-1',
+      '/api/sophia/user-123/tasks/active?thread_id=thread-1&session_id=session-1',
       expect.objectContaining({
         method: 'GET',
         cache: 'no-store',

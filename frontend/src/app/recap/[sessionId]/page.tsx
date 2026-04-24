@@ -15,7 +15,7 @@
 'use client';
 
 import { useParams, useRouter } from 'next/navigation';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import {
   RecapMemoryOrbit,
@@ -39,12 +39,16 @@ export default function RecapPage() {
   const params = useParams();
   const router = useRouter();
   const sessionId = params.sessionId as string;
+  const [hasClientHydrated, setHasClientHydrated] = useState(false);
+
+  useEffect(() => {
+    setHasClientHydrated(true);
+  }, []);
   
   // Store
   const { 
     getArtifacts, 
     setArtifacts, 
-    getDecisions, 
     setDecision,
     allCandidatesReviewed,
     commitMemories,
@@ -53,9 +57,16 @@ export default function RecapPage() {
   // Toast for feedback
   const showToast = useUiStore((state) => state.showToast);
   
-  // Get artifacts from store (or mock for development)
-  const artifacts = getArtifacts(sessionId);
-  const decisions = getDecisions(sessionId);
+  // Delay reading persisted recap state until after mount so the first client
+  // render matches the server render and avoids hydration mismatches.
+  const artifacts = hasClientHydrated ? getArtifacts(sessionId) ?? null : null;
+  // Subscribe directly to the decisions slice for this session so the memo
+  // below recomputes when decisions change.
+  const sessionDecisions = useRecapStore((s) => s.decisions[sessionId]);
+  const decisions = useMemo(
+    () => (hasClientHydrated ? (sessionDecisions ?? []) : []),
+    [hasClientHydrated, sessionDecisions],
+  );
   
   // Convert decisions array to map for easier access
   const decisionsMap = useMemo(() => {
@@ -106,7 +117,7 @@ export default function RecapPage() {
   }, [reload]);
   
   // Show loading state
-  if (status === 'loading') {
+  if (!hasClientHydrated || status === 'loading') {
     return (
       <div className="min-h-screen bg-transparent relative">
         <RecapPageFloatingHeader variant="skeleton" />

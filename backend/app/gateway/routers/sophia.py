@@ -68,6 +68,10 @@ def _resolve_session_record_owner(user_id: str, session_id: str) -> tuple[str, S
     if record is not None:
         return user_id, record
 
+    discovered_record = _session_store.find_by_session_id(session_id)
+    if discovered_record is not None:
+        return discovered_record.user_id, discovered_record
+
     if user_id == _LEGACY_SESSION_USER_ID:
         return user_id, None
 
@@ -379,6 +383,12 @@ def _has_memory_status(mem: dict) -> bool:
     return isinstance(metadata, dict) and isinstance(metadata.get("status"), str)
 
 
+def _is_saved_memory(mem: dict) -> bool:
+    metadata = mem.get("metadata") if isinstance(mem, dict) else None
+    status = metadata.get("status") if isinstance(metadata, dict) else None
+    return status not in {"pending_review", "discarded"}
+
+
 def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> list[dict]:
     memories = apply_review_metadata_overlays(user_id, memories)
     hydrated: list[dict] = []
@@ -483,9 +493,11 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
     ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
-    if not serialized_messages and not recap_artifacts:
-        return None
-
+    # Always return a thread_state dict. Even when both messages and
+    # recap_artifacts are empty, the pipeline should still run (trace +
+    # handoff + identity) rather than silently aborting. When messages are
+    # empty the pipeline will additionally attempt a LangGraph thread fetch
+    # to augment, and falls back to the minimal state if that also fails.
     thread_state: dict = {
         "messages": serialized_messages,
         "platform": body.platform or "text",
@@ -765,11 +777,32 @@ async def bulk_review(user_id: str, body: BulkReviewRequest) -> BulkReviewRespon
                 )
                 results.append(BulkReviewResult(id=item.id, action="approve", status="ok"))
             elif item.action == "discard":
+                discard_metadata = {"status": "discarded"}
                 if local_content_hash:
-                    remove_review_metadata(user_id, content_hash=local_content_hash)
+                    upsert_review_metadata(
+                        user_id,
+                        content_hash=local_content_hash,
+                        metadata=discard_metadata,
+                        sync_state="manual",
+                    )
                 else:
-                    client.delete(memory_id=item.id)
-                    remove_review_metadata(user_id, memory_id=item.id)
+                    existing = {}
+                    try:
+                        existing = client.get(item.id)
+                    except Exception:
+                        logger.warning("Failed to fetch memory detail before discard for %s", item.id, exc_info=True)
+
+                    existing_metadata = existing.get("metadata") if isinstance(existing, dict) and isinstance(existing.get("metadata"), dict) else {}
+                    merged_metadata = {**existing_metadata, **discard_metadata}
+
+                    client.update(memory_id=item.id, metadata=merged_metadata)
+                    upsert_review_metadata(
+                        user_id,
+                        memory_id=item.id,
+                        content=existing.get("memory") if isinstance(existing, dict) else None,
+                        metadata=merged_metadata,
+                        sync_state="manual",
+                    )
                 results.append(BulkReviewResult(id=item.id, action="discard", status="ok"))
         except Exception as e:
             results.append(BulkReviewResult(id=item.id, action=item.action, status="error", error=str(e)))
@@ -869,6 +902,9 @@ async def journal(
             result = client.get_all(filters=filters)
             memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
             memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+
+        if status is None:
+            memories_raw = [memory for memory in memories_raw if _is_saved_memory(memory)]
 
         memories_raw = _sort_memories_desc(memories_raw)
         memories_raw = _dedupe_memories_by_id(memories_raw)
@@ -1377,26 +1413,44 @@ def _build_task_status_description(result: object, builder_result: dict | None) 
 async def get_active_task(
     user_id: str,
     thread_id: str | None = None,
+    session_id: str | None = None,
 ) -> TaskStatusResponse | None:
-    """Return the most recent in-memory builder task for *thread_id*.
+    """Return the most recent builder task for *thread_id*.
 
     The frontend calls this after a voice reconnect to discover builder tasks
     that may have been started while the SSE stream was disconnected.
-    Returns ``null`` when no matching task exists.
+    Returns ``null`` when no matching in-memory or persisted snapshot exists.
     """
     _validate_user(user_id)
 
-    if not thread_id:
+    lookup_user_id = user_id
+    resolved_thread_id = thread_id
+
+    if session_id:
+        lookup_user_id, session_record = _resolve_session_record_owner(user_id, session_id)
+        if session_record is not None and not resolved_thread_id:
+            resolved_thread_id = session_record.thread_id
+
+    if not resolved_thread_id:
         return None
 
     from deerflow.subagents.executor import (
         build_subagent_progress_payload,
         get_latest_task_for_thread,
+        read_latest_background_task_status_payload,
     )
 
-    result = get_latest_task_for_thread(thread_id)
-    if result is None or (result.owner_id and result.owner_id != user_id):
-        return None
+    result = get_latest_task_for_thread(resolved_thread_id)
+    allowed_owner_ids = {user_id, lookup_user_id}
+    if result is None or (result.owner_id and result.owner_id not in allowed_owner_ids):
+        persisted_payload = read_latest_background_task_status_payload(lookup_user_id, resolved_thread_id)
+        if persisted_payload is None and lookup_user_id != user_id:
+            persisted_payload = read_latest_background_task_status_payload(user_id, resolved_thread_id)
+        if persisted_payload is None:
+            return None
+        persisted_payload.pop("owner_id", None)
+        persisted_payload.pop("thread_id", None)
+        return TaskStatusResponse(**persisted_payload)
 
     status_value = result.status.value
     progress_payload = build_subagent_progress_payload(result)
@@ -1453,6 +1507,7 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
         if persisted_payload is None:
             raise HTTPException(status_code=404, detail="Task not found")
         persisted_payload.pop("owner_id", None)
+        persisted_payload.pop("thread_id", None)
         return TaskStatusResponse(**persisted_payload)
 
     status_value = result.status.value

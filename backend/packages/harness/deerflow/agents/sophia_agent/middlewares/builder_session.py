@@ -7,13 +7,17 @@ subagent status into companion state fields (`builder_task`, `builder_result`,
 
 import json
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import AIMessage, ToolMessage
+from langgraph.graph import END
+from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.subagents.executor import (
@@ -40,6 +44,34 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
     """Track builder task lifecycle and keep companion state synchronized."""
 
     state_schema = BuilderSessionState
+
+    @staticmethod
+    def _interrupt_switch_to_builder_result(result: ToolMessage | Command) -> ToolMessage | Command:
+        if isinstance(result, Command):
+            return Command(update=dict(getattr(result, "update", None) or {}), goto=END)
+        if isinstance(result, ToolMessage):
+            return Command(update={"messages": [result]}, goto=END)
+        return result
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        if request.tool_call.get("name") != "switch_to_builder":
+            return handler(request)
+        return self._interrupt_switch_to_builder_result(handler(request))
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+    ) -> ToolMessage | Command:
+        if request.tool_call.get("name") != "switch_to_builder":
+            return await handler(request)
+        return self._interrupt_switch_to_builder_result(await handler(request))
 
     @staticmethod
     def _iso_or_none(dt: datetime | None) -> str | None:

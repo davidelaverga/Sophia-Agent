@@ -14,6 +14,12 @@ gateway:
 test:
 	PYTHONPATH=. uv run pytest tests/ -v
 
+test-live-builder-stress:
+	PYTHONPATH=. RUN_LIVE_BUILDER_STRESS=1 uv run pytest tests/test_builder_stress_live.py -q -s -k stress
+
+test-live-builder-soak:
+	PYTHONPATH=. RUN_LIVE_BUILDER_SOAK=1 uv run pytest tests/test_builder_stress_live.py -q -s -k soak
+
 lint:
 	uvx ruff check .
 

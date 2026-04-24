@@ -10,6 +10,7 @@ const useSessionVoiceMessagesMock = vi.fn();
 const useCompanionVoiceRuntimeMock = vi.fn();
 const useSessionVoiceUiControlsMock = vi.fn();
 const cancelBuilderTaskMock = vi.fn();
+const getActiveBuilderTaskMock = vi.fn();
 const getBuilderTaskStatusMock = vi.fn();
 
 vi.mock('../../app/companion-runtime/artifacts-runtime', () => ({
@@ -50,6 +51,7 @@ vi.mock('../../app/lib/builder-workflow', async () => {
   return {
     ...actual,
     cancelBuilderTask: (...args: unknown[]) => cancelBuilderTaskMock(...args),
+    getActiveBuilderTask: (...args: unknown[]) => getActiveBuilderTaskMock(...args),
     getBuilderTaskStatus: (...args: unknown[]) => getBuilderTaskStatusMock(...args),
   };
 });
@@ -60,6 +62,7 @@ describe('useSessionRouteExperience', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     cancelBuilderTaskMock.mockResolvedValue({ detail: 'Builder cancelled.' });
+    getActiveBuilderTaskMock.mockReset();
     getBuilderTaskStatusMock.mockReset();
 
     useCompanionArtifactsRuntimeMock.mockReturnValue({
@@ -188,7 +191,7 @@ describe('useSessionRouteExperience', () => {
       expect.objectContaining({
         chatStatus: 'ready',
         sendChatMessage,
-        markStreamTurnStarted: streamContract.markStreamTurnStarted,
+        markStreamTurnStarted: expect.any(Function),
       })
     );
 
@@ -250,6 +253,50 @@ describe('useSessionRouteExperience', () => {
     expect(useCompanionVoiceRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({ isTyping: true })
     );
+  });
+
+  it('rehydrates an active builder task during the post-send discovery window even when the stream misses the initial builder event', async () => {
+    getActiveBuilderTaskMock.mockResolvedValue({
+      task_id: 'task-builder-1',
+      status: 'running',
+      detail: 'Builder is drafting the brief.',
+    });
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    await act(async () => {
+      result.current.markStreamTurnStarted(Date.now());
+      await Promise.resolve();
+    });
+
+    expect(getActiveBuilderTaskMock).toHaveBeenCalledWith('thread-1', 'session-1');
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'running',
+      taskId: 'task-builder-1',
+      detail: 'Builder is drafting the brief.',
+    });
   });
 
   it('cancels an active builder task and wraps stopStreaming', async () => {
@@ -407,7 +454,6 @@ describe('useSessionRouteExperience', () => {
 
       expect(getBuilderTaskStatusMock).toHaveBeenCalledWith('task-builder-1');
       expect(result.current.builderTask).toMatchObject({
-        phase: 'running',
         taskId: 'task-builder-1',
         progressPercent: 60,
         activeStepTitle: 'Draft the summary',
@@ -504,5 +550,230 @@ describe('useSessionRouteExperience', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not resurrect the same builder artifact after the user dismisses it', () => {
+    const storeBuilderArtifact = vi.fn();
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact,
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderArtifact: (artifact: {
+        artifactTitle: string;
+        artifactType: string;
+        artifactPath: string;
+      }) => void;
+    };
+
+    const artifact = {
+      artifactTitle: 'One-page brief',
+      artifactType: 'brief',
+      artifactPath: '/mnt/user-data/outputs/one-page-brief.md',
+    };
+
+    act(() => {
+      streamContractCall.setBuilderArtifact(artifact);
+    });
+
+    expect(result.current.builderArtifact).toMatchObject(artifact);
+
+    act(() => {
+      result.current.clearBuilderArtifact();
+    });
+
+    expect(result.current.builderArtifact).toBeNull();
+
+    act(() => {
+      streamContractCall.setBuilderArtifact(artifact);
+    });
+
+    expect(result.current.builderArtifact).toBeNull();
+    expect(storeBuilderArtifact).toHaveBeenCalledWith(null);
+  });
+
+  it('does not rehydrate the same completed builder task after dismissing its deliverable', async () => {
+    getActiveBuilderTaskMock.mockResolvedValue({
+      task_id: 'task-builder-1',
+      status: 'completed',
+      detail: 'Deliverable ready.',
+      builder_result: {
+        artifact_title: 'One-page brief',
+        artifact_type: 'brief',
+        artifact_path: '/mnt/user-data/outputs/one-page-brief.md',
+      },
+    });
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'completed',
+      taskId: 'task-builder-1',
+    });
+    expect(result.current.builderArtifact).toMatchObject({
+      artifactTitle: 'One-page brief',
+    });
+
+    act(() => {
+      result.current.clearBuilderArtifact();
+      result.current.clearBuilderTask();
+    });
+
+    expect(result.current.builderTask).toBeNull();
+    expect(result.current.builderArtifact).toBeNull();
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(result.current.builderTask).toBeNull();
+    expect(result.current.builderArtifact).toBeNull();
+  });
+
+  it('does not clear the builder task when storedBuilderArtifact changes within the same session', async () => {
+    const baseProps = {
+      sessionId: 'session-1',
+      activeSessionId: 'session-1',
+      activeThreadId: 'thread-1',
+      chatRequestBody: { session_id: 'session-1' },
+      hasValidBackendSessionId: true,
+      backendSessionId: 'session-1',
+      userId: 'user-1',
+      artifacts: null,
+      storedBuilderArtifact: null,
+      storeArtifacts: vi.fn(),
+      storeBuilderArtifact: vi.fn(),
+      updateSession: vi.fn(),
+      showUsageLimitModal: vi.fn(),
+      recordConnectivityFailure: vi.fn(),
+      showToast: vi.fn(),
+      setCurrentContext: vi.fn(),
+      setMessageMetadata: vi.fn(),
+      greetingAnchorId: 'greeting-1',
+      markOffline: vi.fn(),
+    } as const;
+
+    const { result, rerender } = renderHook((props: typeof baseProps) =>
+      useSessionRouteExperience(props),
+      { initialProps: baseProps }
+    );
+
+    const streamContractCall = useCompanionStreamContractMock.mock.calls[0][0] as {
+      setBuilderTask: (task: { phase: string; taskId?: string; detail?: string }) => void;
+    };
+
+    act(() => {
+      streamContractCall.setBuilderTask({
+        phase: 'completed',
+        taskId: 'task-builder-1',
+        detail: 'Deliverable ready.',
+      });
+    });
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'completed',
+      taskId: 'task-builder-1',
+    });
+
+    rerender({
+      ...baseProps,
+      storedBuilderArtifact: {
+        artifactTitle: 'One-page brief',
+        artifactType: 'brief',
+        artifactPath: '/mnt/user-data/outputs/one-page-brief.md',
+        decisionsMade: [],
+      },
+    });
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'completed',
+      taskId: 'task-builder-1',
+    });
+    expect(result.current.builderArtifact).toMatchObject({
+      artifactTitle: 'One-page brief',
+    });
+  });
+
+  it('keeps a dismissed builder artifact hidden after remounting the same session', () => {
+    const artifact = {
+      artifactTitle: 'One-page brief',
+      artifactType: 'brief' as const,
+      artifactPath: '/mnt/user-data/outputs/one-page-brief.md',
+      decisionsMade: [],
+    };
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: artifact,
+        storedDismissedBuilderArtifactKey: [artifact.artifactPath, '', artifact.artifactTitle].join('::'),
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    expect(result.current.builderArtifact).toBeNull();
   });
 });

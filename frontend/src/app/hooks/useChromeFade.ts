@@ -6,8 +6,9 @@ import { usePresenceStore } from "../stores/presence-store"
 import { useUiStore } from "../stores/ui-store"
 
 const FADE_DELAY_MS = 500
-const FADED_OPACITY = 0.15
-const RESTING_OPACITY = 0.7
+const FADED_OPACITY_DARK = 0.08
+const FADED_OPACITY_LIGHT = 0.12
+const RESTING_OPACITY = 1.0
 
 /** Presence states that trigger chrome fade */
 const ACTIVE_STATES = new Set(["listening", "thinking", "reflecting", "speaking"])
@@ -67,7 +68,11 @@ export function useChromeFade() {
     }
   }, [presenceStatus, disableChromeFade, mode, chromeFaded, setChromeFaded])
 
-  const chromeOpacity = chromeFaded ? FADED_OPACITY : RESTING_OPACITY
+  const chromeOpacity = chromeFaded
+    ? (typeof document !== "undefined" && document.documentElement.classList.contains("dark")
+        ? FADED_OPACITY_DARK
+        : FADED_OPACITY_LIGHT)
+    : RESTING_OPACITY
 
   return { chromeFaded, chromeOpacity }
 }

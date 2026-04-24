@@ -1,15 +1,36 @@
+export type JournalShaderTier = 1 | 2 | 3
+
+export function getJournalShaderMemoryLimit(tier: JournalShaderTier): number {
+  if (tier === 1) return 6
+  if (tier === 2) return 10
+  return 16
+}
+
+export function getJournalPoolFragmentShaderSource(tier: JournalShaderTier): string {
+  const memoryCount = getJournalShaderMemoryLimit(tier)
+  const enableAurora = tier === 3 ? 1 : 0
+
+  return `#define SHADER_MEMORY_COUNT ${memoryCount}\n#define ENABLE_AURORA ${enableAurora}\n${JOURNAL_POOL_FRAGMENT_SHADER}`
+}
+
 export const JOURNAL_POOL_VERTEX_SHADER = String.raw`attribute vec2 p;void main(){gl_Position=vec4(p,0,1);}`
 
 export const JOURNAL_POOL_FRAGMENT_SHADER = String.raw`
 precision highp float;
+#ifndef SHADER_MEMORY_COUNT
+#define SHADER_MEMORY_COUNT 16
+#endif
+#ifndef ENABLE_AURORA
+#define ENABLE_AURORA 1
+#endif
 uniform float uTime;
 uniform vec2 uRes;
 uniform vec2 uMouse;
 uniform vec3 uCam;
 uniform vec3 uTgt;
 uniform float uFov;
-uniform vec4 uMem[16];
-uniform vec3 uMemCol[16];
+uniform vec4 uMem[SHADER_MEMORY_COUNT];
+uniform vec3 uMemCol[SHADER_MEMORY_COUNT];
 uniform vec4 uComet[4];
 
 float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
@@ -62,7 +83,7 @@ float waveH(vec2 p, float t){
   d=length(p-vec2(-0.15,1.2));decay=exp(-d*0.80);
   h+=0.006*sin(d*14.0-t*1.5+5.5)*decay;
 
-  for(int i=0;i<16;i++){
+  for(int i=0;i<SHADER_MEMORY_COUNT;i++){
     vec2 mp=uMem[i].xy;
     float str=uMem[i].z;
     float ph=uMem[i].w;
@@ -308,6 +329,7 @@ void main(){
   float blueP=exp(-pow(length(uv-vec2(0.74,0.14)),2.0)*5.0);
   col+=vec3(0.015,0.030,0.065)*neb5*blueP*1.3;
 
+#if ENABLE_AURORA
   float auroraY=smoothstep(0.55,0.05,uv.y);
   if(auroraY>0.01){
     float curtain1=sin(uv.x*12.0+uTime*0.08+sin(uv.x*5.0+uTime*0.12)*1.5)*0.5+0.5;
@@ -322,6 +344,7 @@ void main(){
     float peak=pow(fold*curtain1,3.0)*curtainH*0.05*aBreath;
     col+=vec3(0.06,0.08,0.06)*peak;
   }
+#endif
 
   float hGlow=exp(-pow(uv.y-0.38,2.0)*6.0);
   col+=vec3(0.025,0.015,0.04)*hGlow*0.6;
@@ -421,7 +444,7 @@ void main(){
       cCol+=vec3(0.03,0.015,0.05)*exp(-pow(pD-1.5,2.0)*0.5);
       subC+=cCol*cst*0.18*exp(-pD*0.22)*(0.8+depthNoise*0.4);
 
-      for(int i=0;i<16;i++){
+      for(int i=0;i<SHADER_MEMORY_COUNT;i++){
         vec2 mp=uMem[i].xy;
         float str=uMem[i].z;
         if(str<0.01) continue;
@@ -432,7 +455,7 @@ void main(){
         subC+=gemLight*lightPool*0.35;
       }
 
-      for(int i=0;i<16;i++){
+      for(int i=0;i<SHADER_MEMORY_COUNT;i++){
         vec2 mp=uMem[i].xy;
         float str=uMem[i].z;
         if(str<0.01) continue;

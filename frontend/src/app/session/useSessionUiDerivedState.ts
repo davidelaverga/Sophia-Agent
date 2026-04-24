@@ -11,7 +11,6 @@ interface UseSessionUiDerivedStateParams {
   messages: UIMessage[];
   artifacts: RitualArtifacts | null;
   builderArtifact?: BuilderArtifactV1 | null;
-  hasBuilderArtifactLibrary?: boolean;
   isBuilderRunning?: boolean;
   isStreaming: boolean;
   isReflectionVoiceFlowActive: boolean;
@@ -27,7 +26,6 @@ export function useSessionUiDerivedState({
   messages,
   artifacts,
   builderArtifact,
-  hasBuilderArtifactLibrary = false,
   isBuilderRunning = false,
   isStreaming,
   isReflectionVoiceFlowActive,
@@ -42,8 +40,8 @@ export function useSessionUiDerivedState({
     const takeaway = artifacts?.takeaway?.trim();
     const reflection = artifacts?.reflection_candidate?.prompt?.trim();
     const memoriesCount = artifacts?.memory_candidates?.length ?? 0;
-    return Boolean(builderArtifact || hasBuilderArtifactLibrary || takeaway || reflection || memoriesCount > 0);
-  }, [artifacts, builderArtifact, hasBuilderArtifactLibrary]);
+    return Boolean(builderArtifact || takeaway || reflection || memoriesCount > 0);
+  }, [artifacts, builderArtifact]);
 
   const isVoiceThinking = voiceStatus === 'thinking';
   const showThinkingIndicator = (isTyping || isVoiceThinking) && !isReflectionTtsActive;

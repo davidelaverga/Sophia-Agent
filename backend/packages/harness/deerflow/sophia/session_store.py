@@ -95,6 +95,44 @@ class SessionStore:
         """Load a single session by ID."""
         return self._read(self._session_path(user_id, session_id))
 
+    def find_by_session_id(self, session_id: str) -> SessionRecord | None:
+        """Load a session by ID across all persisted user directories."""
+        if not session_id or not self._base.is_dir():
+            return None
+
+        for user_root in self._base.iterdir():
+            if not user_root.is_dir():
+                continue
+
+            record = self._read(user_root / "sessions" / f"{session_id}.json")
+            if record is not None:
+                return record
+
+        return None
+
+    def find_by_thread_id(self, thread_id: str) -> SessionRecord | None:
+        """Load a session by thread ID across all persisted user directories.
+
+        Used for ownership resolution when only the thread is known (e.g. the
+        builder artifact download route). Scans all session files — for
+        low-to-medium user counts this is fine; revisit when we move off disk.
+        """
+        if not thread_id or not self._base.is_dir():
+            return None
+
+        for user_root in self._base.iterdir():
+            if not user_root.is_dir():
+                continue
+            sessions_dir = user_root / "sessions"
+            if not sessions_dir.is_dir():
+                continue
+            for session_path in sessions_dir.glob("*.json"):
+                record = self._read(session_path)
+                if record is not None and record.thread_id == thread_id:
+                    return record
+
+        return None
+
     def update(self, user_id: str, session_id: str, **updates: object) -> SessionRecord | None:
         """Patch fields on an existing session. Returns updated record or None."""
         record = self.get(user_id, session_id)

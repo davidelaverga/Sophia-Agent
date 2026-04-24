@@ -51,22 +51,6 @@ function expectFileToExclude(source: string, forbidden: string[]) {
 }
 
 describe('runtime ownership contract', () => {
-  it('keeps /chat as a thin route shell over the chat route experience', () => {
-    const source = readAppFile('src/app/chat/page.tsx');
-
-    expectFileToInclude(source, ['useChatRouteExperience', 'ConversationView']);
-    expectFileToExclude(source, [
-      'useCompanionRuntime',
-      'useCompanionChatRuntime',
-      'useCompanionStreamContract',
-      'useCompanionArtifactsRuntime',
-      'useCompanionVoiceRuntime',
-      'useChatAiRuntime',
-      'useStreamVoiceSession',
-      'useInterrupt',
-    ]);
-  });
-
   it('keeps /session wired through the session route experience instead of deleted runtime owners', () => {
     const source = readAppFile('src/app/session/page.tsx');
 
@@ -77,19 +61,11 @@ describe('runtime ownership contract', () => {
       'useSessionArtifactsReducer',
       'useSessionVoiceBridge',
       'useSessionVoiceOrchestration',
-      'useCompanionChatRuntime',
-      'useCompanionStreamContract',
-      'useCompanionArtifactsRuntime',
-      'useCompanionVoiceRuntime',
     ]);
   });
 
   it('keeps conversation runtime ownership in the canonical companion runtime namespace', () => {
-    const chatRouteSource = readAppFile('src/app/chat/useChatRouteExperience.ts');
     const sessionRouteSource = readAppFile('src/app/session/useSessionRouteExperience.ts');
-
-    expectFileToInclude(chatRouteSource, ['useCompanionRuntime']);
-    expectFileToExclude(chatRouteSource, ['useChatAiRuntime']);
 
     expectFileToInclude(sessionRouteSource, [
       'useCompanionArtifactsRuntime',
@@ -102,25 +78,6 @@ describe('runtime ownership contract', () => {
       'useSessionStreamContract',
       'useSessionArtifactsReducer',
       'useSessionVoiceBridge',
-    ]);
-  });
-
-  it('keeps ConversationView presentation-only', () => {
-    const source = readAppFile('src/app/components/ConversationView.tsx');
-
-    expectFileToInclude(source, ['ChatRouteExperience']);
-    expectFileToExclude(source, [
-      'useCompanionRuntime',
-      'useCompanionChatRuntime',
-      'useCompanionStreamContract',
-      'useCompanionArtifactsRuntime',
-      'useCompanionVoiceRuntime',
-      'useChatAiRuntime',
-      'useStreamVoiceSession',
-      'useInterrupt',
-      'useSessionPersistence',
-      'useBackendTokenSync',
-      'useUsageMonitor',
     ]);
   });
 

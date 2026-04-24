@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import { isIgnorableBuilderArtifactPath } from '../lib/builder-artifacts';
 import type { BuilderArtifactLibraryItemV1 } from '../types/builder-artifact';
 
 type BuilderArtifactLibraryResponse = {
@@ -28,6 +29,7 @@ function normalizeBuilderArtifactLibrary(
       && typeof item.name === 'string'
       && item.name.trim().length > 0
     ))
+    .filter((item) => !isIgnorableBuilderArtifactPath(item.path))
     .map((item) => ({
       path: item.path,
       name: item.name,

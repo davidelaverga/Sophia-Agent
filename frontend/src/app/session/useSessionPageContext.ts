@@ -24,8 +24,10 @@ export function useSessionPageContext({
 }: UseSessionPageContextParams) {
   const session = useSessionStore(selectSession);
   const latestSessionRef = useRef(session);
+  const stableUserIdRef = useRef<string | null>(session?.userId ?? (authBypassEnabled ? authBypassUserId : null));
   const artifacts = useSessionStore(selectArtifacts);
   const builderArtifact = useSessionStore(selectBuilderArtifact);
+  const dismissedBuilderArtifactKey = useSessionStore((state) => state.session?.dismissedBuilderArtifactKey);
   const storedMessages = useSessionStore(selectMessages);
   const updateMessages = useSessionStore((state) => state.updateMessages);
   const updateSession = useSessionStore((state) => state.updateSession);
@@ -46,11 +48,17 @@ export function useSessionPageContext({
   const sessionId = session?.sessionId || chatConversationId || 'default-session';
   const backendSessionId = session?.sessionId || bootstrapSessionId;
   const hasValidBackendSessionId = isUuid(backendSessionId);
-  const userId = session?.userId || (authBypassEnabled ? authBypassUserId : 'anonymous');
+  const userId = session?.userId || stableUserIdRef.current || (authBypassEnabled ? authBypassUserId : 'anonymous');
   const sessionPresetType = session?.presetType;
   const sessionContextMode = session?.contextMode;
-  const isReadOnly = session?.status === 'ended';
+  // Ended sessions are no longer read-only. Users can continue any past
+  // conversation — the backend auto-reopens it (same thread_id, so the full
+  // transcript and memory context are preserved). `isReadOnly` remains in the
+  // returned shape for historical consumers but is always false.
+  const isReadOnly = false;
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
+  const metadataSessionId = isUuid(currentMetadataSessionId) ? currentMetadataSessionId : undefined;
+  const recoverySessionId = safeSessionId || metadataSessionId;
   const hasMatchingMetadataThreadId = safeSessionId && currentMetadataSessionId === safeSessionId;
   const metadataThreadCollidesWithSessionId = hasMatchingMetadataThreadId
     && currentThreadId === safeSessionId
@@ -79,6 +87,9 @@ export function useSessionPageContext({
 
   useEffect(() => {
     latestSessionRef.current = session;
+    if (session?.userId) {
+      stableUserIdRef.current = session.userId;
+    }
   }, [session]);
 
   useEffect(() => {
@@ -154,6 +165,7 @@ export function useSessionPageContext({
     session,
     artifacts,
     builderArtifact,
+    dismissedBuilderArtifactKey,
     storedMessages,
     updateMessages,
     updateSession,
@@ -174,6 +186,7 @@ export function useSessionPageContext({
     sessionContextMode,
     isReadOnly,
     safeSessionId,
+    recoverySessionId,
     initialGreeting,
     greetingMessageId,
     greetingAnchorId,

@@ -333,7 +333,12 @@ def test_update_session_can_pause_and_resume_resumable_sessions(isolated_session
     )
 
 
-def test_update_session_rejects_reopening_ended_sessions(isolated_session_store):
+def test_update_session_allows_reopening_ended_sessions(isolated_session_store):
+    """Ended sessions can be reopened (status='ended' → 'open').
+
+    The session preserves its thread_id so the transcript and memory context
+    stay intact. Other status transitions from 'ended' remain forbidden.
+    """
     isolated_session_store.create(
         SessionRecord(
             session_id="session-ended",
@@ -344,13 +349,28 @@ def test_update_session_rejects_reopening_ended_sessions(isolated_session_store)
         )
     )
 
+    # Reopen is allowed.
     response = client.patch(
         "/api/v1/sessions/session-ended?user_id=dev-user",
         json={"status": "open"},
     )
+    assert response.status_code == 200
+    assert response.json()["status"] == "open"
+    assert response.json()["ended_at"] is None
+    assert response.json()["thread_id"] == "thread-ended"
 
+    # End it again, then try to transition directly to 'paused' — still blocked.
+    isolated_session_store.update(
+        "dev-user",
+        "session-ended",
+        status="ended",
+        ended_at="2026-04-15T00:20:00+00:00",
+    )
+    response = client.patch(
+        "/api/v1/sessions/session-ended?user_id=dev-user",
+        json={"status": "paused"},
+    )
     assert response.status_code == 409
-    assert response.json()["detail"] == "Ended sessions cannot change status."
 
 
 def test_touch_session_resumes_paused_session(isolated_session_store):
@@ -486,6 +506,168 @@ def test_get_session_messages_strips_tool_use_metadata_from_ai_content(isolated_
             },
         ],
     }
+
+
+def test_continue_session_creates_new_session_id_on_same_thread(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="ended-session",
+            thread_id="thread-shared",
+            user_id="dev-user",
+            status="ended",
+            preset_type="debrief",
+            context_mode="work",
+            platform="voice",
+            intention="Close the loop",
+            focus_cue="What changed",
+            ended_at="2026-04-20T10:00:00+00:00",
+        )
+    )
+
+    with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
+        response = client.post(
+            "/api/v1/sessions/ended-session/continue",
+            json={"user_id": "dev-user"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["continued_from_session_id"] == "ended-session"
+    assert payload["session"]["session_id"] != "ended-session"
+    assert payload["session"]["thread_id"] == "thread-shared"
+    assert payload["session"]["status"] == "open"
+    assert payload["session"]["session_type"] == "debrief"
+    assert payload["session"]["preset_context"] == "work"
+
+    new_record = isolated_session_store.get("dev-user", payload["session"]["session_id"])
+    assert new_record is not None
+    assert new_record.thread_id == "thread-shared"
+    assert new_record.status == "open"
+    assert new_record.intention == "Close the loop"
+    assert new_record.focus_cue == "What changed"
+
+    mock_register_activity.assert_called_once_with(
+        "thread-shared",
+        "dev-user",
+        payload["session"]["session_id"],
+        "work",
+    )
+
+
+def test_continue_session_rejects_non_ended_source(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="open-session",
+            thread_id="thread-open",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    response = client.post(
+        "/api/v1/sessions/open-session/continue",
+        json={"user_id": "dev-user"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Only ended sessions can be continued."
+
+
+def test_continue_session_rejects_when_thread_already_has_active_session(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="ended-session",
+            thread_id="thread-shared",
+            user_id="dev-user",
+            status="ended",
+        )
+    )
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="already-open",
+            thread_id="thread-shared",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    response = client.post(
+        "/api/v1/sessions/ended-session/continue",
+        json={"user_id": "dev-user"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "This thread already has an active session. Resume the active one instead."
+
+
+def test_continue_session_reuses_thread_history_for_messages(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="ended-session",
+            thread_id="thread-shared-history",
+            user_id="dev-user",
+            status="ended",
+            preset_type="debrief",
+            context_mode="work",
+        )
+    )
+
+    continue_response = client.post(
+        "/api/v1/sessions/ended-session/continue",
+        json={"user_id": "dev-user"},
+    )
+    assert continue_response.status_code == 200
+    new_session_id = continue_response.json()["session"]["session_id"]
+
+    request = httpx.Request("GET", "http://127.0.0.1:2024/threads/thread-shared-history/state")
+    mock_response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "values": {
+                "messages": [
+                    {
+                        "id": "human-1",
+                        "type": "human",
+                        "content": "Can we pick this up where we left off?",
+                    },
+                    {
+                        "id": "ai-1",
+                        "type": "ai",
+                        "content": "Yes. Let's continue from that exact point.",
+                    },
+                ]
+            }
+        },
+    )
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        response = client.get(f"/api/v1/sessions/{new_session_id}/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["session_id"] == new_session_id
+    assert payload["thread_id"] == "thread-shared-history"
+    assert payload["messages"] == [
+        {
+            "id": "human-1",
+            "role": "user",
+            "content": "Can we pick this up where we left off?",
+            "created_at": None,
+        },
+        {
+            "id": "ai-1",
+            "role": "sophia",
+            "content": "Yes. Let's continue from that exact point.",
+            "created_at": None,
+        },
+    ]
 
 
 @pytest.mark.parametrize(

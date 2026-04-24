@@ -20,6 +20,7 @@ export function useCompanionStreamContract({
   setInterrupt,
   setCurrentContext,
   setMessageMetadata,
+  onSessionTitle,
   sessionId,
   activeSessionId,
   activeThreadId,
@@ -90,6 +91,7 @@ export function useCompanionStreamContract({
       session_id: meta.session_id || sessionIdValue,
       skill_used: meta.skill_used,
       emotion_detected: meta.emotion_detected,
+      session_title: meta.session_title,
     };
 
     if (metadata.thread_id) {
@@ -100,13 +102,17 @@ export function useCompanionStreamContract({
       setMessageMetadata(messageId, metadata);
     }
 
+    if (meta.session_title && onSessionTitle) {
+      onSessionTitle(meta.session_title, metadata.session_id || sessionIdValue);
+    }
+
     if (streamTurnStartedAtRef.current) {
       emitTiming('session.stream.turn_ms', streamTurnStartedAtRef.current, {
         session_id: sessionIdValue,
       });
       streamTurnStartedAtRef.current = null;
     }
-  }, [activeSessionId, activeThreadId, sessionId, setCurrentContext, setMessageMetadata]);
+  }, [activeSessionId, activeThreadId, onSessionTitle, sessionId, setCurrentContext, setMessageMetadata]);
 
   return {
     handleDataPart,

@@ -10,6 +10,7 @@ import {
   hydrateStoredArtifactsWithRecentMemories,
   useRecapArtifactsLoader,
 } from '../../app/recap/[sessionId]/useRecapArtifactsLoader';
+import { useRecapStore } from '../../app/stores/recap-store';
 
 const markRecapViewedMock = vi.fn();
 const getSessionHistoryEntryMock = vi.fn();
@@ -45,6 +46,11 @@ describe('useRecapArtifactsLoader', () => {
     clearRecentSessionEndHint();
     vi.clearAllMocks();
     getSessionHistoryEntryMock.mockReturnValue(undefined);
+    useRecapStore.setState({
+      artifacts: {},
+      decisions: {},
+      commitStatus: {},
+    });
     vi.useRealTimers();
     vi.spyOn(AbortSignal, 'timeout').mockImplementation(() => new AbortController().signal);
   });
@@ -289,6 +295,170 @@ describe('useRecapArtifactsLoader', () => {
     expect(setArtifacts).toHaveBeenCalledWith(
       'sess-reviewed',
       expect.objectContaining({ takeaway: 'The important part already landed.' }),
+    );
+    expect(result.current.status).toBe('reviewed');
+  });
+
+  it('keeps the recap ready after the last candidate is discarded locally', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        memories: [],
+        count: 0,
+        fallbackApplied: true,
+      }),
+    );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+    useRecapStore.getState().setDecision('sess-local-discard', 'discarded-memory-1', 'discarded');
+    markRecentSessionEnd('sess-local-discard');
+    const artifacts = {
+      sessionId: 'sess-local-discard',
+      threadId: 'thread-local-discard',
+      sessionType: 'debrief' as const,
+      contextMode: 'life' as const,
+      startedAt: '2026-03-03T19:46:00.000Z',
+      endedAt: new Date().toISOString(),
+      takeaway: 'You cleared the noise without needing to keep all of it.',
+      memoryCandidates: [],
+      status: 'ready' as const,
+    };
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-local-discard',
+        artifacts,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(result.current.status).toBe('ready');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(getRecentSessionEndHint()).toBeNull();
+  });
+
+  it('does not flash back to loading when stored artifacts change after a local discard', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({
+        memories: [],
+        count: 0,
+        fallbackApplied: true,
+      }),
+    );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const initialArtifacts = {
+      sessionId: 'sess-no-flash',
+      threadId: 'thread-no-flash',
+      sessionType: 'debrief' as const,
+      contextMode: 'life' as const,
+      startedAt: '2026-03-03T19:46:00.000Z',
+      endedAt: new Date().toISOString(),
+      takeaway: 'You kept only what mattered.',
+      memoryCandidates: [
+        {
+          id: 'mem-1',
+          text: 'Low-signal memory candidate.',
+          category: 'fact' as const,
+        },
+      ],
+      status: 'ready' as const,
+    };
+
+    useRecapStore.getState().setDecision('sess-no-flash', 'mem-1', 'discarded');
+    markRecentSessionEnd('sess-no-flash');
+
+    const { result, rerender } = renderHook(
+      ({ artifacts }) => useRecapArtifactsLoader({
+        sessionId: 'sess-no-flash',
+        artifacts,
+        setArtifacts,
+      }),
+      { initialProps: { artifacts: initialArtifacts } },
+    );
+
+    await flushEffects();
+    expect(result.current.status).toBe('ready');
+
+    rerender({
+      artifacts: {
+        ...initialArtifacts,
+        memoryCandidates: [],
+      },
+    });
+
+    expect(result.current.status).toBe('ready');
+
+    await flushEffects();
+
+    expect(result.current.status).toBe('ready');
+    expect(getRecentSessionEndHint()).toBeNull();
+  });
+
+  it('marks the recap as reviewed when discarded memories already exist for the session', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse({
+          session_id: 'sess-discarded-reviewed',
+          started_at: '2026-03-03T19:46:00.000Z',
+          ended_at: '2026-03-03T20:00:00.000Z',
+          takeaway: 'You let the unnecessary parts stay behind.',
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [],
+          count: 0,
+          fallbackApplied: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [],
+          count: 0,
+          fallbackApplied: false,
+        }),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse({
+          memories: [
+            {
+              id: 'discarded-memory-1',
+              text: 'User chose not to keep the low-signal recap memory.',
+              category: 'preference',
+              created_at: '2026-03-03T20:02:00.000Z',
+            },
+          ],
+          count: 1,
+          fallbackApplied: false,
+        }),
+      );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-discarded-reviewed',
+        artifacts: null,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/memory/recent?status=discarded&session_id=sess-discarded-reviewed&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'sess-discarded-reviewed',
+      expect.objectContaining({ takeaway: 'You let the unnecessary parts stay behind.' }),
     );
     expect(result.current.status).toBe('reviewed');
   });

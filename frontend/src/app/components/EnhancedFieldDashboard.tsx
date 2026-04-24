@@ -50,8 +50,6 @@ export function EnhancedFieldDashboard() {
     activeSession,
     sessionSummary,
     isStartingSession,
-    showSettingsDrawer,
-    setShowSettingsDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     showFreshStartPrompt,
@@ -83,8 +81,9 @@ export function EnhancedFieldDashboard() {
   const [micVisible, setMicVisible] = useState(false);
   const [orbitRevealed, setOrbitRevealed] = useState(false);
   const [tabsVisible, setTabsVisible] = useState(false);
-  const [sidebarExpanded, setSidebarExpanded] = useState(() => openSessionCount > 0);
+  const [sidebarExpanded, setSidebarExpanded] = useState(false);
   const [showMobileSessions, setShowMobileSessions] = useState(false);
+  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const resolvedUserId = user?.id || activeSession?.userId || (authBypassEnabled ? authBypassUserId : undefined);
 
   useEffect(() => {
@@ -96,24 +95,15 @@ export function EnhancedFieldDashboard() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
     const primeSessionsSidebar = async () => {
       if (!resolvedUserId) {
         return;
       }
 
-      const count = await refreshOpenSessions(resolvedUserId);
-      if (!cancelled && count > 0) {
-        setSidebarExpanded(true);
-      }
+      await refreshOpenSessions(resolvedUserId);
     };
 
     void primeSessionsSidebar();
-
-    return () => {
-      cancelled = true;
-    };
   }, [refreshOpenSessions, resolvedUserId]);
 
   // ── Context-switch crossfade ────────────────────────────────
@@ -163,6 +153,12 @@ export function EnhancedFieldDashboard() {
       <CelestialComet contextMode={contextMode} />
       <RitualThread selectedRitual={selectedRitual} isActive={micState !== 'idle' || isStartingSession} />
 
+      {/*
+        Navigation contract:
+        - NavRail exposes the compact entry points for Sessions, Journal, and Settings.
+        - RecentSessionsSidebar renders the expanded Sessions browser after the rail opens it.
+        Keep these responsibilities separate so desktop never shows two session-history triggers.
+      */}
       {/* Desktop nav rail — left edge */}
       <NavRail
         onToggleSessions={() => setSidebarExpanded((v) => !v)}

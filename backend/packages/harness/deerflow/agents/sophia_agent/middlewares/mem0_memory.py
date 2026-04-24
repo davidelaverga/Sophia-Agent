@@ -369,8 +369,8 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             search_ms = 0.0
 
         logger.info(
-            "[Mem0Memory] query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
-            query[:80], categories, context_mode, ritual, active_skill,
+            "[Mem0Memory] thread_id=%s | query='%s' | categories=%s | context_mode=%s | ritual=%s | skill=%s",
+            thread_id, query[:80], categories, context_mode, ritual, active_skill,
         )
 
         if results is None:
@@ -399,7 +399,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             )
 
         if not results:
-            log_middleware("Mem0Memory", f"no memories found (search: {search_ms:.0f}ms)", _t0)
+            log_middleware(
+                "Mem0Memory",
+                f"thread_id={thread_id} no memories found (search: {search_ms:.0f}ms)",
+                _t0,
+            )
             return None
 
         # Log per-category breakdown
@@ -408,8 +412,8 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
             cat = mem.get("category", "unknown") or "unknown"
             category_counts[cat] = category_counts.get(cat, 0) + 1
         logger.info(
-            "[Mem0Memory] %d results | search: %.0fms | breakdown: %s",
-            len(results), search_ms,
+            "[Mem0Memory] thread_id=%s | %d results | search: %.0fms | breakdown: %s",
+            thread_id, len(results), search_ms,
             " | ".join(f"{cat}: {count}" for cat, count in sorted(category_counts.items())),
         )
         # Log each memory's content preview for debugging
@@ -432,7 +436,11 @@ class Mem0MemoryMiddleware(AgentMiddleware[Mem0MemoryState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
-        log_middleware("Mem0Memory", f"{len(results)} memories injected (search: {search_ms:.0f}ms)", _t0)
+        log_middleware(
+            "Mem0Memory",
+            f"thread_id={thread_id} {len(results)} memories injected (search: {search_ms:.0f}ms)",
+            _t0,
+        )
         return {
             "injected_memories": memory_ids,
             "injected_memory_contents": memory_lines,

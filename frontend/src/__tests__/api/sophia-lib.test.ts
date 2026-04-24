@@ -19,6 +19,8 @@ import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../
 describe('Sophia API helper', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    delete process.env.SOPHIA_AUTH_BACKEND_URL
+    delete process.env.NEXT_PUBLIC_SOPHIA_AUTH_BACKEND_URL
     getAuthenticatedUserIdMock.mockResolvedValue('user-123')
     getUserScopedAuthHeaderMock.mockResolvedValue('Bearer token-123')
     refreshUserScopedAuthHeaderMock.mockResolvedValue('')
@@ -44,6 +46,8 @@ describe('Sophia API helper', () => {
   })
 
   it('forwards authenticated requests to the Sophia gateway', async () => {
+    process.env.SOPHIA_AUTH_BACKEND_URL = 'http://127.0.0.1:3101'
+
     const response = await fetchSophiaApi('/api/sophia/user-123/journal', {
       method: 'POST',
       body: JSON.stringify({ hello: 'world' }),
@@ -61,6 +65,7 @@ describe('Sophia API helper', () => {
     const headers = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers
     expect(headers.get('Authorization')).toBe('Bearer token-123')
     expect(headers.get('Content-Type')).toBe('application/json')
+    expect(headers.get('X-Sophia-Auth-Backend-Url')).toBe('http://127.0.0.1:3101')
   })
 
   it('retries once with a refreshed auth header when the gateway returns 403', async () => {

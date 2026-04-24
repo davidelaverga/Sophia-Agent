@@ -8,6 +8,7 @@ config and injects a ``<builder_briefing>`` block into
 
 import html
 import logging
+import re
 import time
 from typing import Any, NotRequired, override
 
@@ -19,12 +20,27 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
 
+_PAGE_COUNT_RE = re.compile(r"\b\d+[- ]page\b", re.IGNORECASE)
+
+
+def _resolve_builder_hard_ceiling(delegation_context: dict[str, Any]) -> int:
+    task = delegation_context.get("task")
+    if not isinstance(task, str):
+        return 20
+    normalized_task = task.lower()
+    if "pdf" not in normalized_task:
+        return 20
+    if ("exactly" in normalized_task and "page" in normalized_task) or _PAGE_COUNT_RE.search(task):
+        return 8
+    return 20
+
 
 class BuilderTaskState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
+    builder_tool_turn_summaries: NotRequired[list[dict]]
     builder_search_sources: NotRequired[list[dict]]
     allow_web_research: NotRequired[bool]
 
@@ -56,6 +72,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
         ]
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
+        turn_summaries = [
+            summary for summary in (state.get("builder_tool_turn_summaries") or []) if isinstance(summary, dict)
+        ]
+        last_turn_rejected_emit = bool(
+            turn_summaries and turn_summaries[-1].get("rejected_emit_builder_artifact")
+        )
         recent_tool_names = [
             str(name).strip()
             for name in (state.get("builder_last_tool_names") or [])
@@ -147,7 +169,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # MUST stay in sync with BuilderArtifactMiddleware._HARD_CEILING in
         # builder_artifact.py — otherwise the model's budget math lies and it
         # over-commits to retries past its advertised limit.
-        _HARD_CEILING = 20
+        _HARD_CEILING = _resolve_builder_hard_ceiling(delegation_context)
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
 
         sections.append(
@@ -156,19 +178,50 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
             "Plan your work to fit within this budget:\n"
             "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
-            "- For text deliverables (markdown, html, plain text, code): write the complete file in a single write_file_tool call. Do NOT split the same file across multiple write_file_tool calls — if output risks exceeding the write budget, ship a tighter draft instead of fragmenting.\n"
+            "- For text deliverables (markdown, html, plain text, code): write the complete file in a single "
+            "write_file_tool call. Do NOT split the same file across multiple write_file_tool calls — if output "
+            "risks exceeding the write budget, ship a tighter draft instead of fragmenting.\n"
             "- For binary deliverables (pdf, pptx, docx, xlsx, png): the DELIVERABLE IS THE BINARY, NOT THE SCRIPT. You MUST:\n"
-            "    (a) Turn 2: write ONE generator script to /mnt/user-data/outputs/_generate_<name>.py that produces the whole binary end-to-end. Keep the script under 120 lines with minimal styling — a tight script generates 3-5x faster than an elaborate one, and time saved here is time you have to recover from errors. If content risks exceeding ~120 lines, split into data.json + a short generator script in two sequential write_file_tool calls.\n"
+            "    (a) Turn 2: write ONE generator script to /mnt/user-data/outputs/_generate_<name>.py that "
+            "produces the whole binary end-to-end. Keep the script under 120 lines with minimal styling — a tight "
+            "script generates 3-5x faster than an elaborate one, and time saved here is time you have to recover "
+            "from errors. If content risks exceeding ~120 lines, split into data.json + a short generator script "
+            "in two sequential write_file_tool calls. Do NOT create importable helper modules/packages (for example "
+            "pear_data.py), and do NOT create files that would only generate __pycache__/ or .pyc byproducts. Keep "
+            "all content inline or in data.json only.\n"
             "    (b) Turn 3: run it with bash_tool (e.g. `python /mnt/user-data/outputs/_generate_<name>.py`). This step is MANDATORY — skipping it leaves the user with a useless .py file.\n"
-            "    (c) Turn 4: verify the binary exists with ls_tool on /mnt/user-data/outputs/. If the binary is missing or bash_tool returned an error, fix the script and re-run — BUT at most 2 fix-and-retry cycles. After 2 failed retries, call emit_builder_artifact with whatever partial deliverable is on disk (the generator .py or a degraded binary), set confidence<=0.5, and put a clear explanation in companion_tone_hint. NEVER exit without calling emit_builder_artifact.\n"
-            "    (d) emit_builder_artifact.artifact_path MUST point to the BINARY file (e.g. .pdf, .pptx, .png) — never to the generator .py script. The .py may appear in supporting_files, but artifact_path must be the final deliverable the user asked for.\n"
+            "    (c) Turn 4: verify the binary exists with ls_tool on /mnt/user-data/outputs/. If the binary is "
+            "missing or bash_tool returned an error, fix the script and re-run — BUT at most 2 fix-and-retry cycles. "
+            "After 2 failed retries, call emit_builder_artifact with whatever partial deliverable is on disk (the "
+            "generator .py or a degraded binary), set confidence<=0.5, and put a clear explanation in "
+            "companion_tone_hint. NEVER exit without calling emit_builder_artifact. If the user asked for a PDF "
+            "with an exact page count, this degraded-binary escape hatch does NOT apply: switch to a deterministic "
+            "page-explicit layout (for example reportlab.pdfgen.canvas with one showPage() per required page), "
+            "regenerate, verify with pypdf, and only then emit.\n"
+            "    (d) emit_builder_artifact.artifact_path MUST point to the BINARY file (e.g. .pdf, .pptx, .png) "
+            "— never to the generator .py script. supporting_files must list only user-facing companion files. Do "
+            "NOT include internal generator/helper scripts such as /mnt/user-data/outputs/_generate_<name>.py in "
+            "supporting_files. If the script itself is the degraded fallback deliverable, put it in artifact_path "
+            "instead of supporting_files.\n"
+            "    (e) For PDFs with an exact page count, prefer reportlab.pdfgen.canvas or another explicit page-based layout. Avoid auto-paginating flowables/Platypus layouts that can silently spill onto extra pages.\n"
             "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
-            "- After each meaningful step (write_file, successful bash run), call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
+            "- After each meaningful step (write_file, successful bash run), call write_todos again to mark the "
+            "corresponding item 'completed' or 'in-progress'. This is how the user sees the progress bar advance "
+            "— skipping these updates leaves the UI stuck.\n"
             "- Make targeted edits only if critical fixes are needed.\n"
             "- Final turn: Call emit_builder_artifact. This is MANDATORY — without it your work is lost.\n"
             "Do NOT iterate endlessly to perfect the output. Ship a complete first draft, then finalize.\n"
             "</completion_instruction>"
         )
+
+        if last_turn_rejected_emit:
+            sections.append(
+                "<emit_repair_instruction>\n"
+                "Your previous emit_builder_artifact call was rejected because the PDF page count was wrong. "
+                "Do NOT emit again until you have changed the generator, regenerated the PDF, and verified it with pypdf. "
+                "Use a deterministic page-explicit layout so each required page is created deliberately.\n"
+                "</emit_repair_instruction>"
+            )
 
         if non_artifact_turns > 0:
             joined_tools = ", ".join(recent_tool_names) if recent_tool_names else "unknown"
@@ -178,7 +231,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 f"{remaining} turn(s) remaining before forced termination.\n"
                 f"Most recent tool calls: {joined_tools}.\n"
             )
-            if remaining <= 3:
+            if last_turn_rejected_emit:
+                escalation += (
+                    "Your previous emit_builder_artifact call was rejected because the PDF page count was wrong. "
+                    "Do NOT emit again until you have changed the generator, regenerated the PDF, and verified it with pypdf. "
+                    "Use a deterministic page-explicit layout so each required page is created deliberately.\n"
+                )
+            elif remaining <= 3:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
                     "Your NEXT action MUST be emit_builder_artifact — DO NOT call write_todos, "

@@ -4,6 +4,7 @@ import { fetchSophiaApi, resolveSophiaUserId } from '../../../_lib/sophia';
 
 export async function GET(request: NextRequest) {
   const threadId = request.nextUrl.searchParams.get('thread_id');
+  const sessionId = request.nextUrl.searchParams.get('session_id');
 
   if (!threadId) {
     return NextResponse.json(null);
@@ -17,6 +18,9 @@ export async function GET(request: NextRequest) {
 
   try {
     const params = new URLSearchParams({ thread_id: threadId });
+    if (sessionId) {
+      params.set('session_id', sessionId);
+    }
     const response = await fetchSophiaApi(
       `/api/sophia/${encodeURIComponent(userId)}/tasks/active?${params.toString()}`,
       {

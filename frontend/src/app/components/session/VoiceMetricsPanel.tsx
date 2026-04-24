@@ -16,17 +16,25 @@ import {
   Radio,
   RotateCcw,
   Sparkles,
+  X,
 } from "lucide-react"
 import { startTransition, useEffect, useMemo, useRef, useState } from "react"
 
-import { registerSophiaCaptureBridge } from "../../lib/session-capture"
+import { registerSophiaCaptureBridge, type SophiaCaptureBundle } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
 import {
   buildVoiceDeveloperMetrics,
   buildVoiceTelemetrySummary,
+  sliceVoiceCaptureEventsToActiveRun,
+  type VoiceBaselineRegression,
   type VoiceDeveloperMetrics,
   type VoiceRegressionMarker,
 } from "../../lib/voice-runtime-metrics"
+import {
+  createVoiceTelemetryBaselineEntry,
+  readVoiceTelemetryBaselineEntries,
+  upsertVoiceTelemetryBaselineEntry,
+} from "../../lib/voice-telemetry-baseline"
 import type { VoiceStateProps } from "../../lib/voice-types"
 import { useUiStore } from "../../stores/ui-store"
 
@@ -51,6 +59,8 @@ type PointerInteraction = {
 }
 
 const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v1"
+const FLOATING_PANEL_COMPACT_MIN_WIDTH = 240
+const FLOATING_PANEL_COMPACT_MIN_HEIGHT = 220
 const FLOATING_PANEL_MIN_WIDTH = 320
 const FLOATING_PANEL_MAX_WIDTH = 720
 const FLOATING_PANEL_MIN_HEIGHT = 260
@@ -59,13 +69,40 @@ const FLOATING_PANEL_EDGE_PADDING = 12
 const FLOATING_PANEL_TOP_PADDING = 76
 const FLOATING_PANEL_HEADER_OFFSET = 164
 
+function getFloatingWidthRange(viewportWidth: number): { minWidth: number; maxWidth: number } {
+  const maxWidth = Math.min(
+    FLOATING_PANEL_MAX_WIDTH,
+    Math.max(FLOATING_PANEL_COMPACT_MIN_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)),
+  )
+
+  return {
+    minWidth: Math.min(FLOATING_PANEL_MIN_WIDTH, maxWidth),
+    maxWidth,
+  }
+}
+
+function getFloatingHeightRange(viewportHeight: number): { minHeight: number; maxHeight: number } {
+  const availableHeight = viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_EDGE_PADDING
+  const maxHeight = Math.min(
+    FLOATING_PANEL_MAX_HEIGHT,
+    Math.max(FLOATING_PANEL_COMPACT_MIN_HEIGHT, availableHeight),
+  )
+
+  return {
+    minHeight: Math.min(FLOATING_PANEL_MIN_HEIGHT, maxHeight),
+    maxHeight,
+  }
+}
+
 function getDefaultFloatingBounds(viewportWidth: number, viewportHeight: number): FloatingPanelBounds {
-  const width = viewportWidth < 640
-    ? Math.max(FLOATING_PANEL_MIN_WIDTH, viewportWidth - 24)
+  const { maxWidth } = getFloatingWidthRange(viewportWidth)
+  const { minHeight, maxHeight } = getFloatingHeightRange(viewportHeight)
+  const width = viewportWidth < 768
+    ? maxWidth
     : Math.min(460, Math.max(360, Math.round(viewportWidth * 0.3)))
   const height = viewportHeight < 760
-    ? Math.max(FLOATING_PANEL_MIN_HEIGHT + 40, viewportHeight - 140)
-    : 560
+    ? Math.max(minHeight, viewportHeight - 140)
+    : Math.min(560, maxHeight)
 
   return clampFloatingBounds({
     left: viewportWidth - width - 24,
@@ -80,12 +117,12 @@ function clampFloatingBounds(
   viewportWidth: number,
   viewportHeight: number,
 ): FloatingPanelBounds {
-  const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, Math.min(FLOATING_PANEL_MAX_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)))
-  const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, Math.min(FLOATING_PANEL_MAX_HEIGHT, viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_EDGE_PADDING))
-  const width = Math.min(Math.max(bounds.width, FLOATING_PANEL_MIN_WIDTH), maxWidth)
-  const height = Math.min(Math.max(bounds.height, FLOATING_PANEL_MIN_HEIGHT), maxHeight)
+  const { minWidth, maxWidth } = getFloatingWidthRange(viewportWidth)
+  const { minHeight, maxHeight } = getFloatingHeightRange(viewportHeight)
+  const width = Math.min(Math.max(bounds.width, minWidth), maxWidth)
+  const height = Math.min(Math.max(bounds.height, minHeight), maxHeight)
   const maxLeft = Math.max(FLOATING_PANEL_EDGE_PADDING, viewportWidth - width - FLOATING_PANEL_EDGE_PADDING)
-  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - 120)
+  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - height - FLOATING_PANEL_EDGE_PADDING)
 
   return {
     left: Math.min(Math.max(bounds.left, FLOATING_PANEL_EDGE_PADDING), maxLeft),
@@ -95,14 +132,18 @@ function clampFloatingBounds(
   }
 }
 
-function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: FloatingPanelBounds; expanded: boolean } | null {
+function readPersistedFloatingBounds(defaultExpanded: boolean): {
+  bounds: FloatingPanelBounds
+  expanded: boolean
+  hidden: boolean
+} | null {
   if (typeof window === "undefined") return null
 
   try {
     const raw = window.localStorage.getItem(FLOATING_PANEL_STORAGE_KEY)
     if (!raw) return null
 
-    const parsed = JSON.parse(raw) as Partial<FloatingPanelBounds> & { expanded?: boolean }
+    const parsed = JSON.parse(raw) as Partial<FloatingPanelBounds> & { expanded?: boolean; hidden?: boolean }
     if (
       typeof parsed.left !== "number"
       || typeof parsed.top !== "number"
@@ -120,9 +161,21 @@ function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: Floati
         height: parsed.height,
       },
       expanded: typeof parsed.expanded === "boolean" ? parsed.expanded : defaultExpanded,
+      hidden: typeof parsed.hidden === "boolean" ? parsed.hidden : false,
     }
   } catch {
     return null
+  }
+}
+
+function scopeCaptureBundleToActiveRun(bundle: SophiaCaptureBundle): SophiaCaptureBundle {
+  const activeRunEvents = sliceVoiceCaptureEventsToActiveRun(bundle.events)
+
+  return {
+    ...bundle,
+    startedAt: activeRunEvents[0]?.recordedAt ?? bundle.startedAt,
+    eventCount: activeRunEvents.length,
+    events: activeRunEvents,
   }
 }
 
@@ -133,6 +186,7 @@ export function VoiceMetricsPanel({
 }: VoiceMetricsPanelProps) {
   const showToast = useUiStore((state) => state.showToast)
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const [hidden, setHidden] = useState(false)
   const [floatingBounds, setFloatingBounds] = useState<FloatingPanelBounds>({
     left: 24,
     top: 88,
@@ -144,6 +198,7 @@ export function VoiceMetricsPanel({
   const [isResizing, setIsResizing] = useState(false)
   const dragRef = useRef<PointerInteraction | null>(null)
   const resizeRef = useRef<PointerInteraction | null>(null)
+  const baselinePersistFingerprintRef = useRef<string | null>(null)
   const [metrics, setMetrics] = useState<VoiceDeveloperMetrics>(() =>
     buildVoiceDeveloperMetrics({
       stage: voiceState.stage,
@@ -164,6 +219,7 @@ export function VoiceMetricsPanel({
 
       const snapshot = capture?.snapshot() ?? null
       const events = capture?.getEvents() ?? []
+      const baselineEntries = readVoiceTelemetryBaselineEntries()
 
       startTransition(() => {
         setMetrics(
@@ -171,6 +227,7 @@ export function VoiceMetricsPanel({
             stage: voiceState.stage,
             events,
             snapshot,
+            baselineEntries,
             runtimeError: voiceState.error,
           }),
         )
@@ -185,9 +242,42 @@ export function VoiceMetricsPanel({
     }
   }, [voiceState.error, voiceState.stage])
 
+  useEffect(() => {
+    const persistenceFingerprint = [
+      metrics.baseline.runKey ?? "no-run",
+      metrics.timings.sessionReadyMs ?? "na",
+      metrics.timings.joinLatencyMs ?? "na",
+      metrics.pipeline.requestStartToFirstTextMs ?? "na",
+      metrics.startup.bindToPlaybackStartMs ?? "na",
+      metrics.transport.webrtc.subscriber.averageRoundTripTimeMs ?? metrics.transport.webrtc.subscriber.lastRoundTripTimeMs ?? "na",
+      metrics.transport.webrtc.subscriber.averageJitterMs ?? metrics.transport.webrtc.subscriber.lastJitterMs ?? "na",
+      metrics.transport.webrtc.subscriber.averagePacketLossPct ?? metrics.transport.webrtc.subscriber.lastPacketLossPct ?? "na",
+    ].join("::")
+
+    if (baselinePersistFingerprintRef.current === persistenceFingerprint) {
+      return
+    }
+
+    const entry = createVoiceTelemetryBaselineEntry(metrics)
+    if (!entry) {
+      return
+    }
+
+    baselinePersistFingerprintRef.current = persistenceFingerprint
+    upsertVoiceTelemetryBaselineEntry(entry)
+  }, [metrics])
+
   const panelTone = useMemo(() => {
+    if (metrics.baseline.regressions.some((regression) => regression.level === "bad")) {
+      return "bad" as const
+    }
+
     if (metrics.regressions.some((marker) => marker.level === "bad")) {
       return "bad" as const
+    }
+
+    if (metrics.baseline.regressions.some((regression) => regression.level === "warn")) {
+      return "warn" as const
     }
 
     if (metrics.regressions.some((marker) => marker.level === "warn")) {
@@ -195,7 +285,10 @@ export function VoiceMetricsPanel({
     }
 
     return metrics.health.level
-  }, [metrics.health.level, metrics.regressions])
+  }, [metrics.baseline.regressions, metrics.health.level, metrics.regressions])
+
+  const isFloatingExpanded = layout === "floating" && expanded
+  const floatingWide = layout === "floating" && floatingBounds.width >= 560
 
   const summaryCards = useMemo(
     () => [
@@ -273,6 +366,7 @@ export function VoiceMetricsPanel({
 
     setFloatingBounds(clampFloatingBounds(nextBounds, viewportWidth, viewportHeight))
     setExpanded(persisted?.expanded ?? defaultExpanded)
+    setHidden(persisted?.hidden ?? false)
     setHasHydratedFloatingState(true)
   }, [defaultExpanded, layout])
 
@@ -281,9 +375,9 @@ export function VoiceMetricsPanel({
 
     window.localStorage.setItem(
       FLOATING_PANEL_STORAGE_KEY,
-      JSON.stringify({ ...floatingBounds, expanded }),
+      JSON.stringify({ ...floatingBounds, expanded, hidden }),
     )
-  }, [expanded, floatingBounds, hasHydratedFloatingState, layout])
+  }, [expanded, floatingBounds, hasHydratedFloatingState, hidden, layout])
 
   useEffect(() => {
     if (layout !== "floating" || typeof window === "undefined") return
@@ -359,19 +453,70 @@ export function VoiceMetricsPanel({
       return null
     }
 
+    const rawCaptureBundle = capture.export()
+    const captureBundle = scopeCaptureBundleToActiveRun(rawCaptureBundle)
+    const summary = buildVoiceTelemetrySummary(metrics)
+
     return JSON.stringify(
       {
         reportType: "voice-telemetry-report",
         version: 1,
         source: "session-ui",
         exportedAt: new Date().toISOString(),
-        summary: buildVoiceTelemetrySummary(metrics),
+        highlights: {
+          bottleneckHint: summary.bottleneckHint,
+          topHotspots: summary.topHotspots,
+          baselineRegressions: metrics.baseline.regressions.slice(0, 3),
+          webrtc: {
+            datacenter: metrics.transport.webrtc.datacenter,
+            sampleCount: metrics.transport.webrtc.sampleCount,
+            subscriberRoundTripTimeMs: metrics.transport.webrtc.subscriber.averageRoundTripTimeMs ?? metrics.transport.webrtc.subscriber.lastRoundTripTimeMs,
+            subscriberJitterMs: metrics.transport.webrtc.subscriber.averageJitterMs ?? metrics.transport.webrtc.subscriber.lastJitterMs,
+            subscriberPacketLossPct: metrics.transport.webrtc.subscriber.averagePacketLossPct ?? metrics.transport.webrtc.subscriber.lastPacketLossPct,
+          },
+        },
+        summary,
         metrics,
-        captureBundle: capture.export(),
+        captureWindow: {
+          scope: "active-run",
+          exportedEventCount: captureBundle.eventCount,
+          rawEventCount: rawCaptureBundle.eventCount,
+          trimmedEventCount: Math.max(0, rawCaptureBundle.eventCount - captureBundle.eventCount),
+        },
+        captureBundle,
+        rawCaptureBundle,
       },
       null,
       2,
     )
+  }
+
+  const clearSessionCapture = () => {
+    if (typeof window === "undefined") {
+      return
+    }
+
+    const capture = window.__sophiaCapture
+    if (!capture) {
+      showToast({ message: "Capture is unavailable right now", variant: "warning", durationMs: 2200 })
+      return
+    }
+
+    capture.clear()
+
+    startTransition(() => {
+      setMetrics(
+        buildVoiceDeveloperMetrics({
+          stage: voiceState.stage,
+          events: [],
+          snapshot: capture.snapshot() ?? null,
+          baselineEntries: readVoiceTelemetryBaselineEntries(),
+          runtimeError: voiceState.error,
+        }),
+      )
+    })
+
+    showToast({ message: "Capture cleared for a fresh bottleneck trace", variant: "success", durationMs: 1800 })
   }
 
   const copySessionJson = async () => {
@@ -443,6 +588,15 @@ export function VoiceMetricsPanel({
 
     setFloatingBounds(getDefaultFloatingBounds(window.innerWidth, window.innerHeight))
     setExpanded(defaultExpanded)
+    setHidden(false)
+  }
+
+  const hideFloatingPanel = () => {
+    dragRef.current = null
+    resizeRef.current = null
+    setIsDragging(false)
+    setIsResizing(false)
+    setHidden(true)
   }
 
   const floatingContainerStyle = layout === "floating"
@@ -450,10 +604,11 @@ export function VoiceMetricsPanel({
         left: floatingBounds.left,
         top: floatingBounds.top,
         width: floatingBounds.width,
+        maxWidth: `calc(100vw - ${FLOATING_PANEL_EDGE_PADDING * 2}px)`,
       }
     : undefined
 
-  const panelStyle = layout === "floating" && expanded
+  const panelStyle = isFloatingExpanded
     ? { height: floatingBounds.height }
     : undefined
 
@@ -467,6 +622,16 @@ export function VoiceMetricsPanel({
         : metrics.builder.phase === "running"
           ? "neutral"
           : "neutral"
+  const connectSourceTone = metrics.startup.credentialsSource === "prefetched"
+    ? "good"
+    : metrics.startup.credentialsSource === "fresh"
+      ? "neutral"
+      : "warn"
+  const warmupTone = metrics.startup.backendWarmupStatus === "completed"
+    ? "good"
+    : metrics.startup.backendWarmupStatus === "failed"
+      ? "warn"
+      : "neutral"
 
   const panel = (
     <section className={cn(
@@ -476,7 +641,12 @@ export function VoiceMetricsPanel({
       isDragging && "select-none",
       isResizing && "select-none",
     )} style={panelStyle}>
-      <div className="flex flex-col gap-4 border-b border-white/8 px-5 py-5 sm:flex-row sm:items-start sm:justify-between">
+      <div className={cn(
+        "flex gap-4 border-b border-white/8 px-5 py-5",
+        layout === "floating"
+          ? "flex-col"
+          : "flex-col sm:flex-row sm:items-start sm:justify-between",
+      )}>
         <div className="flex min-w-0 flex-1 gap-3">
           {layout === "floating" && (
             <button
@@ -507,6 +677,34 @@ export function VoiceMetricsPanel({
                 tone={metrics.transport.activeSource === "custom" ? "warn" : "good"}
               />
               <ToneBadge
+                label={`Connect: ${formatCredentialsSource(metrics.startup.credentialsSource)}`}
+                tone={connectSourceTone}
+              />
+              {metrics.transport.playback.currentState !== "pending" && (
+                <ToneBadge
+                  label={`Playback: ${formatPlaybackState(metrics.transport.playback.currentState)}`}
+                  tone={metrics.transport.playback.timeoutCount > 0 || metrics.transport.playback.errorCount > 0
+                    ? "bad"
+                    : metrics.transport.playback.bindToPlayingMs !== null && metrics.transport.playback.bindToPlayingMs >= 1500
+                      ? "warn"
+                      : metrics.transport.playback.currentState === "playing"
+                        ? "good"
+                        : "neutral"}
+                />
+              )}
+              {metrics.transport.reconnect.count > 0 && (
+                <ToneBadge
+                  label={`Reconnects: ${metrics.transport.reconnect.count}`}
+                  tone={metrics.transport.reconnect.failed > 0 || metrics.transport.reconnect.activeDowntimeMs !== null ? "bad" : "warn"}
+                />
+              )}
+              {metrics.startup.backendWarmupStatus !== "idle" && (
+                <ToneBadge
+                  label={`Warmup: ${formatWarmupStatus(metrics.startup.backendWarmupStatus)}`}
+                  tone={warmupTone}
+                />
+              )}
+              <ToneBadge
                 label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
                 tone={metrics.microphone.detectedAudio ? "good" : "warn"}
               />
@@ -532,7 +730,10 @@ export function VoiceMetricsPanel({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 self-start">
+        <div className={cn(
+          "flex flex-wrap items-center gap-2 self-start",
+          layout === "floating" && "w-full",
+        )}>
           {(layout === "inline" || expanded) && (
             <>
               <button
@@ -544,6 +745,14 @@ export function VoiceMetricsPanel({
               >
                 <Clipboard className="h-3.5 w-3.5" />
                 Copy JSON
+              </button>
+              <button
+                type="button"
+                onClick={clearSessionCapture}
+                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Clear capture
               </button>
               <button
                 type="button"
@@ -563,7 +772,18 @@ export function VoiceMetricsPanel({
               className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
             >
               <RotateCcw className="h-3.5 w-3.5" />
-              Reset
+              Reset panel
+            </button>
+          )}
+          {layout === "floating" && (
+            <button
+              type="button"
+              onClick={hideFloatingPanel}
+              title="Hide telemetry panel"
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+            >
+              <X className="h-3.5 w-3.5" />
+              Hide panel
             </button>
           )}
           <button
@@ -579,14 +799,18 @@ export function VoiceMetricsPanel({
 
       <div
         className={cn(
-          layout === "floating" && expanded && "min-h-0 overflow-y-auto pr-1",
+          isFloatingExpanded && "flex-1 min-h-0 overflow-y-auto pr-1",
         )}
-        style={layout === "floating" && expanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
+        style={isFloatingExpanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
       >
         <div className={cn(
           "grid gap-3 px-5 py-5",
-          layout === "floating" && !expanded
-            ? "grid-cols-1 sm:grid-cols-3"
+          layout === "floating"
+            ? expanded
+              ? floatingWide
+                ? "grid-cols-2"
+                : "grid-cols-1"
+              : "grid-cols-1"
             : "sm:grid-cols-2 xl:grid-cols-3",
         )}>
           {displayedSummaryCards.map((card) => (
@@ -605,26 +829,39 @@ export function VoiceMetricsPanel({
 
         {expanded && (
           <>
-            <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[1.1fr_0.9fr]">
+            <div className={cn(
+              "grid gap-4 border-t border-white/8 px-5 py-5",
+              layout === "floating" ? "grid-cols-1" : "lg:grid-cols-[1.1fr_0.9fr]",
+            )}>
               <BottleneckCard metrics={metrics} />
               <InfoCard
                 icon={Sparkles}
                 title="Startup path"
                 rows={[
+                  ["connect source", formatCredentialsSource(metrics.startup.credentialsSource)],
+                  ["preconnect fetch", formatMs(metrics.startup.preconnectFetchMs)],
+                  ["prepared age", formatMs(metrics.startup.preparedCredentialAgeMs)],
+                  ["warmup status", formatWarmupStatus(metrics.startup.backendWarmupStatus)],
+                  ["warmup duration", formatMs(metrics.startup.backendWarmupDurationMs)],
                   ["request -> credentials", formatMs(metrics.startup.requestToCredentialsMs)],
                   ["credentials -> join", formatMs(metrics.startup.credentialsToJoinMs)],
                   ["join -> ready", formatMs(metrics.startup.joinToReadyMs)],
                   ["join -> audio bound", formatMs(metrics.startup.joinToRemoteAudioMs)],
+                  ["join -> playback", formatMs(metrics.startup.joinToPlaybackStartMs)],
+                  ["bind -> playback", formatMs(metrics.startup.bindToPlaybackStartMs)],
                   ["start -> mic audio", formatMs(metrics.startup.startToMicAudioMs)],
                   ["start -> first transcript", formatMs(metrics.startup.startToFirstUserTranscriptMs)],
                 ]}
-                footer="This isolates the cold-start path before Sophia can even begin to answer your turn."
-                tone={metrics.bottleneck.kind === "startup" ? metrics.bottleneck.level : metrics.thresholds.sessionReady.status}
+                footer={buildStartupFooter(metrics)}
+                tone={startupCardTone(metrics)}
               />
             </div>
 
-            <div className="grid gap-3 border-t border-white/8 px-5 py-5 md:grid-cols-3">
-              {metrics.regressions.length === 0 && (
+            <div className={cn(
+              "grid gap-3 border-t border-white/8 px-5 py-5",
+              layout === "floating" ? "grid-cols-1" : "md:grid-cols-3",
+            )}>
+              {metrics.regressions.length === 0 && metrics.baseline.regressions.length === 0 && (
                 <div className="md:col-span-3 rounded-3xl border border-emerald-300/15 bg-emerald-300/6 px-4 py-4 text-sm text-emerald-100/90">
                   No active regression markers. The latest thresholds are within target ranges for this voice turn.
                 </div>
@@ -632,11 +869,20 @@ export function VoiceMetricsPanel({
               {metrics.regressions.map((marker) => (
                 <RegressionCard key={marker.key} marker={marker} />
               ))}
+              {metrics.baseline.regressions.map((regression) => (
+                <BaselineRegressionCard key={regression.key} regression={regression} />
+              ))}
             </div>
 
-            <div className="grid gap-4 border-t border-white/8 px-5 py-5 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className={cn(
+              "grid gap-4 border-t border-white/8 px-5 py-5",
+              layout === "floating" ? "grid-cols-1" : "xl:grid-cols-[1.2fr_0.8fr]",
+            )}>
               <div className="space-y-4">
-                <div className="grid gap-4 lg:grid-cols-2">
+                <div className={cn(
+                  "grid gap-4",
+                  layout === "floating" ? "grid-cols-1" : "lg:grid-cols-2",
+                )}>
                   <InfoCard
                     icon={Mic}
                     title="Microphone"
@@ -724,16 +970,32 @@ export function VoiceMetricsPanel({
                     ["Run", metrics.sessionIds.runId ?? "pending"],
                     ["Transport", metrics.transport.activeSource.toUpperCase()],
                     ["Remote participants", metrics.transport.remoteParticipantCount?.toString() ?? "pending"],
+                    ["Playback state", formatPlaybackState(metrics.transport.playback.currentState)],
+                    ["bind -> can play", formatMs(metrics.transport.playback.bindToCanPlayMs)],
+                    ["bind -> playback", formatMs(metrics.transport.playback.bindToPlayingMs)],
+                    ...(metrics.transport.playback.lastTimeoutDurationMs !== null
+                      ? [["playback timeout", formatMs(metrics.transport.playback.lastTimeoutDurationMs)] as [string, string]]
+                      : []),
+                    ["Reconnects", String(metrics.transport.reconnect.count)],
+                    ["Last downtime", formatMs(metrics.transport.reconnect.lastDowntimeMs)],
+                    ["Active downtime", formatMs(metrics.transport.reconnect.activeDowntimeMs)],
                     ["SSE open", formatMs(metrics.timings.sseOpenMs)],
                     ["Last event age", formatMs(metrics.timings.lastEventAgeMs)],
+                    ["Connection", formatNetworkConnection(metrics.transport.network)],
+                    ["Network RTT", formatMs(metrics.transport.network.rttMs)],
+                    ["Downlink", formatDownlink(metrics.transport.network.downlinkMbps)],
+                    ["Save-data", formatBooleanValue(metrics.transport.network.saveData)],
+                    ["Datacenter", metrics.transport.webrtc.datacenter ?? "pending"],
+                    ["WebRTC samples", String(metrics.transport.webrtc.sampleCount)],
+                    ["Sub RTT", formatMs(metrics.transport.webrtc.subscriber.averageRoundTripTimeMs ?? metrics.transport.webrtc.subscriber.lastRoundTripTimeMs)],
+                    ["Sub jitter", formatMs(metrics.transport.webrtc.subscriber.averageJitterMs ?? metrics.transport.webrtc.subscriber.lastJitterMs)],
+                    ["Sub loss", formatPercentCompact(metrics.transport.webrtc.subscriber.averagePacketLossPct ?? metrics.transport.webrtc.subscriber.lastPacketLossPct)],
                   ]}
-                  footer={metrics.transport.streamOpen
-                    ? "Browser SSE bridge is open for voice events."
-                    : metrics.transport.activeSource === "custom"
-                      ? "Fallback transport is Stream custom events."
-                      : "Waiting for event transport to come online."}
-                  tone={metrics.bottleneck.kind === "transport" ? metrics.bottleneck.level : metrics.transport.activeSource === "custom" ? "warn" : "neutral"}
+                  footer={buildTransportFooter(metrics)}
+                  tone={transportCardTone(metrics)}
                 />
+
+                <BaselineComparisonCard metrics={metrics} />
 
                 <InfoCard
                   icon={Activity}
@@ -745,13 +1007,30 @@ export function VoiceMetricsPanel({
                     ["voice-runtime", String(metrics.events.voiceRuntime)],
                     ["voice-session", String(metrics.events.voiceSession)],
                     ["harness-input", String(metrics.events.harnessInput)],
-                      ["builder", String(metrics.events.builder)],
+                    ["builder", String(metrics.events.builder)],
+                    ["Start ignored", String(metrics.events.startIgnored)],
+                    ["Startup timeouts", String(metrics.events.startupTimeouts)],
+                    ["Stale connect", String(metrics.events.staleConnectResponses)],
+                    ["Playback bound", String(metrics.events.playbackBound)],
+                    ["Playback can play", String(metrics.events.playbackCanPlay)],
+                    ["Playback started", String(metrics.events.playbackStarted)],
+                    ["Playback waiting", String(metrics.events.playbackWaiting)],
+                    ["Playback stalled", String(metrics.events.playbackStalled)],
+                    ["Playback errors", String(metrics.events.playbackErrors)],
+                    ["Playback timeouts", String(metrics.events.playbackTimeouts)],
+                    ["Preconnect ready", String(metrics.events.preconnectReady)],
+                    ["Preconnect reused", String(metrics.events.preconnectReused)],
+                    ["Preconnect failed", String(metrics.events.preconnectFailed)],
+                    ["Warmup completed", String(metrics.events.warmupCompleted)],
+                    ["Warmup failed", String(metrics.events.warmupFailed)],
+                    ["Reconnect started", String(metrics.events.reconnectStarted)],
+                    ["Reconnect recovered", String(metrics.events.reconnectRecovered)],
+                    ["Reconnect failed", String(metrics.events.reconnectFailed)],
                     ["SSE errors", String(metrics.events.sseErrors)],
                     ["Invalid payloads", String(metrics.events.invalidPayloads)],
                     ["Duplicate transcripts", String(metrics.events.duplicateUserTranscriptIgnored)],
-                    ["Stale connect", String(metrics.events.staleConnectResponses)],
                   ]}
-                  footer="These counters are useful when the bottleneck is transport noise or repeated retries rather than model latency."
+                  footer="These counters separate transport noise from startup retries, browser playback stalls, and reconnect churn."
                   tone={metrics.bottleneck.kind === "transport" ? metrics.bottleneck.level : "neutral"}
                 />
 
@@ -853,6 +1132,21 @@ export function VoiceMetricsPanel({
       return null
     }
 
+    if (hidden) {
+      return (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-40">
+          <button
+            type="button"
+            onClick={() => setHidden(false)}
+            className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-white/10 bg-[color:color-mix(in_srgb,var(--cosmic-panel-strong)_88%,black_12%)] px-4 py-2.5 text-xs font-medium text-sophia-text shadow-[var(--cosmic-shadow-md)] backdrop-blur-md transition-colors hover:bg-[color:color-mix(in_srgb,var(--cosmic-panel-strong)_96%,black_4%)]"
+          >
+            <Activity className="h-3.5 w-3.5" />
+            Show telemetry
+          </button>
+        </div>
+      )
+    }
+
     return (
       <div className="pointer-events-auto fixed z-40" style={floatingContainerStyle}>
         {panel}
@@ -896,6 +1190,23 @@ function BottleneckCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
           </div>
         ))}
       </div>
+      {metrics.topHotspots.length > 0 && (
+        <div className="mt-4 border-t border-white/8 pt-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-sophia-text2/70">
+            Top timing hotspots
+          </div>
+          <div className="space-y-2">
+            {metrics.topHotspots.map((hotspot) => (
+              <div key={hotspot.key} className="rounded-2xl border border-white/8 bg-black/15 px-3 py-2 text-xs text-sophia-text2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-medium text-sophia-text">{hotspot.label}</span>
+                  <ToneBadge label={`${formatMs(hotspot.valueMs)} · ${hotspot.area}`} tone={hotspot.level} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -961,6 +1272,71 @@ function RegressionCard({ marker }: { marker: VoiceRegressionMarker }) {
         {marker.title}
       </div>
       <p className="mt-2 text-sm leading-relaxed text-sophia-text2">{marker.detail}</p>
+    </div>
+  )
+}
+
+function BaselineRegressionCard({ regression }: { regression: VoiceBaselineRegression }) {
+  return (
+    <div className={cn(
+      "rounded-3xl border px-4 py-4",
+      regression.level === "bad"
+        ? "border-rose-300/20 bg-rose-300/8"
+        : "border-amber-300/20 bg-amber-300/8",
+    )}>
+      <div className="flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Gauge className="h-4 w-4" />
+        {regression.title}
+      </div>
+      <p className="mt-2 text-sm leading-relaxed text-sophia-text2">{regression.detail}</p>
+    </div>
+  )
+}
+
+function BaselineComparisonCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
+  return (
+    <div className="rounded-3xl border border-white/8 bg-white/4 p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Gauge className="h-4 w-4 text-sophia-text2/80" />
+        Rolling baseline
+        <span className={tonePillClass(baselineCardTone(metrics))} />
+      </div>
+      <div className="space-y-2">
+        {[
+          ["Previous runs", String(metrics.baseline.sampleSize)],
+          ["Median session ready", formatMs(metrics.baseline.medians.sessionReadyMs)],
+          ["Median join latency", formatMs(metrics.baseline.medians.joinLatencyMs)],
+          ["Median request -> first text", formatMs(metrics.baseline.medians.requestStartToFirstTextMs)],
+          ["Median bind -> playback", formatMs(metrics.baseline.medians.bindToPlaybackStartMs)],
+          ["Median sub RTT", formatMs(metrics.baseline.medians.subscriberRoundTripTimeMs)],
+          ["Median sub jitter", formatMs(metrics.baseline.medians.subscriberJitterMs)],
+          ["Median sub loss", formatPercentCompact(metrics.baseline.medians.subscriberPacketLossPct)],
+        ].map(([label, value]) => (
+          <div key={label} className="flex items-center justify-between gap-4 text-sm">
+            <span className="text-sophia-text2/75">{label}</span>
+            <span className="truncate text-right font-medium text-sophia-text">{value}</span>
+          </div>
+        ))}
+      </div>
+      <p className="mt-4 text-xs leading-relaxed text-sophia-text2/75">{buildBaselineFooter(metrics)}</p>
+      {metrics.baseline.regressions.length > 0 && (
+        <div className="mt-4 border-t border-white/8 pt-4">
+          <div className="mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-sophia-text2/70">
+            Slower than recent sessions
+          </div>
+          <div className="space-y-2">
+            {metrics.baseline.regressions.map((regression) => (
+              <div key={regression.key} className="rounded-2xl border border-white/8 bg-black/15 px-3 py-2 text-xs text-sophia-text2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-medium text-sophia-text">{regression.title}</span>
+                  <ToneBadge label={formatBaselineRegressionDelta(regression)} tone={regression.level} />
+                </div>
+                <p className="mt-1 leading-relaxed">{regression.detail}</p>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1054,6 +1430,111 @@ function buildTurnFlowFooter(metrics: VoiceDeveloperMetrics): string {
   return "Turn metrics will fill in once the backend emits user-end, agent start, and diagnostic events."
 }
 
+function buildStartupFooter(metrics: VoiceDeveloperMetrics): string {
+  if (metrics.events.startupTimeouts > 0) {
+    return "Sophia hit a startup-ready timeout in this session. Investigate preconnect reuse, call join, and ready signaling before focusing on model latency."
+  }
+
+  if (metrics.transport.playback.timeoutCount > 0 || metrics.transport.playback.errorCount > 0) {
+    return metrics.transport.playback.lastError
+      ? `Remote audio bound, but browser playback failed: ${metrics.transport.playback.lastError}`
+      : "Remote audio bound, but browser playback never started cleanly."
+  }
+
+  if (metrics.startup.bindToPlaybackStartMs !== null && metrics.startup.bindToPlaybackStartMs >= 1500) {
+    return `Join and ready completed, but browser playback still needed ${formatMs(metrics.startup.bindToPlaybackStartMs)} after bind before audio actually started.`
+  }
+
+  if (metrics.startup.backendWarmupStatus === "failed") {
+    return metrics.startup.backendWarmupError
+      ? `Backend warmup failed: ${metrics.startup.backendWarmupError}`
+      : "Backend warmup failed before the session became ready."
+  }
+
+  if (metrics.startup.preconnectError) {
+    return `Preconnect fell back to a fresh connect: ${metrics.startup.preconnectError}`
+  }
+
+  if (metrics.startup.credentialsSource === "prefetched") {
+    return "This start reused prefetched credentials, so the remaining latency is mostly join, ready, and first-turn behavior."
+  }
+
+  return "This isolates the cold-start path before Sophia can even begin to answer your turn."
+}
+
+function buildTransportFooter(metrics: VoiceDeveloperMetrics): string {
+  const subscriberRoundTripTimeMs = metrics.transport.webrtc.subscriber.averageRoundTripTimeMs
+    ?? metrics.transport.webrtc.subscriber.lastRoundTripTimeMs
+  const subscriberJitterMs = metrics.transport.webrtc.subscriber.averageJitterMs
+    ?? metrics.transport.webrtc.subscriber.lastJitterMs
+  const subscriberPacketLossPct = metrics.transport.webrtc.subscriber.averagePacketLossPct
+    ?? metrics.transport.webrtc.subscriber.lastPacketLossPct
+
+  if (metrics.transport.reconnect.activeDowntimeMs !== null) {
+    return `Reconnect is still in progress after ${formatMs(metrics.transport.reconnect.activeDowntimeMs)}.`
+  }
+
+  if (metrics.transport.reconnect.failed > 0) {
+    return metrics.transport.reconnect.lastDowntimeMs !== null
+      ? `At least one reconnect failed after ${formatMs(metrics.transport.reconnect.lastDowntimeMs)} of downtime.`
+      : "At least one reconnect failed before the session recovered."
+  }
+
+  if ((metrics.transport.reconnect.totalDowntimeMs ?? 0) > 0) {
+    return `Recovered reconnects added ${formatMs(metrics.transport.reconnect.totalDowntimeMs)} of total transport downtime.`
+  }
+
+  if (metrics.transport.playback.timeoutCount > 0 || metrics.transport.playback.errorCount > 0) {
+    return metrics.transport.playback.lastError
+      ? `Browser playback failed after bind: ${metrics.transport.playback.lastError}`
+      : "Remote audio bound, but browser playback timed out or errored before sound started."
+  }
+
+  if (metrics.transport.playback.bindToPlayingMs !== null && metrics.transport.playback.bindToPlayingMs >= 1500) {
+    return `Remote audio took ${formatMs(metrics.transport.playback.bindToPlayingMs)} to start after bind. Transport is alive, but the media element took time to become audible.`
+  }
+
+  if (metrics.transport.network.online === false) {
+    return "The browser currently reports the client as offline, so transport timing is not trustworthy until connectivity returns."
+  }
+
+  if (
+    metrics.transport.webrtc.sampleCount > 0
+    && (
+      (subscriberRoundTripTimeMs !== null && subscriberRoundTripTimeMs >= 400)
+      || (subscriberJitterMs !== null && subscriberJitterMs >= 80)
+      || (subscriberPacketLossPct !== null && subscriberPacketLossPct >= 5)
+    )
+  ) {
+    return `Stream stats show unstable subscriber transport: RTT ${formatMs(subscriberRoundTripTimeMs)}, jitter ${formatMs(subscriberJitterMs)}, packet loss ${formatPercentCompact(subscriberPacketLossPct)}.`
+  }
+
+  if (metrics.transport.streamOpen) {
+    const connection = formatNetworkConnection(metrics.transport.network)
+    return connection === "pending"
+      ? "Browser SSE bridge is open for voice events."
+      : `Browser SSE bridge is open for voice events. Client network: ${connection}.`
+  }
+
+  if (metrics.transport.activeSource === "custom") {
+    return "Fallback transport is Stream custom events."
+  }
+
+  return "Waiting for event transport to come online."
+}
+
+function buildBaselineFooter(metrics: VoiceDeveloperMetrics): string {
+  if (metrics.baseline.sampleSize === 0) {
+    return "No previous completed runs are stored locally yet. This panel will start flagging regressions after a few voice sessions." 
+  }
+
+  if (metrics.baseline.regressions.length === 0) {
+    return `Compared against ${metrics.baseline.sampleSize} recent runs, the current session is within the local baseline envelope.`
+  }
+
+  return `Compared against ${metrics.baseline.sampleSize} recent runs, this session is slower on ${metrics.baseline.regressions.length} baseline metric${metrics.baseline.regressions.length === 1 ? "" : "s"}.`
+}
+
 function formatDuplicatePhaseFooter(counts: Record<string, number>): string {
   const entries = Object.entries(counts)
   if (entries.length === 0) {
@@ -1090,6 +1571,139 @@ function formatDecimal(value: number | null): string {
 
 function formatPercent(value: number | null): string {
   return value === null ? "--" : `${value}%`
+}
+
+function formatPercentCompact(value: number | null): string {
+  return value === null ? "--" : `${value.toFixed(value >= 10 ? 0 : 1)}%`
+}
+
+function formatBaselineRegressionDelta(regression: VoiceBaselineRegression): string {
+  return `${regression.deltaPercent >= 0 ? "+" : ""}${Math.round(regression.deltaPercent)}%`
+}
+
+function formatCredentialsSource(source: VoiceDeveloperMetrics["startup"]["credentialsSource"]): string {
+  switch (source) {
+    case "prefetched":
+      return "prefetched"
+    case "fresh":
+      return "fresh"
+    default:
+      return "pending"
+  }
+}
+
+function formatWarmupStatus(status: VoiceDeveloperMetrics["startup"]["backendWarmupStatus"]): string {
+  switch (status) {
+    case "completed":
+      return "completed"
+    case "failed":
+      return "failed"
+    case "pending":
+      return "pending"
+    default:
+      return "idle"
+  }
+}
+
+function formatPlaybackState(state: VoiceDeveloperMetrics["transport"]["playback"]["currentState"]): string {
+  switch (state) {
+    case "canplay":
+      return "can play"
+    case "timed_out":
+      return "timed out"
+    default:
+      return state
+  }
+}
+
+function formatNetworkConnection(network: VoiceDeveloperMetrics["transport"]["network"]): string {
+  const onlineLabel = network.online === null ? null : network.online ? "online" : "offline"
+  const effectiveType = network.effectiveType ? network.effectiveType.toLowerCase() : null
+
+  if (onlineLabel && effectiveType) {
+    return `${onlineLabel} / ${effectiveType}`
+  }
+
+  return onlineLabel ?? effectiveType ?? "pending"
+}
+
+function formatDownlink(value: number | null): string {
+  return value === null ? "--" : `${value.toFixed(1)} Mbps`
+}
+
+function formatBooleanValue(value: boolean | null): string {
+  return value === null ? "--" : value ? "yes" : "no"
+}
+
+function startupCardTone(metrics: VoiceDeveloperMetrics): "good" | "warn" | "bad" | "neutral" {
+  if (metrics.events.startupTimeouts > 0) {
+    return "bad"
+  }
+
+  if (metrics.transport.playback.timeoutCount > 0 || metrics.transport.playback.errorCount > 0) {
+    return "bad"
+  }
+
+  if (metrics.startup.bindToPlaybackStartMs !== null && metrics.startup.bindToPlaybackStartMs >= 1500) {
+    return metrics.startup.bindToPlaybackStartMs >= 3000 ? "bad" : "warn"
+  }
+
+  if (metrics.startup.backendWarmupStatus === "failed" || metrics.startup.preconnectError) {
+    return "warn"
+  }
+
+  return metrics.bottleneck.kind === "startup" ? metrics.bottleneck.level : metrics.thresholds.sessionReady.status
+}
+
+function transportCardTone(metrics: VoiceDeveloperMetrics): "good" | "warn" | "bad" | "neutral" {
+  const subscriberRoundTripTimeMs = metrics.transport.webrtc.subscriber.averageRoundTripTimeMs
+    ?? metrics.transport.webrtc.subscriber.lastRoundTripTimeMs
+  const subscriberJitterMs = metrics.transport.webrtc.subscriber.averageJitterMs
+    ?? metrics.transport.webrtc.subscriber.lastJitterMs
+  const subscriberPacketLossPct = metrics.transport.webrtc.subscriber.averagePacketLossPct
+    ?? metrics.transport.webrtc.subscriber.lastPacketLossPct
+
+  if (
+    metrics.transport.reconnect.failed > 0
+    || metrics.transport.reconnect.activeDowntimeMs !== null
+    || metrics.transport.playback.timeoutCount > 0
+    || metrics.transport.playback.errorCount > 0
+    || (subscriberRoundTripTimeMs !== null && subscriberRoundTripTimeMs >= 600)
+    || (subscriberJitterMs !== null && subscriberJitterMs >= 120)
+    || (subscriberPacketLossPct !== null && subscriberPacketLossPct >= 8)
+  ) {
+    return "bad"
+  }
+
+  if (
+    metrics.bottleneck.kind === "transport"
+    || metrics.transport.activeSource === "custom"
+    || ((metrics.transport.reconnect.totalDowntimeMs ?? 0) >= 3000 && metrics.transport.reconnect.count > 0)
+    || (metrics.transport.playback.bindToPlayingMs !== null && metrics.transport.playback.bindToPlayingMs >= 1500)
+    || (subscriberRoundTripTimeMs !== null && subscriberRoundTripTimeMs >= 400)
+    || (subscriberJitterMs !== null && subscriberJitterMs >= 80)
+    || (subscriberPacketLossPct !== null && subscriberPacketLossPct >= 5)
+  ) {
+    return metrics.bottleneck.kind === "transport" ? metrics.bottleneck.level : "warn"
+  }
+
+  return "neutral"
+}
+
+function baselineCardTone(metrics: VoiceDeveloperMetrics): "good" | "warn" | "bad" | "neutral" {
+  if (metrics.baseline.regressions.some((regression) => regression.level === "bad")) {
+    return "bad"
+  }
+
+  if (metrics.baseline.regressions.some((regression) => regression.level === "warn")) {
+    return "warn"
+  }
+
+  if (metrics.baseline.sampleSize > 0) {
+    return "good"
+  }
+
+  return "neutral"
 }
 
 function thresholdKeyForLabel(label: string): keyof VoiceDeveloperMetrics["thresholds"] {

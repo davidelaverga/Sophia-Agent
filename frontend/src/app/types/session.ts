@@ -294,6 +294,26 @@ export interface SessionUpdateRequest {
 }
 
 /**
+ * POST /api/v1/sessions/{id}/continue - Request
+ */
+export interface SessionContinueRequest {
+  user_id?: string;
+  session_type?: PresetType;
+  preset_context?: ContextMode;
+  platform?: 'voice' | 'text' | 'ios_voice';
+  intention?: string;
+  focus_cue?: string;
+}
+
+/**
+ * POST /api/v1/sessions/{id}/continue - Response
+ */
+export interface SessionContinueResponse {
+  continued_from_session_id: string;
+  session: SessionInfo;
+}
+
+/**
  * GET /api/v1/sessions/{id}/messages - Response message
  */
 export interface SessionMessageItem {
@@ -401,6 +421,7 @@ export interface SessionClientStore {
   // Artifacts (populated on session end)
   artifacts?: RitualArtifacts;
   builderArtifact?: BuilderArtifactV1;
+  dismissedBuilderArtifactKey?: string;
   summary?: string;
 }
 

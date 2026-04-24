@@ -16,12 +16,14 @@
 
 import { useCallback } from 'react';
 
-import { endSession as endSessionAPI, isSuccess } from '../lib/api/sessions-api';
+import { endSession as endSessionAPI, getActiveSession, getSession, isError, isSuccess } from '../lib/api/sessions-api';
 import { archiveConversation } from '../lib/conversation-history';
 import { logger } from '../lib/error-logger';
 import { teardownSessionClientState } from '../lib/session-teardown';
-import { useChatStore } from '../stores/chat-store';
+import { isUuid } from '../lib/utils';
+import { useChatStore, type ChatMessage } from '../stores/chat-store';
 import { useSessionStore, selectIsSessionActive, selectSessionSummary } from '../stores/session-store';
+import type { SessionMessage } from '../types/session';
 
 // =============================================================================
 // TYPES
@@ -40,7 +42,7 @@ interface SessionSummary {
 }
 
 interface UseSessionPersistenceReturn {
-  /** @deprecated No-op since session-store auto-persists */
+  /** Restores persisted session/chat state for resume flows */
   restoreSession: () => boolean;
   /** Check if there's a valid session to resume */
   canResume: boolean;
@@ -53,6 +55,125 @@ interface UseSessionPersistenceReturn {
 // =============================================================================
 // HOOK IMPLEMENTATION
 // =============================================================================
+
+function toChatMessages(messages: SessionMessage[]): ChatMessage[] {
+  return messages.map((message) => ({
+    id: message.id,
+    role: message.role === 'user' ? 'user' : 'sophia',
+    content: message.content,
+    createdAt: new Date(message.createdAt).getTime(),
+    status: message.incomplete ? 'interrupted' : 'complete',
+    source: 'text',
+  }));
+}
+
+export async function restorePersistedActiveSession(): Promise<boolean> {
+  const { session, restoreOpenSession } = useSessionStore.getState();
+
+  if (!session?.isActive) {
+    return false;
+  }
+
+  const userId = session.userId?.trim() || undefined;
+
+  if (isUuid(session.sessionId)) {
+    try {
+      const latestSession = await getSession(session.sessionId, userId);
+      if (!isError(latestSession)) {
+        if (latestSession.data.status !== 'ended') {
+          await restoreOpenSession(latestSession.data, userId);
+          return true;
+        }
+
+        logger.warn('SessionPersistence: Ignoring ended backend snapshot during local resume restore', {
+          component: 'SessionPersistence',
+          sessionId: session.sessionId,
+          userId,
+        });
+      }
+    } catch (error) {
+      logger.warn('SessionPersistence: Failed to refresh persisted active session from backend', {
+        component: 'SessionPersistence',
+        sessionId: session.sessionId,
+        userId,
+        error,
+      });
+    }
+  }
+
+  const chatState = useChatStore.getState();
+  const needsChatRehydration = chatState.conversationId !== session.sessionId || chatState.messages.length === 0;
+
+  if (needsChatRehydration) {
+    const restoredMessages = toChatMessages(session.messages ?? []);
+    const lastCompletedAssistant = [...restoredMessages]
+      .reverse()
+      .find((message) => message.role === 'sophia' && message.status === 'complete');
+    const lastUserMessage = [...restoredMessages]
+      .reverse()
+      .find((message) => message.role === 'user');
+
+    useChatStore.setState({
+      messages: restoredMessages,
+      conversationId: session.sessionId,
+      isLoadingHistory: false,
+      lastError: undefined,
+      isLocked: false,
+      activeReplyId: undefined,
+      abortController: undefined,
+      streamStatus: 'idle',
+      streamAttempt: 0,
+      lastCompletedTurnId: lastCompletedAssistant?.turnId,
+      lastUserTurnId: lastUserMessage?.id,
+    });
+  }
+
+  return true;
+}
+
+export async function restoreSessionRouteState(): Promise<boolean> {
+  if (await restorePersistedActiveSession()) {
+    return true;
+  }
+
+  const sessionStore = useSessionStore.getState();
+  const latestRecoverableSession = [
+    ...sessionStore.openSessions,
+    ...sessionStore.recentSessions.filter((session) => session.status !== 'ended'),
+  ]
+    .sort((left, right) => new Date(right.updated_at).getTime() - new Date(left.updated_at).getTime())[0];
+
+  if (latestRecoverableSession) {
+    try {
+      const userId = sessionStore.session?.userId?.trim() || undefined;
+      await sessionStore.restoreOpenSession(latestRecoverableSession, userId);
+      return true;
+    } catch (error) {
+      logger.warn('SessionPersistence: Failed to restore the latest recoverable session from store state', {
+        component: 'SessionPersistence',
+        sessionId: latestRecoverableSession.session_id,
+        error,
+      });
+    }
+  }
+
+  try {
+    const activeSessionResult = await getActiveSession();
+    if (isError(activeSessionResult) || !activeSessionResult.data.has_active_session || !activeSessionResult.data.session) {
+      return false;
+    }
+
+    const userId = useSessionStore.getState().session?.userId?.trim() || undefined;
+    await useSessionStore.getState().restoreOpenSession(activeSessionResult.data.session, userId);
+    return true;
+  } catch (error) {
+    logger.warn('SessionPersistence: Failed to restore active session for the session route', {
+      component: 'SessionPersistence',
+      error,
+    });
+    return false;
+  }
+}
 
 export function useSessionPersistence(): UseSessionPersistenceReturn {
   // Get session state directly from session-store (single source of truth)
@@ -68,12 +189,15 @@ export function useSessionPersistence(): UseSessionPersistenceReturn {
   const canResume = hasActiveSession && sessionSummary !== null;
   
   // ---------------------------------------------------------------------------
-  // Restore Session: No-op (session-store auto-persists via Zustand)
+  // Restore Session: Rehydrate persisted stores for resume surfaces
   // ---------------------------------------------------------------------------
   
   const restoreSession = useCallback((): boolean => {
-    // No-op - session data is already in session-store
-    // Just return true if there's an active session
+    if (!hasActiveSession) {
+      return false;
+    }
+
+    void restorePersistedActiveSession();
     return hasActiveSession;
   }, [hasActiveSession]);
   

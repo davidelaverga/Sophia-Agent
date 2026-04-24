@@ -50,11 +50,16 @@ export interface VisualTier {
 // ---------------------------------------------------------------------------
 
 const STORAGE_KEY = 'sophia-visual-tier-pref'
+const RUNTIME_KEY = 'sophia-visual-tier-runtime'
+const RUNTIME_TTL_MS = 24 * 60 * 60 * 1000 // 24 h
 const FRAME_BUDGET_MS = 22 // ~45 fps threshold — phones can coast at 40 fps and feel fine
 const DEGRADE_WINDOW_FRAMES = 90 // ~1.5s at 60 fps — react faster
 const DEGRADE_WINDOW_FRAMES_PHONE = 60 // ~1s at 60 fps — react even faster on phones
 const DEGRADE_THRESHOLD_RATIO = 0.3 // 30% over budget → degrade (was 40%)
 const DEGRADE_THRESHOLD_RATIO_PHONE = 0.22 // 22% over budget → degrade on phones
+const PROMOTE_CLEAN_WINDOWS = 3 // consecutive clean windows before promoting
+const PROMOTE_MAX_OVER_BUDGET_RATIO = 0.05 // ≤5% over-budget frames = "clean"
+const TIER_TRANSITION_COOLDOWN_MS = 5000 // 5s between any two tier transitions
 const MAX_DEGRADE_STEPS = 2 // tier 3 → 2 → 1 in two successive drops
 const HTML_ATTR = 'data-visual-tier'
 
@@ -70,6 +75,10 @@ interface StaticSignals {
   lowMemory: boolean
   gpuTier: 'low' | 'mid' | 'high' | 'unknown'
   dpr: number
+  /** `navigator.connection.saveData` — explicit data-saver opt-in. */
+  saveData: boolean
+  /** `navigator.connection.effectiveType` ∈ {'slow-2g','2g','3g'} → slow. */
+  slowNetwork: boolean
 }
 
 let _cachedGpuTier: StaticSignals['gpuTier'] | null = null
@@ -98,15 +107,15 @@ function detectGpuTier(): 'low' | 'mid' | 'high' | 'unknown' {
     const lower = renderer.toLowerCase()
 
     // Known low-end indicators
-    if (/swiftshader|llvmpipe|softpipe|mesa/.test(lower)) {
+    if (/swiftshader|llvmpipe|softpipe|google\s?swiftshader|mesa/.test(lower)) {
       _cachedGpuTier = 'low'
       return _cachedGpuTier
     }
-    if (/intel.*hd|intel.*uhd|intel.*iris|mali-[gt]|adreno\s?[1-5]\d\d/i.test(lower)) {
+    if (/intel.*hd|intel.*uhd|intel.*iris|mali-[gt][1-5]\d\d|adreno\s?[1-5]\d\d/i.test(lower)) {
       _cachedGpuTier = 'mid'
       return _cachedGpuTier
     }
-    if (/nvidia|radeon|geforce|apple\s?gpu|apple\s?m[1-9]/i.test(lower)) {
+    if (/nvidia|radeon|geforce|apple\s?gpu|apple\s?m[1-9]|intel\s?arc|adreno\s?[67]\d\d|mali-g[67]\d\d/i.test(lower)) {
       _cachedGpuTier = 'high'
       return _cachedGpuTier
     }
@@ -124,7 +133,10 @@ function detectGpuTier(): 'low' | 'mid' | 'high' | 'unknown' {
 
 function detectStatic(): StaticSignals {
   if (typeof window === 'undefined') {
-    return { cores: 4, isNarrow: false, isPhone: false, reducedMotion: false, lowMemory: false, gpuTier: 'unknown', dpr: 1 }
+    return {
+      cores: 4, isNarrow: false, isPhone: false, reducedMotion: false, lowMemory: false,
+      gpuTier: 'unknown', dpr: 1, saveData: false, slowNetwork: false,
+    }
   }
 
   const cores = navigator.hardwareConcurrency ?? 4
@@ -143,22 +155,30 @@ function detectStatic(): StaticSignals {
   const gpuTier = detectGpuTier()
   const dpr = window.devicePixelRatio ?? 1
 
-  return { cores, isNarrow, isPhone, reducedMotion, lowMemory, gpuTier, dpr }
+  // Network Information API — supported on Chromium/Android/desktop Chrome,
+  // gracefully absent on Safari/Firefox. Treat as neutral when missing.
+  const conn = (navigator as { connection?: { saveData?: boolean; effectiveType?: string } }).connection
+  const saveData = conn?.saveData === true
+  const effective = conn?.effectiveType
+  const slowNetwork = effective === 'slow-2g' || effective === '2g' || effective === '3g'
+
+  return { cores, isNarrow, isPhone, reducedMotion, lowMemory, gpuTier, dpr, saveData, slowNetwork }
 }
 
 function computeTierFromSignals(signals: StaticSignals): VisualTierLevel {
   // Reduced motion always forces tier 1
   if (signals.reducedMotion) return 1
 
-  // Phones always start at tier 1 in auto mode. They can claim 8 cores and a
-  // mid-tier GPU and still stutter at tier 2 — users can explicitly opt up
-  // via the preference picker if their device handles more.
-  if (signals.isPhone) return 1
+  // Explicit data-saver almost always means "give me the lightest thing".
+  if (signals.saveData) return 1
 
   // Any low-end GPU (software raster, etc.) locks tier 1 regardless of CPU.
   if (signals.gpuTier === 'low') return 1
 
-  // Score-based approach for non-phone devices
+  // Score-based approach. Phones are penalized but not hard-pinned — a modern
+  // phone (≥8 cores AND high GPU) can reach Tier 2. The frame-budget monitor
+  // runs with tighter thresholds on phones, so a device that lied about its
+  // specs degrades in ≤ 1s of sustained jank.
   let score = 0
 
   // CPU
@@ -169,11 +189,18 @@ function computeTierFromSignals(signals: StaticSignals): VisualTierLevel {
   if (signals.gpuTier === 'high') score += 3
   else if (signals.gpuTier === 'mid') score += 1
 
+  // Phone penalty — strong enough that a mid-GPU / 4-core phone can't score
+  // into Tier 2, but leaves a path up for an 8-core + high-GPU flagship.
+  if (signals.isPhone) score -= 2
+
   // Viewport (narrow tablets / small laptops still get a penalty)
   if (signals.isNarrow) score -= 2
 
   // Memory
   if (signals.lowMemory) score -= 2
+
+  // Slow network is a weak signal that the device is also likely budget-class.
+  if (signals.slowNetwork) score -= 1
 
   // Unknown GPU on a narrow viewport is suspicious — bias down.
   if (signals.gpuTier === 'unknown' && signals.isNarrow) score -= 1
@@ -235,28 +262,99 @@ function preferenceToTier(pref: VisualTierPreference): VisualTierLevel | null {
 }
 
 // ---------------------------------------------------------------------------
-// Frame budget monitor
+// Runtime tier persistence — remember auto-degrade outcomes across reloads
+// so a device known to stutter doesn't burn the full shader every page load.
 // ---------------------------------------------------------------------------
+
+interface RuntimeRecord {
+  /** `autoDegradeSteps` that was active when we saved. */
+  steps: number
+  /** Timestamp (ms since epoch) — record expires after RUNTIME_TTL_MS. */
+  savedAt: number
+}
+
+function readRuntimeRecord(): RuntimeRecord | null {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(RUNTIME_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<RuntimeRecord>
+    if (typeof parsed.steps !== 'number' || typeof parsed.savedAt !== 'number') return null
+    if (parsed.steps < 0 || parsed.steps > MAX_DEGRADE_STEPS) return null
+    if (Date.now() - parsed.savedAt > RUNTIME_TTL_MS) return null
+    return { steps: parsed.steps, savedAt: parsed.savedAt }
+  } catch {
+    return null
+  }
+}
+
+function writeRuntimeRecord(steps: number): void {
+  if (typeof window === 'undefined') return
+  try {
+    if (steps <= 0) {
+      window.localStorage.removeItem(RUNTIME_KEY)
+      return
+    }
+    const record: RuntimeRecord = { steps, savedAt: Date.now() }
+    window.localStorage.setItem(RUNTIME_KEY, JSON.stringify(record))
+  } catch { /* quota / private browsing */ }
+}
+
+// ---------------------------------------------------------------------------
+// Frame budget monitor — bidirectional with cooldown
+// ---------------------------------------------------------------------------
+
+interface FrameBudgetCallbacks {
+  /** Fired when a window exceeds the over-budget ratio; request a tier drop. */
+  onDegrade: () => void
+  /** Fired after PROMOTE_CLEAN_WINDOWS consecutive clean windows. */
+  onPromote: () => void
+}
 
 function useFrameBudgetMonitor(
   enabled: boolean,
   isPhone: boolean,
-  onDegrade: () => void,
+  canDegrade: boolean,
+  canPromote: boolean,
+  callbacks: FrameBudgetCallbacks,
 ) {
   const rafRef = useRef<number | null>(null)
   const prevTimeRef = useRef(0)
   const overBudgetCount = useRef(0)
   const frameCount = useRef(0)
+  const cleanWindows = useRef(0)
+  const lastTransitionAt = useRef(0)
+
+  const { onDegrade, onPromote } = callbacks
 
   useEffect(() => {
     if (!enabled) return
 
     const windowSize = isPhone ? DEGRADE_WINDOW_FRAMES_PHONE : DEGRADE_WINDOW_FRAMES
-    const threshold = isPhone ? DEGRADE_THRESHOLD_RATIO_PHONE : DEGRADE_THRESHOLD_RATIO
+    const degradeThreshold = isPhone ? DEGRADE_THRESHOLD_RATIO_PHONE : DEGRADE_THRESHOLD_RATIO
     let stopped = false
+
+    const resetWindow = () => {
+      prevTimeRef.current = 0
+      overBudgetCount.current = 0
+      frameCount.current = 0
+      cleanWindows.current = 0
+    }
+
+    const isDocumentHidden = () => typeof document !== 'undefined' && document.visibilityState === 'hidden'
+
+    const stopLoop = () => {
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+      resetWindow()
+    }
 
     function tick(now: number) {
       if (stopped) return
+      if (isDocumentHidden()) {
+        stopLoop()
+        return
+      }
       if (prevTimeRef.current > 0) {
         const delta = now - prevTimeRef.current
         frameCount.current++
@@ -264,13 +362,30 @@ function useFrameBudgetMonitor(
 
         if (frameCount.current >= windowSize) {
           const ratio = overBudgetCount.current / frameCount.current
-          // Reset window BEFORE firing so a re-mount with new `enabled` starts clean.
           overBudgetCount.current = 0
           frameCount.current = 0
-          if (ratio >= threshold) {
-            stopped = true
-            onDegrade()
-            return
+
+          const cooledDown = now - lastTransitionAt.current >= TIER_TRANSITION_COOLDOWN_MS
+
+          if (ratio >= degradeThreshold) {
+            cleanWindows.current = 0
+            if (canDegrade && cooledDown) {
+              lastTransitionAt.current = now
+              // Continue the loop — the hook will re-run the effect with a
+              // fresh `canDegrade` value reflecting the new steps count.
+              onDegrade()
+            }
+          } else if (ratio <= PROMOTE_MAX_OVER_BUDGET_RATIO) {
+            cleanWindows.current++
+            if (cleanWindows.current >= PROMOTE_CLEAN_WINDOWS && canPromote && cooledDown) {
+              cleanWindows.current = 0
+              lastTransitionAt.current = now
+              onPromote()
+            }
+          } else {
+            // "Middle zone": above promote threshold, below degrade threshold.
+            // Reset clean streak but don't act.
+            cleanWindows.current = 0
           }
         }
       }
@@ -278,16 +393,36 @@ function useFrameBudgetMonitor(
       rafRef.current = requestAnimationFrame(tick)
     }
 
-    rafRef.current = requestAnimationFrame(tick)
+    const startLoop = () => {
+      if (stopped || rafRef.current != null || isDocumentHidden()) return
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
+    const handleVisibilityChange = () => {
+      if (stopped) return
+      if (isDocumentHidden()) {
+        // Hidden tabs can queue a very large resume delta; reset the monitor so
+        // auto-degrade reacts only to visible frame pressure.
+        stopLoop()
+        return
+      }
+
+      startLoop()
+    }
+
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
+
+    startLoop()
     return () => {
       stopped = true
-      if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
-      // Clear accumulators so the next monitor cycle starts from zero.
-      prevTimeRef.current = 0
-      overBudgetCount.current = 0
-      frameCount.current = 0
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange)
+      }
+      stopLoop()
     }
-  }, [enabled, isPhone, onDegrade])
+  }, [enabled, isPhone, canDegrade, canPromote, onDegrade, onPromote])
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +441,13 @@ function syncHtmlAttribute(tier: VisualTierLevel) {
 export function useVisualTier(): VisualTier {
   // One-time static detection
   const [signals] = useState(detectStatic)
-  const [autoDegradeSteps, setAutoDegradeSteps] = useState(0)
+  // Seed autoDegradeSteps from a prior session (within RUNTIME_TTL_MS) so a
+  // device that had to degrade yesterday doesn't re-test the heavy shader on
+  // every page load. Auto-promote can still lift it back up.
+  const [autoDegradeSteps, setAutoDegradeSteps] = useState<number>(() => {
+    const record = readRuntimeRecord()
+    return record?.steps ?? 0
+  })
 
   // Init preference from localStorage on mount
   useEffect(() => { initPreference() }, [])
@@ -331,6 +472,14 @@ export function useVisualTier(): VisualTier {
     syncHtmlAttribute(effectiveTier)
   }, [effectiveTier])
 
+  // Persist auto-degrade outcome so reloads start at the learned tier.
+  useEffect(() => {
+    // Only persist while in auto mode — user-set preferences are their own key.
+    if (preference === 'auto') {
+      writeRuntimeRecord(autoDegradeSteps)
+    }
+  }, [autoDegradeSteps, preference])
+
   // Re-detect on resize + reduced-motion changes
   const [liveSignals, setLiveSignals] = useState(signals)
 
@@ -347,30 +496,42 @@ export function useVisualTier(): VisualTier {
     }
   }, [])
 
-  // Frame budget monitor — keep running until we hit MAX_DEGRADE_STEPS or leave auto.
+  // Bidirectional frame-budget monitor — can degrade (up to MAX_DEGRADE_STEPS)
+  // or promote back up (never above the static tier baseline).
   const onDegrade = useCallback(() => {
     setAutoDegradeSteps(prev => Math.min(prev + 1, MAX_DEGRADE_STEPS))
   }, [])
+  const onPromote = useCallback(() => {
+    setAutoDegradeSteps(prev => Math.max(prev - 1, 0))
+  }, [])
   useFrameBudgetMonitor(
-    preference === 'auto' && autoDegradeSteps < MAX_DEGRADE_STEPS,
+    preference === 'auto',
     liveSignals.isPhone,
-    onDegrade,
+    /* canDegrade */ autoDegradeSteps < MAX_DEGRADE_STEPS,
+    /* canPromote */ autoDegradeSteps > 0,
+    { onDegrade, onPromote },
   )
 
-  // DPR cap — phones get tighter caps, and an additional degrade shaves another
-  // 25% off to relieve fragment shader pressure when tier is already 1.
+  // DPR cap — phones get tighter caps. At Tier 1 phones default to 0.75 (not
+  // 1.0) because fragment cost is the bottleneck on integrated mobile GPUs;
+  // 0.75× backing store saves ~44% of per-pixel work with minimal visible
+  // quality loss on phone pixel densities.
   const dprCap = (() => {
     if (effectiveTier === 3) return Math.min(liveSignals.dpr, 2)
     if (effectiveTier === 2) return Math.min(liveSignals.dpr, liveSignals.isPhone ? 1.25 : 1.5)
     // tier 1
-    if (liveSignals.isPhone && autoDegradeSteps >= 2) return Math.min(liveSignals.dpr, 0.75)
-    if (liveSignals.isPhone) return Math.min(liveSignals.dpr, 1)
+    if (liveSignals.isPhone && autoDegradeSteps >= 2) return Math.min(liveSignals.dpr, 0.5)
+    if (liveSignals.isPhone) return Math.min(liveSignals.dpr, 0.75)
     return 1
   })()
 
   const setPreference = useCallback((pref: VisualTierPreference) => {
     setPreferenceValue(pref)
-    if (pref !== 'auto') setAutoDegradeSteps(0)
+    if (pref !== 'auto') {
+      setAutoDegradeSteps(0)
+      // Clear the runtime record — user made an explicit choice.
+      writeRuntimeRecord(0)
+    }
   }, [])
 
   return {

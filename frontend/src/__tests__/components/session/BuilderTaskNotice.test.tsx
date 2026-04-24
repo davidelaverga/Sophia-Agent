@@ -63,7 +63,7 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    expect(screen.getByText('deliverable ready')).toBeInTheDocument();
+    expect(screen.getByText('Deliverable ready.')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /open/i }));
@@ -124,5 +124,36 @@ describe('BuilderTaskNotice', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('keeps field notes collapsed until the user opens them', () => {
+    render(
+      <BuilderTaskNotice
+        task={{
+          phase: 'running',
+          label: 'Builder: product launch memo',
+          progressPercent: 35,
+          totalSteps: 4,
+          completedSteps: 1,
+          todos: [
+            { id: 1, title: 'Collect notes', status: 'completed' },
+            { id: 2, title: 'Shape outline', status: 'in-progress' },
+          ],
+          activityLog: [
+            { type: 'tool_call', title: 'write_file', tool: 'write_file', status: 'running', detail: 'Creating launch memo draft' },
+          ],
+        }}
+      />,
+    );
+
+    const fieldNotesToggle = screen.getByRole('button', { name: /field notes/i });
+    expect(fieldNotesToggle).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(fieldNotesToggle);
+
+    expect(fieldNotesToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByText('live builder stream')).toBeVisible();
+    expect(screen.getByText('Shape outline')).toBeVisible();
+    expect(screen.getByText('write_file')).toBeVisible();
   });
 });

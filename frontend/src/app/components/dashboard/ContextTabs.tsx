@@ -94,10 +94,13 @@ export function ContextTabs({ selected, onSelect }: ContextTabsProps) {
 
       {/* Context hint */}
       <p
-        className="text-[10px] font-light tracking-[0.04em]"
-        style={{ color: 'var(--cosmic-text-faint)' }}
+        className="text-[11px] font-normal tracking-[0.05em]"
+        style={{
+          color: 'color-mix(in srgb, var(--cosmic-text-muted) 78%, var(--text) 22%)',
+          textShadow: '0 1px 10px color-mix(in srgb, var(--background) 82%, transparent)',
+        }}
       >
-        adapts rituals &amp; tone to your context
+        Adapts rituals &amp; tone to your context
       </p>
     </div>
   );

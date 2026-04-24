@@ -13,7 +13,7 @@
 'use client';
 
 import { Sparkles } from 'lucide-react';
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { memo, useState, useEffect, useMemo, useRef } from 'react';
 
 import { humanizeTime } from '../../lib/humanize-time';
 import { parseInlineMarkdown } from '../../lib/parse-inline-markdown';
@@ -33,7 +33,7 @@ interface ReflectionPromptBubbleProps {
   reflectionWhy?: string;
 }
 
-export function ReflectionPromptBubble({
+function ReflectionPromptBubbleComponent({
   message,
   reflectionPrompt,
   reflectionWhy,
@@ -123,6 +123,27 @@ export function ReflectionPromptBubble({
   );
 }
 
+function areReflectionPromptBubblePropsEqual(
+  prev: ReflectionPromptBubbleProps,
+  next: ReflectionPromptBubbleProps,
+) {
+  return (
+    prev.reflectionPrompt === next.reflectionPrompt &&
+    prev.reflectionWhy === next.reflectionWhy &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.createdAt === next.message.createdAt &&
+    prev.message.isNew === next.message.isNew &&
+    prev.message.feedback === next.message.feedback
+  );
+}
+
+export const ReflectionPromptBubble = memo(
+  ReflectionPromptBubbleComponent,
+  areReflectionPromptBubblePropsEqual,
+);
+ReflectionPromptBubble.displayName = 'ReflectionPromptBubble';
+
 // ============================================================================
 // REFLECTION RESPONSE BUBBLE (replaces Sophia's reply MessageBubble)
 // ============================================================================
@@ -133,7 +154,7 @@ interface ReflectionResponseBubbleProps {
   onFeedback?: (messageId: string, feedback: FeedbackType) => void;
 }
 
-export function ReflectionResponseBubble({
+function ReflectionResponseBubbleComponent({
   message,
   isLatest: _isLatest,
   onFeedback,
@@ -254,3 +275,25 @@ export function ReflectionResponseBubble({
     </div>
   );
 }
+
+function areReflectionResponseBubblePropsEqual(
+  prev: ReflectionResponseBubbleProps,
+  next: ReflectionResponseBubbleProps,
+) {
+  return (
+    prev.isLatest === next.isLatest &&
+    prev.onFeedback === next.onFeedback &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.createdAt === next.message.createdAt &&
+    prev.message.isNew === next.message.isNew &&
+    prev.message.incomplete === next.message.incomplete &&
+    prev.message.feedback === next.message.feedback
+  );
+}
+
+export const ReflectionResponseBubble = memo(
+  ReflectionResponseBubbleComponent,
+  areReflectionResponseBubblePropsEqual,
+);
+ReflectionResponseBubble.displayName = 'ReflectionResponseBubble';

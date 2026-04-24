@@ -611,6 +611,11 @@ button, a, [role="button"] {
   --cosmic-border-faint: color-mix(in srgb, var(--sophia-purple) 6%, transparent);
   --cosmic-focus-ring: color-mix(in srgb, var(--sophia-purple) 55%, transparent);
 
+  /* NavRail text highlight tokens */
+  --cosmic-navrail-label-hover: color-mix(in srgb, var(--sophia-glow) 72%, var(--cosmic-text));
+  --cosmic-navrail-label-active-glow: 0 0 6px color-mix(in srgb, var(--sophia-glow) 46%, transparent);
+  --cosmic-navrail-label-hover-glow: 0 0 4px color-mix(in srgb, var(--sophia-glow) 38%, transparent);
+
   /* Teal action tokens */
   --cosmic-teal-bg: color-mix(in srgb, var(--cosmic-teal) 16%, transparent);
   --cosmic-teal-border: color-mix(in srgb, var(--cosmic-teal) 22%, transparent);
@@ -1041,15 +1046,6 @@ a {
   }
   100% {
     background-position: 200% 0;
-  }
-}
-
-@keyframes insightPulse {
-  0%, 100% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--sophia-purple) 30%, transparent);
-  }
-  50% {
-    box-shadow: 0 0 16px 4px color-mix(in srgb, var(--sophia-purple) 20%, transparent);
   }
 }
 
@@ -1909,6 +1905,14 @@ html[data-visual-tier="1"] .animate-pulse-gentle {
 html[data-visual-tier="1"] *:not(.animate-spin):not(.animate-pulse) {
   animation-duration: 0.3s !important;
   transition-duration: 0.15s !important;
+}
+
+/* Free VRAM on low-end devices: stop every element from holding a GPU
+   promotion for transforms/opacity it no longer animates. will-change is a
+   hint to the compositor — at Tier 1 we've killed most of those animations
+   above, so the hint is pure overhead. */
+html[data-visual-tier="1"] * {
+  will-change: auto !important;
 }
 
 /* --- Message bubble fidelity adaptations -------------------------------- */

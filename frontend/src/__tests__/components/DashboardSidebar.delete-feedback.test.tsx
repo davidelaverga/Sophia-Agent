@@ -6,6 +6,11 @@ const pushMock = vi.fn();
 const hapticMock = vi.fn();
 const showToastMock = vi.fn();
 const refreshRecentSessionsMock = vi.fn();
+const refreshOpenSessionsMock = vi.fn();
+const listSessionsMock = vi.fn(async (
+  _userId?: string,
+  _options?: { limit?: number; status?: 'open' | 'paused' | 'ended' },
+) => ({ success: true, data: { sessions: [], total: 0 } }));
 const restoreOpenSessionMock = vi.fn();
 const viewEndedSessionMock = vi.fn();
 const clearSessionMock = vi.fn();
@@ -16,8 +21,10 @@ const clearHistoryMock = vi.fn();
 const removeHistorySessionMock = vi.fn();
 
 const sessionStoreState = {
+  openSessions: [],
   recentSessions: [],
   isLoadingSessions: false,
+  refreshOpenSessions: refreshOpenSessionsMock,
   refreshRecentSessions: refreshRecentSessionsMock,
   restoreOpenSession: restoreOpenSessionMock,
   viewEndedSession: viewEndedSessionMock,
@@ -32,7 +39,10 @@ const historyStoreState = {
   sessions: [],
   clearHistory: clearHistoryMock,
   removeSession: removeHistorySessionMock,
+  syncSessions: vi.fn(),
 };
+
+const authState = { user: { id: 'user-1' } };
 
 vi.mock('next/navigation', () => ({
   useRouter: () => ({ push: pushMock }),
@@ -44,6 +54,19 @@ vi.mock('../../app/hooks/useHaptics', () => ({
 
 vi.mock('../../app/stores/ui-store', () => ({
   useUiStore: (selector: (state: { showToast: typeof showToastMock }) => unknown) => selector({ showToast: showToastMock }),
+}));
+
+vi.mock('../../app/providers', () => ({
+  useAuth: () => authState,
+}));
+
+vi.mock('../../app/lib/auth/dev-bypass', () => ({
+  authBypassEnabled: false,
+  authBypassUserId: null,
+}));
+
+vi.mock('../../app/lib/api/sessions-api', () => ({
+  listSessions: listSessionsMock,
 }));
 
 vi.mock('../../app/stores/session-store', () => ({
@@ -68,6 +91,8 @@ describe('DashboardSidebar delete feedback', () => {
     hapticMock.mockReset();
     showToastMock.mockReset();
     refreshRecentSessionsMock.mockReset();
+    refreshOpenSessionsMock.mockReset();
+    listSessionsMock.mockClear();
     restoreOpenSessionMock.mockReset();
     viewEndedSessionMock.mockReset();
     clearSessionMock.mockReset();
@@ -95,9 +120,11 @@ describe('DashboardSidebar delete feedback', () => {
         focus_cue: null,
       },
     ];
+    sessionStoreState.openSessions = [...sessionStoreState.recentSessions];
     sessionStoreState.isLoadingSessions = false;
     sessionStoreState.session = null;
     historyStoreState.sessions = [];
+    authState.user = { id: 'user-1' };
   });
 
   it('shows deleting feedback and success toast when removing a session', async () => {

@@ -3,11 +3,13 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import get_type_hints
 from unittest.mock import MagicMock
 
 import pytest
+from pypdf import PdfWriter
 
 # --- User ID validation and path traversal ---
 
@@ -2122,6 +2124,62 @@ class TestBuilderTaskMiddleware:
         assert "[citation:Title](URL)" in briefing
         assert "Sources section" in briefing
 
+    def test_rejected_pdf_emit_adds_repair_guidance(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        mw = BuilderTaskMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "builder_non_artifact_turns": 0,
+            "builder_last_tool_names": ["emit_builder_artifact"],
+            "builder_tool_turn_summaries": [{
+                "turn": 19,
+                "tool_names": ["emit_builder_artifact"],
+                "has_emit_builder_artifact": False,
+                "rejected_emit_builder_artifact": True,
+            }],
+            "delegation_context": {
+                "task": "Create exactly a 3-page PDF and verify with pypdf before emit_builder_artifact.",
+                "companion_artifact": {"tone_estimate": 2.7, "active_tone_band": "engagement"},
+                "task_type": "document",
+                "relevant_memories": [],
+                "active_ritual": None,
+                "ritual_phase": None,
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+
+        assert result is not None
+        briefing = result["system_prompt_blocks"][-1]
+        assert "deterministic page-explicit layout" in briefing
+        assert "Do NOT emit again until you have changed the generator" in briefing
+
+    def test_binary_briefing_forbids_helper_modules_and_pyc_artifacts(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        mw = BuilderTaskMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "delegation_context": {
+                "task": "Create exactly a 4-page PDF about pears.",
+                "companion_artifact": {"tone_estimate": 2.7, "active_tone_band": "engagement"},
+                "task_type": "document",
+                "relevant_memories": [],
+                "active_ritual": None,
+                "ritual_phase": None,
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+
+        assert result is not None
+        briefing = result["system_prompt_blocks"][-1]
+        assert "STRICT budget of 8 tool-call turns total" in briefing
+        assert "Do NOT create importable helper modules/packages" in briefing
+        assert "__pycache__/ or .pyc byproducts" in briefing
+        assert "Do NOT include internal generator/helper scripts" in briefing
+
 
 class TestBuilderResearchPolicyMiddleware:
     def test_initializes_web_policy_state_and_prompt(self):
@@ -2185,6 +2243,401 @@ class TestBuilderArtifactMiddleware:
         assert result["builder_result"]["confidence"] == 0.9
         assert result["jump_to"] == "end"
 
+    def test_recovers_missing_primary_artifact_from_generator_script(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: False)
+
+        generator_script = tmp_path / "_generate_doc.py"
+        generator_script.write_text(
+            "from pathlib import Path\n"
+            "Path('/mnt/user-data/outputs/doc.txt').write_text('ok', encoding='utf-8')\n",
+            encoding="utf-8",
+        )
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/doc.txt",
+                "artifact_type": "document",
+                "supporting_files": ["/mnt/user-data/outputs/_generate_doc.py"],
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-recover"))
+
+        assert result is not None
+        assert (tmp_path / "doc.txt").read_text(encoding="utf-8") == "ok"
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/doc.txt"
+
+    def test_strips_internal_supporting_scripts_from_uploads_and_builder_result(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        uploaded_filenames: list[str] = []
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: True)
+        monkeypatch.setattr(
+            builder_artifact_module.supabase_artifact_store,
+            "upload_artifact",
+            lambda *, user_id, thread_id, filename, content: uploaded_filenames.append(filename),
+        )
+
+        (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4\n% test\n")
+        (tmp_path / "_generate_doc.py").write_text("print('hi')\n", encoding="utf-8")
+        (tmp_path / "notes.txt").write_text("sidecar", encoding="utf-8")
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/doc.pdf",
+                "artifact_type": "document",
+                "supporting_files": [
+                    "/mnt/user-data/outputs/_generate_doc.py",
+                    "/mnt/user-data/outputs/notes.txt",
+                ],
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(
+            state,
+            _make_runtime(thread_id="thread-upload", user_id="user-1"),
+        )
+
+        assert result is not None
+        assert result["builder_result"]["supporting_files"] == ["/mnt/user-data/outputs/notes.txt"]
+        assert uploaded_filenames == ["doc.pdf", "notes.txt"]
+
+    def test_uploads_python_primary_artifact_when_it_is_the_fallback_deliverable(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        uploaded_filenames: list[str] = []
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: True)
+        monkeypatch.setattr(
+            builder_artifact_module.supabase_artifact_store,
+            "upload_artifact",
+            lambda *, user_id, thread_id, filename, content: uploaded_filenames.append(filename),
+        )
+
+        (tmp_path / "_generate_doc.py").write_text("print('hi')\n", encoding="utf-8")
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/_generate_doc.py",
+                "artifact_type": "code",
+                "confidence": 0.4,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(
+            state,
+            _make_runtime(thread_id="thread-fallback-script", user_id="user-1"),
+        )
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/_generate_doc.py"
+        assert uploaded_filenames == ["_generate_doc.py"]
+
+    def test_raises_when_primary_artifact_is_still_missing(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: False)
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/doc.txt",
+                "artifact_type": "document",
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        with pytest.raises(FileNotFoundError):
+            BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-missing"))
+
+    def test_repairs_invalid_generator_script_before_recovering_primary_artifact(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: False)
+
+        generator_script = tmp_path / "_generate_doc.py"
+        generator_script.write_text(
+            """
+OUT = \"/mnt/user-data/outputs/doc.pdf\"
+
+events = []
+
+def remember(prefix, text):
+    events.append((prefix, text))
+
+pairs = [
+    (\"Title: \", \"Pear Field Guide\"),
+    (\"Pages: \", \"4\"),
+]:
+    remember(bp, bt)
+
+with open(OUT, \"wb\") as handle:
+    handle.write(b\"%PDF-1.4\\n%%EOF\\n\")
+""".strip(),
+            encoding="utf-8",
+        )
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/doc.pdf",
+                "artifact_type": "document",
+                "supporting_files": ["/mnt/user-data/outputs/_generate_doc.py"],
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-recover-invalid"))
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/doc.pdf"
+        assert (tmp_path / "doc.pdf").exists()
+
+    def test_promotes_internal_generator_artifact_path_to_materialized_pdf(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: False)
+
+        generator_script = tmp_path / "_generate_doc.py"
+        generator_script.write_text(
+            """
+OUT = \"/mnt/user-data/outputs/doc.pdf\"
+
+with open(OUT, \"wb\") as handle:
+    handle.write(b\"%PDF-1.4\\n%%EOF\\n\")
+""".strip(),
+            encoding="utf-8",
+        )
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/_generate_doc.py",
+                "artifact_type": "document",
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-promote-internal"))
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/doc.pdf"
+        assert (tmp_path / "doc.pdf").exists()
+
+    def test_rejects_internal_generator_artifact_path_without_public_deliverable(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: False)
+
+        generator_script = tmp_path / "_generate_doc.py"
+        generator_script.write_text("print('no deliverable')\n", encoding="utf-8")
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/_generate_doc.py",
+                "artifact_type": "document",
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        with pytest.raises(FileNotFoundError, match="internal helper artifact_path"):
+            BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-reject-internal"))
+
+    def test_rejects_pdf_emit_when_page_count_is_wrong(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact_module.supabase_artifact_store, "is_configured", lambda: False)
+
+        pdf_path = tmp_path / "doc.pdf"
+        writer = PdfWriter()
+        for _ in range(5):
+            writer.add_blank_page(width=612, height=792)
+        with pdf_path.open("wb") as handle:
+            writer.write(handle)
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "id": "emit-pdf-mismatch",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/doc.pdf",
+                "artifact_type": "document",
+                "confidence": 0.9,
+            },
+        }]
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+            "delegation_context": {"task": "Length: exactly 3 pages. Before emit_builder_artifact, verify with pypdf."},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-page-mismatch"))
+
+        assert result is not None
+        assert result.get("jump_to") is None
+        assert result["builder_non_artifact_turns"] == 0
+        assert result["builder_emit_rejection_count"] == 1
+        assert "exactly 3 pages" in result["messages"][0].content
+        assert "Do not call emit_builder_artifact again" in result["messages"][0].content
+        assert getattr(result["messages"][0], "status", None) == "error"
+
+    def test_does_not_force_emit_immediately_after_rejected_pdf_emit(self):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        request = MagicMock()
+        request.state = {
+            "builder_non_artifact_turns": 19,
+            "builder_tool_turn_summaries": [{
+                "turn": 19,
+                "tool_names": ["emit_builder_artifact"],
+                "has_emit_builder_artifact": False,
+                "rejected_emit_builder_artifact": True,
+            }],
+        }
+        request.override = MagicMock(side_effect=lambda **kwargs: request)
+
+        captured = {}
+
+        def handler(req):
+            captured["request"] = req
+            return req
+
+        mw.wrap_model_call(request, handler)
+
+        request.override.assert_not_called()
+        assert captured["request"] is request
+
+    def test_forces_emit_when_expected_markdown_exists_after_write_file(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        (tmp_path / "pear-notes.md").write_text("# Pear Notes\n- Buy ripe pears\n", encoding="utf-8")
+
+        mw = BuilderArtifactMiddleware()
+        request = MagicMock()
+        request.state = {
+            "builder_non_artifact_turns": 1,
+            "builder_last_tool_names": ["write_file"],
+            "thread_data": {"outputs_path": str(tmp_path)},
+            "builder_task_started_at_ms": int(time.time() * 1000),
+            "delegation_context": {
+                "task": (
+                    "Create exactly one markdown file and then call emit_builder_artifact with "
+                    'artifact_path="/mnt/user-data/outputs/pear-notes.md".'
+                )
+            },
+        }
+        request.override = MagicMock(side_effect=lambda **kwargs: request)
+
+        captured = {}
+
+        def handler(req):
+            captured["request"] = req
+            return req
+
+        mw.wrap_model_call(request, handler)
+
+        request.override.assert_called_once_with(tool_choice={"type": "tool", "name": "emit_builder_artifact"})
+        assert captured["request"] is request
+
+    def test_does_not_force_emit_when_expected_markdown_is_missing(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        request = MagicMock()
+        request.state = {
+            "builder_non_artifact_turns": 1,
+            "builder_last_tool_names": ["write_file"],
+            "thread_data": {"outputs_path": str(tmp_path)},
+            "builder_task_started_at_ms": int(time.time() * 1000),
+            "delegation_context": {
+                "task": (
+                    "Create exactly one markdown file and then call emit_builder_artifact with "
+                    'artifact_path="/mnt/user-data/outputs/pear-notes.md".'
+                )
+            },
+        }
+        request.override = MagicMock(side_effect=lambda **kwargs: request)
+
+        captured = {}
+
+        def handler(req):
+            captured["request"] = req
+            return req
+
+        mw.wrap_model_call(request, handler)
+
+        request.override.assert_not_called()
+        assert captured["request"] is request
+
     def test_fallback_on_no_tool_call(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
         mw = BuilderArtifactMiddleware()
@@ -2195,6 +2648,28 @@ class TestBuilderArtifactMiddleware:
         result = mw.after_model(state, _make_runtime())
         assert result is not None
         assert result["builder_result"]["confidence"] == 0.3  # fallback
+
+    def test_fallback_on_no_tool_call_promotes_recent_markdown_output(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        (tmp_path / "pear-notes.md").write_text("# Pear Notes\n- Buy ripe pears\n", encoding="utf-8")
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = []
+
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(tmp_path)},
+        }
+
+        result = mw.after_model(state, _make_runtime(thread_id="thread-plain-text-recover"))
+
+        assert result is not None
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/pear-notes.md"
+        assert result["builder_result"]["artifact_type"] == "markdown"
+        assert result["builder_result"]["confidence"] == 0.5
 
     def test_ignores_non_builder_tool_calls(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -2236,6 +2711,31 @@ class TestBuilderArtifactMiddleware:
         state = {"messages": [msg]}
         result = mw.after_model(state, _make_runtime())
         assert result is None
+
+    def test_exact_page_pdf_uses_tighter_hard_ceiling_and_recovers_pdf(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        pdf_path = tmp_path / "doc.pdf"
+        pdf_path.write_bytes(b"%PDF-1.4\n% test\n")
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "bash", "args": {"command": "python /mnt/user-data/outputs/_generate_doc.py"}}]
+
+        state = {
+            "messages": [msg],
+            "builder_non_artifact_turns": 7,
+            "builder_tool_turn_summaries": [],
+            "builder_task_started_at_ms": int((time.time() - 10) * 1000),
+            "thread_data": {"outputs_path": str(tmp_path)},
+            "delegation_context": {"task": "Create exactly a 4-page PDF and verify with pypdf before emit_builder_artifact."},
+        }
+
+        result = BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-force-end"))
+
+        assert result is not None
+        assert result["jump_to"] == "end"
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/doc.pdf"
 
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---

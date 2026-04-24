@@ -94,6 +94,48 @@ def test_reconcile_review_metadata_entries_matches_equivalent_real_memory(tmp_pa
         assert saved["entries"][0]["memory_id"] == "mem_1"
 
 
+def test_reconcile_review_metadata_entries_upgrades_local_placeholder_id(tmp_path):
+    import deerflow.sophia.review_metadata_store as store
+
+    with patch.object(store, "USERS_DIR", tmp_path):
+        store.upsert_review_metadata(
+            "user1",
+            memory_id="local:placeholder-hash",
+            content="User wants to protect quiet mornings for deep work.",
+            metadata={"status": "discarded", "category": "preference"},
+            session_id="sess_1",
+            sync_state="manual",
+        )
+
+        reconciled = store.reconcile_review_metadata_entries(
+            "user1",
+            [{
+                "id": "mem_real_1",
+                "memory": "User wants to protect quiet mornings for focused work.",
+                "metadata": None,
+                "categories": ["preference"],
+            }],
+        )
+
+        overlaid = store.apply_review_metadata_overlays(
+            "user1",
+            [{
+                "id": "mem_real_1",
+                "memory": "User wants to protect quiet mornings for focused work.",
+                "metadata": None,
+                "categories": ["preference"],
+            }],
+        )
+
+        assert reconciled == 1
+        assert len(overlaid) == 1
+        assert overlaid[0]["id"] == "mem_real_1"
+        assert overlaid[0]["metadata"]["status"] == "discarded"
+
+        saved = json.loads((tmp_path / "user1" / "memories" / "review_metadata.json").read_text(encoding="utf-8"))
+        assert saved["entries"][0]["memory_id"] == "mem_real_1"
+
+
 def test_apply_review_metadata_overlays_replaces_memory_text_with_local_edit(tmp_path):
     import deerflow.sophia.review_metadata_store as store
 

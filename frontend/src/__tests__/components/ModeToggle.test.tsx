@@ -16,9 +16,13 @@ vi.mock("../../app/stores/ui-store", () => ({
 }))
 
 let mockCanSwitchToVoice = { canSwitch: true, message: undefined as string | undefined }
+let mockCanSwitchToChat = { canSwitch: true, message: undefined as string | undefined }
 
 vi.mock("../../app/hooks/useModeSwitch", () => ({
-  useModeSwitch: () => ({ canSwitchToVoice: mockCanSwitchToVoice }),
+  useModeSwitch: () => ({
+    canSwitchToVoice: mockCanSwitchToVoice,
+    canSwitchToChat: mockCanSwitchToChat,
+  }),
 }))
 
 // --- Tests -----------------------------------------------------------------
@@ -28,6 +32,7 @@ describe("ModeToggle", () => {
     vi.clearAllMocks()
     mockMode = "voice"
     mockCanSwitchToVoice = { canSwitch: true, message: undefined }
+    mockCanSwitchToChat = { canSwitch: true, message: undefined }
   })
 
   it("renders voice and text tabs", () => {
@@ -59,6 +64,7 @@ describe("ModeToggle", () => {
   })
 
   it("disables voice tab when canSwitchToVoice is false", async () => {
+    mockMode = "text"
     mockCanSwitchToVoice = { canSwitch: false, message: "Voice is busy" }
     const user = userEvent.setup()
     render(<ModeToggle />)
@@ -69,6 +75,7 @@ describe("ModeToggle", () => {
   })
 
   it("shows tooltip on disabled voice tab", () => {
+    mockMode = "text"
     mockCanSwitchToVoice = { canSwitch: false, message: "Voice is busy" }
     render(<ModeToggle />)
     expect(screen.getByRole("tab", { name: /voice/i })).toHaveAttribute("title", "Voice is busy")

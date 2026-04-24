@@ -1,7 +1,7 @@
 'use client';
 
 import { Lock } from 'lucide-react';
-import type { RefObject } from 'react';
+import { memo, type RefObject } from 'react';
 
 import type {
   ContextMode,
@@ -73,7 +73,7 @@ interface SessionConversationPaneProps {
   onGoToDashboard: () => void;
 }
 
-export function SessionConversationPane({
+function SessionConversationPaneComponent({
   messages,
   isInitializingChat,
   sessionPresetType,
@@ -335,3 +335,6 @@ export function SessionConversationPane({
     </>
   );
 }
+
+export const SessionConversationPane = memo(SessionConversationPaneComponent);
+SessionConversationPane.displayName = 'SessionConversationPane';

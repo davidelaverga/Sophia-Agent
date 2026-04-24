@@ -12,6 +12,7 @@ type StreamMeta = {
   run_id?: string;
   skill_used?: string;
   emotion_detected?: string;
+  session_title?: string;
   pending_interrupt?: object | null;
 };
 
@@ -1283,6 +1284,19 @@ export function createSSEToUIMessageStream(
                   if (typeof artifact.voice_emotion_primary === 'string') {
                     meta.emotion_detected = artifact.voice_emotion_primary;
                   }
+
+                  // Capture title from SophiaTitleMiddleware (values event includes state.title)
+                  const valuesTitle = (() => {
+                    if (!data || typeof data !== 'object') return undefined;
+                    const vr = data as Record<string, unknown>;
+                    const nested = vr.values && typeof vr.values === 'object' ? vr.values as Record<string, unknown> : null;
+                    const t = typeof vr.title === 'string' ? vr.title : (nested && typeof nested.title === 'string' ? nested.title : undefined);
+                    return t?.trim() || undefined;
+                  })();
+                  if (valuesTitle) {
+                    meta.session_title = valuesTitle;
+                  }
+
                   break;
                 }
                 case 'session_start':

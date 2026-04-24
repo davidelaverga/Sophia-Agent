@@ -11,6 +11,7 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 
 import { invalidateActiveSessionCache } from '../hooks/useSessionStart';
 import {
+  continueSession as continueSessionAPI,
   deleteAllSessionRecords,
   deleteSessionRecord,
   endSession as endSessionAPI,
@@ -18,6 +19,7 @@ import {
   getSession,
   isError,
   listSessions,
+  updateSession as updatePersistedSession,
 } from '../lib/api/sessions-api';
 import { logger } from '../lib/error-logger';
 import type {
@@ -61,7 +63,8 @@ interface SessionState {
   refreshOpenSessions: (userId?: string) => Promise<number>;
   refreshRecentSessions: (userId?: string) => Promise<void>;
   restoreOpenSession: (sessionInfo: SessionInfo, userId?: string) => Promise<void>;
-  viewEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode) => void;
+  viewEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode, userId?: string) => Promise<void>;
+  continueEndedSession: (sessionId: string, presetType: PresetType, contextMode: ContextMode, userId?: string) => Promise<void>;
   removeOpenSession: (sessionId: string, userId?: string) => Promise<boolean>;
   removeRecentSession: (sessionId: string, userId?: string) => Promise<boolean>;
   removeAllSessions: (userId?: string) => Promise<{ deleted_count: number; session_ids: string[] } | null>;
@@ -365,6 +368,27 @@ export const useSessionStore = create<SessionState>()(
           resolvedSessionInfo = latestSession.data;
         }
 
+        // If the session is ended, auto-reopen it on the backend so the user
+        // can continue. Same thread_id → transcript and memory context stay
+        // intact. Next finalization will dedupe against existing memories.
+        const backendStatus = normalizeBackendSessionStatus(resolvedSessionInfo.status);
+        if (backendStatus === 'ended') {
+          const reopened = await updatePersistedSession(
+            resolvedSessionInfo.session_id,
+            { status: 'open' },
+            resolvedUserId,
+          );
+          if (!isError(reopened)) {
+            resolvedSessionInfo = reopened.data;
+          } else {
+            logger.warn('SessionStore: Failed to reopen ended session — continuing read-from-thread', {
+              sessionId: resolvedSessionInfo.session_id,
+              code: reopened.code,
+              error: reopened.error,
+            });
+          }
+        }
+
         const resolvedStatus = normalizeBackendSessionStatus(resolvedSessionInfo.status);
         const resolvedIsInteractive = resolvedStatus !== 'ended';
         const restored: SessionClientStore = {
@@ -382,6 +406,9 @@ export const useSessionStore = create<SessionState>()(
           focusCue: resolvedSessionInfo.focus_cue ?? undefined,
           isActive: resolvedIsInteractive,
           companionInvokesCount: 0,
+          // Clear any stale messages carried over from a previous session —
+          // loadSession() below will repopulate from the backend thread.
+          messages: [],
         };
 
         set((state) => {
@@ -402,7 +429,12 @@ export const useSessionStore = create<SessionState>()(
 
         try {
           const { useChatStore } = await import('./chat-store');
-          await useChatStore.getState().loadSession(resolvedSessionInfo.session_id, resolvedUserId);
+          const loaded = await useChatStore.getState().loadSession(resolvedSessionInfo.session_id, resolvedUserId);
+          if (!loaded) {
+            logger.warn('SessionStore: loadSession returned false — messages may be missing', {
+              sessionId: resolvedSessionInfo.session_id,
+            });
+          }
         } catch {
           logger.warn('SessionStore: Failed to restore messages for resumed session', {
             sessionId: resolvedSessionInfo.session_id,
@@ -410,35 +442,38 @@ export const useSessionStore = create<SessionState>()(
         }
       },
       
-      // View an ended session as read-only transcript
-      viewEndedSession: (sessionId, presetType, contextMode) => {
-        const { session } = get();
-        if (session?.sessionId === sessionId) return;
+      // View an ended session's transcript without creating a continuation.
+      // Previously this auto-continued via continueSessionAPI which polluted the
+      // sidebar with duplicate rows (original ended + new open). Continuation is
+      // now an explicit action (see continueEndedSession below).
+      viewEndedSession: async (sessionId, _presetType, _contextMode, userId) => {
+        const resolvedUserId = userId?.trim() || get().session?.userId || 'anonymous';
+        const latest = await getSession(sessionId, resolvedUserId);
+        if (isError(latest)) {
+          throw new Error(latest.error || 'Failed to load ended session');
+        }
+        await get().restoreOpenSession(latest.data, resolvedUserId);
+      },
 
-        const now = new Date().toISOString();
-        const restored: SessionClientStore = {
-          sessionId,
-          threadId: sessionId,
-          userId: session?.userId ?? 'anonymous',
-          presetType,
-          contextMode,
-          status: 'ended',
-          voiceMode: false,
-          startedAt: now,
-          lastActivityAt: now,
-          isActive: false,
-          companionInvokesCount: 0,
-        };
+      // Explicit continuation of an ended session — keeps the same thread_id so
+      // history carries over, but creates a fresh session_id for the new chapter.
+      continueEndedSession: async (sessionId, presetType, contextMode, userId) => {
+        const resolvedUserId = userId?.trim() || get().session?.userId || 'anonymous';
+        const currentSession = get().session;
+        const platform = currentSession?.voiceMode ? 'voice' : 'text';
 
-        set({ session: restored, error: null });
+        const continuation = await continueSessionAPI(sessionId, {
+          user_id: resolvedUserId,
+          session_type: presetType,
+          preset_context: contextMode,
+          platform,
+        });
 
-        import('./chat-store')
-          .then(({ useChatStore }) =>
-            useChatStore.getState().loadSession(sessionId, session?.userId),
-          )
-          .catch(() => {
-            logger.warn('SessionStore: Failed to load ended session messages', { sessionId });
-          });
+        if (isError(continuation)) {
+          throw new Error(continuation.error || 'Failed to continue ended session');
+        }
+
+        await get().restoreOpenSession(continuation.data.session, resolvedUserId);
       },
 
       removeOpenSession: async (sessionId, userId) => {

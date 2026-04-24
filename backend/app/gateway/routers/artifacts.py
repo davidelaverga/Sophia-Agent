@@ -10,6 +10,7 @@ from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Res
 from pydantic import BaseModel, Field
 
 from app.gateway.path_utils import resolve_thread_virtual_path
+from deerflow.sophia.session_store import SessionStore
 from deerflow.sophia.storage import supabase_artifact_store
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,21 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["artifacts"])
 _OUTPUTS_VIRTUAL_PATH = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_VIRTUAL_PATH = "mnt/user-data/workspace/outputs"
+
+_session_store = SessionStore()
+
+
+def _lookup_user_for_thread(thread_id: str) -> str | None:
+    """Resolve the owning user_id for a thread by scanning session records.
+
+    Best-effort — returns ``None`` when no matching record exists. Used to
+    build the new-layout Supabase key ``{user_id}/{thread_id}/{filename}``
+    from a per-thread artifact route that only has the thread_id.
+    """
+    if not thread_id:
+        return None
+    record = _session_store.find_by_thread_id(thread_id)
+    return record.user_id if record is not None else None
 
 
 class ThreadArtifactListItem(BaseModel):
@@ -124,6 +140,7 @@ def _try_serve_from_supabase(thread_id: str, path: str, request: Request) -> Res
         return None
     try:
         result = supabase_artifact_store.download_artifact(
+            user_id=_lookup_user_for_thread(thread_id),
             thread_id=thread_id,
             filename=relative,
         )
@@ -314,12 +331,241 @@ async def get_artifact(thread_id: str, path: str, request: Request) -> Response:
         return FileResponse(path=actual_path, filename=actual_path.name, media_type=mime_type, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"})
 
     if mime_type and mime_type == "text/html":
-        return HTMLResponse(content=actual_path.read_text(encoding="utf-8"))
+        try:
+            return HTMLResponse(content=actual_path.read_text(encoding="utf-8"))
+        except UnicodeDecodeError:
+            logger.warning("Artifact guessed as HTML is not valid UTF-8; serving inline bytes instead: %s", actual_path)
 
     if mime_type and mime_type.startswith("text/"):
-        return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        try:
+            return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        except UnicodeDecodeError:
+            logger.warning("Artifact guessed as text is not valid UTF-8; serving inline bytes instead: %s", actual_path)
 
     if is_text_file_by_content(actual_path):
-        return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        try:
+            return PlainTextResponse(content=actual_path.read_text(encoding="utf-8"), media_type=mime_type)
+        except UnicodeDecodeError:
+            logger.warning("Artifact content sniffed as text is not valid UTF-8; serving inline bytes instead: %s", actual_path)
 
     return Response(content=actual_path.read_bytes(), media_type=mime_type, headers={"Content-Disposition": f"inline; filename*=UTF-8''{encoded_filename}"})
+
+
+# ---------------------------------------------------------------------------
+# User-scoped builder files (cross-session library)
+# ---------------------------------------------------------------------------
+
+
+class UserBuilderFileItem(BaseModel):
+    thread_id: str
+    session_id: str | None = None
+    session_title: str | None = None
+    path: str
+    name: str
+    size_bytes: int
+    modified_at: str
+    mime_type: str | None = None
+
+
+class UserBuilderFilesResponse(BaseModel):
+    user_id: str
+    items: list[UserBuilderFileItem] = Field(default_factory=list)
+    total: int
+    limit: int
+
+
+def _validate_user_id(user_id: str) -> str:
+    try:
+        from deerflow.agents.sophia_agent.utils import validate_user_id
+        return validate_user_id(user_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail="Invalid user_id format") from e
+
+
+def _is_builder_internal_file(name: str) -> bool:
+    return name.startswith("_") and name.endswith(".py")
+
+
+def _collect_thread_artifacts(
+    thread_id: str,
+    session_id: str | None,
+    session_title: str | None,
+) -> list[UserBuilderFileItem]:
+    outputs_path = resolve_thread_virtual_path(thread_id, _OUTPUTS_VIRTUAL_PATH)
+    if not outputs_path.exists() or not outputs_path.is_dir():
+        return []
+    items: list[UserBuilderFileItem] = []
+    for file_path in outputs_path.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if _is_builder_internal_file(file_path.name):
+            continue
+        try:
+            stat_result = file_path.stat()
+        except OSError:
+            continue
+        relative = file_path.relative_to(outputs_path).as_posix()
+        mime_type, _ = mimetypes.guess_type(file_path.name)
+        items.append(UserBuilderFileItem(
+            thread_id=thread_id,
+            session_id=session_id,
+            session_title=session_title,
+            path=f"{_OUTPUTS_VIRTUAL_PATH}/{relative}",
+            name=file_path.name,
+            size_bytes=stat_result.st_size,
+            modified_at=datetime.fromtimestamp(stat_result.st_mtime, tz=UTC).isoformat(),
+            mime_type=mime_type,
+        ))
+    return items
+
+
+@router.get(
+    "/users/{user_id}/builder-files",
+    response_model=UserBuilderFilesResponse,
+    summary="List all builder files for a user across sessions",
+)
+async def list_user_builder_files(
+    user_id: str,
+    limit: int = 30,
+) -> UserBuilderFilesResponse:
+    """Return up to ``limit`` most-recently-modified builder files across every
+    thread owned by ``user_id``.
+
+    Walks the local per-thread outputs directories. The existing
+    ``GET /api/threads/{thread_id}/artifacts/{path}`` endpoint remains the
+    download surface — it already falls back to Supabase when the local copy
+    is missing. This endpoint only needs to enumerate.
+    """
+    validated_user = _validate_user_id(user_id)
+    safe_limit = max(1, min(limit, 100))
+
+    # Avoid a hard import cycle — import lazily.
+    from app.gateway.routers.sessions import _list_recent_records
+
+    records = _list_recent_records(validated_user, limit=200)
+
+    # Dedupe by thread_id (a reopened session may share a thread).
+    seen_threads: dict[str, tuple[str | None, str | None]] = {}
+    for record in records:
+        if not record.thread_id:
+            continue
+        if record.thread_id in seen_threads:
+            continue
+        seen_threads[record.thread_id] = (record.session_id, record.title)
+
+    all_items: list[UserBuilderFileItem] = []
+    # Track (thread_id, relative_path) to merge Supabase entries without
+    # duplicating files we already found on local disk.
+    seen_keys: set[tuple[str, str]] = set()
+    for thread_id, (session_id, session_title) in seen_threads.items():
+        for item in _collect_thread_artifacts(thread_id, session_id, session_title):
+            relative = item.path[len(_OUTPUTS_VIRTUAL_PATH) + 1 :] if item.path.startswith(
+                _OUTPUTS_VIRTUAL_PATH + "/"
+            ) else item.name
+            seen_keys.add((thread_id, relative))
+            all_items.append(item)
+
+    # Merge Supabase-mirrored files the gateway does not have locally. Happens
+    # on stateless/multi-instance deployments where the outputs dir is ephemeral.
+    if supabase_artifact_store.is_configured():
+        try:
+            supabase_items = supabase_artifact_store.list_user_objects(
+                validated_user,
+                limit=max(safe_limit * 4, 200),
+            ) or []
+        except Exception:  # noqa: BLE001 — best-effort enrichment
+            logger.exception(
+                "Supabase list failed for user_id=%s; serving local results only",
+                validated_user,
+            )
+            supabase_items = []
+
+        for remote in supabase_items:
+            name = remote.get("name")
+            if not isinstance(name, str) or "/" not in name:
+                continue
+            thread_id, _, relative = name.partition("/")
+            if not thread_id or not relative:
+                continue
+            if _is_builder_internal_file(Path(relative).name):
+                continue
+            key = (thread_id, relative)
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+
+            metadata = remote.get("metadata") if isinstance(remote.get("metadata"), dict) else {}
+            size_bytes = metadata.get("size") if isinstance(metadata, dict) else None
+            mime_type = metadata.get("mimetype") if isinstance(metadata, dict) else None
+            modified_at = (
+                remote.get("updated_at")
+                or remote.get("created_at")
+                or datetime.now(UTC).isoformat()
+            )
+            session_id, session_title = seen_threads.get(thread_id, (None, None))
+            all_items.append(UserBuilderFileItem(
+                thread_id=thread_id,
+                session_id=session_id,
+                session_title=session_title,
+                path=f"{_OUTPUTS_VIRTUAL_PATH}/{relative}",
+                name=Path(relative).name,
+                size_bytes=int(size_bytes) if isinstance(size_bytes, (int, float)) else 0,
+                modified_at=modified_at if isinstance(modified_at, str) else datetime.now(UTC).isoformat(),
+                mime_type=mime_type if isinstance(mime_type, str) else None,
+            ))
+
+    all_items.sort(key=lambda item: item.modified_at, reverse=True)
+    total = len(all_items)
+    return UserBuilderFilesResponse(
+        user_id=validated_user,
+        items=all_items[:safe_limit],
+        total=total,
+        limit=safe_limit,
+    )
+
+
+@router.delete(
+    "/threads/{thread_id}/artifacts/{path:path}",
+    summary="Delete a builder artifact file (local + Supabase mirror)",
+)
+async def delete_artifact(thread_id: str, path: str) -> Response:
+    """Delete a builder-generated file.
+
+    Removes the local copy under ``mnt/user-data/outputs/`` and, best-effort,
+    the Supabase mirror at ``sophia_builder/{thread_id}/{relative_path}``.
+    Returns 204 on success, 404 when neither copy exists.
+    """
+    relative = _relative_output_artifact_path(path)
+    if relative is None or relative == "":
+        raise HTTPException(status_code=400, detail="Only paths under outputs/ can be deleted")
+
+    actual_path = _resolve_artifact_path(thread_id, path)
+    deleted_local = False
+    if actual_path.exists() and actual_path.is_file():
+        try:
+            actual_path.unlink()
+            deleted_local = True
+        except OSError as e:
+            logger.warning("Failed to delete local artifact %s: %s", actual_path, e)
+            raise HTTPException(status_code=500, detail="Failed to delete artifact") from e
+
+    deleted_remote = False
+    try:
+        deleted_remote = supabase_artifact_store.delete_object(
+            user_id=_lookup_user_for_thread(thread_id),
+            thread_id=thread_id,
+            filename=relative,
+        )
+    except Exception:  # noqa: BLE001 — network/transport; local delete is authoritative
+        logger.exception(
+            "Supabase delete failed: thread_id=%s path=%s", thread_id, path,
+        )
+
+    if not deleted_local and not deleted_remote:
+        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
+
+    logger.info(
+        "Deleted artifact thread_id=%s path=%s local=%s supabase=%s",
+        thread_id, path, deleted_local, deleted_remote,
+    )
+    return Response(status_code=204)
