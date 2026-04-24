@@ -54,3 +54,9 @@ deerflow-harness = { workspace = true }
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["packages/harness"]
+filterwarnings = [
+    'ignore:datetime.datetime.utcfromtimestamp\(\) is deprecated and scheduled for removal in a future version.*:DeprecationWarning:lark_oapi\.ws\.pb\.google\.protobuf\.internal\.well_known_types',
+    'ignore:websockets.InvalidStatusCode is deprecated:DeprecationWarning:lark_oapi\.ws\.client',
+    'ignore:websockets\.legacy is deprecated.*:DeprecationWarning:websockets\.legacy',
+    'ignore:Call to deprecated method findAll\..*:DeprecationWarning:readabilipy\.simplifiers\.html',
+]

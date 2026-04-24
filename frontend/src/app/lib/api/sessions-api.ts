@@ -26,6 +26,8 @@ import type {
   OpenSessionsResponse,
   SessionListResponse,
   SessionUpdateRequest,
+  SessionContinueRequest,
+  SessionContinueResponse,
   SessionMessagesResponse,
 } from '../../types/session';
 
@@ -422,6 +424,22 @@ export async function updateSession(
     {
       method: 'PATCH',
       body: JSON.stringify(updates),
+    }
+  );
+}
+
+/**
+ * Continue from an ended session by creating a new session_id on the same thread.
+ */
+export async function continueSession(
+  sessionId: string,
+  request: SessionContinueRequest = {}
+): Promise<ApiResponse<SessionContinueResponse>> {
+  return fetchWithAuth<SessionContinueResponse>(
+    `${SESSIONS_BASE}/${sessionId}/continue`,
+    {
+      method: 'POST',
+      body: JSON.stringify(request),
     }
   );
 }

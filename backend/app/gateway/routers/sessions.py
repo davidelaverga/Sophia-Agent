@@ -112,6 +112,20 @@ class SessionUpdateRequest(BaseModel):
     status: Literal["open", "paused"] | None = None
 
 
+class SessionContinueRequest(BaseModel):
+    user_id: str = "dev-user"
+    session_type: str | None = None
+    preset_context: str | None = None
+    platform: str | None = None
+    intention: str | None = None
+    focus_cue: str | None = None
+
+
+class SessionContinueResponse(BaseModel):
+    continued_from_session_id: str
+    session: SessionInfoResponse
+
+
 class SessionDeleteResponse(BaseModel):
     ok: bool = True
     session_id: str
@@ -416,7 +430,18 @@ async def update_session(
         if requested_status is None:
             return _record_to_info(record)
 
-    if requested_status is not None and record.status == "ended":
+    # Allow reopening ended sessions: users can continue any prior conversation.
+    # The same thread_id is preserved so the transcript and memory context stay
+    # intact. When the session is ended again later, the offline pipeline will
+    # re-run against only the newly added turns (existing memories are passed
+    # into the extraction prompt for dedupe).
+    reopening_ended = requested_status == "open" and record.status == "ended"
+
+    if (
+        requested_status is not None
+        and record.status == "ended"
+        and not reopening_ended
+    ):
         raise HTTPException(status_code=409, detail="Ended sessions cannot change status.")
 
     if updates:
@@ -444,7 +469,91 @@ async def update_session(
             record.context_mode,
         )
 
+        if reopening_ended:
+            # Clear the idempotency marker so the offline pipeline can re-run
+            # at the next session end with the newly added turns.
+            try:
+                from deerflow.sophia.offline_pipeline import forget_processed_session
+
+                forget_processed_session(session_id)
+            except Exception:
+                # Non-fatal: dedupe via existing_memories still protects Mem0.
+                pass
+
     return _record_to_info(record)
+
+
+@router.post("/{session_id}/continue", response_model=SessionContinueResponse)
+async def continue_session(
+    session_id: str,
+    body: SessionContinueRequest,
+) -> SessionContinueResponse:
+    """Start a new resumable session segment from an ended session.
+
+    This creates a new session_id while preserving the original thread_id,
+    which keeps the full transcript continuous and avoids reprocessing
+    offline pipeline artifacts for the already-ended segment.
+    """
+    normalized_user_id = _normalize_user_id(body.user_id)
+    source_owner_user_id, source_record = _resolve_session_record(normalized_user_id, session_id)
+    if source_record is None:
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    if source_record.status != "ended":
+        raise HTTPException(status_code=409, detail="Only ended sessions can be continued.")
+
+    open_records = list(_list_open_records(normalized_user_id))
+    if source_owner_user_id != normalized_user_id:
+        open_records.extend(_store.list_open(source_owner_user_id))
+    open_records = _unique_records(open_records)
+
+    if any(record.thread_id == source_record.thread_id for record in open_records):
+        raise HTTPException(
+            status_code=409,
+            detail="This thread already has an active session. Resume the active one instead.",
+        )
+
+    if len(open_records) >= MAX_OPEN_SESSIONS_PER_USER:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Maximum of {MAX_OPEN_SESSIONS_PER_USER} open sessions reached. "
+            "Please end an existing session first.",
+        )
+
+    now = datetime.now(UTC).isoformat()
+    new_session_id = str(uuid.uuid4())
+    session_type = body.session_type or source_record.preset_type
+    preset_context = body.preset_context or source_record.context_mode
+    platform = body.platform or source_record.platform
+
+    continued_record = SessionRecord(
+        session_id=new_session_id,
+        thread_id=source_record.thread_id,
+        user_id=normalized_user_id,
+        status="open",
+        preset_type=session_type,
+        context_mode=preset_context,
+        platform=platform,
+        intention=body.intention if body.intention is not None else source_record.intention,
+        focus_cue=body.focus_cue if body.focus_cue is not None else source_record.focus_cue,
+        created_at=now,
+        updated_at=now,
+    )
+    _store.create(continued_record)
+
+    from app.gateway.inactivity_watcher import register_activity
+
+    register_activity(
+        continued_record.thread_id,
+        normalized_user_id,
+        continued_record.session_id,
+        continued_record.context_mode,
+    )
+
+    return SessionContinueResponse(
+        continued_from_session_id=session_id,
+        session=_record_to_info(continued_record),
+    )
 
 
 @router.delete("/bulk", response_model=SessionBulkDeleteResponse)

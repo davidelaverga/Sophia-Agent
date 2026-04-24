@@ -110,21 +110,42 @@ def run_offline_pipeline(
             return {"status": "already_processed", "session_id": session_id}
         _processed_sessions.add(session_id)
 
-    # --- Thread state: fetch from LangGraph if not provided ---
+    # --- Thread state: fetch from LangGraph if not provided, or augment when
+    # the caller-supplied state has no messages (e.g. short voice session
+    # where the frontend lost its local message buffer before end-session).
+    # Never abort the pipeline silently — trace + handoff + identity should
+    # still run so the recap page has something to show.
     if thread_state is None:
-        thread_state = _fetch_thread_state(thread_id)
-        if thread_state is None:
+        fetched = _fetch_thread_state(thread_id)
+        if fetched is None:
             logger.warning(
-                "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
+                "session.finalization pipeline_no_thread_state_continuing user_id=%s session_id=%s thread_id=%s",
                 user_id,
                 session_id,
                 thread_id,
             )
-            # Remove from processed set so a retry can succeed after a transient failure
-            with _processed_lock:
-                _processed_sessions.discard(session_id)
-            return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
-        logger.info("Fetched thread_state from LangGraph for session %s", session_id)
+            thread_state = {"messages": [], "platform": "text", "context_mode": "life", "configurable": {}}
+        else:
+            thread_state = fetched
+            logger.info("Fetched thread_state from LangGraph for session %s", session_id)
+    elif not thread_state.get("messages") and thread_id:
+        # Try to augment empty caller-supplied state from LangGraph.
+        fetched = _fetch_thread_state(thread_id)
+        if fetched and fetched.get("messages"):
+            logger.info(
+                "session.finalization pipeline_state_augmented_from_langgraph user_id=%s session_id=%s thread_id=%s message_count=%s",
+                user_id,
+                session_id,
+                thread_id,
+                len(fetched.get("messages", [])),
+            )
+            # Preserve any artifacts from the request body but swap in LG messages.
+            thread_state = {**thread_state, "messages": fetched.get("messages", [])}
+            # Bring over artifacts/current_artifact from LG if request had none.
+            if not thread_state.get("artifacts") and fetched.get("artifacts"):
+                thread_state["artifacts"] = fetched["artifacts"]
+            if not thread_state.get("current_artifact") and fetched.get("current_artifact"):
+                thread_state["current_artifact"] = fetched["current_artifact"]
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])
@@ -262,6 +283,23 @@ def run_offline_pipeline(
 def reset_processed_sessions() -> None:
     """Clear the processed-sessions set.  For testing only."""
     _processed_sessions.clear()
+
+
+def forget_processed_session(session_id: str) -> bool:
+    """Remove ``session_id`` from the processed-set so it can run again.
+
+    Used when an ended session is reopened and will eventually end again with
+    new turns appended — the pipeline must be allowed to re-run, and it will
+    dedupe against existing Mem0 memories via the extraction prompt's
+    ``existing_memories`` field.
+
+    Returns True if the session was present in the set and removed.
+    """
+    with _processed_lock:
+        if session_id in _processed_sessions:
+            _processed_sessions.discard(session_id)
+            return True
+    return False
 
 
 # ------------------------------------------------------------------

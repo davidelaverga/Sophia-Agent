@@ -100,7 +100,7 @@ export function ContextTabs({ selected, onSelect }: ContextTabsProps) {
           textShadow: '0 1px 10px color-mix(in srgb, var(--background) 82%, transparent)',
         }}
       >
-        adapts rituals &amp; tone to your context
+        Adapts rituals &amp; tone to your context
       </p>
     </div>
   );

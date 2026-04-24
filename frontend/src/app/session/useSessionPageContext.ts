@@ -51,7 +51,11 @@ export function useSessionPageContext({
   const userId = session?.userId || stableUserIdRef.current || (authBypassEnabled ? authBypassUserId : 'anonymous');
   const sessionPresetType = session?.presetType;
   const sessionContextMode = session?.contextMode;
-  const isReadOnly = session?.status === 'ended';
+  // Ended sessions are no longer read-only. Users can continue any past
+  // conversation — the backend auto-reopens it (same thread_id, so the full
+  // transcript and memory context are preserved). `isReadOnly` remains in the
+  // returned shape for historical consumers but is always false.
+  const isReadOnly = false;
   const safeSessionId = hasValidBackendSessionId ? backendSessionId : undefined;
   const metadataSessionId = isUuid(currentMetadataSessionId) ? currentMetadataSessionId : undefined;
   const recoverySessionId = safeSessionId || metadataSessionId;

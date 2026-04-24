@@ -6,7 +6,6 @@ import { cn } from '../../lib/utils';
 import type { BuilderTaskV1 } from '../../types/builder-task';
 
 import { BuilderActivityLog } from './BuilderActivityLog';
-import { BuilderReadyPill } from './BuilderReadyPill';
 
 type BuilderTaskNoticeProps = {
   task: BuilderTaskV1;
@@ -438,7 +437,6 @@ export function BuilderTaskNotice({
   isCancelling = false,
   className,
 }: BuilderTaskNoticeProps) {
-  const [isFreshCompletion, setIsFreshCompletion] = useState(false);
   const [isExpanded, setIsExpanded] = useState(task.phase !== 'running');
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
@@ -485,33 +483,16 @@ export function BuilderTaskNotice({
   useEffect(() => {
     const previousTaskState = previousTaskStateRef.current;
     const isNewTask = previousTaskState.identity !== taskIdentity;
-    const justCompleted = task.phase === 'completed' && (
-      previousTaskState.phase !== 'completed' || isNewTask
-    );
 
     if (isNewTask) {
       taskFirstSeenMsRef.current = Date.now();
-    }
-
-    let timerId: ReturnType<typeof setTimeout> | undefined;
-    if (justCompleted) {
-      setIsFreshCompletion(true);
-      timerId = setTimeout(() => setIsFreshCompletion(false), compact ? 1400 : 1800);
-    } else if (task.phase !== 'completed') {
-      setIsFreshCompletion(false);
     }
 
     previousTaskStateRef.current = {
       phase: task.phase,
       identity: taskIdentity,
     };
-
-    return () => {
-      if (timerId) {
-        clearTimeout(timerId);
-      }
-    };
-  }, [task.phase, taskIdentity, compact]);
+  }, [task.phase, taskIdentity]);
 
   useEffect(() => {
     const autoExpand = task.phase !== 'running' || Boolean(liveTask.stuck);
@@ -528,27 +509,6 @@ export function BuilderTaskNotice({
     }
   }, [liveTask.stuck, task.phase, taskIdentity]);
 
-  if (showReadyPill && artifactTitle && onOpenArtifact) {
-    return (
-      <div
-        role="status"
-        aria-live="assertive"
-        className={cn('relative w-[min(360px,calc(100vw-48px))]', className)}
-      >
-        <BuilderReadyPill
-          title={artifactTitle}
-          onOpen={onOpenArtifact}
-          downloadHref={downloadHref}
-          onDownload={onDownload}
-          onDismiss={showDismiss ? onDismiss : undefined}
-          isNew={isFreshCompletion}
-          compact={compact}
-          className="w-full"
-        />
-      </div>
-    );
-  }
-
   return (
     <div
       role="status"
@@ -563,7 +523,7 @@ export function BuilderTaskNotice({
         background: 'color-mix(in srgb, var(--cosmic-panel) 70%, transparent)',
       }}
     >
-      {/* Header row: dot · phase · leading meta · percent · notes toggle */}
+      {/* Header row: dot · phase · leading meta (or artifact title for completed) · percent · notes toggle */}
       <div className="flex items-center gap-2">
         <BuilderBreathingDot accentVar={meta.accentVar} active={isRunning} />
         <span
@@ -576,9 +536,9 @@ export function BuilderTaskNotice({
         <span
           className="min-w-0 flex-1 truncate text-[10px]"
           style={{ color: 'var(--cosmic-text-faint)' }}
-          title={progressMeta.leading}
+          title={showReadyPill && artifactTitle ? artifactTitle : progressMeta.leading}
         >
-          {progressMeta.leading}
+          {showReadyPill && artifactTitle ? artifactTitle : progressMeta.leading}
         </span>
         <span
           className="text-[10px] tabular-nums shrink-0"
@@ -652,7 +612,7 @@ export function BuilderTaskNotice({
         </div>
       )}
 
-      {(showCancel || showDismiss) && (
+      {(showCancel || showDismiss || (showReadyPill && artifactTitle && onOpenArtifact)) && (
         <div className="mt-2 flex items-center justify-end gap-2">
           {showCancel && onCancel && (
             <button
@@ -664,6 +624,31 @@ export function BuilderTaskNotice({
             >
               {isCancelling ? 'cancelling…' : 'cancel'}
             </button>
+          )}
+
+          {showReadyPill && artifactTitle && onOpenArtifact && (
+            <button
+              type="button"
+              onClick={onOpenArtifact}
+              className="rounded-full px-2 py-0.5 text-[9px] lowercase tracking-[0.08em] transition-colors duration-200 hover:bg-white/[0.04]"
+              style={{ color: 'var(--cosmic-text-faint)' }}
+              aria-label="Open"
+            >
+              Open
+            </button>
+          )}
+
+          {showReadyPill && downloadHref && (
+            <a
+              href={downloadHref}
+              download
+              onClick={onDownload}
+              className="rounded-full px-2 py-0.5 text-[9px] lowercase tracking-[0.08em] transition-colors duration-200 hover:bg-white/[0.04]"
+              style={{ color: 'var(--cosmic-text-faint)' }}
+              aria-label="Download"
+            >
+              Download
+            </a>
           )}
 
           {showDismiss && onDismiss && (

@@ -1080,7 +1080,7 @@ function SessionPageContent() {
                 onOpen={handleToggleSessionFilesPanel}
                 downloadHref={pillDownloadHref}
                 onDownload={() => haptic('medium')}
-                onDismiss={clearBuilderArtifact}
+                onDismiss={dismissBuilderDeliverable}
                 itemCount={sessionFilesCount || undefined}
                 isNew={hasNewArtifacts}
               />
@@ -1107,7 +1107,7 @@ function SessionPageContent() {
                 onOpen={handleToggleSessionFilesPanel}
                 downloadHref={pillDownloadHref}
                 onDownload={() => haptic('medium')}
-                onDismiss={clearBuilderArtifact}
+                onDismiss={dismissBuilderDeliverable}
                 itemCount={sessionFilesCount || undefined}
                 isNew={hasNewArtifacts}
                 compact={true}

@@ -3,6 +3,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const pushMock = vi.fn();
 const refreshOpenSessionsMock = vi.fn();
+const syncSessionsMock = vi.fn();
+const listSessionsMock = vi.fn(async (
+  _userId?: string,
+  _options?: { limit?: number; status?: 'open' | 'paused' | 'ended' },
+) => ({ success: true, data: { sessions: [], total: 0 } }));
 
 const sessionStoreState = {
   openSessions: [],
@@ -17,6 +22,7 @@ const sessionStoreState = {
 const historyStoreState = {
   sessions: [],
   removeSession: vi.fn(),
+  syncSessions: syncSessionsMock,
 };
 
 vi.mock('next/navigation', () => ({
@@ -32,6 +38,10 @@ vi.mock('../../app/lib/auth/dev-bypass', () => ({
   authBypassUserId: null,
 }));
 
+vi.mock('../../app/lib/api/sessions-api', () => ({
+  listSessions: listSessionsMock,
+}));
+
 vi.mock('../../app/providers', () => ({
   useAuth: () => ({ user: { id: 'user-1' } }),
 }));
@@ -45,6 +55,10 @@ vi.mock('../../app/stores/session-history-store', () => ({
   useSessionHistoryStore: (selector: (state: typeof historyStoreState) => unknown) => selector(historyStoreState),
 }));
 
+vi.mock('../../app/lib/api/sessions-api', () => ({
+  listSessions: listSessionsMock,
+}));
+
 vi.mock('../../app/components/dashboard/sweepLight', () => ({
   useSweepGlow: () => ({ current: null }),
 }));
@@ -55,6 +69,8 @@ describe('RecentSessionsSidebar toggle visibility', () => {
   beforeEach(() => {
     pushMock.mockReset();
     refreshOpenSessionsMock.mockReset();
+    syncSessionsMock.mockReset();
+    listSessionsMock.mockClear();
     sessionStoreState.openSessions = [];
     sessionStoreState.session = null;
     sessionStoreState.isLoadingSessions = false;
@@ -64,13 +80,13 @@ describe('RecentSessionsSidebar toggle visibility', () => {
   it('does not render a duplicate sessions toggle while collapsed', () => {
     render(<RecentSessionsSidebar isExpanded={false} onToggle={vi.fn()} />);
 
-    expect(screen.queryByRole('button', { name: 'Collapse sessions' })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText('Search sessions…')).not.toBeInTheDocument();
     expect(screen.queryByTitle('View sessions')).not.toBeInTheDocument();
   });
 
-  it('renders the collapse control only when expanded', () => {
+  it('renders sessions browser only when expanded', () => {
     render(<RecentSessionsSidebar isExpanded={true} onToggle={vi.fn()} />);
 
-    expect(screen.getByRole('button', { name: 'Collapse sessions' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('Search sessions…')).toBeInTheDocument();
   });
 });

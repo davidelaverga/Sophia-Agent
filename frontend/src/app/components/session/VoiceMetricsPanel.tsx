@@ -16,6 +16,7 @@ import {
   Radio,
   RotateCcw,
   Sparkles,
+  X,
 } from "lucide-react"
 import { startTransition, useEffect, useMemo, useRef, useState } from "react"
 
@@ -58,6 +59,8 @@ type PointerInteraction = {
 }
 
 const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v1"
+const FLOATING_PANEL_COMPACT_MIN_WIDTH = 240
+const FLOATING_PANEL_COMPACT_MIN_HEIGHT = 220
 const FLOATING_PANEL_MIN_WIDTH = 320
 const FLOATING_PANEL_MAX_WIDTH = 720
 const FLOATING_PANEL_MIN_HEIGHT = 260
@@ -66,13 +69,40 @@ const FLOATING_PANEL_EDGE_PADDING = 12
 const FLOATING_PANEL_TOP_PADDING = 76
 const FLOATING_PANEL_HEADER_OFFSET = 164
 
+function getFloatingWidthRange(viewportWidth: number): { minWidth: number; maxWidth: number } {
+  const maxWidth = Math.min(
+    FLOATING_PANEL_MAX_WIDTH,
+    Math.max(FLOATING_PANEL_COMPACT_MIN_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)),
+  )
+
+  return {
+    minWidth: Math.min(FLOATING_PANEL_MIN_WIDTH, maxWidth),
+    maxWidth,
+  }
+}
+
+function getFloatingHeightRange(viewportHeight: number): { minHeight: number; maxHeight: number } {
+  const availableHeight = viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_EDGE_PADDING
+  const maxHeight = Math.min(
+    FLOATING_PANEL_MAX_HEIGHT,
+    Math.max(FLOATING_PANEL_COMPACT_MIN_HEIGHT, availableHeight),
+  )
+
+  return {
+    minHeight: Math.min(FLOATING_PANEL_MIN_HEIGHT, maxHeight),
+    maxHeight,
+  }
+}
+
 function getDefaultFloatingBounds(viewportWidth: number, viewportHeight: number): FloatingPanelBounds {
-  const width = viewportWidth < 640
-    ? Math.max(FLOATING_PANEL_MIN_WIDTH, viewportWidth - 24)
+  const { maxWidth } = getFloatingWidthRange(viewportWidth)
+  const { minHeight, maxHeight } = getFloatingHeightRange(viewportHeight)
+  const width = viewportWidth < 768
+    ? maxWidth
     : Math.min(460, Math.max(360, Math.round(viewportWidth * 0.3)))
   const height = viewportHeight < 760
-    ? Math.max(FLOATING_PANEL_MIN_HEIGHT + 40, viewportHeight - 140)
-    : 560
+    ? Math.max(minHeight, viewportHeight - 140)
+    : Math.min(560, maxHeight)
 
   return clampFloatingBounds({
     left: viewportWidth - width - 24,
@@ -87,12 +117,12 @@ function clampFloatingBounds(
   viewportWidth: number,
   viewportHeight: number,
 ): FloatingPanelBounds {
-  const maxWidth = Math.max(FLOATING_PANEL_MIN_WIDTH, Math.min(FLOATING_PANEL_MAX_WIDTH, viewportWidth - (FLOATING_PANEL_EDGE_PADDING * 2)))
-  const maxHeight = Math.max(FLOATING_PANEL_MIN_HEIGHT, Math.min(FLOATING_PANEL_MAX_HEIGHT, viewportHeight - FLOATING_PANEL_TOP_PADDING - FLOATING_PANEL_EDGE_PADDING))
-  const width = Math.min(Math.max(bounds.width, FLOATING_PANEL_MIN_WIDTH), maxWidth)
-  const height = Math.min(Math.max(bounds.height, FLOATING_PANEL_MIN_HEIGHT), maxHeight)
+  const { minWidth, maxWidth } = getFloatingWidthRange(viewportWidth)
+  const { minHeight, maxHeight } = getFloatingHeightRange(viewportHeight)
+  const width = Math.min(Math.max(bounds.width, minWidth), maxWidth)
+  const height = Math.min(Math.max(bounds.height, minHeight), maxHeight)
   const maxLeft = Math.max(FLOATING_PANEL_EDGE_PADDING, viewportWidth - width - FLOATING_PANEL_EDGE_PADDING)
-  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - 120)
+  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - height - FLOATING_PANEL_EDGE_PADDING)
 
   return {
     left: Math.min(Math.max(bounds.left, FLOATING_PANEL_EDGE_PADDING), maxLeft),
@@ -102,14 +132,18 @@ function clampFloatingBounds(
   }
 }
 
-function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: FloatingPanelBounds; expanded: boolean } | null {
+function readPersistedFloatingBounds(defaultExpanded: boolean): {
+  bounds: FloatingPanelBounds
+  expanded: boolean
+  hidden: boolean
+} | null {
   if (typeof window === "undefined") return null
 
   try {
     const raw = window.localStorage.getItem(FLOATING_PANEL_STORAGE_KEY)
     if (!raw) return null
 
-    const parsed = JSON.parse(raw) as Partial<FloatingPanelBounds> & { expanded?: boolean }
+    const parsed = JSON.parse(raw) as Partial<FloatingPanelBounds> & { expanded?: boolean; hidden?: boolean }
     if (
       typeof parsed.left !== "number"
       || typeof parsed.top !== "number"
@@ -127,6 +161,7 @@ function readPersistedFloatingBounds(defaultExpanded: boolean): { bounds: Floati
         height: parsed.height,
       },
       expanded: typeof parsed.expanded === "boolean" ? parsed.expanded : defaultExpanded,
+      hidden: typeof parsed.hidden === "boolean" ? parsed.hidden : false,
     }
   } catch {
     return null
@@ -151,6 +186,7 @@ export function VoiceMetricsPanel({
 }: VoiceMetricsPanelProps) {
   const showToast = useUiStore((state) => state.showToast)
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const [hidden, setHidden] = useState(false)
   const [floatingBounds, setFloatingBounds] = useState<FloatingPanelBounds>({
     left: 24,
     top: 88,
@@ -251,6 +287,9 @@ export function VoiceMetricsPanel({
     return metrics.health.level
   }, [metrics.baseline.regressions, metrics.health.level, metrics.regressions])
 
+  const isFloatingExpanded = layout === "floating" && expanded
+  const floatingWide = layout === "floating" && floatingBounds.width >= 560
+
   const summaryCards = useMemo(
     () => [
       {
@@ -327,6 +366,7 @@ export function VoiceMetricsPanel({
 
     setFloatingBounds(clampFloatingBounds(nextBounds, viewportWidth, viewportHeight))
     setExpanded(persisted?.expanded ?? defaultExpanded)
+    setHidden(persisted?.hidden ?? false)
     setHasHydratedFloatingState(true)
   }, [defaultExpanded, layout])
 
@@ -335,9 +375,9 @@ export function VoiceMetricsPanel({
 
     window.localStorage.setItem(
       FLOATING_PANEL_STORAGE_KEY,
-      JSON.stringify({ ...floatingBounds, expanded }),
+      JSON.stringify({ ...floatingBounds, expanded, hidden }),
     )
-  }, [expanded, floatingBounds, hasHydratedFloatingState, layout])
+  }, [expanded, floatingBounds, hasHydratedFloatingState, hidden, layout])
 
   useEffect(() => {
     if (layout !== "floating" || typeof window === "undefined") return
@@ -548,6 +588,15 @@ export function VoiceMetricsPanel({
 
     setFloatingBounds(getDefaultFloatingBounds(window.innerWidth, window.innerHeight))
     setExpanded(defaultExpanded)
+    setHidden(false)
+  }
+
+  const hideFloatingPanel = () => {
+    dragRef.current = null
+    resizeRef.current = null
+    setIsDragging(false)
+    setIsResizing(false)
+    setHidden(true)
   }
 
   const floatingContainerStyle = layout === "floating"
@@ -555,10 +604,11 @@ export function VoiceMetricsPanel({
         left: floatingBounds.left,
         top: floatingBounds.top,
         width: floatingBounds.width,
+        maxWidth: `calc(100vw - ${FLOATING_PANEL_EDGE_PADDING * 2}px)`,
       }
     : undefined
 
-  const panelStyle = layout === "floating" && expanded
+  const panelStyle = isFloatingExpanded
     ? { height: floatingBounds.height }
     : undefined
 
@@ -591,7 +641,12 @@ export function VoiceMetricsPanel({
       isDragging && "select-none",
       isResizing && "select-none",
     )} style={panelStyle}>
-      <div className="flex flex-col gap-4 border-b border-white/8 px-5 py-5 sm:flex-row sm:items-start sm:justify-between">
+      <div className={cn(
+        "flex gap-4 border-b border-white/8 px-5 py-5",
+        layout === "floating"
+          ? "flex-col"
+          : "flex-col sm:flex-row sm:items-start sm:justify-between",
+      )}>
         <div className="flex min-w-0 flex-1 gap-3">
           {layout === "floating" && (
             <button
@@ -675,7 +730,10 @@ export function VoiceMetricsPanel({
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2 self-start">
+        <div className={cn(
+          "flex flex-wrap items-center gap-2 self-start",
+          layout === "floating" && "w-full",
+        )}>
           {(layout === "inline" || expanded) && (
             <>
               <button
@@ -717,6 +775,17 @@ export function VoiceMetricsPanel({
               Reset panel
             </button>
           )}
+          {layout === "floating" && (
+            <button
+              type="button"
+              onClick={hideFloatingPanel}
+              title="Hide telemetry panel"
+              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+            >
+              <X className="h-3.5 w-3.5" />
+              Hide panel
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
@@ -730,14 +799,18 @@ export function VoiceMetricsPanel({
 
       <div
         className={cn(
-          layout === "floating" && expanded && "min-h-0 overflow-y-auto pr-1",
+          isFloatingExpanded && "flex-1 min-h-0 overflow-y-auto pr-1",
         )}
-        style={layout === "floating" && expanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
+        style={isFloatingExpanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
       >
         <div className={cn(
           "grid gap-3 px-5 py-5",
-          layout === "floating" && !expanded
-            ? "grid-cols-1 sm:grid-cols-3"
+          layout === "floating"
+            ? expanded
+              ? floatingWide
+                ? "grid-cols-2"
+                : "grid-cols-1"
+              : "grid-cols-1"
             : "sm:grid-cols-2 xl:grid-cols-3",
         )}>
           {displayedSummaryCards.map((card) => (
@@ -756,7 +829,10 @@ export function VoiceMetricsPanel({
 
         {expanded && (
           <>
-            <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[1.1fr_0.9fr]">
+            <div className={cn(
+              "grid gap-4 border-t border-white/8 px-5 py-5",
+              layout === "floating" ? "grid-cols-1" : "lg:grid-cols-[1.1fr_0.9fr]",
+            )}>
               <BottleneckCard metrics={metrics} />
               <InfoCard
                 icon={Sparkles}
@@ -781,7 +857,10 @@ export function VoiceMetricsPanel({
               />
             </div>
 
-            <div className="grid gap-3 border-t border-white/8 px-5 py-5 md:grid-cols-3">
+            <div className={cn(
+              "grid gap-3 border-t border-white/8 px-5 py-5",
+              layout === "floating" ? "grid-cols-1" : "md:grid-cols-3",
+            )}>
               {metrics.regressions.length === 0 && metrics.baseline.regressions.length === 0 && (
                 <div className="md:col-span-3 rounded-3xl border border-emerald-300/15 bg-emerald-300/6 px-4 py-4 text-sm text-emerald-100/90">
                   No active regression markers. The latest thresholds are within target ranges for this voice turn.
@@ -795,9 +874,15 @@ export function VoiceMetricsPanel({
               ))}
             </div>
 
-            <div className="grid gap-4 border-t border-white/8 px-5 py-5 xl:grid-cols-[1.2fr_0.8fr]">
+            <div className={cn(
+              "grid gap-4 border-t border-white/8 px-5 py-5",
+              layout === "floating" ? "grid-cols-1" : "xl:grid-cols-[1.2fr_0.8fr]",
+            )}>
               <div className="space-y-4">
-                <div className="grid gap-4 lg:grid-cols-2">
+                <div className={cn(
+                  "grid gap-4",
+                  layout === "floating" ? "grid-cols-1" : "lg:grid-cols-2",
+                )}>
                   <InfoCard
                     icon={Mic}
                     title="Microphone"
@@ -1045,6 +1130,21 @@ export function VoiceMetricsPanel({
   if (layout === "floating") {
     if (!hasHydratedFloatingState) {
       return null
+    }
+
+    if (hidden) {
+      return (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-40">
+          <button
+            type="button"
+            onClick={() => setHidden(false)}
+            className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-white/10 bg-[color:color-mix(in_srgb,var(--cosmic-panel-strong)_88%,black_12%)] px-4 py-2.5 text-xs font-medium text-sophia-text shadow-[var(--cosmic-shadow-md)] backdrop-blur-md transition-colors hover:bg-[color:color-mix(in_srgb,var(--cosmic-panel-strong)_96%,black_4%)]"
+          >
+            <Activity className="h-3.5 w-3.5" />
+            Show telemetry
+          </button>
+        </div>
+      )
     }
 
     return (

@@ -33,6 +33,7 @@ export interface SophiaMessageMetadata {
   // Skill and emotion metadata from backend
   skill_used?: string;
   emotion_detected?: string;
+  session_title?: string;
   
   // CRITICAL: Bootstrap flag
   // If true, this message is excluded from model context

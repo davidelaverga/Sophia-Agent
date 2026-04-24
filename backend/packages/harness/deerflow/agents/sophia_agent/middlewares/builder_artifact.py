@@ -547,21 +547,23 @@ def _find_recent_public_output_artifact(
 
 
 def _upload_builder_outputs_to_supabase(
+    user_id: str | None,
     thread_id: str | None,
     outputs_host_path: str | None,
     artifact_args: dict[str, Any],
 ) -> None:
     """Best-effort upload of the builder's outputs to Supabase Storage.
 
-    Silently no-ops when Supabase is not configured, when thread_id or the
-    outputs host path are missing, or when individual files cannot be read.
+    Silently no-ops when Supabase is not configured, when user_id/thread_id or
+    the outputs host path are missing, or when individual files cannot be read.
     Any failure is logged and swallowed so builder flow never regresses.
     """
     if not supabase_artifact_store.is_configured():
         return
-    if not thread_id or not outputs_host_path:
+    if not user_id or not thread_id or not outputs_host_path:
         logger.debug(
-            "Skipping Supabase upload; missing thread_id=%s outputs_host_path=%s",
+            "Skipping Supabase upload; missing user_id=%s thread_id=%s outputs_host_path=%s",
+            user_id,
             thread_id,
             outputs_host_path,
         )
@@ -609,6 +611,7 @@ def _upload_builder_outputs_to_supabase(
 
         try:
             supabase_artifact_store.upload_artifact(
+                user_id=user_id,
                 thread_id=thread_id,
                 filename=relative,
                 content=content,
@@ -822,7 +825,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "has_emit_builder_artifact": True,
                         },
                     )
+                    supabase_user_id = (
+                        runtime.context.get("user_id") if runtime.context else None
+                    )
                     _upload_builder_outputs_to_supabase(
+                        user_id=supabase_user_id,
                         thread_id=thread_id,
                         outputs_host_path=outputs_host_path,
                         artifact_args=sanitized_args,

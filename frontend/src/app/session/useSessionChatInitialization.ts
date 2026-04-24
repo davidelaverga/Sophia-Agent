@@ -63,6 +63,9 @@ export function useSessionChatInitialization({
 }: UseSessionChatInitializationParams) {
   const hasInitializedRef = useRef(false);
   const initialGreetingSetRef = useRef(false);
+  // Tracks which sessionId's server messages have been applied, so late-arriving
+  // messages can override a greeting that the 2s timeout already rendered.
+  const restoredSessionIdRef = useRef<string | undefined>(undefined);
   const [isInitializingChat, setIsInitializingChat] = useState(true);
 
   // R42: Smart opener fallback — if no greeting arrives within 2s, fire default
@@ -95,7 +98,8 @@ export function useSessionChatInitialization({
     if (!session) return;
 
     if (storedMessages && storedMessages.length > 0) {
-      if (!hasInitializedRef.current) {
+      if (restoredSessionIdRef.current !== session.sessionId) {
+        restoredSessionIdRef.current = session.sessionId;
         hasInitializedRef.current = true;
 
         storedMessages.forEach((message) => {

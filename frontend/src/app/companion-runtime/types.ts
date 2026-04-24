@@ -28,6 +28,7 @@ export type UseCompanionStreamContractParams = {
   setInterrupt: (interrupt: InterruptPayload) => void;
   setCurrentContext: (threadId: string, sessionId: string, runId?: string) => void;
   setMessageMetadata: (messageId: string, metadata: Partial<SophiaMessageMetadata>) => void;
+  onSessionTitle?: (title: string, sessionId: string) => void;
   sessionId: string;
   activeSessionId?: string;
   activeThreadId?: string;

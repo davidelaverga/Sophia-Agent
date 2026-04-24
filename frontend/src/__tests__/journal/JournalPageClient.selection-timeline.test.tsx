@@ -123,6 +123,41 @@ describe('JournalPageClient selection and timeline behavior', () => {
     expect(screen.getByRole('slider', { name: 'Journal timeline' })).toHaveAttribute('max', '0')
   })
 
+  it('starts the timeline at today when journal data loads after mount', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+
+      if (url === '/api/journal') {
+        return new Response(JSON.stringify({
+          entries: [
+            {
+              id: 'mem-old',
+              content: 'February should not become the initial timeline position.',
+              category: 'decision',
+              metadata: { importance: 'structural' },
+              created_at: '2026-02-15T10:00:00.000Z',
+            },
+          ],
+          count: 1,
+        }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      }
+
+      throw new Error(`Unexpected fetch call: ${url}`)
+    })
+
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { container } = render(<JournalPageClient />)
+    await flushAsyncWork()
+
+    const slider = screen.getByRole('slider', { name: 'Journal timeline' })
+    expect(slider).toHaveAttribute('value', slider.getAttribute('max'))
+    expect(container.querySelector('[class*="timelineDate"] span')?.textContent).toBe('Today')
+  })
+
   it('hides newer memories when scrubbing back before them', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input.toString()

@@ -493,9 +493,11 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
     ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
-    if not serialized_messages and not recap_artifacts:
-        return None
-
+    # Always return a thread_state dict. Even when both messages and
+    # recap_artifacts are empty, the pipeline should still run (trace +
+    # handoff + identity) rather than silently aborting. When messages are
+    # empty the pipeline will additionally attempt a LangGraph thread fetch
+    # to augment, and falls back to the minimal state if that also fails.
     thread_state: dict = {
         "messages": serialized_messages,
         "platform": body.platform or "text",

@@ -56,6 +56,7 @@ async function proxyArtifactRequest(
   req: NextRequest,
   threadId: string,
   artifactPathSegments: string[],
+  method: 'GET' | 'DELETE' = 'GET',
 ): Promise<Response> {
   const authHeader = await getUserScopedAuthHeader();
   if (!authHeader) {
@@ -70,7 +71,7 @@ async function proxyArtifactRequest(
   });
 
   const execute = (authorization: string) => fetch(url.toString(), {
-    method: 'GET',
+    method,
     headers: {
       Authorization: authorization,
     },
@@ -96,5 +97,13 @@ export async function GET(
   { params }: { params: Promise<{ threadId: string; artifactPath: string[] }> },
 ) {
   const { threadId, artifactPath } = await params;
-  return proxyArtifactRequest(req, threadId, artifactPath || []);
+  return proxyArtifactRequest(req, threadId, artifactPath || [], 'GET');
+}
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ threadId: string; artifactPath: string[] }> },
+) {
+  const { threadId, artifactPath } = await params;
+  return proxyArtifactRequest(req, threadId, artifactPath || [], 'DELETE');
 }

@@ -331,7 +331,21 @@ export const useChatStore = create<ChatStore>()(persist((set, get) => ({
     set({ isLoadingHistory: true, lastError: undefined })
     try {
       const { getSessionMessages } = await import("../lib/api/sessions-api")
-      const result = await getSessionMessages(sessionId, userId)
+
+      // Retry once on transient failure. LangGraph occasionally returns 503
+      // while the thread state is being committed, and a brief network blip
+      // must not leave the user staring at an empty transcript.
+      let result = await getSessionMessages(sessionId, userId)
+      if (!result.success) {
+        const transient =
+          "status" in result
+          && (result.status === 503 || result.status === 502 || result.status === 504 || result.status === 0)
+        if (transient) {
+          await new Promise((resolve) => setTimeout(resolve, 400))
+          result = await getSessionMessages(sessionId, userId)
+        }
+      }
+
       if (!result.success) {
         set({ isLoadingHistory: false, lastError: "error" in result ? result.error : "Unknown error" })
         return false

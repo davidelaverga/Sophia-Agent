@@ -599,12 +599,12 @@ export function JournalPageClient() {
   useEffect(() => {
     setTimelinePosition((current) => {
       if (current === INITIAL_TIMELINE_POSITION) {
-        return maxTimelineDays
+        return sceneEntries.length > 0 ? maxTimelineDays : INITIAL_TIMELINE_POSITION
       }
 
       return clamp(current, 0, maxTimelineDays)
     })
-  }, [maxTimelineDays])
+  }, [maxTimelineDays, sceneEntries.length])
 
   useEffect(() => {
     const controller = new AbortController()

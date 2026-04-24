@@ -333,20 +333,24 @@ class TestInvalidUserId:
 
 
 class TestEmptyThreadState:
-    def test_none_thread_state_returns_error(self, mock_steps):
+    def test_none_thread_state_continues_with_empty_state(self, mock_steps):
+        """When both caller-supplied state is None and LangGraph fetch fails,
+        pipeline continues with an empty minimal state instead of aborting.
+        Trace/handoff/identity still run; extraction no-ops on empty messages."""
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
-        result = run_offline_pipeline(
-            user_id="user_abc",
-            session_id="sess_none",
-            thread_id="thread_none",
-            thread_state=None,
-        )
+        with patch("deerflow.sophia.offline_pipeline.httpx") as mock_httpx:
+            mock_httpx.get.side_effect = Exception("404")
+            result = run_offline_pipeline(
+                user_id="user_abc",
+                session_id="sess_none",
+                thread_id="thread_none",
+                thread_state=None,
+            )
 
-        assert result["status"] == "error"
-        assert result["reason"] == "no_thread_state"
-        # No downstream functions called
-        mock_steps["trace"].assert_not_called()
+        assert result["status"] == "completed"
+        # Trace still runs even with empty state
+        mock_steps["trace"].assert_called_once()
 
     def test_empty_messages_handled_gracefully(self, mock_steps):
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
@@ -535,19 +539,20 @@ class TestStateFetchFallback:
         call_url = mock_httpx.get.call_args[0][0]
         assert "thread_fetch" in call_url
 
-    def test_aborts_when_fetch_fails(self, mock_steps):
-        """Pipeline aborts when both thread_state=None and fetch fails."""
+    def test_continues_when_fetch_fails(self, mock_steps):
+        """Pipeline continues with empty state when fetch fails so the recap
+        page still has trace/handoff outputs to show."""
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
         with patch("deerflow.sophia.offline_pipeline.httpx") as mock_httpx:
             mock_httpx.get.side_effect = Exception("Connection refused")
             result = run_offline_pipeline("user_abc", "sess_fail", "thread_fail", thread_state=None)
 
-        assert result["status"] == "error"
-        assert result["reason"] == "no_thread_state"
+        assert result["status"] == "completed"
+        mock_steps["trace"].assert_called_once()
 
-    def test_aborts_when_fetch_returns_no_messages(self, mock_steps):
-        """Pipeline aborts when fetched state has no messages."""
+    def test_continues_when_fetch_returns_no_messages(self, mock_steps):
+        """Pipeline continues when fetched state has no messages."""
         from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
         mock_response = MagicMock()
@@ -559,5 +564,5 @@ class TestStateFetchFallback:
             mock_httpx.get.return_value = mock_response
             result = run_offline_pipeline("user_abc", "sess_empty", "thread_empty", thread_state=None)
 
-        assert result["status"] == "error"
-        assert result["reason"] == "no_thread_state"
+        assert result["status"] == "completed"
+        mock_steps["trace"].assert_called_once()

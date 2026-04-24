@@ -2289,7 +2289,7 @@ class TestBuilderArtifactMiddleware:
         monkeypatch.setattr(
             builder_artifact_module.supabase_artifact_store,
             "upload_artifact",
-            lambda *, thread_id, filename, content: uploaded_filenames.append(filename),
+            lambda *, user_id, thread_id, filename, content: uploaded_filenames.append(filename),
         )
 
         (tmp_path / "doc.pdf").write_bytes(b"%PDF-1.4\n% test\n")
@@ -2316,7 +2316,10 @@ class TestBuilderArtifactMiddleware:
             "thread_data": {"outputs_path": str(tmp_path)},
         }
 
-        result = BuilderArtifactMiddleware().after_model(state, _make_runtime(thread_id="thread-upload"))
+        result = BuilderArtifactMiddleware().after_model(
+            state,
+            _make_runtime(thread_id="thread-upload", user_id="user-1"),
+        )
 
         assert result is not None
         assert result["builder_result"]["supporting_files"] == ["/mnt/user-data/outputs/notes.txt"]
@@ -2332,7 +2335,7 @@ class TestBuilderArtifactMiddleware:
         monkeypatch.setattr(
             builder_artifact_module.supabase_artifact_store,
             "upload_artifact",
-            lambda *, thread_id, filename, content: uploaded_filenames.append(filename),
+            lambda *, user_id, thread_id, filename, content: uploaded_filenames.append(filename),
         )
 
         (tmp_path / "_generate_doc.py").write_text("print('hi')\n", encoding="utf-8")
@@ -2355,7 +2358,7 @@ class TestBuilderArtifactMiddleware:
 
         result = BuilderArtifactMiddleware().after_model(
             state,
-            _make_runtime(thread_id="thread-fallback-script"),
+            _make_runtime(thread_id="thread-fallback-script", user_id="user-1"),
         )
 
         assert result is not None

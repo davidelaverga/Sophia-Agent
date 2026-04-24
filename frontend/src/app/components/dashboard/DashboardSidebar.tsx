@@ -9,7 +9,6 @@
 'use client';
 
 import {
-  ChevronLeft,
   ChevronRight,
   Search,
   Sparkles,
@@ -20,6 +19,7 @@ import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState, type RefObject } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
+import { listSessions } from '../../lib/api/sessions-api';
 import { authBypassEnabled, authBypassUserId } from '../../lib/auth/dev-bypass';
 import { humanizeTime } from '../../lib/humanize-time';
 import { cn } from '../../lib/utils';
@@ -27,6 +27,7 @@ import { useAuth } from '../../providers';
 import { useConversationStore } from '../../stores/conversation-store';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 import { useSessionStore, selectIsLoadingSessions } from '../../stores/session-store';
+import { useUiStore } from '../../stores/ui-store';
 
 import { useSweepGlow } from './sweepLight';
 
@@ -36,6 +37,18 @@ import { useSweepGlow } from './sweepLight';
 
 function truncatePreview(text: string, max: number) {
   return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+function normalizePresetType(value: string): 'prepare' | 'debrief' | 'reset' | 'vent' | 'open' | 'chat' {
+  if (value === 'prepare' || value === 'debrief' || value === 'reset' || value === 'vent' || value === 'chat') {
+    return value;
+  }
+  return 'open';
+}
+
+function normalizeContextMode(value: string): 'gaming' | 'work' | 'life' {
+  if (value === 'gaming' || value === 'work') return value;
+  return 'life';
 }
 
 // =============================================================================
@@ -77,6 +90,8 @@ interface SessionRowProps {
   timeTooltip: string;
   turns: number;
   isActive: boolean;
+  isEnded?: boolean;
+  isDeleting?: boolean;
   query: string;
   onClick: () => void;
   onDelete: () => void;
@@ -88,6 +103,8 @@ function SessionRow({
   timeTooltip,
   turns,
   isActive,
+  isEnded,
+  isDeleting,
   query,
   onClick,
   onDelete,
@@ -95,14 +112,29 @@ function SessionRow({
   const sweepRef = useSweepGlow();
   const [confirmDelete, setConfirmDelete] = useState(false);
 
+  // Reserve enough padding on the text so the floating action chip
+  // never overlaps the description. The idle trash is ~20px,
+  // the confirm chip ("Delete?") is ~72px, the deleting chip ~78px.
+  const textRightPadding = isDeleting
+    ? 'pr-[84px]'
+    : confirmDelete
+      ? 'pr-[80px]'
+      : 'pr-5';
+
   return (
     <button
       ref={sweepRef as RefObject<HTMLButtonElement>}
-      onClick={() => { if (confirmDelete) { setConfirmDelete(false); return; } haptic('light'); onClick(); }}
-      onMouseLeave={() => setConfirmDelete(false)}
+      onClick={() => {
+        if (isDeleting) return;
+        if (confirmDelete) { setConfirmDelete(false); return; }
+        haptic('light'); onClick();
+      }}
+      onMouseLeave={() => { if (!isDeleting) setConfirmDelete(false); }}
+      disabled={isDeleting}
       className={cn(
         'cosmic-focus-ring group relative w-full rounded-lg px-3 py-2.5 text-left transition-all duration-200',
         'hover:bg-white/[0.03]',
+        isDeleting && 'opacity-60 pointer-events-none',
       )}
       style={{
         filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.18))',
@@ -120,8 +152,20 @@ function SessionRow({
         />
       )}
 
-      {/* Delete: two-step — first click shows confirm, second click deletes */}
-      {confirmDelete ? (
+      {/* Delete: three states — idle icon, confirm chip, deleting chip */}
+      {isDeleting ? (
+        <span
+          aria-live="polite"
+          className={cn(
+            'absolute right-2 top-2 flex items-center gap-1 rounded-md px-1.5 py-0.5',
+            'text-[10px] font-medium bg-white/[0.08]',
+          )}
+          style={{ color: 'var(--cosmic-text-whisper)' }}
+        >
+          <span className="h-2.5 w-2.5 animate-spin rounded-full border border-current border-t-transparent" />
+          Deleting...
+        </span>
+      ) : confirmDelete ? (
         <span
           role="button"
           tabIndex={0}
@@ -158,7 +202,8 @@ function SessionRow({
 
       <p
         className={cn(
-          'line-clamp-2 pr-5 text-[13px] leading-snug transition-colors duration-200',
+          'line-clamp-2 text-[13px] leading-snug transition-colors duration-200',
+          textRightPadding,
           isActive ? 'font-medium' : 'font-normal',
         )}
         style={{ color: isActive ? 'var(--cosmic-text-strong)' : 'var(--cosmic-text)' }}
@@ -182,6 +227,17 @@ function SessionRow({
             </span>
           </>
         )}
+        {isEnded && !confirmDelete && !isDeleting && (
+          <span
+            className="ml-auto rounded px-1.5 py-px text-[10px] font-medium"
+            style={{
+              background: 'color-mix(in srgb, var(--sophia-purple) 15%, transparent)',
+              color: 'var(--sophia-purple)',
+            }}
+          >
+            Continue
+          </span>
+        )}
       </div>
     </button>
   );
@@ -204,38 +260,142 @@ interface RecentSessionsSidebarProps {
 
 export function RecentSessionsSidebar({
   isExpanded,
-  onToggle,
+  onToggle: _onToggle,
   className,
 }: RecentSessionsSidebarProps) {
   const router = useRouter();
   const { user } = useAuth();
   const endedSessions = useSessionHistoryStore((s) => s.sessions);
+  const syncEndedSessions = useSessionHistoryStore((s) => s.syncSessions);
   const removeEndedSession = useSessionHistoryStore((s) => s.removeSession);
+  const clearEndedHistory = useSessionHistoryStore((s) => s.clearHistory);
   const openSessions = useSessionStore((s) => s.openSessions);
   const isLoadingSessions = useSessionStore(selectIsLoadingSessions);
   const refreshOpenSessions = useSessionStore((s) => s.refreshOpenSessions);
   const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
   const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
   const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
+  const removeAllSessions = useSessionStore((s) => s.removeAllSessions);
   const currentSession = useSessionStore((s) => s.session);
+  const showToast = useUiStore((s) => s.showToast);
   const [query, setQuery] = useState('');
+  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+  const [isClearingAll, setIsClearingAll] = useState(false);
   const resolvedUserId = currentSession?.userId || user?.id || (authBypassEnabled ? authBypassUserId : undefined);
 
   const panelSweepRef = useSweepGlow();
 
-  const badgeCount = openSessions.length || endedSessions.filter((s) => !s.recapViewed).length;
-
   useEffect(() => {
-    if (isExpanded) void refreshOpenSessions();
-  }, [isExpanded, refreshOpenSessions]);
+    if (!isExpanded) return;
+
+    void refreshOpenSessions();
+
+    void listSessions(resolvedUserId, { limit: 50, status: 'ended' })
+      .then((result) => {
+        if (!result.success) return;
+        const endedFromBackend = result.data.sessions
+          .filter((session) => session.status === 'ended')
+          .map((session) => ({
+            sessionId: session.session_id,
+            presetType: normalizePresetType(session.session_type),
+            contextMode: normalizeContextMode(session.preset_context),
+            startedAt: session.started_at,
+            endedAt: session.ended_at ?? session.updated_at,
+            messageCount: session.turn_count,
+            takeawayPreview: session.last_message_preview ?? undefined,
+          }));
+        syncEndedSessions(endedFromBackend);
+      })
+      .catch(() => {
+        // Keep local history as fallback if backend sync fails.
+      });
+  }, [isExpanded, refreshOpenSessions, resolvedUserId, syncEndedSessions]);
+
+  const setRowDeleting = useCallback((id: string, deleting: boolean) => {
+    setDeletingIds((prev) => {
+      const next = new Set(prev);
+      if (deleting) next.add(id); else next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const handleDeleteOpen = useCallback(async (sessionId: string, description: string) => {
+    setRowDeleting(sessionId, true);
+    try {
+      const ok = await removeOpenSession(sessionId, resolvedUserId);
+      if (ok) {
+        haptic('success');
+        showToast({ message: `Deleted ${description}.`, variant: 'success' });
+      } else {
+        haptic('error');
+        showToast({ message: `Couldn't delete session.`, variant: 'error' });
+      }
+    } catch {
+      haptic('error');
+      showToast({ message: `Couldn't delete session.`, variant: 'error' });
+    } finally {
+      setRowDeleting(sessionId, false);
+    }
+  }, [removeOpenSession, resolvedUserId, setRowDeleting, showToast]);
+
+  const handleDeleteEnded = useCallback(async (sessionId: string, description: string) => {
+    setRowDeleting(sessionId, true);
+    try {
+      // Delete from backend first so the next sync won't resurrect it
+      const ok = await removeRecentSession(sessionId, resolvedUserId);
+      // Always clear local history entry — backend 404 is treated as success by removeRecentSession
+      removeEndedSession(sessionId);
+      if (ok) {
+        haptic('success');
+        showToast({ message: `Deleted ${description}.`, variant: 'success' });
+      } else {
+        haptic('error');
+        showToast({ message: `Couldn't delete session.`, variant: 'error' });
+      }
+    } catch {
+      haptic('error');
+      showToast({ message: `Couldn't delete session.`, variant: 'error' });
+    } finally {
+      setRowDeleting(sessionId, false);
+    }
+  }, [removeRecentSession, removeEndedSession, resolvedUserId, setRowDeleting, showToast]);
+
+  const handleClearAll = useCallback(async () => {
+    setIsClearingAll(true);
+    try {
+      const result = await removeAllSessions(resolvedUserId);
+      clearEndedHistory();
+      setConfirmClearAll(false);
+      if (result) {
+        haptic('success');
+        const count = result.deleted_count ?? 0;
+        showToast({
+          message: count === 1 ? 'Cleared 1 session.' : `Cleared ${count} sessions.`,
+          variant: 'success',
+        });
+      } else {
+        haptic('error');
+        showToast({ message: `Couldn't clear sessions.`, variant: 'error' });
+      }
+    } catch {
+      haptic('error');
+      showToast({ message: `Couldn't clear sessions.`, variant: 'error' });
+    } finally {
+      setIsClearingAll(false);
+    }
+  }, [removeAllSessions, clearEndedHistory, resolvedUserId, showToast]);
 
   const rows = useMemo(() => {
     const list: Array<{
       key: string;
+      id: string;
       description: string;
       time: ReturnType<typeof humanizeTime>;
       turns: number;
       isActive: boolean;
+      isEnded?: boolean;
       onClick: () => void;
       onDelete: () => void;
     }> = [];
@@ -247,9 +407,11 @@ export function RecentSessionsSidebar({
         || s.focus_cue?.trim()
         || s.intention?.trim()
         || 'New session';
+      const truncated = truncatePreview(desc, 120);
       list.push({
         key: `open-${s.session_id}`,
-        description: truncatePreview(desc, 120),
+        id: s.session_id,
+        description: truncated,
         time: humanizeTime(s.updated_at),
         turns: s.turn_count,
         isActive: currentSession?.sessionId === s.session_id,
@@ -262,29 +424,43 @@ export function RecentSessionsSidebar({
               router.push('/session');
             });
         },
-        onDelete: () => {
-          void removeOpenSession(s.session_id);
-        },
+        onDelete: () => { void handleDeleteOpen(s.session_id, truncated); },
       });
     }
 
+    // Dedupe: if an ended session's id matches an open session, skip — the open row
+    // already represents the continued conversation.
+    const openSessionIds = new Set(openSessions.map((o) => o.session_id));
+
     for (const s of endedSessions) {
+      if (openSessionIds.has(s.sessionId)) continue;
       const desc =
         s.takeawayPreview?.trim()
         || 'Session ended';
+      const truncated = truncatePreview(desc, 120);
       list.push({
         key: `ended-${s.sessionId}`,
-        description: truncatePreview(desc, 120),
+        id: s.sessionId,
+        description: truncated,
         time: humanizeTime(s.endedAt),
         turns: s.messageCount,
         isActive: currentSession?.sessionId === s.sessionId,
-        onClick: () => { viewEndedSession(s.sessionId, s.presetType, s.contextMode); router.push('/session'); },
-        onDelete: () => removeEndedSession(s.sessionId),
+        isEnded: true,
+        onClick: () => {
+          void viewEndedSession(s.sessionId, s.presetType, s.contextMode, resolvedUserId)
+            .catch(() => {
+              // Still navigate — page shows whatever was loaded.
+            })
+            .finally(() => {
+              router.push('/session');
+            });
+        },
+        onDelete: () => { void handleDeleteEnded(s.sessionId, truncated); },
       });
     }
 
     return list;
-  }, [openSessions, endedSessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, viewEndedSession, removeOpenSession, removeEndedSession, router]);
+  }, [openSessions, endedSessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, viewEndedSession, router, handleDeleteOpen, handleDeleteEnded]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return rows;
@@ -300,25 +476,6 @@ export function RecentSessionsSidebar({
     )}>
       {isExpanded && (
         <>
-          {/* This control only collapses the already-open panel; opening lives in NavRail. */}
-          {/* Toggle */}
-          <button
-            onClick={() => { haptic('light'); onToggle(); }}
-            className="cosmic-chrome-button cosmic-focus-ring relative mb-6 flex h-10 w-10 items-center justify-center self-start rounded-xl transition-all duration-200 hover:scale-105"
-            aria-label="Collapse sessions"
-            title="Collapse sessions"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            {badgeCount > 0 && (
-              <span
-                className="absolute -right-0.5 -top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full text-[9px] font-semibold text-white"
-                style={{ background: 'var(--sophia-purple)' }}
-              >
-                {badgeCount > 9 ? '9+' : badgeCount}
-              </span>
-            )}
-          </button>
-
           {/* Content */}
           <div
             ref={panelSweepRef as RefObject<HTMLDivElement>}
@@ -375,6 +532,8 @@ export function RecentSessionsSidebar({
                   timeTooltip={r.time.tooltip}
                   turns={r.turns}
                   isActive={r.isActive}
+                  isEnded={r.isEnded}
+                  isDeleting={deletingIds.has(r.id)}
                   query={query}
                   onClick={r.onClick}
                   onDelete={r.onDelete}
@@ -393,6 +552,57 @@ export function RecentSessionsSidebar({
                 </p>
               )}
             </div>
+
+            {/* Clear all sessions — two-step confirm, only shown when there are rows */}
+            {rows.length > 0 && (
+              <div className="mt-2 border-t border-white/[0.04] px-2 pt-2">
+                {isClearingAll ? (
+                  <div
+                    aria-live="polite"
+                    className="flex items-center gap-2 px-2 py-1.5 text-[11px]"
+                    style={{ color: 'var(--cosmic-text-whisper)' }}
+                  >
+                    <span className="h-3 w-3 animate-spin rounded-full border border-current border-t-transparent" />
+                    Clearing...
+                  </div>
+                ) : confirmClearAll ? (
+                  <div className="flex items-center gap-2">
+                    <button
+                      aria-label="Confirm clear all sessions"
+                      onClick={() => { haptic('medium'); void handleClearAll(); }}
+                      className={cn(
+                        'flex items-center gap-1.5 rounded-md px-2 py-1 text-[11px] font-medium',
+                        'bg-red-500/15 hover:bg-red-500/25 transition-colors',
+                      )}
+                      style={{ color: 'rgb(248 113 113)' }}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                      Delete all?
+                    </button>
+                    <button
+                      onClick={() => setConfirmClearAll(false)}
+                      className="rounded-md px-2 py-1 text-[11px] hover:bg-white/[0.06] transition-colors"
+                      style={{ color: 'var(--cosmic-text-whisper)' }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    aria-label="Clear all sessions"
+                    onClick={() => { haptic('light'); setConfirmClearAll(true); }}
+                    className={cn(
+                      'flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-[11px]',
+                      'hover:bg-white/[0.04] transition-colors',
+                    )}
+                    style={{ color: 'var(--cosmic-text-whisper)' }}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Clear all sessions
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </>
       )}
@@ -543,14 +753,41 @@ export function MobileSessionsContent() {
   const router = useRouter();
   const { user } = useAuth();
   const endedSessions = useSessionHistoryStore((s) => s.sessions);
+  const syncEndedSessions = useSessionHistoryStore((s) => s.syncSessions);
   const removeEndedSession = useSessionHistoryStore((s) => s.removeSession);
   const openSessions = useSessionStore((s) => s.openSessions);
+  const refreshOpenSessions = useSessionStore((s) => s.refreshOpenSessions);
   const restoreOpenSession = useSessionStore((s) => s.restoreOpenSession);
   const viewEndedSession = useSessionStore((s) => s.viewEndedSession);
   const removeOpenSession = useSessionStore((s) => s.removeOpenSession);
+  const removeRecentSession = useSessionStore((s) => s.removeRecentSession);
   const currentSession = useSessionStore((s) => s.session);
   const [query, setQuery] = useState('');
   const resolvedUserId = currentSession?.userId || user?.id || (authBypassEnabled ? authBypassUserId : undefined);
+
+  useEffect(() => {
+    void refreshOpenSessions(resolvedUserId);
+
+    void listSessions(resolvedUserId, { limit: 50, status: 'ended' })
+      .then((result) => {
+        if (!result.success) return;
+        const endedFromBackend = result.data.sessions
+          .filter((session) => session.status === 'ended')
+          .map((session) => ({
+            sessionId: session.session_id,
+            presetType: normalizePresetType(session.session_type),
+            contextMode: normalizeContextMode(session.preset_context),
+            startedAt: session.started_at,
+            endedAt: session.ended_at ?? session.updated_at,
+            messageCount: session.turn_count,
+            takeawayPreview: session.last_message_preview ?? undefined,
+          }));
+        syncEndedSessions(endedFromBackend);
+      })
+      .catch(() => {
+        // Keep local history as fallback if backend sync fails.
+      });
+  }, [refreshOpenSessions, resolvedUserId, syncEndedSessions]);
 
   const rows = useMemo(() => {
     const list: Array<{
@@ -559,6 +796,7 @@ export function MobileSessionsContent() {
       time: ReturnType<typeof humanizeTime>;
       turns: number;
       isActive: boolean;
+      isEnded?: boolean;
       onClick: () => void;
       onDelete: () => void;
     }> = [];
@@ -601,13 +839,27 @@ export function MobileSessionsContent() {
         time: humanizeTime(s.endedAt),
         turns: s.messageCount,
         isActive: currentSession?.sessionId === s.sessionId,
-        onClick: () => { viewEndedSession(s.sessionId, s.presetType, s.contextMode); router.push('/session'); },
-        onDelete: () => removeEndedSession(s.sessionId),
+        isEnded: true,
+        onClick: () => {
+          void viewEndedSession(s.sessionId, s.presetType, s.contextMode, resolvedUserId)
+            .catch(() => {
+              // Still navigate — page shows whatever was loaded.
+            })
+            .finally(() => {
+              router.push('/session');
+            });
+        },
+        onDelete: () => {
+          // Delete from backend first so sync doesn't resurrect it, then clear local history.
+          void removeRecentSession(s.sessionId, resolvedUserId).finally(() => {
+            removeEndedSession(s.sessionId);
+          });
+        },
       });
     }
 
     return list;
-  }, [openSessions, endedSessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, viewEndedSession, removeOpenSession, removeEndedSession, router]);
+  }, [openSessions, endedSessions, currentSession?.sessionId, restoreOpenSession, resolvedUserId, viewEndedSession, removeOpenSession, removeRecentSession, removeEndedSession, router]);
 
   const filtered = useMemo(() => {
     if (!query.trim()) return rows;
@@ -655,6 +907,7 @@ export function MobileSessionsContent() {
             timeTooltip={r.time.tooltip}
             turns={r.turns}
             isActive={r.isActive}
+            isEnded={r.isEnded}
             query={query}
             onClick={r.onClick}
             onDelete={r.onDelete}

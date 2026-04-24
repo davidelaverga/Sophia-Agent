@@ -15,6 +15,7 @@ import {
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
+import { useSessionStore } from '../stores/session-store';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
@@ -70,11 +71,20 @@ function getBuilderArtifactDismissKey(
     return null;
   }
 
-  return [
-    builderArtifact.artifactPath ?? '',
-    [...(builderArtifact.supportingFiles ?? [])].sort().join('|'),
-    builderArtifact.artifactTitle,
-  ].join('::');
+  // Key on artifactPath only (with title fallback). supportingFiles and title
+  // can churn between emissions (e.g. voice runtime re-emits builder_result on
+  // later turns with slightly different supportingFiles). Including them in
+  // the key caused the "download pill reopens momentarily" bug when Sophia
+  // replied after the user dismissed the pill.
+  const path = builderArtifact.artifactPath?.trim();
+  if (path) {
+    return `path::${path}`;
+  }
+  const title = builderArtifact.artifactTitle?.trim();
+  if (title) {
+    return `title::${title}`;
+  }
+  return null;
 }
 
 export function useSessionRouteExperience({
@@ -240,10 +250,18 @@ export function useSessionRouteExperience({
     setInterrupt: routeIncomingInterrupt,
     setCurrentContext,
     setMessageMetadata,
+    onSessionTitle: useCallback((title: string, sid: string) => {
+      const targetSessionId = activeSessionId || sid || sessionId;
+      if (targetSessionId) {
+        useSessionStore.getState().recordOpenSessionActivity(targetSessionId, { title });
+      }
+    }, [activeSessionId, sessionId]),
     sessionId,
     activeSessionId,
     activeThreadId,
   });
+
+  const hasHandledInitialArtifactRef = useRef<string | null>(null);
 
   useEffect(() => {
     setBuilderTask(null);
@@ -253,11 +271,13 @@ export function useSessionRouteExperience({
     dismissedTaskIdsRef.current.clear();
     dismissedArtifactKeyRef.current = storedDismissedBuilderArtifactKey ?? null;
     currentArtifactTaskIdRef.current = null;
+    hasHandledInitialArtifactRef.current = null;
   }, [activeSessionId, storedDismissedBuilderArtifactKey]);
 
   useEffect(() => {
     const storedArtifactKey = getBuilderArtifactDismissKey(storedBuilderArtifact);
 
+    // Explicit dismiss recorded for this exact artifact → keep hidden.
     if (
       storedBuilderArtifact &&
       storedDismissedBuilderArtifactKey &&
@@ -267,8 +287,32 @@ export function useSessionRouteExperience({
       return;
     }
 
+    // Persisted-on-reload: if the session store already has a builder artifact
+    // at mount time (page refresh / open from history), treat it as already
+    // seen so the "download" pill doesn't pop back up. The artifact stays
+    // accessible via the Session Files library. Only artifacts that arrive
+    // during the live session (new SSE/voice emissions after mount) will show
+    // the pill.
+    //
+    // We gate on a per-session ref so this auto-dismiss only fires once, on
+    // the first render for the session — not every time storedBuilderArtifact
+    // updates during the live session.
+    const handledKey = hasHandledInitialArtifactRef.current;
+    const isInitialForSession = handledKey !== (activeSessionId ?? '');
+    if (isInitialForSession) {
+      hasHandledInitialArtifactRef.current = activeSessionId ?? '';
+      if (storedBuilderArtifact && storedArtifactKey) {
+        dismissedArtifactKeyRef.current = storedArtifactKey;
+        setBuilderArtifact(null);
+        if (storedArtifactKey !== storedDismissedBuilderArtifactKey) {
+          updateSession({ dismissedBuilderArtifactKey: storedArtifactKey });
+        }
+        return;
+      }
+    }
+
     setBuilderArtifact(storedBuilderArtifact ?? null);
-  }, [activeSessionId, storedBuilderArtifact, storedDismissedBuilderArtifactKey]);
+  }, [activeSessionId, storedBuilderArtifact, storedDismissedBuilderArtifactKey, updateSession]);
 
   // Rehydrate builder task on reconnect — discovers tasks started while SSE was down
   useEffect(() => {
@@ -283,9 +327,25 @@ export function useSessionRouteExperience({
         const active = await getActiveBuilderTask(activeThreadId, activeSessionId);
         if (cancelled || !active) return;
 
+        // Skip terminal tasks — completed/failed/cancelled tasks from a previous session
+        // on the same thread (e.g. after session continuation) should not reappear.
+        // For reconnects where the task already completed, storedBuilderArtifact →
+        // setBuilderArtifact handles restoring the artifact without needing rehydration.
+        const phase = getBuilderTaskPhaseFromStatus(active.status);
+        if (phase === 'completed' || phase === 'failed' || phase === 'timed_out' || phase === 'cancelled') return;
+
         const rehydrated = mergeBuilderTaskStatus(null, active);
         if (rehydrated) {
+          // Don't resurrect tasks that were dismissed by their task ID
           if (rehydrated.taskId && dismissedTaskIdsRef.current.has(rehydrated.taskId)) return;
+          
+          // Don't resurrect tasks whose artifacts were dismissed
+          const artifact = getBuilderArtifactFromStatus(active);
+          if (artifact) {
+            const artifactKey = getBuilderArtifactDismissKey(artifact);
+            if (artifactKey && dismissedArtifactKeyRef.current === artifactKey) return;
+          }
+          
           recordSophiaCaptureEvent({
             category: 'builder',
             name: 'task-rehydrated',
@@ -293,7 +353,6 @@ export function useSessionRouteExperience({
           });
           setBuilderTask(rehydrated);
 
-          const artifact = getBuilderArtifactFromStatus(active);
           if (artifact) {
             setBuilderArtifactAndPersist(artifact, rehydrated.taskId ?? active.task_id ?? null);
           }

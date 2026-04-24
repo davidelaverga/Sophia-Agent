@@ -28,6 +28,20 @@ def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypat
     assert response.media_type == "text/plain"
 
 
+def test_get_artifact_falls_back_to_binary_response_for_non_utf8_file(tmp_path, monkeypatch) -> None:
+    artifact_path = tmp_path / "guide.pdf"
+    content = b"%PDF-1.4\n\x93binary-pdf-content"
+    artifact_path.write_bytes(content)
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
+
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
+    response = asyncio.run(artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/guide.pdf", request))
+
+    assert bytes(response.body) == content
+    assert response.media_type == "application/pdf"
+
+
 def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, monkeypatch) -> None:
     outputs_dir = tmp_path / "outputs"
     nested_dir = outputs_dir / "nested"
@@ -137,8 +151,8 @@ def test_get_artifact_falls_back_to_supabase_when_local_and_workspace_copies_mis
 
     download_calls: list[dict[str, str]] = []
 
-    def fake_download(*, thread_id: str, filename: str):
-        download_calls.append({"thread_id": thread_id, "filename": filename})
+    def fake_download(*, user_id: str | None, thread_id: str, filename: str):
+        download_calls.append({"user_id": user_id, "thread_id": thread_id, "filename": filename})
         return (b"supabase copy", "text/markdown")
 
     monkeypatch.setattr(
@@ -154,7 +168,7 @@ def test_get_artifact_falls_back_to_supabase_when_local_and_workspace_copies_mis
 
     assert bytes(response.body).decode("utf-8") == "supabase copy"
     assert response.media_type == "text/markdown"
-    assert download_calls == [{"thread_id": "thread-z", "filename": "report.md"}]
+    assert download_calls == [{"user_id": None, "thread_id": "thread-z", "filename": "report.md"}]
 
 
 def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(tmp_path, monkeypatch) -> None:
@@ -172,7 +186,7 @@ def test_get_artifact_returns_404_when_local_missing_and_supabase_has_no_object(
     monkeypatch.setattr(
         artifacts_router.supabase_artifact_store,
         "download_artifact",
-        lambda *, thread_id, filename: None,
+        lambda *, user_id, thread_id, filename: None,
     )
 
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})

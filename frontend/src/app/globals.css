@@ -611,6 +611,11 @@ button, a, [role="button"] {
   --cosmic-border-faint: color-mix(in srgb, var(--sophia-purple) 6%, transparent);
   --cosmic-focus-ring: color-mix(in srgb, var(--sophia-purple) 55%, transparent);
 
+  /* NavRail text highlight tokens */
+  --cosmic-navrail-label-hover: color-mix(in srgb, var(--sophia-glow) 72%, var(--cosmic-text));
+  --cosmic-navrail-label-active-glow: 0 0 6px color-mix(in srgb, var(--sophia-glow) 46%, transparent);
+  --cosmic-navrail-label-hover-glow: 0 0 4px color-mix(in srgb, var(--sophia-glow) 38%, transparent);
+
   /* Teal action tokens */
   --cosmic-teal-bg: color-mix(in srgb, var(--cosmic-teal) 16%, transparent);
   --cosmic-teal-border: color-mix(in srgb, var(--cosmic-teal) 22%, transparent);

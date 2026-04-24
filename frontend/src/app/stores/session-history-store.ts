@@ -36,6 +36,9 @@ interface SessionHistoryState {
   
   /** Add a completed session to history */
   addSession: (entry: Omit<SessionHistoryEntry, 'recapViewed' | 'memoriesApproved'>) => void;
+
+  /** Merge backend-ended sessions into local history */
+  syncSessions: (entries: Omit<SessionHistoryEntry, 'recapViewed' | 'memoriesApproved'>[]) => void;
   
   /** Mark recap as viewed */
   markRecapViewed: (sessionId: string) => void;
@@ -79,6 +82,30 @@ export const useSessionHistoryStore = create<SessionHistoryState>()(
           // Add to front, limit total entries
           const updated = [newEntry, ...state.sessions].slice(0, MAX_HISTORY_ENTRIES);
           return { sessions: updated };
+        });
+      },
+
+      syncSessions: (entries) => {
+        set((state) => {
+          if (entries.length === 0) return state;
+
+          const previousById = new Map(state.sessions.map((session) => [session.sessionId, session]));
+          const merged: SessionHistoryEntry[] = entries.map((entry) => {
+            const previous = previousById.get(entry.sessionId);
+            return {
+              ...entry,
+              recapViewed: previous?.recapViewed ?? false,
+              memoriesApproved: previous?.memoriesApproved ?? false,
+            };
+          });
+
+          merged.sort((a, b) => {
+            const aTime = new Date(a.endedAt).getTime();
+            const bTime = new Date(b.endedAt).getTime();
+            return bTime - aTime;
+          });
+
+          return { sessions: merged.slice(0, MAX_HISTORY_ENTRIES) };
         });
       },
       

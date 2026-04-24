@@ -517,6 +517,46 @@ def invalidate_user_cache(user_id: str) -> None:
             del _cache[k]
 
 
+def list_recent_memories(user_id: str, limit: int = 40) -> list[dict]:
+    """Return recent Mem0 memories for ``user_id`` as normalized dicts.
+
+    Used by the offline extraction pipeline to pass ``existing_memories`` into
+    the extraction prompt so the LLM does not re-emit memories that already
+    exist. This provides semantic dedupe across session continuations and
+    against near-duplicate edits.
+
+    Each entry has: ``id``, ``content``, ``category``. Returns an empty list
+    if Mem0 is unavailable or the call fails.
+    """
+    client = _get_client()
+    if client is None:
+        return []
+
+    try:
+        result = client.get_all(filters={"user_id": user_id})
+    except Exception:
+        logger.warning("list_recent_memories: Mem0 fetch failed for user %s", user_id, exc_info=True)
+        return []
+
+    normalized = _normalize_get_all_result(result)
+    memories: list[dict] = []
+    for entry in normalized:
+        if not isinstance(entry, dict):
+            continue
+        content = entry.get("memory") or entry.get("content") or ""
+        if not content:
+            continue
+        meta = entry.get("metadata") or {}
+        memories.append({
+            "id": entry.get("id", ""),
+            "content": content,
+            "category": meta.get("category", "") if isinstance(meta, dict) else "",
+        })
+        if len(memories) >= limit:
+            break
+    return memories
+
+
 # ---------------------------------------------------------------------------
 # Eager startup: init client + ping in a background thread so the first
 # request doesn't pay the ~2s cold-start.  Runs once at module import time

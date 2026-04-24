@@ -63,7 +63,7 @@ describe('BuilderTaskNotice', () => {
       />,
     );
 
-    expect(screen.getByText('deliverable ready')).toBeInTheDocument();
+    expect(screen.getByText('Deliverable ready.')).toBeInTheDocument();
     expect(screen.getByText('Launch brief final')).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: /open/i }));

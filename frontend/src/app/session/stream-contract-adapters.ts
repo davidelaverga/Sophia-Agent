@@ -350,5 +350,6 @@ export function extractStreamMetadata(
     session_id: readString(meta, 'session_id') ?? previous.session_id,
     skill_used: readString(meta, 'skill_used') ?? previous.skill_used,
     emotion_detected: readString(meta, 'emotion_detected') ?? previous.emotion_detected,
+    session_title: readString(meta, 'session_title') ?? previous.session_title,
   };
 }

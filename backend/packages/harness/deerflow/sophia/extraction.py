@@ -12,7 +12,7 @@ from pathlib import Path
 
 import anthropic
 
-from deerflow.sophia.mem0_client import add_memories
+from deerflow.sophia.mem0_client import add_memories, list_recent_memories
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +110,38 @@ def extract_session_memories(
 
     # Use manual replacement instead of str.format() because the template
     # contains literal JSON curly braces that would conflict with format().
+    # Build existing_memories from caller override or fetch from Mem0 so the
+    # LLM can dedupe against prior extractions (critical for session
+    # continuations where the same thread is re-processed).
+    existing_memories_raw = metadata.get("existing_memories")
+    if existing_memories_raw is None:
+        try:
+            existing_memories_raw = list_recent_memories(user_id, limit=40)
+        except Exception:
+            logger.warning(
+                "extraction: failed to fetch existing memories for dedupe user=%s session=%s",
+                user_id,
+                session_id,
+                exc_info=True,
+            )
+            existing_memories_raw = []
+
+    if isinstance(existing_memories_raw, list) and existing_memories_raw:
+        existing_lines = []
+        for mem in existing_memories_raw:
+            if isinstance(mem, dict):
+                content = mem.get("content") or mem.get("memory") or ""
+                category = mem.get("category") or ""
+                if content:
+                    existing_lines.append(
+                        f"- [{category}] {content}" if category else f"- {content}"
+                    )
+        existing_memories_str = "\n".join(existing_lines) if existing_lines else "None"
+    elif isinstance(existing_memories_raw, str):
+        existing_memories_str = existing_memories_raw or "None"
+    else:
+        existing_memories_str = "None"
+
     replacements = {
         "{transcript}": transcript,
         "{artifacts}": str(metadata.get("artifacts", "None")),
@@ -119,7 +151,7 @@ def extract_session_memories(
         "{tone_start}": str(metadata.get("tone_start", "unknown")),
         "{tone_end}": str(metadata.get("tone_end", "unknown")),
         "{session_id}": session_id,
-        "{existing_memories}": str(metadata.get("existing_memories", "None")),
+        "{existing_memories}": existing_memories_str,
     }
     prompt = template
     for placeholder, value in replacements.items():

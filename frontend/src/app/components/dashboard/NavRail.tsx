@@ -15,8 +15,9 @@
 
 'use client';
 
-import { BookOpen, Clock, Settings } from 'lucide-react';
+import { BookOpen, Clock, FileText, Settings } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { useState } from 'react';
 
 import { haptic } from '../../hooks/useHaptics';
 import { cn } from '../../lib/utils';
@@ -31,9 +32,14 @@ interface NavRailItemProps {
   active?: boolean;
   badge?: number;
   onClick: () => void;
+  /** Render a micro-label below the icon for non-obvious icons. */
+  showLabel?: boolean;
+  railExpanded?: boolean;
 }
 
-function NavRailItem({ icon: Icon, label, active, badge, onClick }: NavRailItemProps) {
+function NavRailItem({ icon: Icon, label, active, badge, onClick, showLabel, railExpanded }: NavRailItemProps) {
+  const showInlineLabel = Boolean(showLabel && railExpanded);
+
   return (
     <div className="group relative flex w-full justify-center">
       <button
@@ -44,8 +50,11 @@ function NavRailItem({ icon: Icon, label, active, badge, onClick }: NavRailItemP
         }}
         aria-label={label}
         className={cn(
-          'relative flex h-10 w-10 items-center justify-center rounded-xl transition-all duration-200',
-          !active && 'hover:bg-white/[0.06]',
+          'relative rounded-xl transition-all duration-200',
+          railExpanded
+            ? 'flex h-10 w-[116px] items-center justify-start gap-2.5 px-3'
+            : 'flex h-10 w-10 items-center justify-center',
+          !active && 'hover:bg-[var(--cosmic-hover-bg)]',
         )}
         style={{ color: active ? 'var(--sophia-purple)' : 'var(--cosmic-text-muted)' }}
       >
@@ -60,6 +69,18 @@ function NavRailItem({ icon: Icon, label, active, badge, onClick }: NavRailItemP
           />
         )}
         <Icon className="h-[18px] w-[18px]" />
+        {showInlineLabel && (
+          <span
+            className={cn(
+              'text-[11px] tracking-[0.01em] leading-none font-medium transition-[color,text-shadow] duration-200',
+              active
+                ? 'text-[var(--sophia-purple)] [text-shadow:var(--cosmic-navrail-label-active-glow)]'
+                : 'text-[var(--cosmic-text-muted)] group-hover:text-[var(--cosmic-navrail-label-hover)] group-hover:[text-shadow:var(--cosmic-navrail-label-hover-glow)]',
+            )}
+          >
+            {label}
+          </span>
+        )}
         {badge != null && badge > 0 && (
           <span
             className="absolute -right-0.5 -top-0.5 flex min-w-[14px] items-center justify-center rounded-full px-1 text-[8px] font-bold text-white"
@@ -70,8 +91,8 @@ function NavRailItem({ icon: Icon, label, active, badge, onClick }: NavRailItemP
         )}
       </button>
 
-      {/* Tooltip — appears to the right on hover */}
-      {!active && (
+      {/* Tooltip — appears to the right on hover (only when no label is shown) */}
+      {!active && !railExpanded && !showLabel && (
         <div
           className={cn(
             'pointer-events-none absolute left-full top-1/2 -translate-y-1/2 ml-3',
@@ -112,28 +133,54 @@ export function NavRail({
 }: NavRailProps) {
   const router = useRouter();
   const sweepRef = useSweepGlow();
+  const [isHoverExpanded, setIsHoverExpanded] = useState(false);
+  const railExpanded = isHoverExpanded && !sessionsExpanded;
 
   return (
     <nav
       ref={sweepRef}
-      className="fixed left-0 top-0 bottom-0 z-30 hidden w-[56px] flex-col items-center py-5 lg:flex"
+      onMouseEnter={() => setIsHoverExpanded(true)}
+      onMouseLeave={() => setIsHoverExpanded(false)}
+      onFocusCapture={() => setIsHoverExpanded(true)}
+      onBlurCapture={(event) => {
+        const nextTarget = event.relatedTarget as Node | null;
+        if (!nextTarget || !event.currentTarget.contains(nextTarget)) {
+          setIsHoverExpanded(false);
+        }
+      }}
+      className={cn(
+        'fixed left-0 top-0 bottom-0 z-30 hidden flex-col py-5 lg:flex',
+        'transition-[width] duration-250 ease-out',
+        railExpanded ? 'w-[132px] items-start pl-2 pr-2' : 'w-[56px] items-center',
+      )}
       style={{
         filter: 'brightness(calc(1 + var(--sweep-glow, 0) * 0.10))',
       }}
     >
       {/* Primary navigation */}
-      <div className="mt-1 flex flex-col items-center gap-1.5">
+      <div className={cn('mt-1 flex w-full flex-col gap-1.5', railExpanded ? 'items-stretch' : 'items-center')}>
         <NavRailItem
           icon={Clock}
           label="Sessions"
           active={sessionsExpanded}
           badge={sessionCount}
           onClick={onToggleSessions}
+          showLabel
+          railExpanded={railExpanded}
         />
         <NavRailItem
           icon={BookOpen}
           label="Journal"
           onClick={() => router.push('/journal')}
+          showLabel
+          railExpanded={railExpanded}
+        />
+        <NavRailItem
+          icon={FileText}
+          label="Files"
+          onClick={() => router.push('/files')}
+          showLabel
+          railExpanded={railExpanded}
         />
       </div>
 
@@ -141,7 +188,7 @@ export function NavRail({
       <div className="flex-1" />
 
       {/* Settings — bottom */}
-      <NavRailItem icon={Settings} label="Settings" onClick={onOpenSettings} />
+      <NavRailItem icon={Settings} label="Settings" onClick={onOpenSettings} railExpanded={railExpanded} />
     </nav>
   );
 }
@@ -224,6 +271,11 @@ export function MobileNavBar({ onOpenSessions, sessionCount, onOpenSettings }: M
         icon={BookOpen}
         label="Journal"
         onClick={() => router.push('/journal')}
+      />
+      <MobileNavItem
+        icon={FileText}
+        label="Files"
+        onClick={() => router.push('/files')}
       />
       <MobileNavItem icon={Settings} label="Settings" onClick={onOpenSettings} />
     </nav>
