@@ -155,6 +155,7 @@ class SophiaState(TypedDict):
     # Builder
     builder_task: dict | None
     builder_result: dict | None
+    builder_delivery: dict | None   # transient current-turn attachment payload for channel uploads
 ```
 ---
 ## Mem0 — 9 Categories and Rules
@@ -220,7 +221,10 @@ if ritual:
 tools = [
     emit_artifact,       # REQUIRED every turn — carries TTS emotion + session continuity
     switch_to_builder,   # delegates to sophia_builder (lead_agent) via task()
+    share_builder_artifact,  # re-attach the latest built file on a later turn
     retrieve_memories,   # targeted deep retrieval (reflect flow, specific queries)
+    web_search,          # loaded from DeerFlow config when configured
+    web_fetch,           # loaded from DeerFlow config when configured
 ]
 ```
 ### emit_artifact — 13 required fields
@@ -228,7 +232,7 @@ tools = [
 Voice speeds → Cartesia values: slow=0.8, gentle=0.9, normal=1.0, engaged=1.05, energetic=1.15.
 Artifact arrives **after** the text stream completes. It updates the emotion for the **next** TTS call.
 ### switch_to_builder
-Companion asks all clarifying questions first, then calls `switch_to_builder` with complete specs. Builder cannot interrupt the parent graph for clarification. Companion stays live and relays progress while builder works asynchronously.
+Companion asks all clarifying questions first, then calls `switch_to_builder` with complete specs. Builder cannot interrupt the parent graph for clarification. The current implementation blocks until the builder finishes, stores `builder_result` plus a transient `builder_delivery` payload in Sophia state, and lets channels upload the finished file immediately in the same turn. Later resend requests should use `share_builder_artifact`.
 ---
 ## Platform Values and Effects
 | Value | Who sets it | What adapts downstream |

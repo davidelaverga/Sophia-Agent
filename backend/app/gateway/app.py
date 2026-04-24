@@ -1,5 +1,6 @@
 import logging
 import os
+import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -11,6 +12,8 @@ from app.gateway.routers import (
     artifacts,
     bootstrap,
     channels,
+    internal_artifacts,
+    internal_builder_tasks,
     mcp,
     memory,
     models,
@@ -21,6 +24,18 @@ from app.gateway.routers import (
     voice,
 )
 from deerflow.config.app_config import get_app_config
+
+# Narrow suppression: LangChain middleware emits a recurring
+# ``PydanticSerializationUnexpectedValue`` warning on the ``context``
+# RunnableConfig field (harmless — the field is serialised elsewhere with
+# ``exclude=None``). The warning fires on every turn and drowns real
+# log signal. Suppress ONLY messages that match the ``context`` field
+# pattern; unrelated Pydantic warnings are left intact.
+warnings.filterwarnings(
+    "ignore",
+    message=r".*PydanticSerializationUnexpectedValue.*context.*",
+    category=UserWarning,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -199,6 +214,15 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Artifacts API is mounted at /api/threads/{thread_id}/artifacts
     app.include_router(artifacts.router)
+
+    # Internal artifact replication endpoint (LangGraph → Gateway)
+    # Only active when SOPHIA_INTERNAL_SECRET is set (Render split-disk topology).
+    if internal_artifacts._load_secret():
+        app.include_router(internal_artifacts.router)
+        # Companion internal registry — terminal builder-task status
+        # snapshots pushed from the LangGraph subagent executor so the
+        # channel notifier can observe completion across processes.
+        app.include_router(internal_builder_tasks.router)
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)

@@ -16,6 +16,11 @@ from deerflow.agents.sophia_agent.utils import log_middleware
 
 class TurnCountState(AgentState):
     turn_count: NotRequired[int]
+    # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
+    # ``messages`` with the ``add_messages`` reducer; shadowing it with a plain
+    # ``list`` downgrades the channel to ``LastValue`` and makes parallel tool
+    # calls crash with ``InvalidUpdateError`` (see
+    # ``tests/test_sophia_state_schema_invariants.py``).
 
 
 class TurnCountMiddleware(AgentMiddleware[TurnCountState]):

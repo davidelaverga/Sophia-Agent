@@ -453,7 +453,9 @@ Tools follow the same philosophy. DeerFlow comes with a core toolset — web sea
 
 Complex tasks rarely fit in a single pass. The lead agent can spawn sub-agents on the fly — each with its own scoped context, tools, and termination conditions.
 
-Sophia's `sophia_builder` is a dedicated builder agent. The companion asks all clarifying questions first, then hands off complete specs. The builder works asynchronously while the companion stays live, with guarded builder-only web research available on delegated tasks that explicitly allow it.
+Sophia's `sophia_builder` is a dedicated builder agent. The companion asks all clarifying questions first, then hands off complete specs. The current implementation waits for the builder to finish inside the same turn, persists the result in Sophia state, and attaches a relay-safe delivery payload so Telegram can receive the generated file even when LangGraph and Gateway run on separate Render disks. A hard turn cap with partial pause / resume lets the user keep the run alive across turns without redoing completed work, and the companion can intentionally resend the latest builder file in a later turn.
+
+Sophia companion and builder mode inherit DeerFlow-native `web_search` and `web_fetch` tools from config, with guarded builder-only web research available on delegated tasks, so research-backed replies and builder outputs can browse and retrieve external sources without a Sophia-specific web integration.
 
 ### Sandbox & File System
 

@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -27,10 +28,35 @@ from deerflow.subagents.config import SubagentConfig
 
 logger = logging.getLogger(__name__)
 
+
+_EVENT_LOOP_CLOSED_MSG = "Event loop is closed"
+
+
+def _is_event_loop_closed_error(exc: BaseException) -> bool:
+    """Detect ``RuntimeError('Event loop is closed')`` or its wrapped forms.
+
+    This failure is surfaced when one subagent's event loop teardown runs
+    concurrently with another subagent's async work that still references
+    that loop (typically shared httpx transports or pending callbacks). We
+    distinguish it from generic subagent exceptions so the debug surface
+    can call it out instead of burying it in a generic ``FAILED``.
+    """
+    if not isinstance(exc, RuntimeError):
+        return False
+    message = str(exc) or ""
+    return _EVENT_LOOP_CLOSED_MSG in message
+
 # Idle threshold before declaring a subagent stuck. Generous enough to cover
 # long single-LLM iterations on the builder (Sonnet often spends 90–130s on a
 # single generation when writing large deliverables at max_tokens=8192).
 _STUCK_IDLE_MS = 150_000
+
+# Soft cap for a single streaming iteration. Exceeding this is not a hard
+# failure — we log a bounded warning and record the long-iteration count on
+# the result so operators can watch for a runaway ``write_file_tool`` loop.
+# Kept well below ``_STUCK_IDLE_MS`` so the signal appears before the stuck
+# detector fires.
+_ITERATION_SOFT_CAP_MS = 90_000
 
 # Synthetic progress uses the turn budget as denominator; kept in sync with
 # BuilderTaskMiddleware._HARD_CEILING. Capped below 100% so real completion
@@ -100,6 +126,12 @@ class SubagentResult:
     iteration_durations_ms: list[int] | None = None
     slowest_iteration_ms: int = 0
     total_stream_ms: int = 0
+    # Count of iterations that exceeded ``_ITERATION_SOFT_CAP_MS``. Useful
+    # for diagnosing ``write_file_tool`` loops that silently push an
+    # individual subagent past its overall timeout without failing loudly.
+    long_iteration_count: int = 0
+    last_long_iteration_ms: int = 0
+    last_long_iteration_tools: list[str] | None = None
 
     def __post_init__(self):
         """Initialize mutable defaults."""
@@ -577,17 +609,70 @@ def build_background_task_status_payload(result: SubagentResult) -> dict[str, An
             "total_stream_ms": result.total_stream_ms,
             "slowest_iteration_ms": result.slowest_iteration_ms,
             "iteration_durations_ms": result.iteration_durations_ms or [],
+            "long_iteration_count": result.long_iteration_count,
+            "last_long_iteration_ms": result.last_long_iteration_ms,
+            "last_long_iteration_tools": result.last_long_iteration_tools or [],
         },
         "owner_id": result.owner_id,
     }
 
 
+_TERMINAL_SUBAGENT_STATUSES = {
+    SubagentStatus.COMPLETED,
+    SubagentStatus.FAILED,
+    SubagentStatus.TIMED_OUT,
+    SubagentStatus.CANCELLED,
+}
+
+
+def _maybe_notify_gateway_of_terminal(result: SubagentResult) -> None:
+    """Push a terminal status snapshot to the Gateway's internal registry.
+
+    Best-effort bridge for Render's split-process topology: the Gateway's
+    channel notifier cannot see subagent results in the LangGraph process,
+    so terminal transitions are mirrored over HTTP. No-op when the
+    ``SOPHIA_GATEWAY_INTERNAL_URL`` / ``SOPHIA_INTERNAL_SECRET`` env vars
+    are absent (single-process / local dev), and any exception is
+    swallowed so subagent execution never regresses on notify failures.
+    """
+    if result.status not in _TERMINAL_SUBAGENT_STATUSES:
+        return
+    try:
+        from deerflow.sophia.storage import gateway_notify
+
+        if not gateway_notify.is_configured():
+            return
+
+        builder_result = _extract_builder_result_from_task_result(result)
+        payload: dict[str, Any] = {
+            "task_id": result.task_id,
+            "status": result.status.value,
+            "error": result.error,
+            "error_type": result.error_type,
+            "trace_id": result.trace_id,
+            "owner_id": result.owner_id,
+            "completed_at": _iso_or_none(result.completed_at),
+            "started_at": _iso_or_none(result.started_at),
+            "timed_out_at": _iso_or_none(result.timed_out_at),
+            "builder_result": builder_result,
+        }
+        gateway_notify.notify_builder_task_status(result.task_id, payload)
+    except Exception:  # noqa: BLE001 — must never break subagent execution
+        logger.warning(
+            "Gateway notify (terminal push) failed for task_id=%s",
+            result.task_id,
+            exc_info=True,
+        )
+
+
 def persist_background_task_status_payload(result: SubagentResult) -> None:
     if not result.owner_id:
+        _maybe_notify_gateway_of_terminal(result)
         return
 
     snapshot_path = _background_task_snapshot_path(result.owner_id, result.task_id)
     if snapshot_path is None:
+        _maybe_notify_gateway_of_terminal(result)
         return
 
     try:
@@ -598,6 +683,8 @@ def persist_background_task_status_payload(result: SubagentResult) -> None:
         temp_path.replace(snapshot_path)
     except Exception:
         logger.warning("Failed to persist background task snapshot for %s", result.task_id, exc_info=True)
+
+    _maybe_notify_gateway_of_terminal(result)
 
 
 def read_background_task_status_payload(user_id: str, task_id: str) -> dict[str, Any] | None:
@@ -615,6 +702,49 @@ def read_background_task_status_payload(user_id: str, task_id: str) -> dict[str,
         return None
 
     return payload
+
+
+def _ensure_runtime_directories() -> None:
+    """Ensure runtime directories required by the LangGraph/subagent stack
+    exist at import time.
+
+    On Render (and other containerised deploys) the LangGraph API process
+    expects a writable ``.langgraph_api`` directory under the project root
+    for its local persistence; when it is missing, the process emits a
+    recurring ``FileNotFoundError`` that buries real failure signal in the
+    logs. We also pre-create the ``users/`` directory used by
+    ``_background_task_snapshot_path`` so the first snapshot write does not
+    race with an on-demand mkdir during a subagent run.
+
+    Failures here are non-fatal: logging a warning is enough. The caller
+    (gateway lifespan hook, langgraph subprocess import) gets a healthy
+    default even without write permission to the project root.
+    """
+    candidates = (
+        _PROJECT_ROOT / ".langgraph_api",
+        _BACKGROUND_TASKS_DIR,
+    )
+    override = os.environ.get("LANGGRAPH_API_DIR")
+    if override:
+        try:
+            candidates = (Path(override), _BACKGROUND_TASKS_DIR)
+        except Exception:
+            logger.warning(
+                "LANGGRAPH_API_DIR=%r is not a valid path; falling back to default",
+                override,
+            )
+    for path in candidates:
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            logger.warning(
+                "Could not pre-create runtime directory %s; downstream writes may fail",
+                path,
+                exc_info=True,
+            )
+
+
+_ensure_runtime_directories()
 
 
 # Global storage for background task results
@@ -959,6 +1089,28 @@ class SubagentExecutor:
                             f"[trace={self.trace_id}] Subagent {self.config.name} iteration "
                             f"#{result.iteration_count} took {iter_ms}ms (>30s)"
                         )
+                    if iter_ms > _ITERATION_SOFT_CAP_MS:
+                        # Long iteration usually means a monolithic write_file
+                        # call is streaming a very large file. Record and warn
+                        # so operators can see the pattern; surface the last
+                        # observed tool names so a follow-up correlates tightly.
+                        prior_tools = (
+                            list(result.last_ai_message_summary.get("tool_names") or [])
+                            if isinstance(result.last_ai_message_summary, dict)
+                            else []
+                        )
+                        result.long_iteration_count += 1
+                        result.last_long_iteration_ms = iter_ms
+                        result.last_long_iteration_tools = prior_tools
+                        logger.warning(
+                            "[trace=%s] Subagent %s iteration #%d exceeded soft cap: %dms (cap=%dms) prior_tools=%s",
+                            self.trace_id,
+                            self.config.name,
+                            result.iteration_count,
+                            iter_ms,
+                            _ITERATION_SOFT_CAP_MS,
+                            prior_tools,
+                        )
 
                     snapshot_updated_at = datetime.now()
                     result.last_update_at = snapshot_updated_at
@@ -1111,15 +1263,36 @@ class SubagentExecutor:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} raised after timeout; preserving TIMED_OUT state")
                 result.error_type = type(e).__qualname__
                 return result
-            logger.exception(
-                f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed: "
-                f"{type(e).__qualname__}: {e}"
-            )
-            result.status = SubagentStatus.FAILED
-            result.error = str(e)
-            result.error_type = type(e).__qualname__
-            result.completed_at = datetime.now()
-            result.last_update_at = result.completed_at
+            if _is_event_loop_closed_error(e):
+                # Known cross-task contamination: one subagent's event loop
+                # closed while another's async work was still in flight
+                # (typically shared httpx transports or pending callbacks).
+                # Use a bounded warning rather than a full traceback — the
+                # stack is not actionable and the recurrent log noise from
+                # logger.exception obscures the real failure surface.
+                logger.warning(
+                    "[trace=%s] Subagent %s hit %r during execution (task_id=%s thread_id=%s)",
+                    self.trace_id,
+                    self.config.name,
+                    _EVENT_LOOP_CLOSED_MSG,
+                    result.task_id,
+                    self.thread_id,
+                )
+                result.status = SubagentStatus.FAILED
+                result.error = f"Event loop closed during subagent execution: {e}"
+                result.error_type = "EventLoopClosed"
+                result.completed_at = datetime.now()
+                result.last_update_at = result.completed_at
+            else:
+                logger.exception(
+                    f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed: "
+                    f"{type(e).__qualname__}: {e}"
+                )
+                result.status = SubagentStatus.FAILED
+                result.error = str(e)
+                result.error_type = type(e).__qualname__
+                result.completed_at = datetime.now()
+                result.last_update_at = result.completed_at
         finally:
             heartbeat_stop_event.set()
             if not heartbeat_task.done():
@@ -1165,7 +1338,23 @@ class SubagentExecutor:
             if result_holder is not None and result_holder.status == SubagentStatus.TIMED_OUT:
                 logger.warning(f"[trace={self.trace_id}] Subagent {self.config.name} execute() raised after timeout; preserving terminal TIMED_OUT")
                 return result_holder
-            logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
+            # Classify ``RuntimeError("Event loop is closed")`` explicitly so
+            # the debug surface can call it out. The loop can close here
+            # when asyncio.run()'s new loop is disposed before async cleanup
+            # (e.g. httpx transports) finishes. Prefer a warning without the
+            # traceback — the stack is not actionable and the noise buries
+            # real failure signal in the logs.
+            event_loop_closed = _is_event_loop_closed_error(e)
+            if event_loop_closed:
+                logger.warning(
+                    "[trace=%s] Subagent %s execute() hit %r (thread_id=%s)",
+                    self.trace_id,
+                    self.config.name,
+                    _EVENT_LOOP_CLOSED_MSG,
+                    self.thread_id,
+                )
+            else:
+                logger.exception(f"[trace={self.trace_id}] Subagent {self.config.name} execution failed")
             # Create a result with error if we don't have one
             if result_holder is not None:
                 result = result_holder
@@ -1177,7 +1366,12 @@ class SubagentExecutor:
                     thread_id=self.thread_id,
                 )
             result.status = SubagentStatus.FAILED
-            result.error = str(e)
+            result.error = (
+                f"Event loop closed during subagent execution: {e}"
+                if event_loop_closed
+                else str(e)
+            )
+            result.error_type = "EventLoopClosed" if event_loop_closed else type(e).__qualname__
             result.completed_at = datetime.now()
             return result
 

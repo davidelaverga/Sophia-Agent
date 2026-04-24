@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -659,6 +660,55 @@ class TestVisualCategories:
         assert resp.status_code == 200
         assert resp.json()["count"] == 0
 
+# ---------------------------------------------------------------------------
+# Telegram Linking
+# ---------------------------------------------------------------------------
+
+class TestTelegramLinking:
+    def test_create_telegram_link_token(self, client):
+        store = MagicMock()
+        store.issue_link_token.return_value = {
+            "token": "token-abc",
+            "expires_at": "2026-04-14T12:00:00+00:00",
+            "context_mode": "work",
+        }
+        with (
+            patch("app.gateway.routers.sophia.get_telegram_link_store", return_value=store),
+            patch("app.gateway.routers.sophia._get_telegram_bot_username", return_value="sophia_bot"),
+        ):
+            resp = client.post(
+                "/api/sophia/test_user/telegram/link",
+                json={"context_mode": "work", "ttl_seconds": 600},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["token"] == "token-abc"
+        assert data["context_mode"] == "work"
+        assert data["deep_link"] == "https://t.me/sophia_bot?start=token-abc"
+
+    def test_get_telegram_link_status_unlinked(self, client):
+        store = MagicMock()
+        store.get_link_by_user.return_value = None
+        with patch("app.gateway.routers.sophia.get_telegram_link_store", return_value=store):
+            resp = client.get("/api/sophia/test_user/telegram/link")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["linked"] is False
+        assert data["user_id"] == "test_user"
+
+    def test_delete_telegram_link(self, client):
+        store = MagicMock()
+        store.unlink_user.return_value = True
+        with patch("app.gateway.routers.sophia.get_telegram_link_store", return_value=store):
+            resp = client.delete("/api/sophia/test_user/telegram/link")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["linked"] is False
+        assert data["removed"] is True
+
 
 # ---------------------------------------------------------------------------
 # Background Task Control
@@ -666,7 +716,6 @@ class TestVisualCategories:
 
 class TestTaskStatus:
     def test_returns_running_task_progress_and_diagnostics(self, client):
-        from types import SimpleNamespace
 
         task_result = SimpleNamespace(
             task_id="task-1",
@@ -749,7 +798,6 @@ class TestTaskStatus:
         assert data["debug"]["recent_shell_commands"][0]["error"] == "No suitable shell executable found."
 
     def test_returns_completed_task_builder_result(self, client):
-        from types import SimpleNamespace
 
         task_result = SimpleNamespace(
             task_id="task-2",
@@ -880,6 +928,278 @@ class TestTaskStatus:
         assert data["progress_percent"] == 50
         assert data["debug"]["last_tool_names"] == ["write_todos"]
         assert data["debug"]["last_shell_command"]["status"] == "timed_out"
+
+    def test_returns_task_from_pushed_registry_when_in_memory_and_snapshot_missing(self, client):
+        pushed_payload = {
+            "task_id": "task-pushed-1",
+            "status": "completed",
+            "trace_id": "trace-p1",
+            "builder_result": {
+                "artifact_title": "Pushed Report",
+                "artifact_type": "document",
+                "companion_summary": "Done from pushed registry.",
+            },
+            "completed_at": "2026-04-05T10:01:00+00:00",
+            "started_at": "2026-04-05T10:00:00+00:00",
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=pushed_payload),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-pushed-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-pushed-1"
+        assert data["status"] == "completed"
+        assert data["builder_result"]["artifact_title"] == "Pushed Report"
+        assert data["builder_delivery"] is None  # no thread_id provided
+
+    def test_hydrates_builder_delivery_when_thread_id_provided_with_pushed_registry(self, client, tmp_path, monkeypatch):
+        from deerflow.config.paths import Paths
+
+        paths = Paths(str(tmp_path))
+        monkeypatch.setattr(
+            "deerflow.sophia.tools.builder_delivery.get_paths", lambda: paths
+        )
+        thread_id = "thread-hydrate"
+        outputs_dir = paths.sandbox_outputs_dir(thread_id)
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        (outputs_dir / "report.txt").write_text("hello pushed")
+
+        pushed_payload = {
+            "task_id": "task-pushed-2",
+            "status": "completed",
+            "trace_id": "trace-p2",
+            "builder_result": {
+                "artifact_path": "/mnt/user-data/outputs/report.txt",
+                "artifact_type": "document",
+                "artifact_title": "Pushed Report",
+                "companion_summary": "Done.",
+            },
+            "completed_at": "2026-04-05T10:01:00+00:00",
+            "started_at": "2026-04-05T10:00:00+00:00",
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=pushed_payload),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-pushed-2?thread_id=thread-hydrate")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "completed"
+        assert data["builder_delivery"] is not None
+        assert data["builder_delivery"]["source"] == "builder_result"
+        assert len(data["builder_delivery"]["attachments"]) == 1
+        assert data["builder_delivery"]["attachments"][0]["filename"] == "report.txt"
+
+    def test_returns_task_from_langgraph_thread_state_fallback(self, client):
+        thread_state = {
+            "values": {
+                "builder_task": {
+                    "task_id": "task-lg-1",
+                    "status": "completed",
+                    "description": "Build doc",
+                },
+                "builder_result": {
+                    "artifact_title": "LangGraph Report",
+                    "artifact_type": "document",
+                    "companion_summary": "Done via thread state.",
+                },
+            }
+        }
+
+        mock_resp = MagicMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = thread_state
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=None),
+            patch("httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            resp = client.get("/api/sophia/test_user/tasks/task-lg-1?thread_id=thread-lg-1")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-lg-1"
+        assert data["status"] == "completed"
+        assert data["builder_result"]["artifact_title"] == "LangGraph Report"
+
+    def test_returns_404_when_all_sources_empty(self, client):
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=None),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/missing-task")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Task not found"
+
+    # ------------------------------------------------------------------
+    # Codex bot review fixes (LANGGRAPH_URL / owner check / task_id match)
+    # ------------------------------------------------------------------
+
+    def test_langgraph_url_env_is_preferred(self, monkeypatch):
+        """_get_langgraph_base_url should prefer LANGGRAPH_URL (render.yaml canonical)."""
+        from app.gateway.routers.sophia import _get_langgraph_base_url
+
+        monkeypatch.setenv("LANGGRAPH_URL", "http://lg-primary")
+        monkeypatch.setenv("SOPHIA_LANGGRAPH_BASE_URL", "http://lg-legacy")
+        monkeypatch.setenv("SOPHIA_BACKEND_BASE_URL", "http://lg-backend")
+
+        assert _get_langgraph_base_url() == "http://lg-primary"
+
+        monkeypatch.delenv("LANGGRAPH_URL", raising=False)
+        # When LANGGRAPH_URL is absent, falls back to SOPHIA_LANGGRAPH_BASE_URL
+        assert _get_langgraph_base_url() == "http://lg-legacy"
+
+    def test_pushed_registry_rejects_other_user(self, client):
+        """Pushed registry fallback must enforce owner_id == user_id to avoid cross-user exposure."""
+        pushed_payload = {
+            "task_id": "task-otheruser",
+            "status": "completed",
+            "owner_id": "other_user",
+            "builder_result": {
+                "artifact_title": "Secret Report",
+                "artifact_type": "document",
+                "companion_summary": "Should not leak.",
+            },
+            "completed_at": "2026-04-05T10:01:00+00:00",
+            "started_at": "2026-04-05T10:00:00+00:00",
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=pushed_payload),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-otheruser")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Task not found"
+
+    def test_pushed_registry_allows_missing_owner_id(self, client):
+        """Backwards-compat: older pushed payloads without owner_id must still be served."""
+        pushed_payload = {
+            "task_id": "task-legacy",
+            "status": "completed",
+            "builder_result": {
+                "artifact_title": "Legacy Report",
+                "artifact_type": "document",
+                "companion_summary": "Older push payload.",
+            },
+            "completed_at": "2026-04-05T10:01:00+00:00",
+            "started_at": "2026-04-05T10:00:00+00:00",
+        }
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=pushed_payload),
+        ):
+            resp = client.get("/api/sophia/test_user/tasks/task-legacy")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-legacy"
+        assert data["status"] == "completed"
+        assert data["builder_result"]["artifact_title"] == "Legacy Report"
+
+    def test_thread_state_fallback_rejects_mismatched_task_id(self, client):
+        """Thread-state fallback must not return a newer task_id's status when the caller polls an older one."""
+        thread_state = {
+            "values": {
+                "builder_task": {
+                    "task_id": "task-NEW",
+                    "status": "completed",
+                    "description": "Second task on the same thread",
+                },
+                "builder_result": {
+                    "artifact_title": "Newer Report",
+                    "artifact_type": "document",
+                    "companion_summary": "Newer build.",
+                },
+            }
+        }
+
+        mock_resp = MagicMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = thread_state
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=None),
+            patch("httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            resp = client.get("/api/sophia/test_user/tasks/task-OLD?thread_id=thread-shared")
+
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Task not found"
+
+    def test_thread_state_fallback_accepts_matching_task_id(self, client):
+        """Thread-state fallback returns the response when builder_task.task_id matches the request."""
+        thread_state = {
+            "values": {
+                "builder_task": {
+                    "task_id": "task-match",
+                    "status": "completed",
+                    "description": "Matching task",
+                },
+                "builder_result": {
+                    "artifact_title": "Matched Report",
+                    "artifact_type": "document",
+                    "companion_summary": "OK.",
+                },
+            }
+        }
+
+        mock_resp = MagicMock(spec=httpx.Response)
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = thread_state
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch("deerflow.subagents.executor.get_background_task_result", return_value=None),
+            patch("deerflow.subagents.executor.read_background_task_status_payload", return_value=None),
+            patch("app.gateway.routers.internal_builder_tasks.get_pushed_builder_task", return_value=None),
+            patch("httpx.AsyncClient") as mock_client_cls,
+        ):
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            resp = client.get("/api/sophia/test_user/tasks/task-match?thread_id=thread-match")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == "task-match"
+        assert data["status"] == "completed"
+        assert data["builder_result"]["artifact_title"] == "Matched Report"
 
 
 # ---------------------------------------------------------------------------

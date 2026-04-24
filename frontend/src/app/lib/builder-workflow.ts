@@ -82,6 +82,17 @@ export type BuilderTaskStatusResponse = {
     detail?: string;
     status?: string;
   }>;
+  builder_delivery?: {
+    source?: string;
+    attachments?: Array<{
+      virtual_path?: string;
+      filename?: string;
+      mime_type?: string;
+      size?: number;
+      is_image?: boolean;
+      content_base64?: string;
+    }>;
+  } | null;
 };
 
 const TERMINAL_TASK_PHASES = new Set<BuilderTaskV1['phase']>(['completed', 'failed', 'timed_out', 'cancelled']);
@@ -267,8 +278,20 @@ export async function getActiveBuilderTask(
   return payload as BuilderTaskStatusResponse;
 }
 
-export async function getBuilderTaskStatus(taskId: string): Promise<BuilderTaskStatusResponse> {
-  const response = await fetch(`/api/sophia/tasks/${encodeURIComponent(taskId)}`, {
+export async function getBuilderTaskStatus(
+  taskId: string,
+  threadId?: string,
+): Promise<BuilderTaskStatusResponse> {
+  const params = new URLSearchParams();
+  if (threadId) {
+    params.set('thread_id', threadId);
+  }
+  const qs = params.toString();
+  const url = qs
+    ? `/api/sophia/tasks/${encodeURIComponent(taskId)}?${qs}`
+    : `/api/sophia/tasks/${encodeURIComponent(taskId)}`;
+
+  const response = await fetch(url, {
     method: 'GET',
     cache: 'no-store',
   });

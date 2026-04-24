@@ -1,5 +1,6 @@
 """End-to-end regression tests for Sophia builder handoff flow."""
 
+import base64
 import importlib
 import json
 import tempfile
@@ -8,12 +9,32 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_session import BuilderSessionMiddleware
 from deerflow.config.summarization_config import ContextSize, SummarizationConfig
 from deerflow.subagents.config import SubagentConfig
+
+
+@pytest.fixture(autouse=True)
+def _clear_executor_task_lookup(monkeypatch):
+    """Neutralize the executor-level duplicate-launch fallback by default.
+
+    ``switch_to_builder`` consults ``get_latest_task_for_thread`` on every
+    call to detect in-flight builder tasks that were launched but never
+    wrote through to companion state. For most tests in this module that
+    lookup should return ``None`` so the queue path is deterministic;
+    individual tests that want to exercise the fallback override this
+    monkeypatch explicitly.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    monkeypatch.setattr(
+        switch_module,
+        "get_latest_task_for_thread",
+        lambda _thread_id: None,
+    )
 
 
 def _make_runtime(state: dict, thread_id: str = "thread-1", user_id: str | None = None, context_user_id: str | None = None) -> SimpleNamespace:
@@ -139,6 +160,255 @@ def test_switch_to_builder_suppresses_duplicate_launch(monkeypatch):
 
     assert payload["status"] == "already_running"
     assert payload["task_id"] == "task-existing"
+
+
+def test_switch_to_builder_suppresses_duplicate_via_executor_fallback(monkeypatch):
+    """When ``state.builder_task`` is empty but the executor still holds an
+    in-flight task for the same thread, the guard must fire via
+    ``get_latest_task_for_thread`` and prevent a second launch.
+
+    This is the Render failure mode from the post-reducer-hotfix logs: the
+    companion graph lost its ``builder_task`` across a worker cycle while
+    the subagent was still running. Without this fallback, two builder
+    tasks ran concurrently on the same thread.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    class FailIfCalledExecutor:
+        def __init__(self, **kwargs):  # pragma: no cover - should never run
+            raise AssertionError(
+                "SubagentExecutor must not be constructed when executor-level duplicate is detected"
+            )
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", FailIfCalledExecutor)
+
+    inflight_result = SimpleNamespace(
+        task_id="task-inflight",
+        trace_id="trace-inflight",
+        status=SimpleNamespace(value="running"),
+        started_at=datetime(2026, 4, 21, 18, 0, 0),
+        description="Builder: running deliverable",
+    )
+    monkeypatch.setattr(
+        switch_module,
+        "get_latest_task_for_thread",
+        lambda thread_id: inflight_result if thread_id == "thread-1" else None,
+    )
+
+    # state has no builder_task — this is the failure mode we guard against.
+    runtime = _make_runtime({"user_id": "user_abc"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a second deck",
+        task_type="presentation",
+        tool_call_id="tc-builder-dup-via-executor",
+    )
+    payload = json.loads(response)
+
+    assert payload["status"] == "already_running"
+    assert payload["task_id"] == "task-inflight"
+    assert payload["builder_task"]["task_id"] == "task-inflight"
+    assert payload["builder_task"]["status"] == "running"
+
+
+def test_switch_to_builder_synthesizes_cold_start_companion_artifact(monkeypatch):
+    """When no prior artifact exists, ``switch_to_builder`` must pass a
+    neutral synthesized companion_artifact to the builder chain instead of
+    an empty dict.
+
+    Regression guard for the cold-start UX degradation: when the user
+    kicks off a build on their first turn (no emit_artifact yet,
+    current_artifact/previous_artifact absent), downstream middleware
+    would otherwise receive an empty artifact and skip tone calibration.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    # First-turn state: no messages, no artifacts.
+    runtime = _make_runtime({"user_id": "user_cold_start"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a short explainer about supply chain resilience.",
+        task_type="document",
+        tool_call_id="tc-cold-start",
+    )
+    payload = json.loads(response)
+
+    delegation_context = payload["delegation_context"]
+    companion_artifact = delegation_context["companion_artifact"]
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert handoff_resolution["artifact_source"] == "cold_start_default"
+    assert handoff_resolution["latest_emit_artifact_present"] is False
+    assert handoff_resolution["current_artifact_present"] is False
+    assert handoff_resolution["previous_artifact_present"] is False
+    assert companion_artifact["tone_estimate"] == 2.5
+    assert companion_artifact["tone_target"] == 3.0
+    assert companion_artifact["active_tone_band"] == "engagement"
+    assert companion_artifact["voice_speed"] == "normal"
+
+
+def test_switch_to_builder_does_not_synthesize_when_prior_artifact_present(monkeypatch):
+    """Synthesis must be silent when any of the three usual artifact sources
+    are populated — the existing artifact is always preferred."""
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            "user_id": "user_with_artifact",
+            "current_artifact": {
+                "tone_estimate": 3.2,
+                "active_tone_band": "engagement",
+                "voice_speed": "engaged",
+            },
+        }
+    )
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a follow-up deliverable.",
+        task_type="document",
+        tool_call_id="tc-has-artifact",
+    )
+    payload = json.loads(response)
+
+    handoff_resolution = payload["handoff_resolution"]
+    companion_artifact = payload["delegation_context"]["companion_artifact"]
+
+    assert handoff_resolution["artifact_source"] == "current_artifact_state"
+    assert companion_artifact["tone_estimate"] == 3.2
+    assert companion_artifact["voice_speed"] == "engaged"
+
+
+def test_switch_to_builder_queues_when_executor_has_only_terminal_task(monkeypatch):
+    """Terminal executor results MUST NOT block a new launch.
+
+    Guards against over-eager duplicate suppression: completed/failed/timed_out
+    tasks in ``_background_tasks`` should not be mistaken for in-flight ones.
+    """
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(
+            self,
+            task: str,
+            task_id: str | None = None,
+            owner_id: str | None = None,
+            description: str | None = None,
+        ):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    terminal_result = SimpleNamespace(
+        task_id="task-done",
+        trace_id="trace-done",
+        status=SimpleNamespace(value="completed"),
+        started_at=datetime(2026, 4, 21, 17, 0, 0),
+        description="Builder: prior completed task",
+    )
+    monkeypatch.setattr(
+        switch_module,
+        "get_latest_task_for_thread",
+        lambda _thread_id: terminal_result,
+    )
+
+    runtime = _make_runtime({"user_id": "user_abc"})
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Kick off a new build",
+        task_type="document",
+        tool_call_id="tc-builder-new",
+    )
+    payload = json.loads(response)
+
+    # Queued (not already_running) because the only visible task is terminal.
+    assert payload["status"] == "queued"
+    assert payload["task_id"] == "tc-builder-new"
 
 
 def test_switch_to_builder_prefers_runtime_config_user_id(monkeypatch):
@@ -469,7 +739,11 @@ def test_switch_to_builder_reports_default_resolution_sources(monkeypatch):
     handoff_resolution = payload["handoff_resolution"]
 
     assert handoff_resolution["user_id_source"] == "default_user"
-    assert handoff_resolution["artifact_source"] == "default_empty"
+    # ``cold_start_default`` marks the synthesized neutral artifact that
+    # replaces the empty-dict fallback. The three *_present diagnostics
+    # must all remain False so observability can still distinguish the
+    # synthesized path from hydrated ones.
+    assert handoff_resolution["artifact_source"] == "cold_start_default"
     assert handoff_resolution["config_user_id_present"] is False
     assert handoff_resolution["context_user_id_present"] is False
     assert handoff_resolution["state_user_id_present"] is False
@@ -728,6 +1002,159 @@ def test_builder_session_logs_missing_background_task(monkeypatch):
     )
 
 
+def _make_handoff_state(task_id: str, trace_id: str, *, user_id: str | None = None) -> dict:
+    """Build a minimal companion-turn state with a fresh builder handoff.
+
+    Mirrors the shape produced by ``switch_to_builder`` so the session
+    middleware adopts the handoff and treats the task as non-terminal
+    (``queued``) before checking for its background record.
+    """
+    handoff_payload = {
+        "type": "builder_handoff",
+        "status": "queued",
+        "task_id": task_id,
+        "task_type": "document",
+        "trace_id": trace_id,
+        "builder_task": {
+            "task_id": task_id,
+            "description": "Build deck",
+            "task_type": "document",
+            "status": "queued",
+            "delegated_at": "2026-04-09T00:00:00Z",
+            "trace_id": trace_id,
+        },
+    }
+    ai_msg = AIMessage(
+        content="Delegating to builder",
+        tool_calls=[{"id": "tool-snapshot", "name": "switch_to_builder", "args": {"task_type": "document"}}],
+    )
+    tool_msg = ToolMessage(
+        content=json.dumps(handoff_payload),
+        tool_call_id="tool-snapshot",
+        name="switch_to_builder",
+    )
+    state: dict = {"messages": [ai_msg, tool_msg], "system_prompt_blocks": []}
+    if user_id is not None:
+        state["user_id"] = user_id
+    return state
+
+
+def test_builder_session_recovers_failed_state_from_snapshot(monkeypatch):
+    """When get_background_task_result returns None but the on-disk snapshot
+    carries a terminal payload, the middleware surfaces the snapshot's
+    status + error (and progress fields) instead of the generic
+    "Builder task state disappeared before completion" message.
+
+    Regression guard for the user-reported case where Sophia had no
+    awareness of the real builder status after an interrupted run.
+    """
+    task_id = "task-snap-failed"
+    state = _make_handoff_state(task_id, "trace-snap-failed", user_id="user_abc")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-snap-failed"}
+
+    snapshot_payload = {
+        "task_id": task_id,
+        "status": "failed",
+        "trace_id": "trace-snap-failed",
+        "description": "Build deck",
+        "error": "builder_web_budget reducer error",
+        "progress_percent": 90,
+        "progress_source": "iterations",
+        "debug": {"iteration_count": 16, "slowest_iteration_ms": 155_688},
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.read_background_task_status_payload",
+        lambda user_id, tid: snapshot_payload if user_id == "user_abc" and tid == task_id else None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda *args, **kwargs: None,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    recovered = state["builder_task"]
+    assert recovered["status"] == "failed"
+    assert recovered["error"] == "builder_web_budget reducer error"
+    assert recovered["progress_percent"] == 90
+    assert recovered["progress_source"] == "iterations"
+    assert recovered["debug"] == {"iteration_count": 16, "slowest_iteration_ms": 155_688}
+    assert state["active_mode"] == "companion"
+    # Failure block must still be emitted so the companion can narrate the
+    # outcome to the user instead of pretending the build is still running.
+    assert any(
+        "Latest builder task ended with status=failed" in block
+        for block in state["system_prompt_blocks"]
+    )
+
+
+def test_builder_session_recovers_completed_state_from_snapshot(monkeypatch):
+    """When the snapshot shows the task already COMPLETED (common after a
+    post-terminal cleanup or a worker restart that wiped the in-memory
+    dict), the middleware must surface the completion + builder_result
+    instead of marking the task failed.
+    """
+    task_id = "task-snap-completed"
+    state = _make_handoff_state(task_id, "trace-snap-completed", user_id="user_abc")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-snap-completed"}
+
+    builder_result = {
+        "artifact_path": "outputs/deck.md",
+        "artifact_type": "document",
+        "artifact_title": "Investor deck",
+        "companion_summary": "Deck drafted.",
+        "confidence": 0.88,
+    }
+    snapshot_payload = {
+        "task_id": task_id,
+        "status": "completed",
+        "trace_id": "trace-snap-completed",
+        "description": "Build deck",
+        "completed_at": "2026-04-21T19:35:30+00:00",
+        "progress_percent": 100,
+        "progress_source": "todos",
+        "builder_result": builder_result,
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.read_background_task_status_payload",
+        lambda _user_id, _task_id: snapshot_payload,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda *args, **kwargs: None,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    recovered = state["builder_task"]
+    assert recovered["status"] == "completed"
+    assert recovered["progress_percent"] == 100
+    assert recovered["completed_at"] == "2026-04-21T19:35:30+00:00"
+    # Error field must NOT be synthesized on completed snapshots.
+    assert "error" not in recovered
+    assert state["builder_result"] == builder_result
+    # No failure block on completed snapshots — the ArtifactMiddleware
+    # synthesis path takes over from here.
+    assert not any(
+        "Latest builder task ended with status=failed" in block
+        for block in state["system_prompt_blocks"]
+    )
+
+
 def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
@@ -794,3 +1221,387 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names
     assert "builder_web_fetch" in builder_tool_names
+
+
+def test_companion_registers_share_builder_artifact_tool(monkeypatch):
+    """The companion must expose ``share_builder_artifact`` so users asking
+    Sophia to "send it again" can reach the re-share path the builder-delivery
+    plumbing already supports. Without it, the resend flow is unreachable and
+    the delivery mechanism added alongside the tool is effectively dead code.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured = {}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    class FakeSummarizationMiddleware:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    FakeSummarizationMiddleware.__name__ = "SummarizationMiddleware"
+
+    monkeypatch.setattr(companion_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(companion_module, "create_chat_model", lambda **kwargs: "summary-model")
+    monkeypatch.setattr(companion_module, "SummarizationMiddleware", FakeSummarizationMiddleware)
+    monkeypatch.setattr(
+        companion_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(
+            enabled=False,
+            trigger=[ContextSize(type="tokens", value=2000)],
+            keep=ContextSize(type="messages", value=20),
+        ),
+    )
+    monkeypatch.setattr(companion_module, "make_retrieve_memories_tool", lambda user_id: MagicMock(name="retrieve_memories"))
+    # Skip web tool loading (pulls in AppConfig which requires a populated
+    # config.yaml when tests run in isolation).
+    monkeypatch.setattr(companion_module, "load_sophia_web_tools", lambda: [])
+
+    def _capture(**kwargs):
+        captured["tools"] = kwargs["tools"]
+        return DummyAgent()
+
+    monkeypatch.setattr(companion_module, "create_agent", _capture)
+    companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
+
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "share_builder_artifact" in tool_names, (
+        f"share_builder_artifact not registered on companion; got tools={tool_names}"
+    )
+
+
+def _capture_companion_middlewares(monkeypatch, *, async_builder: bool) -> dict[str, list]:
+    """Shared helper for the async_builder wiring tests: patches the same
+    set of side-effectful companion imports that ``make_sophia_agent``
+    touches, invokes the factory, and returns whatever ``create_agent`` was
+    called with so the test can assert on middlewares / tools.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured: dict[str, list] = {"middleware": [], "tools": []}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    class FakeSummarizationMiddleware:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    FakeSummarizationMiddleware.__name__ = "SummarizationMiddleware"
+
+    monkeypatch.setattr(companion_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(companion_module, "create_chat_model", lambda **kwargs: "summary-model")
+    monkeypatch.setattr(companion_module, "SummarizationMiddleware", FakeSummarizationMiddleware)
+    monkeypatch.setattr(
+        companion_module,
+        "get_summarization_config",
+        lambda: SummarizationConfig(
+            enabled=False,
+            trigger=[ContextSize(type="tokens", value=2000)],
+            keep=ContextSize(type="messages", value=20),
+        ),
+    )
+    monkeypatch.setattr(companion_module, "make_retrieve_memories_tool", lambda user_id: MagicMock(name="retrieve_memories"))
+    monkeypatch.setattr(companion_module, "load_sophia_web_tools", lambda: [])
+
+    def _capture(**kwargs):
+        captured["middleware"] = list(kwargs["middleware"])
+        captured["tools"] = list(kwargs["tools"])
+        return DummyAgent()
+
+    monkeypatch.setattr(companion_module, "create_agent", _capture)
+    companion_module.make_sophia_agent(
+        {"configurable": {"user_id": "user_123", "async_builder": async_builder}}
+    )
+    return captured
+
+
+def test_async_builder_flag_attaches_async_subagent_middleware(monkeypatch):
+    """When ``configurable.async_builder=True``, the companion registers the
+    deepagents AsyncSubAgentMiddleware and surfaces the five async-task
+    management tools. This is the Phase 1 wiring guarantee for the
+    deepagents v0.5 migration.
+    """
+    captured = _capture_companion_middlewares(monkeypatch, async_builder=True)
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "AsyncSubAgentMiddleware" in middleware_types, (
+        f"AsyncSubAgentMiddleware missing from companion chain when flag=True; "
+        f"got middlewares={middleware_types}"
+    )
+
+    # All five async-task tools must be reachable from the model. They come
+    # from the middleware's ``tools`` property, which ``create_agent``
+    # merges with the supplied ``tools`` list.
+    async_mw = next(mw for mw in captured["middleware"] if type(mw).__name__ == "AsyncSubAgentMiddleware")
+    advertised = {getattr(t, "name", None) for t in async_mw.tools}
+    expected_tools = {
+        "start_async_task",
+        "check_async_task",
+        "update_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
+    }
+    assert expected_tools.issubset(advertised), (
+        f"expected async tools missing; middleware advertises {advertised}"
+    )
+
+    # Legacy sync tool must still coexist during the rollout window so the
+    # flip between sync and async is a one-config change.
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "switch_to_builder" in tool_names
+
+
+def test_async_builder_flag_default_keeps_sync_only(monkeypatch):
+    """When ``configurable.async_builder`` is absent (default False), the
+    companion must NOT attach AsyncSubAgentMiddleware. The sync
+    ``switch_to_builder`` path is the production default for the rollout.
+    """
+    captured = _capture_companion_middlewares(monkeypatch, async_builder=False)
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "AsyncSubAgentMiddleware" not in middleware_types, (
+        f"AsyncSubAgentMiddleware should be absent when flag=False; "
+        f"got middlewares={middleware_types}"
+    )
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "switch_to_builder" in tool_names
+    assert "start_async_task" not in tool_names
+
+
+def test_companion_chain_includes_dangling_tool_call_middleware(monkeypatch):
+    """DanglingToolCallMiddleware must stay wired into the companion chain.
+
+    It self-heals tool_use/tool_result pairings immediately before the
+    Anthropic call. Without it, any sequence where a prior turn's
+    ToolMessage ends up displaced (summarization, state churn after a
+    checkpointer hiccup, etc.) surfaces as an Anthropic 400:
+    ``messages.N.content.M: unexpected `tool_use_id` found in `tool_result`
+    blocks``. This was originally wired in 4383dba7 and was silently
+    dropped by the main-merge 31cabe9d; this test exists so a future merge
+    cannot drop it again without a red test.
+
+    Position requirement: must run inside ``wrap_model_call`` AFTER
+    PromptAssemblyMiddleware (so the patched messages reflect the final
+    assembled shape) and BEFORE AnthropicPromptCachingMiddleware (so the
+    cache keys off the patched shape rather than the pre-patch shape).
+    """
+    captured = _capture_companion_middlewares(monkeypatch, async_builder=False)
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+
+    assert "DanglingToolCallMiddleware" in middleware_types, (
+        "DanglingToolCallMiddleware missing from companion chain; Anthropic will "
+        "reject any turn where the message history contains a ToolMessage "
+        "without its preceding AIMessage tool_use. Got middlewares="
+        f"{middleware_types}"
+    )
+
+    # Position invariant: PromptAssembly < DanglingToolCall < AnthropicPromptCaching.
+    prompt_idx = middleware_types.index("PromptAssemblyMiddleware")
+    dangling_idx = middleware_types.index("DanglingToolCallMiddleware")
+    caching_idx = middleware_types.index("AnthropicPromptCachingMiddleware")
+    assert prompt_idx < dangling_idx < caching_idx, (
+        "DanglingToolCallMiddleware must sit between PromptAssemblyMiddleware "
+        "and AnthropicPromptCachingMiddleware so the cache keys off patched "
+        f"messages. Got order={middleware_types}"
+    )
+
+
+def test_builder_chain_includes_dangling_tool_call_middleware(monkeypatch):
+    """DanglingToolCallMiddleware must stay wired into the builder chain.
+
+    Builder tool calls (bash, web_search, write_file, ...) can fail mid-flight
+    (sandbox crashes, network errors, user cancel). Without this middleware,
+    the very next Anthropic call inside the builder 400s with the same
+    ``tool_use ids were found without tool_result blocks`` signature.
+    Wired in 4383dba7, dropped in 31cabe9d merge, restored alongside the
+    companion counterpart. Same merge-drop guard rationale.
+    """
+    builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
+    captured: dict[str, list] = {"middleware": []}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+
+    def _capture(**kwargs):
+        captured["middleware"] = list(kwargs["middleware"])
+        return DummyAgent()
+
+    monkeypatch.setattr(builder_module, "create_agent", _capture)
+    builder_module._create_builder_agent(user_id="user_123")
+
+    middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
+    assert "DanglingToolCallMiddleware" in middleware_types, (
+        "DanglingToolCallMiddleware missing from builder chain; any mid-task "
+        "tool failure will turn the next Anthropic call into a 400. Got "
+        f"middlewares={middleware_types}"
+    )
+    # Must run AFTER PromptAssemblyMiddleware so it patches the final
+    # message list that is about to be sent to the model.
+    prompt_idx = middleware_types.index("PromptAssemblyMiddleware")
+    dangling_idx = middleware_types.index("DanglingToolCallMiddleware")
+    assert prompt_idx < dangling_idx, (
+        "DanglingToolCallMiddleware must run after PromptAssemblyMiddleware "
+        f"in the builder chain; got order={middleware_types}"
+    )
+
+
+def test_builder_session_emits_delivery_on_completed(monkeypatch):
+    """When the background task reports COMPLETED, BuilderSessionMiddleware
+    must also set ``builder_delivery`` so the channel manager can attach
+    the artifact inline on the next ``runs.wait`` turn."""
+    from datetime import datetime
+    from types import SimpleNamespace
+
+    class _FakeSubagentStatus:
+        PENDING = "pending"
+        RUNNING = "running"
+        COMPLETED = "completed"
+
+    task_id = "task-delivery-1"
+    handoff_payload = {
+        "type": "builder_handoff",
+        "status": "queued",
+        "task_id": task_id,
+        "trace_id": "trace-d1",
+        "builder_task": {
+            "task_id": task_id,
+            "description": "Build doc",
+            "status": "queued",
+            "delegated_at": "2026-04-09T00:00:00Z",
+        },
+    }
+    ai_msg = AIMessage(
+        content="Delegating",
+        tool_calls=[{"id": "tool-d1", "name": "switch_to_builder", "args": {}}],
+    )
+    tool_msg = ToolMessage(
+        content=json.dumps(handoff_payload), tool_call_id="tool-d1", name="switch_to_builder"
+    )
+    state: dict = {"messages": [ai_msg, tool_msg], "system_prompt_blocks": []}
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-d1"}
+
+    completed_result = SimpleNamespace(
+        task_id=task_id,
+        trace_id="trace-d1",
+        status=_FakeSubagentStatus.COMPLETED,
+        result="done",
+        completed_at=datetime.now(),
+        error=None,
+        ai_messages=[],
+        final_state={
+            "builder_result": {
+                "artifact_path": "outputs/doc.md",
+                "artifact_type": "document",
+                "artifact_title": "Doc",
+                "companion_summary": "Done.",
+                "confidence": 0.9,
+            }
+        },
+    )
+
+    delivery_payload = {
+        "source": "builder_result",
+        "attachments": [
+            {
+                "virtual_path": "/mnt/user-data/outputs/doc.md",
+                "filename": "doc.md",
+                "mime_type": "text/markdown",
+                "size": 8,
+                "is_image": False,
+                "content_base64": base64.b64encode(b"content").decode("ascii"),
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.SubagentStatus",
+        _FakeSubagentStatus,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: completed_result,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.cleanup_background_task",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.build_builder_delivery_payload",
+        lambda *, thread_id, builder_result: delivery_payload,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    assert state["builder_task"]["status"] == "completed"
+    assert state["builder_delivery"] == delivery_payload
+
+
+def test_builder_session_emits_delivery_on_snapshot_recovery(monkeypatch):
+    """When recovering a COMPLETED task from the on-disk snapshot,
+    BuilderSessionMiddleware must also build ``builder_delivery``."""
+    task_id = "task-snap-delivery"
+    state = _make_handoff_state(task_id, "trace-snap-d", user_id="user_abc")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-snap-d"}
+
+    builder_result = {
+        "artifact_path": "outputs/report.pdf",
+        "artifact_type": "document",
+        "artifact_title": "Report",
+        "companion_summary": "Recovered.",
+        "confidence": 0.85,
+    }
+    snapshot_payload = {
+        "task_id": task_id,
+        "status": "completed",
+        "trace_id": "trace-snap-d",
+        "builder_result": builder_result,
+    }
+
+    delivery_payload = {
+        "source": "builder_result",
+        "attachments": [
+            {
+                "virtual_path": "/mnt/user-data/outputs/report.pdf",
+                "filename": "report.pdf",
+                "mime_type": "application/pdf",
+                "size": 1024,
+                "is_image": False,
+                "content_base64": base64.b64encode(b"pdf").decode("ascii"),
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.get_background_task_result",
+        lambda _task_id: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.read_background_task_status_payload",
+        lambda _user_id, _task_id: snapshot_payload,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.log_middleware",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.builder_session.build_builder_delivery_payload",
+        lambda *, thread_id, builder_result: delivery_payload,
+    )
+
+    builder_session = BuilderSessionMiddleware()
+    state = _apply_update(state, builder_session.before_agent(state, runtime))
+
+    assert state["builder_task"]["status"] == "completed"
+    assert state["builder_result"] == builder_result
+    assert state["builder_delivery"] == delivery_payload

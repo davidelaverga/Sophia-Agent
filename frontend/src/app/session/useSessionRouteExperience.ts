@@ -247,7 +247,7 @@ export function useSessionRouteExperience({
 
     const pollTaskStatus = async () => {
       try {
-        const status = await getBuilderTaskStatus(activeTaskId);
+        const status = await getBuilderTaskStatus(activeTaskId, activeThreadId);
         if (cancelled) {
           return;
         }
@@ -304,7 +304,7 @@ export function useSessionRouteExperience({
         clearTimeout(timeoutId);
       }
     };
-  }, [builderTask?.phase, builderTask?.taskId, setBuilderArtifactAndPersist]);
+  }, [builderTask?.phase, builderTask?.taskId, activeThreadId, setBuilderArtifactAndPersist]);
 
   useEffect(() => {
     if (!debugEnabled) return;

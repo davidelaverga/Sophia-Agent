@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Coroutine
 from typing import Any
 
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 
 logger = logging.getLogger(__name__)
+InboundFileReader = Callable[[InboundMessage], Coroutine[Any, Any, list[dict[str, Any]]]]
 
 
 class Channel(ABC):
@@ -58,6 +60,10 @@ class Channel(ABC):
         Default implementation returns False (no file upload support).
         """
         return False
+
+    def get_inbound_file_reader(self) -> InboundFileReader | None:
+        """Return an optional inbound file reader for channel-specific attachments."""
+        return None
 
     # -- helpers -----------------------------------------------------------
 

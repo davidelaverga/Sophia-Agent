@@ -192,7 +192,8 @@ _GERUND_OVERRIDES = {
 
 def _get_langgraph_base_url() -> str:
     return (
-        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        os.getenv("LANGGRAPH_URL")
+        or os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
         or os.getenv("SOPHIA_BACKEND_BASE_URL")
         or "http://127.0.0.1:2024"
     ).strip().rstrip("/")

@@ -10,9 +10,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.channels.telegram_linking import (
+    DEFAULT_LINK_TOKEN_TTL_SECONDS,
+    get_telegram_link_store,
+)
 from app.gateway.auth import require_authorized_user_scope
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
@@ -48,6 +53,17 @@ def _validate_user(user_id: str) -> str:
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+
+def _serialize_optional_datetime(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return None
+
+
+def _task_status_value(value: object) -> str:
+    status_value = getattr(value, "value", value)
+    return str(status_value).strip().lower()
 
 
 def _get_mem0_client():
@@ -267,6 +283,80 @@ class SessionEndResponse(BaseModel):
     debrief_prompt: str | None = Field(default=None)
 
 
+def _get_langgraph_base_url() -> str:
+    return (
+        os.getenv("LANGGRAPH_URL")
+        or os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("SOPHIA_BACKEND_BASE_URL")
+        or "http://127.0.0.1:2024"
+    ).strip().rstrip("/")
+
+
+async def _fetch_langgraph_thread_state(thread_id: str) -> dict[str, Any]:
+    """Fetch the current thread state from LangGraph REST API."""
+    base_url = _get_langgraph_base_url()
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(f"{base_url}/threads/{thread_id}/state")
+        resp.raise_for_status()
+        return resp.json()
+
+
+def _hydrate_builder_delivery(thread_id: str, builder_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Build a builder_delivery payload from a builder_result so the frontend can display the artifact inline."""
+    if not builder_result or not isinstance(builder_result, dict):
+        return None
+    try:
+        from deerflow.sophia.tools.builder_delivery import build_builder_delivery_payload
+        return build_builder_delivery_payload(
+            thread_id=thread_id,
+            builder_result=builder_result,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to hydrate builder_delivery for thread_id=%s",
+            thread_id,
+            exc_info=True,
+        )
+        return None
+
+
+class TelegramLinkCreateRequest(BaseModel):
+    context_mode: Literal["work", "gaming", "life"] = Field(
+        default="life",
+        description="Default Sophia context mode to apply on Telegram runs.",
+    )
+    ttl_seconds: int = Field(
+        default=DEFAULT_LINK_TOKEN_TTL_SECONDS,
+        ge=60,
+        le=86400,
+        description="One-time Telegram link token TTL in seconds.",
+    )
+
+
+class TelegramLinkCreateResponse(BaseModel):
+    linked: bool = Field(default=False)
+    token: str = Field(..., description="One-time token used in Telegram deep-linking.")
+    deep_link: str | None = Field(default=None)
+    expires_at: str
+    context_mode: str = Field(default="life")
+
+
+class TelegramLinkStatusResponse(BaseModel):
+    linked: bool = Field(default=False)
+    user_id: str
+    telegram_chat_id: str | None = None
+    telegram_user_id: str | None = None
+    telegram_username: str | None = None
+    context_mode: str | None = None
+    linked_at: str | None = None
+    last_seen_at: str | None = None
+
+
+class TelegramLinkRemoveResponse(BaseModel):
+    linked: bool = Field(default=False)
+    removed: bool = Field(default=False)
+
+
 class TaskCancelResponse(BaseModel):
     task_id: str = Field(..., description="Background task identifier")
     status: str = Field(..., description="Cancellation status")
@@ -316,6 +406,7 @@ class TaskStatusResponse(BaseModel):
     todos: list[dict] = Field(default_factory=list)
     debug: TaskStatusDebug | None = Field(default=None, description="Latest executor-side diagnostics")
     activity_log: list[dict] = Field(default_factory=list, description="Chronological builder activity entries")
+    builder_delivery: dict | None = Field(default=None, description="Inline artifact payload for channel delivery (populated when builder_result is available)")
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +435,28 @@ def _to_memory_item(mem: dict) -> MemoryItem:
         created_at=mem.get("created_at"),
         updated_at=mem.get("updated_at"),
     )
+
+
+def _get_telegram_bot_username() -> str | None:
+    env_username = os.environ.get("TELEGRAM_BOT_USERNAME")
+    if isinstance(env_username, str) and env_username.strip():
+        return env_username.strip().lstrip("@")
+
+    try:
+        from deerflow.config.app_config import get_app_config
+
+        app_config = get_app_config()
+        extra = app_config.model_extra or {}
+        channels = extra.get("channels", {})
+        if isinstance(channels, dict):
+            telegram_cfg = channels.get("telegram", {})
+            if isinstance(telegram_cfg, dict):
+                candidate = telegram_cfg.get("bot_username")
+                if isinstance(candidate, str) and candidate.strip():
+                    return candidate.strip().lstrip("@")
+    except Exception:
+        logger.warning("Unable to resolve Telegram bot username from config", exc_info=True)
+    return None
 
 
 def _merge_memory_detail(summary: dict, detail: dict | None) -> dict:
@@ -1003,6 +1116,71 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
         logger.warning("Visual commitments failed: %s", e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
 
+# ---------------------------------------------------------------------------
+# 6b. Telegram linking
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/telegram/link",
+    response_model=TelegramLinkCreateResponse,
+    summary="Create a one-time Telegram deep-link token",
+)
+async def create_telegram_link_token(
+    user_id: str,
+    body: TelegramLinkCreateRequest,
+) -> TelegramLinkCreateResponse:
+    user_id = _validate_user(user_id)
+    store = get_telegram_link_store()
+    issued = store.issue_link_token(
+        sophia_user_id=user_id,
+        context_mode=body.context_mode,
+        ttl_seconds=body.ttl_seconds,
+    )
+    bot_username = _get_telegram_bot_username()
+    deep_link = f"https://t.me/{bot_username}?start={issued['token']}" if bot_username else None
+    return TelegramLinkCreateResponse(
+        linked=False,
+        token=issued["token"],
+        deep_link=deep_link,
+        expires_at=issued["expires_at"],
+        context_mode=issued["context_mode"],
+    )
+
+
+@router.get(
+    "/{user_id}/telegram/link",
+    response_model=TelegramLinkStatusResponse,
+    summary="Get Telegram link status for the Sophia user",
+)
+async def get_telegram_link_status(user_id: str) -> TelegramLinkStatusResponse:
+    user_id = _validate_user(user_id)
+    store = get_telegram_link_store()
+    link = store.get_link_by_user(user_id)
+    if not link:
+        return TelegramLinkStatusResponse(linked=False, user_id=user_id)
+    return TelegramLinkStatusResponse(
+        linked=True,
+        user_id=user_id,
+        telegram_chat_id=link.get("telegram_chat_id"),
+        telegram_user_id=link.get("telegram_user_id"),
+        telegram_username=link.get("telegram_username"),
+        context_mode=link.get("context_mode"),
+        linked_at=link.get("linked_at"),
+        last_seen_at=link.get("last_seen_at"),
+    )
+
+
+@router.delete(
+    "/{user_id}/telegram/link",
+    response_model=TelegramLinkRemoveResponse,
+    summary="Unlink Telegram from the Sophia user",
+)
+async def remove_telegram_link(user_id: str) -> TelegramLinkRemoveResponse:
+    user_id = _validate_user(user_id)
+    store = get_telegram_link_store()
+    removed = store.unlink_user(user_id)
+    return TelegramLinkRemoveResponse(linked=False, removed=removed)
+
 
 def _extract_builder_result_from_task_result(result: object) -> dict | None:
     final_state = getattr(result, "final_state", None)
@@ -1438,7 +1616,11 @@ async def get_active_task(
     response_model=TaskStatusResponse,
     summary="Get live status for a Sophia background task",
 )
-async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
+async def get_task_status(
+    user_id: str,
+    task_id: str,
+    thread_id: str | None = Query(default=None, description="Optional LangGraph thread ID for fallback state query"),
+) -> TaskStatusResponse:
     _validate_user(user_id)
 
     from deerflow.subagents.executor import (
@@ -1451,8 +1633,69 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
     if result is None or (result.owner_id and result.owner_id != user_id):
         persisted_payload = read_background_task_status_payload(user_id, task_id)
         if persisted_payload is None:
+            # Fallback 1: pushed registry populated by gateway_notify from LangGraph process
+            from app.gateway.routers.internal_builder_tasks import get_pushed_builder_task
+            pushed = get_pushed_builder_task(task_id)
+            if pushed is not None:
+                pushed_owner = pushed.get("owner_id")
+                if pushed_owner and pushed_owner != user_id:
+                    # Ownership mismatch — refuse to return this user's builder_result to another user.
+                    # Fall through to thread-state fallback / 404.
+                    pushed = None
+                else:
+                    pushed_status = pushed.get("status", "unknown")
+                    pushed_builder_result = pushed.get("builder_result")
+                    response = TaskStatusResponse(
+                        task_id=task_id,
+                        status=pushed_status,
+                        trace_id=pushed.get("trace_id"),
+                        error=pushed.get("error"),
+                        builder_result=pushed_builder_result if isinstance(pushed_builder_result, dict) else None,
+                        completed_at=pushed.get("completed_at"),
+                        started_at=pushed.get("started_at"),
+                    )
+                    if thread_id and response.builder_result:
+                        response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
+                    return response
+
+            # Fallback 2: query LangGraph thread state directly (useful when gateway_notify push failed)
+            if thread_id:
+                try:
+                    thread_state = await _fetch_langgraph_thread_state(thread_id)
+                    values = thread_state.get("values", {})
+                    builder_task = values.get("builder_task")
+                    builder_result = values.get("builder_result")
+                    if builder_task and isinstance(builder_task, dict):
+                        bt_task_id = builder_task.get("task_id")
+                        if bt_task_id and bt_task_id != task_id:
+                            # Thread has moved on to a different builder task — refuse to map the
+                            # caller's task_id to whatever is currently on the thread. Fall through to 404.
+                            pass
+                        else:
+                            task_status = builder_task.get("status", "unknown")
+                            response = TaskStatusResponse(
+                                task_id=task_id,
+                                status=task_status,
+                                builder_result=builder_result if isinstance(builder_result, dict) else None,
+                            )
+                            if thread_id and response.builder_result:
+                                response.builder_delivery = _hydrate_builder_delivery(thread_id, response.builder_result)
+                            return response
+                except Exception:
+                    logger.warning(
+                        "LangGraph thread state fallback failed for task_id=%s thread_id=%s",
+                        task_id,
+                        thread_id,
+                        exc_info=True,
+                    )
+
             raise HTTPException(status_code=404, detail="Task not found")
+
         persisted_payload.pop("owner_id", None)
+        if thread_id and persisted_payload.get("builder_result"):
+            persisted_payload["builder_delivery"] = _hydrate_builder_delivery(
+                thread_id, persisted_payload["builder_result"]
+            )
         return TaskStatusResponse(**persisted_payload)
 
     status_value = result.status.value
@@ -1460,7 +1703,7 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
     builder_result = _extract_builder_result_from_task_result(result)
     detail = _build_task_status_detail(result, progress_payload, builder_result)
 
-    return TaskStatusResponse(
+    response = TaskStatusResponse(
         task_id=task_id,
         status=status_value,
         trace_id=result.trace_id,
@@ -1489,6 +1732,9 @@ async def get_task_status(user_id: str, task_id: str) -> TaskStatusResponse:
         debug=_build_task_status_debug(result, status_value, builder_result),
         activity_log=_build_activity_log(result),
     )
+    if thread_id and builder_result:
+        response.builder_delivery = _hydrate_builder_delivery(thread_id, builder_result)
+    return response
 
 @router.post(
     "/{user_id}/tasks/{task_id}/cancel",

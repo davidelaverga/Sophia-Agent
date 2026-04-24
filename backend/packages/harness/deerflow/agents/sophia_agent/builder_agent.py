@@ -8,14 +8,14 @@ via switch_to_builder, using DeerFlow's sandbox tools.
 import logging
 import os
 
-# Apply defensive langchain patches *before* importing anything that builds
-# the agent graph. See deerflow.agents._langchain_patches for details.
-from deerflow.agents import _langchain_patches  # noqa: F401
-
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
+# Apply defensive langchain patches *before* importing anything that builds
+# the agent graph. See deerflow.agents._langchain_patches for details.
+from deerflow.agents import _langchain_patches  # noqa: F401
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -31,7 +31,7 @@ from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_repla
 from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
 from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
-from deerflow.tools.builtins import present_file_tool
+from deerflow.tools.builtins import present_file_tool, view_image_tool
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
@@ -132,8 +132,16 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     middlewares.extend(
         [
-        # 1. Values — soul.md only (voice.md not needed, builder doesn't speak)
-            FileInjectionMiddleware((SKILLS_PATH / "soul.md", False)),
+        # 1. Values + shared contract.
+        #    - soul.md: always on.
+        #    - AGENTS.md: companion↔builder building contract (injected in
+        #      both sides) so the builder and companion share one source of
+        #      truth for delegation, status taxonomy, resume, and crash
+        #      posture.
+            FileInjectionMiddleware(
+                (SKILLS_PATH / "soul.md", False),
+                (SKILLS_PATH / "AGENTS.md", False),
+            ),
         # 2. User personalization — identity file shapes what builder creates
             UserIdentityMiddleware(user_id),
         # 3. Task briefing — translates companion artifact into builder guidance
@@ -146,6 +154,12 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
             BuilderArtifactMiddleware(),
         # 7. Prompt assembly — assembles system_prompt_blocks into system message
             PromptAssemblyMiddleware(),
+        # 8. Tool-message integrity — patch dangling tool_use blocks so a
+        #    failed/interrupted tool call (bash, write_file, web_search, etc.)
+        #    never leaves the Anthropic contract in an invalid state. Wired in
+        #    4383dba7, dropped in main merge (31cabe9d), restored here with a
+        #    chain-membership test to prevent future regressions.
+            DanglingToolCallMiddleware(),
         ]
     )
 
@@ -159,6 +173,10 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         builder_web_search,
         builder_web_fetch,
         present_file_tool,
+        # view_image lets the builder re-read PNG/SVG charts, screenshots,
+        # and other visuals it has generated while iterating on a
+        # visual_report or presentation.
+        view_image_tool,
         emit_builder_artifact,
     ]
 

@@ -93,9 +93,38 @@ make lint       # Lint with ruff
 make format     # Format code with ruff
 ```
 
-Regression tests related to Docker/provisioner behavior:
+Notable regression tests:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
+- `tests/test_subagent_executor.py` (subagent async execution, retained terminal task visibility after cleanup, and cooperative cancel-event wiring on timeout)
+- `tests/test_sessions_gateway.py` (session start plus compatibility `/api/v1/sessions/{session_id}/touch` activity pings)
+- `tests/test_gateway_sophia.py` (Sophia gateway routes, including builder task polling via `/api/sophia/{user_id}/tasks/{task_id}`)
+- `tests/test_sophia_builder_delivery.py` (Sophia builder delivery payloads, resend tool schema binding, native web tool loading, `present_files` fallback extraction, default builder model resolution, per-task-type timeouts, retry-aware failure phrasing, and `view_image_tool` wiring)
+- `tests/test_builder_turn_cap.py` (HARD_TURN_CAP enforcement, partial builder_result shape, resume_context projection, and `<resume_from>` briefing rendering)
+- `tests/test_sophia_agents_md_injection.py` (shared companion↔builder `AGENTS.md` contract content + injection on both agents)
+- `tests/test_sandbox_capability_check.py` (capability probes + exit code for `scripts/sandbox_capability_check.py`)
+- `tests/test_dangling_tool_call_middleware.py` (repairs Anthropic `tool_use`/`tool_result` pairing on the Sophia companion and builder chains)
+
+Dependency floors: `langchain>=1.2.15` is required so the `_fetch_last_ai_and_tool_messages` helper used by LangChain's `tools_to_model` routing edge returns `(None, [])` on empty/partial states instead of raising `UnboundLocalError` when the Sophia builder triggers parallel tool calls. The bump transitively requires `langchain-core>=1.3.0` and `langgraph>=1.1.8`.
+
+Sophia tool invariants:
+- Tools that return `Command(update={...})` must resolve their tool call id through `deerflow.sophia.tools._tool_call_id.resolve_tool_call_id`. The resolver prefers `runtime.tool_call_id` (always present on `langchain.tools.ToolRuntime`) and falls back to the `Annotated[str, InjectedToolCallId]` parameter. It raises `ValueError` if neither source has a non-empty id, so failures are loud rather than silently corrupting the LangGraph turn.
+- Every `ToolMessage` returned from a Sophia tool must set both `tool_call_id` (from the resolver) and `name` (the tool's own name), so LangGraph's `Command.update` validation never rejects the response.
+- `share_builder_artifact` is a re-share-only tool: the docstring explicitly tells the model never to invoke it in the same turn as `switch_to_builder`, because `switch_to_builder` already attaches the builder deliverable through `state["builder_delivery"]`. `BuilderDeliveryMiddleware` clears that ephemeral field at the start of each new turn, so re-sharing requires the persistent `builder_result` to still be in state.
+
+Sophia middleware state schema invariant:
+- Any middleware that declares a `state_schema` extending `AgentState` must either inherit `messages` unchanged or redeclare it with the `add_messages` reducer. Declaring `messages: NotRequired[list]` (or any plain `list` annotation) shadows the inherited `Annotated[list, add_messages]` declaration, downgrades the LangGraph channel to `LastValue`, and makes parallel tool dispatch (for example two `web_search` calls in one AI message) crash with `InvalidUpdateError: At key 'messages': Can receive only one value per step`. `tests/test_sophia_state_schema_invariants.py` auto-discovers every Sophia middleware state class and catches this regression at import time.
+- The same rule applies to the reducer-gated builder-web fields `builder_web_budget`, `builder_allowed_urls`, and `builder_search_sources`. These are declared on `SophiaState` with `_merge_builder_web_budget`, `_union_string_list`, and `_merge_search_sources` reducers (in `packages/harness/deerflow/agents/sophia_agent/state.py`). No middleware `state_schema` may redeclare these as plain `NotRequired[...]` — `langchain.agents.create_agent` merges middleware schemas through a non-deterministic `set` iteration that can let a plain redeclaration win, demote the channel to `LastValue`, and crash parallel `builder_web_search`/`builder_web_fetch` dispatch with `INVALID_CONCURRENT_GRAPH_UPDATE`. The auto-discovered guard in `tests/test_sophia_state_schema_invariants.py` enforces this at the type-hint level; `tests/test_sophia_builder_channels.py` compiles the real builder graph and asserts the corresponding channels are `BinaryOperatorAggregate` at the LangGraph-runtime level.
+
+Sophia builder safeguards (PR G):
+- `switch_to_builder` uses a per-task-type timeout dict in `TASK_TYPE_TIMEOUTS` (`document=600`, `presentation=900`, `research=900`, `visual_report=900`, `frontend=720`, default `600s`) and always pairs `concurrent.futures.Future.cancel()` with a module-level `_cancel_events[task_id]` signal on timeout. `_aexecute` checks the event between `astream` chunks, so timed-out subagents stop making further Anthropic calls instead of lingering for many more minutes. The builder's `ChatAnthropic` also sets `default_request_timeout=180.0` so individual HTTP requests cannot keep a subagent alive past the outer timeout.
+- `SwitchToBuilderInput` accepts `retry_attempt: 0..2` and `resume_from_task_id: str | None`. Failure/partial ToolMessages phrase themselves based on `retry_attempt` (retry offer at 0, alternatives prompt at >=1) and tag `builder_result.status` as `completed | partial | failed_retryable | failed_terminal` for the companion to branch on.
+- `BuilderArtifactMiddleware.before_model` enforces `HARD_TURN_CAP = 40` tool-bearing turns via `hook_config(can_jump_to=["end"])`. At the cap it synthesises a canonical partial builder_result (status=`partial`, `continuation_task_id`, `completed_files`, `summary_of_done`, `turns_used`, `turn_cap`, `confidence=0.5`) and emits a plain AIMessage so the messages channel never carries dangling tool_calls after the jump. The per-delegation `max_turns` and `agent.recursion_limit` are both set to 120 so this pause is actually reachable — each tool turn costs ~2 LangGraph super-steps, so 120 covers ~60 tool turns with headroom above the 40-turn cap.
+- `switch_to_builder(resume_from_task_id=...)` pulls the prior subagent result via `get_background_task_result`, projects `completed_files` / `summary_of_done` / turn stats into `delegation_context["resume_context"]`, and `BuilderTaskMiddleware` renders them as a `<resume_from>` block at the top of the builder briefing. The `continuation_task_id` returned on a `partial` result is the original subagent `task_id`, routed through `delegation_context["task_id"]` by `switch_to_builder` and picked up in `BuilderArtifactMiddleware.before_model` so `get_background_task_result(resume_from_task_id)` resolves cleanly within the 15-minute retention window.
+- `skills/public/sophia/AGENTS.md` is the shared companion↔builder building contract (roles, `SwitchToBuilderInput` shape, status taxonomy, per-status communication protocol, builder obligations, crash posture). It is injected into both `sophia_agent/agent.py` and `sophia_agent/builder_agent.py` via `FileInjectionMiddleware(..., skip_on_crisis=False)`. Keep the file narrow: memories, crisis, identity, and artifact behaviour are harness-enforced and must not be duplicated here.
+- `BuilderTaskMiddleware` ships a `TASK_TYPE_SKILLS` mapping (`research -> chart-visualization/data-analysis/deep-research`, `visual_report -> chart-visualization/data-analysis`, `presentation -> chart-visualization/frontend-design`, `frontend -> frontend-design`, `document -> []`). It loads each listed `SKILL.md` from `skills/public/<skill>/SKILL.md` and injects it as a `<builder_skill name="...">` block before the builder briefing. Missing files log a warning and are skipped rather than crashing the builder.
+- The builder toolset includes `view_image_tool` so visual_report/presentation runs can re-read their own generated PNG/SVG assets.
+- `scripts/sandbox_capability_check.py` is a standalone diagnostic that inventories `pandoc`, `weasyprint`, `reportlab`, `matplotlib`, and `pillow` on the sandbox. Exit 0 when all required capabilities are present, 1 otherwise; `--json` emits a machine-readable report. Run it post-deploy to catch capability gaps before users see `failed_terminal` from the builder.
 
 Boundary check (harness → app import firewall):
 - `tests/test_harness_boundary.py` — ensures `packages/harness/deerflow/` never imports from `app.*`
@@ -215,7 +244,9 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
+| **Sessions** (`/api/v1/sessions`) | `POST /start` - create LangGraph-backed sessions; `POST /{session_id}/touch` - compatibility activity ping for external pollers (defaults missing `thread_id` to `session_id`) |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
+| **Sophia** (`/api/sophia`) | Sophia memory/review/reflect endpoints, visual summaries, Telegram link endpoints (`POST/GET/DELETE /{user_id}/telegram/link`), builder task polling (`GET /{user_id}/tasks/{task_id}`), and session finalization (`POST /{user_id}/end-session`) |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
 
@@ -245,6 +276,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 **Built-in Agents**: `general-purpose` (all tools except `task`) and `bash` (command specialist)
 **Execution**: Dual thread pool - `_scheduler_pool` (3 workers) + `_execution_pool` (3 workers)
 **Concurrency**: `MAX_CONCURRENT_SUBAGENTS = 3` enforced by `SubagentLimitMiddleware` (truncates excess tool calls in `after_model`), 15-minute timeout
+**Retention**: Terminal task results are retained for 15 minutes after cleanup so gateway/channel pollers can still read final state through `get_background_task_result()`
 **Flow**: `task()` tool → `SubagentExecutor` → background thread → poll 5s → SSE events → result
 **Events**: `task_started`, `task_running`, `task_completed`/`task_failed`/`task_timed_out`
 
@@ -300,25 +332,34 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Components**:
 - `message_bus.py` - Async pub/sub hub (`InboundMessage` → queue → dispatcher; `OutboundMessage` → callbacks → channels)
 - `store.py` - JSON-file persistence mapping `channel_name:chat_id[:topic_id]` → `thread_id` (keys are `channel:chat` for root conversations and `channel:chat:topic` for threaded conversations)
-- `manager.py` - Core dispatcher: creates threads via `client.threads.create()`, routes commands, keeps Slack/Telegram on `client.runs.wait()`, and uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates
-- `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
-- `service.py` - Manages lifecycle of all configured channels from `config.yaml`
-- `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place)
+- `telegram_linking.py` - Persistent Telegram↔Sophia link store with one-time token issuance/redeem/unlink, reverse-map-safe chat relinking, and chat activity tracking
+- `session_resolver.py` - Dynamic Telegram run overrides that bind linked chats to `sophia_companion` with native memory backend and linked `context_mode`
+- `manager.py` - Core dispatcher: creates/reuses threads, enforces per-conversation concurrency locks, resolves dynamic session overrides, ingests channel-provided inbound files into uploads (with sandbox acquire/release around sync), builds Telegram-specific inline multimodal payloads for supported attachments, keeps Slack/Telegram on `client.runs.wait()`, uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates, publishes asynchronous builder completion notifications from handoff task IDs, and self-heals a stale LangGraph thread mapping when the server returns a 404 `"Thread or assistant not found."` by dropping the cached mapping, creating a fresh thread, and retrying the run once
+- `manager.py` also materializes Sophia `builder_delivery` payloads into gateway-local outputs before outbound uploads, which is what lets synchronous builder results and explicit resend requests reach Telegram in split Render deployments where LangGraph and Gateway do not share a disk
+- `base.py` - Abstract `Channel` base class (start/stop/send lifecycle) plus optional inbound file reader hook (`get_inbound_file_reader`)
+- `service.py` - Manages lifecycle of all configured channels from `config.yaml` and registers channel inbound file readers with `ChannelManager`
+- `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram.py` handles `/start <token>` linking, `/build`, and media ingestion)
 
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
 2. `ChannelManager._dispatch_loop()` consumes from queue
-3. For chat: look up/create thread on LangGraph Server
-4. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
-5. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
-6. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
-7. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`): handle locally or query Gateway API
-8. Outbound → channel callbacks → platform reply
+3. For chat: resolve a conversation key (`channel:chat:topic`), enforce single active run per key, then look up/create LangGraph thread
+4. Telegram-only: dynamic session resolver maps linked chats to Sophia companion runtime config/context
+5. ChannelManager reads inbound files through optional channel reader, stores them under thread uploads, and builds channel-specific human run payloads (Telegram sends supported attachments inline as native Anthropic `image` / `document` blocks; other channels keep the `<uploaded_files>` + `additional_kwargs.files` path)
+6. Feishu chat: `runs.stream()` → accumulate AI text → publish multiple outbound updates (`is_final=False`) → publish final outbound (`is_final=True`)
+7. Slack/Telegram chat: `runs.wait()` → extract final response → publish outbound
+8. If a `builder_handoff` task ID is returned, manager polls background task state and emits an async completion/failure follow-up outbound
+9. If a synchronous Sophia turn returns top-level `builder_delivery`, manager writes those bytes into its own outputs tree and uploads them directly through the channel implementation
+10. Feishu channel sends one running reply card up front, then patches the same card for each outbound update (card JSON sets `config.update_multi=true` for Feishu's patch API requirement)
+11. For commands (`/new`, `/status`, `/models`, `/memory`, `/help`) and Telegram `/build`: handle or forward appropriately
+12. Outbound → channel callbacks → platform reply
 
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
+- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token, optional `allowed_users`, optional session overrides, optional `bot_username` for deep-link generation)
+
+Sophia companion/builder custom agents do not use the lead-agent tool loader automatically. To expose DeerFlow-native browsing in Sophia, keep `web_search` / `web_fetch` defined in the active config file (for Render, `config.production.yaml`) and provide `TAVILY_API_KEY` plus `JINA_API_KEY` anywhere that config is loaded.
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 

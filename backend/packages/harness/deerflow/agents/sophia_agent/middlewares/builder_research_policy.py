@@ -18,9 +18,17 @@ class BuilderResearchPolicyState(AgentState):
     delegation_context: NotRequired[dict | None]
     allow_web_research: NotRequired[bool]
     explicit_user_urls: NotRequired[list[str]]
-    builder_allowed_urls: NotRequired[list[str]]
-    builder_search_sources: NotRequired[list[dict[str, str]]]
-    builder_web_budget: NotRequired[dict[str, int]]
+    # NOTE: `builder_allowed_urls`, `builder_search_sources`, and
+    # `builder_web_budget` are intentionally NOT redeclared here. `SophiaState`
+    # already declares them with the reducers defined in
+    # ``deerflow.agents.sophia_agent.state`` (`_union_string_list`,
+    # `_merge_search_sources`, `_merge_builder_web_budget`). Redeclaring them
+    # here as plain ``NotRequired[...]`` shadows the reducer annotations when
+    # ``langchain.agents.create_agent`` merges middleware state schemas — the
+    # last-wins set iteration drops the reducer and downgrades the channel to
+    # ``LastValue``. Parallel ``builder_web_search`` / ``builder_web_fetch``
+    # tool calls then crash with ``INVALID_CONCURRENT_GRAPH_UPDATE`` at
+    # runtime. ``tests/test_sophia_state_schema_invariants.py`` enforces this.
 
 
 class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState]):
