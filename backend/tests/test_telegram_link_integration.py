@@ -62,13 +62,21 @@ class TestCmdStartRedemption:
         bus = MessageBus()
         return TelegramChannel(bus=bus, config={"bot_token": "test-token"})
 
-    def _make_update(self, *, text: str, chat_id: int = 42, user_id: int = 101, username: str = "alice"):
+    def _make_update(
+        self,
+        *,
+        text: str,
+        chat_id: int = 42,
+        user_id: int = 101,
+        username: str = "alice",
+        chat_type: str = "private",
+    ):
         from unittest.mock import AsyncMock
 
         message = MagicMock()
         message.reply_text = AsyncMock()
         effective_user = SimpleNamespace(id=user_id, username=username)
-        effective_chat = SimpleNamespace(id=chat_id, type="private")
+        effective_chat = SimpleNamespace(id=chat_id, type=chat_type)
         return SimpleNamespace(
             message=message,
             effective_user=effective_user,
@@ -122,6 +130,32 @@ class TestCmdStartRedemption:
 
         assert store.resolve_user_id("telegram", "42") == "user-42"
         assert store.resolve_user_id("telegram", "99") is None
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("chat_type", ["group", "supergroup", "channel"])
+    async def test_non_private_chat_redemption_is_rejected(self, channel, chat_type):
+        """Redemption in non-private chats must NOT consume the token.
+
+        Regression guard for P1-A: in groups/supergroups ``chat_id`` is
+        shared by every member, so binding it to one user's canonical
+        id would collapse the whole room under that identity.
+        """
+        rec = store.issue_link_token("user-42")
+        update = self._make_update(text=f"/start {rec.token}", chat_type=chat_type)
+        context = SimpleNamespace(args=[rec.token])
+
+        await channel._cmd_start(update, context)
+
+        # No binding created.
+        assert store.resolve_user_id("telegram", "42") is None
+        # Token is still redeemable in a subsequent private-chat flow.
+        still = store.pop_link_token(rec.token)
+        assert still is not None
+        assert still.user_id == "user-42"
+        # User got a helpful reply.
+        update.message.reply_text.assert_awaited_once()
+        reply_text = update.message.reply_text.await_args.args[0]
+        assert "1:1" in reply_text or "private" in reply_text.lower()
 
     @pytest.mark.anyio
     async def test_disallowed_user_is_ignored(self):

@@ -239,11 +239,30 @@ class TelegramChannel(Channel):
         token against the gateway's in-process registry and bind the chat
         to the canonical user_id so subsequent messages route under the
         same identity as the webapp session.
+
+        Deep-link redemption is restricted to **private** chats — in groups
+        or supergroups ``effective_chat.id`` is shared by every member, so
+        a single redemption there would collapse multiple users onto one
+        canonical id. Redemption in a non-private chat is rejected without
+        consuming the token so the user can re-open the link in a DM.
         """
         if not self._check_user(update.effective_user.id):
             return
         args = list(getattr(context, "args", None) or [])
         if args and _looks_like_link_token(args[0]):
+            chat_type = getattr(update.effective_chat, "type", None)
+            if chat_type != "private":
+                logger.warning(
+                    "telegram._cmd_start.non_private_redemption_blocked chat_type=%s chat_id=%s tg_user_id=%s",
+                    chat_type,
+                    update.effective_chat.id,
+                    update.effective_user.id,
+                )
+                await update.message.reply_text(
+                    "Please open the deep link in a 1:1 chat with me, not in a group. "
+                    "Tap the original link again and accept the DM prompt."
+                )
+                return
             ok = self._redeem_start_token(
                 token=args[0],
                 chat_id=str(update.effective_chat.id),

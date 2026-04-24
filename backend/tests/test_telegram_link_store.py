@@ -199,3 +199,145 @@ class TestSupabasePersistence:
         with patch("app.gateway.telegram_link_store.httpx.Client", FakeClient):
             # Must not raise.
             store.bind_chat("telegram", "c", "user-1")
+
+
+class TestSupabaseRehydration:
+    """Regression coverage for P1-B: bindings must survive gateway restarts."""
+
+    def _fake_client_returning(self, pages: list[list[dict] | Exception]):
+        """Build a FakeClient that returns one ``pages`` entry per ``get`` call."""
+
+        calls: list[str] = []
+
+        class Response:
+            def __init__(self, status_code: int, payload: list[dict] | str):
+                self.status_code = status_code
+                self._payload = payload
+                self.text = "" if isinstance(payload, list) else payload
+
+            def json(self):
+                if isinstance(self._payload, str):
+                    raise ValueError("invalid json")
+                return self._payload
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                self._pages = iter(pages)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def get(self, url, headers=None):
+                calls.append(url)
+                try:
+                    page = next(self._pages)
+                except StopIteration:
+                    return Response(200, [])
+                if isinstance(page, Exception):
+                    raise page
+                if isinstance(page, tuple):
+                    status, body = page
+                    return Response(status, body)
+                return Response(200, page)
+
+        return FakeClient, calls
+
+    def test_no_op_when_supabase_not_configured(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        monkeypatch.delenv("SUPABASE_KEY", raising=False)
+        assert store.load_bindings_from_supabase() == 0
+
+    def test_loads_rows_into_in_memory_maps(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        rows = [
+            {
+                "channel": "telegram",
+                "chat_id": "100",
+                "user_id": "user-1",
+                "telegram_user_id": "tg-1",
+                "telegram_username": "alice",
+                "created_at": 1000.0,
+            },
+            {
+                "channel": "telegram",
+                "chat_id": "200",
+                "user_id": "user-2",
+                "telegram_user_id": "tg-2",
+                "telegram_username": "bob",
+                "created_at": 2000.0,
+            },
+        ]
+        fake, _ = self._fake_client_returning([rows])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            loaded = store.load_bindings_from_supabase()
+
+        assert loaded == 2
+        assert store.resolve_user_id("telegram", "100") == "user-1"
+        assert store.resolve_user_id("telegram", "200") == "user-2"
+        binding_for_user_1 = store.get_binding_for_user("user-1")
+        assert binding_for_user_1 is not None
+        assert binding_for_user_1.telegram_username == "alice"
+
+    def test_skips_malformed_rows(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        rows = [
+            {"channel": "telegram", "chat_id": "good", "user_id": "user-good"},
+            {"channel": "telegram", "chat_id": "", "user_id": "user-empty"},
+            {"channel": "slack", "chat_id": "s", "user_id": "u"},  # wrong channel
+            {"chat_id": "x", "user_id": "y"},  # missing channel
+            "not-a-dict",
+            {"channel": "telegram", "chat_id": "also_good", "user_id": "user-ok"},
+        ]
+        fake, _ = self._fake_client_returning([rows])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            loaded = store.load_bindings_from_supabase()
+
+        assert loaded == 2
+        assert store.resolve_user_id("telegram", "good") == "user-good"
+        assert store.resolve_user_id("telegram", "also_good") == "user-ok"
+
+    def test_survives_5xx(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        fake, _ = self._fake_client_returning([(503, "Service Unavailable")])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            loaded = store.load_bindings_from_supabase()
+        assert loaded == 0
+
+    def test_survives_connection_error(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        import httpx
+
+        fake, _ = self._fake_client_returning([httpx.ConnectError("network down")])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            loaded = store.load_bindings_from_supabase()
+        assert loaded == 0
+
+    def test_survives_invalid_json(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        fake, _ = self._fake_client_returning([(200, "this is not json")])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            loaded = store.load_bindings_from_supabase()
+        assert loaded == 0
+
+    def test_pagination_terminates_when_batch_is_short(self, monkeypatch):
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        # One short page -> loop must exit after the first GET.
+        page = [
+            {"channel": "telegram", "chat_id": "c1", "user_id": "u1"},
+            {"channel": "telegram", "chat_id": "c2", "user_id": "u2"},
+        ]
+        fake, calls = self._fake_client_returning([page])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            loaded = store.load_bindings_from_supabase()
+        assert loaded == 2
+        assert len(calls) == 1, f"Expected single GET, got {calls}"

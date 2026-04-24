@@ -381,6 +381,123 @@ def unbind_chat(channel: ChannelName, chat_id: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rehydration from Supabase
+# ---------------------------------------------------------------------------
+
+
+# Supabase REST paginates at 1000 rows by default — request 1000 per page and
+# stop once the returned batch is smaller.
+_SUPABASE_PAGE_SIZE = 1000
+
+
+def _coerce_binding_from_row(row: object) -> UserBinding | None:
+    if not isinstance(row, dict):
+        return None
+    channel = row.get("channel")
+    chat_id = row.get("chat_id")
+    user_id = row.get("user_id")
+    if channel != "telegram" or not isinstance(chat_id, str) or not isinstance(user_id, str):
+        return None
+    if not chat_id.strip() or not user_id.strip():
+        return None
+    created_at_raw = row.get("created_at")
+    try:
+        created_at = float(created_at_raw) if created_at_raw is not None else _now()
+    except (TypeError, ValueError):
+        created_at = _now()
+    telegram_user_id = row.get("telegram_user_id")
+    telegram_username = row.get("telegram_username")
+    return UserBinding(
+        channel="telegram",
+        chat_id=chat_id,
+        user_id=user_id,
+        telegram_user_id=telegram_user_id if isinstance(telegram_user_id, str) else None,
+        telegram_username=telegram_username if isinstance(telegram_username, str) else None,
+        created_at=created_at,
+    )
+
+
+def _install_binding_locked(binding: UserBinding) -> None:
+    """Insert ``binding`` into the in-memory maps (caller holds ``_lock``)."""
+    key = (binding.channel, binding.chat_id)
+    # Bound the total binding count, mirroring ``bind_chat``.
+    while len(_bindings_by_chat) >= _MAX_BINDINGS and key not in _bindings_by_chat:
+        oldest_key, oldest = min(_bindings_by_chat.items(), key=lambda kv: kv[1].created_at)
+        _bindings_by_chat.pop(oldest_key, None)
+        user_keys = _bindings_by_user.get(oldest.user_id)
+        if user_keys is not None:
+            user_keys.discard(oldest_key)
+            if not user_keys:
+                _bindings_by_user.pop(oldest.user_id, None)
+    _bindings_by_chat[key] = binding
+    _bindings_by_user.setdefault(binding.user_id, set()).add(key)
+
+
+def load_bindings_from_supabase() -> int:
+    """Reseed the in-memory binding maps from Supabase.
+
+    Best-effort: logs and swallows all errors. Called once at gateway
+    startup so cross-platform identity resolution survives deploys/restarts.
+    Returns the number of bindings that were loaded (0 when Supabase is
+    not configured or a transport error occurs).
+    """
+    cfg = _supabase_config()
+    if cfg is None:
+        logger.info("telegram_link.rehydrate_skipped reason=supabase_not_configured")
+        return 0
+    url, key = cfg
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "apikey": key,
+    }
+    offset = 0
+    total = 0
+    try:
+        with httpx.Client(timeout=_SUPABASE_TIMEOUT_SECONDS) as client:
+            while True:
+                endpoint = (
+                    f"{url}/rest/v1/{_BINDINGS_TABLE}"
+                    f"?select=channel,chat_id,user_id,telegram_user_id,telegram_username,created_at"
+                    f"&channel=eq.telegram"
+                    f"&order=created_at.asc"
+                    f"&offset={offset}&limit={_SUPABASE_PAGE_SIZE}"
+                )
+                response = client.get(endpoint, headers=headers)
+                if response.status_code >= 400:
+                    logger.warning(
+                        "telegram_link.rehydrate_failed status=%d body=%r",
+                        response.status_code,
+                        response.text[:200],
+                    )
+                    return total
+                try:
+                    rows = response.json()
+                except ValueError:
+                    logger.warning("telegram_link.rehydrate_invalid_json body=%r", response.text[:200])
+                    return total
+                if not isinstance(rows, list) or not rows:
+                    return total
+                installed = 0
+                with _lock:
+                    for row in rows:
+                        binding = _coerce_binding_from_row(row)
+                        if binding is None:
+                            continue
+                        _install_binding_locked(binding)
+                        installed += 1
+                total += installed
+                if len(rows) < _SUPABASE_PAGE_SIZE:
+                    return total
+                offset += _SUPABASE_PAGE_SIZE
+    except httpx.HTTPError as exc:
+        logger.warning("telegram_link.rehydrate_error error=%s", exc)
+        return total
+    finally:
+        if total:
+            logger.info("telegram_link.rehydrated bindings=%d", total)
+
+
+# ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
 
