@@ -27,6 +27,7 @@ from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.storage import supabase_artifact_store
+from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +53,11 @@ def _upload_builder_outputs_to_supabase(
 ) -> None:
     """Best-effort upload of the builder's outputs to Supabase Storage.
 
-    Silently no-ops when Supabase is not configured, when thread_id or the
-    outputs host path are missing, or when individual files cannot be read.
-    Any failure is logged and swallowed so builder flow never regresses.
+    PR-E (Phase 2.2): delegates to ``maybe_mirror_file`` which uses SHA-256
+    hash deduplication. Files that were already mirrored at write time by
+    the tool hooks are skipped automatically. Any failure is logged and
+    swallowed so builder flow never regresses.
     """
-    if not supabase_artifact_store.is_configured():
-        return
     if not thread_id or not outputs_host_path:
         logger.debug(
             "Skipping Supabase upload; missing thread_id=%s outputs_host_path=%s",
@@ -80,37 +80,7 @@ def _upload_builder_outputs_to_supabase(
         if relative is None:
             continue
         host_file = outputs_root / relative
-        try:
-            content = host_file.read_bytes()
-        except FileNotFoundError:
-            logger.warning(
-                "Supabase upload skipped; local file missing thread_id=%s path=%s",
-                thread_id,
-                host_file,
-            )
-            continue
-        except OSError as exc:
-            logger.warning(
-                "Supabase upload skipped; read error thread_id=%s path=%s error=%s",
-                thread_id,
-                host_file,
-                exc,
-            )
-            continue
-
-        try:
-            supabase_artifact_store.upload_artifact(
-                thread_id=thread_id,
-                filename=relative,
-                content=content,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort upload
-            logger.warning(
-                "Supabase upload failed; continuing without remote copy thread_id=%s path=%s error=%s",
-                thread_id,
-                relative,
-                exc,
-            )
+        maybe_mirror_file(str(host_file), thread_id, outputs_host_path)
 
 
 class BuilderArtifactState(AgentState):
