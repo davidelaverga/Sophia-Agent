@@ -13,6 +13,7 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file, scan_and_mirror_outputs
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
@@ -25,6 +26,31 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 )
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+
+
+def _maybe_mirror_tool_output(
+    resolved_path: str,
+    runtime: ToolRuntime[ContextT, ThreadState],
+) -> None:
+    """PR-E (Phase 2.2): mirror a single file to Supabase if it is under outputs.
+
+    Called after ``write_file_tool`` and ``str_replace_tool`` have written a
+    file on the local sandbox. Best-effort: any error is swallowed.
+    """
+    if not supabase_mirror.is_mirror_enabled():
+        return
+    if not is_local_sandbox(runtime):
+        return
+    thread_data = get_thread_data(runtime)
+    if thread_data is None:
+        return
+    outputs_host_path = thread_data.get("outputs_path")
+    if not outputs_host_path:
+        return
+    thread_id = runtime.context.get("thread_id") if runtime.context else None
+    if not thread_id:
+        return
+    supabase_mirror.maybe_mirror_file(resolved_path, thread_id, outputs_host_path)
 
 
 def _get_skills_container_path() -> str:
@@ -694,6 +720,13 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             )
             masked_telemetry = _mask_shell_telemetry(telemetry, thread_data)
             _record_shell_telemetry(runtime, masked_telemetry)
+            # PR-E (Phase 2.2): bash may have created or modified files under
+            # outputs without going through write_file_tool. Scan and mirror.
+            if supabase_mirror.is_mirror_enabled():
+                outputs_host_path = thread_data.get("outputs_path") if thread_data else None
+                thread_id = runtime.context.get("thread_id") if runtime.context else None
+                if outputs_host_path and thread_id:
+                    supabase_mirror.scan_and_mirror_outputs(thread_id, outputs_host_path)
             return mask_local_paths_in_output(output, thread_data)
 
         output = sandbox.execute_command(command)
@@ -839,6 +872,7 @@ def write_file_tool(
             validate_local_tool_path(path, thread_data)
             path = _resolve_and_validate_user_data_path(path, thread_data)
         sandbox.write_file(path, content, append)
+        _maybe_mirror_tool_output(path, runtime)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
@@ -889,6 +923,7 @@ def str_replace_tool(
         else:
             content = content.replace(old_str, new_str, 1)
         sandbox.write_file(path, content)
+        _maybe_mirror_tool_output(path, runtime)
         return "OK"
     except SandboxError as e:
         return f"Error: {e}"
