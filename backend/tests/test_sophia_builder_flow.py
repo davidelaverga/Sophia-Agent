@@ -254,6 +254,187 @@ def test_make_switch_to_builder_tool_uses_bound_user_id_when_runtime_sources_mis
     assert handoff_resolution["configured_user_id_present"] is True
     assert handoff_resolution["config_user_id_present"] is False
     assert handoff_resolution["state_user_id_present"] is False
+    # tool-arg path was not used in this scenario
+    assert handoff_resolution["tool_arg_user_id_present"] is False
+
+
+def test_switch_to_builder_explicit_user_id_tool_arg_beats_runtime_config(monkeypatch):
+    """PR-B: an explicit ``user_id`` tool arg must take priority over every
+    other source, including ``runtime.config.configurable.user_id``. This is
+    the escape hatch for companions whose runtime config is stale or missing
+    — the LLM can pass the authenticated user directly."""
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(self, task: str, task_id: str | None = None, owner_id: str | None = None, description: str | None = None):
+            captured["owner_id"] = owner_id
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: captured.setdefault("builder_agent", {"user_id": user_id, "model_name": model_name}),
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime(
+        {
+            "user_id": "state_user",
+            "current_artifact": {"tone_estimate": 2.0, "active_tone_band": "anger_antagonism"},
+        },
+        user_id="runtime_config_user",
+        context_user_id="runtime_context_user",
+    )
+
+    response = switch_module.switch_to_builder.func(
+        runtime=runtime,
+        task="Build a test doc with explicit user_id tool arg.",
+        task_type="document",
+        user_id="explicit_tool_arg_user",
+        tool_call_id="tc-builder-explicit-user-id",
+    )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    # Explicit tool arg wins over every other source
+    assert captured["builder_agent"]["user_id"] == "explicit_tool_arg_user"
+    assert captured["owner_id"] == "explicit_tool_arg_user"
+    assert handoff_resolution["user_id_source"] == "tool_arg_explicit"
+    assert handoff_resolution["tool_arg_user_id_present"] is True
+    # Diagnostics still record that the other sources were present — we just
+    # chose the explicit arg.
+    assert handoff_resolution["config_user_id_present"] is True
+    assert handoff_resolution["context_user_id_present"] is True
+    assert handoff_resolution["state_user_id_present"] is True
+
+
+def test_make_switch_to_builder_tool_explicit_user_id_arg_beats_bound_user(monkeypatch):
+    """PR-B: an explicit ``user_id`` tool arg must also override the closure-
+    bound user_id created by ``make_switch_to_builder_tool``. In the normal
+    companion-delegation path where the bound user is correct this is a no-op;
+    it matters in edge cases where the LLM has more reliable user context
+    than the agent-construction closure (e.g. mid-session handoff)."""
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    captured = {}
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            captured["kwargs"] = kwargs
+
+        def execute_async(self, task: str, task_id: str | None = None, owner_id: str | None = None, description: str | None = None):
+            captured["owner_id"] = owner_id
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: captured.setdefault("builder_agent", {"user_id": user_id, "model_name": model_name}),
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime({})  # no runtime / state user_id
+    bound_tool = switch_module.make_switch_to_builder_tool("bound_user")
+
+    response = bound_tool.func(
+        runtime=runtime,
+        task="Build with explicit user_id overriding bound user.",
+        task_type="document",
+        user_id="explicit_tool_arg_user",
+        tool_call_id="tc-builder-explicit-over-bound",
+    )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert captured["builder_agent"]["user_id"] == "explicit_tool_arg_user"
+    assert captured["owner_id"] == "explicit_tool_arg_user"
+    assert handoff_resolution["user_id_source"] == "tool_arg_explicit"
+    assert handoff_resolution["tool_arg_user_id_present"] is True
+    # Closure-bound user is still tracked in diagnostics even though not used
+    assert handoff_resolution["configured_user_id_present"] is True
+
+
+def test_switch_to_builder_default_user_fallback_emits_warning(monkeypatch, caplog):
+    """PR-B: when no source supplies a user_id, the resolver MUST emit a
+    WARNING log. ``default_user`` is a hard failure signal in production; it
+    means tool arg, runtime config, runtime context, state, and bound user
+    all failed to provide an authenticated user."""
+    switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
+    import logging
+
+    monkeypatch.setattr(
+        switch_module,
+        "get_subagent_config",
+        lambda _name: SubagentConfig(
+            name="general-purpose",
+            description="test",
+            system_prompt="test",
+            timeout_seconds=90,
+            max_turns=20,
+        ),
+    )
+
+    class DummyExecutor:
+        def __init__(self, **kwargs):
+            pass
+
+        def execute_async(self, task: str, task_id: str | None = None, **_kwargs):
+            return task_id or "generated-task-id"
+
+    monkeypatch.setattr(switch_module, "SubagentExecutor", DummyExecutor)
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.builder_agent._create_builder_agent",
+        lambda user_id, model_name=None: {"user_id": user_id, "model_name": model_name},
+    )
+    monkeypatch.setattr("langgraph.config.get_stream_writer", lambda: (lambda _event: None))
+
+    runtime = _make_runtime({}, user_id=None)
+
+    with caplog.at_level(logging.WARNING, logger=switch_module.logger.name):
+        response = switch_module.switch_to_builder.func(
+            runtime=runtime,
+            task="Build with no user_id anywhere.",
+            task_type="document",
+            tool_call_id="tc-builder-default-warning",
+        )
+    payload = json.loads(response)
+    handoff_resolution = payload["handoff_resolution"]
+
+    assert handoff_resolution["user_id_source"] == "default_user"
+    assert handoff_resolution["tool_arg_user_id_present"] is False
+    # A WARNING must be emitted — hard failure signal for ops.
+    matching = [r for r in caplog.records if r.levelno == logging.WARNING and "default_user" in r.getMessage()]
+    assert matching, (
+        f"Expected a WARNING log when user_id falls back to 'default_user'. "
+        f"Got: {[r.getMessage() for r in caplog.records]}"
+    )
 
 
 def test_switch_to_builder_prefers_latest_emit_artifact_payload(monkeypatch):
@@ -470,6 +651,7 @@ def test_switch_to_builder_reports_default_resolution_sources(monkeypatch):
 
     assert handoff_resolution["user_id_source"] == "default_user"
     assert handoff_resolution["artifact_source"] == "default_empty"
+    assert handoff_resolution["tool_arg_user_id_present"] is False
     assert handoff_resolution["config_user_id_present"] is False
     assert handoff_resolution["context_user_id_present"] is False
     assert handoff_resolution["state_user_id_present"] is False

@@ -96,6 +96,16 @@ class SwitchToBuilderInput(BaseModel):
     task_type: Literal["frontend", "presentation", "research", "document", "visual_report"] = Field(
         description="Type of deliverable. Determines builder skill loading."
     )
+    user_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional: explicit authenticated user identifier. Pass this when "
+            "you know the user_id (e.g. from user_identity context) so the "
+            "builder's Mem0 / identity / ownership checks use the correct user. "
+            "Leave as None to fall back to runtime config / state / agent-bound "
+            "default."
+        ),
+    )
 
 
 def _utcnow_iso() -> str:
@@ -148,11 +158,31 @@ def _resolve_user_id(
     runtime: ToolRuntime[ContextT, SophiaState] | None,
     state: SophiaState,
     configured_user_id: str | None = None,
+    explicit_tool_arg: str | None = None,
 ) -> tuple[str, str, dict[str, bool]]:
-    """Resolve user_id and return source diagnostics."""
+    """Resolve user_id and return source diagnostics.
+
+    Priority order (highest first):
+      1. ``explicit_tool_arg`` — explicit ``user_id`` passed as tool arg by the
+         companion LLM. Highest priority so an authenticated caller can override
+         any stale runtime/state value.
+      2. ``runtime.config.configurable.user_id``
+      3. ``runtime.context.user_id``
+      4. ``state.user_id``
+      5. ``configured_user_id`` — closure-bound user_id set at companion
+         construction time (``make_switch_to_builder_tool(user_id)``). In normal
+         operation this equals the authenticated user; only falls back to
+         ``"default_user"`` if the companion was built without one.
+      6. ``"default_user"`` literal — hard failure mode; logged as WARNING so
+         regressions are visible.
+    """
+    tool_arg_user_id: str | None = None
     configurable_user_id: str | None = None
     context_user_id: str | None = None
     state_user_id: str | None = None
+
+    if isinstance(explicit_tool_arg, str) and explicit_tool_arg.strip():
+        tool_arg_user_id = explicit_tool_arg
 
     if runtime is not None:
         if runtime.config:
@@ -171,12 +201,15 @@ def _resolve_user_id(
         state_user_id = candidate
 
     diagnostics = {
+        "tool_arg_user_id_present": bool(tool_arg_user_id),
         "configured_user_id_present": bool(configured_user_id),
         "config_user_id_present": bool(configurable_user_id),
         "context_user_id_present": bool(context_user_id),
         "state_user_id_present": bool(state_user_id),
     }
 
+    if tool_arg_user_id:
+        return validate_user_id(tool_arg_user_id), "tool_arg_explicit", diagnostics
     if configurable_user_id:
         return validate_user_id(configurable_user_id), "runtime.config.configurable.user_id", diagnostics
     if context_user_id:
@@ -185,6 +218,12 @@ def _resolve_user_id(
         return validate_user_id(state_user_id), "state.user_id", diagnostics
     if configured_user_id:
         return validate_user_id(configured_user_id), "configured_builder_user_id", diagnostics
+    logger.warning(
+        "[Builder] user_id resolution fell back to 'default_user' — no source "
+        "provided an authenticated user. This is a hard failure signal; "
+        "verify tool args, runtime.config.configurable, runtime.context, "
+        "state, and make_switch_to_builder_tool binding."
+    )
     return validate_user_id("default_user"), "default_user", diagnostics
 
 
@@ -386,6 +425,7 @@ def _switch_to_builder_impl(
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
     configured_user_id: str | None = None,
+    user_id_arg: str | None = None,
 ) -> str | Command:
     """Delegate to builder mode when user asks to BUILD, CREATE, RESEARCH, or MAKE
     something requiring file creation or multi-step execution.
@@ -410,7 +450,12 @@ def _switch_to_builder_impl(
         return json.dumps(_build_duplicate_payload(existing_task, task_type, trace_id))
 
     companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
-    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(runtime, state, configured_user_id)
+    user_id, user_id_source, user_id_diagnostics = _resolve_user_id(
+        runtime,
+        state,
+        configured_user_id=configured_user_id,
+        explicit_tool_arg=user_id_arg,
+    )
     handoff_resolution = {
         "user_id_source": user_id_source,
         "artifact_source": artifact_source,
@@ -575,6 +620,7 @@ def _switch_to_builder_impl(
 def switch_to_builder(
     task: str,
     task_type: str,
+    user_id: str | None = None,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> str | Command:
@@ -582,13 +628,16 @@ def switch_to_builder(
     something requiring file creation or multi-step execution.
     Do NOT call for emotional conversation, reflection, or memory tasks.
     Before calling this, ensure you have complete specs — ask any clarifying
-    questions first, then delegate with the complete brief."""
+    questions first, then delegate with the complete brief.
+    Pass ``user_id`` when known so the builder uses the correct authenticated
+    user for Mem0 / identity / ownership checks."""
 
     return _switch_to_builder_impl(
         task=task,
         task_type=task_type,
         runtime=runtime,
         tool_call_id=tool_call_id,
+        user_id_arg=user_id,
     )
 
 
@@ -599,6 +648,7 @@ def make_switch_to_builder_tool(configured_user_id: str):
     def configured_switch_to_builder(
         task: str,
         task_type: str,
+        user_id: str | None = None,
         runtime: ToolRuntime[ContextT, SophiaState] | None = None,
         tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> str | Command:
@@ -606,7 +656,9 @@ def make_switch_to_builder_tool(configured_user_id: str):
         something requiring file creation or multi-step execution.
         Do NOT call for emotional conversation, reflection, or memory tasks.
         Before calling this, ensure you have complete specs — ask any clarifying
-        questions first, then delegate with the complete brief."""
+        questions first, then delegate with the complete brief.
+        Pass ``user_id`` when known so the builder uses the correct authenticated
+        user for Mem0 / identity / ownership checks."""
 
         return _switch_to_builder_impl(
             task=task,
@@ -614,6 +666,7 @@ def make_switch_to_builder_tool(configured_user_id: str):
             runtime=runtime,
             tool_call_id=tool_call_id,
             configured_user_id=bound_user_id,
+            user_id_arg=user_id,
         )
 
     return configured_switch_to_builder
