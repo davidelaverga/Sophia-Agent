@@ -144,10 +144,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Completion instruction — always present, includes budget so the model
         # plans from turn 0 instead of discovering the limit mid-loop.
-        # MUST stay in sync with BuilderArtifactMiddleware._HARD_CEILING in
+        # MUST stay in sync with BuilderArtifactMiddleware._CEILING_FOR_FORCE in
         # builder_artifact.py — otherwise the model's budget math lies and it
         # over-commits to retries past its advertised limit.
-        _HARD_CEILING = 20
+        # PR-C F6 (2026-04-24): lowered 20 → 10 to match the tightened ceiling.
+        _HARD_CEILING = 10
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
 
         sections.append(
@@ -178,7 +179,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 f"{remaining} turn(s) remaining before forced termination.\n"
                 f"Most recent tool calls: {joined_tools}.\n"
             )
-            if remaining <= 3:
+            # PR-C F6 (2026-04-24): thresholds rescaled for the lower ceiling.
+            # ceiling=10: CRITICAL at remaining<=2 (~80%), WARNING at <=4 (~60%).
+            if remaining <= 2:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
                     "Your NEXT action MUST be emit_builder_artifact — DO NOT call write_todos, "
@@ -188,7 +191,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     "if only a generator .py exists, emit that with confidence<=0.4 and "
                     "explain in companion_tone_hint.\n"
                 )
-            elif remaining <= 6:
+            elif remaining <= 4:
                 escalation += (
                     "WARNING: Running low on turns. Wrap up edits and call "
                     "emit_builder_artifact within the next 1-2 turns. "
