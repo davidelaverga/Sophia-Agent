@@ -894,7 +894,7 @@ class SubagentExecutor:
                             timeout=_HEARTBEAT_INTERVAL_SECONDS,
                         )
                         return
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         pass
                     if result.status != SubagentStatus.RUNNING:
                         return
