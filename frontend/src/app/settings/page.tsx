@@ -12,6 +12,7 @@ import { useState } from 'react';
 
 import { EnhancedFieldBackground } from '../components/dashboard/EnhancedFieldBackground';
 import { ProtectedRoute } from '../components/ProtectedRoute';
+import { TelegramConnectCard } from '../components/settings/TelegramConnectCard';
 import { VisualQualityPicker } from '../components/settings/VisualQualityPicker';
 import { haptic } from '../hooks/useHaptics';
 import { authBypassConfiguredValue, authBypassEnabled, authBypassSource } from '../lib/auth/dev-bypass';
@@ -221,6 +222,9 @@ export default function SettingsPage() {
                 <ArrowUpRight className="h-3.5 w-3.5 shrink-0" style={{ color: 'var(--cosmic-text-whisper)' }} />
               </button>
             </section>
+
+            {/* ── Integrations ── */}
+            <TelegramConnectCard />
 
             {/* ── Privacy ── */}
             <section className="cosmic-surface-panel-strong rounded-[1.6rem] p-5">

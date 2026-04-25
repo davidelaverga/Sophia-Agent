@@ -17,6 +17,7 @@ from app.gateway.routers import (
     sessions,
     skills,
     suggestions,
+    telegram_link,
     uploads,
     voice,
 )
@@ -60,6 +61,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Channel service started: %s", channel_service.get_status())
     except Exception:
         logger.exception("No IM channels configured or channel service failed to start")
+
+    # Rehydrate Telegram chat -> canonical user bindings from Supabase so
+    # cross-platform identity resolution survives gateway restarts/deploys.
+    # Best-effort: never block startup on a Supabase outage.
+    try:
+        from app.gateway import telegram_link_store
+
+        loaded = telegram_link_store.load_bindings_from_supabase()
+        if loaded:
+            logger.info("Rehydrated %d Telegram user bindings from Supabase", loaded)
+    except Exception:
+        logger.exception("Failed to rehydrate Telegram user bindings from Supabase")
 
     # Start Sophia inactivity watcher
     try:
@@ -217,6 +230,9 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Voice API is mounted at /api/sophia/{user_id}/voice/*
     app.include_router(voice.router)
+
+    # Telegram link API is mounted at /api/sophia/{user_id}/telegram/*
+    app.include_router(telegram_link.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

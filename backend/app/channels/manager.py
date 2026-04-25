@@ -437,6 +437,7 @@ class ChannelManager:
 
     async def _handle_message(self, msg: InboundMessage) -> None:
         async with self._semaphore:
+            self._apply_canonical_user_id(msg)
             try:
                 if msg.msg_type == InboundMessageType.COMMAND:
                     await self._handle_command(msg)
@@ -449,6 +450,34 @@ class ChannelManager:
                     msg.chat_id,
                 )
                 await self._send_error(msg, "An internal error occurred. Please try again.")
+
+    @staticmethod
+    def _apply_canonical_user_id(msg: InboundMessage) -> None:
+        """Rewrite ``msg.user_id`` to the canonical webapp user id when bound.
+
+        Today only Telegram has a deep-link binding flow. Other channels are
+        no-ops. The original platform user id is preserved in
+        ``msg.metadata['platform_user_id']`` for auditing.
+        """
+        if msg.channel_name != "telegram":
+            return
+        try:
+            from app.gateway.telegram_link_store import resolve_user_id
+        except ImportError:  # pragma: no cover
+            return
+        canonical = resolve_user_id("telegram", msg.chat_id)
+        if canonical is None or canonical == msg.user_id:
+            return
+        msg.metadata.setdefault("platform_user_id", msg.user_id)
+        msg.metadata.setdefault("canonical_user_id", canonical)
+        logger.info(
+            "[Manager] identity resolved: channel=%s chat_id=%s tg_user_id=%s -> user_id=%s",
+            msg.channel_name,
+            msg.chat_id,
+            msg.user_id,
+            canonical,
+        )
+        msg.user_id = canonical
 
     # -- chat handling -----------------------------------------------------
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import threading
 from typing import Any
 
@@ -12,12 +13,24 @@ from app.channels.message_bus import InboundMessageType, MessageBus, OutboundMes
 
 logger = logging.getLogger(__name__)
 
+# Telegram /start payloads are ASCII tokens bounded by the client (~64 chars).
+# Deep-link tokens issued by the gateway are 43-char urlsafe-b64; accept
+# anything that looks like a plausible token so future rotations still work.
+_LINK_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{16,96}$")
+
+
+def _looks_like_link_token(value: str) -> bool:
+    return bool(_LINK_TOKEN_RE.match(value or ""))
+
 
 class TelegramChannel(Channel):
     """Telegram bot channel using long-polling.
 
     Configuration keys (in ``config.yaml`` under ``channels.telegram``):
         - ``bot_token``: Telegram Bot API token (from @BotFather).
+        - ``bot_username``: (optional) Bot username (without '@'). Used for
+          deep-link URLs. Falls back to the ``TELEGRAM_BOT_USERNAME`` env var
+          read by ``app.gateway.telegram_link_store``.
         - ``allowed_users``: (optional) List of allowed Telegram user IDs. Empty = allow all.
     """
 
@@ -219,10 +232,91 @@ class TelegramChannel(Channel):
         return user_id in self._allowed_users
 
     async def _cmd_start(self, update, context) -> None:
-        """Handle /start command."""
+        """Handle /start command.
+
+        When the user arrived via a ``t.me/<bot>?start=<token>`` deep-link,
+        Telegram passes the token as the first positional arg. Redeem the
+        token against the gateway's in-process registry and bind the chat
+        to the canonical user_id so subsequent messages route under the
+        same identity as the webapp session.
+
+        Deep-link redemption is restricted to **private** chats — in groups
+        or supergroups ``effective_chat.id`` is shared by every member, so
+        a single redemption there would collapse multiple users onto one
+        canonical id. Redemption in a non-private chat is rejected without
+        consuming the token so the user can re-open the link in a DM.
+        """
         if not self._check_user(update.effective_user.id):
             return
-        await update.message.reply_text("Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands.")
+        args = list(getattr(context, "args", None) or [])
+        if args and _looks_like_link_token(args[0]):
+            chat_type = getattr(update.effective_chat, "type", None)
+            if chat_type != "private":
+                logger.warning(
+                    "telegram._cmd_start.non_private_redemption_blocked chat_type=%s chat_id=%s tg_user_id=%s",
+                    chat_type,
+                    update.effective_chat.id,
+                    update.effective_user.id,
+                )
+                await update.message.reply_text(
+                    "Please open the deep link in a 1:1 chat with me, not in a group. "
+                    "Tap the original link again and accept the DM prompt."
+                )
+                return
+            ok = self._redeem_start_token(
+                token=args[0],
+                chat_id=str(update.effective_chat.id),
+                tg_user_id=str(update.effective_user.id),
+                tg_username=getattr(update.effective_user, "username", None),
+            )
+            if ok:
+                await update.message.reply_text(
+                    "You're connected. Sophia will now remember you across Telegram and the webapp."
+                )
+                return
+            await update.message.reply_text(
+                "That link has expired. Generate a new one from the webapp and try again."
+            )
+            return
+        await update.message.reply_text(
+            "Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands."
+        )
+
+    def _redeem_start_token(
+        self,
+        *,
+        token: str,
+        chat_id: str,
+        tg_user_id: str,
+        tg_username: str | None,
+    ) -> bool:
+        """Redeem a deep-link token and persist the chat binding.
+
+        The Telegram channel runs in the same process as the gateway so we
+        call the store directly. Returns True if the token was valid and
+        the binding was persisted.
+        """
+        try:
+            from app.gateway.telegram_link_store import bind_chat, pop_link_token
+        except ImportError:  # pragma: no cover — gateway not mounted in this process
+            logger.warning("telegram._cmd_start: telegram_link_store unavailable")
+            return False
+        record = pop_link_token(token)
+        if record is None:
+            logger.info("telegram._cmd_start.redeem_failed chat_id=%s token_prefix=%s", chat_id, token[:6])
+            return False
+        try:
+            bind_chat(
+                "telegram",
+                chat_id,
+                record.user_id,
+                telegram_user_id=tg_user_id,
+                telegram_username=tg_username,
+            )
+        except Exception:  # noqa: BLE001 — never crash the bot handler
+            logger.exception("telegram._cmd_start.bind_failed chat_id=%s", chat_id)
+            return False
+        return True
 
     async def _cmd_generic(self, update, context) -> None:
         """Forward slash commands to the channel manager."""
