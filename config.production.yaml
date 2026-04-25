@@ -34,3 +34,15 @@ summarization:
   keep:
     type: messages
     value: 4
+
+channels:
+  # ChannelManager dispatches inbound IM messages to the LangGraph runtime via
+  # this URL. On Render the gateway service has LANGGRAPH_URL set in env to the
+  # internal hostname of the sophia-langgraph service.
+  langgraph_url: $LANGGRAPH_URL
+  telegram:
+    enabled: true
+    bot_token: $TELEGRAM_BOT_TOKEN
+    # bot_username (e.g. Sophia_EI_bot) is read from the TELEGRAM_BOT_USERNAME
+    # env var by app.gateway.telegram_link_store — no need to pass it here.
+    # allowed_users: []  # empty = allow any Telegram user
