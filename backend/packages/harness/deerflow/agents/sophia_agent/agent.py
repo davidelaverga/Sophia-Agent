@@ -6,6 +6,16 @@ Creates the Sophia companion agent with its middleware chain.
 import logging
 import os
 
+# deepagents v0.5 async subagents (B4). The middleware exposes 5 task-
+# management tools (`start_async_task`, `check_async_task`,
+# `update_async_task`, `cancel_async_task`, `list_async_tasks`) and is
+# attached only when ``configurable.async_builder`` is truthy, so the
+# default behaviour (sync `switch_to_builder` Command path with PR #78's
+# JSON-string fallback) is byte-identical to today.
+from deepagents.middleware.async_subagents import (
+    AsyncSubAgent,
+    AsyncSubAgentMiddleware,
+)
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
@@ -44,6 +54,67 @@ from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
 from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 
 logger = logging.getLogger(__name__)
+
+
+# System-prompt preface injected alongside the five async-subagent tools.
+# Kept short on purpose — the heavy contract lives in
+# `skills/public/sophia/AGENTS.md` (loaded by FileInjectionMiddleware).
+# This block just teaches the companion the async vocabulary so it picks the
+# right tool for the user's intent. The preamble is appended by
+# AsyncSubAgentMiddleware.wrap_model_call only when this middleware is in the
+# chain, so the default companion behaviour is unaffected.
+_ASYNC_BUILDER_SYSTEM_PROMPT = (
+    "You can delegate long builds to the Sophia builder as a background task.\n"
+    "- To start a build, call `start_async_task` with "
+    "`subagent_type=\"sophia_builder\"` and a complete, self-contained task "
+    "description that includes the task_type as a prefix (for example "
+    "`[presentation] Build a 5-slide investor deck...`). The task returns a "
+    "task_id immediately; keep talking to the user while the build runs.\n"
+    "- When the user asks \"how's it going?\" or enough time has passed, call "
+    "`check_async_task` with the task_id.\n"
+    "- If the user course-corrects (\"actually, make it 2 slides not 5\"), "
+    "call `update_async_task` with the task_id and the new instruction. This "
+    "preserves the existing thread so the builder keeps its progress.\n"
+    "- If the user asks you to stop, call `cancel_async_task`.\n"
+    "- Use `list_async_tasks` when the user references \"that document we "
+    "started\" and you need to recall recent task_ids.\n"
+    "Do not poll on a timer. Only check when the user asks or when you know "
+    "enough time has passed that a check is worth offering.\n"
+)
+
+
+def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
+    """Build the deepagents AsyncSubAgentMiddleware for B4.
+
+    The ``AsyncSubAgent`` spec omits ``url`` on purpose — that selects the
+    ASGI (in-process) transport, which routes SDK calls in-process through
+    our existing ``langgraph.json`` registration of ``sophia_builder``. Zero
+    network hop, zero extra auth configuration. Deploying the builder on a
+    separate host later is a one-line change (add ``url=``).
+
+    The middleware also writes to the ``async_tasks`` state channel using its
+    internal ``_tasks_reducer``. Our SophiaState already declares
+    ``async_tasks: Annotated[NotRequired[dict[str, dict]], merge_async_tasks]``
+    and the two reducers are functionally identical (`dict.update`-based
+    merge), so the schema merge is safe whichever wins. PR #78's
+    ``switch_to_builder._build_async_task_metadata`` also emits records that
+    explicitly match deepagents' ``AsyncTask`` shape (the comment in that
+    file says so), so the two writers can coexist on the same channel.
+    """
+    sophia_builder_spec: AsyncSubAgent = {
+        "name": "sophia_builder",
+        "description": (
+            "Sophia's builder graph. Delegate file-creation, research, "
+            "presentation, visual_report, frontend, and document tasks. The "
+            "description you send becomes the builder's task brief, so "
+            "include all specs the user gave you."
+        ),
+        "graph_id": "sophia_builder",
+    }
+    return AsyncSubAgentMiddleware(
+        async_subagents=[sophia_builder_spec],
+        system_prompt=_ASYNC_BUILDER_SYSTEM_PROMPT,
+    )
 
 
 def _create_summarization_middleware():
@@ -127,6 +198,10 @@ def make_sophia_agent(config: RunnableConfig):
     platform = cfg.get("platform", "voice")
     ritual = cfg.get("ritual", None)
     context_mode = cfg.get("context_mode", "life")
+    # B4: opt-in deepagents v0.5 async-subagent tools. Off by default so
+    # `switch_to_builder` (PR #78's sync handoff) stays the production path
+    # until the async pattern is validated end-to-end.
+    async_builder_enabled = bool(cfg.get("async_builder", False))
 
     logger.info(
         "Creating Sophia companion agent: user_id=%s, platform=%s, ritual=%s, context_mode=%s",
@@ -201,6 +276,21 @@ def make_sophia_agent(config: RunnableConfig):
     if web_tools:
         # Insert immediately before BuilderCommandMiddleware (last entry above).
         middlewares.insert(-1, WebResearchGuidanceMiddleware())
+
+    # 16c. Optional: deepagents v0.5 async-subagent middleware (B4). Adds 5
+    # new tools (`start_async_task` / `check_async_task` / `update_async_task`
+    # / `cancel_async_task` / `list_async_tasks`) and a system-prompt preamble
+    # that teaches the model the async vocabulary. Appended AFTER
+    # `BuilderSessionMiddleware` and `BuilderCommandMiddleware` so those
+    # middlewares still see every turn — the async tools are added on top, not
+    # in place of `switch_to_builder`. Default off; opt in per request via
+    # `configurable.async_builder=True`.
+    if async_builder_enabled:
+        middlewares.append(_build_async_subagent_middleware())
+        logger.info(
+            "Sophia companion: async_builder flag enabled; "
+            "AsyncSubAgentMiddleware attached with graph_id=sophia_builder"
+        )
 
     # 17. Summarization (config-driven trigger/keep policy)
     summarization_middleware = _create_summarization_middleware()
