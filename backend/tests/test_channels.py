@@ -722,6 +722,82 @@ class TestChannelManager:
 
         _run(go())
 
+    def test_resolve_run_params_propagates_user_id_to_configurable(self):
+        """Telegram user_id MUST land in `config.configurable` so Sophia's graph
+        factories see a non-None user_id. langgraph-runtime always materialises
+        `configurable.user_id` (defaulting to None when missing); failing to set
+        it explicitly here was the regression that crashed every Telegram inbound
+        message in production with `ValueError: Invalid user_id format`.
+        """
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(
+            bus=bus,
+            store=store,
+            channel_sessions={
+                "telegram": {
+                    "assistant_id": "sophia_companion",
+                    "context": {"platform": "text", "context_mode": "life"},
+                }
+            },
+        )
+
+        msg = InboundMessage(channel_name="telegram", chat_id="123", user_id="7681651928", text="hello")
+        assistant_id, run_config, run_context = manager._resolve_run_params(msg, "thread-abc")
+
+        assert assistant_id == "sophia_companion"
+        assert run_config["configurable"]["user_id"] == "7681651928"
+        assert run_context["user_id"] == "7681651928"
+        assert run_context["thread_id"] == "thread-abc"
+        assert run_context["platform"] == "text"
+        assert run_context["context_mode"] == "life"
+
+    def test_resolve_run_params_user_session_user_id_wins_over_msg(self):
+        """Explicit per-user `config.configurable.user_id` from session config
+        must NOT be overwritten by `msg.user_id`."""
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(
+            bus=bus,
+            store=store,
+            channel_sessions={
+                "telegram": {
+                    "users": {
+                        "vip-user": {
+                            "config": {"configurable": {"user_id": "canonical-vip"}},
+                        }
+                    }
+                }
+            },
+        )
+
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="vip-user", text="hi")
+        _, run_config, _ = manager._resolve_run_params(msg, "thread-1")
+
+        assert run_config["configurable"]["user_id"] == "canonical-vip"
+
+    def test_resolve_run_params_skips_user_id_when_msg_user_id_empty(self):
+        """If somehow msg.user_id is empty, do NOT poison configurable with
+        an empty/None user_id — let make_sophia_agent fall back to its
+        defensive default."""
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store)
+
+        msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="", text="hi")
+        _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
+
+        configurable = run_config.get("configurable") or {}
+        assert "user_id" not in configurable
+        assert "user_id" not in run_context
+        assert run_context["thread_id"] == "thread-1"
+
     def test_handle_feishu_chat_streams_multiple_outbound_updates(self, monkeypatch):
         from app.channels.manager import ChannelManager
 

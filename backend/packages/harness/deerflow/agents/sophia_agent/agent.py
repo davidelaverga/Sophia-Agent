@@ -83,7 +83,14 @@ def make_sophia_agent(config: RunnableConfig):
         context_mode: "work" | "gaming" | "life" (default: "life")
     """
     cfg = config.get("configurable", {})
-    user_id = validate_user_id(cfg.get("user_id", "default_user"))
+    # langgraph_runtime_inmem always writes a `user_id` key into configurable,
+    # defaulting to None when the caller did not supply one. dict.get(..., default)
+    # only returns the default for *missing* keys, so we explicitly coerce None
+    # / empty / non-string values back to "default_user" before validation.
+    raw_user_id = cfg.get("user_id")
+    user_id = validate_user_id(
+        raw_user_id if isinstance(raw_user_id, str) and raw_user_id.strip() else "default_user"
+    )
     platform = cfg.get("platform", "voice")
     ritual = cfg.get("ritual", None)
     context_mode = cfg.get("context_mode", "life")
