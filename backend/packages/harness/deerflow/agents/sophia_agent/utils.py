@@ -42,8 +42,13 @@ def log_middleware(name: str, context: str, start_time: float) -> None:
     elapsed_ms = (time.perf_counter() - start_time) * 1000
     _mw_logger.info("[%s] %s (%.2fms)", name, context, elapsed_ms)
 
-# Strict allowlist for user identifiers used in file paths
-_USER_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+# Strict allowlist for user identifiers used in Sophia state, memory, and file paths.
+#
+# Production auth providers may issue UUIDs, cuid/nanoid-style ids, or
+# namespaced/email-shaped ids. Keep path separators, traversal markers,
+# whitespace, shell metacharacters, and NULs rejected; safe_user_path adds an
+# is_relative_to() defense-in-depth check for filesystem use.
+_USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9._@+:|-]{1,128}$")
 
 
 def validate_user_id(user_id: str) -> str:
@@ -52,7 +57,13 @@ def validate_user_id(user_id: str) -> str:
     Raises ValueError if the user_id contains characters that could
     enable path traversal or other injection attacks.
     """
-    if not user_id or not _USER_ID_PATTERN.match(user_id):
+    if not isinstance(user_id, str) or not user_id:
+        raise ValueError("Invalid user_id format")
+    if user_id != user_id.strip():
+        raise ValueError("Invalid user_id format")
+    if any(ch in user_id for ch in ("/", "\\", "\x00")) or ".." in user_id:
+        raise ValueError("Invalid user_id format")
+    if not _USER_ID_PATTERN.match(user_id):
         raise ValueError("Invalid user_id format")
     return user_id
 

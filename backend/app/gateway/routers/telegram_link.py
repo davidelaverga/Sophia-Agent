@@ -24,6 +24,7 @@ from app.gateway.telegram_link_store import (
     issue_link_token,
     unbind_user,
 )
+from deerflow.agents.sophia_agent.utils import validate_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,13 @@ def _build_start_url(bot_username: str, token: str) -> str:
     return f"https://t.me/{bot_username}?start={token}"
 
 
+def _validate_path_user_id(user_id: str) -> str:
+    try:
+        return validate_user_id(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Invalid user_id format") from exc
+
+
 @router.post(
     "/{user_id}/telegram/link",
     response_model=TelegramLinkResponse,
@@ -67,6 +75,7 @@ def _build_start_url(bot_username: str, token: str) -> str:
     ),
 )
 async def create_telegram_link(user_id: str) -> TelegramLinkResponse:
+    user_id = _validate_path_user_id(user_id)
     record = issue_link_token(user_id)
     bot_username = get_bot_username()
     url = _build_start_url(bot_username, record.token)
@@ -85,6 +94,7 @@ async def create_telegram_link(user_id: str) -> TelegramLinkResponse:
     description="Returns whether the authenticated user has an active Telegram binding.",
 )
 async def get_telegram_link(user_id: str) -> TelegramLinkStatusResponse:
+    user_id = _validate_path_user_id(user_id)
     bot_username = get_bot_username()
     binding = get_binding_for_user(user_id, channel="telegram")
     if binding is None:
@@ -104,6 +114,7 @@ async def get_telegram_link(user_id: str) -> TelegramLinkStatusResponse:
     description="Removes all Telegram bindings for the authenticated user.",
 )
 async def delete_telegram_link(user_id: str) -> Response:
+    user_id = _validate_path_user_id(user_id)
     removed = unbind_user(user_id, channel="telegram")
     logger.info("telegram_link.revoke user_id=%s removed=%d", user_id, removed)
     # 204 regardless of whether a binding existed — idempotent UX.
