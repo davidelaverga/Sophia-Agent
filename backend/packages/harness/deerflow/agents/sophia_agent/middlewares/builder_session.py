@@ -29,7 +29,21 @@ _TERMINAL_STATUSES = {"completed", "synthesized", "failed", "timed_out"}
 
 
 class BuilderSessionState(AgentState):
-    messages: NotRequired[list]
+    # NOTE: Do not redeclare ``messages`` here. ``AgentState`` already declares
+    # ``messages`` with the ``add_messages`` reducer. Shadowing it with a plain
+    # ``list`` annotation downgrades the LangGraph channel to ``LastValue`` via
+    # ``langchain.agents.create_agent``'s set-based schema merge, which causes
+    # every tool-message write (e.g. the ``emit_artifact`` ToolMessage) to
+    # REPLACE the conversation history instead of appending to it. The result
+    # is that ``runs.wait`` returns a ``messages`` list containing only the
+    # final ToolMessage, the AI text response is wiped, and downstream
+    # consumers (Telegram channel, Slack channel, Feishu) ship
+    # "(No response from agent)" to the user even though the run succeeded.
+    # Parallel tool calls additionally crash with ``InvalidUpdateError: At
+    # key 'messages': Can receive only one value per step``.
+    # The schema-level guard in
+    # ``tests/test_sophia_state_schema_invariants.py`` enforces this for all
+    # Sophia middleware state classes.
     active_mode: NotRequired[str]
     builder_task: NotRequired[dict | None]
     builder_result: NotRequired[dict | None]
