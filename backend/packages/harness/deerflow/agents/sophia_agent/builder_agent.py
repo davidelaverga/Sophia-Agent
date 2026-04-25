@@ -25,6 +25,7 @@ from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssem
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.config.app_config import get_app_config
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
 from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
@@ -43,7 +44,14 @@ def make_sophia_builder(config: RunnableConfig):
     to _create_builder_agent().
     """
     cfg = config.get("configurable", {})
-    user_id = cfg.get("user_id", "default_user")
+    # langgraph_runtime_inmem always writes a `user_id` key into configurable,
+    # defaulting to None when the caller did not supply one. dict.get(..., default)
+    # only returns the default for *missing* keys, so coerce None / empty / non-string
+    # values back to "default_user" before validation.
+    raw_user_id = cfg.get("user_id")
+    user_id = validate_user_id(
+        raw_user_id if isinstance(raw_user_id, str) and raw_user_id.strip() else "default_user"
+    )
     model_name = cfg.get("model_name")
     return _create_builder_agent(user_id=user_id, model_name=model_name)
 

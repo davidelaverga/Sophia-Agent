@@ -372,12 +372,27 @@ class ChannelManager:
             user_layer.get("config"),
         )
 
+        # Sophia's graph factories (`make_sophia_agent`, `make_sophia_builder`)
+        # read user_id from `config["configurable"]["user_id"]`. langgraph-runtime
+        # always materialises that key (as None when no caller supplied it), so
+        # we MUST inject msg.user_id here or every IM message crashes the run
+        # before any middleware loads.
+        configurable = dict(run_config.get("configurable") or {})
+        if msg.user_id and not configurable.get("user_id"):
+            configurable["user_id"] = msg.user_id
+        if configurable:
+            run_config["configurable"] = configurable
+
+        run_context_extras: dict[str, Any] = {"thread_id": thread_id}
+        if msg.user_id:
+            run_context_extras["user_id"] = msg.user_id
+
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
             self._default_session.get("context"),
             channel_layer.get("context"),
             user_layer.get("context"),
-            {"thread_id": thread_id},
+            run_context_extras,
         )
 
         return assistant_id, run_config, run_context

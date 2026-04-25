@@ -408,7 +408,21 @@ def _build_queued_command(
     async_task: dict[str, str],
     existing_async_tasks: dict[str, dict] | None = None,
 ) -> Command:
-    """Return control immediately with state updated for async builder tracking."""
+    """Return control immediately with state updated for async builder tracking.
+
+    ``tool_call_id`` MUST be the LLM's original tool-call id (e.g. ``toolu_01…``)
+    — LangGraph's ``ToolNode._validate_tool_command`` requires the ToolMessage
+    to echo that exact id, otherwise the run aborts with
+    ``Expected to have a matching ToolMessage in Command.update``. Substituting
+    the internal builder ``task_id`` here was the PR-H regression. Callers that
+    cannot guarantee a real id MUST use the JSON-string fallback path in
+    ``_switch_to_builder_impl`` instead of constructing a Command.
+    """
+    if not tool_call_id:
+        raise ValueError(
+            "_build_queued_command requires a non-empty tool_call_id from the LLM "
+            "tool call; substituting task_id breaks LangGraph's tool-message contract."
+        )
     task_id = payload["task_id"]
     return Command(
         update={
@@ -420,7 +434,7 @@ def _build_queued_command(
             "messages": [
                 ToolMessage(
                     content=json.dumps(payload),
-                    tool_call_id=tool_call_id or task_id,
+                    tool_call_id=tool_call_id,
                     name="switch_to_builder",
                 )
             ],
@@ -605,6 +619,23 @@ def _switch_to_builder_impl(
         delegation_context=delegation_context,
         handoff_resolution=handoff_resolution,
     )
+
+    # If InjectedToolCallId failed to wire through (production-observed under
+    # @tool(args_schema=...)), we cannot construct a valid Command — LangGraph
+    # would reject any ToolMessage whose tool_call_id doesn't match the LLM's.
+    # Fall back to the pre-PR-H JSON-string return: BuilderSessionMiddleware
+    # adopts the handoff payload from the resulting tool message on the next
+    # turn (see _extract_latest_handoff_payload), so we lose only the
+    # immediate Command-based state update.
+    if not tool_call_id:
+        logger.warning(
+            "[Builder] InjectedToolCallId empty for switch_to_builder — falling back "
+            "to JSON-string return; Command-based state updates skipped this turn "
+            "(BuilderSessionMiddleware adopts on the next turn). Investigate "
+            "langchain version / args_schema interaction in switch_to_builder.py."
+        )
+        return json.dumps(payload)
+
     async_task = _build_async_task_metadata(
         task_id=task_id,
         thread_id=thread_id,
