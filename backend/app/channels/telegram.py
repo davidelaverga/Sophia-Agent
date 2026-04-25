@@ -348,8 +348,16 @@ class TelegramChannel(Channel):
         )
         inbound.topic_id = topic_id
 
+        # `_send_running_reply` calls `bot.send_message`, whose httpx client and
+        # internal asyncio primitives are bound to `_tg_loop` (where the bot was
+        # initialised). This handler is itself running on `_tg_loop` (Telegram's
+        # polling loop), so awaiting directly keeps everything on the right
+        # loop. Scheduling it onto `_main_loop` raised
+        #   RuntimeError: <asyncio.locks.Event …> is bound to a different event loop
+        # in production. Only `bus.publish_inbound` needs the cross-loop hop
+        # because the bus's queue lives on `_main_loop`.
+        await self._send_running_reply(chat_id, update.message.message_id)
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
             asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
 
     async def _on_text(self, update, context) -> None:
@@ -388,6 +396,9 @@ class TelegramChannel(Channel):
         )
         inbound.topic_id = topic_id
 
+        # See _cmd_generic for the rationale: `_send_running_reply` must run on
+        # the bot's loop (`_tg_loop`, == current loop here), only
+        # `bus.publish_inbound` needs the cross-loop hop to `_main_loop`.
+        await self._send_running_reply(chat_id, update.message.message_id)
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
             asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)

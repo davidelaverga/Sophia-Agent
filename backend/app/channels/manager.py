@@ -372,17 +372,19 @@ class ChannelManager:
             user_layer.get("config"),
         )
 
-        # Sophia's graph factories (`make_sophia_agent`, `make_sophia_builder`)
-        # read user_id from `config["configurable"]["user_id"]`. langgraph-runtime
-        # always materialises that key (as None when no caller supplied it), so
-        # we MUST inject msg.user_id here or every IM message crashes the run
-        # before any middleware loads.
-        configurable = dict(run_config.get("configurable") or {})
-        if msg.user_id and not configurable.get("user_id"):
-            configurable["user_id"] = msg.user_id
-        if configurable:
-            run_config["configurable"] = configurable
-
+        # NOTE on user_id propagation: Sophia's graph factories
+        # (`make_sophia_agent`, `make_sophia_builder`) read user_id from
+        # `config["configurable"]["user_id"]`. We deliberately put it in
+        # `context` here, NOT in `config["configurable"]`, because
+        # langgraph-api 0.7+ rejects requests that set BOTH with
+        #   400 "Cannot specify both configurable and context. Prefer setting
+        #        context alone."
+        # (langgraph_api/models/run.py:225-228). When only context is supplied,
+        # langgraph-api copies it into configurable on the server side
+        # (run.py:233 `configurable = context.copy()`), so the factories still
+        # see the user_id at `cfg["user_id"]`. langgraph-runtime then takes
+        # configurable.user_id from request first (ops.py:2512-2521), keeping
+        # the chain end-to-end correct.
         run_context_extras: dict[str, Any] = {"thread_id": thread_id}
         if msg.user_id:
             run_context_extras["user_id"] = msg.user_id
