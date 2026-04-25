@@ -464,11 +464,19 @@ def load_bindings_from_supabase() -> int:
                 )
                 response = client.get(endpoint, headers=headers)
                 if response.status_code >= 400:
-                    logger.warning(
-                        "telegram_link.rehydrate_failed status=%d body=%r",
-                        response.status_code,
-                        response.text[:200],
-                    )
+                    body_snippet = response.text[:200]
+                    if response.status_code == 404 and "PGRST205" in body_snippet:
+                        logger.warning(
+                            "telegram_link.rehydrate_skipped reason=table_missing table=%s "
+                            "hint=run backend/migrations/2026_04_25_telegram_user_bindings.sql",
+                            _BINDINGS_TABLE,
+                        )
+                    else:
+                        logger.warning(
+                            "telegram_link.rehydrate_failed status=%d body=%r",
+                            response.status_code,
+                            body_snippet,
+                        )
                     return total
                 try:
                     rows = response.json()
