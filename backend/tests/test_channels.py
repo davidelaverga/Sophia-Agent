@@ -722,13 +722,13 @@ class TestChannelManager:
 
         _run(go())
 
-    def test_resolve_run_params_propagates_user_id_to_configurable(self):
-        """Telegram user_id MUST land in `config.configurable` so Sophia's graph
-        factories see a non-None user_id. langgraph-runtime always materialises
-        `configurable.user_id` (defaulting to None when missing); failing to set
-        it explicitly here was the regression that crashed every Telegram inbound
-        message in production with `ValueError: Invalid user_id format`.
-        """
+    def test_resolve_run_params_propagates_user_id_via_context_only(self):
+        """Telegram user_id MUST be propagated via `context` ONLY, not via
+        `config.configurable`. langgraph-api 0.7+ rejects requests that set
+        both with `400 "Cannot specify both configurable and context."`
+        (langgraph_api/models/run.py:225). When only context is set, the
+        server copies it into configurable (run.py:233), so Sophia's
+        factories still see `cfg["user_id"]`."""
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
@@ -748,15 +748,24 @@ class TestChannelManager:
         assistant_id, run_config, run_context = manager._resolve_run_params(msg, "thread-abc")
 
         assert assistant_id == "sophia_companion"
-        assert run_config["configurable"]["user_id"] == "7681651928"
+        # user_id MUST be in context, NOT in configurable.
         assert run_context["user_id"] == "7681651928"
+        configurable = run_config.get("configurable") or {}
+        assert "user_id" not in configurable, (
+            "Manager must NOT populate config.configurable.user_id — "
+            "langgraph-api 0.7+ raises 400 when both configurable and context "
+            "are set on the request."
+        )
         assert run_context["thread_id"] == "thread-abc"
         assert run_context["platform"] == "text"
         assert run_context["context_mode"] == "life"
 
-    def test_resolve_run_params_user_session_user_id_wins_over_msg(self):
-        """Explicit per-user `config.configurable.user_id` from session config
-        must NOT be overwritten by `msg.user_id`."""
+    def test_resolve_run_params_session_configurable_does_not_force_conflict(self):
+        """If a channel's session config explicitly provides
+        `config.configurable`, the manager preserves that user-supplied value
+        as-is (the session author opted into the legacy path knowingly). The
+        manager itself never adds user_id to configurable; it only adds it to
+        context."""
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
@@ -776,14 +785,18 @@ class TestChannelManager:
         )
 
         msg = InboundMessage(channel_name="telegram", chat_id="c", user_id="vip-user", text="hi")
-        _, run_config, _ = manager._resolve_run_params(msg, "thread-1")
+        _, run_config, run_context = manager._resolve_run_params(msg, "thread-1")
 
+        # Session-author-supplied configurable.user_id is left alone (user opted in).
         assert run_config["configurable"]["user_id"] == "canonical-vip"
+        # Manager still populates context.user_id from msg.user_id (which becomes
+        # the canonical id post-_apply_canonical_user_id rewrite).
+        assert run_context["user_id"] == "vip-user"
 
     def test_resolve_run_params_skips_user_id_when_msg_user_id_empty(self):
-        """If somehow msg.user_id is empty, do NOT poison configurable with
-        an empty/None user_id — let make_sophia_agent fall back to its
-        defensive default."""
+        """If msg.user_id is empty, the manager must NOT add a user_id key to
+        either configurable or context — let make_sophia_agent fall back to
+        its defensive default."""
         from app.channels.manager import ChannelManager
 
         bus = MessageBus()
@@ -2018,6 +2031,191 @@ class TestTelegramPrivateChatThread:
             msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
             assert msg.topic_id == "20"
             assert msg.msg_type == InboundMessageType.COMMAND
+
+        _run(go())
+
+
+class TestTelegramRunningReplyEventLoop:
+    """Regression: `_send_running_reply` invokes the bot's HTTP client, which
+    is bound to `_tg_loop` (the polling-thread loop). Scheduling it onto
+    `_main_loop` raised
+        RuntimeError: <asyncio.locks.Event …> is bound to a different event loop
+    in production whenever `_main_loop != _tg_loop`. The handlers themselves
+    run on `_tg_loop`, so the reply MUST be scheduled there. We also keep the
+    scheduling fire-and-forget so transient Telegram slowness can never delay
+    forwarding the user's message to the manager — the codex bot caught a
+    regression in PR #79 where `await self._send_running_reply(...)` made
+    manager dispatch depend on the best-effort acknowledgement.
+    """
+
+    @staticmethod
+    def _capture_loop_bot():
+        """A mock telegram bot whose `send_message` records the running loop
+        and signals an Event on entry so tests can wait for the
+        fire-and-forget task to actually execute."""
+        captured: dict = {}
+
+        async def send_message(**kwargs):
+            captured["loop"] = asyncio.get_running_loop()
+            captured["kwargs"] = kwargs
+            captured["called"].set()
+            return MagicMock(message_id=42)
+
+        bot = MagicMock()
+        bot.send_message = send_message
+        return bot, captured
+
+    def test_on_text_runs_running_reply_on_handler_loop_not_main_loop(self):
+        """`_on_text` must schedule `bot.send_message` on the current handler
+        loop (= `_tg_loop` in production), NOT on `_main_loop`."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            bot, captured = self._capture_loop_bot()
+            captured["called"] = asyncio.Event()
+            mock_app = MagicMock()
+            mock_app.bot = bot
+            ch._application = mock_app
+            # Production shape: _main_loop is a DIFFERENT loop from the one
+            # running this handler. Use a fresh event loop to model that.
+            different_loop = asyncio.new_event_loop()
+            ch._main_loop = different_loop
+
+            handler_loop = asyncio.get_running_loop()
+            update = _make_telegram_update("private", message_id=100)
+
+            try:
+                await ch._on_text(update, None)
+                # Fire-and-forget — wait for the scheduled task to actually run.
+                await asyncio.wait_for(captured["called"].wait(), timeout=2.0)
+            finally:
+                different_loop.close()
+
+            assert captured.get("loop") is handler_loop, (
+                "bot.send_message must run on the handler's loop "
+                "(= _tg_loop in prod), not on _main_loop. Got loop "
+                f"{captured.get('loop')!r} vs handler_loop {handler_loop!r}."
+            )
+            assert captured["kwargs"]["text"] == "Working on it..."
+
+        _run(go())
+
+    def test_cmd_generic_runs_running_reply_on_handler_loop_not_main_loop(self):
+        """Same contract for slash-command handler `_cmd_generic`."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            bot, captured = self._capture_loop_bot()
+            captured["called"] = asyncio.Event()
+            mock_app = MagicMock()
+            mock_app.bot = bot
+            ch._application = mock_app
+            different_loop = asyncio.new_event_loop()
+            ch._main_loop = different_loop
+
+            handler_loop = asyncio.get_running_loop()
+            update = _make_telegram_update("private", message_id=200, text="/status")
+
+            try:
+                await ch._cmd_generic(update, None)
+                await asyncio.wait_for(captured["called"].wait(), timeout=2.0)
+            finally:
+                different_loop.close()
+
+            assert captured.get("loop") is handler_loop, (
+                "bot.send_message must run on the handler's loop, not on _main_loop."
+            )
+
+        _run(go())
+
+    def test_on_text_does_not_block_on_slow_running_reply(self):
+        """If `bot.send_message` is slow/stuck, the handler MUST still return
+        promptly so the user's message reaches the manager via
+        `bus.publish_inbound` without waiting for the best-effort reply.
+
+        This regression locks in the codex bot's review: PR #79's interim
+        `await self._send_running_reply(...)` made the chat path block on a
+        Telegram round-trip; this test fails under that pattern and passes
+        with the fire-and-forget scheduling.
+        """
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            send_release = asyncio.Event()
+            send_started = asyncio.Event()
+
+            async def slow_send_message(**kwargs):
+                send_started.set()
+                # Block until the test releases — simulates a stuck Telegram
+                # API call, rate-limit retry, or network latency.
+                await send_release.wait()
+                return MagicMock(message_id=42)
+
+            mock_bot = MagicMock()
+            mock_bot.send_message = slow_send_message
+            mock_app = MagicMock()
+            mock_app.bot = mock_bot
+            ch._application = mock_app
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=300)
+
+            # Handler must return BEFORE the slow send completes. A tight
+            # timeout is the proof that we are not awaiting the reply.
+            await asyncio.wait_for(ch._on_text(update, None), timeout=1.0)
+            # Manager dispatch (via the bus) must already be possible even
+            # though the reply is still stuck.
+            inbound_msg = await asyncio.wait_for(bus.get_inbound(), timeout=1.0)
+            assert inbound_msg.text == "hello"
+            # Confirm the reply task at least started (was scheduled, not skipped).
+            await asyncio.wait_for(send_started.wait(), timeout=1.0)
+            # Release the slow send so the background task drains cleanly.
+            send_release.set()
+            # Drain pending background tasks so the test doesn't leak warnings.
+            await asyncio.sleep(0)
+
+        _run(go())
+
+    def test_cmd_generic_does_not_block_on_slow_running_reply(self):
+        """Same non-blocking contract for slash-command handler `_cmd_generic`."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+
+            send_release = asyncio.Event()
+            send_started = asyncio.Event()
+
+            async def slow_send_message(**kwargs):
+                send_started.set()
+                await send_release.wait()
+                return MagicMock(message_id=42)
+
+            mock_bot = MagicMock()
+            mock_bot.send_message = slow_send_message
+            mock_app = MagicMock()
+            mock_app.bot = mock_bot
+            ch._application = mock_app
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_update("private", message_id=301, text="/status")
+
+            await asyncio.wait_for(ch._cmd_generic(update, None), timeout=1.0)
+            inbound_msg = await asyncio.wait_for(bus.get_inbound(), timeout=1.0)
+            assert inbound_msg.msg_type == InboundMessageType.COMMAND
+            await asyncio.wait_for(send_started.wait(), timeout=1.0)
+            send_release.set()
+            await asyncio.sleep(0)
 
         _run(go())
 

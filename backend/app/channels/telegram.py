@@ -48,6 +48,11 @@ class TelegramChannel(Channel):
                 pass
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
+        # Fire-and-forget tasks scheduled inside the bot's loop (`_tg_loop`)
+        # for "Working on it..." replies. Keep strong references so the GC
+        # cannot drop a running task; entries are removed on completion via
+        # `task.add_done_callback(self._background_tasks.discard)`.
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def start(self) -> None:
         if self._running:
@@ -348,8 +353,26 @@ class TelegramChannel(Channel):
         )
         inbound.topic_id = topic_id
 
+        # `_send_running_reply` calls `bot.send_message`, whose httpx client and
+        # internal asyncio primitives are bound to `_tg_loop` (where the bot
+        # was initialised). This handler is itself running on `_tg_loop`
+        # (Telegram's polling loop), so `asyncio.create_task` schedules the
+        # reply on the correct loop. We deliberately fire-and-forget so a
+        # slow/failing Telegram API call does NOT delay forwarding the user's
+        # message to the manager (the codex bot review caught a regression
+        # where `await self._send_running_reply(...)` made manager dispatch
+        # depend on the best-effort acknowledgement). Errors inside
+        # `_send_running_reply` are already logged via its own try/except.
+        # Scheduling onto `_main_loop` instead raised
+        #   RuntimeError: <asyncio.locks.Event …> is bound to a different event loop
+        # in production. `bus.publish_inbound` does need the cross-loop hop
+        # because the bus's queue lives on `_main_loop`.
+        reply_task = asyncio.create_task(
+            self._send_running_reply(chat_id, update.message.message_id)
+        )
+        self._background_tasks.add(reply_task)
+        reply_task.add_done_callback(self._background_tasks.discard)
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
             asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
 
     async def _on_text(self, update, context) -> None:
@@ -388,6 +411,11 @@ class TelegramChannel(Channel):
         )
         inbound.topic_id = topic_id
 
+        # See `_cmd_generic` above for the loop / fire-and-forget rationale.
+        reply_task = asyncio.create_task(
+            self._send_running_reply(chat_id, update.message.message_id)
+        )
+        self._background_tasks.add(reply_task)
+        reply_task.add_done_callback(self._background_tasks.discard)
         if self._main_loop and self._main_loop.is_running():
-            asyncio.run_coroutine_threadsafe(self._send_running_reply(chat_id, update.message.message_id), self._main_loop)
             asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
