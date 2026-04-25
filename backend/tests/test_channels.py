@@ -9,6 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
 from app.channels.base import Channel
@@ -413,6 +414,24 @@ def _make_async_iterator(items):
     return iterator()
 
 
+def _make_failing_async_iterator(exc: BaseException):
+    async def iterator():
+        raise exc
+        yield  # pragma: no cover
+
+    return iterator()
+
+
+def _make_http_status_error(status_code: int, body: str = '{"detail":"Thread or assistant not found."}') -> httpx.HTTPStatusError:
+    request = httpx.Request("POST", "https://langgraph.test/threads/stale-thread/runs/wait")
+    response = httpx.Response(status_code, text=body, request=request)
+    return httpx.HTTPStatusError(
+        f"Client error '{status_code}' for url '{request.url}'",
+        request=request,
+        response=response,
+    )
+
+
 class TestChannelManager:
     def test_handle_chat_creates_thread(self):
         from app.channels.manager import ChannelManager
@@ -455,6 +474,110 @@ class TestChannelManager:
 
             assert len(outbound_received) == 1
             assert outbound_received[0].text == "Hello from agent!"
+
+        _run(go())
+
+    def test_handle_chat_recovers_stale_langgraph_thread_once(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("telegram", "chat1", "stale-thread", user_id="user1")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            recovered_result = {
+                "messages": [
+                    {"type": "human", "content": "hi"},
+                    {"type": "ai", "content": "Recovered thread response"},
+                ]
+            }
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.runs.wait = AsyncMock(side_effect=[_make_http_status_error(404), recovered_result])
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert store.get_thread_id("telegram", "chat1") == "fresh-thread"
+            mock_client.threads.create.assert_called_once()
+            assert mock_client.runs.wait.call_count == 2
+            assert [call.args[0] for call in mock_client.runs.wait.call_args_list] == ["stale-thread", "fresh-thread"]
+            assert outbound_received[0].thread_id == "fresh-thread"
+            assert outbound_received[0].text == "Recovered thread response"
+
+        _run(go())
+
+    def test_handle_chat_does_not_recover_unrelated_404(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("telegram", "chat1", "stale-thread", user_id="user1")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.runs.wait = AsyncMock(side_effect=_make_http_status_error(404, '{"detail":"Run not found."}'))
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert store.get_thread_id("telegram", "chat1") == "stale-thread"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_called_once()
+            assert outbound_received[0].text == "An internal error occurred. Please try again."
+
+        _run(go())
+
+    def test_handle_chat_does_not_recover_5xx(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("telegram", "chat1", "stale-thread", user_id="user1")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.runs.wait = AsyncMock(side_effect=_make_http_status_error(503, "Service unavailable"))
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert store.get_thread_id("telegram", "chat1") == "stale-thread"
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_called_once()
+            assert outbound_received[0].text == "An internal error occurred. Please try again."
 
         _run(go())
 
@@ -629,6 +752,68 @@ class TestChannelManager:
             assert [msg.text for msg in outbound_received] == ["Hello", "Hello world", "Hello world"]
             assert [msg.is_final for msg in outbound_received] == [False, False, True]
             assert all(msg.thread_ts == "om-source-1" for msg in outbound_received)
+
+        _run(go())
+
+    def test_handle_feishu_stream_recovers_stale_langgraph_thread_once(self, monkeypatch):
+        from app.channels.manager import ChannelManager
+
+        monkeypatch.setattr("app.channels.manager.STREAM_UPDATE_MIN_INTERVAL_SECONDS", 0.0)
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("feishu", "chat1", "stale-thread", user_id="user1")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            success_events = [
+                _make_stream_part(
+                    "values",
+                    {
+                        "messages": [
+                            {"type": "human", "content": "hi"},
+                            {"type": "ai", "content": "Recovered stream response"},
+                        ],
+                        "artifacts": [],
+                    },
+                )
+            ]
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.runs.stream = MagicMock(
+                side_effect=[
+                    _make_failing_async_iterator(_make_http_status_error(404)),
+                    _make_async_iterator(success_events),
+                ]
+            )
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(
+                InboundMessage(
+                    channel_name="feishu",
+                    chat_id="chat1",
+                    user_id="user1",
+                    text="hi",
+                    thread_ts="om-source-1",
+                )
+            )
+            await _wait_for(lambda: any(m.is_final for m in outbound_received))
+            await manager.stop()
+
+            assert store.get_thread_id("feishu", "chat1") == "fresh-thread"
+            mock_client.threads.create.assert_called_once()
+            assert mock_client.runs.stream.call_count == 2
+            assert [call.args[0] for call in mock_client.runs.stream.call_args_list] == ["stale-thread", "fresh-thread"]
+            final = [m for m in outbound_received if m.is_final][-1]
+            assert final.thread_id == "fresh-thread"
+            assert final.text == "Recovered stream response"
 
         _run(go())
 

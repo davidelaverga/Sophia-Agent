@@ -9,6 +9,8 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
+import httpx
+
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
 
@@ -37,6 +39,15 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
         if isinstance(layer, Mapping):
             merged.update(layer)
     return merged
+
+
+def _is_recoverable_thread_404(exc: BaseException) -> bool:
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return False
+    if exc.response.status_code != 404:
+        return False
+    body = (exc.response.text or "").lower()
+    return "thread" in body and "not found" in body
 
 
 def _extract_response_text(result: dict | list) -> str:
@@ -495,6 +506,19 @@ class ChannelManager:
         logger.info("[Manager] new thread created on LangGraph Server: thread_id=%s for chat_id=%s topic_id=%s", thread_id, msg.chat_id, msg.topic_id)
         return thread_id
 
+    async def _recover_stale_thread(self, client, msg: InboundMessage, stale_thread_id: str, exc: httpx.HTTPStatusError) -> str:
+        body = (exc.response.text or "")[:200]
+        logger.warning(
+            "[Manager] stale LangGraph thread detected: old_thread_id=%s channel=%s chat_id=%s topic_id=%s response=%r; recreating",
+            stale_thread_id,
+            msg.channel_name,
+            msg.chat_id,
+            msg.topic_id,
+            body,
+        )
+        self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
+        return await self._create_thread(client, msg)
+
     async def _handle_chat(self, msg: InboundMessage) -> None:
         client = self._get_client()
 
@@ -521,14 +545,23 @@ class ChannelManager:
             )
             return
 
-        logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
-        result = await client.runs.wait(
-            thread_id,
-            assistant_id,
-            input={"messages": [{"role": "human", "content": msg.text}]},
-            config=run_config,
-            context=run_context,
-        )
+        for attempt in range(2):
+            logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+            try:
+                result = await client.runs.wait(
+                    thread_id,
+                    assistant_id,
+                    input={"messages": [{"role": "human", "content": msg.text}]},
+                    config=run_config,
+                    context=run_context,
+                )
+                break
+            except httpx.HTTPStatusError as exc:
+                if attempt == 0 and _is_recoverable_thread_404(exc):
+                    thread_id = await self._recover_stale_thread(client, msg, thread_id, exc)
+                    assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+                    continue
+                raise
 
         response_text = _extract_response_text(result)
         artifacts = _extract_artifacts(result)
@@ -569,93 +602,102 @@ class ChannelManager:
         run_config: dict[str, Any],
         run_context: dict[str, Any],
     ) -> None:
-        logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
+        attempt = 0
+        while True:
+            logger.info("[Manager] invoking runs.stream(thread_id=%s, text=%r)", thread_id, msg.text[:100])
 
-        last_values: dict[str, Any] | list | None = None
-        streamed_buffers: dict[str, str] = {}
-        current_message_id: str | None = None
-        latest_text = ""
-        last_published_text = ""
-        last_publish_at = 0.0
-        stream_error: BaseException | None = None
+            last_values: dict[str, Any] | list | None = None
+            streamed_buffers: dict[str, str] = {}
+            current_message_id: str | None = None
+            latest_text = ""
+            last_published_text = ""
+            last_publish_at = 0.0
+            stream_error: BaseException | None = None
 
-        try:
-            async for chunk in client.runs.stream(
-                thread_id,
-                assistant_id,
-                input={"messages": [{"role": "human", "content": msg.text}]},
-                config=run_config,
-                context=run_context,
-                stream_mode=["messages-tuple", "values"],
-            ):
-                event = getattr(chunk, "event", "")
-                data = getattr(chunk, "data", None)
+            try:
+                async for chunk in client.runs.stream(
+                    thread_id,
+                    assistant_id,
+                    input={"messages": [{"role": "human", "content": msg.text}]},
+                    config=run_config,
+                    context=run_context,
+                    stream_mode=["messages-tuple", "values"],
+                ):
+                    event = getattr(chunk, "event", "")
+                    data = getattr(chunk, "data", None)
 
-                if event == "messages-tuple":
-                    accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
-                    if accumulated_text:
-                        latest_text = accumulated_text
-                elif event == "values" and isinstance(data, (dict, list)):
-                    last_values = data
-                    snapshot_text = _extract_response_text(data)
-                    if snapshot_text:
-                        latest_text = snapshot_text
+                    if event == "messages-tuple":
+                        accumulated_text, current_message_id = _accumulate_stream_text(streamed_buffers, current_message_id, data)
+                        if accumulated_text:
+                            latest_text = accumulated_text
+                    elif event == "values" and isinstance(data, (dict, list)):
+                        last_values = data
+                        snapshot_text = _extract_response_text(data)
+                        if snapshot_text:
+                            latest_text = snapshot_text
 
-                if not latest_text or latest_text == last_published_text:
-                    continue
+                    if not latest_text or latest_text == last_published_text:
+                        continue
 
-                now = time.monotonic()
-                if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
-                    continue
+                    now = time.monotonic()
+                    if last_published_text and now - last_publish_at < STREAM_UPDATE_MIN_INTERVAL_SECONDS:
+                        continue
 
-                await self.bus.publish_outbound(
-                    OutboundMessage(
-                        channel_name=msg.channel_name,
-                        chat_id=msg.chat_id,
-                        thread_id=thread_id,
-                        text=latest_text,
-                        is_final=False,
-                        thread_ts=msg.thread_ts,
+                    await self.bus.publish_outbound(
+                        OutboundMessage(
+                            channel_name=msg.channel_name,
+                            chat_id=msg.chat_id,
+                            thread_id=thread_id,
+                            text=latest_text,
+                            is_final=False,
+                            thread_ts=msg.thread_ts,
+                        )
                     )
-                )
-                last_published_text = latest_text
-                last_publish_at = now
-        except Exception as exc:
-            stream_error = exc
-            logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
-        finally:
-            result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
-            response_text = _extract_response_text(result)
-            artifacts = _extract_artifacts(result)
-            response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
+                    last_published_text = latest_text
+                    last_publish_at = now
+                break
+            except Exception as exc:
+                if attempt == 0 and _is_recoverable_thread_404(exc):
+                    thread_id = await self._recover_stale_thread(client, msg, thread_id, exc)
+                    assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
+                    attempt += 1
+                    continue
+                stream_error = exc
+                logger.exception("[Manager] streaming error: thread_id=%s", thread_id)
+                break
 
-            if not response_text:
-                if attachments:
-                    response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
-                elif stream_error:
-                    response_text = "An error occurred while processing your request. Please try again."
-                else:
-                    response_text = latest_text or "(No response from agent)"
+        result = last_values if last_values is not None else {"messages": [{"type": "ai", "content": latest_text}]}
+        response_text = _extract_response_text(result)
+        artifacts = _extract_artifacts(result)
+        response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
-            logger.info(
-                "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s",
-                thread_id,
-                len(response_text),
-                len(artifacts),
-                stream_error,
+        if not response_text:
+            if attachments:
+                response_text = _format_artifact_text([attachment.virtual_path for attachment in attachments])
+            elif stream_error:
+                response_text = "An error occurred while processing your request. Please try again."
+            else:
+                response_text = latest_text or "(No response from agent)"
+
+        logger.info(
+            "[Manager] streaming response completed: thread_id=%s, response_len=%d, artifacts=%d, error=%s",
+            thread_id,
+            len(response_text),
+            len(artifacts),
+            stream_error,
+        )
+        await self.bus.publish_outbound(
+            OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text=response_text,
+                artifacts=artifacts,
+                attachments=attachments,
+                is_final=True,
+                thread_ts=msg.thread_ts,
             )
-            await self.bus.publish_outbound(
-                OutboundMessage(
-                    channel_name=msg.channel_name,
-                    chat_id=msg.chat_id,
-                    thread_id=thread_id,
-                    text=response_text,
-                    artifacts=artifacts,
-                    attachments=attachments,
-                    is_final=True,
-                    thread_ts=msg.thread_ts,
-                )
-            )
+        )
 
     # -- command handling --------------------------------------------------
 

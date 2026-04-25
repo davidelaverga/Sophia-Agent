@@ -43,6 +43,11 @@ channels:
   telegram:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
+    session:
+      assistant_id: sophia_companion
+      context:
+        platform: text
+        context_mode: life
     # bot_username (e.g. Sophia_EI_bot) is read from the TELEGRAM_BOT_USERNAME
     # env var by app.gateway.telegram_link_store — no need to pass it here.
     # allowed_users: []  # empty = allow any Telegram user

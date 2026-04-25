@@ -279,7 +279,7 @@ class TelegramChannel(Channel):
             )
             return
         await update.message.reply_text(
-            "Welcome to DeerFlow! Send me a message to start a conversation.\nType /help for available commands."
+            "Hi, I'm Sophia. Send me a message any time.\nType /help for available commands."
         )
 
     def _redeem_start_token(
