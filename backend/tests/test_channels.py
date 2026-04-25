@@ -500,6 +500,7 @@ class TestChannelManager:
                 ]
             }
             mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.threads.get = AsyncMock(side_effect=_make_http_status_error(404, '{"detail":"Thread not found."}'))
             mock_client.runs.wait = AsyncMock(side_effect=[_make_http_status_error(404), recovered_result])
             manager._client = mock_client
 
@@ -514,6 +515,40 @@ class TestChannelManager:
             assert [call.args[0] for call in mock_client.runs.wait.call_args_list] == ["stale-thread", "fresh-thread"]
             assert outbound_received[0].thread_id == "fresh-thread"
             assert outbound_received[0].text == "Recovered thread response"
+
+        _run(go())
+
+    def test_handle_chat_does_not_recover_when_assistant_missing_but_thread_exists(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            store.set_thread_id("telegram", "chat1", "existing-thread", user_id="user1")
+            manager = ChannelManager(bus=bus, store=store)
+
+            outbound_received = []
+
+            async def capture_outbound(msg):
+                outbound_received.append(msg)
+
+            bus.subscribe_outbound(capture_outbound)
+
+            mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.threads.get = AsyncMock(return_value={"thread_id": "existing-thread"})
+            mock_client.runs.wait = AsyncMock(side_effect=_make_http_status_error(404))
+            manager._client = mock_client
+
+            await manager.start()
+            await bus.publish_inbound(InboundMessage(channel_name="telegram", chat_id="chat1", user_id="user1", text="hi"))
+            await _wait_for(lambda: len(outbound_received) >= 1)
+            await manager.stop()
+
+            assert store.get_thread_id("telegram", "chat1") == "existing-thread"
+            mock_client.threads.get.assert_called_once_with("existing-thread")
+            mock_client.threads.create.assert_not_called()
+            mock_client.runs.wait.assert_called_once()
+            assert outbound_received[0].text == "An internal error occurred. Please try again."
 
         _run(go())
 
@@ -786,6 +821,7 @@ class TestChannelManager:
                 )
             ]
             mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+            mock_client.threads.get = AsyncMock(side_effect=_make_http_status_error(404, '{"detail":"Thread not found."}'))
             mock_client.runs.stream = MagicMock(
                 side_effect=[
                     _make_failing_async_iterator(_make_http_status_error(404)),

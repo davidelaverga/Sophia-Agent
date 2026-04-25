@@ -41,7 +41,7 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
     return merged
 
 
-def _is_recoverable_thread_404(exc: BaseException) -> bool:
+def _is_thread_or_assistant_404(exc: BaseException) -> bool:
     if not isinstance(exc, httpx.HTTPStatusError):
         return False
     if exc.response.status_code != 404:
@@ -519,6 +519,21 @@ class ChannelManager:
         self.store.remove(msg.channel_name, msg.chat_id, topic_id=msg.topic_id)
         return await self._create_thread(client, msg)
 
+    async def _is_stale_thread_error(self, client, thread_id: str, exc: BaseException) -> bool:
+        """Return True only when LangGraph confirms ``thread_id`` is missing.
+
+        LangGraph's run endpoint can return the same 404 text for a missing
+        thread *or* an invalid assistant id. Do not delete the persisted channel
+        mapping unless a direct thread lookup also says the thread is gone.
+        """
+        if not _is_thread_or_assistant_404(exc):
+            return False
+        try:
+            await client.threads.get(thread_id)
+        except httpx.HTTPStatusError as thread_exc:
+            return _is_thread_or_assistant_404(thread_exc)
+        return False
+
     async def _handle_chat(self, msg: InboundMessage) -> None:
         client = self._get_client()
 
@@ -557,7 +572,7 @@ class ChannelManager:
                 )
                 break
             except httpx.HTTPStatusError as exc:
-                if attempt == 0 and _is_recoverable_thread_404(exc):
+                if attempt == 0 and await self._is_stale_thread_error(client, thread_id, exc):
                     thread_id = await self._recover_stale_thread(client, msg, thread_id, exc)
                     assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
                     continue
@@ -657,7 +672,7 @@ class ChannelManager:
                     last_publish_at = now
                 break
             except Exception as exc:
-                if attempt == 0 and _is_recoverable_thread_404(exc):
+                if attempt == 0 and await self._is_stale_thread_error(client, thread_id, exc):
                     thread_id = await self._recover_stale_thread(client, msg, thread_id, exc)
                     assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
                     attempt += 1
