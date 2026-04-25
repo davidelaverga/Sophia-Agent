@@ -20,6 +20,26 @@ type CreateThreadResponse = {
 };
 
 const DEV_DIRECT_LANGGRAPH_URL = 'http://127.0.0.1:2024';
+const SOPHIA_USER_ID_REGEX = /^[A-Za-z0-9._@+:|-]{1,128}$/;
+
+export function isValidSophiaUserId(userId: string): boolean {
+  return (
+    typeof userId === 'string' &&
+    userId.length > 0 &&
+    userId === userId.trim() &&
+    !userId.includes('/') &&
+    !userId.includes('\\') &&
+    !userId.includes('\0') &&
+    !userId.includes('..') &&
+    SOPHIA_USER_ID_REGEX.test(userId)
+  );
+}
+
+function assertValidSophiaUserId(userId: string): void {
+  if (!isValidSophiaUserId(userId)) {
+    throw new Error('Invalid user_id format');
+  }
+}
 
 function shouldRetryWithFreshThread(response: Response, errorText: string, hadThreadId: boolean): boolean {
   if (!hadThreadId) {
@@ -120,6 +140,7 @@ export async function fetchBackendStreamWithBootstrap(
   backendUrl: string,
   backendPayload: BackendStreamPayload,
 ): Promise<BackendFetchResult> {
+  assertValidSophiaUserId(backendPayload.user_id);
   const authToken = await getUserScopedAuthToken();
   const ritual = resolveRitual(backendPayload.session_type);
   let activeBackendUrl = normalizeBackendUrl(backendUrl);

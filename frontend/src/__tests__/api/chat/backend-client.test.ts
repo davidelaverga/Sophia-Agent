@@ -15,6 +15,7 @@ vi.mock('../../../app/api/chat/_lib/config', () => ({
 
 import {
   fetchBackendStreamWithBootstrap,
+  isValidSophiaUserId,
   type BackendStreamPayload,
 } from '../../../app/api/chat/_lib/backend-client';
 
@@ -177,5 +178,28 @@ describe('fetchBackendStreamWithBootstrap', () => {
     );
     expect(result.threadId).toBe('thread-fresh-789');
     expect(result.upstream.status).toBe(200);
+  });
+
+  it('accepts production auth provider user_id shapes', () => {
+    expect(isValidSophiaUserId('123e4567-e89b-12d3-a456-426614174000')).toBe(true);
+    expect(isValidSophiaUserId('clx8k2n9s0000abcd1234efgh')).toBe(true);
+    expect(isValidSophiaUserId('user.with-dots+plus@example.com')).toBe(true);
+    expect(isValidSophiaUserId('auth0:abc|def')).toBe(true);
+    expect(isValidSophiaUserId('a'.repeat(128))).toBe(true);
+  });
+
+  it('rejects unsafe user ids before forwarding to LangGraph', async () => {
+    const fetchMock = vi.fn();
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(fetchBackendStreamWithBootstrap(
+      'http://localhost:2026/api/langgraph/threads',
+      {
+        ...basePayload,
+        user_id: 'user..bad',
+      },
+    )).rejects.toThrow('Invalid user_id format');
+
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

@@ -2,15 +2,9 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
-from unittest.mock import MagicMock
-
-import httpx
 import pytest
 
-from deerflow.sophia.storage import supabase_artifact_store
-from deerflow.sophia.storage import supabase_mirror
+from deerflow.sophia.storage import supabase_artifact_store, supabase_mirror
 
 
 @pytest.fixture(autouse=True)

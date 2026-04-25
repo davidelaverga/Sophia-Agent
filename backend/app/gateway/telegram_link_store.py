@@ -32,6 +32,8 @@ from typing import Literal
 
 import httpx
 
+from deerflow.agents.sophia_agent.utils import validate_user_id
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -129,11 +131,12 @@ def issue_link_token(user_id: str, *, ttl_seconds: int = _TOKEN_TTL_SECONDS) -> 
     """
     if not user_id or not user_id.strip():
         raise ValueError("user_id is required")
+    normalized_user_id = validate_user_id(user_id.strip())
     token = secrets.token_urlsafe(32)
     now = _now()
     record = LinkTokenRecord(
         token=token,
-        user_id=user_id.strip(),
+        user_id=normalized_user_id,
         expires_at=now + ttl_seconds,
         created_at=now,
     )
@@ -147,7 +150,7 @@ def issue_link_token(user_id: str, *, ttl_seconds: int = _TOKEN_TTL_SECONDS) -> 
         _tokens[token] = record
     logger.info(
         "telegram_link.issue user_id=%s token_prefix=%s expires_in=%ds",
-        user_id,
+        normalized_user_id,
         token[:6],
         ttl_seconds,
     )
@@ -279,10 +282,11 @@ def bind_chat(
     """
     if not chat_id or not user_id:
         raise ValueError("chat_id and user_id are required")
+    normalized_user_id = validate_user_id(user_id.strip())
     binding = UserBinding(
         channel=channel,
         chat_id=str(chat_id),
-        user_id=user_id.strip(),
+        user_id=normalized_user_id,
         telegram_user_id=telegram_user_id,
         telegram_username=telegram_username,
         created_at=_now(),
@@ -399,6 +403,10 @@ def _coerce_binding_from_row(row: object) -> UserBinding | None:
     if channel != "telegram" or not isinstance(chat_id, str) or not isinstance(user_id, str):
         return None
     if not chat_id.strip() or not user_id.strip():
+        return None
+    try:
+        user_id = validate_user_id(user_id.strip())
+    except ValueError:
         return None
     created_at_raw = row.get("created_at")
     try:

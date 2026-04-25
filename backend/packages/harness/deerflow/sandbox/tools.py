@@ -13,7 +13,7 @@ from deerflow.sandbox.exceptions import (
 )
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
-from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file, scan_and_mirror_outputs
+from deerflow.sophia.storage import supabase_mirror
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (

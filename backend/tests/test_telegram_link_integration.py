@@ -178,7 +178,10 @@ class TestCmdStartRedemption:
 
 class TestChannelManagerIdentity:
     def test_apply_canonical_replaces_user_id_for_telegram(self):
-        store.bind_chat("telegram", "42", "canonical-user")
+        from deerflow.agents.sophia_agent.utils import validate_user_id
+
+        canonical_user_id = "user.with-dots+plus@example.com"
+        store.bind_chat("telegram", "42", canonical_user_id)
         msg = InboundMessage(
             channel_name="telegram",
             chat_id="42",
@@ -187,9 +190,9 @@ class TestChannelManagerIdentity:
             msg_type=InboundMessageType.CHAT,
         )
         ChannelManager._apply_canonical_user_id(msg)
-        assert msg.user_id == "canonical-user"
+        assert validate_user_id(msg.user_id) == canonical_user_id
         assert msg.metadata["platform_user_id"] == "tg-101"
-        assert msg.metadata["canonical_user_id"] == "canonical-user"
+        assert msg.metadata["canonical_user_id"] == canonical_user_id
 
     def test_apply_canonical_noop_when_no_binding(self):
         msg = InboundMessage(

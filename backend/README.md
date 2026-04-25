@@ -350,6 +350,12 @@ make format     # Format code (ruff)
 uv run pytest
 ```
 
+Sandbox mirror hook regression coverage (write_file/str_replace/bash wiring):
+
+```bash
+PYTHONPATH=. uv run pytest tests/test_sandbox_tools.py -v
+```
+
 ---
 
 ## Technology Stack

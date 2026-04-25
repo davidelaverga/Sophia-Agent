@@ -52,6 +52,10 @@ class TestTokenIssuance:
         rec = store.issue_link_token("  user-x  ")
         assert rec.user_id == "user-x"
 
+    def test_issue_accepts_auth_provider_user_id_shapes(self):
+        rec = store.issue_link_token("user.with-dots+plus@example.com")
+        assert rec.user_id == "user.with-dots+plus@example.com"
+
     def test_issue_produces_distinct_tokens(self):
         r1 = store.issue_link_token("user-a")
         r2 = store.issue_link_token("user-a")
@@ -83,6 +87,10 @@ class TestBindings:
     def test_bind_and_resolve(self):
         store.bind_chat("telegram", "chat-1", "user-1", telegram_username="alice")
         assert store.resolve_user_id("telegram", "chat-1") == "user-1"
+
+    def test_bind_accepts_auth_provider_user_id_shapes(self):
+        store.bind_chat("telegram", "chat-1", "auth0:abc|def", telegram_username="alice")
+        assert store.resolve_user_id("telegram", "chat-1") == "auth0:abc|def"
 
     def test_resolve_unknown_chat_returns_none(self):
         assert store.resolve_user_id("telegram", "missing") is None
@@ -125,6 +133,10 @@ class TestBindings:
             store.bind_chat("telegram", "", "user-x")
         with pytest.raises(ValueError):
             store.bind_chat("telegram", "chat", "")
+
+    def test_bind_rejects_invalid_user_id(self):
+        with pytest.raises(ValueError):
+            store.bind_chat("telegram", "chat", "user..bad")
 
 
 class TestSupabasePersistence:

@@ -17,6 +17,11 @@ class TestUserIdValidation:
         assert validate_user_id("user_123") == "user_123"
         assert validate_user_id("test-user") == "test-user"
         assert validate_user_id("ABC") == "ABC"
+        assert validate_user_id("123e4567-e89b-12d3-a456-426614174000") == "123e4567-e89b-12d3-a456-426614174000"
+        assert validate_user_id("clx8k2n9s0000abcd1234efgh") == "clx8k2n9s0000abcd1234efgh"
+        assert validate_user_id("user.with-dots+plus@example.com") == "user.with-dots+plus@example.com"
+        assert validate_user_id("auth0:abc|def") == "auth0:abc|def"
+        assert validate_user_id("a" * 128) == "a" * 128
 
     def test_empty_user_id_rejected(self):
         from deerflow.agents.sophia_agent.utils import validate_user_id
@@ -28,6 +33,9 @@ class TestUserIdValidation:
         "..\\windows\\system32",
         "valid_user/../../other",
         "user\x00hidden",
+        " user",
+        "user ",
+        "user..hidden",
         "a" * 200,
         "user id with spaces",
         "user;rm -rf",
@@ -52,6 +60,12 @@ class TestUserIdValidation:
         users_dir.mkdir()
         with pytest.raises(ValueError):
             safe_user_path(users_dir, "../etc", "passwd")
+
+    def test_sophia_agent_accepts_auth_provider_user_id_shape(self):
+        from deerflow.agents.sophia_agent.agent import make_sophia_agent
+
+        agent = make_sophia_agent({"configurable": {"user_id": "user.with-dots+plus@example.com"}})
+        assert agent is not None
 
 
 class TestExtractLastMessageText:

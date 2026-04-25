@@ -5,7 +5,7 @@ import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts'
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
 
-import { fetchBackendStreamWithBootstrap } from './backend-client';
+import { fetchBackendStreamWithBootstrap, isValidSophiaUserId } from './backend-client';
 import { parseAndValidateChatPayload } from './chat-request';
 import {
   AI_SDK_STREAM_HEADER,
@@ -128,6 +128,12 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
       return new Response(
         JSON.stringify({ error: 'Not authenticated' }),
         { status: 401, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    if (!isValidSophiaUserId(userId)) {
+      return new Response(
+        JSON.stringify({ error: 'Invalid user_id format' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } },
       );
     }
 

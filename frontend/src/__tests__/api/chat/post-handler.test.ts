@@ -18,6 +18,7 @@ vi.mock('../../../app/lib/rate-limiter', () => ({
 
 vi.mock('../../../app/api/chat/_lib/backend-client', () => ({
   fetchBackendStreamWithBootstrap: (...args: unknown[]) => fetchBackendStreamWithBootstrapMock(...args),
+  isValidSophiaUserId: (userId: string) => userId !== 'user..bad',
 }));
 
 vi.mock('../../../app/api/chat/_lib/chat-request', () => ({
@@ -101,5 +102,17 @@ describe('handleChatPost auth hardening', () => {
       }),
     );
     expect(fetchBackendStreamWithBootstrapMock.mock.calls[0][1].user_id).not.toBe('attacker-user');
+  });
+
+  it('rejects invalid authenticated user_id before forwarding', async () => {
+    getAuthenticatedUserIdMock.mockResolvedValue('user..bad');
+
+    const response = await handleChatPost({
+      json: async () => ({ message: 'Hello' }),
+    } as never);
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({ error: 'Invalid user_id format' });
+    expect(fetchBackendStreamWithBootstrapMock).not.toHaveBeenCalled();
   });
 });

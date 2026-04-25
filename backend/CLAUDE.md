@@ -239,6 +239,7 @@ Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → 
 - `read_file` - Read file contents with optional line range
 - `write_file` - Write/append to files, creates directories
 - `str_replace` - Substring replacement (single or all occurrences)
+- When `SOPHIA_SUPABASE_MIRROR_ALL` is enabled, local `write_file`/`str_replace` calls mirror changed outputs incrementally and `bash` performs a post-command outputs scan for missed file writes.
 
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
@@ -340,6 +341,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 5. Next interaction injects top 15 facts + context into `<memory>` tags in system prompt
 
 Focused regression coverage for the updater lives in `backend/tests/test_memory_updater.py`.
+Focused regression coverage for sandbox mirror hook wiring lives in `backend/tests/test_sandbox_tools.py`.
 
 **Configuration** (`config.yaml` → `memory`):
 - `enabled` / `injection_enabled` - Master switches

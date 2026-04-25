@@ -63,6 +63,11 @@ class TestCreateLink:
         response = secure_client.post("/api/sophia/user-test/telegram/link")
         assert response.status_code == 401
 
+    def test_rejects_invalid_user_id(self, client):
+        response = client.post("/api/sophia/user..bad/telegram/link")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid user_id format"
+
     def test_token_is_stored_and_redeemable(self, client):
         body = client.post("/api/sophia/user-test/telegram/link").json()
         rec = store.pop_link_token(body["token"])
