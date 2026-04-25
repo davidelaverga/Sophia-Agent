@@ -18,9 +18,15 @@ class BuilderResearchPolicyState(AgentState):
     delegation_context: NotRequired[dict | None]
     allow_web_research: NotRequired[bool]
     explicit_user_urls: NotRequired[list[str]]
-    builder_allowed_urls: NotRequired[list[str]]
-    builder_search_sources: NotRequired[list[dict[str, str]]]
-    builder_web_budget: NotRequired[dict[str, int]]
+    # NOTE: builder_allowed_urls / builder_search_sources / builder_web_budget
+    # are NOT redeclared here. SophiaState already declares them with the
+    # `_union_string_list` / `_merge_search_sources` / `_merge_builder_web_budget`
+    # reducers respectively. Redeclaring them as plain `NotRequired[...]` would
+    # shadow those reducers via langchain.agents.create_agent's set-based
+    # schema merge, downgrade the channels to LastValue, and crash parallel
+    # `builder_web_search` / `builder_web_fetch` tool calls with
+    # `INVALID_CONCURRENT_GRAPH_UPDATE`. The
+    # `tests/test_sophia_state_schema_invariants.py` guard locks this.
 
 
 class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState]):

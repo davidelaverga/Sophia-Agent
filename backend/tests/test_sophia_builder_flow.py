@@ -1112,6 +1112,10 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         lambda: FakeSummarizationMiddleware(),
     )
     monkeypatch.setattr(companion_module, "make_retrieve_memories_tool", lambda user_id: {"tool": user_id})
+    # `load_sophia_web_tools()` reads the global app_config; the test fixture
+    # doesn't seed it, so stub the loader to return an empty list. Native web
+    # tools are exercised in dedicated tests (`test_sophia_web_tools_*`).
+    monkeypatch.setattr(companion_module, "load_sophia_web_tools", lambda: [])
 
     def _capture_companion(**kwargs):
         captured_companion["middleware"] = kwargs["middleware"]
