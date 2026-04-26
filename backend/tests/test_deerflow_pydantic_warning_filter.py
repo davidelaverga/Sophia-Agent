@@ -15,7 +15,15 @@ import warnings
 
 def test_deerflow_import_installs_pydantic_context_warning_filter():
     """Importing deerflow registers a filter for the noisy context warning."""
-    import deerflow  # noqa: F401
+    import deerflow
+
+    # Re-arm the filter inside pytest's per-test ``catch_warnings()`` window.
+    # In the full suite, ``deerflow`` is typically already in ``sys.modules``
+    # (some earlier test imported ``deerflow.agents.sophia_agent.agent``), so
+    # the import-time side effect happened in a prior test's window and is no
+    # longer visible. Calling the install function explicitly makes the
+    # assertion deterministic regardless of import-cache state.
+    deerflow._install_pydantic_context_warning_filter()
 
     matching = [
         entry
