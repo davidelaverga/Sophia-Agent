@@ -15,6 +15,7 @@ from langchain_core.runnables import RunnableConfig
 # Apply defensive langchain patches *before* importing anything that builds
 # the agent graph. See deerflow.agents._langchain_patches for details.
 from deerflow.agents import _langchain_patches  # noqa: F401
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -158,6 +159,16 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
             BuilderArtifactMiddleware(),
         # 7. Prompt assembly — assembles system_prompt_blocks into system message
             PromptAssemblyMiddleware(),
+        # 8. Dangling tool-call patching — runs inside wrap_model_call to
+        #    insert synthetic ToolMessages for any AIMessage tool_use block
+        #    that lacks its corresponding tool_result. Anthropic 400s with
+        #    `unexpected tool_use_id found in tool_result blocks` when this
+        #    invariant breaks (it can after a sandbox crash, user interrupt,
+        #    or summarization injecting a HumanMessage between the AI tool_use
+        #    and its tool_result). MUST sit AFTER PromptAssemblyMiddleware so
+        #    the patched message list reaches the model. The chain-membership
+        #    assertion in test_sophia_builder_flow.py locks this position.
+            DanglingToolCallMiddleware(),
         ]
     )
 

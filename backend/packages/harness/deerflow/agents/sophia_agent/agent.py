@@ -13,6 +13,7 @@ from langchain_core.runnables import RunnableConfig
 # Apply defensive langchain patches *before* importing anything that builds
 # the agent graph. See deerflow.agents._langchain_patches for details.
 from deerflow.agents import _langchain_patches  # noqa: F401
+from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
@@ -155,13 +156,27 @@ def make_sophia_agent(config: RunnableConfig):
     if summarization_middleware is not None:
         middlewares.append(summarization_middleware)
 
-    # Post-chain: prompt assembly, then caching, then title
+    # Post-chain: prompt assembly, dangling-tool-call patching, caching, then title.
+    #
+    # `DanglingToolCallMiddleware` MUST run inside `wrap_model_call` (not
+    # `before_model`) and MUST sit BEFORE `AnthropicPromptCachingMiddleware`
+    # so the cache keys off the final, patched message list and
+    # langchain-anthropic never sees a tool_result without its preceding
+    # tool_use (Anthropic 400 `unexpected tool_use_id found in tool_result
+    # blocks`). It was wired in commit 4383dba7 / c4af3e09 on the
+    # voice-transport-migration-telegram branch and accidentally dropped in
+    # the main merge (31cabe9d); the chain-membership assertion in
+    # `tests/test_sophia_builder_flow.py::test_middleware_parity_in_companion_and_builder_chains`
+    # locks the position so a future refactor can't re-drop it silently.
     from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
     middlewares.extend(
         [
             PromptAssemblyMiddleware(),
-            # Prompt caching AFTER assembly — adds cache_control to the assembled
-            # system message. Turn 2+ reads from cache → ~85% lower TTFT.
+            DanglingToolCallMiddleware(),
+            # Prompt caching AFTER assembly + dangling-tool patching — adds
+            # cache_control to the assembled system message and keys the
+            # cache off the patched messages. Turn 2+ reads from cache →
+            # ~85% lower TTFT.
             AnthropicPromptCachingMiddleware(ttl="5m"),
             SophiaTitleMiddleware(),
         ]

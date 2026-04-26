@@ -1126,6 +1126,18 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "BuilderSessionMiddleware" in companion_types
     assert "SummarizationMiddleware" in companion_types
 
+    # B2 — DanglingToolCallMiddleware MUST sit AFTER PromptAssemblyMiddleware
+    # and BEFORE AnthropicPromptCachingMiddleware in the companion chain so
+    # the cache keys off the patched message list. Lock the position.
+    assert "DanglingToolCallMiddleware" in companion_types
+    assert "PromptAssemblyMiddleware" in companion_types
+    assert "AnthropicPromptCachingMiddleware" in companion_types
+    assert (
+        companion_types.index("PromptAssemblyMiddleware")
+        < companion_types.index("DanglingToolCallMiddleware")
+        < companion_types.index("AnthropicPromptCachingMiddleware")
+    )
+
     monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
     monkeypatch.setattr(
         builder_module,
@@ -1149,6 +1161,15 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names
     assert "builder_web_fetch" in builder_tool_names
+    # B2 — DanglingToolCallMiddleware MUST sit AFTER PromptAssemblyMiddleware
+    # in the builder chain too. The builder doesn't currently use Anthropic
+    # prompt caching, so we only assert the lower bound.
+    assert "DanglingToolCallMiddleware" in builder_types
+    assert "PromptAssemblyMiddleware" in builder_types
+    assert (
+        builder_types.index("PromptAssemblyMiddleware")
+        < builder_types.index("DanglingToolCallMiddleware")
+    )
 
 
 def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
