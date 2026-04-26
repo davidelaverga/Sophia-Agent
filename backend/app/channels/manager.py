@@ -226,8 +226,13 @@ async def _build_block_for_attachment(
         or mime_type in _TEXT_LIKE_MIME_TYPES
         or suffix in _TEXT_LIKE_EXTENSIONS
     ):
-        decoded = content.decode("utf-8", errors="replace").strip()
-        if decoded:
+        decoded = content.decode("utf-8", errors="replace")
+        # Gate on the stripped form (so all-whitespace files still route to the
+        # "empty" note) but pass the original decoded text through — leading
+        # and trailing whitespace can be load-bearing in YAML, code, Markdown
+        # fences, etc., and the truncation guard in _build_text_document_block
+        # still bounds the size.
+        if decoded.strip():
             return _build_text_document_block(filename=filename, text=decoded)
         return _build_attachment_note_block(
             filename=filename,

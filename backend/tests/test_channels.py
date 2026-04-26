@@ -2825,6 +2825,44 @@ class TestManagerMultimodalBlockBuilder:
 
         _run(go())
 
+    def test_text_like_whitespace_only_falls_back_to_note(self):
+        """All-whitespace files still route to the 'empty' note; gating on
+        ``.strip()`` is what flags them, but the gate must not also rewrite
+        the payload of non-empty files (see the next test)."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "ws-only",
+                [{"filename": "ws.txt", "mime_type": "text/plain", "content": b"   \n  \n"}],
+            )
+
+            assert blocks[1]["type"] == "text"
+            assert "ws.txt" in blocks[1]["text"]
+            assert "empty or undecodable" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_text_like_preserves_leading_and_trailing_whitespace(self):
+        """Indent-sensitive payloads (YAML, code, Markdown fences) must reach
+        the model verbatim; trimming boundary whitespace changes semantics."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        # Leading blank line + trailing newline + indented body — typical of
+        # YAML or Python pasted into a `.txt`.
+        raw = "\n\nkey:\n  child: value\n  list:\n    - one\n    - two\n\n"
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "config",
+                [{"filename": "config.yaml", "mime_type": "application/yaml", "content": raw.encode("utf-8")}],
+            )
+
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["data"] == raw
+
+        _run(go())
+
     def test_multiple_attachments_in_order(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
