@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import re
 import threading
@@ -526,6 +527,36 @@ class TelegramChannel(Channel):
         """
         return self._read_inbound_files
 
+    async def _run_bot_call_on_telegram_loop(self, coro):
+        """Run a bot API coroutine on ``_tg_loop`` when called cross-loop.
+
+        Telegram bot internals are loop-affine to the polling loop where the
+        application was initialized (``_tg_loop``). The manager invokes the
+        inbound file reader on its own loop, so attachment bot I/O must hop
+        back to ``_tg_loop`` to avoid "bound to a different event loop"
+        runtime errors.
+        """
+        tg_loop = self._tg_loop
+        if not tg_loop or not tg_loop.is_running():
+            return await coro
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is tg_loop:
+            return await coro
+
+        future = asyncio.run_coroutine_threadsafe(coro, tg_loop)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        except Exception:
+            if isinstance(future, concurrent.futures.Future):
+                future.cancel()
+            raise
+
     async def _read_inbound_files(self, inbound) -> list[dict[str, Any]]:
         """Download bytes for each ``inbound.files`` entry via the Bot API.
 
@@ -554,8 +585,8 @@ class TelegramChannel(Channel):
                 mime_type = "application/octet-stream"
 
             try:
-                telegram_file = await bot.get_file(file_id)
-                content = await telegram_file.download_as_bytearray()
+                telegram_file = await self._run_bot_call_on_telegram_loop(bot.get_file(file_id))
+                content = await self._run_bot_call_on_telegram_loop(telegram_file.download_as_bytearray())
             except Exception:
                 logger.exception(
                     "[Telegram] failed to download inbound file_id=%s filename=%s",

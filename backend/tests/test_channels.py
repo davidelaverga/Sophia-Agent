@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -2452,6 +2454,67 @@ class TestTelegramInboundFileReader:
             ]
 
         _run(go())
+
+    def test_reader_dispatches_bot_calls_to_telegram_loop(self):
+        from app.channels.telegram import TelegramChannel
+
+        download_started = threading.Event()
+        threads_seen: dict[str, int] = {}
+        loops_seen: dict[str, asyncio.AbstractEventLoop] = {}
+
+        loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
+
+        def _run_telegram_loop():
+            loop = asyncio.new_event_loop()
+            loop_holder["loop"] = loop
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+            loop.close()
+
+        tg_thread = threading.Thread(target=_run_telegram_loop, daemon=True)
+        tg_thread.start()
+
+        while "loop" not in loop_holder:
+            time.sleep(0.01)
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._tg_loop = loop_holder["loop"]
+
+            class FakeTelegramFile:
+                async def download_as_bytearray(self):
+                    threads_seen["download"] = threading.get_ident()
+                    loops_seen["download"] = asyncio.get_running_loop()
+                    download_started.set()
+                    return bytearray(b"LOOP_HOP_OK")
+
+            async def fake_get_file(file_id):
+                assert file_id == "ph_x"
+                threads_seen["get_file"] = threading.get_ident()
+                loops_seen["get_file"] = asyncio.get_running_loop()
+                return FakeTelegramFile()
+
+            ch._application = MagicMock()
+            ch._application.bot = MagicMock()
+            ch._application.bot.get_file = fake_get_file
+
+            inbound = MagicMock()
+            inbound.files = [{"file_id": "ph_x", "filename": "photo.jpg", "mime_type": "image/jpeg"}]
+
+            downloaded = await ch.get_inbound_file_reader()(inbound)
+            assert downloaded == [{"filename": "photo.jpg", "mime_type": "image/jpeg", "content": b"LOOP_HOP_OK"}]
+            assert download_started.is_set()
+            assert loops_seen["get_file"] is ch._tg_loop
+            assert loops_seen["download"] is ch._tg_loop
+            assert threads_seen["get_file"] == tg_thread.ident
+            assert threads_seen["download"] == tg_thread.ident
+
+        try:
+            _run(go())
+        finally:
+            loop_holder["loop"].call_soon_threadsafe(loop_holder["loop"].stop)
+            tg_thread.join(timeout=2)
 
 
 class TestManagerMultimodalBlockBuilder:
