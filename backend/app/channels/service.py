@@ -127,6 +127,30 @@ class ChannelService:
             channel = channel_cls(bus=self.bus, config=config)
             await channel.start()
             self._channels[name] = channel
+            # Auto-register the channel's inbound-file reader with the
+            # manager (B5). Channels that opt into multimodal attachment
+            # support expose a `get_inbound_file_reader()` method that
+            # returns an async callable; the manager uses it to download
+            # bytes referenced by `InboundMessage.files` and inline them
+            # as Anthropic content blocks. Channels without this method
+            # (Slack, Feishu today) silently skip — text-only behaviour
+            # for them is unchanged.
+            reader_factory = getattr(channel, "get_inbound_file_reader", None)
+            if callable(reader_factory):
+                try:
+                    reader = reader_factory()
+                except Exception:
+                    logger.exception(
+                        "Channel %s exposes get_inbound_file_reader but it raised; "
+                        "inbound attachments will not be downloaded for this channel",
+                        name,
+                    )
+                else:
+                    if callable(reader):
+                        self.manager.register_inbound_file_reader(name, reader)
+                        logger.info(
+                            "Registered inbound-file reader for channel %s", name
+                        )
             logger.info("Channel %s started", name)
             return True
         except Exception:

@@ -84,6 +84,22 @@ class TelegramChannel(Channel):
         app.add_handler(CommandHandler("memory", self._cmd_generic))
         app.add_handler(CommandHandler("help", self._cmd_generic))
 
+        # Media handler — registered BEFORE the text handler so photo /
+        # document messages with optional captions are routed here instead of
+        # falling through to the text-only path. Without this handler, images
+        # and PDFs sent to the bot are silently dropped before they ever
+        # reach the manager (the user-visible regression: "Sophia, do you
+        # see the images I sent you?" → no, because they never arrived).
+        # The reader is registered with the manager via service.py so the
+        # manager can download bytes on demand and inline them as Anthropic
+        # content blocks.
+        app.add_handler(
+            MessageHandler(
+                (filters.PHOTO | filters.Document.ALL) & ~filters.COMMAND,
+                self._on_media,
+            )
+        )
+
         # General message handler
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
@@ -419,3 +435,141 @@ class TelegramChannel(Channel):
         reply_task.add_done_callback(self._background_tasks.discard)
         if self._main_loop and self._main_loop.is_running():
             asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+
+    async def _on_media(self, update, context) -> None:
+        """Handle photo and document messages.
+
+        The companion (Sophia) receives the attachment as inline content
+        blocks in the human message — the manager downloads bytes via
+        ``get_inbound_file_reader()`` and constructs Anthropic image /
+        document blocks from them. The user's optional caption is used as
+        the message text; if absent we ship a neutral default so the LLM
+        understands it should interpret the file.
+
+        Only the ``file_id`` and metadata are placed on the InboundMessage
+        here — actual byte download is deferred to the manager's
+        registered reader to avoid blocking the polling thread on a long
+        Telegram CDN fetch (the bus dispatch loop is the right place to
+        await the download, behind the per-conversation lock).
+        """
+        if not self._check_user(update.effective_user.id):
+            return
+
+        message = update.message
+        files: list[dict[str, Any]] = []
+
+        if message.photo:
+            # Telegram sends multiple photo sizes — the last entry is the
+            # largest (highest resolution). That's what we ship to the LLM.
+            photo = message.photo[-1]
+            files.append(
+                {
+                    "file_id": photo.file_id,
+                    "filename": f"telegram_photo_{photo.file_unique_id}.jpg",
+                    "mime_type": "image/jpeg",
+                }
+            )
+        if message.document:
+            document = message.document
+            files.append(
+                {
+                    "file_id": document.file_id,
+                    "filename": document.file_name or f"telegram_document_{document.file_unique_id}",
+                    "mime_type": document.mime_type or "application/octet-stream",
+                }
+            )
+
+        if not files:
+            return
+
+        text = (message.caption or "").strip() or "Please look at the attached file."
+        chat_id = str(update.effective_chat.id)
+        user_id = str(update.effective_user.id)
+        msg_id = str(message.message_id)
+
+        # Same topic_id rule as _on_text: private chats share a single
+        # thread; group chats key on reply-to or message_id.
+        if update.effective_chat.type == "private":
+            topic_id = None
+        else:
+            reply_to = message.reply_to_message
+            topic_id = str(reply_to.message_id) if reply_to else msg_id
+
+        inbound = self._make_inbound(
+            chat_id=chat_id,
+            user_id=user_id,
+            text=text,
+            msg_type=InboundMessageType.CHAT,
+            thread_ts=msg_id,
+        )
+        inbound.topic_id = topic_id
+        inbound.files = files
+
+        # Same fire-and-forget pattern as _on_text — see `_cmd_generic` for
+        # the loop rationale (handler is on `_tg_loop`, bus is on `_main_loop`).
+        reply_task = asyncio.create_task(
+            self._send_running_reply(chat_id, message.message_id)
+        )
+        self._background_tasks.add(reply_task)
+        reply_task.add_done_callback(self._background_tasks.discard)
+        if self._main_loop and self._main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.bus.publish_inbound(inbound), self._main_loop)
+
+    def get_inbound_file_reader(self):
+        """Return the async callable the manager invokes to download the
+        bytes referenced by ``InboundMessage.files``.
+
+        Registered with ``ChannelManager.register_inbound_file_reader``
+        when the channel starts (see ``ChannelService._start_channel``).
+        Kept as a method on the channel so it can capture
+        ``self._application`` and only fire when the bot is alive.
+        """
+        return self._read_inbound_files
+
+    async def _read_inbound_files(self, inbound) -> list[dict[str, Any]]:
+        """Download bytes for each ``inbound.files`` entry via the Bot API.
+
+        Returns a list of ``{filename, mime_type, content}`` dicts —
+        opaque to the manager; the manager's block builder turns these
+        into Anthropic content blocks.
+        """
+        if not self._application:
+            return []
+        if not inbound.files:
+            return []
+
+        downloaded: list[dict[str, Any]] = []
+        bot = self._application.bot
+        for index, file_meta in enumerate(inbound.files, start=1):
+            if not isinstance(file_meta, dict):
+                continue
+            file_id = file_meta.get("file_id")
+            if not isinstance(file_id, str) or not file_id:
+                continue
+            filename = file_meta.get("filename")
+            if not isinstance(filename, str) or not filename.strip():
+                filename = f"telegram_upload_{index}"
+            mime_type = file_meta.get("mime_type")
+            if not isinstance(mime_type, str) or not mime_type:
+                mime_type = "application/octet-stream"
+
+            try:
+                telegram_file = await bot.get_file(file_id)
+                content = await telegram_file.download_as_bytearray()
+            except Exception:
+                logger.exception(
+                    "[Telegram] failed to download inbound file_id=%s filename=%s",
+                    file_id,
+                    filename,
+                )
+                continue
+
+            downloaded.append(
+                {
+                    "filename": filename,
+                    "mime_type": mime_type,
+                    "content": bytes(content),
+                }
+            )
+
+        return downloaded
