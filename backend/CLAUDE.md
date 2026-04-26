@@ -305,6 +305,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
 - `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place)
+- Telegram attachment downloads triggered by `ChannelManager` must be dispatched back onto `telegram.py`'s `_tg_loop` (using `asyncio.run_coroutine_threadsafe`) because PTB bot I/O is loop-affine to the polling thread loop.
 
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import mimetypes
 import time
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 import httpx
@@ -19,6 +20,29 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+
+# Anthropic multimodal content-block limits.
+# Source: docs.anthropic.com/en/docs/build-with-claude/vision and pdf-support.
+# Inline image cap is 5 MB per block; we cap PDF at 10 MB to leave headroom
+# under the 32 MB hard limit while keeping latency reasonable. Files larger
+# than these caps drop to a text "note" block telling the LLM the file
+# couldn't be inlined — the user can re-send a smaller version. xlsx/pptx/
+# markitdown conversion is intentionally NOT ported in this PR (the working
+# branch had it; deferred per the focused B5 scope).
+_INLINE_IMAGE_MIME_TYPES = {
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+}
+_INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+_INLINE_PDF_MAX_BYTES = 10 * 1024 * 1024
+# A registered inbound-file reader is the channel-side downloader the
+# manager invokes to fetch the bytes referenced by ``InboundMessage.files``.
+# Keeping this as a callable rather than a hard import lets the manager stay
+# decoupled from per-channel SDKs (Telegram, Slack, …) while still receiving
+# multimodal attachments end-to-end.
+InboundFileReader = Callable[["InboundMessage"], Awaitable[list[dict[str, Any]]]]
 
 DEFAULT_RUN_CONFIG: dict[str, Any] = {"recursion_limit": 100}
 DEFAULT_RUN_CONTEXT: dict[str, Any] = {
@@ -39,6 +63,131 @@ def _merge_dicts(*layers: Any) -> dict[str, Any]:
         if isinstance(layer, Mapping):
             merged.update(layer)
     return merged
+
+
+def _build_image_block(*, mime_type: str, content: bytes) -> dict[str, Any]:
+    """Anthropic image content block (base64-encoded)."""
+    return {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": mime_type,
+            "data": base64.b64encode(content).decode("ascii"),
+        },
+    }
+
+
+def _build_pdf_block(*, filename: str, content: bytes) -> dict[str, Any]:
+    """Anthropic native PDF document block (base64-encoded). Claude
+    interprets the PDF directly — text and images on each page are visible
+    to the model."""
+    return {
+        "type": "document",
+        "source": {
+            "type": "base64",
+            "media_type": "application/pdf",
+            "data": base64.b64encode(content).decode("ascii"),
+        },
+        "title": filename,
+    }
+
+
+def _build_attachment_note_block(*, filename: str, mime_type: str, note: str) -> dict[str, Any]:
+    """Plain-text content block describing an attachment we couldn't
+    inline. Tells the model what the user attached, what type it was, and
+    why we can't show it directly — so the model can ask the user for an
+    alternative format instead of pretending it saw the file."""
+    return {
+        "type": "text",
+        "text": (
+            f"[Attachment: {filename} ({mime_type}) — {note}]"
+        ),
+    }
+
+
+def _build_multimodal_blocks_for_inbound_files(
+    text: str,
+    inbound_files: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the Anthropic content-block list for a human message that
+    carries Telegram-style attachments.
+
+    Layout: text first, then one block per attachment (image/document/note).
+    Image-like MIME types under the inline cap become base64 image blocks;
+    PDFs under the cap become document blocks; anything else degrades to a
+    descriptive text note so the model still knows the user attached
+    something. Ordering matters — Anthropic recommends putting images
+    FIRST when the question references them, but Telegram usually sends
+    caption-after-attachment, and our user-visible behaviour is "describe
+    the attachment", so leading with the user's text is fine.
+
+    Returns the full block list, ready to drop into
+    ``input={"messages": [{"role": "human", "content": <blocks>}]}``.
+    """
+    blocks: list[dict[str, Any]] = []
+    text = (text or "").strip()
+    if text:
+        blocks.append({"type": "text", "text": text})
+
+    for file_info in inbound_files:
+        if not isinstance(file_info, dict):
+            continue
+        filename = str(file_info.get("filename") or "attachment")
+        mime_type = str(file_info.get("mime_type") or "application/octet-stream").lower()
+        content = file_info.get("content")
+        if not isinstance(content, (bytes, bytearray)):
+            continue
+        content = bytes(content)
+
+        if mime_type in _INLINE_IMAGE_MIME_TYPES:
+            if len(content) <= _INLINE_IMAGE_MAX_BYTES:
+                blocks.append(_build_image_block(mime_type=mime_type, content=content))
+            else:
+                blocks.append(
+                    _build_attachment_note_block(
+                        filename=filename,
+                        mime_type=mime_type,
+                        note=(
+                            "image too large to attach inline (>5 MB). Ask the user to resize "
+                            "or compress and resend."
+                        ),
+                    )
+                )
+            continue
+
+        if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
+            if len(content) <= _INLINE_PDF_MAX_BYTES:
+                blocks.append(_build_pdf_block(filename=filename, content=content))
+            else:
+                blocks.append(
+                    _build_attachment_note_block(
+                        filename=filename,
+                        mime_type=mime_type,
+                        note=(
+                            "PDF too large to attach inline (>10 MB). Ask the user for a smaller "
+                            "version or a text excerpt of the relevant section."
+                        ),
+                    )
+                )
+            continue
+
+        # Catch-all for unsupported binary/text formats. xlsx/pptx/docx
+        # markitdown conversion is intentionally not implemented in this
+        # PR (focused B5 scope) — the working branch has a richer pipeline
+        # and that can be ported in a follow-up if needed.
+        blocks.append(
+            _build_attachment_note_block(
+                filename=filename,
+                mime_type=mime_type,
+                note=(
+                    "this file type can't be inlined yet (only images and PDFs are "
+                    "supported). Ask the user for a screenshot or copy-paste of the "
+                    "relevant content."
+                ),
+            )
+        )
+
+    return blocks
 
 
 def _is_thread_or_assistant_404(exc: BaseException) -> bool:
@@ -351,6 +500,20 @@ class ChannelManager:
         self._semaphore: asyncio.Semaphore | None = None
         self._running = False
         self._task: asyncio.Task | None = None
+        # Per-channel inbound-file readers, registered via
+        # ``register_inbound_file_reader`` from ``ChannelService._start_channel``.
+        # When a message arrives with ``InboundMessage.files`` populated, the
+        # manager looks up the reader by ``msg.channel_name`` and awaits it on
+        # the dispatch loop (NOT on the channel's polling thread) to download
+        # the bytes off the critical path.
+        self._inbound_file_readers: dict[str, InboundFileReader] = {}
+
+    def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
+        """Register a per-channel async function that downloads bytes for
+        ``InboundMessage.files``. See ``ChannelService._start_channel`` for
+        the wiring point — channels with a ``get_inbound_file_reader()``
+        method (e.g. Telegram) are auto-registered when they start."""
+        self._inbound_file_readers[channel_name] = reader
 
     def _resolve_session_layer(self, msg: InboundMessage) -> tuple[dict[str, Any], dict[str, Any]]:
         channel_layer = _as_dict(self._channel_sessions.get(msg.channel_name))
@@ -551,6 +714,77 @@ class ChannelManager:
             return _is_thread_or_assistant_404(thread_exc)
         return False
 
+    async def _resolve_human_message_input(self, msg: InboundMessage) -> dict[str, Any]:
+        """Build the ``input`` payload for a single human turn.
+
+        When ``msg.files`` is empty (text-only messages) we ship the simple
+        ``{"role": "human", "content": "..."}`` shape that every channel
+        used before B5. When attachments are present AND the channel has a
+        registered inbound-file reader, we download the bytes off the
+        critical path and build Anthropic multimodal content blocks
+        (image/document/note) so the LLM sees the file directly. If the
+        download fails or no reader is registered, we fall back to a
+        text-only message that includes a description of what the user
+        attached so the LLM doesn't pretend it received nothing.
+        """
+        text_input = {"messages": [{"role": "human", "content": msg.text or ""}]}
+
+        if not msg.files:
+            return text_input
+
+        reader = self._inbound_file_readers.get(msg.channel_name)
+        if reader is None:
+            logger.warning(
+                "[Manager] inbound files present but no reader registered for channel=%s; "
+                "shipping text-only with descriptive note (count=%d)",
+                msg.channel_name,
+                len(msg.files),
+            )
+            note_lines = [
+                f"- {f.get('filename', 'attachment')} ({f.get('mime_type', 'unknown')})"
+                for f in msg.files
+                if isinstance(f, dict)
+            ]
+            descriptive_text = (
+                f"{msg.text or 'Please look at the attached files.'}\n"
+                "[The user attached files but the channel could not download them inline:\n"
+                + "\n".join(note_lines)
+                + "]"
+            )
+            return {"messages": [{"role": "human", "content": descriptive_text}]}
+
+        try:
+            downloaded = await reader(msg)
+        except Exception:
+            logger.exception(
+                "[Manager] inbound file reader failed for channel=%s chat_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+            )
+            downloaded = []
+
+        if not downloaded:
+            logger.info(
+                "[Manager] no inbound files downloaded for channel=%s chat_id=%s "
+                "(reader returned 0); shipping text-only",
+                msg.channel_name,
+                msg.chat_id,
+            )
+            return text_input
+
+        blocks = _build_multimodal_blocks_for_inbound_files(msg.text or "", downloaded)
+        if not blocks:
+            return text_input
+
+        logger.info(
+            "[Manager] inbound files downloaded: channel=%s chat_id=%s files=%d blocks=%d",
+            msg.channel_name,
+            msg.chat_id,
+            len(downloaded),
+            len(blocks),
+        )
+        return {"messages": [{"role": "human", "content": blocks}]}
+
     async def _handle_chat(self, msg: InboundMessage) -> None:
         client = self._get_client()
 
@@ -577,13 +811,20 @@ class ChannelManager:
             )
             return
 
+        # Build the human-message input ONCE — this downloads any
+        # InboundMessage.files via the registered reader and packages them
+        # as Anthropic multimodal blocks. Done before the retry loop so a
+        # stale-thread retry doesn't re-download (Telegram file_ids stay
+        # valid across the heal).
+        human_input = await self._resolve_human_message_input(msg)
+
         for attempt in range(2):
             logger.info("[Manager] invoking runs.wait(thread_id=%s, text=%r)", thread_id, msg.text[:100])
             try:
                 result = await client.runs.wait(
                     thread_id,
                     assistant_id,
-                    input={"messages": [{"role": "human", "content": msg.text}]},
+                    input=human_input,
                     config=run_config,
                     context=run_context,
                 )

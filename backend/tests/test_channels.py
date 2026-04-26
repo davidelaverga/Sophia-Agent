@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -2247,3 +2249,496 @@ class TestSlackMarkdownConversion:
         result = _slack_md_converter.convert("# Title")
         assert "*Title*" in result
         assert "#" not in result
+
+
+# ---------------------------------------------------------------------------
+# B5 — Telegram inbound attachments (images + PDFs).
+#
+# The user-visible bug: photos / PDFs sent to the Telegram bot were silently
+# dropped because `start()` only registered a TEXT handler. The fix adds a
+# media handler + per-channel inbound-file reader + manager-side multimodal
+# block builder that turns Telegram file_ids into Anthropic content blocks.
+# ---------------------------------------------------------------------------
+
+
+def _make_telegram_media_update(
+    *,
+    message_id: int,
+    photo: bool = False,
+    document: dict[str, str] | None = None,
+    caption: str | None = None,
+    chat_type: str = "private",
+):
+    """Build a mock Telegram Update carrying a photo and/or document."""
+    update = MagicMock()
+    update.effective_chat.type = chat_type
+    update.effective_chat.id = 200
+    update.effective_user.id = 42
+    update.message.message_id = message_id
+    update.message.caption = caption
+    update.message.text = None
+    update.message.reply_to_message = None
+    if photo:
+        # Telegram sends multiple sizes; the channel uses the last (largest).
+        small = MagicMock(file_id="ph_small_id", file_unique_id="phu_s")
+        large = MagicMock(file_id="ph_large_id", file_unique_id="phu_l")
+        update.message.photo = [small, large]
+    else:
+        update.message.photo = []
+    if document:
+        doc = MagicMock()
+        doc.file_id = document.get("file_id", "doc_id")
+        doc.file_unique_id = document.get("file_unique_id", "docu_1")
+        doc.file_name = document.get("file_name")
+        doc.mime_type = document.get("mime_type")
+        update.message.document = doc
+    else:
+        update.message.document = None
+    return update
+
+
+class TestTelegramInboundMedia:
+    """Capture-side: ``_on_media`` extracts file_ids and publishes an
+    InboundMessage with a populated ``files`` list. Without this handler
+    Telegram drops photos / documents silently — that was the prod
+    regression."""
+
+    def test_photo_message_publishes_inbound_with_files(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_media_update(message_id=300, photo=True, caption="What is in this photo?")
+            await ch._on_media(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            assert msg.text == "What is in this photo?"
+            assert msg.files == [
+                {
+                    "file_id": "ph_large_id",
+                    "filename": "telegram_photo_phu_l.jpg",
+                    "mime_type": "image/jpeg",
+                }
+            ]
+
+        _run(go())
+
+    def test_document_message_uses_document_filename_and_mime(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_media_update(
+                message_id=301,
+                document={"file_id": "pdf_id_1", "file_name": "research.pdf", "mime_type": "application/pdf"},
+            )
+            await ch._on_media(update, None)
+
+            msg = await asyncio.wait_for(bus.get_inbound(), timeout=2)
+            # Default text when caption is missing — keeps the LLM aware that
+            # the user attached something even with no caption.
+            assert msg.text == "Please look at the attached file."
+            assert msg.files == [
+                {
+                    "file_id": "pdf_id_1",
+                    "filename": "research.pdf",
+                    "mime_type": "application/pdf",
+                }
+            ]
+
+        _run(go())
+
+    def test_no_attachments_short_circuits(self):
+        """A media handler that fires for an update with neither a photo
+        nor a document (defensive: shouldn't happen given the handler
+        filter, but fail-safe is correct)."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._main_loop = asyncio.get_event_loop()
+
+            update = _make_telegram_media_update(message_id=302)
+            await ch._on_media(update, None)
+
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(bus.get_inbound(), timeout=0.2)
+
+        _run(go())
+
+
+class TestTelegramInboundFileReader:
+    """The channel's ``get_inbound_file_reader()`` returns an async
+    callable the manager invokes to download bytes for each
+    ``InboundMessage.files`` entry. Mocked Bot API here — the integration
+    smoke is on Render staging."""
+
+    def test_reader_downloads_each_file_id(self):
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            mock_bot = MagicMock()
+
+            async def fake_get_file(file_id):
+                tg_file = MagicMock()
+                # Different bytes per file so we can assert ordering.
+                payload = b"PNG_BYTES" if file_id.startswith("ph_") else b"%PDF-PAYLOAD"
+
+                async def _download():
+                    return bytearray(payload)
+
+                tg_file.download_as_bytearray = _download
+                return tg_file
+
+            mock_bot.get_file = fake_get_file
+            ch._application = MagicMock()
+            ch._application.bot = mock_bot
+
+            inbound = MagicMock()
+            inbound.files = [
+                {"file_id": "ph_x", "filename": "photo.jpg", "mime_type": "image/jpeg"},
+                {"file_id": "doc_x", "filename": "report.pdf", "mime_type": "application/pdf"},
+            ]
+            reader = ch.get_inbound_file_reader()
+            downloaded = await reader(inbound)
+
+            assert downloaded == [
+                {"filename": "photo.jpg", "mime_type": "image/jpeg", "content": b"PNG_BYTES"},
+                {"filename": "report.pdf", "mime_type": "application/pdf", "content": b"%PDF-PAYLOAD"},
+            ]
+
+        _run(go())
+
+    def test_reader_skips_failures_and_continues(self):
+        """If one file fails to download, the others still come through."""
+        from app.channels.telegram import TelegramChannel
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            mock_bot = MagicMock()
+
+            async def fake_get_file(file_id):
+                if file_id == "doc_broken":
+                    raise RuntimeError("simulated CDN failure")
+                tg_file = MagicMock()
+
+                async def _download():
+                    return bytearray(b"PNG_DATA")
+
+                tg_file.download_as_bytearray = _download
+                return tg_file
+
+            mock_bot.get_file = fake_get_file
+            ch._application = MagicMock()
+            ch._application.bot = mock_bot
+
+            inbound = MagicMock()
+            inbound.files = [
+                {"file_id": "ph_ok", "filename": "ok.jpg", "mime_type": "image/jpeg"},
+                {"file_id": "doc_broken", "filename": "broken.pdf", "mime_type": "application/pdf"},
+            ]
+            downloaded = await ch.get_inbound_file_reader()(inbound)
+
+            assert downloaded == [
+                {"filename": "ok.jpg", "mime_type": "image/jpeg", "content": b"PNG_DATA"},
+            ]
+
+        _run(go())
+
+    def test_reader_dispatches_bot_calls_to_telegram_loop(self):
+        from app.channels.telegram import TelegramChannel
+
+        download_started = threading.Event()
+        threads_seen: dict[str, int] = {}
+        loops_seen: dict[str, asyncio.AbstractEventLoop] = {}
+
+        loop_holder: dict[str, asyncio.AbstractEventLoop] = {}
+
+        def _run_telegram_loop():
+            loop = asyncio.new_event_loop()
+            loop_holder["loop"] = loop
+            asyncio.set_event_loop(loop)
+            loop.run_forever()
+            loop.close()
+
+        tg_thread = threading.Thread(target=_run_telegram_loop, daemon=True)
+        tg_thread.start()
+
+        while "loop" not in loop_holder:
+            time.sleep(0.01)
+
+        async def go():
+            bus = MessageBus()
+            ch = TelegramChannel(bus=bus, config={"bot_token": "test-token"})
+            ch._tg_loop = loop_holder["loop"]
+
+            class FakeTelegramFile:
+                async def download_as_bytearray(self):
+                    threads_seen["download"] = threading.get_ident()
+                    loops_seen["download"] = asyncio.get_running_loop()
+                    download_started.set()
+                    return bytearray(b"LOOP_HOP_OK")
+
+            async def fake_get_file(file_id):
+                assert file_id == "ph_x"
+                threads_seen["get_file"] = threading.get_ident()
+                loops_seen["get_file"] = asyncio.get_running_loop()
+                return FakeTelegramFile()
+
+            ch._application = MagicMock()
+            ch._application.bot = MagicMock()
+            ch._application.bot.get_file = fake_get_file
+
+            inbound = MagicMock()
+            inbound.files = [{"file_id": "ph_x", "filename": "photo.jpg", "mime_type": "image/jpeg"}]
+
+            downloaded = await ch.get_inbound_file_reader()(inbound)
+            assert downloaded == [{"filename": "photo.jpg", "mime_type": "image/jpeg", "content": b"LOOP_HOP_OK"}]
+            assert download_started.is_set()
+            assert loops_seen["get_file"] is ch._tg_loop
+            assert loops_seen["download"] is ch._tg_loop
+            assert threads_seen["get_file"] == tg_thread.ident
+            assert threads_seen["download"] == tg_thread.ident
+
+        try:
+            _run(go())
+        finally:
+            loop_holder["loop"].call_soon_threadsafe(loop_holder["loop"].stop)
+            tg_thread.join(timeout=2)
+
+
+class TestManagerMultimodalBlockBuilder:
+    """``_build_multimodal_blocks_for_inbound_files`` turns the reader's
+    output into Anthropic content blocks."""
+
+    def test_image_under_cap_becomes_base64_image_block(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "What's in this image?",
+            [{"filename": "photo.png", "mime_type": "image/png", "content": png_bytes}],
+        )
+
+        assert blocks[0] == {"type": "text", "text": "What's in this image?"}
+        assert blocks[1]["type"] == "image"
+        assert blocks[1]["source"]["type"] == "base64"
+        assert blocks[1]["source"]["media_type"] == "image/png"
+        assert base64.b64decode(blocks[1]["source"]["data"]) == png_bytes
+
+    def test_pdf_under_cap_becomes_native_document_block(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        pdf_bytes = b"%PDF-1.7\n" + b"y" * 200
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "Summarize this paper",
+            [{"filename": "paper.pdf", "mime_type": "application/pdf", "content": pdf_bytes}],
+        )
+
+        assert blocks[0]["type"] == "text"
+        assert blocks[1]["type"] == "document"
+        assert blocks[1]["source"]["type"] == "base64"
+        assert blocks[1]["source"]["media_type"] == "application/pdf"
+        assert blocks[1]["title"] == "paper.pdf"
+        assert base64.b64decode(blocks[1]["source"]["data"]) == pdf_bytes
+
+    def test_image_over_cap_falls_back_to_descriptive_note(self):
+        from app.channels.manager import _INLINE_IMAGE_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
+
+        oversized = b"\xff" * (_INLINE_IMAGE_MAX_BYTES + 1)
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "huge image",
+            [{"filename": "big.jpg", "mime_type": "image/jpeg", "content": oversized}],
+        )
+
+        assert blocks[1]["type"] == "text"
+        assert "big.jpg" in blocks[1]["text"]
+        assert "5 MB" in blocks[1]["text"]
+
+    def test_pdf_over_cap_falls_back_to_descriptive_note(self):
+        from app.channels.manager import _INLINE_PDF_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
+
+        oversized = b"\xff" * (_INLINE_PDF_MAX_BYTES + 1)
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "huge paper",
+            [{"filename": "big.pdf", "mime_type": "application/pdf", "content": oversized}],
+        )
+
+        assert blocks[1]["type"] == "text"
+        assert "big.pdf" in blocks[1]["text"]
+        assert "10 MB" in blocks[1]["text"]
+
+    def test_unsupported_mime_falls_back_to_descriptive_note(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "look at this",
+            [{"filename": "spreadsheet.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content": b"PK..."}],
+        )
+
+        # Text + note (no image / document block).
+        assert len(blocks) == 2
+        assert blocks[1]["type"] == "text"
+        assert "spreadsheet.xlsx" in blocks[1]["text"]
+        assert "can't be inlined" in blocks[1]["text"]
+
+    def test_multiple_attachments_in_order(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "compare these",
+            [
+                {"filename": "a.png", "mime_type": "image/png", "content": b"PNG1"},
+                {"filename": "b.pdf", "mime_type": "application/pdf", "content": b"%PDF-2"},
+                {"filename": "c.png", "mime_type": "image/png", "content": b"PNG3"},
+            ],
+        )
+
+        assert [b["type"] for b in blocks] == ["text", "image", "document", "image"]
+        # PDF in the middle shows up as a document with the right filename.
+        assert blocks[2]["title"] == "b.pdf"
+
+    def test_empty_text_omits_text_block(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "",
+            [{"filename": "p.png", "mime_type": "image/png", "content": b"PNG"}],
+        )
+
+        # Only the image block — no leading empty text block.
+        assert len(blocks) == 1
+        assert blocks[0]["type"] == "image"
+
+    def test_invalid_file_entries_are_skipped(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        blocks = _build_multimodal_blocks_for_inbound_files(
+            "mixed",
+            [
+                "not-a-dict",  # type: ignore[list-item]
+                {"filename": "ok.png", "mime_type": "image/png", "content": b"PNG"},
+                {"filename": "no-content.png", "mime_type": "image/png"},
+                {"filename": "bad-content", "mime_type": "image/png", "content": "not-bytes"},
+            ],
+        )
+
+        # text + only one valid image survives.
+        assert [b["type"] for b in blocks] == ["text", "image"]
+
+
+class TestManagerInboundFileReaderRegistry:
+    """``register_inbound_file_reader`` + ``_resolve_human_message_input``
+    drive the actual download path that runs inside ``_handle_chat``."""
+
+    def test_resolve_input_text_only_when_no_files(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            mgr = ChannelManager(bus=bus, store=store)
+            msg = InboundMessage(channel_name="telegram", chat_id="1", user_id="u", text="hi")
+
+            input_payload = await mgr._resolve_human_message_input(msg)
+
+            assert input_payload == {"messages": [{"role": "human", "content": "hi"}]}
+
+        _run(go())
+
+    def test_resolve_input_uses_registered_reader_for_attachments(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            mgr = ChannelManager(bus=bus, store=store)
+
+            async def fake_reader(_inbound):
+                return [{"filename": "p.png", "mime_type": "image/png", "content": b"PNG"}]
+
+            mgr.register_inbound_file_reader("telegram", fake_reader)
+
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="1",
+                user_id="u",
+                text="see this",
+                files=[{"file_id": "ph", "filename": "p.png", "mime_type": "image/png"}],
+            )
+            input_payload = await mgr._resolve_human_message_input(msg)
+            blocks = input_payload["messages"][0]["content"]
+
+            assert isinstance(blocks, list)
+            assert blocks[0] == {"type": "text", "text": "see this"}
+            assert blocks[1]["type"] == "image"
+
+        _run(go())
+
+    def test_resolve_input_falls_back_to_descriptive_text_when_no_reader(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            mgr = ChannelManager(bus=bus, store=store)
+
+            msg = InboundMessage(
+                channel_name="slack",  # no reader registered
+                chat_id="1",
+                user_id="u",
+                text="see this",
+                files=[{"file_id": "x", "filename": "doc.pdf", "mime_type": "application/pdf"}],
+            )
+            input_payload = await mgr._resolve_human_message_input(msg)
+            content = input_payload["messages"][0]["content"]
+
+            # String content (text-only fallback) carrying a description so
+            # the LLM doesn't pretend the user sent nothing.
+            assert isinstance(content, str)
+            assert "doc.pdf" in content
+            assert "application/pdf" in content
+
+        _run(go())
+
+    def test_resolve_input_falls_back_when_reader_raises(self):
+        from app.channels.manager import ChannelManager
+
+        async def go():
+            bus = MessageBus()
+            store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+            mgr = ChannelManager(bus=bus, store=store)
+
+            async def broken_reader(_inbound):
+                raise RuntimeError("boom")
+
+            mgr.register_inbound_file_reader("telegram", broken_reader)
+
+            msg = InboundMessage(
+                channel_name="telegram",
+                chat_id="1",
+                user_id="u",
+                text="hi",
+                files=[{"file_id": "x", "filename": "p.png", "mime_type": "image/png"}],
+            )
+            input_payload = await mgr._resolve_human_message_input(msg)
+
+            # Reader failure → text-only payload preserves the user's intent
+            # without crashing the dispatch.
+            assert input_payload == {"messages": [{"role": "human", "content": "hi"}]}
+
+        _run(go())
+
+
+# Add base64 import at module scope for the multimodal block tests.
+import base64  # noqa: E402  — kept at end to minimise diff against pre-B5 file

@@ -149,6 +149,7 @@ FastAPI application providing REST endpoints for frontend integration:
 ### IM Channels
 
 The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.
+Telegram inbound attachment downloads (photo/PDF path) are executed on Telegram's polling event loop via a loop-hop helper, so manager-side file reader calls avoid cross-loop bot runtime errors.
 
 For Feishu card updates, DeerFlow stores the running card's `message_id` per inbound message and patches that same card until the run finishes, preserving the existing `OK` / `DONE` reaction flow.
 
