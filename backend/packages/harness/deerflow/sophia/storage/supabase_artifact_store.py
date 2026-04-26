@@ -162,6 +162,79 @@ def check_artifact_exists(
             http.close()
 
 
+def create_signed_url(
+    thread_id: str,
+    filename: str,
+    *,
+    expires_in_seconds: int = 7 * 24 * 60 * 60,
+    client: httpx.Client | None = None,
+) -> str | None:
+    """Mint a temporary signed URL for an uploaded artifact.
+
+    Used by the builder-events notifier so completion cards can deliver the
+    artifact directly without server-side proxying. Returns the absolute
+    signed URL on success, ``None`` when Supabase is not configured or
+    signing fails (caller should fall back to no link in that case).
+
+    Default expiry is 7 days. Channel-specific deliverers can override (e.g.
+    Telegram passes the URL straight to ``send_document``, which downloads
+    server-side, so a short expiry is fine).
+    """
+    config = _load_config()
+    if config is None:
+        return None
+
+    object_path = _object_path(thread_id, filename)
+    sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{object_path}"
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    body = {"expiresIn": int(expires_in_seconds)}
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.post(sign_url, json=body, headers=headers)
+        if not response.is_success:
+            logger.warning(
+                "Supabase signed-URL mint failed for %s/%s status=%s body=%s",
+                thread_id,
+                filename,
+                response.status_code,
+                response.text[:200],
+            )
+            return None
+        data = response.json()
+        signed_url = data.get("signedURL") or data.get("signed_url")
+        if not isinstance(signed_url, str) or not signed_url:
+            logger.warning(
+                "Supabase signed-URL response missing signedURL field for %s/%s",
+                thread_id,
+                filename,
+            )
+            return None
+        # Supabase returns a path relative to ``/storage/v1`` — combine with
+        # the configured public URL to produce a usable absolute link.
+        if signed_url.startswith("http://") or signed_url.startswith("https://"):
+            return signed_url
+        if signed_url.startswith("/"):
+            return f"{config.url}/storage/v1{signed_url}"
+        return f"{config.url}/storage/v1/{signed_url}"
+    except httpx.HTTPError as exc:
+        logger.warning(
+            "Supabase signed-URL mint error for %s/%s error=%s",
+            thread_id,
+            filename,
+            exc,
+        )
+        return None
+    finally:
+        if owns_client:
+            http.close()
+
+
 def download_artifact(
     thread_id: str,
     filename: str,

@@ -190,6 +190,12 @@ async def start_channel_service() -> ChannelService:
     if _channel_service is not None:
         return _channel_service
     _channel_service = ChannelService.from_app_config()
+    # Expose the bus on the module-level slot so the gateway router can
+    # forward builder-events webhooks into channel adapters without app
+    # state plumbing.
+    from app.channels import message_bus as _message_bus_module
+
+    _message_bus_module.set_global_bus(_channel_service.bus)
     await _channel_service.start()
     return _channel_service
 
@@ -199,4 +205,7 @@ async def stop_channel_service() -> None:
     global _channel_service
     if _channel_service is not None:
         await _channel_service.stop()
+        from app.channels import message_bus as _message_bus_module
+
+        _message_bus_module.set_global_bus(None)
         _channel_service = None

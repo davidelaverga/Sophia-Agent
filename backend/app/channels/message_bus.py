@@ -112,6 +112,7 @@ class OutboundMessage:
 # ---------------------------------------------------------------------------
 
 OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
+BuilderCompletionCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 class MessageBus:
@@ -120,11 +121,18 @@ class MessageBus:
     Channels publish inbound messages; the dispatcher consumes them.
     The dispatcher publishes outbound messages; channels receive them
     via registered callbacks.
+
+    Builder-completion events ride a parallel pub/sub track. They are not
+    OutboundMessages — they don't have a per-turn ``text`` and they fire
+    asynchronously after the parent companion run already returned. Each
+    channel adapter that wants to render completion cards subscribes via
+    ``subscribe_builder_completion``.
     """
 
     def __init__(self) -> None:
         self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self._outbound_listeners: list[OutboundCallback] = []
+        self._builder_completion_listeners: list[BuilderCompletionCallback] = []
 
     # -- inbound -----------------------------------------------------------
 
@@ -171,3 +179,75 @@ class MessageBus:
                 await callback(msg)
             except Exception:
                 logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
+
+    # -- builder completion ------------------------------------------------
+
+    def subscribe_builder_completion(self, callback: BuilderCompletionCallback) -> None:
+        """Register a coroutine listener for builder completion events.
+
+        Each channel adapter that surfaces completion cards (Telegram first,
+        Slack/Feishu later) subscribes here. The callback receives the raw
+        webhook payload from
+        ``deerflow.sophia.builder_events.build_completion_payload``.
+        Adapters are responsible for the channel-specific rendering and
+        thread→chat_id reverse lookup (via ``app.channels.store``).
+        """
+        self._builder_completion_listeners.append(callback)
+
+    def unsubscribe_builder_completion(self, callback: BuilderCompletionCallback) -> None:
+        self._builder_completion_listeners = [
+            cb for cb in self._builder_completion_listeners if cb is not callback
+        ]
+
+    async def publish_builder_completion(self, payload: dict[str, Any]) -> None:
+        """Fan a builder completion event out to all subscribed channel adapters.
+
+        Best-effort: a failing adapter logs but never blocks the others.
+        """
+        logger.info(
+            "[Bus] builder_completion dispatching: thread_id=%s task_id=%s status=%s listeners=%d",
+            payload.get("thread_id"),
+            payload.get("task_id"),
+            payload.get("status"),
+            len(self._builder_completion_listeners),
+        )
+        for callback in self._builder_completion_listeners:
+            try:
+                await callback(payload)
+            except Exception:
+                logger.exception(
+                    "Error in builder_completion callback for task_id=%s",
+                    payload.get("task_id"),
+                )
+
+
+# ---------------------------------------------------------------------------
+# Module-level convenience for the gateway router
+# ---------------------------------------------------------------------------
+
+
+_global_bus: "MessageBus | None" = None
+
+
+def set_global_bus(bus: "MessageBus | None") -> None:
+    """Register (or clear) the process-wide bus.
+
+    Channels register themselves on this bus during their startup. The
+    gateway router uses it to forward incoming builder-events webhooks
+    without needing app-state plumbing.
+    """
+    global _global_bus
+    _global_bus = bus
+
+
+def get_global_bus() -> "MessageBus | None":
+    return _global_bus
+
+
+async def publish_builder_completion(payload: dict[str, Any]) -> None:
+    """Publish a builder completion to the process-wide bus, if installed."""
+    bus = _global_bus
+    if bus is None:
+        logger.debug("publish_builder_completion: no global bus installed; skipping channel fan-out")
+        return
+    await bus.publish_builder_completion(payload)
