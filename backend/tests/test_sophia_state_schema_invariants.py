@@ -292,15 +292,34 @@ def test_middleware_state_does_not_shadow_reducer_gated_builder_fields(
 # ---------------------------------------------------------------------------
 
 
-def test_merge_builder_web_budget_takes_max_of_counters_and_last_wins_for_limits():
+def test_merge_builder_web_budget_sums_call_deltas_and_last_wins_for_limits():
+    """``*_calls`` keys are SUMMED (delta semantics) — concurrent +1 writes
+    from parallel ``builder_web_search`` / ``builder_web_fetch`` tool
+    invocations all add up. ``*_limit`` keys are static config; last-wins
+    is correct because the middleware seeds them once and tools never
+    rewrite them."""
+    # Tools write per-invocation deltas like ``{"search_calls": 1}``, NOT
+    # the whole budget dict. The reducer combines them into the running
+    # state.
     current = {"search_calls": 5, "search_limit": 10, "fetch_calls": 2}
-    update = {"search_calls": 6, "search_limit": 10, "fetch_calls": 3}
-    merged = _merge_builder_web_budget(current, update)
-    # Counter keys take max per-key (safe undercount on parallel bursts).
-    assert merged["search_calls"] == 6
-    assert merged["fetch_calls"] == 3
-    # Limit keys are static config — last-wins is fine.
+    delta = {"search_calls": 1, "fetch_calls": 1}
+    merged = _merge_builder_web_budget(current, delta)
+    assert merged["search_calls"] == 6  # 5 + 1
+    assert merged["fetch_calls"] == 3  # 2 + 1
+    # Static limit preserved (not in delta, so not touched).
     assert merged["search_limit"] == 10
+
+
+def test_merge_builder_web_budget_static_limits_use_last_wins():
+    """If the limit is rewritten (e.g., by an init-once middleware reseed
+    on a fresh thread), the new value wins. Last-wins for non-``*_calls``
+    keys stays compatible with delta semantics for counters because limits
+    are never summed."""
+    current = {"search_limit": 5, "search_calls": 3}
+    update = {"search_limit": 10}
+    merged = _merge_builder_web_budget(current, update)
+    assert merged["search_limit"] == 10  # last-wins
+    assert merged["search_calls"] == 3  # untouched (not in update)
 
 
 def test_merge_builder_web_budget_handles_none_inputs():
@@ -309,16 +328,66 @@ def test_merge_builder_web_budget_handles_none_inputs():
     assert _merge_builder_web_budget({"fetch_calls": 2}, None) == {"fetch_calls": 2}
 
 
-def test_merge_builder_web_budget_is_associative():
-    # LangGraph applies concurrent updates sequentially via reducer(a, b)
-    # then reducer(result, c); associativity keeps counters stable regardless
-    # of dispatch order.
+def test_merge_builder_web_budget_empty_delta_is_noop():
+    """``_budget_guard`` returns an empty delta on the budget-exhausted error
+    path. Passing it through the reducer must be a no-op (preserve current
+    state exactly)."""
+    current = {"search_calls": 5, "search_limit": 10}
+    merged = _merge_builder_web_budget(current, {})
+    assert merged == current
+
+
+def test_merge_builder_web_budget_is_associative_under_sum_semantics():
+    """LangGraph applies concurrent updates sequentially via reducer(a, b)
+    then reducer(result, c); associativity keeps counters stable regardless
+    of dispatch order."""
     base = {"search_calls": 5}
-    update_a = {"search_calls": 6}
-    update_b = {"search_calls": 6}
-    left = _merge_builder_web_budget(_merge_builder_web_budget(base, update_a), update_b)
-    right = _merge_builder_web_budget(base, _merge_builder_web_budget(update_a, update_b))
-    assert left == right == {"search_calls": 6}
+    delta_a = {"search_calls": 1}
+    delta_b = {"search_calls": 1}
+    left = _merge_builder_web_budget(
+        _merge_builder_web_budget(base, delta_a), delta_b
+    )
+    right = _merge_builder_web_budget(
+        base, _merge_builder_web_budget(delta_a, delta_b)
+    )
+    # Both orderings yield 5 + 1 + 1 = 7. The two deltas merged together
+    # via the reducer also sum (1 + 1 = 2), so the right side computes
+    # 5 + 2 = 7. Associativity holds.
+    assert left == right == {"search_calls": 7}
+
+
+def test_merge_builder_web_budget_parallel_burst_does_not_lose_increments():
+    """REGRESSION (codex bot review on PR #81): the prior ``max``-based
+    reducer collapsed concurrent ``+1`` writes from parallel tool calls
+    into a single increment, under-reporting usage and letting requests
+    exceed the configured per-task budget. This test simulates a 4-way
+    parallel burst — each call writes the same delta and they MUST all
+    accumulate."""
+    state_before = {"search_calls": 0, "search_limit": 10}
+    # 4 parallel ``builder_web_search`` invocations in the same super-step.
+    # Each tool writes a +1 delta independently.
+    burst = [{"search_calls": 1} for _ in range(4)]
+
+    state = state_before
+    for delta in burst:
+        state = _merge_builder_web_budget(state, delta)
+
+    # All four increments survive — the prior max-based reducer would have
+    # left this at 1 (max(0, 1) once, then max(1, 1) three times).
+    assert state["search_calls"] == 4
+    assert state["search_limit"] == 10  # static limit preserved
+
+
+def test_merge_builder_web_budget_distinct_counter_keys_accumulate_independently():
+    """A single delta can carry both ``search_calls`` and ``fetch_calls``
+    (or any future ``*_calls`` key). They sum independently."""
+    state = {"search_calls": 2, "fetch_calls": 7, "search_limit": 5}
+    state = _merge_builder_web_budget(state, {"search_calls": 1})
+    state = _merge_builder_web_budget(state, {"fetch_calls": 1})
+    state = _merge_builder_web_budget(state, {"search_calls": 1, "fetch_calls": 2})
+    assert state["search_calls"] == 4  # 2 + 1 + 1
+    assert state["fetch_calls"] == 10  # 7 + 1 + 2
+    assert state["search_limit"] == 5  # untouched
 
 
 def test_union_string_list_preserves_order_and_dedups():

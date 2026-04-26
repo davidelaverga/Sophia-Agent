@@ -50,7 +50,19 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             if str(url).strip()
         ]
 
-        budget = dict(state.get("builder_web_budget") or delegation_context.get("builder_web_budget") or make_builder_web_budget(task_type))
+        # `_merge_builder_web_budget` SUMS *_calls keys (delta semantics) so
+        # the middleware MUST be init-once for this field — re-writing the
+        # whole dict on every turn would double-count the counters tools have
+        # accumulated. We seed the budget on the first turn and skip the
+        # write thereafter; tools own the *_calls deltas via the reducer
+        # while *_limit values are static and last-wins (idempotent).
+        existing_budget = state.get("builder_web_budget") or {}
+        if existing_budget:
+            budget = dict(existing_budget)
+            seed_budget = False
+        else:
+            budget = dict(delegation_context.get("builder_web_budget") or make_builder_web_budget(task_type))
+            seed_budget = True
         tracked_sources = [
             source
             for source in (state.get("builder_search_sources") or [])
@@ -104,11 +116,16 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             f"fetch_limit={budget.get('fetch_limit')} explicit_urls={len(explicit_user_urls)}",
             _t0,
         )
-        return {
+        update: dict[str, Any] = {
             "system_prompt_blocks": blocks,
             "allow_web_research": allow_web_research,
             "explicit_user_urls": explicit_user_urls,
             "builder_allowed_urls": sorted(allowed_urls),
             "builder_search_sources": tracked_sources,
-            "builder_web_budget": budget,
         }
+        if seed_budget:
+            # Only on the first turn (when state had no budget yet). On
+            # subsequent turns the tools' deltas continue to accumulate via
+            # the reducer; we deliberately don't re-write here.
+            update["builder_web_budget"] = budget
+        return update

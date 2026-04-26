@@ -24,24 +24,35 @@ def _merge_builder_web_budget(
 ) -> dict:
     """Reducer for ``builder_web_budget``.
 
-    The guarded builder web tools (``builder_web_search``, ``builder_web_fetch``)
-    each read the current counter dict, increment the appropriate ``*_calls``
-    key, and return the new dict via ``Command.update``. When the builder
-    model emits parallel tool calls in a single AI message, LangGraph
-    dispatches both tool executions in the same super-step and both try to
-    write this field. Without a reducer this raises::
+    Two key/value classes are mixed in this dict and require different merge
+    semantics:
 
-        InvalidUpdateError: At key 'builder_web_budget': Can receive only
-        one value per step. Use an Annotated key to handle multiple values.
+    - ``*_calls`` keys are SUMMED (delta semantics). The guarded builder web
+      tools (``builder_web_search``, ``builder_web_fetch``) write **deltas**
+      via ``Command.update={"builder_web_budget": {"<key>_calls": 1}}`` —
+      each tool call contributes its own +1, and LangGraph applies parallel
+      updates sequentially through this reducer so concurrent bursts add up
+      correctly. The earlier ``max`` reducer collapsed concurrent
+      increments (two parallel tools both reading 5 and writing 6 yielded
+      ``max(6, 6) = 6``, losing one increment), which under-reported usage
+      and let requests exceed the per-task budget. Codex bot review on
+      PR #81 surfaced this; the fix moves to delta+sum semantics together
+      with the ``_budget_guard`` change in
+      ``backend/packages/harness/deerflow/sophia/tools/builder_web_search.py``.
 
-    We merge by taking max per-key for ``*_calls`` counter keys and last-wins
-    for everything else (``*_limit`` keys are static config, not deltas).
-    Max-based merging safely undercounts parallel increments by at most one
-    per collision, which is acceptable for a soft quota: the limit still
-    fires; it just fires one call later than an ideal delta-summing reducer
-    would. This trade-off lets the tools keep their read-modify-write shape
-    unchanged and keeps the reducer associative (required because LangGraph
-    applies concurrent updates sequentially).
+    - All other keys (notably ``*_limit``) use LAST-WINS. They are static
+      config seeded once by ``BuilderResearchPolicyMiddleware`` from
+      ``make_builder_web_budget(task_type)`` and never mutated by the
+      tools.
+
+    Sum is associative and order-independent, so LangGraph's sequential
+    application of concurrent updates is safe regardless of dispatch order.
+
+    Caller contract: tools MUST write only the keys they intend to mutate,
+    not the whole budget dict. The reducer preserves any unmodified keys
+    from the current state. Writing the whole dict (the OLD pattern that
+    used absolute counter values) would over-count under sum semantics —
+    the schema-invariant test guards against re-introducing that pattern.
     """
     if current is None and update is None:
         return {}
@@ -58,7 +69,7 @@ def _merge_builder_web_budget(
             and isinstance(value, int)
             and isinstance(merged.get(key), int)
         ):
-            merged[key] = max(merged[key], value)
+            merged[key] = merged[key] + value
         else:
             merged[key] = value
     return merged
