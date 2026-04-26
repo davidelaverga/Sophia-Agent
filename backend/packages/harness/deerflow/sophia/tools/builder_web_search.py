@@ -67,15 +67,36 @@ def _tool_response(
 
 
 def _budget_guard(state: SophiaState, key: str) -> tuple[dict[str, int], str | None]:
+    """Read the current ``*_calls`` counter, enforce the ``*_limit`` cap,
+    and return a per-tool DELTA to write to state.
+
+    Returns:
+        ``(delta, error)`` — ``delta`` is a per-tool patch like
+        ``{"<key>_calls": 1}`` that the caller passes to
+        ``_tool_response(... builder_web_budget=delta)``. The
+        ``_merge_builder_web_budget`` reducer in
+        ``deerflow.agents.sophia_agent.state`` SUMS ``*_calls`` keys, so
+        concurrent tool bursts in the same super-step add up correctly
+        without collapsing to a single increment (the bug codex bot
+        flagged on PR #81). On error the delta is ``{}`` — the caller
+        bails out before consuming a call, so no state mutation is
+        necessary; passing an empty dict to the reducer is a no-op.
+
+    The function still does the read-side check (``calls >= limit``) so
+    a parallel burst at the boundary can over-count by at most ``N-1``
+    where ``N`` is the parallel fan-out per turn, instead of
+    under-counting by ``N-1`` as the prior absolute-write+max-reducer
+    did. Bounded over-count is preferable to bounded under-count because
+    it preserves the spend ceiling.
+    """
     budget = dict(state.get("builder_web_budget") or {})
     limit_key = f"{key}_limit"
     calls_key = f"{key}_calls"
     limit = int(budget.get(limit_key, 0) or 0)
     calls = int(budget.get(calls_key, 0) or 0)
     if limit and calls >= limit:
-        return budget, f"Error: Builder {key} budget exhausted ({calls}/{limit}). Continue without more browsing."
-    budget[calls_key] = calls + 1
-    return budget, None
+        return {}, f"Error: Builder {key} budget exhausted ({calls}/{limit}). Continue without more browsing."
+    return {calls_key: 1}, None
 
 
 @tool("builder_web_search", parse_docstring=True)

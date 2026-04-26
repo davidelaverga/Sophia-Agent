@@ -63,6 +63,15 @@ def test_builder_web_search_respects_policy_gate():
 
 
 def test_builder_web_fetch_accepts_allowed_and_explicit_urls(monkeypatch):
+    """The fetch tool now writes per-call deltas (``{"fetch_calls": 1}``)
+    rather than the whole budget dict — the reducer
+    ``_merge_builder_web_budget`` sums deltas at the LangGraph layer so
+    parallel bursts no longer collapse increments. This test simulates two
+    sequential fetches and verifies the delta contract; reducer-level
+    accumulation is covered by the dedicated reducer tests in
+    ``test_sophia_state_schema_invariants.py``."""
+    from deerflow.agents.sophia_agent.state import _merge_builder_web_budget
+
     module = importlib.import_module("deerflow.sophia.tools.builder_web_fetch")
     mock_tool = MagicMock()
     mock_tool.run.return_value = "# Example Page\n\nFetched body"
@@ -82,11 +91,17 @@ def test_builder_web_fetch_accepts_allowed_and_explicit_urls(monkeypatch):
         tool_call_id="tc-fetch-approved",
     )
 
+    # Apply the approved-call delta through the SAME reducer LangGraph uses,
+    # then run the second fetch on the merged state. This is the integration
+    # equivalent of two sequential super-steps.
+    merged_budget = _merge_builder_web_budget(
+        state["builder_web_budget"], approved.update["builder_web_budget"]
+    )
     updated_state = dict(state)
     updated_state.update(
         {
             "builder_search_sources": approved.update["builder_search_sources"],
-            "builder_web_budget": approved.update["builder_web_budget"],
+            "builder_web_budget": merged_budget,
         }
     )
     explicit = module.builder_web_fetch.func(
@@ -97,8 +112,15 @@ def test_builder_web_fetch_accepts_allowed_and_explicit_urls(monkeypatch):
 
     assert _message_content(approved).startswith("# Example Page")
     assert _message_content(explicit).startswith("# Example Page")
-    assert approved.update["builder_web_budget"]["fetch_calls"] == 1
-    assert explicit.update["builder_web_budget"]["fetch_calls"] == 2
+    # Delta contract: each tool invocation writes a +1 delta, NOT an absolute.
+    assert approved.update["builder_web_budget"] == {"fetch_calls": 1}
+    assert explicit.update["builder_web_budget"] == {"fetch_calls": 1}
+    # End-to-end accumulation happens through the reducer.
+    final_budget = _merge_builder_web_budget(
+        merged_budget, explicit.update["builder_web_budget"]
+    )
+    assert final_budget["fetch_calls"] == 2
+    assert final_budget["fetch_limit"] == 5  # static limit preserved
     assert {item["url"] for item in explicit.update["builder_search_sources"]} == {
         "https://example.com/approved",
         "https://example.com/from-brief",

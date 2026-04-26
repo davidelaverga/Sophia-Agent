@@ -25,7 +25,13 @@ class BuilderTaskState(AgentState):
     delegation_context: NotRequired[dict | None]
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
-    builder_search_sources: NotRequired[list[dict]]
+    # NOTE: builder_search_sources is NOT redeclared here. SophiaState already
+    # declares it with the `_merge_search_sources` reducer; redeclaring it as
+    # plain `NotRequired[list[dict]]` would shadow that reducer via
+    # langchain.agents.create_agent's set-based schema merge, downgrade the
+    # channel to LastValue, and crash parallel `builder_web_search` /
+    # `builder_web_fetch` writes. The
+    # `tests/test_sophia_state_schema_invariants.py` guard locks this.
     allow_web_research: NotRequired[bool]
 
 

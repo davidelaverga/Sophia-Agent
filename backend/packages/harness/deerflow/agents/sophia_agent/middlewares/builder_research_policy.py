@@ -18,9 +18,15 @@ class BuilderResearchPolicyState(AgentState):
     delegation_context: NotRequired[dict | None]
     allow_web_research: NotRequired[bool]
     explicit_user_urls: NotRequired[list[str]]
-    builder_allowed_urls: NotRequired[list[str]]
-    builder_search_sources: NotRequired[list[dict[str, str]]]
-    builder_web_budget: NotRequired[dict[str, int]]
+    # NOTE: builder_allowed_urls / builder_search_sources / builder_web_budget
+    # are NOT redeclared here. SophiaState already declares them with the
+    # `_union_string_list` / `_merge_search_sources` / `_merge_builder_web_budget`
+    # reducers respectively. Redeclaring them as plain `NotRequired[...]` would
+    # shadow those reducers via langchain.agents.create_agent's set-based
+    # schema merge, downgrade the channels to LastValue, and crash parallel
+    # `builder_web_search` / `builder_web_fetch` tool calls with
+    # `INVALID_CONCURRENT_GRAPH_UPDATE`. The
+    # `tests/test_sophia_state_schema_invariants.py` guard locks this.
 
 
 class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState]):
@@ -44,7 +50,19 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             if str(url).strip()
         ]
 
-        budget = dict(state.get("builder_web_budget") or delegation_context.get("builder_web_budget") or make_builder_web_budget(task_type))
+        # `_merge_builder_web_budget` SUMS *_calls keys (delta semantics) so
+        # the middleware MUST be init-once for this field — re-writing the
+        # whole dict on every turn would double-count the counters tools have
+        # accumulated. We seed the budget on the first turn and skip the
+        # write thereafter; tools own the *_calls deltas via the reducer
+        # while *_limit values are static and last-wins (idempotent).
+        existing_budget = state.get("builder_web_budget") or {}
+        if existing_budget:
+            budget = dict(existing_budget)
+            seed_budget = False
+        else:
+            budget = dict(delegation_context.get("builder_web_budget") or make_builder_web_budget(task_type))
+            seed_budget = True
         tracked_sources = [
             source
             for source in (state.get("builder_search_sources") or [])
@@ -98,11 +116,16 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             f"fetch_limit={budget.get('fetch_limit')} explicit_urls={len(explicit_user_urls)}",
             _t0,
         )
-        return {
+        update: dict[str, Any] = {
             "system_prompt_blocks": blocks,
             "allow_web_research": allow_web_research,
             "explicit_user_urls": explicit_user_urls,
             "builder_allowed_urls": sorted(allowed_urls),
             "builder_search_sources": tracked_sources,
-            "builder_web_budget": budget,
         }
+        if seed_budget:
+            # Only on the first turn (when state had no budget yet). On
+            # subsequent turns the tools' deltas continue to accumulate via
+            # the reducer; we deliberately don't re-write here.
+            update["builder_web_budget"] = budget
+        return update

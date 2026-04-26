@@ -145,8 +145,13 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     middlewares.extend(
         [
-        # 1. Values — soul.md only (voice.md not needed, builder doesn't speak)
-            FileInjectionMiddleware((SKILLS_PATH / "soul.md", False)),
+        # 1. Values — soul.md (the builder doesn't speak, so voice.md isn't
+        #    needed) plus AGENTS.md, the small shared companion↔builder
+        #    coordination contract that is also injected on the companion side.
+            FileInjectionMiddleware(
+                (SKILLS_PATH / "soul.md", False),
+                (SKILLS_PATH / "AGENTS.md", False),
+            ),
         # 2. User personalization — identity file shapes what builder creates
             UserIdentityMiddleware(user_id),
         # 3. Task briefing — translates companion artifact into builder guidance

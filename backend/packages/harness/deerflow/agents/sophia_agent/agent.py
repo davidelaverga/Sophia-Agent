@@ -32,8 +32,10 @@ from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
 from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
 from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+from deerflow.agents.sophia_agent.middlewares.web_research import WebResearchGuidanceMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import SophiaState
+from deerflow.agents.sophia_agent.tooling import load_sophia_web_tools
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
@@ -45,10 +47,30 @@ logger = logging.getLogger(__name__)
 
 
 def _create_summarization_middleware():
-    """Create a SophiaSummarizationMiddleware instance from app config."""
+    """Create a SophiaSummarizationMiddleware instance from app config.
+
+    Returns ``None`` when summarization cannot be constructed (config
+    disabled, default-model lookup fails, summarization config itself fails
+    to load). Summarization is an optional middleware — agent construction
+    must NOT depend on it. Codex bot review on PR #81 surfaced that the
+    sister bug to ``load_sophia_web_tools()`` lives here too:
+    ``create_chat_model(thinking_enabled=False)`` (used to resolve the
+    default model when ``config.model_name`` is unset) calls
+    ``get_app_config()``, which raises ``FileNotFoundError`` /
+    ``pydantic.ValidationError`` in config-less or partially-configured
+    environments. Failing open keeps ``make_sophia_agent`` constructible.
+    """
     from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
 
-    config = get_summarization_config()
+    try:
+        config = get_summarization_config()
+    except Exception:
+        logger.warning(
+            "Sophia summarization: failed to load summarization config; middleware disabled.",
+            exc_info=True,
+        )
+        return None
+
     if not config.enabled:
         return None
 
@@ -59,7 +81,17 @@ def _create_summarization_middleware():
         else:
             trigger = config.trigger.to_tuple()
 
-    model = config.model_name if config.model_name else create_chat_model(thinking_enabled=False)
+    if config.model_name:
+        model = config.model_name
+    else:
+        try:
+            model = create_chat_model(thinking_enabled=False)
+        except Exception:
+            logger.warning(
+                "Sophia summarization: failed to resolve default chat model; middleware disabled.",
+                exc_info=True,
+            )
+            return None
 
     kwargs: dict = {
         "model": model,
@@ -114,6 +146,12 @@ def make_sophia_agent(config: RunnableConfig):
         timeout=60.0,
     )
 
+    # Native web tools (Tavily web_search + Jina web_fetch). Resolves an empty
+    # list when no `tools:` providers are configured — the WebResearchGuidance
+    # middleware below is then also skipped, so the companion behaves exactly
+    # as before. Only added to the tools list at the bottom of this factory.
+    web_tools = load_sophia_web_tools()
+
     # Middleware chain — order is load-bearing.
     middlewares = [
         # 1. Infrastructure
@@ -122,11 +160,15 @@ def make_sophia_agent(config: RunnableConfig):
         MessageCoercionMiddleware(),
         # 3. Crisis fast-path (before any expensive middleware)
         CrisisCheckMiddleware(),
-        # 4. Always-loaded identity files (soul always, voice+techniques skip on crisis)
+        # 4. Always-loaded identity files (soul always, voice+techniques skip on
+        #    crisis). AGENTS.md is the small shared companion↔builder building
+        #    contract; skip_on_crisis=False because crisis paths never call the
+        #    builder and the extra ~500 tokens are negligible at peak.
         FileInjectionMiddleware(
             (SKILLS_PATH / "soul.md", False),
             (SKILLS_PATH / "voice.md", True),
             (SKILLS_PATH / "techniques.md", True),
+            (SKILLS_PATH / "AGENTS.md", False),
         ),
         # 5. Platform signal
         PlatformContextMiddleware(),
@@ -150,6 +192,15 @@ def make_sophia_agent(config: RunnableConfig):
         # 16. Deterministic Builder command routing for explicit document requests
         BuilderCommandMiddleware(),
     ]
+
+    # 16b. Web research guidance — only when web tools were actually loaded.
+    # Injects a system prompt block teaching citation discipline, populating
+    # emit_builder_artifact.sources_used, and never claiming to have checked
+    # the web without using the tools. Sits before BuilderCommandMiddleware so
+    # the guidance is part of the model's pre-builder routing context.
+    if web_tools:
+        # Insert immediately before BuilderCommandMiddleware (last entry above).
+        middlewares.insert(-1, WebResearchGuidanceMiddleware())
 
     # 17. Summarization (config-driven trigger/keep policy)
     summarization_middleware = _create_summarization_middleware()
@@ -184,7 +235,7 @@ def make_sophia_agent(config: RunnableConfig):
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
     switch_to_builder = make_switch_to_builder_tool(user_id)
-    tools = [emit_artifact, switch_to_builder, retrieve_memories]
+    tools = [emit_artifact, switch_to_builder, retrieve_memories, *web_tools]
 
     agent = create_agent(
         model=model,
