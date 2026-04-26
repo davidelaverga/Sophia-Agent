@@ -46,10 +46,30 @@ logger = logging.getLogger(__name__)
 
 
 def _create_summarization_middleware():
-    """Create a SophiaSummarizationMiddleware instance from app config."""
+    """Create a SophiaSummarizationMiddleware instance from app config.
+
+    Returns ``None`` when summarization cannot be constructed (config
+    disabled, default-model lookup fails, summarization config itself fails
+    to load). Summarization is an optional middleware — agent construction
+    must NOT depend on it. Codex bot review on PR #81 surfaced that the
+    sister bug to ``load_sophia_web_tools()`` lives here too:
+    ``create_chat_model(thinking_enabled=False)`` (used to resolve the
+    default model when ``config.model_name`` is unset) calls
+    ``get_app_config()``, which raises ``FileNotFoundError`` /
+    ``pydantic.ValidationError`` in config-less or partially-configured
+    environments. Failing open keeps ``make_sophia_agent`` constructible.
+    """
     from deerflow.agents.sophia_agent.middlewares.sophia_summarization import SophiaSummarizationMiddleware
 
-    config = get_summarization_config()
+    try:
+        config = get_summarization_config()
+    except Exception:
+        logger.warning(
+            "Sophia summarization: failed to load summarization config; middleware disabled.",
+            exc_info=True,
+        )
+        return None
+
     if not config.enabled:
         return None
 
@@ -60,7 +80,17 @@ def _create_summarization_middleware():
         else:
             trigger = config.trigger.to_tuple()
 
-    model = config.model_name if config.model_name else create_chat_model(thinking_enabled=False)
+    if config.model_name:
+        model = config.model_name
+    else:
+        try:
+            model = create_chat_model(thinking_enabled=False)
+        except Exception:
+            logger.warning(
+                "Sophia summarization: failed to resolve default chat model; middleware disabled.",
+                exc_info=True,
+            )
+            return None
 
     kwargs: dict = {
         "model": model,
