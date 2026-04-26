@@ -8,12 +8,14 @@ import logging
 import mimetypes
 import time
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.store import ChannelStore
+from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_bytes_to_markdown_text
 
 logger = logging.getLogger(__name__)
 
@@ -24,11 +26,9 @@ DEFAULT_ASSISTANT_ID = "lead_agent"
 # Anthropic multimodal content-block limits.
 # Source: docs.anthropic.com/en/docs/build-with-claude/vision and pdf-support.
 # Inline image cap is 5 MB per block; we cap PDF at 10 MB to leave headroom
-# under the 32 MB hard limit while keeping latency reasonable. Files larger
-# than these caps drop to a text "note" block telling the LLM the file
-# couldn't be inlined — the user can re-send a smaller version. xlsx/pptx/
-# markitdown conversion is intentionally NOT ported in this PR (the working
-# branch had it; deferred per the focused B5 scope).
+# under the 32 MB hard limit while keeping latency reasonable. PDFs over the
+# cap and Office formats fall through to markitdown conversion; text-like
+# files decode directly. Truly binary unsupported types still drop to a note.
 _INLINE_IMAGE_MIME_TYPES = {
     "image/gif",
     "image/jpeg",
@@ -37,6 +37,57 @@ _INLINE_IMAGE_MIME_TYPES = {
 }
 _INLINE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 _INLINE_PDF_MAX_BYTES = 10 * 1024 * 1024
+_TEXT_LIKE_MIME_TYPES = {
+    "application/csv",
+    "application/javascript",
+    "application/json",
+    "application/sql",
+    "application/xml",
+    "application/x-javascript",
+    "application/x-yaml",
+    "application/yaml",
+    "image/svg+xml",
+}
+_TEXT_LIKE_EXTENSIONS = {
+    ".cjs",
+    ".css",
+    ".csv",
+    ".html",
+    ".htm",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".markdown",
+    ".mjs",
+    ".py",
+    ".sql",
+    ".svg",
+    ".ts",
+    ".tsx",
+    ".tsv",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+}
+_INLINE_TEXT_MAX_CHARS = 60_000
+_TRUNCATION_SUFFIX = "\n\n[Truncated after 60000 characters for inline delivery.]"
+# MIME → canonical extension for the formats markitdown can convert. Used to
+# route attachments whose filename has no usable suffix (e.g. Telegram emits
+# synthesized names like ``telegram_document_<id>`` when the document has no
+# ``file_name``) and to give markitdown a temp-file extension it can use to
+# pick the right converter.
+_CONVERTIBLE_MIME_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.ms-powerpoint": ".ppt",
+}
 # A registered inbound-file reader is the channel-side downloader the
 # manager invokes to fetch the bytes referenced by ``InboundMessage.files``.
 # Keeping this as a callable rather than a hard import lets the manager stay
@@ -105,22 +156,109 @@ def _build_attachment_note_block(*, filename: str, mime_type: str, note: str) ->
     }
 
 
-def _build_multimodal_blocks_for_inbound_files(
+def _build_text_document_block(*, filename: str, text: str) -> dict[str, Any]:
+    """Anthropic text-source document block. Used for content that has been
+    converted to markdown (PDFs over the inline cap, xlsx/pptx/docx) or for
+    text-like files we decoded directly. Truncates at _INLINE_TEXT_MAX_CHARS
+    with a visible suffix so the model knows the tail was cut."""
+    if len(text) > _INLINE_TEXT_MAX_CHARS:
+        text = text[:_INLINE_TEXT_MAX_CHARS] + _TRUNCATION_SUFFIX
+    return {
+        "type": "document",
+        "source": {"type": "text", "media_type": "text/plain", "data": text},
+        "title": filename,
+    }
+
+
+async def _build_block_for_attachment(
+    *,
+    filename: str,
+    mime_type: str,
+    content: bytes,
+) -> dict[str, Any]:
+    """Pick the right block type for one inbound file. The dispatch ladder:
+    inline image → small native PDF → markitdown for large PDFs and Office
+    formats → utf-8 decode for text-like files → descriptive note as the
+    binary fallback."""
+    suffix = Path(filename).suffix.lower()
+    mime_ext = _CONVERTIBLE_MIME_EXTENSIONS.get(mime_type)
+
+    if mime_type in _INLINE_IMAGE_MIME_TYPES:
+        if len(content) <= _INLINE_IMAGE_MAX_BYTES:
+            return _build_image_block(mime_type=mime_type, content=content)
+        return _build_attachment_note_block(
+            filename=filename,
+            mime_type=mime_type,
+            note=(
+                "image too large to attach inline (>5 MB). Ask the user to resize or "
+                "compress and resend."
+            ),
+        )
+
+    is_pdf = mime_type == "application/pdf" or suffix == ".pdf"
+    if is_pdf and len(content) <= _INLINE_PDF_MAX_BYTES:
+        return _build_pdf_block(filename=filename, content=content)
+
+    if is_pdf or suffix in CONVERTIBLE_EXTENSIONS or mime_ext is not None:
+        # markitdown picks its converter from the file extension, so when the
+        # inbound filename lacks a usable one (e.g. extensionless Telegram
+        # fallback names) synthesize one from the MIME type before handing
+        # the bytes off. The user-visible block ``title`` keeps the original
+        # filename via ``_build_text_document_block`` below.
+        if suffix in CONVERTIBLE_EXTENSIONS or suffix == ".pdf" or not mime_ext:
+            convert_filename = filename
+        else:
+            convert_filename = f"{filename}{mime_ext}"
+        text = await convert_bytes_to_markdown_text(content, filename=convert_filename)
+        if text:
+            return _build_text_document_block(filename=filename, text=text)
+        return _build_attachment_note_block(
+            filename=filename,
+            mime_type=mime_type,
+            note=(
+                "couldn't extract text from this file. Ask the user for a smaller "
+                "version or paste the relevant section."
+            ),
+        )
+
+    if (
+        mime_type.startswith("text/")
+        or mime_type in _TEXT_LIKE_MIME_TYPES
+        or suffix in _TEXT_LIKE_EXTENSIONS
+    ):
+        decoded = content.decode("utf-8", errors="replace")
+        # Gate on the stripped form (so all-whitespace files still route to the
+        # "empty" note) but pass the original decoded text through — leading
+        # and trailing whitespace can be load-bearing in YAML, code, Markdown
+        # fences, etc., and the truncation guard in _build_text_document_block
+        # still bounds the size.
+        if decoded.strip():
+            return _build_text_document_block(filename=filename, text=decoded)
+        return _build_attachment_note_block(
+            filename=filename,
+            mime_type=mime_type,
+            note="file appears empty or undecodable as text.",
+        )
+
+    return _build_attachment_note_block(
+        filename=filename,
+        mime_type=mime_type,
+        note=(
+            "binary attachment can't be transported inline. Ask the user for a "
+            "screenshot or a copy-paste of the relevant content."
+        ),
+    )
+
+
+async def _build_multimodal_blocks_for_inbound_files(
     text: str,
     inbound_files: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Build the Anthropic content-block list for a human message that
-    carries Telegram-style attachments.
+    carries channel attachments.
 
-    Layout: text first, then one block per attachment (image/document/note).
-    Image-like MIME types under the inline cap become base64 image blocks;
-    PDFs under the cap become document blocks; anything else degrades to a
-    descriptive text note so the model still knows the user attached
-    something. Ordering matters — Anthropic recommends putting images
-    FIRST when the question references them, but Telegram usually sends
-    caption-after-attachment, and our user-visible behaviour is "describe
-    the attachment", so leading with the user's text is fine.
-
+    Layout: text first, then one block per attachment. See
+    ``_build_block_for_attachment`` for the per-file dispatch ladder.
     Returns the full block list, ready to drop into
     ``input={"messages": [{"role": "human", "content": <blocks>}]}``.
     """
@@ -137,55 +275,12 @@ def _build_multimodal_blocks_for_inbound_files(
         content = file_info.get("content")
         if not isinstance(content, (bytes, bytearray)):
             continue
-        content = bytes(content)
-
-        if mime_type in _INLINE_IMAGE_MIME_TYPES:
-            if len(content) <= _INLINE_IMAGE_MAX_BYTES:
-                blocks.append(_build_image_block(mime_type=mime_type, content=content))
-            else:
-                blocks.append(
-                    _build_attachment_note_block(
-                        filename=filename,
-                        mime_type=mime_type,
-                        note=(
-                            "image too large to attach inline (>5 MB). Ask the user to resize "
-                            "or compress and resend."
-                        ),
-                    )
-                )
-            continue
-
-        if mime_type == "application/pdf" or filename.lower().endswith(".pdf"):
-            if len(content) <= _INLINE_PDF_MAX_BYTES:
-                blocks.append(_build_pdf_block(filename=filename, content=content))
-            else:
-                blocks.append(
-                    _build_attachment_note_block(
-                        filename=filename,
-                        mime_type=mime_type,
-                        note=(
-                            "PDF too large to attach inline (>10 MB). Ask the user for a smaller "
-                            "version or a text excerpt of the relevant section."
-                        ),
-                    )
-                )
-            continue
-
-        # Catch-all for unsupported binary/text formats. xlsx/pptx/docx
-        # markitdown conversion is intentionally not implemented in this
-        # PR (focused B5 scope) — the working branch has a richer pipeline
-        # and that can be ported in a follow-up if needed.
-        blocks.append(
-            _build_attachment_note_block(
-                filename=filename,
-                mime_type=mime_type,
-                note=(
-                    "this file type can't be inlined yet (only images and PDFs are "
-                    "supported). Ask the user for a screenshot or copy-paste of the "
-                    "relevant content."
-                ),
-            )
+        block = await _build_block_for_attachment(
+            filename=filename,
+            mime_type=mime_type,
+            content=bytes(content),
         )
+        blocks.append(block)
 
     return blocks
 
@@ -772,7 +867,7 @@ class ChannelManager:
             )
             return text_input
 
-        blocks = _build_multimodal_blocks_for_inbound_files(msg.text or "", downloaded)
+        blocks = await _build_multimodal_blocks_for_inbound_files(msg.text or "", downloaded)
         if not blocks:
             return text_input
 

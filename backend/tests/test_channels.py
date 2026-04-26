@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -2525,116 +2525,396 @@ class TestManagerMultimodalBlockBuilder:
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
         png_bytes = b"\x89PNG\r\n\x1a\n" + b"x" * 100
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "What's in this image?",
-            [{"filename": "photo.png", "mime_type": "image/png", "content": png_bytes}],
-        )
 
-        assert blocks[0] == {"type": "text", "text": "What's in this image?"}
-        assert blocks[1]["type"] == "image"
-        assert blocks[1]["source"]["type"] == "base64"
-        assert blocks[1]["source"]["media_type"] == "image/png"
-        assert base64.b64decode(blocks[1]["source"]["data"]) == png_bytes
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "What's in this image?",
+                [{"filename": "photo.png", "mime_type": "image/png", "content": png_bytes}],
+            )
+
+            assert blocks[0] == {"type": "text", "text": "What's in this image?"}
+            assert blocks[1]["type"] == "image"
+            assert blocks[1]["source"]["type"] == "base64"
+            assert blocks[1]["source"]["media_type"] == "image/png"
+            assert base64.b64decode(blocks[1]["source"]["data"]) == png_bytes
+
+        _run(go())
 
     def test_pdf_under_cap_becomes_native_document_block(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
         pdf_bytes = b"%PDF-1.7\n" + b"y" * 200
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "Summarize this paper",
-            [{"filename": "paper.pdf", "mime_type": "application/pdf", "content": pdf_bytes}],
-        )
 
-        assert blocks[0]["type"] == "text"
-        assert blocks[1]["type"] == "document"
-        assert blocks[1]["source"]["type"] == "base64"
-        assert blocks[1]["source"]["media_type"] == "application/pdf"
-        assert blocks[1]["title"] == "paper.pdf"
-        assert base64.b64decode(blocks[1]["source"]["data"]) == pdf_bytes
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "Summarize this paper",
+                [{"filename": "paper.pdf", "mime_type": "application/pdf", "content": pdf_bytes}],
+            )
+
+            assert blocks[0]["type"] == "text"
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "base64"
+            assert blocks[1]["source"]["media_type"] == "application/pdf"
+            assert blocks[1]["title"] == "paper.pdf"
+            assert base64.b64decode(blocks[1]["source"]["data"]) == pdf_bytes
+
+        _run(go())
+
+    def test_pdf_under_cap_does_not_call_markitdown(self):
+        """Small PDFs must keep going through native vision — markitdown is
+        only the large-PDF fallback. Patching the converter and asserting it
+        was never awaited proves the dispatcher short-circuits before it."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            with patch("app.channels.manager.convert_bytes_to_markdown_text", new=AsyncMock(return_value="should-not-be-used")) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "small pdf",
+                    [{"filename": "small.pdf", "mime_type": "application/pdf", "content": b"%PDF-1.7" + b"z" * 100}],
+                )
+            mock_convert.assert_not_awaited()
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "base64"
+
+        _run(go())
 
     def test_image_over_cap_falls_back_to_descriptive_note(self):
         from app.channels.manager import _INLINE_IMAGE_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
 
         oversized = b"\xff" * (_INLINE_IMAGE_MAX_BYTES + 1)
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "huge image",
-            [{"filename": "big.jpg", "mime_type": "image/jpeg", "content": oversized}],
-        )
 
-        assert blocks[1]["type"] == "text"
-        assert "big.jpg" in blocks[1]["text"]
-        assert "5 MB" in blocks[1]["text"]
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "huge image",
+                [{"filename": "big.jpg", "mime_type": "image/jpeg", "content": oversized}],
+            )
 
-    def test_pdf_over_cap_falls_back_to_descriptive_note(self):
+            assert blocks[1]["type"] == "text"
+            assert "big.jpg" in blocks[1]["text"]
+            assert "5 MB" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_pdf_over_cap_converts_via_markitdown(self):
+        """Large PDFs route through markitdown and land as text-source
+        document blocks — the ground-truth regression PR #85 left out."""
         from app.channels.manager import _INLINE_PDF_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
 
-        oversized = b"\xff" * (_INLINE_PDF_MAX_BYTES + 1)
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "huge paper",
-            [{"filename": "big.pdf", "mime_type": "application/pdf", "content": oversized}],
-        )
+        oversized = b"%PDF-1.7\n" + b"\xff" * _INLINE_PDF_MAX_BYTES
 
-        assert blocks[1]["type"] == "text"
-        assert "big.pdf" in blocks[1]["text"]
-        assert "10 MB" in blocks[1]["text"]
+        async def go():
+            with patch(
+                "app.channels.manager.convert_bytes_to_markdown_text",
+                new=AsyncMock(return_value="# Big paper\n\nextracted body text"),
+            ) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "huge paper",
+                    [{"filename": "big.pdf", "mime_type": "application/pdf", "content": oversized}],
+                )
 
-    def test_unsupported_mime_falls_back_to_descriptive_note(self):
+            mock_convert.assert_awaited_once()
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "text"
+            assert blocks[1]["source"]["media_type"] == "text/plain"
+            assert blocks[1]["title"] == "big.pdf"
+            assert "Big paper" in blocks[1]["source"]["data"]
+
+        _run(go())
+
+    def test_pdf_over_cap_with_markitdown_failure_falls_back_to_note(self):
+        """When markitdown can't extract anything, the user still gets a
+        descriptive note instead of a silent failure."""
+        from app.channels.manager import _INLINE_PDF_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
+
+        oversized = b"%PDF-1.7\n" + b"\xff" * _INLINE_PDF_MAX_BYTES
+
+        async def go():
+            with patch("app.channels.manager.convert_bytes_to_markdown_text", new=AsyncMock(return_value=None)):
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "huge paper",
+                    [{"filename": "big.pdf", "mime_type": "application/pdf", "content": oversized}],
+                )
+
+            assert blocks[1]["type"] == "text"
+            assert "big.pdf" in blocks[1]["text"]
+            assert "couldn't extract" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_xlsx_converts_via_markitdown(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "look at this",
-            [{"filename": "spreadsheet.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content": b"PK..."}],
+        async def go():
+            with patch(
+                "app.channels.manager.convert_bytes_to_markdown_text",
+                new=AsyncMock(return_value="| col |\n|---|\n| val |"),
+            ) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "look at this",
+                    [{"filename": "spreadsheet.xlsx", "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "content": b"PK..."}],
+                )
+
+            mock_convert.assert_awaited_once()
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "text"
+            assert blocks[1]["title"] == "spreadsheet.xlsx"
+            assert "| col |" in blocks[1]["source"]["data"]
+
+        _run(go())
+
+    def test_extensionless_office_mime_routes_via_markitdown(self):
+        """Telegram emits filenames like ``telegram_document_<id>`` (no
+        extension) when ``document.file_name`` is missing. The dispatcher
+        must still route real Office docs through markitdown based on the
+        MIME type, and synthesize a usable extension on the temp file the
+        converter sees so markitdown picks the right reader."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            with patch(
+                "app.channels.manager.convert_bytes_to_markdown_text",
+                new=AsyncMock(return_value="| col |\n|---|\n| val |"),
+            ) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "look at this",
+                    [{
+                        "filename": "telegram_document_abc",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "content": b"PK...",
+                    }],
+                )
+
+            mock_convert.assert_awaited_once()
+            # MIME-derived extension is appended for the converter, while the
+            # user-visible block title keeps the original filename.
+            kwargs = mock_convert.await_args.kwargs
+            assert kwargs["filename"] == "telegram_document_abc.xlsx"
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "text"
+            assert blocks[1]["title"] == "telegram_document_abc"
+
+        _run(go())
+
+    def test_extensionless_pdf_mime_routes_via_markitdown(self):
+        """Same extensionless-filename concern, but for an oversize PDF that
+        must reach the markitdown fallback rather than the binary note."""
+        from app.channels.manager import _INLINE_PDF_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
+
+        oversized = b"%PDF-1.7\n" + b"\xff" * _INLINE_PDF_MAX_BYTES
+
+        async def go():
+            with patch(
+                "app.channels.manager.convert_bytes_to_markdown_text",
+                new=AsyncMock(return_value="extracted body"),
+            ) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "huge paper",
+                    [{
+                        "filename": "telegram_document_xyz",
+                        "mime_type": "application/pdf",
+                        "content": oversized,
+                    }],
+                )
+
+            mock_convert.assert_awaited_once()
+            kwargs = mock_convert.await_args.kwargs
+            assert kwargs["filename"] == "telegram_document_xyz.pdf"
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["title"] == "telegram_document_xyz"
+
+        _run(go())
+
+    def test_markitdown_returns_none_falls_back_to_note(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            with patch("app.channels.manager.convert_bytes_to_markdown_text", new=AsyncMock(return_value=None)):
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "see this",
+                    [{"filename": "report.docx", "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "content": b"PK..."}],
+                )
+
+            assert blocks[1]["type"] == "text"
+            assert "report.docx" in blocks[1]["text"]
+            assert "couldn't extract" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_truly_unsupported_binary_falls_back_to_note(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "what is this",
+                [{"filename": "blob.bin", "mime_type": "application/octet-stream", "content": b"\x00\x01\x02"}],
+            )
+
+            assert len(blocks) == 2
+            assert blocks[1]["type"] == "text"
+            assert "blob.bin" in blocks[1]["text"]
+            assert "binary attachment" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_text_like_extension_decoded_as_document(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "read this",
+                [{"filename": "notes.txt", "mime_type": "text/plain", "content": b"hello world"}],
+            )
+
+            assert blocks[1] == {
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": "hello world"},
+                "title": "notes.txt",
+            }
+
+        _run(go())
+
+    def test_csv_via_text_like_path(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "csv",
+                [{"filename": "data.csv", "mime_type": "text/csv", "content": b"a,b\n1,2"}],
+            )
+
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "text"
+            assert blocks[1]["source"]["data"] == "a,b\n1,2"
+            assert blocks[1]["title"] == "data.csv"
+
+        _run(go())
+
+    def test_text_like_truncation_appends_suffix(self):
+        from app.channels.manager import (
+            _INLINE_TEXT_MAX_CHARS,
+            _TRUNCATION_SUFFIX,
+            _build_multimodal_blocks_for_inbound_files,
         )
 
-        # Text + note (no image / document block).
-        assert len(blocks) == 2
-        assert blocks[1]["type"] == "text"
-        assert "spreadsheet.xlsx" in blocks[1]["text"]
-        assert "can't be inlined" in blocks[1]["text"]
+        long_text = "a" * (_INLINE_TEXT_MAX_CHARS + 5_000)
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "long",
+                [{"filename": "long.txt", "mime_type": "text/plain", "content": long_text.encode()}],
+            )
+
+            data = blocks[1]["source"]["data"]
+            assert data.endswith(_TRUNCATION_SUFFIX)
+            assert len(data) == _INLINE_TEXT_MAX_CHARS + len(_TRUNCATION_SUFFIX)
+
+        _run(go())
+
+    def test_text_like_undecodable_empty_falls_back_to_note(self):
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "empty",
+                [{"filename": "empty.txt", "mime_type": "text/plain", "content": b""}],
+            )
+
+            assert blocks[1]["type"] == "text"
+            assert "empty.txt" in blocks[1]["text"]
+            assert "empty or undecodable" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_text_like_whitespace_only_falls_back_to_note(self):
+        """All-whitespace files still route to the 'empty' note; gating on
+        ``.strip()`` is what flags them, but the gate must not also rewrite
+        the payload of non-empty files (see the next test)."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "ws-only",
+                [{"filename": "ws.txt", "mime_type": "text/plain", "content": b"   \n  \n"}],
+            )
+
+            assert blocks[1]["type"] == "text"
+            assert "ws.txt" in blocks[1]["text"]
+            assert "empty or undecodable" in blocks[1]["text"]
+
+        _run(go())
+
+    def test_text_like_preserves_leading_and_trailing_whitespace(self):
+        """Indent-sensitive payloads (YAML, code, Markdown fences) must reach
+        the model verbatim; trimming boundary whitespace changes semantics."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        # Leading blank line + trailing newline + indented body — typical of
+        # YAML or Python pasted into a `.txt`.
+        raw = "\n\nkey:\n  child: value\n  list:\n    - one\n    - two\n\n"
+
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "config",
+                [{"filename": "config.yaml", "mime_type": "application/yaml", "content": raw.encode("utf-8")}],
+            )
+
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["data"] == raw
+
+        _run(go())
 
     def test_multiple_attachments_in_order(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "compare these",
-            [
-                {"filename": "a.png", "mime_type": "image/png", "content": b"PNG1"},
-                {"filename": "b.pdf", "mime_type": "application/pdf", "content": b"%PDF-2"},
-                {"filename": "c.png", "mime_type": "image/png", "content": b"PNG3"},
-            ],
-        )
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "compare these",
+                [
+                    {"filename": "a.png", "mime_type": "image/png", "content": b"PNG1"},
+                    {"filename": "b.pdf", "mime_type": "application/pdf", "content": b"%PDF-2"},
+                    {"filename": "c.png", "mime_type": "image/png", "content": b"PNG3"},
+                ],
+            )
 
-        assert [b["type"] for b in blocks] == ["text", "image", "document", "image"]
-        # PDF in the middle shows up as a document with the right filename.
-        assert blocks[2]["title"] == "b.pdf"
+            assert [b["type"] for b in blocks] == ["text", "image", "document", "image"]
+            # PDF in the middle shows up as a document with the right filename.
+            assert blocks[2]["title"] == "b.pdf"
+
+        _run(go())
 
     def test_empty_text_omits_text_block(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "",
-            [{"filename": "p.png", "mime_type": "image/png", "content": b"PNG"}],
-        )
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "",
+                [{"filename": "p.png", "mime_type": "image/png", "content": b"PNG"}],
+            )
 
-        # Only the image block — no leading empty text block.
-        assert len(blocks) == 1
-        assert blocks[0]["type"] == "image"
+            # Only the image block — no leading empty text block.
+            assert len(blocks) == 1
+            assert blocks[0]["type"] == "image"
+
+        _run(go())
 
     def test_invalid_file_entries_are_skipped(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
-        blocks = _build_multimodal_blocks_for_inbound_files(
-            "mixed",
-            [
-                "not-a-dict",  # type: ignore[list-item]
-                {"filename": "ok.png", "mime_type": "image/png", "content": b"PNG"},
-                {"filename": "no-content.png", "mime_type": "image/png"},
-                {"filename": "bad-content", "mime_type": "image/png", "content": "not-bytes"},
-            ],
-        )
+        async def go():
+            blocks = await _build_multimodal_blocks_for_inbound_files(
+                "mixed",
+                [
+                    "not-a-dict",  # type: ignore[list-item]
+                    {"filename": "ok.png", "mime_type": "image/png", "content": b"PNG"},
+                    {"filename": "no-content.png", "mime_type": "image/png"},
+                    {"filename": "bad-content", "mime_type": "image/png", "content": "not-bytes"},
+                ],
+            )
 
-        # text + only one valid image survives.
-        assert [b["type"] for b in blocks] == ["text", "image"]
+            # text + only one valid image survives.
+            assert [b["type"] for b in blocks] == ["text", "image"]
+
+        _run(go())
 
 
 class TestManagerInboundFileReaderRegistry:
