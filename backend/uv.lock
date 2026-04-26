@@ -892,7 +892,7 @@ requires-dist = [
     { name = "langchain-mcp-adapters", specifier = ">=0.1.0" },
     { name = "langchain-openai", specifier = ">=1.1.7" },
     { name = "langgraph", specifier = ">=1.0.6" },
-    { name = "langgraph-api", specifier = ">=0.7.0,<0.8.0" },
+    { name = "langgraph-api", specifier = ">=0.8.0,<0.9.0" },
     { name = "langgraph-checkpoint-sqlite", specifier = ">=3.0.3" },
     { name = "langgraph-cli", specifier = ">=0.4.14" },
     { name = "langgraph-runtime-inmem", specifier = ">=0.22.1" },
@@ -1950,7 +1950,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-api"
-version = "0.7.65"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cloudpickle" },
@@ -1958,6 +1958,7 @@ dependencies = [
     { name = "grpcio" },
     { name = "grpcio-health-checking" },
     { name = "grpcio-tools" },
+    { name = "httptools", marker = "sys_platform != 'win32'" },
     { name = "httpx" },
     { name = "jsonschema-rs" },
     { name = "langchain-core" },
@@ -1979,11 +1980,13 @@ dependencies = [
     { name = "truststore" },
     { name = "uuid-utils" },
     { name = "uvicorn" },
+    { name = "uvloop", marker = "sys_platform != 'win32'" },
     { name = "watchfiles" },
+    { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a3/36/6d751d6f7becea1008ab963bc2f89a4c76dd2ae707399162b6950bfa7d4c/langgraph_api-0.7.65.tar.gz", hash = "sha256:c7d49b87d60ef2e07ae1582ac62a601720a51be637a89740d2593221dcda6da0", size = 625227, upload-time = "2026-03-05T02:28:50.185Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/5e/7a/a355ceb2d9eb804d9a0e74f3620a4578a397d00f12d748e4d876a105ea11/langgraph_api-0.8.1.tar.gz", hash = "sha256:51249d71c29d153c8e64aa1f3ff2717d8364d8d4ee500461a1b2fb7974f72237", size = 671799, upload-time = "2026-04-23T20:01:38.598Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/46/b0/afd71dc70177dedbc21579b148a76f67c5c4606ed31dcc6c78d67be58c18/langgraph_api-0.7.65-py3-none-any.whl", hash = "sha256:f32f39cb9ebe58152d9f2fa06541dbb296bf238b85d4fb9811f7a8549d2701be", size = 528075, upload-time = "2026-03-05T02:28:48.425Z" },
+    { url = "https://files.pythonhosted.org/packages/d8/fe/7d5d68ce387902f752432e68ec34e60da93232b2c00cb5fa7464da03d16f/langgraph_api-0.8.1-py3-none-any.whl", hash = "sha256:36f5cba9db7b2db1d8571298ef741622aa0423443e4cff000dd04a38cb2ef769", size = 558980, upload-time = "2026-04-23T20:01:36.905Z" },
 ]
 
 [[package]]
@@ -2041,7 +2044,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-runtime-inmem"
-version = "0.26.0"
+version = "0.28.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "blockbuster" },
@@ -2052,9 +2055,9 @@ dependencies = [
     { name = "starlette" },
     { name = "structlog" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/67/01/3a6265341cf4d7f6550543ec6917d8eb4a0cfba5fbe2669497a631762304/langgraph_runtime_inmem-0.26.0.tar.gz", hash = "sha256:b9c587d1339320a2a54a570a21aecaf59eebc4be07cef1d8a5b035f3f2c61d6a", size = 110402, upload-time = "2026-02-24T00:22:31.938Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/49/daf02ad6b9accd858a0e165d8beb94e5378fad12c17b29f8228d7a596be0/langgraph_runtime_inmem-0.28.0.tar.gz", hash = "sha256:e02536508b5c154f18a24240663af7c2389f43cb4fbbac995a2717b4cfe40d2f", size = 115393, upload-time = "2026-04-23T19:49:38.872Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/21/b2/69cb16fc83b94449ee6e80c73b8c522da59ef1f52714e06c3cff1e27eab8/langgraph_runtime_inmem-0.26.0-py3-none-any.whl", hash = "sha256:cd91fd9783be5aecb99888fd3aa0d6677ea74d973fbb306acd566c9323cbc7c1", size = 44241, upload-time = "2026-02-24T00:22:30.815Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/b1/b600e38260da97f2d71a041b2730f97f51bb2ce62a98230a7fac5fc3ca02/langgraph_runtime_inmem-0.28.0-py3-none-any.whl", hash = "sha256:26adc3bf115eba0b52532d18a13a297631454bc9f2a0e1f9b77060583ba81fdf", size = 47625, upload-time = "2026-04-23T19:49:37.869Z" },
 ]
 
 [[package]]
