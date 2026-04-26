@@ -74,6 +74,20 @@ _TEXT_LIKE_EXTENSIONS = {
 }
 _INLINE_TEXT_MAX_CHARS = 60_000
 _TRUNCATION_SUFFIX = "\n\n[Truncated after 60000 characters for inline delivery.]"
+# MIME → canonical extension for the formats markitdown can convert. Used to
+# route attachments whose filename has no usable suffix (e.g. Telegram emits
+# synthesized names like ``telegram_document_<id>`` when the document has no
+# ``file_name``) and to give markitdown a temp-file extension it can use to
+# pick the right converter.
+_CONVERTIBLE_MIME_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.ms-excel": ".xls",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/msword": ".doc",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/vnd.ms-powerpoint": ".ppt",
+}
 # A registered inbound-file reader is the channel-side downloader the
 # manager invokes to fetch the bytes referenced by ``InboundMessage.files``.
 # Keeping this as a callable rather than a hard import lets the manager stay
@@ -167,6 +181,7 @@ async def _build_block_for_attachment(
     formats → utf-8 decode for text-like files → descriptive note as the
     binary fallback."""
     suffix = Path(filename).suffix.lower()
+    mime_ext = _CONVERTIBLE_MIME_EXTENSIONS.get(mime_type)
 
     if mime_type in _INLINE_IMAGE_MIME_TYPES:
         if len(content) <= _INLINE_IMAGE_MAX_BYTES:
@@ -184,8 +199,17 @@ async def _build_block_for_attachment(
     if is_pdf and len(content) <= _INLINE_PDF_MAX_BYTES:
         return _build_pdf_block(filename=filename, content=content)
 
-    if is_pdf or suffix in CONVERTIBLE_EXTENSIONS:
-        text = await convert_bytes_to_markdown_text(content, filename=filename)
+    if is_pdf or suffix in CONVERTIBLE_EXTENSIONS or mime_ext is not None:
+        # markitdown picks its converter from the file extension, so when the
+        # inbound filename lacks a usable one (e.g. extensionless Telegram
+        # fallback names) synthesize one from the MIME type before handing
+        # the bytes off. The user-visible block ``title`` keeps the original
+        # filename via ``_build_text_document_block`` below.
+        if suffix in CONVERTIBLE_EXTENSIONS or suffix == ".pdf" or not mime_ext:
+            convert_filename = filename
+        else:
+            convert_filename = f"{filename}{mime_ext}"
+        text = await convert_bytes_to_markdown_text(content, filename=convert_filename)
         if text:
             return _build_text_document_block(filename=filename, text=text)
         return _build_attachment_note_block(

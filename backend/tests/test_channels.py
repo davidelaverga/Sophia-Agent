@@ -2662,6 +2662,68 @@ class TestManagerMultimodalBlockBuilder:
 
         _run(go())
 
+    def test_extensionless_office_mime_routes_via_markitdown(self):
+        """Telegram emits filenames like ``telegram_document_<id>`` (no
+        extension) when ``document.file_name`` is missing. The dispatcher
+        must still route real Office docs through markitdown based on the
+        MIME type, and synthesize a usable extension on the temp file the
+        converter sees so markitdown picks the right reader."""
+        from app.channels.manager import _build_multimodal_blocks_for_inbound_files
+
+        async def go():
+            with patch(
+                "app.channels.manager.convert_bytes_to_markdown_text",
+                new=AsyncMock(return_value="| col |\n|---|\n| val |"),
+            ) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "look at this",
+                    [{
+                        "filename": "telegram_document_abc",
+                        "mime_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        "content": b"PK...",
+                    }],
+                )
+
+            mock_convert.assert_awaited_once()
+            # MIME-derived extension is appended for the converter, while the
+            # user-visible block title keeps the original filename.
+            kwargs = mock_convert.await_args.kwargs
+            assert kwargs["filename"] == "telegram_document_abc.xlsx"
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["source"]["type"] == "text"
+            assert blocks[1]["title"] == "telegram_document_abc"
+
+        _run(go())
+
+    def test_extensionless_pdf_mime_routes_via_markitdown(self):
+        """Same extensionless-filename concern, but for an oversize PDF that
+        must reach the markitdown fallback rather than the binary note."""
+        from app.channels.manager import _INLINE_PDF_MAX_BYTES, _build_multimodal_blocks_for_inbound_files
+
+        oversized = b"%PDF-1.7\n" + b"\xff" * _INLINE_PDF_MAX_BYTES
+
+        async def go():
+            with patch(
+                "app.channels.manager.convert_bytes_to_markdown_text",
+                new=AsyncMock(return_value="extracted body"),
+            ) as mock_convert:
+                blocks = await _build_multimodal_blocks_for_inbound_files(
+                    "huge paper",
+                    [{
+                        "filename": "telegram_document_xyz",
+                        "mime_type": "application/pdf",
+                        "content": oversized,
+                    }],
+                )
+
+            mock_convert.assert_awaited_once()
+            kwargs = mock_convert.await_args.kwargs
+            assert kwargs["filename"] == "telegram_document_xyz.pdf"
+            assert blocks[1]["type"] == "document"
+            assert blocks[1]["title"] == "telegram_document_xyz"
+
+        _run(go())
+
     def test_markitdown_returns_none_falls_back_to_note(self):
         from app.channels.manager import _build_multimodal_blocks_for_inbound_files
 
