@@ -1,9 +1,12 @@
 """Focused tests for the Telegram channel's builder-completion delivery.
 
 Locks:
-- Success events trigger ``send_document`` with the signed artifact URL +
-  caption. The chat_id is reverse-looked-up from ``thread_id`` via the
-  channel store.
+- Success events download the artifact bytes from Supabase and stream
+  them to Telegram as an ``InputFile`` (multipart upload). The chat_id is
+  reverse-looked-up from ``thread_id`` via the channel store.
+- When the download fails (Supabase 404, missing filename, exception),
+  the channel falls back to a plaintext message with the signed URL so
+  the user still receives the deliverable.
 - Error / timeout events send the apology copy + an inline keyboard with
   Try again / Dismiss buttons.
 - Cancelled events send neutral copy without buttons.
@@ -24,7 +27,6 @@ import pytest
 
 from app.channels.message_bus import InboundMessageType, MessageBus
 from app.channels.telegram import TelegramChannel
-
 
 # ---- Fixtures --------------------------------------------------------------
 
@@ -113,20 +115,98 @@ def _stub_store_lookup(
 
 
 @pytest.mark.anyio
-async def test_success_event_sends_document_with_signed_url(channel: TelegramChannel):
+async def test_success_event_sends_document_as_input_file(channel: TelegramChannel):
+    """Success path: download bytes from Supabase, stream to Telegram as
+    InputFile. Production hit `Failed to get http url content` when handing
+    Telegram the signed URL — the bytes path sidesteps Telegram's egress
+    fetch entirely.
+    """
+    from telegram import InputFile
+
     _bind_loop(channel)
     _stub_store_lookup(channel, chat_id="987654321")
     payload = _success_payload()
-    await channel._on_builder_completion(payload)
+
+    with patch("app.channels.telegram.download_artifact") as mock_download:
+        mock_download.return_value = (b"# Climate Change Brief\n\nA short doc.", "text/markdown")
+        await channel._on_builder_completion(payload)
 
     bot = channel._application.bot
     bot.send_document.assert_awaited_once()
     call_kwargs = bot.send_document.call_args.kwargs
     assert call_kwargs["chat_id"] == 987654321
-    assert call_kwargs["document"] == payload["artifact_url"]
+    # Document is now an InputFile with the downloaded bytes — not the URL.
+    assert isinstance(call_kwargs["document"], InputFile)
+    assert call_kwargs["document"].filename == "climate_change_brief.md"
     assert "Climate Change Brief is ready" in call_kwargs["caption"]
     assert "focused one-page brief" in call_kwargs["caption"]
     bot.send_message.assert_not_awaited()
+    # download_artifact called with thread_id + filename (not URL).
+    mock_download.assert_called_once_with("thread-1", "climate_change_brief.md")
+
+
+@pytest.mark.anyio
+async def test_success_event_falls_back_to_text_when_download_returns_none(channel: TelegramChannel):
+    """Supabase 404 / not-configured returns None — the channel must still
+    deliver something. Send caption + signed URL as plaintext so the user
+    can click through to the file rather than getting silence.
+    """
+    _bind_loop(channel)
+    _stub_store_lookup(channel, chat_id="55")
+    payload = _success_payload()
+
+    with patch("app.channels.telegram.download_artifact") as mock_download:
+        mock_download.return_value = None
+        await channel._on_builder_completion(payload)
+
+    bot = channel._application.bot
+    bot.send_document.assert_not_awaited()
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.call_args.kwargs["text"]
+    assert "Climate Change Brief is ready" in text
+    assert payload["artifact_url"] in text
+
+
+@pytest.mark.anyio
+async def test_success_event_falls_back_to_text_when_download_raises(channel: TelegramChannel):
+    """Network/HTTP errors during download must not crash delivery — fall
+    back to plaintext with the link.
+    """
+    _bind_loop(channel)
+    _stub_store_lookup(channel, chat_id="55")
+    payload = _success_payload()
+
+    with patch("app.channels.telegram.download_artifact") as mock_download:
+        mock_download.side_effect = RuntimeError("supabase unreachable")
+        await channel._on_builder_completion(payload)
+
+    bot = channel._application.bot
+    bot.send_document.assert_not_awaited()
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.call_args.kwargs["text"]
+    assert payload["artifact_url"] in text
+
+
+@pytest.mark.anyio
+async def test_success_event_without_filename_skips_download_and_uses_plaintext(channel: TelegramChannel):
+    """If the publisher omitted ``artifact_filename`` we can't key the
+    Supabase fetch — go straight to plaintext fallback without a wasted
+    download attempt.
+    """
+    _bind_loop(channel)
+    _stub_store_lookup(channel, chat_id="55")
+    payload = _success_payload()
+    payload.pop("artifact_filename")
+
+    with patch("app.channels.telegram.download_artifact") as mock_download:
+        await channel._on_builder_completion(payload)
+
+    mock_download.assert_not_called()
+    bot = channel._application.bot
+    bot.send_document.assert_not_awaited()
+    bot.send_message.assert_awaited_once()
+    text = bot.send_message.call_args.kwargs["text"]
+    assert payload["artifact_url"] in text
 
 
 @pytest.mark.anyio

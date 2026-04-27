@@ -7,10 +7,12 @@ import concurrent.futures
 import logging
 import re
 import threading
+from io import BytesIO
 from typing import Any
 
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
+from deerflow.sophia.storage.supabase_artifact_store import download_artifact
 
 logger = logging.getLogger(__name__)
 
@@ -782,37 +784,90 @@ class TelegramChannel(Channel):
         caption = self._build_completion_caption(payload)
         status = payload.get("status")
         artifact_url = payload.get("artifact_url")
+        artifact_filename = payload.get("artifact_filename")
         task_id = payload.get("task_id") or "unknown"
 
         bot = self._application.bot
 
         async def _send():
             try:
-                if status == "success" and isinstance(artifact_url, str) and artifact_url:
-                    # Send the file as a document with caption. Telegram
-                    # downloads the URL server-side, so a 7-day signed URL
-                    # is plenty.
-                    sent = await bot.send_document(
-                        chat_id=int(chat_id),
-                        document=artifact_url,
-                        caption=caption,
-                    )
+                if status == "success":
+                    doc_bytes: bytes | None = None
+                    if isinstance(artifact_filename, str) and artifact_filename:
+                        # Download in the gateway and stream to Telegram as
+                        # multipart bytes. Handing Telegram the Supabase
+                        # signed URL fails in production with `Failed to get
+                        # http url content` — bytes upload sidesteps both
+                        # Telegram's egress reachability and any Supabase
+                        # signed-URL routing edge cases.
+                        try:
+                            result = await asyncio.to_thread(
+                                download_artifact, thread_id, artifact_filename
+                            )
+                            if result is not None:
+                                doc_bytes, _ = result
+                        except Exception:
+                            logger.warning(
+                                "[Telegram] artifact download error chat=%s task_id=%s filename=%s",
+                                chat_id,
+                                task_id,
+                                artifact_filename,
+                                exc_info=True,
+                            )
+
+                    if doc_bytes is not None:
+                        from telegram import InputFile
+
+                        sent = await bot.send_document(
+                            chat_id=int(chat_id),
+                            document=InputFile(BytesIO(doc_bytes), filename=artifact_filename),
+                            caption=caption,
+                        )
+                        logger.info(
+                            "[Telegram] builder completion delivered chat=%s task_id=%s status=success bytes=%d filename=%s",
+                            chat_id,
+                            task_id,
+                            len(doc_bytes),
+                            artifact_filename,
+                        )
+                    else:
+                        # Fallback when the gateway can't fetch bytes (no
+                        # filename in payload, Supabase 404, etc.). Send the
+                        # caption + signed URL as plaintext so the user
+                        # still receives the deliverable as a clickable link.
+                        text = caption
+                        if isinstance(artifact_url, str) and artifact_url:
+                            text = f"{caption}\n\n{artifact_url}"
+                        sent = await bot.send_message(chat_id=int(chat_id), text=text)
+                        logger.warning(
+                            "[Telegram] builder completion fell back to plaintext chat=%s task_id=%s filename=%s url_present=%s",
+                            chat_id,
+                            task_id,
+                            artifact_filename,
+                            bool(artifact_url),
+                        )
                 elif status in {"error", "timeout"}:
                     sent = await bot.send_message(
                         chat_id=int(chat_id),
                         text=caption,
                         reply_markup=self._build_retry_keyboard(task_id, topic_id=topic_id),
                     )
+                    logger.info(
+                        "[Telegram] builder completion delivered chat=%s task_id=%s status=%s",
+                        chat_id,
+                        task_id,
+                        status,
+                    )
                 else:
                     sent = await bot.send_message(chat_id=int(chat_id), text=caption)
+                    logger.info(
+                        "[Telegram] builder completion delivered chat=%s task_id=%s status=%s",
+                        chat_id,
+                        task_id,
+                        status,
+                    )
 
                 self._last_bot_message[chat_id] = sent.message_id
-                logger.info(
-                    "[Telegram] builder completion delivered chat=%s task_id=%s status=%s",
-                    chat_id,
-                    task_id,
-                    status,
-                )
             except Exception:
                 logger.exception(
                     "[Telegram] failed to deliver builder completion chat=%s task_id=%s",
