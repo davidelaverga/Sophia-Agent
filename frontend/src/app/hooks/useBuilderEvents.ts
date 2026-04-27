@@ -46,20 +46,17 @@ export function useBuilderEvents(
     // crash the hook — we just skip recovery and rely on SSE.
     if (typeof fetch === 'function') {
       try {
-        const lastFetch = fetch(lastUrl, { credentials: 'include' });
-        if (lastFetch && typeof lastFetch.then === 'function') {
-          lastFetch
-            .then(async (resp) => {
-              if (cancelled) return;
-              if (resp.status === 200) {
-                const payload = (await resp.json()) as BuilderCompletionEventV1;
-                setEvent(payload);
-              }
-            })
-            .catch(() => {
-              // Network blip on /last is fine — SSE will catch the next event.
-            });
-        }
+        void fetch(lastUrl, { credentials: 'include' })
+          .then(async (resp) => {
+            if (cancelled) return;
+            if (resp.status === 200) {
+              const payload = (await resp.json()) as BuilderCompletionEventV1;
+              setEvent(payload);
+            }
+          })
+          .catch(() => {
+            // Network blip on /last is fine — SSE will catch the next event.
+          });
       } catch {
         // Synchronous fetch error (fetch not callable, etc.) — fall through
         // to the SSE subscription.

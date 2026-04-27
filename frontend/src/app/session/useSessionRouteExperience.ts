@@ -5,6 +5,7 @@ import { useCompanionChatRuntime } from '../companion-runtime/chat-runtime';
 import { getCompanionRouteProfile } from '../companion-runtime/route-profiles';
 import { useCompanionStreamContract } from '../companion-runtime/stream-contract';
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
+import { useBuilderEvents } from '../hooks/useBuilderEvents';
 import {
   cancelBuilderTask as requestBuilderTaskCancellation,
   getActiveBuilderTask,
@@ -15,7 +16,6 @@ import {
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
-import { useBuilderEvents } from '../hooks/useBuilderEvents';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 import type { BuilderTaskV1 } from '../types/builder-task';
