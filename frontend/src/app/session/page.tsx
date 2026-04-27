@@ -37,6 +37,7 @@ import {
   DebriefOfferModal,
   FeedbackToast,
 } from '../components/session';
+import { BuilderCompletionCard } from '../components/session/BuilderCompletionCard';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
@@ -262,6 +263,10 @@ function SessionPageContent() {
     queueVoiceRetryFromCancel,
     baseHandleMicClick,
     setVoiceStatusCompat,
+    // PR-B: completion-card surface
+    builderCompletion,
+    handleBuilderRetry,
+    handleBuilderCompletionDismiss,
   } = useSessionRouteExperience({
     sessionId,
     activeSessionId: session?.sessionId,
@@ -991,7 +996,25 @@ function SessionPageContent() {
             />
           )}
 
-          {focusMode === 'text' && showBuilderTaskNotice && builderTask && (
+          {/*
+            PR-B: in text mode, prefer the new BuilderCompletionCard whenever
+            an SSE completion event has arrived for this thread. The new card
+            carries Open + Download (success) and Try Again (error/timeout)
+            with the original task brief inline. We only fall through to the
+            running BuilderTaskNotice while the task is still in flight.
+          */}
+          {focusMode === 'text' && builderCompletion && (
+            <BuilderCompletionCard
+              event={builderCompletion}
+              onRetry={handleBuilderRetry}
+              onDismiss={handleBuilderCompletionDismiss}
+              onDownload={() => haptic('medium')}
+            />
+          )}
+          {focusMode === 'text'
+            && !builderCompletion
+            && showBuilderTaskNotice
+            && builderTask && (
             <BuilderTaskNotice
               task={builderTask}
               artifactTitle={builderArtifact?.artifactTitle}
@@ -1056,7 +1079,25 @@ function SessionPageContent() {
             </div>
           )}
 
-          {focusMode !== 'text' && showBuilderTaskNotice && builderTask && (
+          {/* PR-B: voice-mode equivalent of the completion card. */}
+          {focusMode !== 'text' && builderCompletion && (
+            <div
+              className="fixed left-1/2 -translate-x-1/2 z-40"
+              style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}
+            >
+              <BuilderCompletionCard
+                event={builderCompletion}
+                onRetry={handleBuilderRetry}
+                onDismiss={handleBuilderCompletionDismiss}
+                onDownload={() => haptic('medium')}
+                compact={false}
+              />
+            </div>
+          )}
+          {focusMode !== 'text'
+            && !builderCompletion
+            && showBuilderTaskNotice
+            && builderTask && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-40"
               style={{ bottom: '180px', opacity: voiceBuilderChromeOpacity, transition: 'opacity 0.6s ease' }}

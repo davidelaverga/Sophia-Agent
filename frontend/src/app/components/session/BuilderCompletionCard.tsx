@@ -27,6 +27,14 @@ const CANCELLED_BODY = 'Build was cancelled. Let me know when you want to pick i
 type BuilderCompletionCardProps = {
   event: BuilderCompletionEventV1;
   onOpen?: (event: BuilderCompletionEventV1) => void;
+  /**
+   * Optional secondary action invoked when the user clicks the Download
+   * button on a success card. Receives the same event so the host can
+   * drive analytics / haptics / dismiss-on-download. The actual download
+   * is triggered by the underlying anchor's ``download`` attribute, so
+   * the host does NOT need to perform the file fetch itself.
+   */
+  onDownload?: (event: BuilderCompletionEventV1) => void;
   onRetry?: (event: BuilderCompletionEventV1) => void;
   onDismiss?: (event: BuilderCompletionEventV1) => void;
   compact?: boolean;
@@ -96,6 +104,7 @@ function deriveBody(event: BuilderCompletionEventV1): string | null {
 export function BuilderCompletionCard({
   event,
   onOpen,
+  onDownload,
   onRetry,
   onDismiss,
   compact = false,
@@ -106,6 +115,11 @@ export function BuilderCompletionCard({
   const body = useMemo(() => deriveBody(event), [event]);
 
   const showOpen = event.status === 'success' && Boolean(event.artifact_url);
+  // Download is shown alongside Open on success — same signed URL, but
+  // anchors with a ``download`` attribute force browser save instead of
+  // navigation. Matches the BuilderReadyPill UX so users have a familiar
+  // primary (Open) + secondary (Download) action set on success cards.
+  const showDownload = showOpen;
   const showRetry = event.status === 'error' || event.status === 'timeout';
   const showDismiss = Boolean(onDismiss);
 
@@ -115,6 +129,13 @@ export function BuilderCompletionCard({
       window.open(event.artifact_url, '_blank', 'noopener,noreferrer');
     }
     onOpen?.(event);
+  };
+
+  // Native anchor click — the ``download`` attribute on the <a> tells the
+  // browser to save the linked URL instead of navigating to it. We don't
+  // call preventDefault because we WANT the browser's default to fire.
+  const handleDownload: MouseEventHandler<HTMLAnchorElement> = () => {
+    onDownload?.(event);
   };
 
   const handleRetry: MouseEventHandler<HTMLButtonElement> = (e) => {
@@ -216,6 +237,27 @@ export function BuilderCompletionCard({
           >
             open
           </button>
+        )}
+
+        {showDownload && event.artifact_url && (
+          <a
+            href={event.artifact_url}
+            download={event.artifact_filename || true}
+            onClick={handleDownload}
+            className={cn(
+              'rounded-full border tracking-[0.08em] lowercase transition-all duration-300',
+              compact ? 'px-2.5 py-1 text-[9px]' : 'px-3 py-1 text-[10px]',
+            )}
+            style={{
+              borderColor: `color-mix(in srgb, ${meta.accentVar} 28%, transparent)`,
+              background: 'transparent',
+              color: 'var(--cosmic-text-faint)',
+              textDecoration: 'none',
+            }}
+            aria-label="Download artifact"
+          >
+            download
+          </a>
         )}
 
         {showRetry && (
