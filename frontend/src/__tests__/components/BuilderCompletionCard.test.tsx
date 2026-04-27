@@ -71,6 +71,34 @@ describe("BuilderCompletionCard — success variant", () => {
     render(<BuilderCompletionCard event={SUCCESS_EVENT} />)
     expect(screen.queryByRole("button", { name: /try again/i })).toBeNull()
   })
+
+  it("renders a Download anchor with the signed URL and download attribute", () => {
+    render(<BuilderCompletionCard event={SUCCESS_EVENT} />)
+    const link = screen.getByRole("link", { name: /download/i }) as HTMLAnchorElement
+    expect(link.getAttribute("href")).toBe(SUCCESS_EVENT.artifact_url)
+    // The download attribute makes the browser save instead of navigating.
+    expect(link.hasAttribute("download")).toBe(true)
+    // Filename hint is preferred over the boolean form.
+    expect(link.getAttribute("download")).toBe(SUCCESS_EVENT.artifact_filename)
+  })
+
+  it("invokes onDownload when the Download link is clicked", () => {
+    const onDownload = vi.fn()
+    render(<BuilderCompletionCard event={SUCCESS_EVENT} onDownload={onDownload} />)
+    const link = screen.getByRole("link", { name: /download/i })
+    fireEvent.click(link)
+    expect(onDownload).toHaveBeenCalledWith(SUCCESS_EVENT)
+  })
+
+  it("does NOT render Download on error/timeout/cancelled states", () => {
+    const errorEvent = {
+      ...SUCCESS_EVENT,
+      status: "error" as const,
+      artifact_url: undefined,
+    }
+    render(<BuilderCompletionCard event={errorEvent} />)
+    expect(screen.queryByRole("link", { name: /download/i })).toBeNull()
+  })
 })
 
 describe("BuilderCompletionCard — error variant", () => {

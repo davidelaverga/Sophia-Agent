@@ -192,16 +192,26 @@ describe('useSessionRouteExperience', () => {
       })
     );
 
+    // PR-B (B5): the route experience now wraps sendMessage with a
+    // cancel-on-restart guard so a new prompt cancels any in-flight builder
+    // task before submitting. The voice runtime receives the WRAPPED
+    // function (a stable callback), not the raw mock return value — but
+    // the wrapped function delegates to it for the actual send.
     expect(useCompanionVoiceRuntimeMock).toHaveBeenCalledWith(
       expect.objectContaining({
         sessionId: 'session-1',
         onUserTranscriptFallback: appendVoiceUserMessage,
         appendAssistantMessage: appendVoiceAssistantMessage,
-        sendMessage,
+        sendMessage: expect.any(Function),
         latestAssistantMessage,
         isTyping: false,
       })
     );
+    // Sanity-check the delegation: invoking the wrapped sendMessage with
+    // no in-flight builder calls the raw mock with identical args.
+    const wrappedSendMessage = useCompanionVoiceRuntimeMock.mock.calls[0][0].sendMessage;
+    void wrappedSendMessage({ text: 'ping' });
+    expect(sendMessage).toHaveBeenCalledWith({ text: 'ping' });
 
     expect(setOnUserTranscriptHandler).toHaveBeenCalledWith(appendVoiceUserMessage);
     expect(setAssistantResponseSuppressedChecker).toHaveBeenCalledWith(expect.any(Function));
