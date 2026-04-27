@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+from collections import OrderedDict
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -38,11 +39,49 @@ _WEBHOOK_PATH = "/internal/builder-events"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
 
 
-# Process-local set of task_ids that have already had their completion
+# Process-local LRU cache of task_ids that have already had their completion
 # webhook posted. Prevents duplicates from heartbeat persists, lock-protected
 # writebacks, and the outer-exception handler all firing for the same task.
-_emitted_task_ids: set[str] = set()
+#
+# Bounded with an LRU eviction policy so a long-running LangGraph process
+# doesn't accumulate every historical task_id forever. The cap is generous
+# enough that no real session collides with itself: at peak Sophia rates
+# (~1 task per minute), 10k entries cover a week of continuous work.
+_EMITTED_CACHE_MAX = 10_000
+_emitted_task_ids: "OrderedDict[str, None]" = OrderedDict()
 _emitted_lock = threading.Lock()
+
+
+def _try_mark_emitted(task_id: str) -> bool:
+    """Atomically claim the right to emit for ``task_id``.
+
+    Returns ``True`` when the caller wins the race (and is responsible for
+    firing the webhook), ``False`` when another caller already claimed it.
+    On ``True`` returns, the caller MUST eventually fire the webhook *or*
+    call :func:`_release_emit_claim` to allow a future retry — otherwise
+    a payload-build failure would permanently silence the task.
+    """
+    with _emitted_lock:
+        if task_id in _emitted_task_ids:
+            # Touch for LRU recency so a hot task_id stays warm.
+            _emitted_task_ids.move_to_end(task_id)
+            return False
+        _emitted_task_ids[task_id] = None
+        if len(_emitted_task_ids) > _EMITTED_CACHE_MAX:
+            # Evict the oldest entry (FIFO end of the OrderedDict).
+            _emitted_task_ids.popitem(last=False)
+        return True
+
+
+def _release_emit_claim(task_id: str) -> None:
+    """Roll back a successful :func:`_try_mark_emitted` claim.
+
+    Called when payload construction fails after the claim is recorded so
+    that a subsequent terminal write for the same task_id (e.g. a retry
+    after the malformed-state condition is fixed) can still go through.
+    """
+    with _emitted_lock:
+        _emitted_task_ids.pop(task_id, None)
 
 
 # Agent names whose terminal events we surface as builder-completion cards.
@@ -232,14 +271,19 @@ def emit_completion_event(
     if not task_id:
         return False
 
-    with _emitted_lock:
-        if task_id in _emitted_task_ids:
-            return False
-        _emitted_task_ids.add(task_id)
+    # Claim the dedup slot atomically. If another terminal write already
+    # fired for this task_id, return early.
+    if not _try_mark_emitted(task_id):
+        return False
 
     try:
         payload = build_completion_payload(result, agent_name=agent_name)
     except Exception:
+        # Payload build failed (malformed result state, etc.). Roll back
+        # the dedup claim so a subsequent retry for the same task_id can
+        # still deliver — otherwise a transient bug here would permanently
+        # silence the user-visible completion card.
+        _release_emit_claim(task_id)
         logger.warning(
             "Failed to build builder-events payload for task_id=%s",
             task_id,

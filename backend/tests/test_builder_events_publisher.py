@@ -316,3 +316,82 @@ def test_should_emit_for_agent_filter():
     assert builder_events.should_emit_for_agent("general-purpose") is False
     assert builder_events.should_emit_for_agent(None) is False
     assert builder_events.should_emit_for_agent("") is False
+
+
+def test_emit_does_not_poison_dedup_when_payload_build_fails(stub_executor_module, monkeypatch):
+    """Codex review (PR #87): if ``build_completion_payload`` raises after
+    the dedup mark is recorded, the emit_completion_event would silence
+    the task forever. The fix releases the claim on failure so a
+    subsequent terminal write for the same task_id can still deliver.
+    """
+    result = _make_result(task_id="task-poison")
+    _set_status(result, "completed")
+
+    # Force the payload builder to throw on the first call only.
+    call_count = {"n": 0}
+
+    def _maybe_explode(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("payload build crashed")
+        return {
+            "thread_id": result.thread_id,
+            "task_id": result.task_id,
+            "status": "success",
+            "agent_name": "sophia_builder",
+        }
+
+    captured: list[dict] = []
+    monkeypatch.setattr(builder_events, "build_completion_payload", _maybe_explode)
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        first = builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        # First call: payload build crashed → returns False, dedup released.
+        assert first is False
+
+        # Second call should now succeed because the dedup claim was rolled back.
+        second = builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        _wait_for_capture(captured, expected=1)
+
+    assert second is True
+    assert len(captured) == 1
+    assert captured[0]["task_id"] == "task-poison"
+
+
+def test_emitted_task_cache_is_lru_bounded(stub_executor_module, monkeypatch):
+    """Codex review (PR #87): the dedup set must not grow unbounded.
+
+    Lower the cap and saturate the cache; the oldest entry must be
+    evicted so a long-running process can't OOM through the notifier.
+    """
+    monkeypatch.setattr(builder_events, "_EMITTED_CACHE_MAX", 3)
+
+    # Drive the cache through > the cap.
+    for i in range(5):
+        result = _make_result(task_id=f"task-{i}")
+        _set_status(result, "completed")
+        with patch.object(builder_events, "_post_webhook"):
+            assert builder_events.emit_completion_event(result, agent_name="sophia_builder") is True
+
+    # Internal cache should now hold at most _EMITTED_CACHE_MAX entries.
+    assert len(builder_events._emitted_task_ids) == 3
+
+    # The earliest task IDs (0, 1) should have been evicted; firing for
+    # ``task-0`` again must succeed because the cache no longer remembers
+    # the previous emit.
+    early_result = _make_result(task_id="task-0")
+    _set_status(early_result, "completed")
+    captured: list[dict] = []
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        assert builder_events.emit_completion_event(early_result, agent_name="sophia_builder") is True
+        _wait_for_capture(captured, expected=1)
+    assert captured and captured[0]["task_id"] == "task-0"
+
+    # The most recent entries (the last three we emitted PLUS task-0
+    # we just re-emitted) must still be tracked, and a duplicate fire
+    # for one of them must NOT re-emit.
+    repeat_result = _make_result(task_id="task-4")
+    _set_status(repeat_result, "completed")
+    with patch.object(builder_events, "_post_webhook") as post:
+        emitted = builder_events.emit_completion_event(repeat_result, agent_name="sophia_builder")
+    assert emitted is False
+    post.assert_not_called()

@@ -618,13 +618,23 @@ class TelegramChannel(Channel):
 
     _RETRY_PROMPT = "yes, please try that again"
 
-    def _find_chat_id_for_thread(self, thread_id: str) -> str | None:
-        """Reverse-lookup the originating Telegram chat for a thread.
+    def _find_chat_topic_for_thread(
+        self, thread_id: str
+    ) -> tuple[str, str | None] | None:
+        """Reverse-lookup the originating Telegram chat *and* topic_id.
 
         The completion notifier delivers events keyed by parent thread_id;
-        we map back to the chat via the channel store. Returns ``None`` if
+        we map back to the originating IM conversation via the channel
+        store. Returns ``(chat_id, topic_id)`` on hit, or ``None`` when
         the thread isn't bound to a Telegram chat (cross-channel events
-        for non-Telegram threads should be silently dropped).
+        for non-Telegram threads are silently dropped).
+
+        ``topic_id`` is the SAME value the store keys on for group/forum
+        chats. It must be propagated through the retry inbound message,
+        otherwise ``ChannelManager._handle_chat`` would call
+        ``store.get_thread_id(chat_id, topic_id=None)`` and miss the
+        original mapping — starting a fresh DeerFlow thread instead of
+        continuing the conversation that owned the failed builder task.
         """
         try:
             store = getattr(self.bus, "_store", None)
@@ -638,12 +648,27 @@ class TelegramChannel(Channel):
             if store is None:
                 return None
             entry = store.find_by_thread_id(thread_id, channel_name="telegram")
-            return entry.get("chat_id") if entry else None
+            if not entry:
+                return None
+            chat_id = entry.get("chat_id")
+            if not isinstance(chat_id, str) or not chat_id:
+                return None
+            topic_id = entry.get("topic_id")
+            if topic_id is not None and not isinstance(topic_id, str):
+                topic_id = str(topic_id)
+            return chat_id, topic_id
         except Exception:
             logger.exception(
                 "[Telegram] reverse lookup failed for thread_id=%s", thread_id
             )
             return None
+
+    # Backwards-compat shim: the unit-test fixture and older callers still
+    # patch / expect the chat-id-only helper. Keep delegating so a single
+    # source of truth (``_find_chat_topic_for_thread``) drives both paths.
+    def _find_chat_id_for_thread(self, thread_id: str) -> str | None:
+        match = self._find_chat_topic_for_thread(thread_id)
+        return match[0] if match else None
 
     @staticmethod
     def _build_completion_caption(payload: dict[str, Any]) -> str:
@@ -676,21 +701,61 @@ class TelegramChannel(Channel):
             body += f"\n\nTask: {task_brief}"
         return body
 
-    def _build_retry_keyboard(self, task_id: str):
+    @staticmethod
+    def _encode_callback_data(action: str, task_id: str, topic_id: str | None) -> str:
+        """Pack ``(task_id, topic_id)`` into a single callback_data string.
+
+        Telegram's per-button ``callback_data`` is capped at 64 bytes. Our
+        scheme is ``builder_<action>_<task_id>__<topic_id>`` (or just
+        ``builder_<action>_<task_id>`` when there's no topic, e.g. private
+        chats). ``__`` is the separator since neither task_id (uuid hex)
+        nor topic_id (Telegram message_id digits) ever contain it.
+        """
+        base = f"builder_{action}_{task_id}"
+        if topic_id is None or topic_id == "":
+            return base
+        return f"{base}__{topic_id}"
+
+    @staticmethod
+    def _parse_callback_data(data: str) -> tuple[str | None, str | None, str | None]:
+        """Inverse of :meth:`_encode_callback_data`.
+
+        Returns ``(action, task_id, topic_id)``. ``action`` is None when
+        the prefix doesn't match the builder card scheme.
+        """
+        if not data.startswith("builder_"):
+            return None, None, None
+        # Expect "builder_<action>_<rest>" — split on first two underscores.
+        try:
+            _, action, rest = data.split("_", 2)
+        except ValueError:
+            return None, None, None
+        if "__" in rest:
+            task_id, _, topic_id = rest.partition("__")
+            return action, task_id or None, topic_id or None
+        return action, rest or None, None
+
+    def _build_retry_keyboard(self, task_id: str, *, topic_id: str | None = None):
         """Build inline keyboard with retry/dismiss buttons.
 
-        ``callback_data`` is the literal payload Telegram echoes back when
-        the button is clicked; we parse it in ``_on_callback_query``. Limit
-        is 64 bytes per Telegram, which the ``builder_retry_<task_id>``
-        scheme stays comfortably under.
+        ``callback_data`` carries both ``task_id`` and (when present)
+        ``topic_id`` so the retry handler can route the synthesized user
+        message to the original DeerFlow thread — see
+        :meth:`_find_chat_topic_for_thread` for why.
         """
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("Try again", callback_data=f"builder_retry_{task_id}"),
-                    InlineKeyboardButton("Dismiss", callback_data=f"builder_dismiss_{task_id}"),
+                    InlineKeyboardButton(
+                        "Try again",
+                        callback_data=self._encode_callback_data("retry", task_id, topic_id),
+                    ),
+                    InlineKeyboardButton(
+                        "Dismiss",
+                        callback_data=self._encode_callback_data("dismiss", task_id, topic_id),
+                    ),
                 ]
             ]
         )
@@ -708,10 +773,11 @@ class TelegramChannel(Channel):
         thread_id = payload.get("thread_id")
         if not isinstance(thread_id, str) or not thread_id:
             return
-        chat_id = self._find_chat_id_for_thread(thread_id)
-        if chat_id is None:
+        match = self._find_chat_topic_for_thread(thread_id)
+        if match is None:
             # Not a Telegram-originated thread; the webapp path handles it.
             return
+        chat_id, topic_id = match
 
         caption = self._build_completion_caption(payload)
         status = payload.get("status")
@@ -735,7 +801,7 @@ class TelegramChannel(Channel):
                     sent = await bot.send_message(
                         chat_id=int(chat_id),
                         text=caption,
-                        reply_markup=self._build_retry_keyboard(task_id),
+                        reply_markup=self._build_retry_keyboard(task_id, topic_id=topic_id),
                     )
                 else:
                     sent = await bot.send_message(chat_id=int(chat_id), text=caption)
@@ -787,43 +853,72 @@ class TelegramChannel(Channel):
             logger.debug("[Telegram] callback_query answer failed", exc_info=True)
 
         data = (query.data or "").strip()
+        action, task_id, topic_id = self._parse_callback_data(data)
+        if action is None or action not in {"retry", "dismiss"}:
+            return
+
         chat_id = query.message.chat_id if query.message else None
         if chat_id is None:
             return
 
         user_id = str(query.from_user.id) if query.from_user else ""
 
-        if data.startswith("builder_dismiss_"):
+        if action == "dismiss":
             try:
                 await query.edit_message_reply_markup(reply_markup=None)
             except Exception:
                 logger.debug("[Telegram] dismiss edit_reply_markup failed", exc_info=True)
             return
 
-        if data.startswith("builder_retry_"):
-            try:
-                await query.edit_message_reply_markup(reply_markup=None)
-            except Exception:
-                logger.debug("[Telegram] retry edit_reply_markup failed", exc_info=True)
+        # action == "retry"
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            logger.debug("[Telegram] retry edit_reply_markup failed", exc_info=True)
 
-            # Translate the click into a normal user turn so it flows
-            # through the same channel→LangGraph path as a typed reply.
-            inbound = self._build_inbound_message(
-                chat_id=str(chat_id),
-                user_id=user_id,
-                text=self._RETRY_PROMPT,
+        # Translate the click into a normal user turn so it flows through
+        # the same channel→LangGraph path as a typed reply. The retry
+        # InboundMessage MUST carry the original topic_id so
+        # ``ChannelManager._handle_chat`` resolves to the same DeerFlow
+        # thread the failed builder task was running in — without this,
+        # group / forum chats start a fresh thread on retry and lose the
+        # builder's prior context (the codex bot review on PR #87 caught
+        # this).
+        inbound = self._build_inbound_message(
+            chat_id=str(chat_id),
+            user_id=user_id,
+            text=self._RETRY_PROMPT,
+            topic_id=topic_id,
+        )
+        logger.info(
+            "[Telegram] retry button clicked: chat=%s task_id=%s topic_id=%s",
+            chat_id,
+            task_id,
+            topic_id,
+        )
+        if self._main_loop and self._main_loop.is_running():
+            asyncio.run_coroutine_threadsafe(
+                self.bus.publish_inbound(inbound), self._main_loop
             )
-            if self._main_loop and self._main_loop.is_running():
-                asyncio.run_coroutine_threadsafe(
-                    self.bus.publish_inbound(inbound), self._main_loop
-                )
 
-    def _build_inbound_message(self, *, chat_id: str, user_id: str, text: str):
+    def _build_inbound_message(
+        self,
+        *,
+        chat_id: str,
+        user_id: str,
+        text: str,
+        topic_id: str | None = None,
+    ):
         """Construct a CHAT InboundMessage matching ``_on_text``'s shape."""
-        return InboundMessage(
+        inbound = InboundMessage(
             channel_name="telegram",
             chat_id=chat_id,
             user_id=user_id,
             text=text,
             msg_type=InboundMessageType.CHAT,
         )
+        # ``topic_id`` is set as an attribute (not a constructor field) to
+        # match ``_on_text`` / ``_on_media``: see the existing pattern at
+        # ``inbound.topic_id = topic_id`` in those handlers.
+        inbound.topic_id = topic_id
+        return inbound

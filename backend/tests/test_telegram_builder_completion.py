@@ -93,13 +93,20 @@ def _cancelled_payload(thread_id: str = "thread-1", task_id: str = "task-3") -> 
     }
 
 
-def _stub_store_lookup(channel: TelegramChannel, *, chat_id: str | None) -> None:
-    """Stub the chat_id reverse lookup."""
+def _stub_store_lookup(
+    channel: TelegramChannel,
+    *,
+    chat_id: str | None,
+    topic_id: str | None = None,
+) -> None:
+    """Stub the chat_id + topic_id reverse lookup."""
 
-    def _fake_find(thread_id: str) -> str | None:  # noqa: ARG001
-        return chat_id
+    def _fake_find(thread_id: str) -> tuple[str, str | None] | None:  # noqa: ARG001
+        if chat_id is None:
+            return None
+        return chat_id, topic_id
 
-    channel._find_chat_id_for_thread = _fake_find  # type: ignore[assignment]
+    channel._find_chat_topic_for_thread = _fake_find  # type: ignore[assignment]
 
 
 # ---- Tests -----------------------------------------------------------------
@@ -138,13 +145,34 @@ async def test_error_event_sends_text_with_retry_keyboard(channel: TelegramChann
     assert "Build a 5-slide investor deck" in call_kwargs["text"]
 
     # The inline keyboard MUST carry the retry + dismiss callbacks bound
-    # to this task_id so the click handler can route it.
+    # to this task_id so the click handler can route it. With no topic_id
+    # (private chat), the callback_data omits the ``__<topic_id>`` suffix.
     markup = call_kwargs["reply_markup"]
     button_rows = markup.inline_keyboard
     assert len(button_rows) == 1
     callbacks = {btn.text: btn.callback_data for btn in button_rows[0]}
     assert callbacks["Try again"] == f"builder_retry_{payload['task_id']}"
     assert callbacks["Dismiss"] == f"builder_dismiss_{payload['task_id']}"
+
+
+@pytest.mark.anyio
+async def test_error_event_in_group_chat_encodes_topic_id_in_keyboard(channel: TelegramChannel):
+    """Codex review (PR #87): the retry button in group / forum chats must
+    carry the original topic_id so the synthesized retry message routes
+    back to the same DeerFlow thread.
+    """
+    _bind_loop(channel)
+    _stub_store_lookup(channel, chat_id="111", topic_id="42")
+    payload = _error_payload()
+    await channel._on_builder_completion(payload)
+
+    bot = channel._application.bot
+    call_kwargs = bot.send_message.call_args.kwargs
+    callbacks = {btn.text: btn.callback_data for btn in call_kwargs["reply_markup"].inline_keyboard[0]}
+
+    # ``builder_<action>_<task_id>__<topic_id>`` — see _encode_callback_data.
+    assert callbacks["Try again"] == f"builder_retry_{payload['task_id']}__42"
+    assert callbacks["Dismiss"] == f"builder_dismiss_{payload['task_id']}__42"
 
 
 @pytest.mark.anyio
@@ -176,7 +204,9 @@ async def test_unknown_thread_id_drops_silently(channel: TelegramChannel):
 
 @pytest.mark.anyio
 async def test_retry_button_publishes_inbound_message(channel: TelegramChannel):
-    """Clicking Try again fires an InboundMessage with the retry prompt."""
+    """Clicking Try again in a private chat publishes an InboundMessage
+    with the retry prompt and ``topic_id=None``.
+    """
     _bind_loop(channel)
     channel._main_loop = asyncio.get_running_loop()
     publish_inbound_mock = AsyncMock()
@@ -208,6 +238,44 @@ async def test_retry_button_publishes_inbound_message(channel: TelegramChannel):
     assert inbound.user_id == "99"
     assert inbound.text == "yes, please try that again"
     assert inbound.msg_type == InboundMessageType.CHAT
+    # Private-chat callback has no topic_id segment: topic_id MUST be None
+    # so ChannelManager._handle_chat resolves to the private-chat thread.
+    assert inbound.topic_id is None
+
+
+@pytest.mark.anyio
+async def test_retry_button_in_group_chat_propagates_topic_id(channel: TelegramChannel):
+    """Codex review (PR #87): in group / forum chats, the retry inbound
+    MUST carry the original topic_id so ChannelManager._handle_chat
+    routes back to the same DeerFlow thread that owned the failed task.
+    Otherwise the retry would silently start a fresh thread and lose
+    builder context.
+    """
+    _bind_loop(channel)
+    channel._main_loop = asyncio.get_running_loop()
+    publish_inbound_mock = AsyncMock()
+    channel.bus.publish_inbound = publish_inbound_mock  # type: ignore[assignment]
+
+    fake_query = MagicMock()
+    fake_query.answer = AsyncMock()
+    fake_query.edit_message_reply_markup = AsyncMock()
+    fake_query.data = "builder_retry_task-2__42"  # topic_id=42 from group thread
+    fake_query.message = SimpleNamespace(chat_id=-1001234567890)
+    fake_query.from_user = SimpleNamespace(id=99)
+
+    update = SimpleNamespace(callback_query=fake_query)
+    await channel._on_callback_query(update, context=None)
+
+    for _ in range(20):
+        if publish_inbound_mock.await_count > 0:
+            break
+        await asyncio.sleep(0.01)
+
+    publish_inbound_mock.assert_awaited_once()
+    inbound = publish_inbound_mock.await_args.args[0]
+    assert inbound.chat_id == "-1001234567890"
+    assert inbound.topic_id == "42"
+    assert inbound.text == "yes, please try that again"
 
 
 @pytest.mark.anyio
@@ -230,3 +298,50 @@ async def test_dismiss_button_clears_keyboard_only(channel: TelegramChannel):
 
     fake_query.edit_message_reply_markup.assert_awaited_once_with(reply_markup=None)
     publish_inbound_mock.assert_not_awaited()
+
+
+def test_callback_data_round_trip():
+    """The encode/parse helpers are inverses for both private + group cases."""
+    encode = TelegramChannel._encode_callback_data
+    parse = TelegramChannel._parse_callback_data
+
+    # Private chat — no topic_id segment.
+    private = encode("retry", "task-abc", None)
+    assert private == "builder_retry_task-abc"
+    assert parse(private) == ("retry", "task-abc", None)
+
+    # Group / forum chat — topic_id encoded after ``__`` separator.
+    group = encode("retry", "task-abc", "42")
+    assert group == "builder_retry_task-abc__42"
+    assert parse(group) == ("retry", "task-abc", "42")
+
+    # Dismiss action also round-trips cleanly.
+    dismiss = encode("dismiss", "task-xyz", "100")
+    assert dismiss == "builder_dismiss_task-xyz__100"
+    assert parse(dismiss) == ("dismiss", "task-xyz", "100")
+
+    # Unknown / malformed prefix is rejected.
+    assert parse("not_a_builder_callback") == (None, None, None)
+    assert parse("") == (None, None, None)
+
+
+def test_callback_data_stays_within_telegram_64_byte_limit():
+    """Telegram caps callback_data at 64 bytes — our encoding must fit
+    the production generators of task_id and topic_id.
+
+    - ``task_id`` is ``str(uuid.uuid4())[:8]`` (8 hex chars) — see
+      ``backend/packages/harness/deerflow/subagents/executor.py``.
+    - ``topic_id`` is ``str(message_id)`` from python-telegram-bot, which
+      Telegram caps well below 19 digits in practice.
+
+    The realistic max payload is ~45 bytes — comfortably under the limit.
+    PR 2 (async retrofit) needs to re-validate this when deepagents
+    starts using LangGraph thread_ids (UUIDs) as the task_id source.
+    """
+    encode = TelegramChannel._encode_callback_data
+    realistic_task = "a" * 8
+    realistic_topic = "9" * 19  # Telegram's worst-case message_id length
+    payload = encode("dismiss", realistic_task, realistic_topic)
+    assert len(payload.encode("utf-8")) <= 64, (
+        f"callback_data exceeded Telegram's 64-byte limit: {len(payload)} bytes"
+    )
