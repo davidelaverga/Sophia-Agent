@@ -1084,6 +1084,175 @@ def test_builder_session_logs_missing_background_task(monkeypatch):
     )
 
 
+# ---------------------------------------------------------------------------
+# Memory fix: <previous_builder_task> anchor block
+#
+# Symptom this guards: in the Telegram session at thread 9c1e24ef, after the
+# builder finished and the user asked "is it ready?", Sophia answered without
+# referencing the original document topic. Root cause: the original user
+# message gets summarized away once token thresholds trip, and the artifact
+# synthesis block only describes WHAT WAS BUILT — not WHAT WAS ASKED.
+#
+# These tests lock the fix: BuilderSessionMiddleware injects the original
+# task brief from delegation_context.task into the system prompt for every
+# turn while the task is alive (running OR completed OR failed OR
+# synthesized), so the anchor survives summarization.
+# ---------------------------------------------------------------------------
+
+
+def _builder_session_state_with_task_brief(task_brief: str, status: str) -> dict:
+    return {
+        "messages": [],
+        "system_prompt_blocks": [],
+        "active_tone_band": "engagement",
+        "builder_task": {
+            "task_id": "task-anchor",
+            "task_type": "document",
+            "status": status,
+            "trace_id": "trace-anchor",
+        },
+        "delegation_context": {"task": task_brief, "task_type": "document"},
+    }
+
+
+def test_builder_session_injects_task_brief_after_completion():
+    """When the builder is completed, the original brief must be in the prompt.
+
+    Otherwise Sophia answers "is it ready?" with a generic acknowledgement
+    instead of naming the topic the user originally asked about.
+    """
+    task_brief = "Create a one-page document about LLM time-series solutions."
+    state = _builder_session_state_with_task_brief(task_brief, status="completed")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-1"}
+
+    middleware = BuilderSessionMiddleware()
+    update = middleware.before_agent(state, runtime)
+
+    assert update is not None, "expected a state update including the brief block"
+    blocks = update.get("system_prompt_blocks", [])
+    brief_blocks = [b for b in blocks if "<previous_builder_task>" in b]
+    assert brief_blocks, "expected <previous_builder_task> block to be appended"
+    assert task_brief in brief_blocks[0], "task brief must appear verbatim in the block"
+    assert "Status: completed" in brief_blocks[0], "block must include the lifecycle status"
+
+
+def test_builder_session_injects_task_brief_during_running():
+    """The anchor must be present on intermediate 'still working' turns too.
+
+    If the user pings during a 90-second build ("how's it going?"), Sophia
+    must still know what topic she's working on — otherwise the in-progress
+    block alone leaves her with no anchor.
+    """
+    task_brief = "Draft a memo summarising the Q2 product strategy review."
+    state = _builder_session_state_with_task_brief(task_brief, status="running")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-1"}
+
+    # Stub the background task lookup so the running branch executes without
+    # touching real subagent infrastructure.
+    class _FakeStatus:
+        RUNNING = "running"
+        COMPLETED = "completed"
+        FAILED = "failed"
+        TIMED_OUT = "timed_out"
+        PENDING = "pending"
+
+    running_result = SimpleNamespace(
+        task_id="task-anchor",
+        trace_id="trace-anchor",
+        status=_FakeStatus.RUNNING,
+        started_at=datetime.now(),
+        completed_at=None,
+        result=None,
+        error=None,
+        ai_messages=[],
+        final_state=None,
+    )
+
+    import deerflow.agents.sophia_agent.middlewares.builder_session as builder_session_module
+    original_status = builder_session_module.SubagentStatus
+    original_get = builder_session_module.get_background_task_result
+    builder_session_module.SubagentStatus = _FakeStatus
+    builder_session_module.get_background_task_result = lambda _tid: running_result
+    try:
+        middleware = BuilderSessionMiddleware()
+        update = middleware.before_agent(state, runtime)
+    finally:
+        builder_session_module.SubagentStatus = original_status
+        builder_session_module.get_background_task_result = original_get
+
+    assert update is not None
+    blocks = update.get("system_prompt_blocks", [])
+    brief_blocks = [b for b in blocks if "<previous_builder_task>" in b]
+    assert brief_blocks, "running turns must also carry the task brief anchor"
+    assert task_brief in brief_blocks[0]
+    assert "Status: running" in brief_blocks[0]
+    # The existing in-progress block must still be there too.
+    assert any("<builder_task_status>" in b for b in blocks)
+
+
+def test_builder_session_injects_task_brief_after_failure():
+    """On failure, the brief must be present so Sophia can describe the retry intelligently.
+
+    The failure card UX prompts the user "Sorry it seems like the task didn't
+    complete. Do you want me to try again?" — when the user replies "yes",
+    Sophia needs the original brief in the prompt to re-issue the same task.
+    """
+    task_brief = "Build a 5-slide investor deck for the Series A round."
+    state = _builder_session_state_with_task_brief(task_brief, status="failed")
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-1"}
+
+    middleware = BuilderSessionMiddleware()
+    update = middleware.before_agent(state, runtime)
+
+    assert update is not None
+    blocks = update.get("system_prompt_blocks", [])
+    brief_blocks = [b for b in blocks if "<previous_builder_task>" in b]
+    assert brief_blocks, "failed turns must carry the task brief for retry coherence"
+    assert task_brief in brief_blocks[0]
+
+
+def test_builder_session_skips_brief_when_no_active_task():
+    """No builder task ever launched → no anchor block (don't pollute the prompt)."""
+    state = {
+        "messages": [],
+        "system_prompt_blocks": [],
+    }
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-1"}
+
+    middleware = BuilderSessionMiddleware()
+    update = middleware.before_agent(state, runtime)
+
+    if update is None:
+        return  # No state change at all — fine.
+    blocks = update.get("system_prompt_blocks", [])
+    assert not any("<previous_builder_task>" in b for b in blocks)
+
+
+def test_builder_session_skips_brief_when_delegation_context_missing():
+    """Builder task exists but delegation_context.task is missing → no block.
+
+    Defensive: if some upstream code cleared delegation_context, we must not
+    inject an empty / malformed anchor block.
+    """
+    state = {
+        "messages": [],
+        "system_prompt_blocks": [],
+        "builder_task": {"task_id": "task-x", "status": "completed"},
+        # delegation_context is intentionally absent
+    }
+    runtime = MagicMock()
+    runtime.context = {"thread_id": "thread-1"}
+
+    middleware = BuilderSessionMiddleware()
+    update = middleware.before_agent(state, runtime) or {}
+    blocks = update.get("system_prompt_blocks", [])
+    assert not any("<previous_builder_task>" in b for b in blocks)
+
+
 def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")

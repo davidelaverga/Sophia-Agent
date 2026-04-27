@@ -10,6 +10,7 @@ from app.gateway.routers import (
     agents,
     artifacts,
     bootstrap,
+    builder_events,
     channels,
     mcp,
     memory,
@@ -21,6 +22,7 @@ from app.gateway.routers import (
     uploads,
     voice,
 )
+from app.gateway.workers.builder_events import install_builder_events_worker
 from deerflow.config.app_config import get_app_config
 
 # Configure logging
@@ -47,6 +49,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError(error_msg) from e
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
+
+    # Install the builder-events worker on app.state. The router endpoints
+    # use ``get_builder_events_worker(app)`` to fan completion events out
+    # to webapp SSE subscribers and channel adapters.
+    install_builder_events_worker(app)
+    logger.info("Builder events worker installed")
 
     # NOTE: MCP tools initialization is NOT done here because:
     # 1. Gateway doesn't use MCP tools - they are used by Agents in the LangGraph Server
@@ -240,6 +248,10 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Sophia API is mounted at /api/sophia
     from app.gateway.routers import sophia
     app.include_router(sophia.router)
+
+    # Builder events: internal POST + public SSE for completion cards
+    app.include_router(builder_events.internal_router)
+    app.include_router(builder_events.public_router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

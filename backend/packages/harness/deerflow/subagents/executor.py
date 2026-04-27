@@ -740,6 +740,27 @@ class SubagentExecutor:
                 f"with {len(self.tools)} tools"
             )
 
+    def _emit_builder_completion_event(self, result: SubagentResult) -> None:
+        """Notify the gateway worker when a sophia_builder task ends.
+
+        Fire-and-forget: the actual POST runs on a daemon thread inside
+        ``deerflow.sophia.builder_events.emit_completion_event``. Filtering
+        by agent name keeps the executor decoupled from Sophia-specific
+        notification policy — generic subagents (e.g. ``general-purpose``)
+        do not produce completion cards.
+        """
+        try:
+            from deerflow.sophia.builder_events import emit_completion_event
+
+            emit_completion_event(result, agent_name=self.config.name)
+        except Exception:  # pragma: no cover - defensive: never fail the executor
+            logger.warning(
+                "[trace=%s] Failed to emit builder-completion event for task_id=%s",
+                self.trace_id,
+                getattr(result, "task_id", None),
+                exc_info=True,
+            )
+
     @staticmethod
     def _append_ai_message(result: SubagentResult, message: AIMessage) -> None:
         """Append a unique AI message to the result holder."""
@@ -1268,6 +1289,7 @@ class SubagentExecutor:
                         task_state.slowest_iteration_ms = exec_result.slowest_iteration_ms
                         task_state.total_stream_ms = exec_result.total_stream_ms
                     persist_background_task_status_payload(task_state)
+                    self._emit_builder_completion_event(task_state)
                 except FuturesTimeoutError:
                     logger.error(
                         f"[trace={self.trace_id}] Subagent {self.config.name} execution timed out after {self.config.timeout_seconds}s "
@@ -1283,18 +1305,23 @@ class SubagentExecutor:
                         task_state.completed_at = datetime.now()
                         task_state.timed_out_at = task_state.completed_at
                     persist_background_task_status_payload(task_state)
+                    self._emit_builder_completion_event(task_state)
                     # Cancel the future (best effort - may not stop the actual execution)
                     cancel_event.set()
                     execution_future.cancel()
                 except FuturesCancelledError:
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} future cancelled")
+                    cancelled_task: SubagentResult | None = None
                     with _background_tasks_lock:
                         current = _background_tasks.get(task_id)
                         if current is not None and current.status != SubagentStatus.CANCELLED:
                             current.status = SubagentStatus.CANCELLED
                             current.error = "Execution cancelled by user"
                             current.completed_at = datetime.now()
-                            persist_background_task_status_payload(current)
+                            cancelled_task = current
+                    if cancelled_task is not None:
+                        persist_background_task_status_payload(cancelled_task)
+                        self._emit_builder_completion_event(cancelled_task)
             except Exception as e:
                 logger.exception(
                     f"[trace={self.trace_id}] Subagent {self.config.name} async execution failed: "
@@ -1312,6 +1339,7 @@ class SubagentExecutor:
                     task_state.error = str(e)
                     task_state.completed_at = datetime.now()
                 persist_background_task_status_payload(task_state)
+                self._emit_builder_completion_event(task_state)
             finally:
                 with _background_tasks_lock:
                     _background_task_futures.pop(task_id, None)
@@ -1435,6 +1463,35 @@ def cancel_background_task(task_id: str, reason: str = "Execution cancelled by u
         cancel_event = _background_task_cancel_events.get(task_id)
 
     persist_background_task_status_payload(result)
+
+    # Best-effort completion notify on user-initiated cancel. We don't have
+    # the SubagentExecutor instance here (cancel is a module-level entry
+    # point), so we use the agent-name filter inline. Sophia is the only
+    # caller of this path today; generic subagent cancels won't surface
+    # a card.
+    try:
+        from deerflow.sophia.builder_events import emit_completion_event
+
+        # Without an executor instance the agent name isn't trivially
+        # accessible; rely on the description / final_state hint, falling
+        # back to "sophia_builder" since that's the only path that exposes
+        # cancellation via this entry point in production.
+        agent_name_hint = "sophia_builder"
+        if isinstance(result.final_state, dict):
+            builder_task = result.final_state.get("builder_task")
+            if isinstance(builder_task, dict):
+                # If this metadata exists, the cancellation came from the
+                # builder lifecycle. Otherwise we still default to builder
+                # because cancel_background_task is invoked from
+                # switch_to_builder.cancel paths.
+                pass
+        emit_completion_event(result, agent_name=agent_name_hint)
+    except Exception:  # pragma: no cover
+        logger.warning(
+            "Failed to emit builder-completion event on cancel for task_id=%s",
+            task_id,
+            exc_info=True,
+        )
 
     if cancel_event is not None:
         cancel_event.set()

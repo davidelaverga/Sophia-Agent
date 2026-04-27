@@ -140,6 +140,26 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
         )
 
     @staticmethod
+    def _task_brief_block(task_brief: str, status: str) -> str:
+        """Anchor block reminding Sophia what the user originally asked for.
+
+        Without this, when summarization compresses the original user message
+        and the only remaining context is the artifact synthesis ("WHAT WAS
+        BUILT"), Sophia loses the "WHAT WAS ASKED" anchor and answers vaguely
+        ("is it ready?" → "Yes, it's done!" with no topic). This block keeps
+        the brief in-prompt across every turn while the task is alive.
+        """
+        return (
+            "<previous_builder_task>\n"
+            f"You delegated this task to the builder: {task_brief}\n"
+            f"Status: {status}.\n"
+            "If the user references the task obliquely "
+            "(\"is it ready?\", \"yes try again\"), respond with that "
+            "context in mind — name the topic, don't speak generically.\n"
+            "</previous_builder_task>"
+        )
+
+    @staticmethod
     def _failure_block(task: dict) -> str:
         debug = task.get("debug") or {}
         last_tools = ", ".join(debug.get("last_tool_names", [])) if debug.get("last_tool_names") else None
@@ -385,6 +405,24 @@ class BuilderSessionMiddleware(AgentMiddleware[BuilderSessionState]):
                     cleanup_background_task(task_id)
         elif current_task and current_status in _TERMINAL_STATUSES:
             updates["active_mode"] = "companion"
+
+        # Memory anchor: keep the original user task brief in the prompt for
+        # every turn while a builder task is alive. ``delegation_context.task``
+        # holds the full brief from ``switch_to_builder`` and survives state
+        # compression. Without this anchor, summarization can drop the
+        # original user message and the artifact synthesis block only
+        # describes WHAT WAS BUILT — Sophia loses WHAT WAS ASKED.
+        if current_task:
+            final_status = (updates.get("builder_task") or current_task or {}).get("status")
+            if final_status in _NON_TERMINAL_STATUSES or final_status in _TERMINAL_STATUSES:
+                delegation_context = (
+                    updates.get("delegation_context")
+                    or state.get("delegation_context")
+                    or {}
+                )
+                task_brief = (delegation_context or {}).get("task")
+                if task_brief and isinstance(task_brief, str) and task_brief.strip():
+                    blocks.append(self._task_brief_block(task_brief.strip(), final_status or "unknown"))
 
         if blocks != list(state.get("system_prompt_blocks", [])):
             updates["system_prompt_blocks"] = blocks

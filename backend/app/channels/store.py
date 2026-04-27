@@ -136,6 +136,25 @@ class ChannelStore:
             self._save()
             return True
 
+    def find_by_thread_id(
+        self,
+        thread_id: str,
+        *,
+        channel_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Reverse lookup: find the (channel, chat, topic) bound to a thread.
+
+        Used by the builder-completion notifier to deliver completion cards
+        back to the originating chat. Returns the first matching entry —
+        a thread is expected to be bound to one chat by construction.
+
+        Returns ``None`` if no mapping references the thread.
+        """
+        for entry in self.list_entries(channel_name=channel_name):
+            if entry.get("thread_id") == thread_id:
+                return entry
+        return None
+
     def list_entries(self, channel_name: str | None = None) -> list[dict[str, Any]]:
         """List all stored mappings, optionally filtered by channel."""
         results = []
