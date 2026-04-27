@@ -2426,6 +2426,37 @@ class TestBuilderArtifactMiddleware:
         (outputs_dir / "report.md").write_text("# real")
         assert BuilderArtifactMiddleware._has_output_file(state) is True
 
+    def test_has_output_file_ignores_stale_files_before_current_task(self, tmp_path):
+        """Forced-emit gating must ignore artifacts from prior tasks.
+
+        If the outputs directory already contains files from an older builder run,
+        the current run should still get a forced write turn first until it writes
+        a fresh deliverable.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        stale_file = outputs_dir / "old-report.md"
+        stale_file.write_text("# stale")
+        now = stale_file.stat().st_mtime
+        old = now - 120.0
+        os.utime(stale_file, (old, old))
+
+        # Start this task after the stale file mtime but before the fresh file.
+        started_at_ms = int(now * 1000)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_task_started_at_ms": started_at_ms,
+        }
+        assert BuilderArtifactMiddleware._has_output_file(state) is False
+
+        fresh_file = outputs_dir / "new-report.md"
+        fresh_file.write_text("# fresh")
+        fresh = now + 120.0
+        os.utime(fresh_file, (fresh, fresh))
+        assert BuilderArtifactMiddleware._has_output_file(state) is True
+
     def test_artifact_files_exist_rejects_empty_path_during_forced_emit(self):
         """PR-A: empty artifact_path in the forced-emit window is treated
         as an escape hatch and rejected. This forces the loop into the

@@ -182,6 +182,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # (force write_file first) instead of forcing a phantom emit.
             return False
 
+        builder_task_started_at_ms = state.get("builder_task_started_at_ms")
+        min_mtime: float | None = None
+        if isinstance(builder_task_started_at_ms, (int, float)) and builder_task_started_at_ms > 0:
+            # Ignore stale artifacts from prior builder tasks in the same thread.
+            # Keep the same 5s grace used by hard-ceiling promotion.
+            min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
+
         try:
             outputs_root = Path(outputs_host_path)
             if not outputs_root.is_dir():
@@ -190,6 +197,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 if not entry.is_file():
                     continue
                 if entry.name.startswith("_") or entry.name.startswith("."):
+                    continue
+                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
                     continue
                 return True
         except OSError:
