@@ -68,6 +68,31 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             if str(name).strip()
         ]
 
+        # Wall-clock budget awareness — sourced from extra_configurable which
+        # SubagentExecutor merges into initial state (see executor.py:835).
+        # ``builder_task_kickoff_ms`` is the queue-time fallback for the very
+        # first turn before BuilderArtifactMiddleware has had a chance to
+        # write ``builder_task_started_at_ms``. Both keys are missing for
+        # non-builder agents that don't opt in, in which case the wall-clock
+        # prompt fragment is suppressed and behavior is identical to today.
+        builder_timeout_seconds = 0
+        raw_timeout = state.get("builder_timeout_seconds")
+        if isinstance(raw_timeout, (int, float)) and raw_timeout > 0:
+            builder_timeout_seconds = int(raw_timeout)
+        started_ms = state.get("builder_task_started_at_ms") or 0
+        if not isinstance(started_ms, (int, float)) or started_ms <= 0:
+            started_ms = state.get("builder_task_kickoff_ms") or 0
+        wall_clock_pct: int | None = None
+        wall_clock_elapsed_s: int | None = None
+        if (
+            builder_timeout_seconds > 0
+            and isinstance(started_ms, (int, float))
+            and started_ms > 0
+        ):
+            elapsed_ms = max(0, int(time.time() * 1000) - int(started_ms))
+            wall_clock_elapsed_s = int(elapsed_ms / 1000)
+            wall_clock_pct = int(round(elapsed_ms / (builder_timeout_seconds * 1000) * 100))
+
         # --- Build briefing sections ---
         sections: list[str] = []
 
@@ -159,15 +184,27 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         _HARD_CEILING = 20
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
 
+        wall_clock_line = ""
+        if wall_clock_pct is not None and wall_clock_elapsed_s is not None:
+            wall_clock_line = (
+                f"Wall-clock budget: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used "
+                f"({wall_clock_pct}%). Once you cross 70% of the wall-clock budget, your NEXT action "
+                "MUST be emit_builder_artifact regardless of remaining turn count. Each long write "
+                "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
+            )
+
         sections.append(
             "<completion_instruction>\n"
             f"You have a STRICT budget of {_HARD_CEILING} tool-call turns total. "
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
+            f"{wall_clock_line}"
             "Plan your work to fit within this budget:\n"
             "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
             "- For text deliverables (markdown, html, plain text, code): write the complete file in a single "
-            "write_file_tool call. Do NOT split the same file across multiple write_file_tool calls — if output "
-            "risks exceeding the write budget, ship a tighter draft instead of fragmenting.\n"
+            "write_file_tool call. Do NOT split the same file across multiple write_file_tool calls and do NOT "
+            "call write_file_tool repeatedly to the same path — overwriting a long document costs 90+ seconds "
+            "per turn and burns the wall-clock budget. If output risks exceeding the write budget, ship a "
+            "tighter draft instead of fragmenting.\n"
             "- For binary deliverables (pdf, pptx, docx, xlsx, png): the DELIVERABLE IS THE BINARY, NOT THE SCRIPT. You MUST:\n"
             "    (a) Turn 2: write ONE generator script to /mnt/user-data/outputs/_generate_<name>.py that produces "
             "the whole binary end-to-end. Keep the script under 120 lines with minimal styling — a tight script "
@@ -201,11 +238,26 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 f"{remaining} turn(s) remaining before forced termination.\n"
                 f"Most recent tool calls: {joined_tools}.\n"
             )
+            if wall_clock_pct is not None and wall_clock_elapsed_s is not None:
+                escalation += (
+                    f"Wall-clock: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used "
+                    f"({wall_clock_pct}%).\n"
+                )
             # PR-A (2026-04-27): thresholds rescaled for the bumped ceiling
             # (10 → 20). Same proportions as before — CRITICAL at the last
             # ~15% of the budget (remaining<=3), WARNING at the last ~30%
             # (remaining<=6) so the model gets graduated wrap-up pressure.
-            if remaining <= 3:
+            #
+            # Wall-clock-aware promotion: when the per-run wall-clock budget
+            # has crossed 70%, escalate to CRITICAL even if turn-count
+            # remaining > 3. This matches BuilderArtifactMiddleware's
+            # _FORCE_EMIT_WALL_CLOCK_FRACTION so the prompt and the API-level
+            # tool_choice forcing agree.
+            wall_clock_critical = (
+                wall_clock_pct is not None
+                and wall_clock_pct >= 70
+            )
+            if remaining <= 3 or wall_clock_critical:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
                     "Your NEXT action MUST be emit_builder_artifact — DO NOT call write_todos, "

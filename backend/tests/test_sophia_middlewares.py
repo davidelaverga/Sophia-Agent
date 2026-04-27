@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import get_type_hints
 from unittest.mock import MagicMock
@@ -157,6 +158,27 @@ def _make_runtime(**context_kwargs):
     """Create a mock Runtime with context."""
     runtime = MagicMock()
     runtime.context = context_kwargs
+    return runtime
+
+
+def _make_runtime_with_builder_timeout(*, thread_id: str | None = None, timeout_s: int):
+    """Create a mock Runtime mirroring ``_make_runtime`` with a thread_id.
+
+    Backward-compatible kept signature: callers pass ``timeout_s`` because
+    earlier iterations of the wall-clock gate read it from
+    ``runtime.config``. The current implementation reads
+    ``builder_timeout_seconds`` directly from ``state`` (where
+    ``SubagentExecutor`` merges it from ``extra_configurable``), so callers
+    must put ``builder_timeout_seconds`` into the state dict they pass to
+    the middleware. ``timeout_s`` here is documented as the value the test
+    is asserting against — but it is not used to populate the runtime.
+    """
+    del timeout_s  # signature kept for readability; value lives in state
+    runtime = MagicMock()
+    context: dict[str, object] = {}
+    if thread_id is not None:
+        context["thread_id"] = thread_id
+    runtime.context = context
     return runtime
 
 
@@ -2483,6 +2505,183 @@ class TestBuilderArtifactMiddleware:
         args = {"artifact_type": "concept", "confidence": 0.7}
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+
+    # ---------------------------------------------------------------------
+    # Wall-clock-aware force-emit (companion-to-builder timeout fix)
+    # ---------------------------------------------------------------------
+    #
+    # Sonnet's per-turn write_file cost on long deliverables is 90-150s. When
+    # a builder is making genuine progress but each turn is expensive, the
+    # turn-count force window (turn 17+) doesn't open before the per-run cap
+    # fires. These tests verify that force-emit also activates on wall-clock
+    # crossing 70% of the per-run budget, regardless of turn count.
+
+    def test_force_choice_triggered_by_wall_clock_with_file(self, tmp_path):
+        """1300s elapsed of 1800s (72%) with a real file on disk and turn
+        count well below the ceiling → force emit_builder_artifact."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        started_ms = int((time.time() - 1300) * 1000)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 8,  # well below ceiling=20
+            "builder_task_started_at_ms": started_ms,
+            "builder_timeout_seconds": 1800,
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state, runtime)
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_force_choice_triggered_by_wall_clock_no_file(self, tmp_path):
+        """1300s elapsed of 1800s (72%) with NO file → force write_file
+        first (two-stage). Without this, the model would be locked to emit
+        on a non-existent path and spin in the rejection loop."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()  # empty
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        started_ms = int((time.time() - 1300) * 1000)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 8,
+            "builder_task_started_at_ms": started_ms,
+            "builder_timeout_seconds": 1800,
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state, runtime)
+        assert choice == {"type": "tool", "name": "write_file"}
+
+    def test_force_choice_below_threshold_no_op(self, tmp_path):
+        """900s elapsed of 1800s (50%) → no forcing, regardless of file
+        state. Wall-clock gate must only fire above 70%."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        started_ms = int((time.time() - 900) * 1000)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 5,
+            "builder_task_started_at_ms": started_ms,
+            "builder_timeout_seconds": 1800,
+        }
+        assert BuilderArtifactMiddleware()._force_choice_for_state(state, runtime) is None
+
+    def test_force_choice_respects_runtime_timeout_override(self, tmp_path):
+        """Threshold is computed against ``builder_timeout_seconds`` in state
+        (set by ``switch_to_builder`` via ``extra_configurable``), not a
+        hardcoded value. With timeout=1800s, 1100s (61%) is below; 1500s
+        (83%) is above."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+
+        below_threshold = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 5,
+            "builder_task_started_at_ms": int((time.time() - 1100) * 1000),
+            "builder_timeout_seconds": 1800,
+        }
+        assert BuilderArtifactMiddleware()._force_choice_for_state(below_threshold, runtime) is None
+
+        above_threshold = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 5,
+            "builder_task_started_at_ms": int((time.time() - 1500) * 1000),
+            "builder_timeout_seconds": 1800,
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(above_threshold, runtime)
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_force_choice_falls_back_to_kickoff_when_started_at_ms_missing(self, tmp_path):
+        """builder_task_started_at_ms is set on the FIRST non-emit turn
+        (after_model). Before that, the wall-clock gate must use the
+        kickoff timestamp set by switch_to_builder so the very first slow
+        turn still gets the right gating."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        kickoff_ms = int((time.time() - 1400) * 1000)  # 78% elapsed
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 0,  # first turn — no started_at_ms yet
+            "builder_task_started_at_ms": 0,
+            "builder_task_kickoff_ms": kickoff_ms,
+            "builder_timeout_seconds": 1800,
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state, runtime)
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_force_choice_no_trigger_when_neither_timestamp_set(self, tmp_path):
+        """Defensive: with neither started_at_ms nor kickoff_ms, the gate
+        must NOT fire. Otherwise the very first turn could get force-emitted
+        before any work has happened."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 0,
+            "builder_timeout_seconds": 1800,
+            # Neither builder_task_started_at_ms nor builder_task_kickoff_ms
+        }
+        assert BuilderArtifactMiddleware()._force_choice_for_state(state, runtime) is None
+
+    def test_force_choice_no_trigger_when_timeout_missing(self, tmp_path):
+        """Defensive: without ``builder_timeout_seconds`` in state (e.g.
+        non-builder subagents that don't opt in), the wall-clock gate must
+        NOT fire. Behavior is identical to today (turn-count-only)."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 5,
+            "builder_task_started_at_ms": int((time.time() - 9999) * 1000),  # ancient
+            # builder_timeout_seconds intentionally absent
+        }
+        assert BuilderArtifactMiddleware()._force_choice_for_state(state, runtime) is None
+
+    def test_artifact_files_exist_rejects_empty_path_under_wall_clock_pressure(self, tmp_path):
+        """Empty artifact_path during wall-clock force-emit is also
+        rejected (parallel to the existing turn-count rejection). Without
+        this, the model could escape force-emit pressure by emitting with
+        no real deliverable."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        runtime = _make_runtime_with_builder_timeout(thread_id="thread-x", timeout_s=1800)
+        started_ms = int((time.time() - 1500) * 1000)  # 83% elapsed
+        state = {
+            "builder_non_artifact_turns": 5,  # well below turn-count force window
+            "builder_task_started_at_ms": started_ms,
+            "builder_timeout_seconds": 1800,
+        }
+        args = {"artifact_type": "document", "confidence": 0.1}  # no path
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
 
     def test_emit_accepted_when_file_on_disk(self, tmp_path):
         """PR-D: when the referenced artifact file exists on disk,

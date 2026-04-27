@@ -1,6 +1,7 @@
 """Subagent execution engine."""
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -963,73 +964,124 @@ class SubagentExecutor:
             if self.stream_messages:
                 # Use stream mode when callers need progressive AI message updates
                 # (for example the generic task tool's task_running events).
-                async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                    if cancel_event and cancel_event.is_set():
-                        raise SubagentCancelledError("Execution cancelled by user")
-
-                    # Track per-iteration wall time
-                    iter_now_perf = time.perf_counter()
-                    iter_ms = round((iter_now_perf - iteration_start_perf) * 1000)
-                    iteration_start_perf = iter_now_perf
-                    result.iteration_count += 1
-                    result.iteration_durations_ms.append(iter_ms)
-                    if iter_ms > result.slowest_iteration_ms:
-                        result.slowest_iteration_ms = iter_ms
-                    if iter_ms > 30_000:
-                        logger.warning(
-                            f"[trace={self.trace_id}] Subagent {self.config.name} iteration "
-                            f"#{result.iteration_count} took {iter_ms}ms (>30s)"
-                        )
-
-                    snapshot_updated_at = datetime.now()
-                    result.last_update_at = snapshot_updated_at
-                    live_snapshot = _extract_live_state_snapshot(chunk)
-                    if live_snapshot is not None:
-                        result.live_state = live_snapshot
-                        live_signature = _snapshot_signature(live_snapshot)
-                        if live_signature != result._live_state_signature:
-                            result._live_state_signature = live_signature
-                            result.last_progress_at = snapshot_updated_at
-
-                    final_state = chunk
-
-                    messages = chunk.get("messages", [])
-                    last_message = messages[-1] if messages else None
-                    tool_names: list[str] = []
-                    if isinstance(last_message, AIMessage):
-                        message_summary = self._summarize_ai_message(last_message)
-                        tool_names = list(message_summary.get("tool_names", []))
-
-                        if _timed_out_externally():
+                #
+                # Per-turn timeout: when ``config.per_turn_timeout_seconds > 0``
+                # we wrap each ``__anext__`` with ``asyncio.wait_for`` so a single
+                # hung LLM/tool call cannot consume the entire run budget. On
+                # per-turn timeout we convert to a TIMED_OUT terminal state and
+                # return — same shape as the per-run timeout path in the async
+                # dispatcher. Cleanup of the async generator is best-effort via
+                # ``aclose()`` in the finally block.
+                per_turn_s = max(int(getattr(self.config, "per_turn_timeout_seconds", 0) or 0), 0)
+                agen = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+                try:
+                    while True:
+                        try:
+                            if per_turn_s > 0:
+                                chunk = await asyncio.wait_for(agen.__anext__(), timeout=per_turn_s)
+                            else:
+                                chunk = await agen.__anext__()
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError:
+                            iter_now_perf = time.perf_counter()
+                            iter_ms = round((iter_now_perf - iteration_start_perf) * 1000)
+                            iteration_start_perf = iter_now_perf
+                            result.iteration_durations_ms.append(iter_ms)
+                            if iter_ms > result.slowest_iteration_ms:
+                                result.slowest_iteration_ms = iter_ms
+                            late_tools = list(
+                                (result.last_ai_message_summary or {}).get("tool_names", [])
+                            )
+                            logger.error(
+                                f"[trace={self.trace_id}] Subagent {self.config.name} per-turn timeout: "
+                                f"iteration #{result.iteration_count + 1} exceeded {per_turn_s}s "
+                                f"(last_tools={late_tools})"
+                            )
+                            result.status = SubagentStatus.TIMED_OUT
+                            result.error = (
+                                f"Per-turn timeout exceeded ({per_turn_s}s) on iteration "
+                                f"#{result.iteration_count + 1}"
+                            )
+                            result.error_type = "PerTurnTimeoutError"
+                            result.completed_at = datetime.now()
+                            result.last_update_at = result.completed_at
                             result.timeout_observed_during_stream = True
-                            result.late_ai_message_summary = message_summary
+                            result.timed_out_at = result.completed_at
+                            return result
+
+                        if cancel_event and cancel_event.is_set():
+                            raise SubagentCancelledError("Execution cancelled by user")
+
+                        # Track per-iteration wall time
+                        iter_now_perf = time.perf_counter()
+                        iter_ms = round((iter_now_perf - iteration_start_perf) * 1000)
+                        iteration_start_perf = iter_now_perf
+                        result.iteration_count += 1
+                        result.iteration_durations_ms.append(iter_ms)
+                        if iter_ms > result.slowest_iteration_ms:
+                            result.slowest_iteration_ms = iter_ms
+                        # Slow-iteration log threshold raised from 30s → 120s:
+                        # 90–150s is now expected for legitimate long writes
+                        # (see _resolve_builder_limits in switch_to_builder.py).
+                        if iter_ms > 120_000:
                             logger.warning(
-                                f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; "
-                                f"late_tools={tool_names}"
+                                f"[trace={self.trace_id}] Subagent {self.config.name} iteration "
+                                f"#{result.iteration_count} took {iter_ms}ms (>120s)"
+                            )
+
+                        snapshot_updated_at = datetime.now()
+                        result.last_update_at = snapshot_updated_at
+                        live_snapshot = _extract_live_state_snapshot(chunk)
+                        if live_snapshot is not None:
+                            result.live_state = live_snapshot
+                            live_signature = _snapshot_signature(live_snapshot)
+                            if live_signature != result._live_state_signature:
+                                result._live_state_signature = live_signature
+                                result.last_progress_at = snapshot_updated_at
+
+                        final_state = chunk
+
+                        messages = chunk.get("messages", [])
+                        last_message = messages[-1] if messages else None
+                        tool_names: list[str] = []
+                        if isinstance(last_message, AIMessage):
+                            message_summary = self._summarize_ai_message(last_message)
+                            tool_names = list(message_summary.get("tool_names", []))
+
+                            if _timed_out_externally():
+                                result.timeout_observed_during_stream = True
+                                result.late_ai_message_summary = message_summary
+                                logger.warning(
+                                    f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; "
+                                    f"late_tools={tool_names}"
+                                )
+                                return result
+
+                            result.last_ai_message_summary = message_summary
+                        elif _timed_out_externally():
+                            result.timeout_observed_during_stream = True
+                            logger.warning(
+                                f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; aborting local updates"
                             )
                             return result
 
-                        result.last_ai_message_summary = message_summary
-                    elif _timed_out_externally():
-                        result.timeout_observed_during_stream = True
-                        logger.warning(
-                            f"[trace={self.trace_id}] Subagent {self.config.name} observed external timeout while streaming; aborting local updates"
-                        )
-                        return result
-
-                    previous_count = len(result.ai_messages)
-                    self._collect_ai_messages_from_state(chunk, result)
-                    if len(result.ai_messages) > previous_count:
-                        if tool_names:
-                            logger.info(
-                                f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message "
-                                f"#{len(result.ai_messages)} tools={tool_names}"
-                            )
-                        else:
-                            logger.info(
-                                f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
-                            )
-                    persist_background_task_status_payload(result)
+                        previous_count = len(result.ai_messages)
+                        self._collect_ai_messages_from_state(chunk, result)
+                        if len(result.ai_messages) > previous_count:
+                            if tool_names:
+                                logger.info(
+                                    f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message "
+                                    f"#{len(result.ai_messages)} tools={tool_names}"
+                                )
+                            else:
+                                logger.info(
+                                    f"[trace={self.trace_id}] Subagent {self.config.name} captured AI message #{len(result.ai_messages)}"
+                                )
+                        persist_background_task_status_payload(result)
+                finally:
+                    with contextlib.suppress(Exception):
+                        await agen.aclose()
             else:
                 final_state = await agent.ainvoke(state, config=run_config, context=context)  # type: ignore[arg-type]
                 snapshot_updated_at = datetime.now()

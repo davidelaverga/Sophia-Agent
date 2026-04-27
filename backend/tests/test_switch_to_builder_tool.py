@@ -86,8 +86,12 @@ def test_normalize_builder_request_preserves_real_research_task():
 def test_resolve_builder_limits_shortens_demo_budget():
     switch_module = importlib.import_module("deerflow.sophia.tools.switch_to_builder")
 
-    assert switch_module._resolve_builder_limits(True) == (40, 45)
-    assert switch_module._resolve_builder_limits(False) == (150, 600)
+    # Demo mode: tight envelope so UI smoke tests fail fast.
+    assert switch_module._resolve_builder_limits(True) == (40, 45, 30)
+    # Normal mode: 150 turns, 1800s per-run cap, 300s per-turn cap.
+    # The per-turn cap is new (3-tuple); previously this was (150, 600).
+    # See _resolve_builder_limits docstring for the threshold rationale.
+    assert switch_module._resolve_builder_limits(False) == (150, 1800, 300)
 
 
 def test_build_builder_progress_description_uses_document_topic():
