@@ -306,6 +306,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
 - `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place)
 - Telegram attachment downloads triggered by `ChannelManager` must be dispatched back onto `telegram.py`'s `_tg_loop` (using `asyncio.run_coroutine_threadsafe`) because PTB bot I/O is loop-affine to the polling thread loop.
+- Telegram builder completion delivery uploads artifact bytes directly (instead of passing signed URLs to Telegram), and truncates outgoing text to Telegram API limits (`send_document` caption 1024 chars, `send_message` text 4096 chars).
 
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`

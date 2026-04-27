@@ -146,6 +146,23 @@ async def test_success_event_sends_document_as_input_file(channel: TelegramChann
 
 
 @pytest.mark.anyio
+async def test_success_event_truncates_document_caption_to_telegram_limit(channel: TelegramChannel):
+    """Telegram document captions are capped at 1024 chars."""
+    _bind_loop(channel)
+    _stub_store_lookup(channel, chat_id="987654321")
+    payload = _success_payload()
+    payload["summary"] = "x" * 3000
+
+    with patch("app.channels.telegram.download_artifact") as mock_download:
+        mock_download.return_value = (b"file-bytes", "text/markdown")
+        await channel._on_builder_completion(payload)
+
+    call_kwargs = channel._application.bot.send_document.call_args.kwargs
+    assert len(call_kwargs["caption"]) == 1024
+    assert call_kwargs["caption"].endswith("…")
+
+
+@pytest.mark.anyio
 async def test_success_event_falls_back_to_text_when_download_returns_none(channel: TelegramChannel):
     """Supabase 404 / not-configured returns None — the channel must still
     deliver something. Send caption + signed URL as plaintext so the user
@@ -185,6 +202,23 @@ async def test_success_event_falls_back_to_text_when_download_raises(channel: Te
     bot.send_message.assert_awaited_once()
     text = bot.send_message.call_args.kwargs["text"]
     assert payload["artifact_url"] in text
+
+
+@pytest.mark.anyio
+async def test_success_event_plaintext_fallback_truncates_long_text(channel: TelegramChannel):
+    """Telegram messages are capped at 4096 chars."""
+    _bind_loop(channel)
+    _stub_store_lookup(channel, chat_id="55")
+    payload = _success_payload()
+    payload["summary"] = "x" * 10000
+
+    with patch("app.channels.telegram.download_artifact") as mock_download:
+        mock_download.return_value = None
+        await channel._on_builder_completion(payload)
+
+    text = channel._application.bot.send_message.call_args.kwargs["text"]
+    assert len(text) == 4096
+    assert text.endswith("…")
 
 
 @pytest.mark.anyio

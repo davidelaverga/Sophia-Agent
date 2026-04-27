@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 # Deep-link tokens issued by the gateway are 43-char urlsafe-b64; accept
 # anything that looks like a plausible token so future rotations still work.
 _LINK_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-]{16,96}$")
+_TELEGRAM_CAPTION_LIMIT = 1024
+_TELEGRAM_TEXT_LIMIT = 4096
 
 
 def _looks_like_link_token(value: str) -> bool:
@@ -704,6 +706,15 @@ class TelegramChannel(Channel):
         return body
 
     @staticmethod
+    def _truncate_for_telegram(text: str, *, limit: int) -> str:
+        """Clamp text to Telegram limits, appending an ellipsis if needed."""
+        if len(text) <= limit:
+            return text
+        if limit <= 1:
+            return "…"
+        return f"{text[: limit - 1]}…"
+
+    @staticmethod
     def _encode_callback_data(action: str, task_id: str, topic_id: str | None) -> str:
         """Pack ``(task_id, topic_id)`` into a single callback_data string.
 
@@ -818,10 +829,19 @@ class TelegramChannel(Channel):
                     if doc_bytes is not None:
                         from telegram import InputFile
 
+                        safe_caption = self._truncate_for_telegram(caption, limit=_TELEGRAM_CAPTION_LIMIT)
+                        if safe_caption != caption:
+                            logger.warning(
+                                "[Telegram] builder completion caption truncated chat=%s task_id=%s original_len=%d",
+                                chat_id,
+                                task_id,
+                                len(caption),
+                            )
+
                         sent = await bot.send_document(
                             chat_id=int(chat_id),
                             document=InputFile(BytesIO(doc_bytes), filename=artifact_filename),
-                            caption=caption,
+                            caption=safe_caption,
                         )
                         logger.info(
                             "[Telegram] builder completion delivered chat=%s task_id=%s status=success bytes=%d filename=%s",
@@ -838,7 +858,8 @@ class TelegramChannel(Channel):
                         text = caption
                         if isinstance(artifact_url, str) and artifact_url:
                             text = f"{caption}\n\n{artifact_url}"
-                        sent = await bot.send_message(chat_id=int(chat_id), text=text)
+                        safe_text = self._truncate_for_telegram(text, limit=_TELEGRAM_TEXT_LIMIT)
+                        sent = await bot.send_message(chat_id=int(chat_id), text=safe_text)
                         logger.warning(
                             "[Telegram] builder completion fell back to plaintext chat=%s task_id=%s filename=%s url_present=%s",
                             chat_id,
@@ -849,7 +870,7 @@ class TelegramChannel(Channel):
                 elif status in {"error", "timeout"}:
                     sent = await bot.send_message(
                         chat_id=int(chat_id),
-                        text=caption,
+                        text=self._truncate_for_telegram(caption, limit=_TELEGRAM_TEXT_LIMIT),
                         reply_markup=self._build_retry_keyboard(task_id, topic_id=topic_id),
                     )
                     logger.info(
@@ -859,7 +880,7 @@ class TelegramChannel(Channel):
                         status,
                     )
                 else:
-                    sent = await bot.send_message(chat_id=int(chat_id), text=caption)
+                    sent = await bot.send_message(chat_id=int(chat_id), text=self._truncate_for_telegram(caption, limit=_TELEGRAM_TEXT_LIMIT))
                     logger.info(
                         "[Telegram] builder completion delivered chat=%s task_id=%s status=%s",
                         chat_id,
