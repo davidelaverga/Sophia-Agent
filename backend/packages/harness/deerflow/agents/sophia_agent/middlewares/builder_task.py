@@ -153,8 +153,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # MUST stay in sync with BuilderArtifactMiddleware._CEILING_FOR_FORCE in
         # builder_artifact.py — otherwise the model's budget math lies and it
         # over-commits to retries past its advertised limit.
-        # PR-C F6 (2026-04-24): lowered 20 → 10 to match the tightened ceiling.
-        _HARD_CEILING = 10
+        # PR-A (2026-04-27): bumped 10 → 20 so research-heavy tasks have room
+        # to gather sources before being forced to emit. See builder_artifact.py
+        # for the full rationale.
+        _HARD_CEILING = 20
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
 
         sections.append(
@@ -199,9 +201,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 f"{remaining} turn(s) remaining before forced termination.\n"
                 f"Most recent tool calls: {joined_tools}.\n"
             )
-            # PR-C F6 (2026-04-24): thresholds rescaled for the lower ceiling.
-            # ceiling=10: CRITICAL at remaining<=2 (~80%), WARNING at <=4 (~60%).
-            if remaining <= 2:
+            # PR-A (2026-04-27): thresholds rescaled for the bumped ceiling
+            # (10 → 20). Same proportions as before — CRITICAL at the last
+            # ~15% of the budget (remaining<=3), WARNING at the last ~30%
+            # (remaining<=6) so the model gets graduated wrap-up pressure.
+            if remaining <= 3:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
                     "Your NEXT action MUST be emit_builder_artifact — DO NOT call write_todos, "
@@ -211,7 +215,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     "if only a generator .py exists, emit that with confidence<=0.4 and "
                     "explain in companion_tone_hint.\n"
                 )
-            elif remaining <= 4:
+            elif remaining <= 6:
                 escalation += (
                     "WARNING: Running low on turns. Wrap up edits and call "
                     "emit_builder_artifact within the next 1-2 turns. "

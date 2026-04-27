@@ -116,17 +116,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     # model literally cannot call any other tool. Prompt-level escalation is
     # not reliable mid-retry-loop; the API-level constraint is.
     #
-    # PR-C F6 (2026-04-24): lowered ceiling 20 → 10. The previous ceiling was
-    # set high to give bash room to recover from failing runs, but in practice
-    # long-running builds rarely recovered — they just burnt the budget on
-    # pathological retries. 10 turns is enough for a clean end-to-end build
-    # (write_todos → write_file → bash run → bash verify → emit) plus one or
-    # two retry rounds, and it halves the worst-case duration users wait for
-    # a stuck build. A soft WARN at turn 6 (``_SOFT_WARN_AT``) gives the model
-    # an early signal to start wrapping up before tool_choice forcing kicks in.
-    _FORCE_EMIT_REMAINING = 2
-    _CEILING_FOR_FORCE = 10
-    _SOFT_WARN_AT = 6
+    # PR-A (2026-04-27): bumped ceiling 10 → 20 after a research-heavy task in
+    # log ``019dcfbf-f219-7d83-86a4-ffb161ebddf7`` proved 10 too tight. The
+    # builder used 8 turns just on web_search/web_fetch and was then forced to
+    # emit_builder_artifact before write_file_tool could run, trapping the
+    # model in an unrecoverable retry loop on a non-existent file. Returning
+    # to the pre-PR-C-F6 ceiling of 20 gives research tasks room to gather
+    # sources AND write the deliverable AND verify it. Soft warn at 12 (60%)
+    # and force-emit at remaining<=3 keep the same proportions as before.
+    #
+    # PR-C F6 history (2026-04-24): lowered 20 → 10 because the original
+    # ceiling let pathological retries burn the budget. PR-A fixes those
+    # retries at the source (two-stage forced-emit + empty-path rejection)
+    # so the larger budget no longer enables runaway retry loops.
+    _FORCE_EMIT_REMAINING = 3
+    _CEILING_FOR_FORCE = 20
+    _SOFT_WARN_AT = 12
 
     @staticmethod
     def _should_force_emit(state: BuilderArtifactState) -> bool:
@@ -140,7 +145,79 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": "emit_builder_artifact"}
 
     @staticmethod
+    def _forced_write_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces write_file.
+
+        PR-A: used in the two-stage forced-emit path when the model is in the
+        forced-emit window but hasn't written any deliverable yet. Forcing
+        emit at that point traps the model — it can only call emit, the
+        emit gets rejected (no file exists), and the loop spins. By forcing
+        write_file for one turn first, we guarantee the model has at least
+        one chance to land a file before tool_choice locks to emit.
+        """
+        return {"type": "tool", "name": "write_file"}
+
+    @staticmethod
+    def _has_output_file(state: BuilderArtifactState) -> bool:
+        """Return True if any user-facing file exists in the sandbox outputs dir.
+
+        PR-A: used by ``wrap_model_call`` to decide whether the forced-emit
+        window should immediately force ``tool_choice=emit_builder_artifact``
+        or first force ``tool_choice=write_file`` to give a not-yet-written
+        deliverable a chance to land.
+
+        Files whose name starts with ``_`` (e.g. generator scripts named
+        ``_generate_foo.py``) or ``.`` (hidden files) are excluded — those
+        aren't user-facing deliverables.
+        """
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path")
+            if isinstance(thread_data, dict)
+            else None
+        )
+        if not isinstance(outputs_host_path, str) or not outputs_host_path:
+            # No outputs dir configured — assume the model hasn't written
+            # anything. Returning False routes through the safer path
+            # (force write_file first) instead of forcing a phantom emit.
+            return False
+
+        builder_task_started_at_ms = state.get("builder_task_started_at_ms")
+        min_mtime: float | None = None
+        if isinstance(builder_task_started_at_ms, (int, float)) and builder_task_started_at_ms > 0:
+            # Ignore stale artifacts from prior builder tasks in the same thread.
+            # Keep the same 5s grace used by hard-ceiling promotion.
+            min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
+
+        try:
+            outputs_root = Path(outputs_host_path)
+            if not outputs_root.is_dir():
+                return False
+            for entry in outputs_root.rglob("*"):
+                if not entry.is_file():
+                    continue
+                if entry.name.startswith("_") or entry.name.startswith("."):
+                    continue
+                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+                    continue
+                return True
+        except OSError:
+            # Filesystem error (permissions, race) — fall through to True
+            # so the existing forced-emit path proceeds. Better to risk one
+            # phantom emit than to accidentally trap the model in write_file
+            # forcing on every turn when something is genuinely wrong with
+            # the sandbox.
+            logger.debug(
+                "BuilderArtifact._has_output_file: scan failed for outputs_path=%s",
+                outputs_host_path,
+                exc_info=True,
+            )
+            return True
+        return False
+
+    @classmethod
     def _artifact_files_exist(
+        cls,
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
         runtime: Runtime,
@@ -151,6 +228,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         emit_builder_artifact before the file has actually been written.
         Returns ``True`` only when ALL referenced paths resolve to an existing
         local file OR an existing Supabase object.
+
+        PR-A (2026-04-27): tightened the empty-candidates fast-path. When the
+        model is in the forced-emit window (``_should_force_emit`` is True),
+        an empty ``artifact_path`` is treated as ESCAPE-HATCH-INVALID: it
+        almost always means the model gave up under tool_choice pressure
+        and is emitting nothing. We reject so the hard-ceiling fallback
+        path (which scans outputs/ and produces a deterministic
+        confidence=0.5 promotion or confidence=0.2 apology) can take over.
+        Outside the forced-emit window the old behaviour applies — text-only
+        / conceptual artifacts are still accepted.
         """
         candidates: list[str] = []
         primary = artifact_args.get("artifact_path")
@@ -164,8 +251,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
 
         if not candidates:
-            # No files referenced — nothing to verify. Accept (builder may be
-            # emitting a text-only or conceptual result).
+            if cls._should_force_emit(state):
+                logger.warning(
+                    "BuilderArtifact: rejecting empty artifact_path during "
+                    "forced-emit (non_artifact_turns=%s) — letting hard "
+                    "ceiling fallback promote a real file or surface a "
+                    "deterministic apology instead of a phantom emit.",
+                    state.get("builder_non_artifact_turns"),
+                )
+                return False
+            # No files referenced AND not under forced-emit pressure —
+            # accept (builder may be emitting a text-only or conceptual
+            # result).
             return True
 
         thread_data = state.get("thread_data") or {}
@@ -205,21 +302,48 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         return True
 
+    def _force_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        """Two-stage forced-tool-choice (PR-A).
+
+        Returns the Anthropic ``tool_choice`` payload appropriate for the
+        current ceiling state:
+
+        - ``None`` when forcing isn't required yet.
+        - ``{"type": "tool", "name": "write_file"}`` when forcing IS required
+          but no deliverable has been written yet (avoids trapping the model
+          in an emit-only loop on a non-existent file).
+        - ``{"type": "tool", "name": "emit_builder_artifact"}`` when forcing
+          is required and a deliverable already exists on disk.
+        """
+        if not self._should_force_emit(state):
+            return None
+        if self._has_output_file(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+                "(non_artifact_turns=%s, ceiling=%s)",
+                state.get("builder_non_artifact_turns"),
+                self._CEILING_FOR_FORCE,
+            )
+            return self._forced_tool_choice()
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=write_file before emit "
+            "(non_artifact_turns=%s, ceiling=%s, no output file yet — "
+            "two-stage force prevents phantom-emit loop)",
+            state.get("builder_non_artifact_turns"),
+            self._CEILING_FOR_FORCE,
+        )
+        return self._forced_write_tool_choice()
+
     @override
     def wrap_model_call(
         self,
         request: ModelRequest,
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
-        """Force emit_builder_artifact tool_choice when ceiling is imminent."""
-        if self._should_force_emit(request.state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s)",
-                request.state.get("builder_non_artifact_turns"),
-                self._CEILING_FOR_FORCE,
-            )
-            request = request.override(tool_choice=self._forced_tool_choice())
+        """Force tool_choice when ceiling is imminent (two-stage)."""
+        choice = self._force_choice_for_state(request.state)
+        if choice is not None:
+            request = request.override(tool_choice=choice)
         return handler(request)
 
     @override
@@ -228,15 +352,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         request: ModelRequest,
         handler: Callable[[ModelRequest], Awaitable[Any]],
     ) -> Any:
-        """Async variant — same logic as wrap_model_call."""
-        if self._should_force_emit(request.state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s)",
-                request.state.get("builder_non_artifact_turns"),
-                self._CEILING_FOR_FORCE,
-            )
-            request = request.override(tool_choice=self._forced_tool_choice())
+        """Async variant — same two-stage logic as wrap_model_call."""
+        choice = self._force_choice_for_state(request.state)
+        if choice is not None:
+            request = request.override(tool_choice=choice)
         return await handler(request)
 
     @override

@@ -2252,9 +2252,11 @@ class TestBuilderArtifactMiddleware:
         assert result is None
 
     def test_builder_artifact_warns_at_turn_6(self, caplog):
-        """PR-C F6: a soft warning is logged at the ``_SOFT_WARN_AT`` turn
-        (6) so the builder (and ops watchers) get an early wrap-up signal
-        before tool_choice forcing and the hard ceiling kick in."""
+        """PR-A: a soft warning is logged at the ``_SOFT_WARN_AT`` turn
+        (12 with the new ceiling=20) so the builder (and ops watchers)
+        get an early wrap-up signal before tool_choice forcing and the
+        hard ceiling kick in.
+        """
         import logging
 
         from deerflow.agents.sophia_agent.middlewares import builder_artifact as mod
@@ -2264,14 +2266,14 @@ class TestBuilderArtifactMiddleware:
         msg = MagicMock()
         msg.type = "ai"
         msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
-        # At turn 5 → after processing this non-artifact turn, counter = 6.
-        state = {"messages": [msg], "builder_non_artifact_turns": 5}
+        # Turn 11 → after processing this non-artifact turn, counter = 12 = soft warn.
+        state = {"messages": [msg], "builder_non_artifact_turns": 11}
 
         with caplog.at_level(logging.WARNING, logger=mod.logger.name):
             result = mw.after_model(state, _make_runtime())
 
         assert result is not None
-        assert result["builder_non_artifact_turns"] == 6
+        assert result["builder_non_artifact_turns"] == 12
         # builder_result should NOT be set yet — this is still a normal turn.
         assert "builder_result" not in result
         soft_warnings = [
@@ -2279,14 +2281,14 @@ class TestBuilderArtifactMiddleware:
             if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()
         ]
         assert soft_warnings, (
-            f"Expected a soft-ceiling WARNING at turn 6. Got: "
+            f"Expected a soft-ceiling WARNING at turn 12. Got: "
             f"{[r.getMessage() for r in caplog.records]}"
         )
         # Warning is emitted exactly once (only at the soft-warn turn).
         assert len(soft_warnings) == 1
 
-    def test_builder_artifact_does_not_warn_before_turn_6(self, caplog):
-        """Ensure the soft warning does not fire on earlier or later turns."""
+    def test_builder_artifact_does_not_warn_before_soft_ceiling(self, caplog):
+        """Ensure the soft warning does not fire before the soft-warn turn."""
         import logging
 
         from deerflow.agents.sophia_agent.middlewares import builder_artifact as mod
@@ -2296,8 +2298,8 @@ class TestBuilderArtifactMiddleware:
         msg = MagicMock()
         msg.type = "ai"
         msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
-        # Turn 3 → next counter = 4 (no warning).
-        state = {"messages": [msg], "builder_non_artifact_turns": 3}
+        # Turn 9 → next counter = 10 (still 2 turns shy of 12, no warning).
+        state = {"messages": [msg], "builder_non_artifact_turns": 9}
 
         with caplog.at_level(logging.WARNING, logger=mod.logger.name):
             mw.after_model(state, _make_runtime())
@@ -2307,22 +2309,23 @@ class TestBuilderArtifactMiddleware:
             if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()
         ]
         assert not soft_warnings, (
-            f"Did not expect a soft-ceiling WARNING before turn 6. Got: "
+            f"Did not expect a soft-ceiling WARNING before turn 12. Got: "
             f"{[r.getMessage() for r in caplog.records]}"
         )
 
-    def test_builder_artifact_forces_at_turn_10(self):
-        """PR-C F6: at the hard ceiling (10) the middleware force-ends the
+    def test_builder_artifact_forces_at_hard_ceiling(self):
+        """PR-A: at the hard ceiling (20) the middleware force-ends the
         build with a fallback builder_result instead of letting the agent
-        loop burn more turns. This is the final safety net."""
+        loop burn more turns. This is the final safety net.
+        """
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
         msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
-        # Turn 9 → next counter = 10 → triggers hard ceiling.
-        state = {"messages": [msg], "builder_non_artifact_turns": 9}
+        # Turn 19 → next counter = 20 → triggers hard ceiling.
+        state = {"messages": [msg], "builder_non_artifact_turns": 19}
 
         result = mw.after_model(state, _make_runtime())
         assert result is not None
@@ -2331,24 +2334,155 @@ class TestBuilderArtifactMiddleware:
         assert result.get("jump_to") == "end"
         assert "builder_result" in result
         builder_result = result["builder_result"]
-        assert builder_result["steps_completed"] == 10
+        assert builder_result["steps_completed"] == 20
         # Without a promotable file, we get the explicit force-stop fallback.
         assert builder_result["artifact_title"] == "Build task force-stopped"
         assert builder_result["confidence"] == 0.2
         assert result["builder_non_artifact_turns"] == 0
 
     def test_builder_artifact_forces_tool_choice_near_ceiling(self):
-        """PR-C F6: when within ``_FORCE_EMIT_REMAINING`` of the ceiling, the
-        model call is forced to tool_choice=emit_builder_artifact. Verify
-        via the static helper so we don't need a full model-call harness."""
+        """PR-A: when within ``_FORCE_EMIT_REMAINING`` of the ceiling, the
+        model call is forced. Verify via the static helper so we don't
+        need a full model-call harness.
+        """
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
-        # ceiling=10, remaining=2 → force at turn >= 8.
-        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 7}) is False
-        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 8}) is True
-        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 9}) is True
+        # ceiling=20, remaining=3 → force at turn >= 17.
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 16}) is False
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 17}) is True
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 18}) is True
+        assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 19}) is True
         # Never force on turn 0 (guard against empty state resetting).
         assert BuilderArtifactMiddleware._should_force_emit({"builder_non_artifact_turns": 0}) is False
+
+    # PR-A: two-stage forced-emit + empty-path rejection
+    # ---------------------------------------------------
+
+    def test_force_choice_returns_write_file_when_no_output_yet(self, tmp_path):
+        """PR-A: in the forced-emit window with an empty outputs dir, the
+        first stage forces tool_choice=write_file (not emit). This breaks
+        the trap where the model can't escape an emit-only loop on a
+        non-existent file.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()  # exists but empty
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 17,  # in force-emit window (>= 17)
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "write_file"}
+
+    def test_force_choice_returns_emit_when_output_file_exists(self, tmp_path):
+        """PR-A: same window, but a real deliverable IS on disk → force emit."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 17,
+        }
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_force_choice_returns_none_outside_window(self, tmp_path):
+        """PR-A: outside the forced-emit window the helper returns None
+        (no override) regardless of file state.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 5,
+        }
+        assert BuilderArtifactMiddleware()._force_choice_for_state(state) is None
+
+    def test_has_output_file_skips_underscore_prefixed_files(self, tmp_path):
+        """PR-A: generator scripts named ``_generate_foo.py`` aren't user-
+        facing deliverables, so the two-stage check ignores them. Without
+        this exclusion the model could "satisfy" the check by writing a
+        helper script and never produce a real artifact.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "_generate_thing.py").write_text("# generator only")
+        (outputs_dir / ".hidden").write_text("ignore me")
+
+        state = {"thread_data": {"outputs_path": str(outputs_dir)}}
+        assert BuilderArtifactMiddleware._has_output_file(state) is False
+
+        # Adding a real deliverable flips it true.
+        (outputs_dir / "report.md").write_text("# real")
+        assert BuilderArtifactMiddleware._has_output_file(state) is True
+
+    def test_has_output_file_ignores_stale_files_before_current_task(self, tmp_path):
+        """Forced-emit gating must ignore artifacts from prior tasks.
+
+        If the outputs directory already contains files from an older builder run,
+        the current run should still get a forced write turn first until it writes
+        a fresh deliverable.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        stale_file = outputs_dir / "old-report.md"
+        stale_file.write_text("# stale")
+        now = stale_file.stat().st_mtime
+        old = now - 120.0
+        os.utime(stale_file, (old, old))
+
+        # Start this task after the stale file mtime but before the fresh file.
+        started_at_ms = int(now * 1000)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_task_started_at_ms": started_at_ms,
+        }
+        assert BuilderArtifactMiddleware._has_output_file(state) is False
+
+        fresh_file = outputs_dir / "new-report.md"
+        fresh_file.write_text("# fresh")
+        fresh = now + 120.0
+        os.utime(fresh_file, (fresh, fresh))
+        assert BuilderArtifactMiddleware._has_output_file(state) is True
+
+    def test_artifact_files_exist_rejects_empty_path_during_forced_emit(self):
+        """PR-A: empty artifact_path in the forced-emit window is treated
+        as an escape hatch and rejected. This forces the loop into the
+        hard-ceiling fallback (which produces a deterministic apology or
+        promotes a real file) instead of accepting confidence=0.1 phantoms.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {"builder_non_artifact_turns": 17}  # in force-emit window
+        # No artifact_path, no supporting_files → empty candidates.
+        args = {"artifact_type": "document", "confidence": 0.1}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_artifact_files_exist_accepts_empty_path_outside_window(self):
+        """Outside the forced-emit window, empty candidates remain valid
+        (text-only / conceptual artifacts are still legitimate).
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {"builder_non_artifact_turns": 5}  # well below force window
+        args = {"artifact_type": "concept", "confidence": 0.7}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
 
     def test_emit_accepted_when_file_on_disk(self, tmp_path):
         """PR-D: when the referenced artifact file exists on disk,
@@ -2591,9 +2725,11 @@ class TestBuilderArtifactMiddleware:
         assert "jump_to" not in result
 
     def test_rejected_emit_advances_to_hard_ceiling_and_terminates(self, monkeypatch, tmp_path):
-        """Codex fix: simulate two consecutive rejected forced emits at turns
-        8 and 9. The counter advances to 10 on the second rejection, so a
-        subsequent non-emit turn triggers the hard ceiling fallback."""
+        """Codex fix: simulate two consecutive rejected forced emits inside
+        the forced-emit window (PR-A: turns 17–19 with ceiling=20). The
+        counter advances to 19 on the second rejection, so a subsequent
+        non-emit turn triggers the hard ceiling fallback at turn 20.
+        """
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
         from deerflow.sophia.storage import supabase_artifact_store
 
@@ -2608,7 +2744,7 @@ class TestBuilderArtifactMiddleware:
 
         mw = BuilderArtifactMiddleware()
 
-        # Turn 8: forced emit, rejected → counter becomes 9
+        # Turn 17: forced emit, rejected → counter becomes 18
         msg1 = MagicMock()
         msg1.type = "ai"
         msg1.tool_calls = [
@@ -2630,28 +2766,28 @@ class TestBuilderArtifactMiddleware:
         state = {
             "messages": [msg1],
             "thread_data": {"outputs_path": str(outputs_dir)},
-            "builder_non_artifact_turns": 8,
+            "builder_non_artifact_turns": 17,
             "builder_tool_turn_summaries": [],
         }
         result1 = mw.after_model(state, runtime)
         assert result1 is not None
-        assert result1["builder_non_artifact_turns"] == 9
+        assert result1["builder_non_artifact_turns"] == 18
         assert result1["builder_tool_turn_summaries"][-1]["emit_rejected"] is True
 
-        # Turn 9: forced emit again, rejected → counter becomes 10
+        # Turn 18: forced emit again, rejected → counter becomes 19
         state["messages"] = [msg1]
-        state["builder_non_artifact_turns"] = 9
+        state["builder_non_artifact_turns"] = 18
         state["builder_tool_turn_summaries"] = result1["builder_tool_turn_summaries"]
         result2 = mw.after_model(state, runtime)
         assert result2 is not None
-        assert result2["builder_non_artifact_turns"] == 10
+        assert result2["builder_non_artifact_turns"] == 19
 
-        # Turn 10: a non-emit turn (e.g. bash) — hard ceiling triggers
+        # Turn 19: a non-emit turn (e.g. bash) — hard ceiling triggers at 20
         msg2 = MagicMock()
         msg2.type = "ai"
         msg2.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
         state["messages"] = [msg2]
-        state["builder_non_artifact_turns"] = 10
+        state["builder_non_artifact_turns"] = 19
         state["builder_tool_turn_summaries"] = result2["builder_tool_turn_summaries"]
         result3 = mw.after_model(state, runtime)
         assert result3 is not None
