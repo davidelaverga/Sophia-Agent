@@ -132,12 +132,55 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     _FORCE_EMIT_REMAINING = 3
     _CEILING_FOR_FORCE = 20
     _SOFT_WARN_AT = 12
+    # Wall-clock fraction of the per-run timeout at which we activate
+    # force-emit even if the turn-count ceiling hasn't been hit. Each
+    # write_file LLM call costs ~95s on long-form deliverables; with
+    # _resolve_builder_limits returning timeout=1800s, 0.70 leaves ~540s of
+    # slack — enough for one final write + emit + network buffer.
+    _FORCE_EMIT_WALL_CLOCK_FRACTION = 0.70
 
     @staticmethod
     def _should_force_emit(state: BuilderArtifactState) -> bool:
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
         remaining = BuilderArtifactMiddleware._CEILING_FOR_FORCE - non_artifact_turns
         return remaining <= BuilderArtifactMiddleware._FORCE_EMIT_REMAINING and non_artifact_turns > 0
+
+    @staticmethod
+    def _should_force_emit_by_clock(state: BuilderArtifactState, runtime: Runtime | None = None) -> bool:
+        """Return True when the wall-clock budget has crossed the force-emit fraction.
+
+        Reads ``builder_timeout_seconds`` and ``builder_task_kickoff_ms`` from
+        ``state`` (populated via ``SubagentExecutor``'s ``extra_configurable``
+        plumbing in ``switch_to_builder``). Uses ``builder_task_started_at_ms``
+        from state when present, falling back to ``builder_task_kickoff_ms``
+        (set at queue time) so the very first turn — before ``after_model``
+        has had a chance to record ``builder_task_started_at_ms`` — still
+        gets the right answer.
+
+        ``runtime`` is accepted for parity with other middleware methods and
+        kept as a fallback signal source, but the canonical path is state-only:
+        ``executor.py`` already merges ``extra_configurable`` into initial
+        state, matching how ``delegation_context`` flows.
+
+        Returns False (today's behavior, turn-count-only) when neither timestamp
+        is set or when ``builder_timeout_seconds`` is missing/non-positive. This
+        keeps the gate backward-compatible for any caller that doesn't opt in.
+        """
+        raw_timeout = state.get("builder_timeout_seconds")
+        timeout_s = 0
+        if isinstance(raw_timeout, (int, float)) and raw_timeout > 0:
+            timeout_s = int(raw_timeout)
+        if timeout_s <= 0:
+            return False
+
+        started_ms = state.get("builder_task_started_at_ms") or 0
+        if not isinstance(started_ms, (int, float)) or started_ms <= 0:
+            started_ms = state.get("builder_task_kickoff_ms") or 0
+        if not isinstance(started_ms, (int, float)) or started_ms <= 0:
+            return False
+
+        elapsed_ms = max(0, int(time.time() * 1000) - int(started_ms))
+        return elapsed_ms / (timeout_s * 1000) >= BuilderArtifactMiddleware._FORCE_EMIT_WALL_CLOCK_FRACTION
 
     @staticmethod
     def _forced_tool_choice() -> dict[str, Any]:
@@ -251,7 +294,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
 
         if not candidates:
-            if cls._should_force_emit(state):
+            # Reject empty artifact_path under EITHER turn-count pressure
+            # (existing) OR wall-clock pressure (new). Both indicate the
+            # model is emitting under tool_choice pressure with no real
+            # deliverable to point at — let the hard-ceiling fallback
+            # promote a real file or surface a deterministic apology.
+            if cls._should_force_emit(state) or cls._should_force_emit_by_clock(state, runtime):
                 logger.warning(
                     "BuilderArtifact: rejecting empty artifact_path during "
                     "forced-emit (non_artifact_turns=%s) — letting hard "
@@ -302,11 +350,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         return True
 
-    def _force_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        """Two-stage forced-tool-choice (PR-A).
+    def _force_choice_for_state(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None = None,
+    ) -> dict[str, Any] | None:
+        """Two-stage forced-tool-choice (PR-A) with wall-clock awareness.
+
+        Activates when EITHER the turn-count ceiling is imminent
+        (``_should_force_emit``) OR the wall-clock fraction of the per-run
+        timeout has been crossed (``_should_force_emit_by_clock``). The
+        two-stage selection is unchanged — only the activation condition
+        broadens. This guarantees a real emit lands on slow-but-productive
+        runs before the executor's per-run cap fires.
 
         Returns the Anthropic ``tool_choice`` payload appropriate for the
-        current ceiling state:
+        current state:
 
         - ``None`` when forcing isn't required yet.
         - ``{"type": "tool", "name": "write_file"}`` when forcing IS required
@@ -315,22 +374,29 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         - ``{"type": "tool", "name": "emit_builder_artifact"}`` when forcing
           is required and a deliverable already exists on disk.
         """
-        if not self._should_force_emit(state):
+        turn_force = self._should_force_emit(state)
+        clock_force = self._should_force_emit_by_clock(state, runtime)
+        if not (turn_force or clock_force):
             return None
+        force_reason = "turns" if turn_force and not clock_force else (
+            "wall_clock" if clock_force and not turn_force else "turns+wall_clock"
+        )
         if self._has_output_file(state):
             logger.warning(
                 "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s)",
+                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
                 state.get("builder_non_artifact_turns"),
                 self._CEILING_FOR_FORCE,
+                force_reason,
             )
             return self._forced_tool_choice()
         logger.warning(
             "BuilderArtifact: forcing tool_choice=write_file before emit "
-            "(non_artifact_turns=%s, ceiling=%s, no output file yet — "
+            "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
             "two-stage force prevents phantom-emit loop)",
             state.get("builder_non_artifact_turns"),
             self._CEILING_FOR_FORCE,
+            force_reason,
         )
         return self._forced_write_tool_choice()
 
@@ -341,7 +407,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ModelRequest], Any],
     ) -> Any:
         """Force tool_choice when ceiling is imminent (two-stage)."""
-        choice = self._force_choice_for_state(request.state)
+        choice = self._force_choice_for_state(request.state, request.runtime)
         if choice is not None:
             request = request.override(tool_choice=choice)
         return handler(request)
@@ -353,7 +419,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ModelRequest], Awaitable[Any]],
     ) -> Any:
         """Async variant — same two-stage logic as wrap_model_call."""
-        choice = self._force_choice_for_state(request.state)
+        choice = self._force_choice_for_state(request.state, request.runtime)
         if choice is not None:
             request = request.override(tool_choice=choice)
         return await handler(request)

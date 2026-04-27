@@ -147,9 +147,16 @@ def test_explicit_document_command_routes_through_builder_and_returns_artifact(m
     assert captured["owner_id"] == "builder-user"
     assert captured["executor_kwargs"]["thread_id"] == "thread-direct-doc"
     assert captured["executor_kwargs"]["parent_model"] == "test-parent-model"
+    # _resolve_builder_limits overrides the seeded config via dataclasses.replace
+    # to set the wall-clock-aware budget (1800s per-run, 300s per-turn).
+    # See switch_to_builder.py for the threshold rationale.
     assert captured["executor_kwargs"]["config"].max_turns == 150
-    assert captured["executor_kwargs"]["config"].timeout_seconds == 600
+    assert captured["executor_kwargs"]["config"].timeout_seconds == 1800
+    assert captured["executor_kwargs"]["config"].per_turn_timeout_seconds == 300
     assert captured["executor_kwargs"]["extra_configurable"]["delegation_context"]["task_type"] == "document"
+    # Wall-clock plumbing the middlewares depend on:
+    assert captured["executor_kwargs"]["extra_configurable"]["builder_timeout_seconds"] == 1800
+    assert captured["executor_kwargs"]["extra_configurable"]["builder_task_kickoff_ms"] > 0
 
 
 def test_document_command_middleware_leaves_normal_chat_to_model():

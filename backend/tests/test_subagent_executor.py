@@ -477,6 +477,134 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.COMPLETED
         assert "Task" in result.result
 
+    # -------------------------------------------------------------------
+    # Per-turn timeout (companion-to-builder timeout fix)
+    # -------------------------------------------------------------------
+    #
+    # The executor enforces a per-iteration timeout by wrapping each
+    # ``astream`` chunk's ``__anext__`` call with ``asyncio.wait_for``. A
+    # genuinely hung LLM/tool call is converted to a TIMED_OUT terminal
+    # state instead of being allowed to consume the entire run budget.
+
+    @pytest.mark.anyio
+    async def test_per_turn_timeout_fires_on_slow_iteration(self, classes, base_config, mock_agent, msg):
+        """A single iteration that takes longer than per_turn_timeout_seconds
+        must convert the run to TIMED_OUT with a per-turn error message."""
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        config = SubagentConfig(
+            name="slow-agent",
+            description="Test slow agent",
+            system_prompt="Slow.",
+            max_turns=10,
+            timeout_seconds=60,
+            per_turn_timeout_seconds=1,
+        )
+
+        async def slow_astream(*args, **kwargs):
+            # Sleep longer than the per-turn cap before yielding the first chunk.
+            await asyncio.sleep(2)
+            yield {"messages": [msg.human("Task"), msg.ai("Late", "msg-1")]}
+
+        mock_agent.astream = slow_astream
+
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            thread_id="test-thread",
+            trace_id="trace-slow",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.TIMED_OUT
+        assert result.error is not None
+        assert "Per-turn timeout exceeded" in result.error
+        assert "1s" in result.error  # the configured per-turn cap
+        assert result.error_type == "PerTurnTimeoutError"
+        assert result.completed_at is not None
+        assert result.timeout_observed_during_stream is True
+
+    @pytest.mark.anyio
+    async def test_per_turn_timeout_disabled_when_zero(self, classes, base_config, mock_agent, msg):
+        """With per_turn_timeout_seconds=0, slow iterations are allowed to
+        complete normally — preserves today's behavior for callers that
+        don't opt in (e.g. general-purpose, bash subagents)."""
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        config = SubagentConfig(
+            name="default-agent",
+            description="Test default-cap agent",
+            system_prompt="Default.",
+            max_turns=10,
+            timeout_seconds=60,
+            per_turn_timeout_seconds=0,  # disabled
+        )
+
+        async def slow_astream(*args, **kwargs):
+            await asyncio.sleep(0.05)  # slow but well under per-run cap
+            yield {"messages": [msg.human("Task"), msg.ai("Done", "msg-1")]}
+
+        mock_agent.astream = slow_astream
+
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        # Without per-turn enforcement, the run completes normally.
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.error is None
+
+    @pytest.mark.anyio
+    async def test_per_turn_timeout_preserves_iteration_telemetry(self, classes, mock_agent, msg):
+        """When per-turn fires, the late iteration's wall time is still
+        recorded (so post-mortem traces show *which* iteration blew the
+        budget) and the result returns immediately without raising."""
+        SubagentConfig = classes["SubagentConfig"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        config = SubagentConfig(
+            name="slow-agent-2",
+            description="Telemetry on per-turn",
+            system_prompt="Slow.",
+            max_turns=10,
+            timeout_seconds=60,
+            per_turn_timeout_seconds=1,
+        )
+
+        async def slow_astream(*args, **kwargs):
+            await asyncio.sleep(1.5)
+            yield {"messages": [msg.human("Task"), msg.ai("Never seen", "msg-1")]}
+
+        mock_agent.astream = slow_astream
+
+        executor = SubagentExecutor(
+            config=config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.TIMED_OUT
+        # Iteration 1 was killed before any chunk was processed; iteration_count
+        # stays at 0 (we only increment after a chunk is received), but the
+        # late iteration's duration is recorded for diagnostics.
+        assert result.iteration_count == 0
+        assert result.iteration_durations_ms  # at least one entry recorded
+
 
 # -----------------------------------------------------------------------------
 # Sync Execution Path Tests

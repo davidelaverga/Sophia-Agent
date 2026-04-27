@@ -117,6 +117,8 @@ Per-turn retrieval uses rule-based category selection in Python (zero latency), 
 
 Writes happen only in the offline pipeline — never in-turn. Every write includes full entity scoping: `user_id`, `agent_id`, `run_id` (session), `timestamp`, and metadata including `tone_estimate` (required for `feeling` category).
 
+Implementation note: backend memory timestamps are emitted as timezone-aware UTC ISO-8601 values (with `Z`) to avoid deprecated naive datetime usage.
+
 ---
 
 ## The Smart Opener System

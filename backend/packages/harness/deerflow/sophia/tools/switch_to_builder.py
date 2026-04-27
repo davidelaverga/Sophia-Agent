@@ -561,15 +561,19 @@ def _switch_to_builder_impl(
             }
         )
 
-    # Builder execution guardrails
-    max_turns, timeout_seconds = _resolve_builder_limits(demo_mode)
+    # Builder execution guardrails — applied uniformly to every builder task
+    # type (document, presentation, research, code, data_analysis, …). Per-task
+    # tuning is out of scope; one envelope keeps the force-emit math consistent.
+    max_turns, timeout_seconds, per_turn_timeout_seconds = _resolve_builder_limits(demo_mode)
     config = replace(
         config,
         max_turns=max_turns,
         timeout_seconds=timeout_seconds,
+        per_turn_timeout_seconds=per_turn_timeout_seconds,
         name="sophia_builder",
     )
 
+    builder_task_kickoff_ms = int(time.time() * 1000)
     executor = SubagentExecutor(
         config=config,
         tools=[],
@@ -579,7 +583,11 @@ def _switch_to_builder_impl(
         thread_id=thread_id,
         trace_id=trace_id,
         pre_built_agent=builder_agent,
-        extra_configurable={"delegation_context": delegation_context},
+        extra_configurable={
+            "delegation_context": delegation_context,
+            "builder_timeout_seconds": int(timeout_seconds),
+            "builder_task_kickoff_ms": builder_task_kickoff_ms,
+        },
     )
 
     task_id = tool_call_id or str(uuid.uuid4())[:8]
@@ -823,21 +831,32 @@ def _build_demo_builder_task() -> str:
     )
 
 
-def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int]:
-    """Return recursion and timeout budgets for the delegated Builder task.
+def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int, int]:
+    """Return recursion, per-run timeout, and per-turn timeout budgets for the
+    delegated Builder task.
 
-    Budget must be large enough for Sonnet to generate multi-page documents
-    with images/charts and still call emit_builder_artifact. A single streamed
-    LLM turn can easily take 90-150s for a 5-page PDF, so the overall budget
-    needs substantial headroom above one turn.
+    Three coordinated caps:
 
-    `max_turns` is forwarded to LangGraph as `recursion_limit`. Because the
-    Sophia middleware chain yields multiple graph super-steps per logical
-    tool call (~5 per turn with before/after hooks + prompt assembly), we
-    size the budget well above the _HARD_CEILING=12 prompt guidance so the
-    agent does not abort with GraphRecursionError on a normal deliverable.
+    - ``max_turns`` is forwarded to LangGraph as ``recursion_limit``. Because the
+      Sophia middleware chain yields multiple graph super-steps per logical tool
+      call (~5 per turn with before/after hooks + prompt assembly), we size the
+      budget well above the ``_HARD_CEILING=20`` prompt guidance so the agent
+      does not abort with GraphRecursionError on a normal deliverable.
+
+    - ``timeout_seconds`` (per-run) bounds the total wall-clock occupation of an
+      executor worker. Sized to fit ~12 expensive turns × 150s each, which
+      covers a multi-section research document with revisions.
+
+    - ``per_turn_timeout_seconds`` bounds a single ``astream`` chunk. A single
+      streamed LLM turn can take 90-150s for a 5-page PDF, so the per-turn cap
+      is set to ~2× the longest legitimate turn. This catches genuinely hung
+      LLM/tool calls within a small multiple of normal cost instead of letting
+      them drift to the per-run cap.
+
+    Demo tasks intentionally use a tighter envelope so quick UI smoke tests
+    fail fast.
     """
     if demo_mode:
-        return 40, 45
+        return 40, 45, 30
 
-    return 150, 600
+    return 150, 1800, 300

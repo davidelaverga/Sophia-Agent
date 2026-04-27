@@ -134,6 +134,26 @@ def test_switch_to_builder_queues_background_task(monkeypatch):
     ]
     assert captured["kwargs"]["extra_configurable"]["delegation_context"]["allow_web_research"] is False
     assert captured["kwargs"]["extra_configurable"]["delegation_context"]["search_mode"] == "autonomous"
+
+    # Wall-clock plumbing: switch_to_builder propagates the per-run timeout
+    # and a kickoff timestamp so BuilderArtifactMiddleware /
+    # BuilderTaskMiddleware can compute wall-clock pressure. Without these
+    # keys, the wall-clock force-emit gate reverts to today's turn-count-only
+    # behavior — verifying their presence here prevents a silent regression.
+    extra = captured["kwargs"]["extra_configurable"]
+    assert extra["builder_timeout_seconds"] == 1800
+    assert isinstance(extra["builder_task_kickoff_ms"], int)
+    assert extra["builder_task_kickoff_ms"] > 0
+
+    # Per-turn timeout is wired onto the SubagentConfig replaced in
+    # _switch_to_builder_impl. The test's get_subagent_config returns a
+    # config without per_turn_timeout_seconds; switch_to_builder must
+    # override it via dataclasses.replace().
+    submitted_config = captured["kwargs"]["config"]
+    assert submitted_config.timeout_seconds == 1800
+    assert submitted_config.per_turn_timeout_seconds == 300
+    assert submitted_config.max_turns == 150
+
     assert events[-1]["type"] == "task_started"
     assert events[-1]["task_id"] == "tc-builder-1"
 
