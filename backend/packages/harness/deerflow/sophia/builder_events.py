@@ -93,6 +93,54 @@ def _gateway_url() -> str:
     return os.environ.get("SOPHIA_GATEWAY_URL", _DEFAULT_GATEWAY_URL).rstrip("/")
 
 
+_misconfigured_logged = False
+_misconfigured_logged_lock = threading.Lock()
+
+
+def _warn_if_misconfigured(payload: dict[str, Any]) -> None:
+    """Log a one-shot warning when the gateway URL points at localhost in
+    a deployed environment.
+
+    The Render LangGraph and Gateway services run as separate processes —
+    the LangGraph container can't reach the gateway via ``localhost:8001``.
+    Operators must set ``SOPHIA_GATEWAY_URL`` on the LangGraph service to
+    the Gateway's internal/public URL. We can't detect "is this Render?"
+    perfectly from inside the container, but we can detect "the gateway URL
+    is localhost AND we're not running locally" via a few common heuristics
+    and surface a loud warning so misconfiguration is obvious in the first
+    failure log.
+    """
+    global _misconfigured_logged
+    if _misconfigured_logged:
+        return
+
+    explicit = os.environ.get("SOPHIA_GATEWAY_URL", "").strip()
+    if explicit:
+        # Operator set the URL explicitly — assume they know what they did.
+        return
+
+    looks_deployed = any(
+        os.environ.get(var)
+        for var in ("RENDER", "RENDER_EXTERNAL_URL", "FLY_APP_NAME", "K_SERVICE")
+    )
+    if not looks_deployed:
+        return
+
+    with _misconfigured_logged_lock:
+        if _misconfigured_logged:
+            return
+        _misconfigured_logged = True
+    logger.warning(
+        "Builder-events: SOPHIA_GATEWAY_URL not set in a deployed "
+        "environment; falling back to %s which will NOT reach the "
+        "Gateway service. Completion cards will be DROPPED until "
+        "SOPHIA_GATEWAY_URL is configured. (task_id=%s, thread_id=%s)",
+        _DEFAULT_GATEWAY_URL,
+        payload.get("task_id"),
+        payload.get("thread_id"),
+    )
+
+
 def should_emit_for_agent(agent_name: str | None) -> bool:
     """Decide whether terminal events from this agent should fan out as cards."""
     return isinstance(agent_name, str) and agent_name in _OBSERVED_AGENT_NAMES
@@ -149,6 +197,54 @@ def _extract_task_brief(result: SubagentResult) -> str | None:
     return None
 
 
+# PR-A: phantom-success detection thresholds.
+#
+# The builder's hard-ceiling fallback (builder_artifact.py:_HARD_CEILING) emits
+# a confidence=0.5 result when it can promote a real file from outputs/, and a
+# confidence=0.2 "force-stopped" result when it can't. A success event with
+# very low confidence AND no artifact_path almost always means the model gave
+# up under tool_choice pressure without producing anything — surfacing that as
+# a "ready" card with a broken Open button is worse than telling the user the
+# truth and offering retry.
+_PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD = 0.3
+
+
+def _is_phantom_success(
+    *,
+    status: str,
+    artifact_path: str | None,
+    artifact_url: str | None,
+    confidence: Any,
+) -> bool:
+    """Decide whether a 'success' event is actually a phantom (no deliverable).
+
+    A success event is phantom when ALL of:
+    - status maps to 'success' (i.e., subagent reported COMPLETED)
+    - artifact_url is missing (signed-URL mint failed because the file
+      doesn't exist on Supabase) AND artifact_path is missing/empty
+    - confidence is below the phantom threshold
+
+    The confidence check matters because a deliberately-text-only artifact
+    (no path, but high confidence) is legitimate — only the low-confidence
+    no-path combo signals "model gave up".
+    """
+    if status != "success":
+        return False
+    has_path = isinstance(artifact_path, str) and artifact_path.strip()
+    has_url = isinstance(artifact_url, str) and artifact_url.strip()
+    if has_path or has_url:
+        return False
+    try:
+        confidence_value = float(confidence) if confidence is not None else None
+    except (TypeError, ValueError):
+        confidence_value = None
+    if confidence_value is None:
+        # Missing confidence + missing path/url is itself suspicious; treat
+        # as phantom so the user gets the failure card with retry.
+        return True
+    return confidence_value < _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
+
+
 def build_completion_payload(
     result: SubagentResult,
     *,
@@ -159,6 +255,12 @@ def build_completion_payload(
     Single source of truth for the wire contract — both PR 1 (sync builder)
     and PR 2 (async deepagents) emit the same shape so the gateway worker
     and frontend card don't need to branch.
+
+    PR-A: detects "phantom success" (status=success but no artifact_path,
+    no artifact_url, and confidence below the threshold) and coerces it to
+    status=error with a retry-friendly error_message. Without this, the
+    frontend would render a success card with a broken Open button when
+    the builder gave up without producing a deliverable.
     """
     # Local import to avoid circular: subagents.executor → sophia.builder_events
     from deerflow.subagents.executor import _extract_builder_result_from_task_result
@@ -167,6 +269,7 @@ def build_completion_payload(
     artifact_path = builder_result.get("artifact_path")
     artifact_title = builder_result.get("artifact_title")
     artifact_type = builder_result.get("artifact_type")
+    confidence = builder_result.get("confidence")
 
     artifact_filename = None
     if isinstance(artifact_path, str) and artifact_path:
@@ -189,12 +292,36 @@ def build_completion_payload(
         if isinstance(builder_task, dict):
             task_type = builder_task.get("task_type")
 
+    mapped_status = _map_status(status_value)
+    error_message: str | None = getattr(result, "error", None)
+
+    if _is_phantom_success(
+        status=mapped_status,
+        artifact_path=artifact_path,
+        artifact_url=artifact_url,
+        confidence=confidence,
+    ):
+        logger.warning(
+            "Builder-events: coercing phantom-success to error for "
+            "task_id=%s confidence=%s artifact_path=%r — builder reported "
+            "success but produced no deliverable.",
+            getattr(result, "task_id", None),
+            confidence,
+            artifact_path,
+        )
+        mapped_status = "error"
+        if not error_message:
+            error_message = (
+                "Builder finished but couldn’t produce a deliverable. "
+                "Want me to try again?"
+            )
+
     return {
         "thread_id": getattr(result, "thread_id", None),
         "task_id": getattr(result, "task_id", None),
         "trace_id": getattr(result, "trace_id", None),
         "agent_name": agent_name,
-        "status": _map_status(status_value),
+        "status": mapped_status,
         "task_type": task_type,
         "task_brief": _extract_task_brief(result),
         "artifact_url": artifact_url,
@@ -203,7 +330,7 @@ def build_completion_payload(
         "artifact_filename": artifact_filename,
         "summary": builder_result.get("companion_summary"),
         "user_next_action": builder_result.get("user_next_action"),
-        "error_message": getattr(result, "error", None),
+        "error_message": error_message,
         "completed_at": _iso(getattr(result, "completed_at", None)),
         "source": "subagent_executor",
     }
@@ -214,6 +341,7 @@ def _post_webhook(payload: dict[str, Any]) -> None:
     if not payload.get("thread_id"):
         # No parent thread → nothing for the gateway to route to.
         return
+    _warn_if_misconfigured(payload)
     url = f"{_gateway_url()}{_WEBHOOK_PATH}"
     try:
         with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
@@ -301,6 +429,12 @@ def emit_completion_event(
 
 
 def reset_for_tests() -> None:
-    """Clear the emitted-task-ids dedup set. Test-only."""
+    """Clear the emitted-task-ids dedup set + misconfigured-warning latch.
+
+    Test-only.
+    """
+    global _misconfigured_logged
     with _emitted_lock:
         _emitted_task_ids.clear()
+    with _misconfigured_logged_lock:
+        _misconfigured_logged = False

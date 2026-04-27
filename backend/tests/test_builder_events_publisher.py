@@ -191,11 +191,20 @@ def test_emit_completion_event_maps_status_to_card_enum(stub_executor_module):
         ("timed_out", "timeout"),
         ("cancelled", "cancelled"),
     ]
+    # Provide a real builder_result so the success case isn't coerced to
+    # phantom (PR-A added that check). Empty builder_result + completed
+    # is a separate test below.
+    builder_result_payload = {
+        "artifact_path": "/mnt/user-data/outputs/report.md",
+        "artifact_type": "document",
+        "confidence": 0.9,
+    }
     for status_value, expected_card_status in cases:
         builder_events.reset_for_tests()
         result = _make_result(
             task_id=f"task-{status_value}",
             error="boom" if status_value != "completed" else None,
+            final_state={"builder_result": builder_result_payload},
         )
         _set_status(result, status_value)
 
@@ -355,6 +364,175 @@ def test_emit_does_not_poison_dedup_when_payload_build_fails(stub_executor_modul
     assert second is True
     assert len(captured) == 1
     assert captured[0]["task_id"] == "task-poison"
+
+
+def test_phantom_success_is_coerced_to_error(stub_executor_module):
+    """PR-A: when the builder reports COMPLETED but produced no deliverable
+    (no artifact_path, no artifact_url) AND confidence is below threshold,
+    the publisher should coerce status to error so the frontend renders
+    the failure card with retry instead of a success card with a broken
+    Open button.
+
+    Trigger conditions in the wild: builder hits the hard-ceiling fallback
+    with no promotable file, sets confidence=0.2 and artifact_path=None.
+    """
+    result = _make_result(
+        final_state={
+            "builder_task": {"task_type": "document"},
+            "builder_result": {
+                "artifact_path": None,
+                "artifact_type": "unknown",
+                "artifact_title": "Build task force-stopped",
+                "companion_summary": "no deliverable produced",
+                "confidence": 0.2,
+            },
+            "delegation_context": {"task": "Write a one-pager about climate."},
+        },
+    )
+    _set_status(result, "completed")
+
+    captured: list[dict] = []
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        _wait_for_capture(captured, expected=1)
+
+    assert captured, "expected a payload"
+    payload = captured[0]
+    # Coerced to error.
+    assert payload["status"] == "error"
+    # Retry-friendly default error_message.
+    assert payload["error_message"] is not None
+    assert "Want me to try again" in payload["error_message"]
+    # task_brief preserved so the retry button has context.
+    assert payload["task_brief"] == "Write a one-pager about climate."
+
+
+def test_phantom_success_threshold_keeps_high_confidence_text_only_artifacts(stub_executor_module):
+    """A high-confidence completion with no path is a legitimate text-only
+    artifact (e.g. a concept summary). It must NOT be coerced to error.
+    """
+    result = _make_result(
+        final_state={
+            "builder_task": {"task_type": "research"},
+            "builder_result": {
+                "artifact_path": None,
+                "artifact_type": "research_report",
+                "companion_summary": "Synthesis: X is true because Y.",
+                "confidence": 0.9,
+            },
+        },
+    )
+    _set_status(result, "completed")
+
+    captured: list[dict] = []
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        _wait_for_capture(captured, expected=1)
+
+    assert captured
+    assert captured[0]["status"] == "success"
+    assert captured[0]["error_message"] is None
+
+
+def test_phantom_success_missing_confidence_is_treated_as_phantom(stub_executor_module):
+    """PR-A: if the builder result has no confidence at all AND no path,
+    treat as phantom — it's strictly worse than any defined success case.
+    """
+    result = _make_result(
+        final_state={
+            "builder_result": {
+                "artifact_path": None,
+                "artifact_type": "unknown",
+                # confidence intentionally absent
+            },
+        },
+    )
+    _set_status(result, "completed")
+
+    captured: list[dict] = []
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        _wait_for_capture(captured, expected=1)
+
+    assert captured
+    assert captured[0]["status"] == "error"
+
+
+def test_misconfigured_gateway_warning_fires_in_deployed_env(monkeypatch, caplog):
+    """PR-A: when SOPHIA_GATEWAY_URL is unset AND the runtime looks like a
+    deployed environment (RENDER, FLY_APP_NAME, K_SERVICE), the publisher
+    logs a single WARNING the first time it tries to deliver an event so
+    operators see the misconfiguration immediately instead of debugging
+    silent drops.
+    """
+    import logging
+
+    monkeypatch.delenv("SOPHIA_GATEWAY_URL", raising=False)
+    monkeypatch.setenv("RENDER", "true")
+    builder_events.reset_for_tests()  # clear the latch
+
+    # Block the actual httpx call so we only test the warning path.
+    with patch("deerflow.sophia.builder_events.httpx.Client") as client_cls:
+        client_cls.side_effect = ConnectionError("blocked in test")
+        with caplog.at_level(logging.WARNING, logger=builder_events.logger.name):
+            builder_events._post_webhook({"thread_id": "t-1", "task_id": "task-1"})
+            # Second invocation must NOT log the misconfiguration warning again
+            # — it's a one-shot probe.
+            builder_events._post_webhook({"thread_id": "t-2", "task_id": "task-2"})
+
+    misconfig_warnings = [
+        r for r in caplog.records
+        if "SOPHIA_GATEWAY_URL not set in a deployed environment" in r.getMessage()
+    ]
+    assert len(misconfig_warnings) == 1, (
+        f"Expected exactly one misconfiguration warning, got {len(misconfig_warnings)}"
+    )
+
+
+def test_misconfigured_gateway_warning_does_not_fire_locally(monkeypatch, caplog):
+    """PR-A: in local dev (no RENDER/FLY_APP_NAME/K_SERVICE env vars), the
+    default localhost URL is correct — no warning.
+    """
+    import logging
+
+    monkeypatch.delenv("SOPHIA_GATEWAY_URL", raising=False)
+    for var in ("RENDER", "RENDER_EXTERNAL_URL", "FLY_APP_NAME", "K_SERVICE"):
+        monkeypatch.delenv(var, raising=False)
+    builder_events.reset_for_tests()
+
+    with patch("deerflow.sophia.builder_events.httpx.Client") as client_cls:
+        client_cls.side_effect = ConnectionError("blocked in test")
+        with caplog.at_level(logging.WARNING, logger=builder_events.logger.name):
+            builder_events._post_webhook({"thread_id": "t-1", "task_id": "task-1"})
+
+    misconfig_warnings = [
+        r for r in caplog.records
+        if "SOPHIA_GATEWAY_URL not set in a deployed environment" in r.getMessage()
+    ]
+    assert misconfig_warnings == []
+
+
+def test_misconfigured_gateway_warning_skipped_when_explicit_url_set(monkeypatch, caplog):
+    """PR-A: if SOPHIA_GATEWAY_URL IS set (any value, even invalid), trust
+    the operator and don't warn. Wrong URL still produces a delivery
+    failure log via the existing exception handler.
+    """
+    import logging
+
+    monkeypatch.setenv("SOPHIA_GATEWAY_URL", "http://gateway.internal:8001")
+    monkeypatch.setenv("RENDER", "true")
+    builder_events.reset_for_tests()
+
+    with patch("deerflow.sophia.builder_events.httpx.Client") as client_cls:
+        client_cls.side_effect = ConnectionError("blocked in test")
+        with caplog.at_level(logging.WARNING, logger=builder_events.logger.name):
+            builder_events._post_webhook({"thread_id": "t-1", "task_id": "task-1"})
+
+    misconfig_warnings = [
+        r for r in caplog.records
+        if "SOPHIA_GATEWAY_URL not set in a deployed environment" in r.getMessage()
+    ]
+    assert misconfig_warnings == []
 
 
 def test_emitted_task_cache_is_lru_bounded(stub_executor_module, monkeypatch):
