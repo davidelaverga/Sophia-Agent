@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.workers.builder_events import get_builder_events_worker
+from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +100,25 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
             payload.get("task_id"),
             exc_info=True,
         )
+
+    # Trigger a synthetic companion turn so Sophia proactively surfaces
+    # the artifact in chat without the user having to send another
+    # message. Fire-and-forget: ``wake()`` swallows its own errors and
+    # the user's existing turn-driven adoption flow remains the
+    # fallback. See ``app/gateway/workers/companion_wakeup.py``.
+    #
+    # Use the ``_or_none`` lookup so test fixtures that install only the
+    # SSE worker don't get a noisy warning on every webhook POST.
+    wakeup = get_companion_wakeup_or_none(request.app)
+    if wakeup is not None:
+        try:
+            asyncio.create_task(wakeup.wake(payload))
+        except Exception:
+            logger.warning(
+                "Companion wakeup scheduling failed for builder event task_id=%s",
+                payload.get("task_id"),
+                exc_info=True,
+            )
 
     return {"delivered_subscribers": delivered}
 
