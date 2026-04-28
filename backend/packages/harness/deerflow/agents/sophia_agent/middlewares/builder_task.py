@@ -9,6 +9,7 @@ config and injects a ``<builder_briefing>`` block into
 import html
 import logging
 import time
+from pathlib import Path
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
@@ -18,6 +19,121 @@ from langgraph.runtime import Runtime
 from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
+
+
+# PR #94: max number of files to enumerate in the CRITICAL endgame block.
+# Keeps the prompt budget bounded even on chaotic builds with dozens of
+# scratch files; the model only needs the most recently-modified
+# candidates to pick a path.
+_ENDGAME_MAX_FILES = 10
+
+
+def _list_outputs_for_prompt(state: "BuilderTaskState") -> list[dict[str, Any]]:
+    """Return up to ``_ENDGAME_MAX_FILES`` recent files in the builder's
+    ``outputs/`` directory, sorted by mtime descending.
+
+    Each entry is a dict with ``path`` (virtual sandbox path under
+    ``/mnt/user-data/outputs/``), ``size_bytes``, ``mtime``, and a
+    ``category`` that flags how the model should treat the file
+    (``"deliverable"``, ``"generator"``, or ``"intermediate"``).
+
+    Same staleness filtering as ``BuilderArtifactMiddleware._has_output_file``
+    — files modified before ``builder_task_started_at_ms - 5s`` are ignored
+    so a prior task's leftovers aren't surfaced as candidates.
+
+    Returns an empty list when ``outputs_path`` is missing, the directory
+    doesn't exist, or the scan fails (best-effort — never blocks the
+    prompt assembly).
+    """
+    thread_data = state.get("thread_data") or {}
+    outputs_host_path = (
+        thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+    )
+    if not isinstance(outputs_host_path, str) or not outputs_host_path:
+        return []
+
+    builder_task_started_at_ms = state.get("builder_task_started_at_ms")
+    min_mtime: float | None = None
+    if isinstance(builder_task_started_at_ms, (int, float)) and builder_task_started_at_ms > 0:
+        min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
+
+    _DELIVERABLE_EXTS = {
+        ".pdf", ".pptx", ".docx", ".xlsx",
+        ".png", ".jpg", ".jpeg", ".svg",
+        ".html", ".zip",
+    }
+    _INTERMEDIATE_EXTS = {".json", ".csv", ".tsv", ".txt"}
+
+    try:
+        outputs_root = Path(outputs_host_path)
+        if not outputs_root.is_dir():
+            return []
+        candidates: list[tuple[Path, float]] = []
+        for entry in outputs_root.rglob("*"):
+            if not entry.is_file():
+                continue
+            if entry.name.startswith("."):
+                continue
+            stat = entry.stat()
+            if min_mtime is not None and stat.st_mtime < min_mtime:
+                continue
+            candidates.append((entry, stat.st_mtime))
+        candidates.sort(key=lambda pair: pair[1], reverse=True)
+    except OSError:
+        logger.debug(
+            "BuilderTask._list_outputs_for_prompt: scan failed for outputs_path=%s",
+            outputs_host_path,
+            exc_info=True,
+        )
+        return []
+
+    listing: list[dict[str, Any]] = []
+    for path, mtime in candidates[:_ENDGAME_MAX_FILES]:
+        rel = path.relative_to(outputs_root).as_posix()
+        suffix = path.suffix.lower()
+        name = path.name
+        if name.startswith("_generate") and suffix == ".py":
+            category = "generator"
+        elif suffix in _DELIVERABLE_EXTS:
+            category = "deliverable"
+        elif suffix in _INTERMEDIATE_EXTS or name.startswith("_"):
+            category = "intermediate"
+        else:
+            # Unknown extension — treat as a possible deliverable rather
+            # than intermediate. Markdown/text reports written without an
+            # explicit ``.md`` (rare) fall here too.
+            category = "deliverable"
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        listing.append(
+            {
+                "path": f"/mnt/user-data/outputs/{rel}",
+                "size_bytes": int(size),
+                "mtime": float(mtime),
+                "category": category,
+            }
+        )
+    return listing
+
+
+def _format_size(num_bytes: int) -> str:
+    """Format a byte count for the prompt — concise but readable."""
+    if num_bytes < 1024:
+        return f"{num_bytes} B"
+    if num_bytes < 1024 * 1024:
+        return f"{num_bytes / 1024:.1f} KB"
+    return f"{num_bytes / (1024 * 1024):.1f} MB"
+
+
+def _format_age(now_s: float, mtime: float) -> str:
+    delta = max(0.0, now_s - mtime)
+    if delta < 60:
+        return f"{int(delta)}s ago"
+    if delta < 3600:
+        return f"{int(delta / 60)}m ago"
+    return f"{int(delta / 3600)}h ago"
 
 
 class BuilderTaskState(AgentState):
@@ -266,7 +382,60 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     "Use artifact_path pointing to the best file that exists on disk; "
                     "if only a generator .py exists, emit that with confidence<=0.4 and "
                     "explain in companion_tone_hint.\n"
+                    "Do NOT emit with artifact_path=null. If you cannot decide, pick the "
+                    "first file marked 'deliverable' (or 'generator' if no deliverable exists) "
+                    "from the list below.\n"
                 )
+                # PR #94: enumerate actual files in outputs/ so the model
+                # can pick a real path under tool_choice pressure instead
+                # of emitting artifact_path=null. Run ``675c2c35`` (PDF +
+                # diagrams) ended in a GraphRecursionError because the
+                # model emitted None repeatedly under forced emit; giving
+                # it a concrete file list eliminates that guessing step.
+                outputs_listing = _list_outputs_for_prompt(state)
+                if outputs_listing:
+                    now_s = time.time()
+                    file_lines: list[str] = []
+                    has_deliverable = any(
+                        item["category"] == "deliverable" for item in outputs_listing
+                    )
+                    has_generator = any(
+                        item["category"] == "generator" for item in outputs_listing
+                    )
+                    for item in outputs_listing:
+                        size_str = _format_size(item["size_bytes"])
+                        age_str = _format_age(now_s, item["mtime"])
+                        if item["category"] == "deliverable":
+                            tag = "← preferred (final deliverable)"
+                            if has_deliverable:
+                                # Mark only the most recent deliverable as preferred.
+                                # After we tag the first one, downgrade the rest.
+                                has_deliverable = False
+                            else:
+                                tag = "(another deliverable)"
+                        elif item["category"] == "generator":
+                            if not has_deliverable and has_generator:
+                                tag = "(generator script — emit with confidence<=0.4 if no deliverable works)"
+                                has_generator = False
+                            else:
+                                tag = "(generator script)"
+                        else:
+                            tag = "(intermediate — do NOT emit as final)"
+                        file_lines.append(
+                            f"  - {item['path']}  ({size_str}, modified {age_str})  {tag}"
+                        )
+                    escalation += (
+                        "Files currently in /mnt/user-data/outputs/ that you may emit:\n"
+                        + "\n".join(file_lines)
+                        + "\n"
+                    )
+                else:
+                    escalation += (
+                        "No files were detected in /mnt/user-data/outputs/. "
+                        "Emit with artifact_path=null is INVALID — "
+                        "write at least one file before emit_builder_artifact, "
+                        "or accept the force-stop fallback.\n"
+                    )
             elif remaining <= 6:
                 escalation += (
                     "WARNING: Running low on turns. Wrap up edits and call "
