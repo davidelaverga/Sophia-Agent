@@ -144,6 +144,7 @@ from deerflow.config import get_app_config
 - `switch_to_builder` now records handoff resolution diagnostics (`user_id_source`, `artifact_source`, and source-presence flags) in logs and in the handoff payload to accelerate incident triage
 - `BuilderSessionMiddleware` consumes that payload, prevents duplicate handoffs while a task is active, maps background task terminal states into `builder_task` / `builder_result`, and logs adopted handoffs plus timeout debug fields (`task_id`, `last_tool_calls`, `late_tool_calls_after_timeout`)
 - Builder middleware tracks non-artifact tool-call turns and injects stronger `<builder_endgame>` completion guidance when finalization drifts
+- Builder artifact middleware only treats `_generate_*.py` files (not similarly named `_generator*.py` helpers) as forced-bash generator scripts and hard-ceiling generator fallback candidates
 - `SubagentExecutor` keeps timeout terminal-state guarantees while recording `last_ai_message_summary` and `late_ai_message_summary` for post-timeout diagnostics
 - Companion chain now wires `SummarizationMiddleware` from `summarization` config trigger settings
 - Builder chain includes `SandboxMiddleware` + `TodoMiddleware` in addition to builder-specific task/artifact middlewares

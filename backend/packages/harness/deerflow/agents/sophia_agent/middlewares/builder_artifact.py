@@ -318,7 +318,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     continue
                 # Match generator scripts produced by the builder per the
                 # binary-deliverable prompt (``_generate_<name>.py``).
-                if not (entry.name.startswith("_generate") and entry.suffix.lower() == ".py"):
+                if not (entry.name.startswith("_generate_") and entry.suffix.lower() == ".py"):
                     continue
                 if min_mtime is not None and entry.stat().st_mtime < min_mtime:
                     continue
@@ -831,7 +831,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                     gen_candidates = [
                                         p for p in outputs_root_local.rglob("*")
                                         if p.is_file()
-                                        and p.name.startswith("_generate")
+                                        and p.name.startswith("_generate_")
                                         and p.suffix.lower() == ".py"
                                     ]
                                     if builder_task_started_at_ms:

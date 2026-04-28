@@ -2472,7 +2472,7 @@ class TestBuilderArtifactMiddleware:
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
 
     def test_has_generator_script_detects_generate_py(self, tmp_path):
-        """``_has_generator_script`` only matches ``_generate*.py`` —
+        """``_has_generator_script`` only matches ``_generate_*.py`` —
         not other underscore-prefixed files, not unrelated scripts.
         """
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -2490,6 +2490,10 @@ class TestBuilderArtifactMiddleware:
 
         # Non-underscore .py → False
         (outputs_dir / "helper.py").write_text("# not a generator")
+        assert BuilderArtifactMiddleware._has_generator_script(state) is False
+
+        # Similar-but-invalid prefix (``_generator``) → False
+        (outputs_dir / "_generator_pdf.py").write_text("# wrong prefix")
         assert BuilderArtifactMiddleware._has_generator_script(state) is False
 
         # Real generator → True
