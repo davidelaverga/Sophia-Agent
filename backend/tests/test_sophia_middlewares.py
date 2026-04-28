@@ -2696,6 +2696,36 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
 
+    def test_artifact_files_exist_rejects_outputs_path_traversal(self, tmp_path):
+        """Emit verification rejects traversal attempts under outputs/.
+
+        A path like ``/mnt/user-data/outputs/../../secret.txt`` must not be
+        treated as a valid outputs-relative candidate.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {"thread_data": {"outputs_path": str(tmp_path / "outputs")}}
+        args = {"artifact_path": "/mnt/user-data/outputs/../../secret.txt"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_artifact_files_exist_rejects_supporting_file_path_traversal(self, tmp_path):
+        """Traversal in ``supporting_files`` is rejected the same way as primary paths."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# report")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {"thread_data": {"outputs_path": str(outputs_dir)}}
+        args = {
+            "artifact_path": "/mnt/user-data/outputs/report.md",
+            "supporting_files": ["/mnt/user-data/outputs/../secrets.env"],
+        }
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
     # ---------------------------------------------------------------------
     # Wall-clock-aware force-emit (companion-to-builder timeout fix)
     # ---------------------------------------------------------------------
@@ -3183,6 +3213,312 @@ class TestBuilderArtifactMiddleware:
         assert result3.get("jump_to") == "end"
         assert "builder_result" in result3
         assert result3["builder_result"]["artifact_title"] == "Build task force-stopped"
+
+    # PR #94: short-circuit on consecutive empty-artifact_path rejections
+    # ------------------------------------------------------------------
+    #
+    # Run ``675c2c35`` (PDF + diagrams) blew LangGraph's recursion_limit at
+    # turn 29 because the empty-path rejection loop consumed graph
+    # super-steps faster than the Sophia hard-ceiling at turn 30 could
+    # fire. After 2 consecutive ``artifact_path=null`` rejections we now
+    # short-circuit straight to the hard-ceiling fallback (binary scan →
+    # generator promotion → apology) instead of letting the rejection
+    # loop continue.
+
+    def test_consecutive_empty_emit_rejections_short_circuits_to_fallback(self, tmp_path):
+        """Two consecutive empty-path rejections trigger the fallback even
+        if ``builder_non_artifact_turns`` is well below ``_CEILING_FOR_FORCE``.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        # artifact_path None — same shape the model produced in run 675c2c35.
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": None,
+                "artifact_type": "document",
+                "artifact_title": "Untitled",
+                "steps_completed": 22,
+                "decisions_made": [],
+                "companion_summary": "Done.",
+                "companion_tone_hint": "Neutral",
+                "confidence": 0.5,
+            },
+        }]
+        runtime = _make_runtime(thread_id="test-thread")
+
+        # First empty rejection — counter 27 → 28, consecutive_empty 0 → 1.
+        # No short-circuit yet (threshold is 2).
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 27,  # in force-emit window (>= 27)
+            "builder_consecutive_empty_emit_rejections": 0,
+        }
+        result1 = mw.after_model(state, runtime)
+        assert result1 is not None
+        assert result1["builder_consecutive_empty_emit_rejections"] == 1
+        assert result1.get("jump_to") != "end"
+
+        # Second empty rejection — consecutive_empty 1 → 2, short-circuit fires.
+        state["builder_non_artifact_turns"] = 28
+        state["builder_consecutive_empty_emit_rejections"] = 1
+        state["builder_tool_turn_summaries"] = result1["builder_tool_turn_summaries"]
+        result2 = mw.after_model(state, runtime)
+        assert result2 is not None
+        assert result2.get("jump_to") == "end"
+        assert "builder_result" in result2
+        # Counter resets after fallback fires.
+        assert result2["builder_consecutive_empty_emit_rejections"] == 0
+        # Real PDF on disk → fallback promotes it (confidence=0.5).
+        assert result2["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
+        assert result2["builder_result"]["confidence"] == 0.5
+
+    def test_consecutive_rejection_short_circuit_promotes_generator_when_no_binary(self, tmp_path):
+        """Short-circuit reuses the same fallback priority as hard-ceiling:
+        promote a generator script when no preferred binary is on disk.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "_generate_pdf.py").write_text("# generator only")
+        # No .pdf — binary scan finds nothing.
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {"artifact_path": None, "artifact_type": "document", "confidence": 0.3},
+        }]
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "messages": [msg],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_non_artifact_turns": 28,
+            "builder_consecutive_empty_emit_rejections": 1,
+        }
+        result = mw.after_model(state, runtime)
+        assert result is not None
+        assert result.get("jump_to") == "end"
+        assert result["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/_generate_pdf.py"
+        assert result["builder_result"]["artifact_type"] == "code"
+        assert result["builder_result"]["confidence"] == 0.4
+
+    def test_consecutive_rejection_counter_resets_on_non_emit_turn(self):
+        """Any non-emit turn (e.g. bash, write_file) breaks the empty-rejection
+        streak. Otherwise an emit rejection followed by a productive turn
+        followed by another empty rejection would trip the short-circuit
+        unfairly.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{"name": "bash", "args": {"command": "ls"}}]
+        state = {
+            "messages": [msg],
+            "builder_non_artifact_turns": 5,
+            # Streak from a prior empty rejection.
+            "builder_consecutive_empty_emit_rejections": 1,
+        }
+        result = mw.after_model(state, _make_runtime())
+        assert result is not None
+        assert result["builder_consecutive_empty_emit_rejections"] == 0
+
+    def test_consecutive_rejection_counter_resets_on_typo_path_rejection(self, tmp_path):
+        """A non-empty but invalid artifact_path (typo / hallucinated path)
+        is NOT a None-emit signal — the model gave a real attempt. Reset
+        the consecutive-empty streak so the model gets a normal retry via
+        wrap_tool_call without tripping the short-circuit prematurely.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+        from deerflow.sophia.storage import supabase_artifact_store
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [{
+            "name": "emit_builder_artifact",
+            "args": {
+                "artifact_path": "/mnt/user-data/outputs/typo.pdf",  # doesn't exist
+                "artifact_type": "document",
+                "artifact_title": "Typo",
+                "steps_completed": 5,
+                "decisions_made": [],
+                "companion_summary": "Done.",
+                "companion_tone_hint": "Neutral",
+                "confidence": 0.5,
+            },
+        }]
+        runtime = _make_runtime(thread_id="test-thread")
+        # Patch Supabase to also return False so the path is genuinely missing.
+        import unittest.mock
+        with unittest.mock.patch.object(supabase_artifact_store, "check_artifact_exists", return_value=False):
+            state = {
+                "messages": [msg],
+                "thread_data": {"outputs_path": str(outputs_dir)},
+                "builder_non_artifact_turns": 27,
+                "builder_consecutive_empty_emit_rejections": 1,  # mid-streak
+            }
+            result = mw.after_model(state, runtime)
+        assert result is not None
+        # Streak resets — typo path is not an empty-path emit.
+        assert result["builder_consecutive_empty_emit_rejections"] == 0
+        assert result.get("jump_to") != "end"
+
+    def test_endgame_lists_output_files_when_critical(self, tmp_path):
+        """PR #94: when the endgame escalates to CRITICAL (turn-count or
+        wall-clock pressure), the prompt enumerates the actual files in
+        outputs/ so the model picks a real path instead of emitting None.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+        (outputs_dir / "_generate_pdf.py").write_text("# generator")
+        (outputs_dir / "data.json").write_text("{}")
+
+        mw = BuilderTaskMiddleware()
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "system_prompt_blocks": [],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "delegation_context": {
+                "task_type": "document",
+                "companion_artifact": {"tone_estimate": 2.5, "active_tone_band": "engagement"},
+            },
+            "builder_non_artifact_turns": 28,  # remaining=2, CRITICAL
+        }
+        result = mw.before_agent(state, runtime)
+        assert result is not None
+        blocks = result.get("system_prompt_blocks") or []
+        # Find the briefing block with endgame inside.
+        briefing = next((b for b in blocks if "<builder_endgame>" in b), None)
+        assert briefing is not None, "expected <builder_endgame> block"
+        # CRITICAL escalation should be present.
+        assert "CRITICAL: You are about to be terminated" in briefing
+        # File listing must include the deliverable, generator, and intermediate.
+        assert "/mnt/user-data/outputs/report.pdf" in briefing
+        assert "preferred (final deliverable)" in briefing
+        assert "/mnt/user-data/outputs/_generate_pdf.py" in briefing
+        assert "generator script" in briefing
+        assert "/mnt/user-data/outputs/data.json" in briefing
+        assert "intermediate" in briefing
+        # Anti-null guidance.
+        assert "Do NOT emit with artifact_path=null" in briefing
+
+    def test_endgame_omits_file_list_when_outputs_dir_empty(self, tmp_path):
+        """When outputs/ is empty, the endgame surfaces the 'no files' message
+        instead of an empty bullet list.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()  # empty
+
+        mw = BuilderTaskMiddleware()
+        runtime = _make_runtime(thread_id="test-thread")
+        state = {
+            "system_prompt_blocks": [],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "delegation_context": {
+                "task_type": "document",
+                "companion_artifact": {"tone_estimate": 2.5, "active_tone_band": "engagement"},
+            },
+            "builder_non_artifact_turns": 28,  # remaining=2, CRITICAL
+        }
+        result = mw.before_agent(state, runtime)
+        briefing = next(
+            (b for b in (result.get("system_prompt_blocks") or []) if "<builder_endgame>" in b),
+            None,
+        )
+        assert briefing is not None
+        assert "No files were detected in /mnt/user-data/outputs/" in briefing
+        # Don't include phantom "Files currently in" header when there are none.
+        assert "Files currently in /mnt/user-data/outputs/ that you may emit" not in briefing
+
+    def test_endgame_does_not_list_files_when_not_critical(self, tmp_path):
+        """File enumeration only fires under CRITICAL escalation. WARNING and
+        normal endgame remain unchanged so prompts stay terse on healthy runs.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        mw = BuilderTaskMiddleware()
+        runtime = _make_runtime(thread_id="test-thread")
+        # remaining = 30 - 5 = 25 (well above WARNING at remaining<=6)
+        state = {
+            "system_prompt_blocks": [],
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "delegation_context": {
+                "task_type": "document",
+                "companion_artifact": {"tone_estimate": 2.5, "active_tone_band": "engagement"},
+            },
+            "builder_non_artifact_turns": 5,
+        }
+        result = mw.before_agent(state, runtime)
+        briefing = next(
+            (b for b in (result.get("system_prompt_blocks") or []) if "<builder_endgame>" in b),
+            None,
+        )
+        assert briefing is not None
+        # No file listing, no CRITICAL escalation at this turn count.
+        assert "Files currently in /mnt/user-data/outputs/" not in briefing
+        assert "CRITICAL" not in briefing
+
+    def test_list_outputs_for_prompt_filters_stale_files(self, tmp_path):
+        """``_list_outputs_for_prompt`` honors ``builder_task_started_at_ms``
+        so stale files from a prior task aren't surfaced as candidates.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_task import _list_outputs_for_prompt
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        stale = outputs_dir / "old.pdf"
+        stale.write_bytes(b"%PDF-1.4 stale")
+        now = stale.stat().st_mtime
+        os.utime(stale, (now - 120.0, now - 120.0))
+
+        # Task started after the stale file.
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_task_started_at_ms": int(now * 1000),
+        }
+        assert _list_outputs_for_prompt(state) == []
+
+        # Add a fresh file → it should appear.
+        fresh = outputs_dir / "new.pdf"
+        fresh.write_bytes(b"%PDF-1.4 fresh")
+        os.utime(fresh, (now + 120.0, now + 120.0))
+        listing = _list_outputs_for_prompt(state)
+        assert len(listing) == 1
+        assert listing[0]["path"] == "/mnt/user-data/outputs/new.pdf"
+        assert listing[0]["category"] == "deliverable"
 
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---
