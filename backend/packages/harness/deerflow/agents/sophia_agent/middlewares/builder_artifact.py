@@ -14,7 +14,7 @@ of completing with a phantom artifact.
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NotRequired, override
 
 from langchain.agents import AgentState
@@ -43,7 +43,15 @@ def _extract_output_relative_path(artifact_path: str | None) -> str | None:
     if not normalized.startswith(_OUTPUTS_VIRTUAL_PREFIX):
         return None
     relative = normalized[len(_OUTPUTS_VIRTUAL_PREFIX):].lstrip("/")
-    return relative or None
+    if not relative:
+        return None
+
+    # Reject path traversal so emit verification/mirroring cannot resolve
+    # outside the outputs root (e.g. "/mnt/user-data/outputs/../../etc/passwd").
+    relative_path = PurePosixPath(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        return None
+    return relative_path.as_posix()
 
 
 def _upload_builder_outputs_to_supabase(
@@ -583,6 +591,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         for candidate in candidates:
             relative = _extract_output_relative_path(candidate)
             if relative is None:
+                # If the path is under outputs prefix but failed relative-path
+                # extraction, treat as invalid (e.g. traversal attempt).
+                if isinstance(candidate, str) and candidate.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX):
+                    logger.warning(
+                        "BuilderArtifact: rejecting invalid outputs artifact path=%s",
+                        candidate,
+                    )
+                    return False
                 # Non-virtual path — we can't verify it against the sandbox
                 # outputs dir. Accept it and let downstream consumers decide.
                 continue

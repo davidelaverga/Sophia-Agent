@@ -2692,6 +2692,36 @@ class TestBuilderArtifactMiddleware:
 
         assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
 
+    def test_artifact_files_exist_rejects_outputs_path_traversal(self, tmp_path):
+        """Emit verification rejects traversal attempts under outputs/.
+
+        A path like ``/mnt/user-data/outputs/../../secret.txt`` must not be
+        treated as a valid outputs-relative candidate.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {"thread_data": {"outputs_path": str(tmp_path / "outputs")}}
+        args = {"artifact_path": "/mnt/user-data/outputs/../../secret.txt"}
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
+    def test_artifact_files_exist_rejects_supporting_file_path_traversal(self, tmp_path):
+        """Traversal in ``supporting_files`` is rejected the same way as primary paths."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# report")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {"thread_data": {"outputs_path": str(outputs_dir)}}
+        args = {
+            "artifact_path": "/mnt/user-data/outputs/report.md",
+            "supporting_files": ["/mnt/user-data/outputs/../secrets.env"],
+        }
+
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is False
+
     # ---------------------------------------------------------------------
     # Wall-clock-aware force-emit (companion-to-builder timeout fix)
     # ---------------------------------------------------------------------
