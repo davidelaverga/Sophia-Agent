@@ -178,10 +178,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # MUST stay in sync with BuilderArtifactMiddleware._CEILING_FOR_FORCE in
         # builder_artifact.py — otherwise the model's budget math lies and it
         # over-commits to retries past its advertised limit.
-        # PR-A (2026-04-27): bumped 10 → 20 so research-heavy tasks have room
-        # to gather sources before being forced to emit. See builder_artifact.py
-        # for the full rationale.
-        _HARD_CEILING = 20
+        # PR-B (2026-04-28): bumped 20 → 30 so binary deliverables (PDF/PPTX
+        # with diagrams) have room for write→bash→fix cycles before being
+        # forced to emit. See builder_artifact.py for the full rationale.
+        _HARD_CEILING = 30
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
 
         wall_clock_line = ""
