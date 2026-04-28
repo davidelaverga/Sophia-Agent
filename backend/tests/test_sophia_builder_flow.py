@@ -152,7 +152,8 @@ def test_switch_to_builder_queues_background_task(monkeypatch):
     submitted_config = captured["kwargs"]["config"]
     assert submitted_config.timeout_seconds == 1800
     assert submitted_config.per_turn_timeout_seconds == 300
-    assert submitted_config.max_turns == 150
+    # PR #94: max_turns (LangGraph recursion_limit) raised 150 → 250.
+    assert submitted_config.max_turns == 250
 
     assert events[-1]["type"] == "task_started"
     assert events[-1]["task_id"] == "tc-builder-1"

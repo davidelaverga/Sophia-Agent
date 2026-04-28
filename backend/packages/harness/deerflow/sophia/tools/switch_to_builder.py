@@ -838,10 +838,19 @@ def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int, int]:
     Three coordinated caps:
 
     - ``max_turns`` is forwarded to LangGraph as ``recursion_limit``. Because the
-      Sophia middleware chain yields multiple graph super-steps per logical tool
-      call (~5 per turn with before/after hooks + prompt assembly), we size the
-      budget well above the ``_HARD_CEILING=20`` prompt guidance so the agent
-      does not abort with GraphRecursionError on a normal deliverable.
+      Sophia middleware chain yields ~5–7 graph super-steps per logical AI turn
+      (model node + before/after hooks for PromptAssembly, BuilderTask,
+      BuilderResearchPolicy, BuilderArtifact, FileInjection, UserIdentity,
+      SandboxMiddleware, TodoMiddleware, DanglingToolCall, … + tool node +
+      routing), the recursion budget must scale with the prompt-level turn
+      ceiling. Rule of thumb:
+        ``recursion_limit ≈ _CEILING_FOR_FORCE × ~6 + slack``.
+      With ``_CEILING_FOR_FORCE=30`` (PR #93) the worst case is roughly
+      30 × 6 = 180 productive super-steps + ~20 for the rejection loop +
+      ~30 for post-fallback cleanup ≈ 230. We pick 250 to leave a small
+      cushion. PR #94 raised this from 150 → 250 after run ``675c2c35``
+      blew the limit at turn 29 with a ``GraphRecursionError`` before the
+      hard-ceiling fallback at turn 30 could fire.
 
     - ``timeout_seconds`` (per-run) bounds the total wall-clock occupation of an
       executor worker. Sized to fit ~12 expensive turns × 150s each, which
@@ -859,4 +868,4 @@ def _resolve_builder_limits(demo_mode: bool) -> tuple[int, int, int]:
     if demo_mode:
         return 40, 45, 30
 
-    return 150, 1800, 300
+    return 250, 1800, 300

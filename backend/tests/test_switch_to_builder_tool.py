@@ -88,10 +88,12 @@ def test_resolve_builder_limits_shortens_demo_budget():
 
     # Demo mode: tight envelope so UI smoke tests fail fast.
     assert switch_module._resolve_builder_limits(True) == (40, 45, 30)
-    # Normal mode: 150 turns, 1800s per-run cap, 300s per-turn cap.
-    # The per-turn cap is new (3-tuple); previously this was (150, 600).
-    # See _resolve_builder_limits docstring for the threshold rationale.
-    assert switch_module._resolve_builder_limits(False) == (150, 1800, 300)
+    # Normal mode: 250 turns (recursion_limit), 1800s per-run cap, 300s per-turn cap.
+    # PR #94 raised max_turns 150 → 250 because run ``675c2c35`` blew
+    # LangGraph's recursion limit at turn 29 (counting middleware super-steps,
+    # not just AI turns) before the Sophia hard-ceiling at turn 30 could
+    # invoke the fallback. Rule of thumb: recursion_limit ≈ _CEILING_FOR_FORCE × ~6 + slack.
+    assert switch_module._resolve_builder_limits(False) == (250, 1800, 300)
 
 
 def test_build_builder_progress_description_uses_document_topic():

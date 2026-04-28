@@ -88,6 +88,11 @@ class BuilderArtifactState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
+    # PR #94: count consecutive emit attempts rejected for empty/missing
+    # ``artifact_path``. When this reaches ``_REJECTION_SHORT_CIRCUIT_AT``
+    # we route directly to the hard-ceiling fallback instead of letting
+    # the model retry into the LangGraph recursion limit.
+    builder_consecutive_empty_emit_rejections: NotRequired[int]
 
 
 class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
@@ -142,6 +147,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     # _resolve_builder_limits returning timeout=1800s, 0.70 leaves ~540s of
     # slack — enough for one final write + emit + network buffer.
     _FORCE_EMIT_WALL_CLOCK_FRACTION = 0.70
+    # PR #94: when the model emits ``artifact_path=None`` (or any empty
+    # path) under forced ``tool_choice=emit_builder_artifact``, we reject
+    # and let it retry. After this many consecutive empty rejections we
+    # short-circuit straight to the hard-ceiling fallback — synthesizing
+    # ``builder_result`` from disk state — rather than letting the rejection
+    # loop burn the remaining LangGraph recursion budget. Threshold of 2
+    # leaves room for one transient empty-emit (e.g. a typo on the model's
+    # first attempt) while still bounding the loop to ~12 super-steps
+    # instead of the ~21 the ceiling-only path costs.
+    _REJECTION_SHORT_CIRCUIT_AT = 2
 
     @staticmethod
     def _should_force_emit(state: BuilderArtifactState) -> bool:
@@ -280,6 +295,174 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
             return True
         return False
+
+    @staticmethod
+    def _build_ceiling_fallback(
+        state: BuilderArtifactState,
+        *,
+        steps_completed: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Synthesize a ``builder_result`` dict by scanning ``outputs/`` for
+        a deliverable to promote.
+
+        Used by both the hard-ceiling termination path
+        (``non_artifact_turns >= _CEILING_FOR_FORCE``) and the
+        consecutive-rejection short-circuit path (PR #94, when the model
+        emits ``artifact_path=None`` repeatedly under forced emit).
+
+        Promotion priority:
+
+        1. Preferred binary deliverable extension (``.pdf/.pptx/.docx/.xlsx/
+           .png/.jpg/.jpeg/.svg/.html/.zip``) — confidence=0.5, "recovered".
+        2. Generator script (``_generate_*.py``) — confidence=0.4, partial
+           deliverable with a "run it yourself" companion summary.
+        3. Apology fallback (``artifact_path=None``, confidence=0.2) — when
+           neither category matches.
+
+        ``reason`` is included in log lines so traces can distinguish ceiling
+        terminations from rejection short-circuits.
+        """
+        builder_task_started_at_ms = state.get("builder_task_started_at_ms") or 0
+
+        promoted_path: str | None = None
+        promoted_type = "unknown"
+        try:
+            thread_data_local = state.get("thread_data") or {}
+            outputs_host_path_local = (
+                thread_data_local.get("outputs_path")
+                if isinstance(thread_data_local, dict)
+                else None
+            )
+            if outputs_host_path_local:
+                outputs_root_local = Path(outputs_host_path_local)
+                if outputs_root_local.is_dir():
+                    _PROMOTE_EXTS = (
+                        ".pdf", ".pptx", ".docx", ".xlsx",
+                        ".png", ".jpg", ".jpeg", ".svg",
+                        ".html", ".zip",
+                    )
+                    candidates = [
+                        p for p in outputs_root_local.rglob("*")
+                        if p.is_file()
+                        and not p.name.startswith("_")
+                        and p.suffix.lower() in _PROMOTE_EXTS
+                    ]
+                    if builder_task_started_at_ms:
+                        min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
+                        candidates = [
+                            p for p in candidates
+                            if p.stat().st_mtime >= min_mtime
+                        ]
+                    if candidates:
+                        candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                        best = candidates[0]
+                        rel = best.relative_to(outputs_root_local).as_posix()
+                        promoted_path = f"/mnt/user-data/outputs/{rel}"
+                        ext = best.suffix.lower().lstrip(".")
+                        promoted_type = ext or "unknown"
+        except Exception as exc:  # noqa: BLE001 — best-effort only
+            logger.warning(
+                "BuilderArtifact: ceiling fallback scan failed reason=%s error=%s",
+                reason,
+                exc,
+            )
+
+        promoted_generator_path: str | None = None
+        if promoted_path is None:
+            try:
+                thread_data_local = state.get("thread_data") or {}
+                outputs_host_path_local = (
+                    thread_data_local.get("outputs_path")
+                    if isinstance(thread_data_local, dict)
+                    else None
+                )
+                if outputs_host_path_local:
+                    outputs_root_local = Path(outputs_host_path_local)
+                    if outputs_root_local.is_dir():
+                        gen_candidates = [
+                            p for p in outputs_root_local.rglob("*")
+                            if p.is_file()
+                            and p.name.startswith("_generate_")
+                            and p.suffix.lower() == ".py"
+                        ]
+                        if builder_task_started_at_ms:
+                            min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
+                            gen_candidates = [
+                                p for p in gen_candidates
+                                if p.stat().st_mtime >= min_mtime
+                            ]
+                        if gen_candidates:
+                            gen_candidates.sort(
+                                key=lambda p: p.stat().st_mtime, reverse=True
+                            )
+                            best = gen_candidates[0]
+                            rel = best.relative_to(outputs_root_local).as_posix()
+                            promoted_generator_path = f"/mnt/user-data/outputs/{rel}"
+                            logger.warning(
+                                "BuilderArtifact: fallback promoting generator script %s "
+                                "(reason=%s, no binary deliverable found)",
+                                promoted_generator_path,
+                                reason,
+                            )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "BuilderArtifact: generator-script fallback scan failed reason=%s error=%s",
+                    reason,
+                    exc,
+                )
+
+        if promoted_path:
+            return {
+                "artifact_path": promoted_path,
+                "artifact_type": promoted_type,
+                "artifact_title": "Build task completed (recovered)",
+                "steps_completed": steps_completed,
+                "decisions_made": [],
+                "companion_summary": (
+                    "The builder ran long and didn't call emit cleanly, "
+                    "but the deliverable is on disk — I'm surfacing it now."
+                ),
+                "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
+                "user_next_action": "Open the file and let me know if it lands.",
+                "confidence": 0.5,
+            }
+        if promoted_generator_path:
+            return {
+                "artifact_path": promoted_generator_path,
+                "artifact_type": "code",
+                "artifact_title": "Build task partial (generator script only)",
+                "steps_completed": steps_completed,
+                "decisions_made": [],
+                "companion_summary": (
+                    "I built the generator script but couldn't produce the final "
+                    "binary cleanly — sharing the script so you have something to "
+                    "work with."
+                ),
+                "companion_tone_hint": (
+                    "Honest and constructive — partial deliverable; offer to debug "
+                    "if the user shares the error from running it."
+                ),
+                "user_next_action": (
+                    "Try running `python <path>` yourself, or send me the error "
+                    "and I'll fix it."
+                ),
+                "confidence": 0.4,
+            }
+        return {
+            "artifact_path": None,
+            "artifact_type": "unknown",
+            "artifact_title": "Build task force-stopped",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                f"The builder made {steps_completed} edits but didn't finish cleanly. "
+                "No final deliverable was produced."
+            ),
+            "companion_tone_hint": "Apologetic — builder ran out of budget.",
+            "user_next_action": "Tell me what to try differently and I'll run it again.",
+            "confidence": 0.2,
+        }
 
     @staticmethod
     def _has_generator_script(state: BuilderArtifactState) -> bool:
@@ -658,6 +841,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             args.get("artifact_path"),
                         )
                         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+
+                        # PR #94: track *empty* artifact_path rejections separately
+                        # so we can short-circuit before the LangGraph recursion
+                        # limit blows. The model's ``artifact_path=None`` under
+                        # forced ``tool_choice`` is a strong signal that further
+                        # retries won't help — collapse to the hard-ceiling
+                        # fallback after _REJECTION_SHORT_CIRCUIT_AT consecutive
+                        # such rejections.
+                        primary = args.get("artifact_path")
+                        is_empty_path_rejection = not (
+                            isinstance(primary, str) and primary.strip()
+                        )
+                        consecutive_rejections = int(
+                            state.get("builder_consecutive_empty_emit_rejections", 0) or 0
+                        )
+                        if is_empty_path_rejection:
+                            consecutive_rejections += 1
+                        else:
+                            consecutive_rejections = 0
+
                         history = self._append_turn_summary(
                             state,
                             {
@@ -665,12 +868,42 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 "tool_names": tool_names,
                                 "has_emit_builder_artifact": True,
                                 "emit_rejected": True,
+                                "empty_artifact_path": is_empty_path_rejection,
                             },
                         )
+
+                        if (
+                            is_empty_path_rejection
+                            and consecutive_rejections >= self._REJECTION_SHORT_CIRCUIT_AT
+                        ):
+                            logger.warning(
+                                "BuilderArtifact: short-circuiting after %d consecutive "
+                                "empty-artifact_path rejections at turn=%d (ceiling=%d) — "
+                                "routing to ceiling fallback to avoid GraphRecursionError.",
+                                consecutive_rejections,
+                                non_artifact_turns,
+                                self._CEILING_FOR_FORCE,
+                            )
+                            fallback = self._build_ceiling_fallback(
+                                state,
+                                steps_completed=non_artifact_turns,
+                                reason=f"consecutive_empty_emit_rejections={consecutive_rejections}",
+                            )
+                            return {
+                                "builder_result": fallback,
+                                "builder_non_artifact_turns": 0,
+                                "builder_last_tool_names": tool_names,
+                                "builder_tool_turn_summaries": history,
+                                "builder_task_started_at_ms": 0,
+                                "builder_consecutive_empty_emit_rejections": 0,
+                                "jump_to": "end",
+                            }
+
                         return {
                             "builder_non_artifact_turns": non_artifact_turns,
                             "builder_last_tool_names": tool_names,
                             "builder_tool_turn_summaries": history,
+                            "builder_consecutive_empty_emit_rejections": consecutive_rejections,
                         }
 
                     history = self._append_turn_summary(
@@ -703,6 +936,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
                         "builder_task_started_at_ms": 0,
+                        "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
                     }
 
@@ -746,7 +980,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 # Hard ceiling: force end before hitting the recursion limit.
                 # Builds that haven't emitted by this point almost never recover
                 # — the budget is better spent recovering whatever file is
-                # already on disk than letting bash thrash.
+                # already on disk than letting bash thrash. PR #94 extracted
+                # the fallback-construction logic into ``_build_ceiling_fallback``
+                # so the consecutive-rejection short-circuit can reuse it.
                 _HARD_CEILING = self._CEILING_FOR_FORCE
                 if non_artifact_turns >= _HARD_CEILING:
                     logger.warning(
@@ -754,168 +990,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         non_artifact_turns,
                         joined_names,
                     )
-                    # Best-effort: scan the outputs dir for a real binary
-                    # deliverable (pdf/pptx/docx/xlsx/png/html/zip) that the
-                    # builder already produced but never emitted. If we find
-                    # one, promote it to artifact_path so the user gets the
-                    # real file instead of "force-stopped" with no download.
-                    promoted_path: str | None = None
-                    promoted_type = "unknown"
-                    try:
-                        thread_data_local = state.get("thread_data") or {}
-                        outputs_host_path_local = (
-                            thread_data_local.get("outputs_path")
-                            if isinstance(thread_data_local, dict)
-                            else None
-                        )
-                        if outputs_host_path_local:
-                            outputs_root_local = Path(outputs_host_path_local)
-                            if outputs_root_local.is_dir():
-                                # Preferred extensions, in priority order
-                                _PROMOTE_EXTS = (
-                                    ".pdf", ".pptx", ".docx", ".xlsx",
-                                    ".png", ".jpg", ".jpeg", ".svg",
-                                    ".html", ".zip",
-                                )
-                                candidates = [
-                                    p for p in outputs_root_local.rglob("*")
-                                    if p.is_file()
-                                    and not p.name.startswith("_")
-                                    and p.suffix.lower() in _PROMOTE_EXTS
-                                ]
-                                # Only promote files produced during THIS task.
-                                # Subtract a small grace window (5s) to absorb
-                                # clock skew between builder and host.
-                                if builder_task_started_at_ms:
-                                    min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                                    candidates = [
-                                        p for p in candidates
-                                        if p.stat().st_mtime >= min_mtime
-                                    ]
-                                if candidates:
-                                    # Most recently modified wins
-                                    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-                                    best = candidates[0]
-                                    rel = best.relative_to(outputs_root_local).as_posix()
-                                    promoted_path = f"/mnt/user-data/outputs/{rel}"
-                                    ext = best.suffix.lower().lstrip(".")
-                                    promoted_type = ext or "unknown"
-                    except Exception as exc:  # noqa: BLE001 — best-effort only
-                        logger.warning(
-                            "BuilderArtifact: ceiling fallback scan failed error=%s",
-                            exc,
-                        )
-
-                    # PR-B (2026-04-28): if no preferred binary was promoted,
-                    # fall back to a builder-produced generator script
-                    # (``_generate_*.py``). This guarantees binary-deliverable
-                    # tasks that hit the ceiling mid-debugging hand the user
-                    # SOMETHING runnable instead of a confidence=0.2 apology
-                    # with no path. Run ``c130c516`` (PDF with diagrams) was
-                    # the motivating case: 17 turns of write→bash cycles,
-                    # forced into 3 wasted forced-write turns, ended with a
-                    # bare apology even though a working generator script was
-                    # on disk.
-                    promoted_generator_path: str | None = None
-                    if promoted_path is None:
-                        try:
-                            thread_data_local = state.get("thread_data") or {}
-                            outputs_host_path_local = (
-                                thread_data_local.get("outputs_path")
-                                if isinstance(thread_data_local, dict)
-                                else None
-                            )
-                            if outputs_host_path_local:
-                                outputs_root_local = Path(outputs_host_path_local)
-                                if outputs_root_local.is_dir():
-                                    gen_candidates = [
-                                        p for p in outputs_root_local.rglob("*")
-                                        if p.is_file()
-                                        and p.name.startswith("_generate_")
-                                        and p.suffix.lower() == ".py"
-                                    ]
-                                    if builder_task_started_at_ms:
-                                        min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                                        gen_candidates = [
-                                            p for p in gen_candidates
-                                            if p.stat().st_mtime >= min_mtime
-                                        ]
-                                    if gen_candidates:
-                                        gen_candidates.sort(
-                                            key=lambda p: p.stat().st_mtime, reverse=True
-                                        )
-                                        best = gen_candidates[0]
-                                        rel = best.relative_to(outputs_root_local).as_posix()
-                                        promoted_generator_path = f"/mnt/user-data/outputs/{rel}"
-                                        logger.warning(
-                                            "BuilderArtifact: ceiling fallback promoting "
-                                            "generator script %s (no binary deliverable found)",
-                                            promoted_generator_path,
-                                        )
-                        except Exception as exc:  # noqa: BLE001
-                            logger.warning(
-                                "BuilderArtifact: generator-script fallback scan failed error=%s",
-                                exc,
-                            )
-
-                    if promoted_path:
-                        fallback = {
-                            "artifact_path": promoted_path,
-                            "artifact_type": promoted_type,
-                            "artifact_title": "Build task completed (recovered)",
-                            "steps_completed": non_artifact_turns,
-                            "decisions_made": [],
-                            "companion_summary": (
-                                "The builder ran long and didn't call emit cleanly, "
-                                "but the deliverable is on disk — I'm surfacing it now."
-                            ),
-                            "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
-                            "user_next_action": "Open the file and let me know if it lands.",
-                            "confidence": 0.5,
-                        }
-                    elif promoted_generator_path:
-                        fallback = {
-                            "artifact_path": promoted_generator_path,
-                            "artifact_type": "code",
-                            "artifact_title": "Build task partial (generator script only)",
-                            "steps_completed": non_artifact_turns,
-                            "decisions_made": [],
-                            "companion_summary": (
-                                "I built the generator script but couldn't produce the final "
-                                "binary cleanly — sharing the script so you have something to "
-                                "work with."
-                            ),
-                            "companion_tone_hint": (
-                                "Honest and constructive — partial deliverable; offer to debug "
-                                "if the user shares the error from running it."
-                            ),
-                            "user_next_action": (
-                                "Try running `python <path>` yourself, or send me the error "
-                                "and I'll fix it."
-                            ),
-                            "confidence": 0.4,
-                        }
-                    else:
-                        fallback = {
-                            "artifact_path": None,
-                            "artifact_type": "unknown",
-                            "artifact_title": "Build task force-stopped",
-                            "steps_completed": non_artifact_turns,
-                            "decisions_made": [],
-                            "companion_summary": (
-                                f"The builder made {non_artifact_turns} edits but didn't finish cleanly. "
-                                "No final deliverable was produced."
-                            ),
-                            "companion_tone_hint": "Apologetic — builder ran out of budget.",
-                            "user_next_action": "Tell me what to try differently and I'll run it again.",
-                            "confidence": 0.2,
-                        }
+                    fallback = self._build_ceiling_fallback(
+                        state,
+                        steps_completed=non_artifact_turns,
+                        reason="hard_ceiling",
+                    )
                     return {
                         "builder_result": fallback,
                         "builder_non_artifact_turns": 0,
                         "builder_last_tool_names": tool_names,
                         "builder_tool_turn_summaries": history,
                         "builder_task_started_at_ms": 0,
+                        "builder_consecutive_empty_emit_rejections": 0,
                         "jump_to": "end",
                     }
 
@@ -929,6 +1015,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_last_tool_names": tool_names,
                     "builder_tool_turn_summaries": history,
                     "builder_task_started_at_ms": builder_task_started_at_ms,
+                    # PR #94: any non-emit turn breaks the empty-rejection
+                    # streak. Reset so the short-circuit only fires on
+                    # *consecutive* empty emits.
+                    "builder_consecutive_empty_emit_rejections": 0,
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback
@@ -958,6 +1048,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_last_tool_names": [],
                 "builder_tool_turn_summaries": history,
+                "builder_consecutive_empty_emit_rejections": 0,
             }
 
         log_middleware("BuilderArtifact", "no AI message found", _t0)
