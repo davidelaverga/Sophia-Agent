@@ -116,22 +116,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     # model literally cannot call any other tool. Prompt-level escalation is
     # not reliable mid-retry-loop; the API-level constraint is.
     #
-    # PR-A (2026-04-27): bumped ceiling 10 → 20 after a research-heavy task in
-    # log ``019dcfbf-f219-7d83-86a4-ffb161ebddf7`` proved 10 too tight. The
-    # builder used 8 turns just on web_search/web_fetch and was then forced to
-    # emit_builder_artifact before write_file_tool could run, trapping the
-    # model in an unrecoverable retry loop on a non-existent file. Returning
-    # to the pre-PR-C-F6 ceiling of 20 gives research tasks room to gather
-    # sources AND write the deliverable AND verify it. Soft warn at 12 (60%)
-    # and force-emit at remaining<=3 keep the same proportions as before.
+    # PR-B (2026-04-28): bumped ceiling 20 → 30 after run ``c130c516`` (PDF
+    # with diagrams) hit the 20-turn cap mid-progress: write→bash→fix cycles
+    # for binary deliverables legitimately need 12-15 turns of build pipeline
+    # plus initial planning + final emit. At 20 the model ran out of budget
+    # while still iterating productively, then got trapped in 3 wasted forced-
+    # write turns (LLM emitted near-empty content because the recovery path
+    # for binary tasks is bash, not write_file). Soft warn rescaled to 18
+    # (60%) and force-emit at remaining<=3 (turn 27+). Wall-clock force-emit
+    # at 70% of per-run timeout (1260s of 1800s) is the backstop for runaway
+    # text deliverables — those rarely need 30 turns.
     #
+    # PR-A history (2026-04-27): bumped 10 → 20 after a research-heavy task
+    # in log ``019dcfbf-f219-7d83-86a4-ffb161ebddf7`` proved 10 too tight.
     # PR-C F6 history (2026-04-24): lowered 20 → 10 because the original
     # ceiling let pathological retries burn the budget. PR-A fixes those
     # retries at the source (two-stage forced-emit + empty-path rejection)
     # so the larger budget no longer enables runaway retry loops.
     _FORCE_EMIT_REMAINING = 3
-    _CEILING_FOR_FORCE = 20
-    _SOFT_WARN_AT = 12
+    _CEILING_FOR_FORCE = 30
+    _SOFT_WARN_AT = 18
     # Wall-clock fraction of the per-run timeout at which we activate
     # force-emit even if the turn-count ceiling hasn't been hit. Each
     # write_file LLM call costs ~95s on long-form deliverables; with
@@ -201,6 +205,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": "write_file"}
 
     @staticmethod
+    def _forced_bash_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces bash.
+
+        PR-B (2026-04-28): used by the three-stage forced-emit path when a
+        generator script (``_generate_*.py``) exists in outputs/ but no
+        user-facing binary (pdf/pptx/png/...) has been produced yet. For
+        binary deliverables the recovery action is *running* the generator,
+        not writing yet another generator. Forcing write_file in that state
+        — as PR-A did — traps the model: each forced write produces another
+        ``_generate_*.py`` (which ``_has_output_file`` filters out), so the
+        gate stays False and the loop spins. Forcing bash gives the model a
+        deterministic chance to produce the binary by running what it
+        already has on disk. If bash also fails to produce output, the
+        hard-ceiling fallback promotes the generator script with
+        ``confidence=0.4`` so the user still gets something.
+        """
+        return {"type": "tool", "name": "bash"}
+
+    @staticmethod
     def _has_output_file(state: BuilderArtifactState) -> bool:
         """Return True if any user-facing file exists in the sandbox outputs dir.
 
@@ -256,6 +279,59 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 exc_info=True,
             )
             return True
+        return False
+
+    @staticmethod
+    def _has_generator_script(state: BuilderArtifactState) -> bool:
+        """Return True if a builder-produced ``_generate_*.py`` script exists.
+
+        PR-B (2026-04-28): companion to ``_has_output_file`` for the three-
+        stage forced-emit path. The builder prompt instructs binary tasks
+        to write ``_generate_<name>.py`` then bash-run it. When no binary
+        deliverable has landed yet but a generator script has, the recovery
+        action is running the script (force ``bash``), not writing yet
+        another script (force ``write_file``).
+
+        Same staleness filtering as ``_has_output_file``: ignores generators
+        from prior builder tasks via ``builder_task_started_at_ms``.
+        """
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path")
+            if isinstance(thread_data, dict)
+            else None
+        )
+        if not isinstance(outputs_host_path, str) or not outputs_host_path:
+            return False
+
+        builder_task_started_at_ms = state.get("builder_task_started_at_ms")
+        min_mtime: float | None = None
+        if isinstance(builder_task_started_at_ms, (int, float)) and builder_task_started_at_ms > 0:
+            min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
+
+        try:
+            outputs_root = Path(outputs_host_path)
+            if not outputs_root.is_dir():
+                return False
+            for entry in outputs_root.rglob("*"):
+                if not entry.is_file():
+                    continue
+                # Match generator scripts produced by the builder per the
+                # binary-deliverable prompt (``_generate_<name>.py``).
+                if not (entry.name.startswith("_generate") and entry.suffix.lower() == ".py"):
+                    continue
+                if min_mtime is not None and entry.stat().st_mtime < min_mtime:
+                    continue
+                return True
+        except OSError:
+            logger.debug(
+                "BuilderArtifact._has_generator_script: scan failed for outputs_path=%s",
+                outputs_host_path,
+                exc_info=True,
+            )
+            # Conservative on error: report no generator so the existing
+            # write_file forcing path proceeds.
+            return False
         return False
 
     @classmethod
@@ -355,24 +431,29 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime | None = None,
     ) -> dict[str, Any] | None:
-        """Two-stage forced-tool-choice (PR-A) with wall-clock awareness.
+        """Three-stage forced-tool-choice (PR-A + PR-B) with wall-clock awareness.
 
         Activates when EITHER the turn-count ceiling is imminent
         (``_should_force_emit``) OR the wall-clock fraction of the per-run
         timeout has been crossed (``_should_force_emit_by_clock``). The
-        two-stage selection is unchanged — only the activation condition
-        broadens. This guarantees a real emit lands on slow-but-productive
-        runs before the executor's per-run cap fires.
+        stage selection within the force window is what changed in PR-B
+        for binary deliverables that have written a generator but failed
+        to produce the final binary.
 
         Returns the Anthropic ``tool_choice`` payload appropriate for the
         current state:
 
         - ``None`` when forcing isn't required yet.
-        - ``{"type": "tool", "name": "write_file"}`` when forcing IS required
-          but no deliverable has been written yet (avoids trapping the model
-          in an emit-only loop on a non-existent file).
-        - ``{"type": "tool", "name": "emit_builder_artifact"}`` when forcing
-          is required and a deliverable already exists on disk.
+        - ``{"type": "tool", "name": "emit_builder_artifact"}`` when a
+          user-facing binary already exists on disk — proceed with emit.
+        - ``{"type": "tool", "name": "bash"}`` (PR-B) when no binary exists
+          but a ``_generate_*.py`` does — recovery for binary deliverables
+          is to RUN the generator, not write yet another one. After this
+          forced bash either produces a binary (next turn flips to emit)
+          or doesn't (hard-ceiling fallback promotes the script itself).
+        - ``{"type": "tool", "name": "write_file"}`` when neither a binary
+          nor a generator exists — the model has produced nothing on disk
+          and needs to land at least one file before emit is forced.
         """
         turn_force = self._should_force_emit(state)
         clock_force = self._should_force_emit_by_clock(state, runtime)
@@ -381,20 +462,41 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         force_reason = "turns" if turn_force and not clock_force else (
             "wall_clock" if clock_force and not turn_force else "turns+wall_clock"
         )
+        non_artifact_turns = state.get("builder_non_artifact_turns")
+
+        # Stage 1: a real user-facing binary is on disk → force emit.
         if self._has_output_file(state):
             logger.warning(
                 "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
                 "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
-                state.get("builder_non_artifact_turns"),
+                non_artifact_turns,
                 self._CEILING_FOR_FORCE,
                 force_reason,
             )
             return self._forced_tool_choice()
+
+        # Stage 2 (PR-B): a generator script exists but no binary yet →
+        # force bash so the model runs what it has, instead of writing
+        # another generator that gets filtered out by _has_output_file.
+        if self._has_generator_script(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=bash before emit "
+                "(non_artifact_turns=%s, ceiling=%s, reason=%s, generator "
+                "script on disk but no binary — three-stage force gives the "
+                "model a chance to RUN the generator instead of writing yet "
+                "another one)",
+                non_artifact_turns,
+                self._CEILING_FOR_FORCE,
+                force_reason,
+            )
+            return self._forced_bash_tool_choice()
+
+        # Stage 3: nothing on disk at all → force write_file (PR-A).
         logger.warning(
             "BuilderArtifact: forcing tool_choice=write_file before emit "
             "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
-            "two-stage force prevents phantom-emit loop)",
-            state.get("builder_non_artifact_turns"),
+            "force prevents phantom-emit loop)",
+            non_artifact_turns,
             self._CEILING_FOR_FORCE,
             force_reason,
         )
@@ -704,6 +806,58 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             exc,
                         )
 
+                    # PR-B (2026-04-28): if no preferred binary was promoted,
+                    # fall back to a builder-produced generator script
+                    # (``_generate_*.py``). This guarantees binary-deliverable
+                    # tasks that hit the ceiling mid-debugging hand the user
+                    # SOMETHING runnable instead of a confidence=0.2 apology
+                    # with no path. Run ``c130c516`` (PDF with diagrams) was
+                    # the motivating case: 17 turns of write→bash cycles,
+                    # forced into 3 wasted forced-write turns, ended with a
+                    # bare apology even though a working generator script was
+                    # on disk.
+                    promoted_generator_path: str | None = None
+                    if promoted_path is None:
+                        try:
+                            thread_data_local = state.get("thread_data") or {}
+                            outputs_host_path_local = (
+                                thread_data_local.get("outputs_path")
+                                if isinstance(thread_data_local, dict)
+                                else None
+                            )
+                            if outputs_host_path_local:
+                                outputs_root_local = Path(outputs_host_path_local)
+                                if outputs_root_local.is_dir():
+                                    gen_candidates = [
+                                        p for p in outputs_root_local.rglob("*")
+                                        if p.is_file()
+                                        and p.name.startswith("_generate")
+                                        and p.suffix.lower() == ".py"
+                                    ]
+                                    if builder_task_started_at_ms:
+                                        min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
+                                        gen_candidates = [
+                                            p for p in gen_candidates
+                                            if p.stat().st_mtime >= min_mtime
+                                        ]
+                                    if gen_candidates:
+                                        gen_candidates.sort(
+                                            key=lambda p: p.stat().st_mtime, reverse=True
+                                        )
+                                        best = gen_candidates[0]
+                                        rel = best.relative_to(outputs_root_local).as_posix()
+                                        promoted_generator_path = f"/mnt/user-data/outputs/{rel}"
+                                        logger.warning(
+                                            "BuilderArtifact: ceiling fallback promoting "
+                                            "generator script %s (no binary deliverable found)",
+                                            promoted_generator_path,
+                                        )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(
+                                "BuilderArtifact: generator-script fallback scan failed error=%s",
+                                exc,
+                            )
+
                     if promoted_path:
                         fallback = {
                             "artifact_path": promoted_path,
@@ -718,6 +872,28 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
                             "user_next_action": "Open the file and let me know if it lands.",
                             "confidence": 0.5,
+                        }
+                    elif promoted_generator_path:
+                        fallback = {
+                            "artifact_path": promoted_generator_path,
+                            "artifact_type": "code",
+                            "artifact_title": "Build task partial (generator script only)",
+                            "steps_completed": non_artifact_turns,
+                            "decisions_made": [],
+                            "companion_summary": (
+                                "I built the generator script but couldn't produce the final "
+                                "binary cleanly — sharing the script so you have something to "
+                                "work with."
+                            ),
+                            "companion_tone_hint": (
+                                "Honest and constructive — partial deliverable; offer to debug "
+                                "if the user shares the error from running it."
+                            ),
+                            "user_next_action": (
+                                "Try running `python <path>` yourself, or send me the error "
+                                "and I'll fix it."
+                            ),
+                            "confidence": 0.4,
                         }
                     else:
                         fallback = {
