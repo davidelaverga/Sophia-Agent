@@ -1355,6 +1355,25 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "BuilderResearchPolicyMiddleware" in builder_types
     assert "builder_web_search" in builder_tool_names
     assert "builder_web_fetch" in builder_tool_names
+    # emit_builder_artifact is the structured "I'm done" signal — the
+    # BuilderCompletionCard payload depends on its 13 fields, so it must
+    # remain in the builder's tool list.
+    assert "emit_builder_artifact" in builder_tool_names
+    # render_markdown_to_pdf (Phase B) is the skill-driven PDF path.
+    assert "render_markdown_to_pdf" in builder_tool_names
+    # ``present_files`` must NOT be in the builder's tool list. Its presence
+    # invited the model (trained on upstream's pattern) to call
+    # ``present_files + emit_builder_artifact`` together on the final turn,
+    # which BuilderArtifactMiddleware rejected as "mixed tool calls; loop
+    # continues". The fallback empty-artifact path then propagated to the
+    # frontend as a phantom-success error. emit_builder_artifact's
+    # artifact_path already drives the BuilderCompletionCard, so a separate
+    # present_files signal is redundant.
+    assert "present_files" not in builder_tool_names, (
+        "present_files must not be in the builder's tool list — it conflicts "
+        "with emit_builder_artifact's atomic-completion contract. See the "
+        "comment block in builder_agent.py for the full rationale."
+    )
     # B2 — DanglingToolCallMiddleware MUST sit AFTER PromptAssemblyMiddleware
     # in the builder chain too. The builder doesn't currently use Anthropic
     # prompt caching, so we only assert the lower bound.
