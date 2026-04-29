@@ -316,6 +316,12 @@ def build_completion_payload(
                 "Want me to try again?"
             )
 
+    # The originating user is recorded on the SubagentResult as ``owner_id``
+    # (set by ``execute_async``). Carry it on the event so the gateway-side
+    # companion-wakeup worker can route the synthetic turn to the correct
+    # user without having to round-trip ``client.threads.get_state``.
+    owner_id = getattr(result, "owner_id", None)
+
     return {
         "thread_id": getattr(result, "thread_id", None),
         "task_id": getattr(result, "task_id", None),
@@ -333,6 +339,7 @@ def build_completion_payload(
         "error_message": error_message,
         "completed_at": _iso(getattr(result, "completed_at", None)),
         "source": "subagent_executor",
+        "user_id": owner_id if isinstance(owner_id, str) and owner_id else None,
     }
 
 

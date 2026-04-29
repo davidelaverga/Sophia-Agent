@@ -1354,6 +1354,106 @@ class TestArtifactMiddleware:
         result = mw.after_model({"messages": [ai_msg]}, _make_runtime())
         assert result is None
 
+    def test_wakeup_synthesis_injects_must_speak_directive(self, tmp_path):
+        """A wakeup turn must produce a synthesis block with the WAKEUP TURN
+        hard directive so the model can't return empty content + skip
+        emit_artifact (the failure mode observed in production logs as
+        ``[Artifact] no artifact in response``).
+        """
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        builder_result = {
+            "artifact_path": "/mnt/user-data/outputs/guide.md",
+            "artifact_type": "document",
+            "artifact_title": "Hermes Memory Quickstart",
+            "companion_summary": "Wrote a short guide.",
+            "companion_tone_hint": "neutral",
+            "user_next_action": "Open it and tell me what to revise.",
+            "decisions_made": [],
+        }
+        state = {
+            "messages": [],  # wakeup shape — no fresh HumanMessage
+            "builder_result": builder_result,
+            "builder_task": {"status": "completed"},
+            "active_tone_band": "engagement",
+        }
+
+        # is_builder_wakeup propagated through runtime.context
+        result = mw.before_agent(state, _make_runtime(is_builder_wakeup=True))
+
+        assert result is not None
+        block = "\n".join(result["system_prompt_blocks"])
+        assert "<builder_completed>" in block
+        assert "WAKEUP TURN" in block
+        assert "MUST" in block and "emit_artifact" in block
+        # The standard tone-aware presentation guidance is still present.
+        assert "Express this result naturally" in block
+
+    def test_synthesis_omits_wakeup_directive_for_normal_user_turn(self, tmp_path):
+        """Normal user turns must not get the WAKEUP TURN directive — the
+        model already has a HumanMessage to respond to and the standard
+        artifact-instructions cover ``emit_artifact``."""
+        from langchain_core.messages import HumanMessage
+
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        state = {
+            "messages": [HumanMessage(content="how's the doc coming?")],
+            "builder_result": {
+                "artifact_title": "Guide",
+                "artifact_type": "document",
+                "companion_summary": "Wrote a short guide.",
+                "decisions_made": [],
+            },
+            "builder_task": {"status": "completed"},
+            "active_tone_band": "engagement",
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        block = "\n".join(result["system_prompt_blocks"])
+        assert "<builder_completed>" in block
+        assert "WAKEUP TURN" not in block
+
+    def test_wakeup_synthesis_fallback_detection_when_context_flag_missing(
+        self, tmp_path
+    ):
+        """When the runtime context lacks ``is_builder_wakeup`` (older
+        callers, tests), the middleware falls back to inspecting the
+        message tail. Empty messages or a non-HumanMessage tail counts as
+        wakeup-shaped."""
+        from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
+        path = tmp_path / "artifact_instructions.md"
+        path.write_text("Instructions")
+        mw = ArtifactMiddleware(path)
+
+        state = {
+            "messages": [],
+            "builder_result": {
+                "artifact_title": "Guide",
+                "artifact_type": "document",
+                "companion_summary": "Wrote a short guide.",
+                "decisions_made": [],
+            },
+            "builder_task": {"status": "completed"},
+            "active_tone_band": "engagement",
+        }
+
+        # Note: no is_builder_wakeup in runtime context.
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        block = "\n".join(result["system_prompt_blocks"])
+        assert "WAKEUP TURN" in block
+
 
 # --- PromptAssemblyMiddleware ---
 
@@ -2158,6 +2258,98 @@ class TestBuilderTaskMiddleware:
         assert "[citation:Title](URL)" in briefing
         assert "Sources section" in briefing
 
+    def test_skills_inventory_block_lists_all_relevant_skills_unconditionally(
+        self, monkeypatch, caplog
+    ):
+        """Phase B regression. Without this, ``load_skills(enabled_only=True)``
+        + missing ``extensions_config.json`` silently returned an empty
+        inventory and the ``<skill_system>`` block never reached the prompt
+        — leaving the builder writing matplotlib/reportlab loops by default.
+
+        The fix uses the ``_BUILDER_RELEVANT_SKILLS`` whitelist as the
+        actual gate; ``enabled_only`` is False so missing operator config
+        doesn't zero out the inventory.
+        """
+        import logging
+
+        from deerflow.agents.sophia_agent.middlewares import builder_task as builder_task_module
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        # Construct fake Skill objects matching the four whitelisted names.
+        # Each has ``enabled=False`` to simulate the failure mode (missing
+        # ``extensions_config.json`` leaves every skill ``enabled=False``).
+        class _FakeSkill:
+            def __init__(self, name: str) -> None:
+                self.name = name
+                self.description = f"{name} description"
+                self.enabled = False  # <-- key: would be filtered by enabled_only=True
+
+            def get_container_file_path(self, base: str) -> str:
+                return f"{base}/{self.name}/SKILL.md"
+
+        fake_skills = [
+            _FakeSkill("chart-visualization"),
+            _FakeSkill("ppt-generation"),
+            _FakeSkill("image-generation"),
+            _FakeSkill("data-analysis"),
+            _FakeSkill("unrelated-skill"),  # filtered out by whitelist
+        ]
+
+        def _stub_load_skills(*, enabled_only: bool = False, **_: object):
+            # The fix passes enabled_only=False; this stub asserts on it.
+            assert enabled_only is False, (
+                "BuilderTask must pass enabled_only=False so the whitelist "
+                "is the only filter — see Phase B regression context."
+            )
+            return list(fake_skills)
+
+        # Patch via the central skills module namespace, since builder_task
+        # does ``from deerflow.skills import load_skills`` inside the method.
+        import deerflow.skills as skills_module
+
+        monkeypatch.setattr(skills_module, "load_skills", _stub_load_skills)
+
+        with caplog.at_level(logging.INFO, logger=builder_task_module.logger.name):
+            block = BuilderTaskMiddleware._build_skills_inventory_block()
+
+        assert block is not None
+        # All four whitelisted skills are present, regardless of enabled state.
+        assert "<skill_system>" in block
+        assert "chart-visualization" in block
+        assert "ppt-generation" in block
+        assert "image-generation" in block
+        assert "data-analysis" in block
+        # The unrelated skill is filtered out by the whitelist.
+        assert "unrelated-skill" not in block
+        # Observability: the INFO breadcrumb fires either way.
+        assert any(
+            "skills_inventory: 4 skills injected" in rec.message for rec in caplog.records
+        )
+
+    def test_skills_inventory_block_logs_when_no_relevant_skills_found(
+        self, monkeypatch, caplog
+    ):
+        """When the on-disk skills directory has none of the four
+        whitelisted builder skills (corrupt deploy, etc.), the block
+        returns None but the INFO log still fires so the failure is
+        visible from a single grep instead of silent."""
+        import logging
+
+        import deerflow.skills as skills_module
+        from deerflow.agents.sophia_agent.middlewares import builder_task as builder_task_module
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        monkeypatch.setattr(skills_module, "load_skills", lambda **_: [])
+
+        with caplog.at_level(logging.INFO, logger=builder_task_module.logger.name):
+            block = BuilderTaskMiddleware._build_skills_inventory_block()
+
+        assert block is None
+        assert any(
+            "skills_inventory: 0 skills injected (none)" in rec.message
+            for rec in caplog.records
+        )
+
 
 class TestBuilderResearchPolicyMiddleware:
     def test_initializes_web_policy_state_and_prompt(self):
@@ -2244,6 +2436,89 @@ class TestBuilderArtifactMiddleware:
         assert result["builder_non_artifact_turns"] == 1
         assert result["builder_last_tool_names"] == ["bash"]
         assert result["builder_tool_turn_summaries"][-1]["has_emit_builder_artifact"] is False
+
+    def test_logs_skill_manifest_read_when_builder_reads_skill_md(self, caplog):
+        """Phase B observability. The user complained "we have no
+        visibility in the logs about which skills the builder picks".
+        When the builder calls ``read_file`` on a SKILL.md path, the
+        middleware must emit ``[BuilderSkill] manifest_read: skill=<name>``
+        so the discovery is greppable from a single line."""
+        import logging
+
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "read_file",
+                "args": {"path": "/mnt/skills/chart-visualization/SKILL.md"},
+            }
+        ]
+        state = {"messages": [msg]}
+
+        with caplog.at_level(logging.INFO, logger="deerflow.agents.sophia_agent.middlewares.builder_artifact"):
+            mw.after_model(state, _make_runtime())
+
+        assert any(
+            "[BuilderSkill] manifest_read: skill=chart-visualization" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_logs_skill_script_invoked_for_bash_under_skills_dir(self, caplog):
+        """When the builder runs a bundled script via bash, log
+        ``[BuilderSkill] script_invoked: skill=<name>``. This is the
+        signal the builder is using a pre-tested workflow rather than
+        falling back to writing its own ``_generate_*.py``."""
+        import logging
+
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "bash",
+                "args": {
+                    "command": (
+                        "python /mnt/skills/ppt-generation/scripts/build.py "
+                        "--input spec.json --output deck.pptx"
+                    )
+                },
+            }
+        ]
+        state = {"messages": [msg]}
+
+        with caplog.at_level(logging.INFO, logger="deerflow.agents.sophia_agent.middlewares.builder_artifact"):
+            mw.after_model(state, _make_runtime())
+
+        assert any(
+            "[BuilderSkill] script_invoked: skill=ppt-generation" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_does_not_log_skill_for_unrelated_tool_calls(self, caplog):
+        """``write_file`` and unrelated bash commands must not produce
+        BuilderSkill log lines. Otherwise the breadcrumb becomes noise."""
+        import logging
+
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/foo.md"}},
+            {"name": "bash", "args": {"command": "ls /mnt/user-data/outputs"}},
+        ]
+        state = {"messages": [msg]}
+
+        with caplog.at_level(logging.INFO, logger="deerflow.agents.sophia_agent.middlewares.builder_artifact"):
+            mw.after_model(state, _make_runtime())
+
+        assert not any("[BuilderSkill]" in rec.message for rec in caplog.records)
 
     def test_emit_resets_non_artifact_turn_counter(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

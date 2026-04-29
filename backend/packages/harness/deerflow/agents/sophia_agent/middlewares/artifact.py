@@ -112,7 +112,14 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
                 log_middleware("Artifact", "recovered builder result from tool message", _t0)
 
         if builder_result and builder_task.get("status") == "completed":
-            synthesis_block = self._build_synthesis_prompt(builder_result, state)
+            # Detect the companion-wakeup turn so the synthesis prompt can
+            # add a hard "you must speak and emit_artifact" directive.
+            # The flag is set on ``runtime.context`` by ``CompanionWakeup``
+            # in the gateway worker; we also fall back to detecting an
+            # empty trailing-human message slot, which is the runtime
+            # signature of a wakeup (``input={"messages": []}``).
+            is_wakeup = bool(runtime.context.get("is_builder_wakeup")) or self._is_wakeup_state(state)
+            synthesis_block = self._build_synthesis_prompt(builder_result, state, is_wakeup=is_wakeup)
             blocks.append(synthesis_block)
             # Mark as synthesized to prevent re-injection on subsequent turns
             log_middleware("Artifact", "builder synthesis injected", _t0)
@@ -235,8 +242,17 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
         ),
     }
 
-    def _build_synthesis_prompt(self, builder: dict, state: dict) -> str:
-        """Build the synthesis prompt for presenting builder results."""
+    def _build_synthesis_prompt(self, builder: dict, state: dict, *, is_wakeup: bool = False) -> str:
+        """Build the synthesis prompt for presenting builder results.
+
+        When ``is_wakeup`` is True the user did not just send a message —
+        the builder finished asynchronously and the gateway scheduled a
+        synthetic turn so Sophia proactively announces the artifact in
+        chat. Without an explicit "you MUST speak now and emit_artifact"
+        directive the model frequently returns empty content + no
+        ``emit_artifact`` (logged as ``[Artifact] no artifact in
+        response``), and nothing visible reaches the chat surface.
+        """
         tone_band = state.get("active_tone_band", "engagement")
         instruction = self._SYNTHESIS_INSTRUCTIONS.get(
             tone_band, self._SYNTHESIS_INSTRUCTIONS["engagement"]
@@ -267,9 +283,39 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
             "decisions mechanically. The user should feel this was done "
             "WITH care, not BY a machine."
         )
+
+        if is_wakeup:
+            parts.append(
+                "\nWAKEUP TURN: There is no new user message — the builder "
+                "just finished and you are proactively announcing it. You "
+                "MUST: (1) produce an AIMessage that mentions the artifact "
+                "title in 1–2 sentences, then (2) call emit_artifact with "
+                "the standard 13 fields. Do NOT stay silent and do NOT skip "
+                "emit_artifact. This is the only signal the user receives "
+                "that the work is done."
+            )
+
         parts.append("</builder_completed>")
 
         return "\n".join(parts)
+
+    @staticmethod
+    def _is_wakeup_state(state: dict) -> bool:
+        """Best-effort detection of a wakeup turn from state shape alone.
+
+        Used as a fallback when ``runtime.context.is_builder_wakeup`` is
+        not propagated (older callers, tests). A wakeup turn enters with
+        no fresh ``HumanMessage`` because ``input={"messages": []}`` —
+        the most recent message is therefore an AI/tool/system message
+        from a prior turn, never a HumanMessage.
+        """
+        messages = state.get("messages") or []
+        if not messages:
+            return True
+        last = messages[-1]
+        # Be liberal: any non-human latest-message during builder
+        # synthesis is treated as wakeup-shaped.
+        return getattr(last, "type", None) != "human"
 
     @staticmethod
     def _extract_builder_result_from_messages(messages: list) -> dict | None:

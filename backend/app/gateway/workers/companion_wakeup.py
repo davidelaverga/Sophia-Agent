@@ -51,8 +51,9 @@ Design notes:
   proactive announcement would be noise.
 - **Configuration carry-through.** The wakeup turn passes
   ``is_builder_wakeup=True`` and the originating ``builder_task_id`` in
-  ``configurable`` so future code paths can branch on this if needed
-  (none currently — the existing middlewares are wakeup-agnostic).
+  ``context`` (mirrored into runtime configurable by langgraph-api) so
+  future code paths can branch on this if needed (none currently — the
+  existing middlewares are wakeup-agnostic).
 """
 
 from __future__ import annotations
@@ -176,17 +177,41 @@ class CompanionWakeup:
             # any in-flight user turn instead of interrupting it (the
             # default ``"reject"`` would drop us, ``"interrupt"`` would
             # cancel the user's run mid-flight — neither is what we want).
+            #
+            # ``context=`` mirrors ``ChannelManager._build_run_kwargs``
+            # (see ``app/channels/manager.py`` ``DEFAULT_RUN_CONTEXT`` +
+            # the user_id/thread_id extras path). langgraph-api 0.7+
+            # rejects requests that set both ``configurable`` and
+            # ``context``; we pass everything via ``context`` and let the
+            # server copy it into ``configurable`` so
+            # ``make_sophia_agent`` reads ``user_id``/``platform`` from
+            # the right place. Without this, the agent factory falls back
+            # to ``user_id="default_user"`` and ``platform="voice"`` —
+            # neither of which matches the chat thread the wakeup is
+            # firing into, and downstream middlewares either silently
+            # no-op or load the wrong user identity.
+            user_id = event.get("user_id")
+            context: dict[str, Any] = {
+                "thread_id": thread_id,
+                # Synthetic turn is text-shaped. Voice/iOS surfaces still
+                # render the resulting AIMessage via the same chat stream
+                # — picking ``"text"`` keeps response budgets reasonable.
+                "platform": "text",
+                "context_mode": "life",
+                "thinking_enabled": False,
+                "is_plan_mode": False,
+                "subagent_enabled": True,
+                "is_builder_wakeup": True,
+                "builder_task_id": task_id,
+                "builder_event_status": event.get("status"),
+            }
+            if isinstance(user_id, str) and user_id:
+                context["user_id"] = user_id
             await client.runs.create(
                 thread_id,
                 _COMPANION_ASSISTANT_ID,
                 input={"messages": []},
-                config={
-                    "configurable": {
-                        "is_builder_wakeup": True,
-                        "builder_task_id": task_id,
-                        "builder_event_status": event.get("status"),
-                    }
-                },
+                context=context,
                 multitask_strategy="enqueue",
             )
             self._remember(task_id)
