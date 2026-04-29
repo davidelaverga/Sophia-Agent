@@ -63,6 +63,11 @@ class BuilderCompletionEvent(BaseModel):
     error_message: str | None = None
     completed_at: str | None = None
     source: str | None = Field(None, description="Origin: subagent_executor | async_subagent_monitor")
+    user_id: str | None = Field(
+        None,
+        description="Originating user id, used by the companion wakeup worker to "
+        "construct a properly-attributed synthetic turn.",
+    )
 
 
 # ---- Routers ---------------------------------------------------------------

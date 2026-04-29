@@ -25,11 +25,55 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
+    """Log builder skill discovery / invocation as INFO breadcrumbs.
+
+    Two distinct events are surfaced so the user can grep one line per
+    builder run to answer "did the builder pick a skill?":
+
+    - ``[BuilderSkill] manifest_read: skill=<name>`` — the model called
+      ``read_file`` on a SKILL.md, i.e. it discovered the skill workflow.
+    - ``[BuilderSkill] script_invoked: skill=<name>`` — the model called
+      ``bash`` with a command path under ``skills/<name>/``, i.e. it
+      executed a skill-bundled script.
+
+    Without these the existing logs only show ``write_file`` and ``bash``
+    tool names, with no signal whether the builder is using a pre-tested
+    skill workflow or writing its own ``_generate_*.py`` script.
+    """
+    relevant = BuilderTaskMiddleware._BUILDER_RELEVANT_SKILLS
+    for tc in tool_calls:
+        name = tc.get("name")
+        args = tc.get("args") or {}
+        if name in ("read_file", "read_file_tool"):
+            path = args.get("path") or args.get("file_path") or ""
+            if isinstance(path, str) and "/skills/" in path and path.endswith("/SKILL.md"):
+                # Extract the skill folder name: ``…/skills/<name>/SKILL.md``.
+                segment = path.split("/skills/", 1)[1].split("/", 1)[0]
+                if segment in relevant:
+                    logger.info("[BuilderSkill] manifest_read: skill=%s", segment)
+        elif name == "bash":
+            cmd = args.get("command")
+            if not isinstance(cmd, str) or not cmd:
+                continue
+            for skill_name in relevant:
+                # Match both the host (``skills/<name>/``) and container
+                # (``/mnt/skills/<name>/``) layouts so this works in
+                # local-sandbox and aio-sandbox modes alike.
+                if (
+                    f"/skills/{skill_name}/" in cmd
+                    or f"/mnt/skills/{skill_name}/" in cmd
+                ):
+                    logger.info("[BuilderSkill] script_invoked: skill=%s", skill_name)
+                    break
 
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
@@ -831,6 +875,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
             # AI message has tool calls -- look for emit_builder_artifact
             if tool_calls:
+                # Surface skill-discovery / skill-invocation breadcrumbs
+                # before any control-flow branches return. The user
+                # complained about zero visibility into which skills the
+                # builder picks; this resolves that without changing
+                # behaviour.
+                _emit_skill_usage_logs(tool_calls)
                 artifact_calls = [tc for tc in tool_calls if tc.get("name") == "emit_builder_artifact"]
                 tool_names = self._tool_names(tool_calls)
 

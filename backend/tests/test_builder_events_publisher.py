@@ -77,6 +77,7 @@ def _make_result(
     error: str | None = None,
     description: str | None = None,
     completed_at: datetime | None = None,
+    owner_id: str | None = None,
 ) -> SimpleNamespace:
     """Build a SubagentResult-like object with the fields the publisher reads.
 
@@ -94,6 +95,7 @@ def _make_result(
         error=error,
         description=description,
         ai_messages=[],
+        owner_id=owner_id,
     )
 
 
@@ -182,6 +184,62 @@ def test_emit_completion_event_fires_once_for_observed_agent(stub_executor_modul
     assert payload["completed_at"] == "2026-04-26T21:02:51"
     assert payload["agent_name"] == "sophia_builder"
     assert payload["source"] == "subagent_executor"
+
+
+def test_payload_includes_owner_id_as_user_id(stub_executor_module):
+    """The companion-wakeup worker (gateway side) needs ``user_id`` on
+    the event so it can construct a properly-attributed synthetic turn.
+    Without this, the wakeup falls back to ``user_id="default_user"``
+    which loads the wrong identity."""
+    result = _make_result(
+        final_state={
+            "builder_result": {
+                "artifact_path": "/mnt/user-data/outputs/note.md",
+                "artifact_title": "Note",
+                "artifact_type": "document",
+                "companion_summary": "Wrote a note.",
+            },
+            "delegation_context": {"task": "Write a note."},
+        },
+        owner_id="user-abc",
+    )
+    _set_status(result, "completed")
+
+    captured: list[dict] = []
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        _wait_for_capture(captured, expected=1)
+
+    assert len(captured) == 1
+    assert captured[0]["user_id"] == "user-abc"
+
+
+def test_payload_omits_user_id_when_owner_id_missing(stub_executor_module):
+    """``owner_id`` is best-effort: when missing, the payload carries
+    ``user_id=None`` so the gateway worker degrades to the existing
+    no-user-id fallback path (defaulting to ``"default_user"`` in the
+    agent factory) rather than a hard failure."""
+    result = _make_result(
+        final_state={
+            "builder_result": {
+                "artifact_path": "/mnt/user-data/outputs/note.md",
+                "artifact_title": "Note",
+                "artifact_type": "document",
+                "companion_summary": "Wrote a note.",
+            },
+            "delegation_context": {"task": "Write a note."},
+        },
+        owner_id=None,
+    )
+    _set_status(result, "completed")
+
+    captured: list[dict] = []
+    with patch.object(builder_events, "_post_webhook", side_effect=lambda p: captured.append(p)):
+        builder_events.emit_completion_event(result, agent_name="sophia_builder")
+        _wait_for_capture(captured, expected=1)
+
+    assert len(captured) == 1
+    assert captured[0]["user_id"] is None
 
 
 def test_emit_completion_event_maps_status_to_card_enum(stub_executor_module):

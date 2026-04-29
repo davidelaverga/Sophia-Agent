@@ -87,6 +87,7 @@ async def test_wake_queues_run_on_success_event():
         "task_id": "task-1",
         "status": "success",
         "agent_name": "sophia_builder",
+        "user_id": "user-xyz",
     })
 
     assert fired is True
@@ -96,10 +97,26 @@ async def test_wake_queues_run_on_success_event():
     assert call["assistant_id"] == "sophia_companion"
     assert call["input"] == {"messages": []}
     assert call["multitask_strategy"] == "enqueue"
-    # Wakeup metadata in configurable so future code paths can branch.
-    assert call["config"]["configurable"]["is_builder_wakeup"] is True
-    assert call["config"]["configurable"]["builder_task_id"] == "task-1"
-    assert call["config"]["configurable"]["builder_event_status"] == "success"
+    # Everything goes via ``context`` (langgraph-api 0.7+ rejects requests
+    # that set both ``configurable`` and ``context`` at once; the server
+    # copies context into configurable so the agent factory still reads
+    # ``cfg["user_id"]`` correctly).
+    assert "config" not in call
+    ctx = call["context"]
+    assert ctx["thread_id"] == "thread-A"
+    assert ctx["user_id"] == "user-xyz"
+    # Synthetic turn shape — text-platform with safe defaults so the
+    # companion middleware chain initialises correctly. CLAUDE.md hard
+    # rule #6: "Platform signal is mandatory in every DeerFlow request".
+    assert ctx["platform"] == "text"
+    assert ctx["context_mode"] == "life"
+    assert ctx["thinking_enabled"] is False
+    assert ctx["is_plan_mode"] is False
+    assert ctx["subagent_enabled"] is True
+    # Wakeup metadata so downstream code paths can branch.
+    assert ctx["is_builder_wakeup"] is True
+    assert ctx["builder_task_id"] == "task-1"
+    assert ctx["builder_event_status"] == "success"
 
 
 @pytest.mark.anyio
@@ -171,7 +188,7 @@ async def test_wake_dedup_does_not_block_other_task_ids():
 
     assert fired is True
     assert len(runs.calls) == 2
-    assert runs.calls[1]["config"]["configurable"]["builder_task_id"] == "task-2"
+    assert runs.calls[1]["context"]["builder_task_id"] == "task-2"
 
 
 @pytest.mark.anyio
@@ -291,7 +308,7 @@ async def test_internal_post_schedules_wakeup_on_success(
 
     assert len(runs.calls) == 1
     assert runs.calls[0]["thread_id"] == "thread-route"
-    assert runs.calls[0]["config"]["configurable"]["builder_task_id"] == "task-route"
+    assert runs.calls[0]["context"]["builder_task_id"] == "task-route"
 
 
 @pytest.mark.anyio

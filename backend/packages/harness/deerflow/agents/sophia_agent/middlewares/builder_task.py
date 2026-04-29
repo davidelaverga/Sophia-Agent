@@ -333,6 +333,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"You have a STRICT budget of {_HARD_CEILING} tool-call turns total. "
             f"Currently on turn {non_artifact_turns}/{_HARD_CEILING} ({remaining} remaining).\n"
             f"{wall_clock_line}"
+            "BEFORE planning, check <skill_system> above. If a listed skill matches "
+            "the deliverable type (e.g. chart-visualization for any chart, "
+            "ppt-generation for slide decks, image-generation for standalone "
+            "images, data-analysis for tabular data), USE IT — read its SKILL.md "
+            "via read_file_tool and follow its workflow. ONLY if no listed skill "
+            "applies should you write a _generate_<name>.py script from scratch. "
+            "Writing your own matplotlib/reportlab/python-pptx code is the "
+            "fragile path PR #93/#94 spent recovery machinery on.\n"
             "Plan your work to fit within this budget:\n"
             "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
             "- For text deliverables (markdown, html, plain text, code): write the complete file in a single "
@@ -537,12 +545,34 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             return None
 
         try:
-            skills = load_skills(enabled_only=True)
+            # Intentionally NOT ``enabled_only=True``. The
+            # ``_BUILDER_RELEVANT_SKILLS`` whitelist below already pins
+            # the four binary-generation skills the builder always needs,
+            # and gating them through ``extensions_config.json`` adds a
+            # silent failure mode: when that file is missing (e.g. fresh
+            # checkout, render deploy without operator config), the
+            # loader's exception path leaves every skill ``enabled=False``
+            # and ``enabled_only=True`` filters them all out — so the
+            # ``<skill_system>`` block never reaches the prompt and the
+            # model falls back to writing matplotlib/reportlab loops.
+            # The whitelist is the correct gate; per-skill enable state
+            # is operator policy that doesn't apply to the builder's
+            # intrinsic tooling.
+            skills = load_skills(enabled_only=False)
         except Exception:  # pragma: no cover — defensive
             logger.warning("BuilderTask: load_skills failed; skipping skills inventory block", exc_info=True)
             return None
 
         relevant = [s for s in skills if getattr(s, "name", None) in cls._BUILDER_RELEVANT_SKILLS]
+        # Log either way so "did the builder see skills this run?" is
+        # answerable from a single grep on the langgraph-server logs.
+        # Without this, the only signal in the existing logs is the
+        # absence of a ``<skill_system>`` line — which is invisible.
+        logger.info(
+            "[BuilderTask] skills_inventory: %d skills injected (%s)",
+            len(relevant),
+            ", ".join(sorted(s.name for s in relevant)) if relevant else "none",
+        )
         if not relevant:
             return None
 
