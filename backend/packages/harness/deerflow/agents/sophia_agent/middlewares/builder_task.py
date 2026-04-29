@@ -259,6 +259,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "</output_contract>"
         )
 
+        # PR Phase B (2026-04-29): inject the skills inventory so the
+        # builder knows the pre-tested generation workflows
+        # (chart-visualization, ppt-generation, image-generation,
+        # data-analysis) are available. Without this block the model
+        # falls back to writing its own matplotlib/reportlab code, which
+        # is the failure pattern PR #93/#94 spent recovery machinery on.
+        skills_block = self._build_skills_inventory_block()
+        if skills_block:
+            sections.append(skills_block)
+
         sections.append(
             "<preinstalled_libraries>\n"
             "The sandbox already has these Python libraries installed. Import them directly — do NOT run pip install:\n"
@@ -269,6 +279,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- Other: markdown, requests, httpx\n"
             "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
             "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
+            "Note: prefer skills (above) over writing your own generator code "
+            "for PDF/PPTX/charts/data-analysis. The skills wrap pre-tested "
+            "generators that handle font/encoding/embedding correctly.\n"
             "</preinstalled_libraries>"
         )
 
@@ -327,27 +340,45 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "call write_file_tool repeatedly to the same path — overwriting a long document costs 90+ seconds "
             "per turn and burns the wall-clock budget. If output risks exceeding the write budget, ship a "
             "tighter draft instead of fragmenting.\n"
-            "- For binary deliverables (pdf, pptx, docx, xlsx, png): the DELIVERABLE IS THE BINARY, NOT THE SCRIPT. You MUST:\n"
-            "    (a) Turn 2: write ONE generator script to /mnt/user-data/outputs/_generate_<name>.py that produces "
-            "the whole binary end-to-end. Keep the script under 120 lines with minimal styling — a tight script "
-            "generates 3-5x faster than an elaborate one, and time saved here is time you have to recover from "
-            "errors. If content risks exceeding ~120 lines, split into data.json + a short generator script in two "
-            "sequential write_file_tool calls.\n"
-            "    (b) Turn 3: run it with bash_tool (e.g. `python /mnt/user-data/outputs/_generate_<name>.py`). This step is MANDATORY — skipping it leaves the user with a useless .py file.\n"
-            "    (c) Turn 4: verify the binary exists with ls_tool on /mnt/user-data/outputs/. If the binary is "
-            "missing or bash_tool returned an error, fix the script and re-run — BUT at most 2 fix-and-retry cycles. "
-            "After 2 failed retries, call emit_builder_artifact with whatever partial deliverable is on disk "
-            "(the generator .py or a degraded binary), set confidence<=0.5, and put a clear explanation in "
-            "companion_tone_hint. NEVER exit without calling emit_builder_artifact.\n"
-            "    (d) emit_builder_artifact.artifact_path MUST point to the BINARY file (e.g. .pdf, .pptx, .png) — "
-            "never to the generator .py script. The .py may appear in supporting_files, but artifact_path must be "
-            "the final deliverable the user asked for.\n"
-            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
-            "- After each meaningful step (write_file, successful bash run), call write_todos again to mark the "
-            "corresponding item 'completed' or 'in-progress'. This is how the user sees the progress bar advance — "
-            "skipping these updates leaves the UI stuck.\n"
+            "- For binary deliverables (pdf, pptx, docx, xlsx, png, charts): the DELIVERABLE IS THE BINARY. "
+            "**Use skills and tools that wrap pre-tested generators — do NOT write your own matplotlib / "
+            "reportlab / python-pptx code.** Past attempts failed repeatedly on font/encoding/image-embedding "
+            "errors. Picks by deliverable shape:\n"
+            "    * **PDF** (technical report, document with diagrams):\n"
+            "      1. For each diagram or chart, use the chart-visualization skill (read its SKILL.md, then "
+            "         invoke the appropriate generate_*_chart script via bash_tool). The skill outputs PNG/SVG "
+            "         to a path under /mnt/user-data/outputs/.\n"
+            "      2. Compose a Markdown source file in /mnt/user-data/outputs/<name>.md with image embeds "
+            "         pointing to the chart files. Write it once with write_file_tool — single call.\n"
+            "      3. Call render_markdown_to_pdf(markdown_path=<.md>, pdf_path=<.pdf>) to produce the binary. "
+            "         This tool wraps pandoc and handles fonts/unicode/embedding correctly.\n"
+            "      4. emit_builder_artifact.artifact_path = the .pdf path.\n"
+            "      If render_markdown_to_pdf returns success=false with error_type='pandoc_missing' or "
+            "      'pandoc_error', SHIP THE MARKDOWN as the artifact instead (artifact_type='document', "
+            "      artifact_path = the .md file) with confidence<=0.5 and explain in companion_tone_hint.\n"
+            "    * **PPTX / presentation**: use the ppt-generation skill (read its SKILL.md). The skill "
+            "      orchestrates image-generation per slide and composes them into a PPTX. Do not write your own "
+            "      python-pptx code.\n"
+            "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
+            "      generated PNG/SVG is the deliverable.\n"
+            "    * **Data analysis / spreadsheet**: use the data-analysis skill (DuckDB-based) for SQL over "
+            "      tabular data. Output CSV/JSON/Markdown directly.\n"
+            "    * **xlsx / docx / other formats not covered by a skill**: as a LAST RESORT, write a short "
+            "      generator script to /mnt/user-data/outputs/_generate_<name>.py and bash-run it. This path "
+            "      is fragile (the very pattern PR #93/#94 spent recovery machinery on). Prefer a skill if at "
+            "      all possible. If you must use a generator script: keep it under 120 lines, run it with "
+            "      bash_tool, verify with ls_tool, and at most 2 fix-and-retry cycles before shipping the .py "
+            "      with confidence<=0.4.\n"
+            "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install. "
+            "    The render_markdown_to_pdf tool encapsulates the PDF rendering pipeline; you do not need to "
+            "    install anything to use it.\n"
+            "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
+            "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "
+            "the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
             "- Make targeted edits only if critical fixes are needed.\n"
-            "- Final turn: Call emit_builder_artifact. This is MANDATORY — without it your work is lost.\n"
+            "- Final turn: Call emit_builder_artifact pointing artifact_path at the FINAL DELIVERABLE (the "
+            ".pdf, .pptx, .png, .md, etc. — never a generator .py unless that's the explicit fallback above). "
+            "This is MANDATORY — without it your work is lost.\n"
             "Do NOT iterate endlessly to perfect the output. Ship a complete first draft, then finalize.\n"
             "</completion_instruction>"
         )
@@ -474,6 +505,90 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     # ------------------------------------------------------------------
     # Private helpers
     # ------------------------------------------------------------------
+
+    # Skills the builder is steered toward for binary deliverables.
+    # Phase B (2026-04-29): inject these into the system prompt so the
+    # model uses pre-tested generators instead of writing matplotlib /
+    # reportlab / python-pptx code itself. Limited to the binary-
+    # generation skills relevant to builder workflows; other skills
+    # (sophia, bootstrap, surprise-me, …) are noise here.
+    _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
+        "chart-visualization",
+        "ppt-generation",
+        "image-generation",
+        "data-analysis",
+    )
+
+    @classmethod
+    def _build_skills_inventory_block(cls) -> str | None:
+        """Return a ``<skill_system>`` block listing builder-relevant skills.
+
+        Reuses the central skills loader so SKILL.md descriptions stay
+        in sync with what the lead_agent sees. When ``load_skills`` is
+        unavailable (offline tests, packaging issue) or no relevant
+        skills are enabled, returns ``None`` and the model falls back
+        to the pre-Phase-B "_generate_*.py" path explicitly described
+        in <completion_instruction>.
+        """
+        try:
+            from deerflow.skills import load_skills  # local import: package may be optional in tests
+        except Exception:  # pragma: no cover — defensive
+            logger.warning("BuilderTask: deerflow.skills unavailable; skipping skills inventory block")
+            return None
+
+        try:
+            skills = load_skills(enabled_only=True)
+        except Exception:  # pragma: no cover — defensive
+            logger.warning("BuilderTask: load_skills failed; skipping skills inventory block", exc_info=True)
+            return None
+
+        relevant = [s for s in skills if getattr(s, "name", None) in cls._BUILDER_RELEVANT_SKILLS]
+        if not relevant:
+            return None
+
+        try:
+            from deerflow.config import get_app_config
+
+            container_base = get_app_config().skills.container_path
+        except Exception:
+            container_base = "/mnt/skills"
+
+        items: list[str] = []
+        for skill in relevant:
+            name = getattr(skill, "name", "")
+            description = (getattr(skill, "description", "") or "").strip()
+            try:
+                location = skill.get_container_file_path(container_base)
+            except Exception:
+                location = f"{container_base}/{name}/SKILL.md"
+            items.append(
+                f"  <skill>\n"
+                f"    <name>{name}</name>\n"
+                f"    <description>{description}</description>\n"
+                f"    <location>{location}</location>\n"
+                f"  </skill>"
+            )
+
+        return (
+            "<skill_system>\n"
+            "Pre-tested workflows for binary deliverables. Strongly preferred over "
+            "writing your own matplotlib/reportlab/python-pptx code — past attempts at "
+            "ad-hoc Python generation failed repeatedly on font/encoding/image-embedding "
+            "errors.\n"
+            "\n"
+            "How to use a skill:\n"
+            "1. read_file_tool on the skill's SKILL.md to learn its workflow.\n"
+            "2. Follow the SKILL.md instructions — usually involves invoking the bundled "
+            "script via bash_tool with structured input (a JSON spec, not custom code).\n"
+            "3. The script writes its output (PNG/SVG/PPTX/JSON/CSV) to a path you pass it.\n"
+            "4. Compose downstream artifacts (e.g. a Markdown document referencing chart "
+            "images) using the skill's output paths.\n"
+            "\n"
+            "<available_skills>\n"
+            + "\n".join(items)
+            + "\n</available_skills>\n"
+            "</skill_system>"
+        )
 
     @staticmethod
     def _tone_guidance(tone_estimate: float, band: str) -> str:
