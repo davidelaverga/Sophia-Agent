@@ -33,6 +33,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.workers.builder_events import get_builder_events_worker
+from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,25 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
             exc_info=True,
         )
 
+    # Trigger a synthetic companion turn so Sophia proactively surfaces
+    # the artifact in chat without the user having to send another
+    # message. Fire-and-forget: ``wake()`` swallows its own errors and
+    # the user's existing turn-driven adoption flow remains the
+    # fallback. See ``app/gateway/workers/companion_wakeup.py``.
+    #
+    # Use the ``_or_none`` lookup so test fixtures that install only the
+    # SSE worker don't get a noisy warning on every webhook POST.
+    wakeup = get_companion_wakeup_or_none(request.app)
+    if wakeup is not None:
+        try:
+            asyncio.create_task(wakeup.wake(payload))
+        except Exception:
+            logger.warning(
+                "Companion wakeup scheduling failed for builder event task_id=%s",
+                payload.get("task_id"),
+                exc_info=True,
+            )
+
     return {"delivered_subscribers": delivered}
 
 
@@ -109,7 +129,7 @@ def _format_sse_event(payload: dict[str, Any]) -> bytes:
     The webapp listener parses ``event.data`` as JSON. Always emit a
     standard ``data:`` line followed by the required blank line.
     """
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 @public_router.get(
@@ -140,7 +160,7 @@ async def stream_builder_events(thread_id: str, request: Request) -> StreamingRe
                         return
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Heartbeat keeps proxies / browsers from closing
                         # the connection on idle. SSE comments are valid
                         # and ignored by the EventSource API.

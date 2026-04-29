@@ -23,6 +23,7 @@ from app.gateway.routers import (
     voice,
 )
 from app.gateway.workers.builder_events import install_builder_events_worker
+from app.gateway.workers.companion_wakeup import install_companion_wakeup
 from deerflow.config.app_config import get_app_config
 
 # Configure logging
@@ -55,6 +56,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # to webapp SSE subscribers and channel adapters.
     install_builder_events_worker(app)
     logger.info("Builder events worker installed")
+
+    # Install the companion wakeup worker. When a builder completion
+    # event arrives, this worker triggers a synthetic empty turn on the
+    # companion's LangGraph thread so Sophia proactively surfaces the
+    # artifact in chat without the user having to send another message.
+    # See ``app/gateway/workers/companion_wakeup.py`` for the rationale.
+    install_companion_wakeup(app)
+    logger.info("Companion wakeup worker installed")
 
     # NOTE: MCP tools initialization is NOT done here because:
     # 1. Gateway doesn't use MCP tools - they are used by Agents in the LangGraph Server
