@@ -51,8 +51,9 @@ Design notes:
   proactive announcement would be noise.
 - **Configuration carry-through.** The wakeup turn passes
   ``is_builder_wakeup=True`` and the originating ``builder_task_id`` in
-  ``configurable`` so future code paths can branch on this if needed
-  (none currently — the existing middlewares are wakeup-agnostic).
+  ``context`` (mirrored into runtime configurable by langgraph-api) so
+  future code paths can branch on this if needed (none currently — the
+  existing middlewares are wakeup-agnostic).
 """
 
 from __future__ import annotations
