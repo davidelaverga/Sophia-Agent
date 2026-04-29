@@ -129,7 +129,7 @@ def _format_sse_event(payload: dict[str, Any]) -> bytes:
     The webapp listener parses ``event.data`` as JSON. Always emit a
     standard ``data:`` line followed by the required blank line.
     """
-    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode("utf-8")
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n".encode()
 
 
 @public_router.get(
@@ -160,7 +160,7 @@ async def stream_builder_events(thread_id: str, request: Request) -> StreamingRe
                         return
                     try:
                         event = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    except asyncio.TimeoutError:
+                    except TimeoutError:
                         # Heartbeat keeps proxies / browsers from closing
                         # the connection on idle. SSE comments are valid
                         # and ignored by the EventSource API.
