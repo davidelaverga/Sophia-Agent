@@ -2326,6 +2326,49 @@ class TestBuilderTaskMiddleware:
             "skills_inventory: 4 skills injected" in rec.message for rec in caplog.records
         )
 
+    def test_completion_instruction_mandates_emit_only_on_final_turn(self):
+        """Belt-and-suspenders for the ``present_files`` removal. Even though
+        the tool is gone from the builder's toolbox, the prompt should also
+        explicitly tell the model to call ONLY emit_builder_artifact on the
+        final turn — so any future tool the model is tempted to pair with
+        emit (write_todos, bash, write_file) is also off the table.
+
+        Production failure context: when ``present_files`` was in the tool
+        list the model paired it with ``emit_builder_artifact`` on the
+        final turn (turn 9 in the failing log), and
+        ``BuilderArtifactMiddleware`` rejected the combination as "mixed
+        tool calls; loop continues". The emit-only directive prevents the
+        same shape from re-emerging via other UX-companion tools.
+        """
+        from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
+        mw = BuilderTaskMiddleware()
+        state = {
+            "system_prompt_blocks": [],
+            "delegation_context": {
+                "companion_artifact": {"tone_estimate": 2.7, "active_tone_band": "engagement"},
+                "task_type": "document",
+                "relevant_memories": [],
+                "active_ritual": None,
+                "ritual_phase": None,
+            },
+        }
+
+        result = mw.before_agent(state, _make_runtime())
+        assert result is not None
+        briefing = "\n".join(result["system_prompt_blocks"])
+        # The emit-only mandate must appear in the completion_instruction.
+        assert "ONLY emit_builder_artifact" in briefing
+        # The "do not pair with any other tool" rule must be explicit so
+        # the model does not retry the failure shape with a different tool.
+        assert "Do NOT pair emit_builder_artifact with any other tool call" in briefing
+        # The artifact card must be explicitly framed as the user-facing
+        # surface so the model does not feel a separate present_files call
+        # is needed for visibility.
+        assert "artifact card surfaces the file" in briefing.lower() or (
+            "artifact card" in briefing.lower() and "surfaces" in briefing.lower()
+        )
+
     def test_skills_inventory_block_logs_when_no_relevant_skills_found(
         self, monkeypatch, caplog
     ):
