@@ -33,7 +33,6 @@ from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
 from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.sophia.tools.render_markdown_to_pdf import render_markdown_to_pdf
-from deerflow.tools.builtins import present_file_tool
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
@@ -182,6 +181,24 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     # ``render_markdown_to_pdf`` (Phase B) replaces the model writing
     # ``_generate_*.py`` + matplotlib + reportlab for PDFs — see the tool's
     # module docstring for the rationale.
+    #
+    # Note: ``present_file_tool`` is intentionally NOT in this list. Upstream
+    # deer-flow uses ``present_files`` as a UX-only marker for surfacing
+    # deliverables, paired with plain-text-end as the implicit completion
+    # signal. Sophia replaces both with ``emit_builder_artifact``: it carries
+    # the structured handoff payload (artifact_path, companion_summary,
+    # decisions_made, confidence, …) that drives the BuilderCompletionCard
+    # and the companion synthesis prompt — the artifact card IS the user-
+    # facing surface, so a separate present_files signal is redundant.
+    #
+    # Keeping both invited the model (trained on upstream's pattern) to call
+    # ``present_files + emit_builder_artifact`` together on the final turn.
+    # ``BuilderArtifactMiddleware`` rejected that combination as "mixed tool
+    # calls; loop continues", and the next turn's plain-text reply tripped
+    # the empty-fallback path. Removing ``present_file_tool`` from the
+    # builder's toolbox eliminates the conflict at the root: the model
+    # cannot produce the bad combo, and ``emit_builder_artifact`` remains
+    # the single, structured "I'm done" signal.
     tools = [
         bash_tool,
         ls_tool,
@@ -191,7 +208,6 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         builder_web_search,
         builder_web_fetch,
         render_markdown_to_pdf,
-        present_file_tool,
         emit_builder_artifact,
     ]
 
