@@ -271,6 +271,63 @@ describe('useSessionExitFlow', () => {
     );
   });
 
+  it('does not persist fallback live artifacts into the recap store', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-fallback-artifacts',
+        ended_at: '2026-03-03T20:00:00.000Z',
+        duration_minutes: 4,
+        turn_count: 2,
+        offer_debrief: false,
+        debrief_prompt: undefined,
+        recap_artifacts: undefined,
+      },
+    });
+
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const { result } = renderHook(() =>
+      useSessionExitFlow({
+        isReadOnly: false,
+        isSophiaResponding: false,
+        stopStreaming: vi.fn(),
+        setEnding: vi.fn(),
+        sessionId: 'session-fallback-artifacts',
+        sessionStartedAt: '2026-03-03T19:56:00.000Z',
+        sessionPresetType: 'open',
+        sessionContextMode: 'life',
+        messageCount: 2,
+        endSessionStore: vi.fn(),
+        clearSessionStore: vi.fn(),
+        clearBootstrap: vi.fn(),
+        navigateTo: vi.fn(),
+        promoteToDebriefMode: vi.fn(),
+        startDebriefWithLLM: vi.fn(),
+        currentArtifacts: {
+          takeaway: 'Session completed',
+          reflection_candidate: {
+            prompt: 'What mattered most in this conversation?',
+          },
+        },
+      }),
+    );
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
+      session_id: 'session-fallback-artifacts',
+      recap_artifacts: undefined,
+    }));
+    expect(addSessionMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'session-fallback-artifacts',
+      takeawayPreview: undefined,
+    }));
+    expect(setRecapArtifactsMock).not.toHaveBeenCalled();
+  });
+
   it('ends resumed sessions with the persisted backend thread id', async () => {
     endSessionApiMock.mockResolvedValue({
       success: true,

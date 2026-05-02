@@ -339,6 +339,88 @@ describe('useRecapArtifactsLoader', () => {
     expect(getRecentSessionEndHint()).toBeNull();
   });
 
+  it('suppresses stored fallback artifacts while a just-ended recap loads the real payload', async () => {
+    const setArtifacts = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      jsonResponse({
+        session_id: 'sess-fallback-flash',
+        ended_at: '2026-03-03T20:00:00.000Z',
+        takeaway: 'You named the thing clearly enough to carry it forward.',
+        memory_candidates: [
+          {
+            id: 'real-memory-1',
+            text: 'User wants fresh recaps to wait for real session artifacts instead of fallback copy.',
+            category: 'preference',
+          },
+        ],
+      }),
+    );
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+    markRecentSessionEnd('sess-fallback-flash');
+
+    const fallbackArtifacts = {
+      sessionId: 'sess-fallback-flash',
+      threadId: 'thread-fallback-flash',
+      sessionType: 'debrief' as const,
+      contextMode: 'life' as const,
+      endedAt: new Date().toISOString(),
+      takeaway: 'Session completed',
+      memoryCandidates: [],
+      status: 'ready' as const,
+    };
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-fallback-flash',
+        artifacts: fallbackArtifacts,
+        setArtifacts,
+      }),
+    );
+
+    expect(result.current.status).not.toBe('ready');
+
+    await flushEffects();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sophia/sessions/sess-fallback-flash/recap',
+      expect.objectContaining({ method: 'GET' }),
+    );
+    expect(setArtifacts).toHaveBeenCalledWith(
+      'sess-fallback-flash',
+      expect.objectContaining({
+        takeaway: 'You named the thing clearly enough to carry it forward.',
+        memoryCandidates: [expect.objectContaining({ id: 'real-memory-1' })],
+      }),
+    );
+    expect(result.current.status).toBe('ready');
+    expect(getRecentSessionEndHint()).toBeNull();
+  });
+
+  it('does not show development mock fallback while a just-ended recap is still composing', async () => {
+    vi.useFakeTimers();
+
+    const setArtifacts = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValueOnce(jsonResponse({ detail: 'warming up' }, 503));
+
+    global.fetch = fetchMock as unknown as typeof fetch;
+    markRecentSessionEnd('sess-no-dev-mock');
+
+    const { result } = renderHook(() =>
+      useRecapArtifactsLoader({
+        sessionId: 'sess-no-dev-mock',
+        artifacts: null,
+        setArtifacts,
+      }),
+    );
+
+    await flushEffects();
+
+    expect(result.current.status).toBe('processing');
+    expect(setArtifacts).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it('does not flash back to loading when stored artifacts change after a local discard', async () => {
     const setArtifacts = vi.fn();
     const fetchMock = vi.fn().mockResolvedValue(

@@ -19,6 +19,8 @@ import { useUiStore as useUiToastStore } from '../stores/ui-store';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
 import type { SessionEndRequest, PresetType, ContextMode, RitualArtifacts } from '../types/session';
 
+import { isRealReflection, isRealTakeaway } from './artifacts';
+
 interface DebriefData {
   prompt: string;
   durationMinutes: number;
@@ -55,9 +57,14 @@ function mapLiveArtifactsToRecapV1({
     return null;
   }
 
-  const hasTakeaway = typeof currentArtifacts?.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
-  const hasReflection = typeof currentArtifacts?.reflection_candidate?.prompt === 'string'
-    && currentArtifacts.reflection_candidate.prompt.trim().length > 0;
+  const takeaway = typeof currentArtifacts?.takeaway === 'string'
+    ? currentArtifacts.takeaway.trim()
+    : undefined;
+  const reflectionPrompt = typeof currentArtifacts?.reflection_candidate?.prompt === 'string'
+    ? currentArtifacts.reflection_candidate.prompt.trim()
+    : undefined;
+  const hasTakeaway = isRealTakeaway(takeaway);
+  const hasReflection = isRealReflection(reflectionPrompt);
   const hasMemories = Array.isArray(currentArtifacts?.memory_candidates)
     && currentArtifacts.memory_candidates.length > 0;
 
@@ -73,10 +80,10 @@ function mapLiveArtifactsToRecapV1({
       context_mode: contextMode,
       started_at: startedAt,
       ended_at: endedAt,
-      takeaway: hasTakeaway ? currentArtifacts.takeaway : undefined,
+      takeaway: hasTakeaway ? takeaway : undefined,
       reflection_candidate: hasReflection
         ? {
-            prompt: currentArtifacts.reflection_candidate?.prompt,
+            prompt: reflectionPrompt,
             tag: currentArtifacts.reflection_candidate?.category,
           }
         : undefined,
@@ -105,9 +112,14 @@ function serializeLiveArtifactsForSessionEnd(
     return undefined;
   }
 
-  const hasTakeaway = typeof currentArtifacts?.takeaway === 'string' && currentArtifacts.takeaway.trim().length > 0;
-  const hasReflection = typeof currentArtifacts?.reflection_candidate?.prompt === 'string'
-    && currentArtifacts.reflection_candidate.prompt.trim().length > 0;
+  const takeaway = typeof currentArtifacts?.takeaway === 'string'
+    ? currentArtifacts.takeaway.trim()
+    : undefined;
+  const reflectionPrompt = typeof currentArtifacts?.reflection_candidate?.prompt === 'string'
+    ? currentArtifacts.reflection_candidate.prompt.trim()
+    : undefined;
+  const hasTakeaway = isRealTakeaway(takeaway);
+  const hasReflection = isRealReflection(reflectionPrompt);
   const hasMemories = Array.isArray(currentArtifacts?.memory_candidates)
     && currentArtifacts.memory_candidates.length > 0;
 
@@ -116,10 +128,10 @@ function serializeLiveArtifactsForSessionEnd(
   }
 
   return {
-    takeaway: hasTakeaway ? currentArtifacts.takeaway : undefined,
+    takeaway: hasTakeaway ? takeaway : undefined,
     reflection_candidate: hasReflection
       ? {
-          prompt: currentArtifacts.reflection_candidate?.prompt,
+          prompt: reflectionPrompt,
           tag: currentArtifacts.reflection_candidate?.category,
         }
       : undefined,

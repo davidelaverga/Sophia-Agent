@@ -5,6 +5,7 @@ import { mapBackendArtifactsToRecapV1 } from '../../lib/artifacts-adapter';
 import { logger } from '../../lib/error-logger';
 import type { RecapArtifactsV1 } from '../../lib/recap-types';
 import { clearRecentSessionEndHint, getRecentSessionEndHint } from '../../lib/recent-session-end';
+import { isRealReflection, isRealTakeaway } from '../../session/artifacts';
 import { useRecapStore } from '../../stores/recap-store';
 import { useSessionHistoryStore } from '../../stores/session-history-store';
 
@@ -203,12 +204,45 @@ function sessionHasLocalReviewedDecisions(sessionId: string): boolean {
   return decisions.some((decision) => decision.decision !== 'idle');
 }
 
+function isDevelopmentMockArtifacts(artifacts: RecapArtifactsV1): boolean {
+  return artifacts.takeaway === mockRecapArtifacts.takeaway
+    && (artifacts.memoryCandidates ?? []).some((candidate) => candidate.id === 'mem-1');
+}
+
+function hasRenderableRecapContent(artifacts: RecapArtifactsV1): boolean {
+  return isRealTakeaway(artifacts.takeaway)
+    || isRealReflection(artifacts.reflectionCandidate?.prompt)
+    || (artifacts.memoryCandidates?.length ?? 0) > 0
+    || Boolean(artifacts.builderArtifact);
+}
+
+function shouldSuppressStoredArtifactsForRecentEnd(
+  artifacts: RecapArtifactsV1 | null,
+  sessionId: string,
+  hasRecentEndHint: boolean,
+): boolean {
+  if (!artifacts || !hasRecentEndHint || sessionHasLocalReviewedDecisions(sessionId)) {
+    return false;
+  }
+
+  return !hasRenderableRecapContent(artifacts) || isDevelopmentMockArtifacts(artifacts);
+}
+
 export function useRecapArtifactsLoader({
   sessionId,
   artifacts,
   setArtifacts,
 }: UseRecapArtifactsLoaderParams): UseRecapArtifactsLoaderResult {
-  const [status, setStatus] = useState<RecapPageStatus>(() => (artifacts ? 'ready' : 'loading'));
+  const currentRecentEndHint = getRecentSessionEndHint();
+  const hasCurrentRecentEndHint = currentRecentEndHint?.sessionId === sessionId;
+  const suppressCurrentStoredArtifacts = shouldSuppressStoredArtifactsForRecentEnd(
+    artifacts,
+    sessionId,
+    hasCurrentRecentEndHint,
+  );
+  const [status, setStatus] = useState<RecapPageStatus>(() => (
+    artifacts && !suppressCurrentStoredArtifacts ? 'ready' : 'loading'
+  ));
   const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
@@ -221,6 +255,11 @@ export function useRecapArtifactsLoader({
 
       const recentEndHint = getRecentSessionEndHint();
       const hasRecentEndHint = recentEndHint?.sessionId === sessionId;
+      const shouldIgnoreStoredArtifacts = shouldSuppressStoredArtifactsForRecentEnd(
+        artifacts,
+        sessionId,
+        hasRecentEndHint,
+      );
 
       const shouldRetryMemories = (endedAt: string | null | undefined) => {
         return hasRecentEndHint || wasEndedRecently(endedAt);
@@ -256,7 +295,11 @@ export function useRecapArtifactsLoader({
         return true;
       };
 
-      if (artifacts) {
+      if (!artifacts || shouldIgnoreStoredArtifacts) {
+        setStatus(hasRecentEndHint ? 'processing' : 'loading');
+      }
+
+      if (artifacts && !shouldIgnoreStoredArtifacts) {
         const historyEntry = useSessionHistoryStore.getState().getSession(sessionId);
         const shouldRetryStoredMemories = shouldRetryMemories(artifacts.endedAt || historyEntry?.endedAt);
         const hasStoredMemories = Array.isArray(artifacts.memoryCandidates) && artifacts.memoryCandidates.length > 0;
@@ -423,6 +466,10 @@ export function useRecapArtifactsLoader({
         });
       }
 
+      if (hasRecentEndHint && scheduleRecentRetry()) {
+        return;
+      }
+
       if (process.env.NODE_ENV === 'development') {
         logger.debug('Recap', 'Using mock data for development');
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -452,7 +499,7 @@ export function useRecapArtifactsLoader({
   }, []);
 
   return {
-    status,
+    status: suppressCurrentStoredArtifacts && status === 'ready' ? 'processing' : status,
     reload,
   };
 }
