@@ -97,6 +97,40 @@ def test_delete_session_removes_persisted_record(isolated_session_store):
     assert open_response.json() == {"sessions": [], "count": 0}
 
 
+def test_session_store_reads_legacy_backend_users_and_migrates_updates(tmp_path):
+    primary_root = tmp_path / "users"
+    legacy_root = tmp_path / "backend" / "users"
+    store = SessionStore(primary_root, legacy_root)
+
+    legacy_record = SessionRecord(
+        session_id="legacy-session",
+        thread_id="legacy-thread",
+        user_id="dev-user",
+        status="open",
+        updated_at="2026-04-15T22:00:00+00:00",
+    )
+    legacy_path = legacy_root / "dev-user" / "sessions" / "legacy-session.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_text(legacy_record.model_dump_json(indent=2), encoding="utf-8")
+
+    loaded = store.get("dev-user", "legacy-session")
+
+    assert loaded is not None
+    assert loaded.thread_id == "legacy-thread"
+    assert store.list_open("dev-user")[0].session_id == "legacy-session"
+
+    updated = store.update(
+        "dev-user",
+        "legacy-session",
+        status="ended",
+        ended_at="2026-04-15T22:05:00+00:00",
+    )
+
+    assert updated is not None
+    assert updated.status == "ended"
+    assert (primary_root / "dev-user" / "sessions" / "legacy-session.json").is_file()
+
+
 def test_delete_all_sessions_removes_all_records_and_unregisters_threads(isolated_session_store):
     isolated_session_store.create(
         SessionRecord(

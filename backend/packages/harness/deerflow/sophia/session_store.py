@@ -1,7 +1,9 @@
 """File-based session persistence for Sophia multi-session.
 
 Stores one JSON file per session under ``users/{user_id}/sessions/{session_id}.json``.
-Designed for low-to-medium volume (tens to hundreds of sessions per user).
+By default it writes to the repo-root ``users/`` directory and can read legacy
+records from ``backend/users/`` so recap/memory/session flows stay aligned while
+older local data is migrated forward.
 """
 
 from __future__ import annotations
@@ -47,7 +49,9 @@ class SessionRecord(BaseModel):
 # Store
 # ---------------------------------------------------------------------------
 
-_DEFAULT_BASE_PATH = Path("users")
+_PROJECT_ROOT = Path(__file__).resolve().parents[5]
+_DEFAULT_BASE_PATH = _PROJECT_ROOT / "users"
+_LEGACY_BASE_PATH = _PROJECT_ROOT / "backend" / "users"
 
 
 class SessionStore:
@@ -58,8 +62,13 @@ class SessionStore:
         {base_path}/{user_id}/sessions/{session_id}.json
     """
 
-    def __init__(self, base_path: Path | None = None) -> None:
+    def __init__(self, base_path: Path | None = None, legacy_base_path: Path | None = None) -> None:
         self._base = base_path or _DEFAULT_BASE_PATH
+        self._legacy_base = (
+            legacy_base_path
+            if legacy_base_path is not None
+            else (_LEGACY_BASE_PATH if base_path is None and _LEGACY_BASE_PATH != self._base else None)
+        )
 
     # -- helpers -------------------------------------------------------------
 
@@ -68,6 +77,22 @@ class SessionStore:
 
     def _session_path(self, user_id: str, session_id: str) -> Path:
         return self._user_dir(user_id) / f"{session_id}.json"
+
+    def _iter_base_paths(self) -> tuple[Path, ...]:
+        if self._legacy_base is None or self._legacy_base == self._base:
+            return (self._base,)
+        return (self._base, self._legacy_base)
+
+    def _iter_user_dirs(self, user_id: str) -> tuple[Path, ...]:
+        return tuple(base / user_id / "sessions" for base in self._iter_base_paths())
+
+    def _iter_session_paths(self, user_id: str, session_id: str) -> tuple[Path, ...]:
+        return tuple(user_dir / f"{session_id}.json" for user_dir in self._iter_user_dirs(user_id))
+
+    def _prefer_record(self, current: SessionRecord | None, candidate: SessionRecord) -> SessionRecord:
+        if current is None:
+            return candidate
+        return candidate if candidate.updated_at >= current.updated_at else current
 
     def _write(self, record: SessionRecord) -> None:
         path = self._session_path(record.user_id, record.session_id)
@@ -93,20 +118,28 @@ class SessionStore:
 
     def get(self, user_id: str, session_id: str) -> SessionRecord | None:
         """Load a single session by ID."""
-        return self._read(self._session_path(user_id, session_id))
+        for path in self._iter_session_paths(user_id, session_id):
+            record = self._read(path)
+            if record is not None:
+                return record
+        return None
 
     def find_by_session_id(self, session_id: str) -> SessionRecord | None:
         """Load a session by ID across all persisted user directories."""
-        if not session_id or not self._base.is_dir():
+        if not session_id:
             return None
 
-        for user_root in self._base.iterdir():
-            if not user_root.is_dir():
+        for base in self._iter_base_paths():
+            if not base.is_dir():
                 continue
 
-            record = self._read(user_root / "sessions" / f"{session_id}.json")
-            if record is not None:
-                return record
+            for user_root in base.iterdir():
+                if not user_root.is_dir():
+                    continue
+
+                record = self._read(user_root / "sessions" / f"{session_id}.json")
+                if record is not None:
+                    return record
 
         return None
 
@@ -117,19 +150,23 @@ class SessionStore:
         builder artifact download route). Scans all session files — for
         low-to-medium user counts this is fine; revisit when we move off disk.
         """
-        if not thread_id or not self._base.is_dir():
+        if not thread_id:
             return None
 
-        for user_root in self._base.iterdir():
-            if not user_root.is_dir():
+        for base in self._iter_base_paths():
+            if not base.is_dir():
                 continue
-            sessions_dir = user_root / "sessions"
-            if not sessions_dir.is_dir():
-                continue
-            for session_path in sessions_dir.glob("*.json"):
-                record = self._read(session_path)
-                if record is not None and record.thread_id == thread_id:
-                    return record
+
+            for user_root in base.iterdir():
+                if not user_root.is_dir():
+                    continue
+                sessions_dir = user_root / "sessions"
+                if not sessions_dir.is_dir():
+                    continue
+                for session_path in sessions_dir.glob("*.json"):
+                    record = self._read(session_path)
+                    if record is not None and record.thread_id == thread_id:
+                        return record
 
         return None
 
@@ -161,28 +198,35 @@ class SessionStore:
 
     def delete(self, user_id: str, session_id: str) -> bool:
         """Delete a session record from disk."""
-        path = self._session_path(user_id, session_id)
-        if not path.is_file():
-            return False
-        path.unlink()
-        return True
+        deleted = False
+        for path in self._iter_session_paths(user_id, session_id):
+            if not path.is_file():
+                continue
+            path.unlink()
+            deleted = True
+        return deleted
 
     def delete_all(self, user_id: str) -> list[SessionRecord]:
         """Delete all session records for a user and return the deleted records."""
-        user_dir = self._user_dir(user_id)
-        if not user_dir.is_dir():
-            return []
+        deleted_by_id: dict[str, SessionRecord] = {}
 
-        deleted_records: list[SessionRecord] = []
-        for path in user_dir.glob("*.json"):
-            record = self._read(path)
-            if record is not None:
-                deleted_records.append(record)
-            try:
-                path.unlink()
-            except FileNotFoundError:
+        for user_dir in self._iter_user_dirs(user_id):
+            if not user_dir.is_dir():
                 continue
 
+            for path in user_dir.glob("*.json"):
+                record = self._read(path)
+                if record is not None:
+                    deleted_by_id[record.session_id] = self._prefer_record(
+                        deleted_by_id.get(record.session_id),
+                        record,
+                    )
+                try:
+                    path.unlink()
+                except FileNotFoundError:
+                    continue
+
+        deleted_records = list(deleted_by_id.values())
         deleted_records.sort(key=lambda record: record.updated_at, reverse=True)
         return deleted_records
 
@@ -199,13 +243,21 @@ class SessionStore:
 
     def _list_all(self, user_id: str) -> list[SessionRecord]:
         """Load all sessions for a user, sorted by updated_at descending."""
-        user_dir = self._user_dir(user_id)
-        if not user_dir.is_dir():
-            return []
-        records: list[SessionRecord] = []
-        for path in user_dir.glob("*.json"):
-            record = self._read(path)
-            if record is not None:
-                records.append(record)
+        records_by_id: dict[str, SessionRecord] = {}
+
+        for user_dir in self._iter_user_dirs(user_id):
+            if not user_dir.is_dir():
+                continue
+
+            for path in user_dir.glob("*.json"):
+                record = self._read(path)
+                if record is None:
+                    continue
+                records_by_id[record.session_id] = self._prefer_record(
+                    records_by_id.get(record.session_id),
+                    record,
+                )
+
+        records = list(records_by_id.values())
         records.sort(key=lambda r: r.updated_at, reverse=True)
         return records
