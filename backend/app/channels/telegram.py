@@ -58,6 +58,14 @@ class TelegramChannel(Channel):
         # cannot drop a running task; entries are removed on completion via
         # `task.add_done_callback(self._background_tasks.discard)`.
         self._background_tasks: set[asyncio.Task] = set()
+        # Dual-bot architecture, Phase 1: surface whether a sibling worker bot
+        # token is configured. Phase 1 is config-only — no second client is
+        # built, no behavior changes. Phase 3 of the spec wires this token to
+        # an actual worker `Application` that posts builder progress in groups.
+        if config.get("worker_bot_token", ""):
+            logger.info("Telegram dual-bot: worker bot token configured (Phase 1 — not yet wired)")
+        else:
+            logger.info("Telegram dual-bot: no worker bot token configured (single-bot mode)")
 
     async def start(self) -> None:
         if self._running:
