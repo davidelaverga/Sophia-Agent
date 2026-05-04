@@ -697,6 +697,8 @@ If YES:
 | Spec diverges from implementation | Davide | Update spec first, then approve PR |
 | Any prompt file changed | Jorge or Luis | Write GEPA log entry in compound step |
 | Voice behavior feels off after a change | Luis + Davide | Check GEPA log for last `voice.md` change |
+| Before non-trivial structural backend change | Anyone (incl. Claude) | `mcp__sentrux__session_start` → edit → `mcp__sentrux__session_end` |
+| PR fails the architecture gate | Author | Read the score delta in the CI comment; see CLAUDE.md → "Sentrux feedback loop" |
 
 ---
 

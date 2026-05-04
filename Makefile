@@ -169,3 +169,27 @@ down:
 # Start all Sophia voice services (Windows PowerShell)
 sophia-dev:
 	@powershell -ExecutionPolicy Bypass -File scripts/sophia-dev.ps1
+
+# ==========================================
+# Sentrux — architectural sensor (CLI + MCP)
+# ==========================================
+
+SENTRUX_VERSION ?= latest
+
+sentrux-install:
+	@command -v sentrux >/dev/null 2>&1 || { \
+	  if [ "$$(uname)" = "Darwin" ]; then \
+	    brew install sentrux/tap/sentrux; \
+	  else \
+	    curl -fsSL https://raw.githubusercontent.com/sentrux/sentrux/main/install.sh | sh; \
+	  fi; }
+	@sentrux --version
+
+sentrux-scan:
+	@sentrux check .
+
+sentrux-gate-save:
+	@sentrux gate --save .
+
+sentrux-gate-check:
+	@sentrux gate .

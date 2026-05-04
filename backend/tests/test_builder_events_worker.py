@@ -78,7 +78,7 @@ async def test_publish_does_not_leak_to_other_threads():
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=0.2)
                 sink.append(event)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return
 
     task_a = asyncio.create_task(consumer("thread-A", received_a))

@@ -1,0 +1,78 @@
+name: Architecture gate (sentrux)
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  group: sentrux-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # Pinned sentrux release. Bump after verifying the new version locally.
+      # https://github.com/sentrux/sentrux/releases
+      SENTRUX_VERSION: v0.5.7
+    steps:
+      - name: Checkout PR head with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install sentrux (pinned)
+        run: |
+          set -euo pipefail
+          # Sentrux ships raw binaries (not tarballs) per release asset.
+          URL="https://github.com/sentrux/sentrux/releases/download/${SENTRUX_VERSION}/sentrux-linux-x86_64"
+          echo "Downloading ${URL}"
+          sudo curl -fsSL "${URL}" -o /usr/local/bin/sentrux
+          sudo chmod +x /usr/local/bin/sentrux
+          sentrux --version
+
+      - name: Capture main baseline
+        run: |
+          set -euo pipefail
+          git worktree add ../main-baseline origin/main
+          (cd ../main-baseline && sentrux gate --save .)
+          mkdir -p .sentrux
+          # Sentrux writes the baseline to .sentrux/baseline.json.
+          cp ../main-baseline/.sentrux/baseline.json .sentrux/baseline.json
+
+      - name: Score-regression gate (BLOCKING)
+        # If sentrux gate does not exit non-zero on regression, replace this with
+        # a parser step that reads the JSON output and exits 1 ourselves.
+        run: sentrux gate .
+
+      - name: Rules check (advisory in v1)
+        continue-on-error: true
+        run: sentrux check .
+
+      - name: Comment score delta on PR (best-effort)
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+            let body = "**Sentrux architecture gate**\n\n";
+            try {
+              const out = execSync('sentrux gate . --json 2>/dev/null || sentrux gate .', { encoding: 'utf8' });
+              body += "```\n" + out.trim().slice(0, 3500) + "\n```";
+            } catch (e) {
+              body += "Score regressed vs `main` — see job logs for details.";
+            }
+            try {
+              await github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body,
+              });
+            } catch (e) {
+              core.warning(`Could not post PR comment: ${e.message}`);
+            }

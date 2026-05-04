@@ -396,6 +396,16 @@ docs/specs/05_frontend_ux.md             — Vision Agents, Journal, visual arti
 docs/specs/06_implementation_spec.md     — precise codebase details for Jorge and Luis
 ```
 ---
+## Sentrux feedback loop
+Sentrux is wired in as an MCP server (see [.mcp.json](.mcp.json)) and as a blocking PR gate. Use it to sense your own architectural blast radius:
+- **Before any non-trivial structural change**: call `mcp__sentrux__session_start` to capture a baseline.
+- **After edits**: call `mcp__sentrux__check_rules`. The rules in [.sentrux/rules.toml](.sentrux/rules.toml) encode the dependency-shaped subset of the Hard Constraints above (sophia_agent ↮ sophia/prompts, voice ↮ agents, app ← deerflow one-way, lead_agent ↮ sophia_agent). Runtime constraints — middleware ordering, soul.md immutability, runs/stream usage — are NOT in those rules; review still owns them.
+- **At task end**: call `mcp__sentrux__session_end`. The architectural quality score must not regress.
+- **Quick checks**: `mcp__sentrux__scan` for a snapshot, `mcp__sentrux__dsm` for the dependency-structure matrix.
+
+CI runs the same gate on every PR ([.github/workflows/sentrux-gate.yml](.github/workflows/sentrux-gate.yml)): score regressions vs `main` block the merge; rule violations are advisory in v1.
+
+---
 ## Compound Log
 Every merged PR appends an entry to `COMPOUND_LOG.md` at the repo root.
 Format per entry:

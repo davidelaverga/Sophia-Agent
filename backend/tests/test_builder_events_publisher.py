@@ -19,12 +19,11 @@ import sys
 import time
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from deerflow.sophia import builder_events
-
 
 # ---- Stub executor module the publisher imports lazily ---------------------
 
