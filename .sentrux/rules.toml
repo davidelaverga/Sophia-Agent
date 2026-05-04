@@ -1,0 +1,68 @@
+# Sentrux architectural rules for Sophia / deer-flow
+#
+# Rules here encode the static-dependency subset of CLAUDE.md "Hard Constraints".
+# Runtime constraints (middleware ordering, soul.md immutability, runs/stream usage,
+# offline pipeline idempotency) are NOT expressible here — those stay in CLAUDE.md
+# and are enforced by review.
+#
+# Real backend layout: backend/packages/harness/deerflow/...  (CLAUDE.md describes
+# backend/src/... aspirationally; the rules below use the actual paths.)
+
+[constraints]
+max_cycles = 0
+no_god_files = true
+# max_coupling and max_cc intentionally unset until we have a baseline scan.
+
+# --- Backend layers (deerflow harness, lowest to highest) ---
+
+[[layers]]
+name = "deerflow_models"
+paths = ["backend/packages/harness/deerflow/models/**"]
+order = 0
+
+[[layers]]
+name = "deerflow_config"
+paths = ["backend/packages/harness/deerflow/config/**"]
+order = 1
+
+[[layers]]
+name = "deerflow_sophia_services"
+paths = ["backend/packages/harness/deerflow/sophia/**"]
+order = 2
+
+[[layers]]
+name = "deerflow_agents"
+paths = ["backend/packages/harness/deerflow/agents/**"]
+order = 3
+
+[[layers]]
+name = "app_gateway"
+paths = ["backend/app/**"]
+order = 4
+
+# --- Boundaries derived from CLAUDE.md hard constraints ---
+
+[[boundaries]]
+from = "backend/packages/harness/deerflow/agents/sophia_agent/**"
+to   = "backend/packages/harness/deerflow/sophia/prompts/**"
+reason = "Pipeline prompt templates are inputs to the offline pipeline, never the per-turn agent context (CLAUDE.md hard constraint #8)."
+
+[[boundaries]]
+from = "voice/**"
+to   = "backend/packages/harness/deerflow/agents/**"
+reason = "Voice layer must talk to the harness via DeerFlow runs/stream API, not by importing agent internals."
+
+[[boundaries]]
+from = "backend/packages/harness/deerflow/agents/**"
+to   = "voice/**"
+reason = "Agents must not reach into the voice layer."
+
+[[boundaries]]
+from = "backend/packages/harness/deerflow/**"
+to   = "backend/app/**"
+reason = "Harness package is one-way upstream of the gateway — never the reverse."
+
+[[boundaries]]
+from = "backend/packages/harness/deerflow/agents/lead_agent/**"
+to   = "backend/packages/harness/deerflow/agents/sophia_agent/**"
+reason = "lead_agent is the generic builder; it must not depend on Sophia-specific code (CLAUDE.md hard constraint #7)."
