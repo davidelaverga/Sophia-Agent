@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 2
+config_version: 3
 
 # ============================================================================
 # Models Configuration
@@ -461,6 +461,7 @@ checkpointer:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
+#     worker_bot_token: $TELEGRAM_WORKER_BOT_TOKEN  # optional sibling worker bot for group-chat builder posts (dual-bot Phase 1; unwired in v1)
 #     bot_username: $TELEGRAM_BOT_USERNAME  # e.g. Sophia_EI_bot; needed for t.me deep-link flow
 #     allowed_users: []               # empty = allow all
 #
