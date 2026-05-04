@@ -8,6 +8,7 @@ config and injects a ``<builder_briefing>`` block into
 
 import html
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, NotRequired, override
@@ -26,6 +27,13 @@ logger = logging.getLogger(__name__)
 # scratch files; the model only needs the most recently-modified
 # candidates to pick a path.
 _ENDGAME_MAX_FILES = 10
+
+# Task types that hit the image-generation skill (directly or via the
+# ppt-generation orchestration). When OPENAI_API_KEY is missing, builds of
+# these types loop for ~21 minutes until the hard turn cap fires; the
+# pre-flight gate below short-circuits to a clean missing-capability emit
+# within ~1 turn instead.
+_VISUAL_TASK_TYPES = frozenset({"presentation", "visual_report"})
 
 
 def _list_outputs_for_prompt(state: "BuilderTaskState") -> list[dict[str, Any]]:
@@ -251,6 +259,35 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # Task type
         sections.append(f"<task_type>{task_type}</task_type>")
+
+        # Pre-flight gate: when this build will need image-generation but the
+        # required API key isn't configured, tell the model to STOP rather
+        # than burning 30 turns on a doomed loop. Spec-aligned per
+        # AGENTS.md: "When the task cannot be completed because a required
+        # capability is missing, STOP — do not loop retrying the same
+        # command. Call emit_builder_artifact with low confidence and
+        # explain the missing capability in companion_summary."
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        if task_type in _VISUAL_TASK_TYPES and not api_key:
+            sections.append(
+                "<missing_capability>\n"
+                "OPENAI_API_KEY is not set in this environment. The image-generation skill "
+                "(used directly and by ppt-generation) cannot run. DO NOT attempt to write "
+                "your own python-pptx / matplotlib / Pillow code as a workaround — that path "
+                "consumes the turn budget without producing a viable deliverable.\n"
+                "STOP IMMEDIATELY. On your NEXT tool call, emit_builder_artifact with:\n"
+                "- artifact_path: the most useful intermediate file you have on disk if any "
+                "(e.g. a JSON plan or markdown outline under /mnt/user-data/outputs/), or "
+                "an empty plan written in this turn.\n"
+                "- artifact_type: 'document'.\n"
+                "- confidence: 0.1 (capability missing, not your fault).\n"
+                "- companion_summary: tell the user plainly that visual generation isn't "
+                "configured and offer alternatives (text/markdown summary, or wait until "
+                "the operator sets OPENAI_API_KEY).\n"
+                "- companion_tone_hint: 'apologetic-pragmatic'.\n"
+                "</missing_capability>"
+            )
+
         sections.append(
             "<output_contract>\n"
             "- Write every user-facing deliverable and supporting file under /mnt/user-data/outputs/ using absolute paths.\n"
