@@ -762,6 +762,54 @@ class SubagentExecutor:
                 exc_info=True,
             )
 
+    def _build_progress_handler(self, task: str, result: SubagentResult) -> Any | None:
+        """Build a ``ProgressCallbackHandler`` for a builder run, or return None.
+
+        Phase 2 of the dual-bot spec. Attached to the run config when:
+        - the agent is ``sophia_builder``
+        - the result has an ``owner_id`` (we need a user_id to scope traces)
+
+        Failures here must NEVER prevent a builder from running. Any error
+        results in returning ``None`` — the run proceeds without progress
+        events.
+        """
+        if self.config.name != "sophia_builder":
+            return None
+        if not getattr(result, "owner_id", None):
+            return None
+        try:
+            from deerflow.sophia.builder_progress import ProgressEmitter
+            from deerflow.sophia.builder_progress_callback import ProgressCallbackHandler
+
+            session_id = result.thread_id or self.thread_id or "unknown"
+            artifact_id = result.task_id
+
+            def _logger_sink(event: Any) -> None:
+                logger.info(
+                    "[trace=%s] builder-progress %s [%s] %s",
+                    self.trace_id,
+                    event.event_type.value,
+                    artifact_id,
+                    event.summary,
+                )
+
+            emitter = ProgressEmitter(
+                user_id=result.owner_id,
+                session_id=session_id,
+                artifact_id=artifact_id,
+                sink=_logger_sink,
+            )
+            task_subject = (task or "").strip().splitlines()[0][:80] if task else None
+            return ProgressCallbackHandler(emitter, task_subject=task_subject)
+        except Exception:  # pragma: no cover - defensive: never fail the executor
+            logger.warning(
+                "[trace=%s] Failed to build progress callback handler for task_id=%s",
+                self.trace_id,
+                getattr(result, "task_id", None),
+                exc_info=True,
+            )
+            return None
+
     @staticmethod
     def _append_ai_message(result: SubagentResult, message: AIMessage) -> None:
         """Append a unique AI message to the result holder."""
@@ -955,6 +1003,13 @@ class SubagentExecutor:
                 configurable.update(self.extra_configurable)
             if configurable:
                 run_config["configurable"] = configurable
+
+            # Phase 2 of dual-bot spec: attach progress event handler when this
+            # is a builder run. Returns None for non-builder agents or when
+            # owner_id is missing, in which case no events fire.
+            progress_handler = self._build_progress_handler(task, result)
+            if progress_handler is not None:
+                run_config["callbacks"] = [progress_handler]
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
