@@ -51,6 +51,7 @@ from deerflow.config.summarization_config import get_summarization_config
 from deerflow.models import create_chat_model
 from deerflow.sophia.tools.emit_artifact import emit_artifact
 from deerflow.sophia.tools.retrieve_memories import make_retrieve_memories_tool
+from deerflow.sophia.tools.start_builder_task import make_start_builder_task_tool
 from deerflow.sophia.tools.switch_to_builder import make_switch_to_builder_tool
 
 logger = logging.getLogger(__name__)
@@ -65,26 +66,29 @@ logger = logging.getLogger(__name__)
 # chain, so the default companion behaviour is unaffected.
 _ASYNC_BUILDER_SYSTEM_PROMPT = (
     "You can delegate long builds to the Sophia builder as a background task.\n"
-    "- To start a build, call `start_async_task` with "
-    "`subagent_type=\"sophia_builder\"` and a complete, self-contained task "
-    "description that includes the task_type as a prefix (for example "
-    "`[presentation] Build a 5-slide investor deck...`). The task returns a "
-    "task_id immediately; keep talking to the user while the build runs.\n"
-    "- When the user asks \"how's it going?\" or enough time has passed, call "
+    "- To start a build, call `start_builder_task` with `task_type` "
+    '("document" / "research" / "presentation" / "frontend" / '
+    '"visual_report") and a complete, self-contained `description`. The '
+    "tool returns a task_id immediately; keep talking to the user while the "
+    "build runs. (Do NOT call the lower-level `start_async_task` tool "
+    "directly — `start_builder_task` enriches the description with relevant "
+    "memories, your current emotional read, ritual context, and explicit "
+    "URLs the user provided.)\n"
+    '- When the user asks "how\'s it going?" or enough time has passed, call '
     "`check_async_task` with the task_id.\n"
-    "- If the user course-corrects (\"actually, make it 2 slides not 5\"), "
+    '- If the user course-corrects ("actually, make it 2 slides not 5"), '
     "call `update_async_task` with the task_id and the new instruction. This "
     "preserves the existing thread so the builder keeps its progress.\n"
     "- If the user asks you to stop, call `cancel_async_task`.\n"
-    "- Use `list_async_tasks` when the user references \"that document we "
-    "started\" and you need to recall recent task_ids.\n"
+    '- Use `list_async_tasks` when the user references "that document we '
+    'started" and you need to recall recent task_ids.\n'
     "Do not poll on a timer. Only check when the user asks or when you know "
     "enough time has passed that a check is worth offering.\n"
 )
 
 
 def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
-    """Build the deepagents AsyncSubAgentMiddleware for B4.
+    """Build the deepagents AsyncSubAgentMiddleware.
 
     The ``AsyncSubAgent`` spec omits ``url`` on purpose — that selects the
     ASGI (in-process) transport, which routes SDK calls in-process through
@@ -92,29 +96,38 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
     network hop, zero extra auth configuration. Deploying the builder on a
     separate host later is a one-line change (add ``url=``).
 
-    The middleware also writes to the ``async_tasks`` state channel using its
-    internal ``_tasks_reducer``. Our SophiaState already declares
+    The middleware writes to the ``async_tasks`` state channel using its
+    internal ``_tasks_reducer``. Our SophiaState declares
     ``async_tasks: Annotated[NotRequired[dict[str, dict]], merge_async_tasks]``
     and the two reducers are functionally identical (`dict.update`-based
-    merge), so the schema merge is safe whichever wins. PR #78's
-    ``switch_to_builder._build_async_task_metadata`` also emits records that
-    explicitly match deepagents' ``AsyncTask`` shape (the comment in that
-    file says so), so the two writers can coexist on the same channel.
+    merge), so the schema merge is safe whichever wins.
+
+    PR-B contract: ``start_async_task`` is filtered from the model-visible
+    tool set. The model launches builds via the ``start_builder_task``
+    wrapper (regular agent tool, see ``make_start_builder_task_tool``) which
+    enriches the description before calling the LangGraph SDK. The four
+    lifecycle tools (``check_async_task``, ``update_async_task``,
+    ``cancel_async_task``, ``list_async_tasks``) remain native — they do
+    not need enrichment and the wrapper does not own them.
     """
     sophia_builder_spec: AsyncSubAgent = {
         "name": "sophia_builder",
         "description": (
             "Sophia's builder graph. Delegate file-creation, research, "
-            "presentation, visual_report, frontend, and document tasks. The "
-            "description you send becomes the builder's task brief, so "
-            "include all specs the user gave you."
+            "presentation, visual_report, frontend, and document tasks via "
+            "`start_builder_task`. The wrapper's enriched description "
+            "becomes the builder's task brief."
         ),
         "graph_id": "sophia_builder",
     }
-    return AsyncSubAgentMiddleware(
+    middleware = AsyncSubAgentMiddleware(
         async_subagents=[sophia_builder_spec],
         system_prompt=_ASYNC_BUILDER_SYSTEM_PROMPT,
     )
+    # Filter ``start_async_task`` so the model only sees the enriched
+    # ``start_builder_task`` wrapper. The lifecycle four stay native.
+    middleware.tools = [t for t in middleware.tools if t.name != "start_async_task"]
+    return middleware
 
 
 def _create_summarization_middleware():
@@ -198,10 +211,14 @@ def make_sophia_agent(config: RunnableConfig):
     platform = cfg.get("platform", "voice")
     ritual = cfg.get("ritual", None)
     context_mode = cfg.get("context_mode", "life")
-    # B4: opt-in deepagents v0.5 async-subagent tools. Off by default so
-    # `switch_to_builder` (PR #78's sync handoff) stays the production path
-    # until the async pattern is validated end-to-end.
-    async_builder_enabled = bool(cfg.get("async_builder", False))
+    # PR-B (2026-05): deepagents v0.5 async-subagent middleware is now
+    # ALWAYS attached. The model dispatches builds via the
+    # ``start_builder_task`` wrapper (PR-A) which adds duplicate-launch
+    # protection, live-context embedding, and trusted user_id resolution
+    # on top of the native ``async_tasks`` channel. ``switch_to_builder``
+    # remains in the tool list for one PR cycle as a revert path; PR-C
+    # deletes it along with ``BuilderSessionMiddleware`` and the
+    # ``_install_fetch_last_ai_patch`` defensive monkeypatch.
 
     logger.info(
         "Creating Sophia companion agent: user_id=%s, platform=%s, ritual=%s, context_mode=%s",
@@ -277,20 +294,16 @@ def make_sophia_agent(config: RunnableConfig):
         # Insert immediately before BuilderCommandMiddleware (last entry above).
         middlewares.insert(-1, WebResearchGuidanceMiddleware())
 
-    # 16c. Optional: deepagents v0.5 async-subagent middleware (B4). Adds 5
-    # new tools (`start_async_task` / `check_async_task` / `update_async_task`
-    # / `cancel_async_task` / `list_async_tasks`) and a system-prompt preamble
-    # that teaches the model the async vocabulary. Appended AFTER
-    # `BuilderSessionMiddleware` and `BuilderCommandMiddleware` so those
-    # middlewares still see every turn — the async tools are added on top, not
-    # in place of `switch_to_builder`. Default off; opt in per request via
-    # `configurable.async_builder=True`.
-    if async_builder_enabled:
-        middlewares.append(_build_async_subagent_middleware())
-        logger.info(
-            "Sophia companion: async_builder flag enabled; "
-            "AsyncSubAgentMiddleware attached with graph_id=sophia_builder"
-        )
+    # 16c. deepagents v0.5 async-subagent middleware (always-on as of PR-B).
+    # Exposes the four lifecycle tools (`check_async_task`,
+    # `update_async_task`, `cancel_async_task`, `list_async_tasks`) and a
+    # system-prompt preamble teaching the async vocabulary. ``start_async_task``
+    # is filtered out by ``_build_async_subagent_middleware`` so the model only
+    # launches builds via ``start_builder_task`` (regular agent tool, added
+    # below). Appended AFTER ``BuilderSessionMiddleware`` and
+    # ``BuilderCommandMiddleware`` so those middlewares still see every turn
+    # during the PR-B/PR-C transition window.
+    middlewares.append(_build_async_subagent_middleware())
 
     # 17. Summarization (config-driven trigger/keep policy)
     summarization_middleware = _create_summarization_middleware()
@@ -325,7 +338,11 @@ def make_sophia_agent(config: RunnableConfig):
 
     retrieve_memories = make_retrieve_memories_tool(user_id)
     switch_to_builder = make_switch_to_builder_tool(user_id)
-    tools = [emit_artifact, switch_to_builder, retrieve_memories, *web_tools]
+    start_builder_task = make_start_builder_task_tool(user_id)
+    # PR-B: ``start_builder_task`` is the canonical builder-launch path. The
+    # legacy ``switch_to_builder`` tool stays in the list for one PR cycle
+    # so we can revert PR-B atomically if anything regresses; PR-C drops it.
+    tools = [emit_artifact, start_builder_task, switch_to_builder, retrieve_memories, *web_tools]
 
     agent = create_agent(
         model=model,

@@ -1418,15 +1418,24 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# B4 — deepagents v0.5 AsyncSubAgentMiddleware gating + coexistence
+# PR-B (2026-05) — deepagents v0.5 AsyncSubAgentMiddleware always-on
 #
-# The middleware MUST be opt-in via `configurable.async_builder=True` so the
-# default behaviour (sync `switch_to_builder` Command path with PR #78's
-# JSON-string fallback) is byte-identical to today. When opted in, the 5
-# async tools (`start_async_task` / `check_async_task` / `update_async_task`
-# / `cancel_async_task` / `list_async_tasks`) live ALONGSIDE
-# `switch_to_builder` — both coexist, no replacement.
+# The middleware is ALWAYS attached. ``start_async_task`` is filtered from
+# the model-visible tool set; the model launches builds via the
+# ``start_builder_task`` wrapper (regular agent tool). The four lifecycle
+# tools (``check_async_task`` / ``update_async_task`` / ``cancel_async_task``
+# / ``list_async_tasks``) remain native via the middleware's ``.tools``
+# attribute. ``switch_to_builder`` stays in the agent-level tools list for
+# one PR cycle as a revert path; PR-C deletes it.
 # ---------------------------------------------------------------------------
+
+
+def _find_async_middleware(middlewares):
+    """Return the AsyncSubAgentMiddleware from a captured middleware list."""
+    for mw in middlewares:
+        if type(mw).__name__ == "AsyncSubAgentMiddleware":
+            return mw
+    raise AssertionError("AsyncSubAgentMiddleware not found in chain")
 
 
 def _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured):
@@ -1468,11 +1477,11 @@ def _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured
     monkeypatch.setattr(companion_module, "create_agent", _capture)
 
 
-def test_async_builder_default_off_does_not_attach_async_middleware(monkeypatch):
-    """When `configurable.async_builder` is not supplied, the
-    AsyncSubAgentMiddleware MUST NOT be in the chain and the async tool
-    pack MUST NOT appear in the tools list. The companion behaves
-    byte-identically to today's `switch_to_builder` sync handoff path.
+def test_async_subagent_middleware_always_attached(monkeypatch):
+    """``AsyncSubAgentMiddleware`` is in the chain on every request as of
+    PR-B. ``start_builder_task`` is the model-visible launch tool;
+    ``start_async_task`` is filtered out so the model only ever sees the
+    enriched-description path.
     """
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     captured: dict = {}
@@ -1483,104 +1492,55 @@ def test_async_builder_default_off_does_not_attach_async_middleware(monkeypatch)
     middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
 
-    assert "AsyncSubAgentMiddleware" not in middleware_types, (
-        "AsyncSubAgentMiddleware must be opt-in via configurable.async_builder=True; "
-        "default chain must be byte-identical to the pre-B4 behaviour."
+    assert "AsyncSubAgentMiddleware" in middleware_types, (
+        "AsyncSubAgentMiddleware must always be attached as of PR-B."
     )
-    for async_tool_name in (
-        "start_async_task",
+    # Wrapper tool is exposed at the agent level.
+    assert "start_builder_task" in tool_names, (
+        "start_builder_task wrapper must be in the agent's tool list."
+    )
+    # Switch tool still in the list during the PR-B/PR-C transition window.
+    assert "switch_to_builder" in tool_names
+
+    # The four lifecycle tools live on the middleware's ``.tools`` attribute,
+    # not in ``create_agent(tools=...)`` — verify they are present and
+    # ``start_async_task`` is filtered out so the model can't bypass the
+    # ``start_builder_task`` wrapper.
+    async_middleware = _find_async_middleware(captured["middleware"])
+    middleware_tool_names = {
+        getattr(tool, "name", None) for tool in getattr(async_middleware, "tools", [])
+    }
+    expected_lifecycle = {
         "check_async_task",
         "update_async_task",
         "cancel_async_task",
         "list_async_tasks",
-    ):
-        assert async_tool_name not in tool_names, (
-            f"Async tool {async_tool_name!r} must not appear when "
-            "configurable.async_builder is unset."
-        )
-    # The sync switch_to_builder handoff path stays intact in the default chain.
-    assert "switch_to_builder" in tool_names
+    }
+    assert expected_lifecycle <= middleware_tool_names, (
+        f"Missing lifecycle tools: {expected_lifecycle - middleware_tool_names}"
+    )
+    assert "start_async_task" not in middleware_tool_names
+    assert "start_async_task" not in tool_names
 
 
-def test_async_builder_flag_attaches_async_middleware_after_builder_session(monkeypatch):
-    """When `configurable.async_builder=True`, AsyncSubAgentMiddleware is
-    appended to the chain AFTER `BuilderSessionMiddleware` and
-    `BuilderCommandMiddleware` (so they still see every turn). The 5 async
-    tools are added on top of `switch_to_builder` — both coexist.
+def test_async_subagent_middleware_after_builder_session_and_command(monkeypatch):
+    """Position contract: AsyncSubAgentMiddleware sits AFTER
+    BuilderSessionMiddleware and BuilderCommandMiddleware so those still
+    observe every turn during the PR-B/PR-C transition window.
     """
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     captured: dict = {}
     _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
 
-    companion_module.make_sophia_agent(
-        {"configurable": {"user_id": "user_123", "async_builder": True}}
-    )
+    companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
 
     middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
-    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
-
-    assert "AsyncSubAgentMiddleware" in middleware_types, (
-        "AsyncSubAgentMiddleware must be in the chain when "
-        "configurable.async_builder=True."
-    )
-    # Position contract: AFTER BuilderSessionMiddleware AND
-    # BuilderCommandMiddleware so the existing builder lifecycle still
-    # observes each turn.
     assert "BuilderSessionMiddleware" in middleware_types
     assert "BuilderCommandMiddleware" in middleware_types
-    assert (
-        middleware_types.index("BuilderSessionMiddleware")
-        < middleware_types.index("AsyncSubAgentMiddleware")
+    assert "AsyncSubAgentMiddleware" in middleware_types
+    assert middleware_types.index("BuilderSessionMiddleware") < middleware_types.index(
+        "AsyncSubAgentMiddleware"
     ), "AsyncSubAgentMiddleware must sit AFTER BuilderSessionMiddleware"
-    assert (
-        middleware_types.index("BuilderCommandMiddleware")
-        < middleware_types.index("AsyncSubAgentMiddleware")
+    assert middleware_types.index("BuilderCommandMiddleware") < middleware_types.index(
+        "AsyncSubAgentMiddleware"
     ), "AsyncSubAgentMiddleware must sit AFTER BuilderCommandMiddleware"
-
-    # Coexistence: `switch_to_builder` stays in the agent-level tools list.
-    assert "switch_to_builder" in tool_names
-
-    # The 5 async tools are NOT injected into `create_agent(tools=...)`; the
-    # AsyncSubAgentMiddleware exposes them via its own `.tools` attribute and
-    # `create_agent` discovers them by inspecting the middleware. Verify they
-    # are present on the middleware instance.
-    async_middleware = next(
-        mw for mw in captured["middleware"] if type(mw).__name__ == "AsyncSubAgentMiddleware"
-    )
-    middleware_tool_names = {
-        getattr(tool, "name", None) for tool in getattr(async_middleware, "tools", [])
-    }
-    for async_tool_name in (
-        "start_async_task",
-        "check_async_task",
-        "update_async_task",
-        "cancel_async_task",
-        "list_async_tasks",
-    ):
-        assert async_tool_name in middleware_tool_names, (
-            f"Async tool {async_tool_name!r} missing from "
-            "AsyncSubAgentMiddleware.tools — coexistence with switch_to_builder broken."
-        )
-
-
-def test_async_builder_flag_falsy_values_keep_middleware_off(monkeypatch):
-    """`bool(cfg.get("async_builder", False))` must reject falsy non-True
-    values — empty string, 0, None — to avoid accidentally enabling the
-    async pattern via a misconfigured request."""
-    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
-
-    for falsy_value in (False, None, 0, "", "false"):
-        captured: dict = {}
-        _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
-        companion_module.make_sophia_agent(
-            {"configurable": {"user_id": "user_123", "async_builder": falsy_value}}
-        )
-        middleware_types = [type(mw).__name__ for mw in captured["middleware"]]
-        # Non-empty strings like "false" are truthy in Python — that's a real
-        # caller mistake we want to surface, not silently mask. So we test
-        # only the values that `bool(...)` reads as False.
-        if not falsy_value:
-            assert "AsyncSubAgentMiddleware" not in middleware_types, (
-                f"async_builder={falsy_value!r} should keep the middleware off; "
-                "check the bool(cfg.get(...)) gate in agent.py."
-            )

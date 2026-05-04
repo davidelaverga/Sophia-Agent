@@ -3,8 +3,15 @@
 When a user issues a direct document creation command such as
 "Sophia create a dummy document of one page about X", the companion should
 skip the clarification roulette and route straight into Builder with sane
-defaults. This middleware synthesizes a switch_to_builder tool call before the
-model is invoked so the rest of the Builder pipeline remains unchanged.
+defaults. This middleware synthesizes a ``start_builder_task`` tool call
+before the model is invoked so the rest of the Builder pipeline remains
+unchanged.
+
+PR-B (2026-05): the synthesized tool call name was migrated from
+``switch_to_builder`` to ``start_builder_task`` as part of the deepagents
+async-subagent migration. The synthesized brief produced by
+``_build_direct_document_task`` is unchanged — only the tool name and arg
+key (``task`` → ``description``) differ.
 """
 
 from __future__ import annotations
@@ -70,10 +77,10 @@ class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
             id=f"sophia-builder-direct-{uuid.uuid4().hex[:8]}",
             tool_calls=[
                 {
-                    "name": "switch_to_builder",
+                    "name": "start_builder_task",
                     "id": tool_call_id,
                     "args": {
-                        "task": direct_task,
+                        "description": direct_task,
                         "task_type": "document",
                     },
                 }

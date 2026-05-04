@@ -93,6 +93,8 @@ make lint       # Lint with ruff
 make format     # Format code with ruff
 ```
 
+**Worker pool sizing for async-subagent dispatch**: when running LangGraph dev locally, prefer `langgraph dev --n-jobs-per-worker 20`. Sophia's companion dispatches builder runs in-process via deepagents `AsyncSubAgentMiddleware` (ASGI transport). A supervisor with N concurrent builder tasks needs N+1 worker slots; 20 is the LangChain-published recommended ceiling for local dev and gives ample headroom for Phase-3 dual-bot work.
+
 Regression tests related to Docker/provisioner behavior:
 - `tests/test_docker_sandbox_mode_detection.py` (mode detection from `config.yaml`)
 - `tests/test_provisioner_kubeconfig.py` (kubeconfig file/directory handling)
