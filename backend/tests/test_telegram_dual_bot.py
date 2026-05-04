@@ -44,6 +44,13 @@ class TestTelegramDualBotPhase1:
         messages = [r.getMessage() for r in caplog.records]
         assert any("single-bot mode" in m for m in messages), messages
 
+    def test_logs_single_bot_mode_when_worker_token_is_whitespace(self, bus: MessageBus, caplog: pytest.LogCaptureFixture) -> None:
+        config = {"bot_token": "primary", "worker_bot_token": "   "}
+        with caplog.at_level(logging.INFO, logger="app.channels.telegram"):
+            TelegramChannel(bus, config)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("single-bot mode" in m for m in messages), messages
+
     def test_no_second_client_is_built_in_phase_1(self, bus: MessageBus) -> None:
         # Phase 1 commitment: even when a worker token is provided, no second
         # `Application` is constructed. Phase 3 introduces that wiring.
