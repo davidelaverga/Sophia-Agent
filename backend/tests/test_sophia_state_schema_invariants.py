@@ -129,7 +129,6 @@ def test_middleware_state_classes_were_discovered():
     for expected in (
         "BuilderArtifactState",
         "BuilderResearchPolicyState",
-        "BuilderSessionState",
         "BuilderTaskState",
         "SessionStateState",
         "TurnCountState",
