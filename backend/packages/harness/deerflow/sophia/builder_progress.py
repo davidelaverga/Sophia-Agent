@@ -208,6 +208,7 @@ _PRIORITY_TYPES = frozenset(
         ProgressEventType.STARTED,
         ProgressEventType.COMPLETED,
         ProgressEventType.ERROR,
+        ProgressEventType.DRAFTING,
     }
 )
 

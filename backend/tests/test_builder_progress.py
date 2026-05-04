@@ -194,6 +194,18 @@ class TestProgressEmitterThrottle:
         emitter.emit(ProgressEventType.FINDING, "second")
         assert len(delivered) == 2
 
+
+    def test_drafting_event_bypasses_throttle_window(self, tmp_path: Path) -> None:
+        clock = _ManualClock()
+        emitter, delivered, _ = _make_emitter(tmp_path, throttle_seconds=60.0, clock=clock)
+        emitter.emit(ProgressEventType.FINDING, "f1")
+        result = emitter.emit(ProgressEventType.DRAFTING, "draft")
+        assert result is not None
+        assert [e.event_type for e in delivered] == [
+            ProgressEventType.FINDING,
+            ProgressEventType.DRAFTING,
+        ]
+
     def test_priority_event_does_not_reset_throttle_for_non_priority(self, tmp_path: Path) -> None:
         # Spec §4.2.2: priority types bypass; they should not refresh the
         # throttle window for subsequent non-priority emits, otherwise a
