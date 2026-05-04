@@ -267,7 +267,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # capability is missing, STOP — do not loop retrying the same
         # command. Call emit_builder_artifact with low confidence and
         # explain the missing capability in companion_summary."
-        if task_type in _VISUAL_TASK_TYPES and not os.environ.get("OPENAI_API_KEY"):
+        api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+        if task_type in _VISUAL_TASK_TYPES and not api_key:
             sections.append(
                 "<missing_capability>\n"
                 "OPENAI_API_KEY is not set in this environment. The image-generation skill "

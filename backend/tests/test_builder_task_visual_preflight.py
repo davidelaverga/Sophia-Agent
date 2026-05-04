@@ -102,3 +102,11 @@ class TestVisualPreflightGate:
         result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
         briefing = _briefing(result)
         assert "<missing_capability>" in briefing
+
+    def test_whitespace_only_key_treated_as_missing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("OPENAI_API_KEY", "   ")
+        result = BuilderTaskMiddleware().before_agent(_make_state("presentation"), _make_runtime())
+        briefing = _briefing(result)
+        assert "<missing_capability>" in briefing
