@@ -40,9 +40,9 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import uuid
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from langchain.tools import InjectedToolCallId, ToolRuntime, tool
+from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
@@ -536,13 +536,22 @@ async def _start_builder_task_impl(
     description: str,
     task_type: str,
     runtime: ToolRuntime[ContextT, SophiaState] | None,
-    tool_call_id: str,
     *,
     configured_user_id: str | None = None,
     user_id_arg: str | None = None,
 ) -> str | Command:
     """Async implementation. Mirrors ``switch_to_builder``'s shape but dispatches
-    via deepagents-native ASGI transport instead of ``SubagentExecutor``."""
+    via deepagents-native ASGI transport instead of ``SubagentExecutor``.
+
+    ``tool_call_id`` is read from ``runtime.tool_call_id``. Earlier we declared
+    it via ``Annotated[str, InjectedToolCallId]`` on the tool signature, which
+    LangChain silently drops when the tool is decorated with
+    ``@tool(args_schema=…)`` (the public Pydantic schema doesn't list
+    injected args, so the executor has no hook to populate them). The
+    deepagents native lifecycle tools (``check_async_task`` etc.) and
+    ``lead_agent``'s ``setup_agent_tool`` both source the id from runtime;
+    this keeps us on the proven path.
+    """
     # Validate ``tool_call_id`` BEFORE dispatch. Without it we cannot
     # construct a Command — LangGraph rejects ToolMessages whose
     # ``tool_call_id`` doesn't match the LLM's. Launching first and falling
@@ -550,20 +559,21 @@ async def _start_builder_task_impl(
     # would orphan the just-created LangGraph thread/run: the lifecycle
     # tools resolve tasks from ``state["async_tasks"]`` which we wouldn't
     # have written. Refuse to launch instead.
-    #
-    # Codex bot review on PR-A: empty ``tool_call_id`` previously launched
-    # a real builder run and then returned a string without writing
-    # ``async_tasks`` — leaving the run untracked and unmanageable.
+    tool_call_id = (
+        runtime.tool_call_id
+        if runtime is not None and getattr(runtime, "tool_call_id", None)
+        else ""
+    )
     if not tool_call_id:
         logger.error(
-            "[Builder] start_builder_task invoked without tool_call_id; "
-            "refusing to launch (would orphan the builder run)."
+            "[Builder] start_builder_task invoked without tool_call_id "
+            "(runtime=%s); refusing to launch (would orphan the builder run).",
+            "missing" if runtime is None else "runtime present but tool_call_id empty",
         )
         return (
             "Cannot launch builder task right now: tool_call_id was not "
-            "injected. This is a langchain integration error — verify the "
-            "args_schema wiring on the start_builder_task tool. No "
-            "background work was started; safe to retry."
+            "available on the tool runtime. No background work was started; "
+            "safe to retry."
         )
 
     state: SophiaState = runtime.state if runtime is not None else {}  # type: ignore[assignment]
@@ -711,7 +721,6 @@ async def start_builder_task(
     task_type: str,
     user_id: str | None = None,
     runtime: ToolRuntime[ContextT, SophiaState] | None = None,
-    tool_call_id: Annotated[str, InjectedToolCallId] = "",
 ) -> str | Command:
     """Delegate a long build task to Sophia's builder via deepagents async-subagent.
 
@@ -725,7 +734,6 @@ async def start_builder_task(
         description=description,
         task_type=task_type,
         runtime=runtime,
-        tool_call_id=tool_call_id,
         user_id_arg=user_id,
     )
 
@@ -746,7 +754,6 @@ def make_start_builder_task_tool(configured_user_id: str):
         task_type: str,
         user_id: str | None = None,
         runtime: ToolRuntime[ContextT, SophiaState] | None = None,
-        tool_call_id: Annotated[str, InjectedToolCallId] = "",
     ) -> str | Command:
         """Delegate a long build task to Sophia's builder via deepagents async-subagent.
 
@@ -761,7 +768,6 @@ def make_start_builder_task_tool(configured_user_id: str):
             description=description,
             task_type=task_type,
             runtime=runtime,
-            tool_call_id=tool_call_id,
             configured_user_id=bound_user_id,
             user_id_arg=user_id,
         )
