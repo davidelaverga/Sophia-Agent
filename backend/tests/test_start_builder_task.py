@@ -118,6 +118,13 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert tool_msg.name == "start_builder_task"
     assert "task_id: asgi-1" in tool_msg.content
 
+    # The dispatched run config MUST carry the new builder thread_id in
+    # configurable so the builder's ThreadDataMiddleware can locate
+    # workspace/uploads/outputs directories. Without this propagation the
+    # builder fails with "Thread ID is required" on its first turn.
+    config_payload = captured["run_kwargs"]["config"]
+    assert config_payload["configurable"]["thread_id"] == "asgi-1"
+
 
 # ---------- duplicate protection --------------------------------------------
 
