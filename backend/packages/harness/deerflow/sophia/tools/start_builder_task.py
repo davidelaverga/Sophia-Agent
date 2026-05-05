@@ -46,7 +46,6 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
-from pydantic import BaseModel, Field
 
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
@@ -146,21 +145,6 @@ _BUILDER_GENERIC_DEMO_MARKERS = (
     "show me it working",
     "show it working",
 )
-
-
-class StartBuilderTaskInput(BaseModel):
-    """Input schema for ``start_builder_task``."""
-
-    description: str = Field(
-        description=(
-            "Complete task description with all specs gathered from clarification. Be specific — the builder cannot ask follow-up questions. Include all constraints (length, audience, tone, format) and any explicit URLs the user provided."
-        )
-    )
-    task_type: Literal["document", "research", "presentation", "frontend", "visual_report"] = Field(description=("Type of deliverable. Determines builder skill loading and web research policy."))
-    user_id: str | None = Field(
-        default=None,
-        description=("Optional diagnostic hint. NEVER trusted to override authenticated identity: trusted sources (gateway/runtime config, runtime context, state, closure binding) always win. Leave None in normal operation."),
-    )
 
 
 def _utcnow_iso() -> str:
@@ -715,20 +699,24 @@ async def _start_builder_task_impl(
     )
 
 
-@tool(args_schema=StartBuilderTaskInput)
+@tool("start_builder_task", parse_docstring=True)
 async def start_builder_task(
-    description: str,
-    task_type: str,
     runtime: ToolRuntime,
+    description: str,
+    task_type: Literal["document", "research", "presentation", "frontend", "visual_report"],
     user_id: str | None = None,
 ) -> str | Command:
     """Delegate a long build task to Sophia's builder via deepagents async-subagent.
 
-    Use for: file creation, research with sources, document/presentation/
-    visual_report generation. Do NOT use for: emotional conversation,
-    reflection, memory tasks. Returns a task_id immediately; keep talking to
-    the user. Call ``check_async_task`` only when the user asks for status.
-    ``user_id`` is a diagnostic hint — leave None in normal operation.
+    Use for file creation, research with sources, document / presentation /
+    visual_report generation. Do NOT use for emotional conversation,
+    reflection, or memory tasks. Returns a task_id immediately; keep talking
+    to the user. Call ``check_async_task`` only when the user asks for status.
+
+    Args:
+        description: Complete task description with all specs gathered from clarification. Be specific — the builder cannot ask follow-up questions. Include length, audience, tone, format, and any URLs the user provided.
+        task_type: Type of deliverable. Determines builder skill loading and web research policy.
+        user_id: Diagnostic hint only. Leave None in normal operation; trusted runtime identity always wins.
     """
     return await _start_builder_task_impl(
         description=description,
@@ -748,21 +736,25 @@ def make_start_builder_task_tool(configured_user_id: str):
     """
     bound_user_id = _validate_user_id(configured_user_id)
 
-    @tool("start_builder_task", args_schema=StartBuilderTaskInput)
+    @tool("start_builder_task", parse_docstring=True)
     async def configured_start_builder_task(
-        description: str,
-        task_type: str,
         runtime: ToolRuntime,
+        description: str,
+        task_type: Literal["document", "research", "presentation", "frontend", "visual_report"],
         user_id: str | None = None,
     ) -> str | Command:
         """Delegate a long build task to Sophia's builder via deepagents async-subagent.
 
-        Use for: file creation, research with sources, document/presentation/
-        visual_report generation. Do NOT use for: emotional conversation,
-        reflection, memory tasks. Returns a task_id immediately; keep talking
-        to the user. Call ``check_async_task`` only when the user asks for
-        status. ``user_id`` is a diagnostic hint — leave None in normal
-        operation.
+        Use for file creation, research with sources, document / presentation /
+        visual_report generation. Do NOT use for emotional conversation,
+        reflection, or memory tasks. Returns a task_id immediately; keep
+        talking to the user. Call ``check_async_task`` only when the user asks
+        for status.
+
+        Args:
+            description: Complete task description with all specs gathered from clarification. Be specific — the builder cannot ask follow-up questions. Include length, audience, tone, format, and any URLs the user provided.
+            task_type: Type of deliverable. Determines builder skill loading and web research policy.
+            user_id: Diagnostic hint only. Leave None in normal operation; trusted runtime identity always wins.
         """
         return await _start_builder_task_impl(
             description=description,
