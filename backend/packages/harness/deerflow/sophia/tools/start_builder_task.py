@@ -719,8 +719,8 @@ async def _start_builder_task_impl(
 async def start_builder_task(
     description: str,
     task_type: str,
+    runtime: ToolRuntime,
     user_id: str | None = None,
-    runtime: ToolRuntime[ContextT, SophiaState] | None = None,
 ) -> str | Command:
     """Delegate a long build task to Sophia's builder via deepagents async-subagent.
 
@@ -752,8 +752,8 @@ def make_start_builder_task_tool(configured_user_id: str):
     async def configured_start_builder_task(
         description: str,
         task_type: str,
+        runtime: ToolRuntime,
         user_id: str | None = None,
-        runtime: ToolRuntime[ContextT, SophiaState] | None = None,
     ) -> str | Command:
         """Delegate a long build task to Sophia's builder via deepagents async-subagent.
 
