@@ -21,7 +21,15 @@ def _make_runtime(
     thread_id: str = "thread-1",
     user_id: str | None = None,
     context_user_id: str | None = None,
+    tool_call_id: str = "tc-test",
 ) -> SimpleNamespace:
+    """Stand-in for ``ToolRuntime``.
+
+    ``tool_call_id`` is read from ``runtime.tool_call_id`` by
+    ``_start_builder_task_impl`` (production path: LangGraph's tool executor
+    populates it). Pass ``tool_call_id=""`` to exercise the refuse-to-launch
+    guard.
+    """
     configurable: dict = {"thread_id": thread_id}
     if user_id is not None:
         configurable["user_id"] = user_id
@@ -35,6 +43,7 @@ def _make_runtime(
             "configurable": configurable,
             "metadata": {"model_name": "claude-haiku-4-5-20251001", "trace_id": "trace-1"},
         },
+        tool_call_id=tool_call_id,
     )
 
 
@@ -89,7 +98,6 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
             description="Build a 5-slide investor deck.",
             task_type="presentation",
             runtime=runtime,
-            tool_call_id="tc-1",
         )
     )
 
@@ -103,9 +111,10 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert task["run_id"] == "run-1"
     assert task["task_type"] == "presentation"
     assert task["demo_mode"] is False
-    # ToolMessage echoes the LLM tool_call_id.
+    # ToolMessage echoes the runtime's tool_call_id (test default = "tc-test";
+    # production: LangGraph's tool executor populates ``runtime.tool_call_id``).
     tool_msg = update["messages"][0]
-    assert tool_msg.tool_call_id == "tc-1"
+    assert tool_msg.tool_call_id == "tc-test"
     assert tool_msg.name == "start_builder_task"
     assert "task_id: asgi-1" in tool_msg.content
 
@@ -143,7 +152,6 @@ def test_start_builder_task_duplicate_protection(monkeypatch):
             description="Make another deck",
             task_type="presentation",
             runtime=runtime,
-            tool_call_id="tc-dup",
         )
     )
     assert isinstance(response, str)
@@ -179,7 +187,6 @@ def test_start_builder_task_duplicate_protection_allows_after_terminal(monkeypat
             description="Make a doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-after",
         )
     )
     assert isinstance(response, Command)
@@ -214,7 +221,6 @@ def test_start_builder_task_duplicate_protection_ignores_other_agents(monkeypatc
             description="Make a doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-other",
         )
     )
     assert isinstance(response, Command)
@@ -251,7 +257,6 @@ def test_start_builder_task_live_context_embedding(monkeypatch):
             description=("Compare AR glasses launching in 2026. Use https://example.com/ar-roundup-2026 as a starting source."),
             task_type="research",
             runtime=runtime,
-            tool_call_id="tc-ctx",
         )
     )
     assert isinstance(response, Command)
@@ -308,7 +313,6 @@ def test_start_builder_task_prefix_idempotent(monkeypatch):
             description="[document] Write a one-pager about X",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-prefix",
         )
     )
     body = captured["run_kwargs"]["input"]["messages"][0]["content"]
@@ -333,7 +337,6 @@ def test_start_builder_task_sdk_failure_returns_string(monkeypatch):
             description="Make a doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-fail",
         )
     )
     assert isinstance(response, str)
@@ -364,7 +367,6 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch):
             description="Build a sample project so the user can see the feature working.",
             task_type="frontend",
             runtime=runtime,
-            tool_call_id="tc-demo",
         )
     )
     assert isinstance(response, Command)
@@ -395,7 +397,6 @@ def test_start_builder_task_prefers_runtime_config_user_id(monkeypatch):
             description="Make a doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-cfg",
         )
     )
     config_payload = captured["run_kwargs"]["config"]
@@ -418,6 +419,7 @@ def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_mi
             "configurable": {"thread_id": "thread-x"},
             "metadata": {},
         },
+        tool_call_id="tc-bound",
     )
 
     asyncio.run(
@@ -425,7 +427,6 @@ def test_make_start_builder_task_tool_uses_bound_user_id_when_runtime_sources_mi
             description="Make a doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-bound",
         )
     )
     config_payload = captured["run_kwargs"]["config"]
@@ -447,7 +448,6 @@ def test_start_builder_task_tool_arg_user_id_does_not_override_runtime_config(mo
                 task_type="document",
                 user_id="hallucinated_bob",
                 runtime=runtime,
-                tool_call_id="tc-injection",
             )
         )
 
@@ -476,18 +476,19 @@ def test_start_builder_task_refuses_launch_without_tool_call_id(monkeypatch):
 
     monkeypatch.setattr("langgraph_sdk.get_client", _fail)
 
-    runtime = _make_runtime({"user_id": "alice"})
+    # Runtime carries empty tool_call_id — production equivalent of
+    # LangGraph's tool executor failing to populate it.
+    runtime = _make_runtime({"user_id": "alice"}, tool_call_id="")
 
     response = asyncio.run(
         module.start_builder_task.coroutine(
             description="Make a doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="",
         )
     )
     assert isinstance(response, str)
-    assert "tool_call_id was not injected" in response
+    assert "tool_call_id was not available" in response
     assert "No background work was started" in response or "no background work" in response.lower()
 
 
@@ -530,7 +531,6 @@ def test_start_builder_task_treats_pending_status_as_active(monkeypatch):
             description="Make another doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-pending",
         )
     )
     assert isinstance(response, str)
@@ -568,7 +568,6 @@ def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch):
             description="Make another doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-int",
         )
     )
     assert isinstance(response, str)
@@ -610,7 +609,6 @@ def test_start_builder_task_treats_unknown_status_as_active(monkeypatch):
             description="Make another doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-future",
         )
     )
     assert isinstance(response, str)
@@ -644,7 +642,6 @@ def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
             description="Retry the doc",
             task_type="document",
             runtime=runtime,
-            tool_call_id="tc-retry",
         )
     )
     assert isinstance(response, Command)
