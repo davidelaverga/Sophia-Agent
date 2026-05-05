@@ -67,42 +67,48 @@ class TestAgentsMdFile:
             )
 
     def test_names_actual_runtime_status_values(self):
-        """The status values that ``BuilderSessionMiddleware`` actually emits
-        on ``state["builder_task"]["status"]``. Anything else would teach the
-        model to branch on values that never arrive."""
+        """The status values the deepagents ``AsyncSubAgentMiddleware``
+        actually writes on ``state["async_tasks"][task_id]["status"]``.
+        Anything else would teach the model to branch on values that never
+        arrive.
+
+        Post-Phase-1 migration (May 2026): the lifecycle is owned by the
+        native middleware which reflects LangGraph SDK ``Run.status`` —
+        ``running`` / ``success`` / ``error`` / ``cancelled`` plus the
+        SDK-only ``pending`` / ``interrupted`` / ``timeout``."""
         content = AGENTS_MD_PATH.read_text(encoding="utf-8")
-        for status in ("queued", "running", "completed", "failed"):
+        for status in ("running", "success", "error", "cancelled"):
             assert status in content, (
                 f"status {status!r} missing from AGENTS.md — the model has "
                 "no documentation for a state the runtime actually emits."
             )
 
-    def test_names_actual_switch_to_builder_input_fields(self):
-        """The exact fields ``SwitchToBuilderInput`` accepts today."""
+    def test_names_actual_start_builder_task_input_fields(self):
+        """The exact fields ``StartBuilderTaskInput`` accepts today."""
         content = AGENTS_MD_PATH.read_text(encoding="utf-8")
-        for field in ("task", "task_type", "user_id"):
+        for field in ("description", "task_type", "user_id"):
             assert field in content, (
                 f"field {field!r} missing from AGENTS.md — the model has no "
                 "documentation for an arg the schema actually accepts."
             )
 
-    def test_does_not_document_unimplemented_switch_to_builder_args(self):
-        """Codex bot review (PR #81): AGENTS.md cannot document args that
-        ``SwitchToBuilderInput`` does not accept. The model would call
-        ``switch_to_builder(retry_attempt=1, ...)`` and the args would be
+    def test_does_not_document_unimplemented_start_builder_task_args(self):
+        """Codex bot review (PR #81 + #104): AGENTS.md cannot document args
+        that ``StartBuilderTaskInput`` does not accept. The model would call
+        ``start_builder_task(retry_attempt=1, ...)`` and the args would be
         silently dropped, treating retries as fresh builds."""
         content = AGENTS_MD_PATH.read_text(encoding="utf-8")
-        # Allow the explicit *denial* sentence (``There is no separate ...
-        # taxonomy``) which teaches the model NOT to expect these. Forbid the
+        # Allow the explicit *denial* sentence (e.g. "There is no separate ...
+        # taxonomy") which teaches the model NOT to expect these. Forbid the
         # *prescriptive* uses (declaring them as args, telling the model to
         # branch on them).
         forbidden_in_prescriptive_form = [
-            # Args that don't exist in SwitchToBuilderInput
+            # Args that don't exist in StartBuilderTaskInput
             "retry_attempt:",
             "retry_attempt=",
             "resume_from_task_id:",
             "resume_from_task_id=",
-            # Fields that don't exist in BuilderArtifactInput / builder_result
+            # Fields that don't exist in BuilderArtifactInput / builder result
             "continuation_task_id",
             "completed_files",
             "summary_of_done",
@@ -111,19 +117,16 @@ class TestAgentsMdFile:
             assert symbol not in content, (
                 f"AGENTS.md mentions unimplemented symbol {symbol!r} in a "
                 "prescriptive form. Either remove it or implement it in the "
-                "same commit (SwitchToBuilderInput, BuilderArtifactInput, "
-                "BuilderSessionMiddleware)."
+                "same commit (StartBuilderTaskInput, BuilderArtifactInput, "
+                "AsyncSubAgentMiddleware)."
             )
 
     def test_does_not_document_unimplemented_status_taxonomy(self):
         """Codex bot review (PR #81): ``BuilderArtifactInput`` has no
-        ``status`` field on any branch (verified against
-        ``feat/voice-transport-migration-telegram``,
-        ``fix/builder-reliability-pr-h-async-switch-to-builder``,
-        ``fix/sophia-builder-artifact-finalization``, and ``main``). The
-        runtime only emits ``completed`` and ``failed`` on
-        ``builder_task.status``. Documenting other values would tell the
-        model to branch on unreachable states."""
+        ``status`` field on any branch. The runtime emits only the deepagents
+        ``AsyncTask.status`` taxonomy on ``state["async_tasks"][task_id]``.
+        Documenting other values would tell the model to branch on
+        unreachable states."""
         content = AGENTS_MD_PATH.read_text(encoding="utf-8")
         # The denial sentence is allowed — it teaches the model these don't
         # exist. Forbid all other contexts: any status appearing in a `: `

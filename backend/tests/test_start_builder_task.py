@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import importlib
-import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -462,11 +461,20 @@ def test_start_builder_task_tool_arg_user_id_does_not_override_runtime_config(mo
 # ---------- tool_call_id fallback -------------------------------------------
 
 
-def test_start_builder_task_returns_string_when_tool_call_id_missing(monkeypatch):
-    """Without a tool_call_id we cannot construct a Command; fall back to JSON string."""
+def test_start_builder_task_refuses_launch_without_tool_call_id(monkeypatch):
+    """Empty ``tool_call_id`` must NOT launch a builder run.
+
+    Codex bot review on PR-A: the previous fallback launched the SDK run
+    and then returned a JSON string without writing ``async_tasks``,
+    leaving the run untracked and unmanageable. Refusing to launch keeps
+    state consistent — no orphans.
+    """
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
-    fake_client, _captured = _make_fake_sdk_client(thread_id="t-1", run_id="r-1")
-    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    def _fail(_url=None):  # pragma: no cover — must not be called
+        raise AssertionError("SDK client must not be created when tool_call_id is empty")
+
+    monkeypatch.setattr("langgraph_sdk.get_client", _fail)
 
     runtime = _make_runtime({"user_id": "alice"})
 
@@ -479,6 +487,165 @@ def test_start_builder_task_returns_string_when_tool_call_id_missing(monkeypatch
         )
     )
     assert isinstance(response, str)
-    payload = json.loads(response)
-    assert payload["task_id"] == "t-1"
-    assert payload["status"] == "running"
+    assert "tool_call_id was not injected" in response
+    assert "No background work was started" in response or "no background work" in response.lower()
+
+
+# ---------- status-set coverage (terminal-blacklist semantics) --------------
+
+
+def test_start_builder_task_treats_pending_status_as_active(monkeypatch):
+    """LangGraph SDK can write ``status="pending"`` via check_async_task.
+
+    The previous whitelist (``{"queued", "running", "started"}``) missed
+    pending, so a duplicate launch could slip through after a status check.
+    Codex bot review on PR-A flagged this; the inverted terminal-status
+    blacklist now treats pending as active.
+    """
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    def _fail(_url=None):  # pragma: no cover
+        raise AssertionError("SDK client must not be created on duplicate launch")
+
+    monkeypatch.setattr("langgraph_sdk.get_client", _fail)
+
+    runtime = _make_runtime(
+        {
+            "async_tasks": {
+                "pending-1": {
+                    "task_id": "pending-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "pending-1",
+                    "run_id": "r-pending",
+                    "status": "pending",
+                    "created_at": "2026-04-24T00:00:00Z",
+                    "last_checked_at": "2026-04-24T00:00:00Z",
+                    "last_updated_at": "2026-04-24T00:00:00Z",
+                }
+            }
+        }
+    )
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Make another doc",
+            task_type="document",
+            runtime=runtime,
+            tool_call_id="tc-pending",
+        )
+    )
+    assert isinstance(response, str)
+    assert "already in progress" in response
+    assert "pending-1" in response
+
+
+def test_start_builder_task_treats_interrupted_status_as_active(monkeypatch):
+    """``interrupted`` is also a non-terminal LangGraph SDK run status."""
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    def _fail(_url=None):  # pragma: no cover
+        raise AssertionError("SDK client must not be created on duplicate launch")
+
+    monkeypatch.setattr("langgraph_sdk.get_client", _fail)
+
+    runtime = _make_runtime(
+        {
+            "async_tasks": {
+                "int-1": {
+                    "task_id": "int-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "int-1",
+                    "run_id": "r-int",
+                    "status": "interrupted",
+                    "created_at": "2026-04-24T00:00:00Z",
+                    "last_checked_at": "2026-04-24T00:00:00Z",
+                    "last_updated_at": "2026-04-24T00:00:00Z",
+                }
+            }
+        }
+    )
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Make another doc",
+            task_type="document",
+            runtime=runtime,
+            tool_call_id="tc-int",
+        )
+    )
+    assert isinstance(response, str)
+    assert "already in progress" in response
+
+
+def test_start_builder_task_treats_unknown_status_as_active(monkeypatch):
+    """Default-active: any new/unknown status blocks duplicate launches.
+
+    Sentinel for forward-compat — when LangGraph SDK adds a new status we
+    don't yet know about, the conservative behaviour is to treat it as
+    "still running" rather than to allow a second concurrent launch.
+    """
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    def _fail(_url=None):  # pragma: no cover
+        raise AssertionError("SDK client must not be created on duplicate launch")
+
+    monkeypatch.setattr("langgraph_sdk.get_client", _fail)
+
+    runtime = _make_runtime(
+        {
+            "async_tasks": {
+                "future-1": {
+                    "task_id": "future-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "future-1",
+                    "run_id": "r-future",
+                    "status": "some_brand_new_langgraph_status",
+                    "created_at": "2026-04-24T00:00:00Z",
+                    "last_checked_at": "2026-04-24T00:00:00Z",
+                    "last_updated_at": "2026-04-24T00:00:00Z",
+                }
+            }
+        }
+    )
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Make another doc",
+            task_type="document",
+            runtime=runtime,
+            tool_call_id="tc-future",
+        )
+    )
+    assert isinstance(response, str)
+    assert "already in progress" in response
+
+
+def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
+    """``failed`` (and other terminal statuses) must NOT block a new launch."""
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, _captured = _make_fake_sdk_client(thread_id="new-1", run_id="r-new")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    runtime = _make_runtime(
+        {
+            "async_tasks": {
+                "old-1": {
+                    "task_id": "old-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "old-1",
+                    "run_id": "r-old",
+                    "status": "failed",
+                    "created_at": "2026-04-24T00:00:00Z",
+                    "last_checked_at": "2026-04-24T00:00:00Z",
+                    "last_updated_at": "2026-04-24T00:00:00Z",
+                }
+            }
+        }
+    )
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Retry the doc",
+            task_type="document",
+            runtime=runtime,
+            tool_call_id="tc-retry",
+        )
+    )
+    assert isinstance(response, Command)
+    assert "new-1" in response.update["async_tasks"]

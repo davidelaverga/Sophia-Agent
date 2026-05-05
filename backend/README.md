@@ -54,17 +54,19 @@ The single LangGraph agent (`lead_agent`) is the runtime entry point, created vi
 - **System prompt** with skills injection, memory context, and working directory guidance
 ### Sophia Companion + Builder
 
-The Sophia graphs (`sophia_companion`, `sophia_builder`) now use a stateful builder handoff flow:
+The Sophia graphs (`sophia_companion`, `sophia_builder`) use the deepagents v0.5 async-subagent pattern:
 
-- `switch_to_builder` queues builder work asynchronously and returns a structured `builder_handoff` payload immediately (no blocking polling loop)
-- `switch_to_builder` now resolves builder `user_id` from runtime configurable/context first and prefers the latest non-empty in-turn `emit_artifact` tool payload over stale persisted artifacts when building delegation context (empty payloads fall back to state artifacts)
-- `switch_to_builder` also emits handoff resolution diagnostics (`user_id_source`, `artifact_source`, and source-presence flags) in both logs and handoff payloads for faster production triage
-- `BuilderSessionMiddleware` consumes the handoff payload, tracks task status from background execution, writes `builder_task` / `builder_result` into companion state, and logs adopted handoffs plus timeout debug fields (`task_id`, `last_tool_calls`, `late_tool_calls_after_timeout`)
+- `start_builder_task` is the canonical companion-side dispatch tool. It launches the builder via deepagents `AsyncSubAgentMiddleware` (LangGraph SDK ASGI in-process transport) and returns a `task_id` immediately, written to `state["async_tasks"]`
+- `start_builder_task` enriches the builder's brief with relevant memories from the session, current emotional context (tone + active_goal), active ritual / phase, and explicit user-supplied URLs; the wrapper also seeds `delegation_context`, `allow_web_research`, `explicit_user_urls`, and `builder_web_budget` on the builder's input
+- The wrapper resolves builder `user_id` with strict priority: runtime configurable/context → state → `make_start_builder_task_tool(user_id)` closure → LLM-supplied tool arg (warning) → `default_user` (warning). The LLM tool arg never overrides a trusted source; mismatches are logged for prompt-injection audit
+- Duplicate-launch protection uses a terminal-status blacklist so unknown / future LangGraph statuses (`pending`, `interrupted`, …) correctly block new launches conservatively
+- Empty `tool_call_id` causes the wrapper to refuse to launch (prevents orphaned LangGraph runs that the lifecycle tools couldn't manage)
+- Lifecycle (`check_async_task`, `update_async_task`, `cancel_async_task`, `list_async_tasks`) is owned by the native deepagents middleware; `start_async_task` is filtered from the model-visible tool set
 - Builder execution now tracks non-artifact tool turns and escalates endgame instructions so the builder explicitly finalizes with `emit_builder_artifact`
 - Builder artifact force-recovery treats only `_generate_*.py` files as runnable generator scripts (avoids false positives from similarly named helper files like `_generator_*.py`)
 - `BuilderArtifactMiddleware` rejects path-traversal artifact paths (for both `artifact_path` and `supporting_files`) so emit verification/mirroring cannot escape `/mnt/user-data/outputs/`
-- Background subagent timeout handling preserves terminal safety while capturing late-turn diagnostics (`last` and `late` tool-call summaries) for debugging
-- Companion synthesis remains in `ArtifactMiddleware` and runs when `builder_task.status == "completed"`
+- Background subagent timeout surfaces as a terminal status (`error`, `failed`, `timeout`, `timed_out`) on the corresponding `state["async_tasks"][task_id]` entry; the companion learns about it via `check_async_task`
+- Companion synthesis remains in `ArtifactMiddleware` and runs against the builder's `emit_builder_artifact` payload returned via `check_async_task`
 - Companion chain now includes config-driven `SummarizationMiddleware` wiring
 - Builder chain now includes `SandboxMiddleware` and `TodoMiddleware` for execution parity
 

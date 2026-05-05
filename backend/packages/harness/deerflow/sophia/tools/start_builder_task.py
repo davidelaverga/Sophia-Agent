@@ -38,10 +38,9 @@ SDK failure fallback, and user_id resolution (mirroring
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import uuid
-from typing import Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from langchain.tools import InjectedToolCallId, ToolRuntime, tool
 from langchain_core.messages import AIMessage, ToolMessage
@@ -49,13 +48,33 @@ from langgraph.types import Command
 from langgraph.typing import ContextT
 from pydantic import BaseModel, Field
 
-from deerflow.agents.sophia_agent.state import SophiaState
-from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
     make_builder_web_budget,
     should_allow_builder_web_research,
 )
+
+# Importing ``deerflow.agents.sophia_agent.state`` (or any module under
+# ``deerflow.agents``) at module-load time triggers loading of
+# ``deerflow.agents.__init__``, which imports ``make_sophia_agent`` →
+# ``agent.py``, which imports back from this module. Using ``TYPE_CHECKING``
+# for the type alias and a lazy import for ``validate_user_id`` breaks the
+# cycle so direct ``from deerflow.sophia.tools.start_builder_task import …``
+# imports work regardless of test/runtime load order.
+if TYPE_CHECKING:
+    from deerflow.agents.sophia_agent.state import SophiaState
+else:
+    SophiaState = dict  # runtime fallback for the type alias
+
+
+def _validate_user_id(user_id: str) -> str:
+    """Lazy proxy for ``deerflow.agents.sophia_agent.utils.validate_user_id``.
+
+    Imported lazily to avoid the circular described above.
+    """
+    from deerflow.agents.sophia_agent.utils import validate_user_id
+
+    return validate_user_id(user_id)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +85,25 @@ __all__ = [
 
 _ASYNC_BUILDER_AGENT_NAME = "sophia_builder"
 
-_NON_TERMINAL_TASK_STATUSES = {"queued", "running", "started"}
+# Terminal builder-task statuses. Anything NOT in this set is treated as
+# active (covers ``running``, ``pending``, ``interrupted``, ``queued``,
+# ``started``, and any new LangGraph SDK status we haven't seen yet).
+# Default-active is the safer behaviour: a duplicate launch is rejected
+# whenever we are unsure whether a build is finished.
+#
+# Codex bot review on PR-A flagged that the previous whitelist
+# ``{"queued", "running", "started"}`` missed ``pending`` (which the
+# LangGraph SDK can write back into ``async_tasks`` via
+# ``check_async_task``) and any other status that lands in the future.
+_TERMINAL_TASK_STATUSES = {
+    "success",
+    "completed",
+    "error",
+    "failed",
+    "cancelled",
+    "timeout",
+    "timed_out",
+}
 
 # Task-type prefix (and short label) the model should embed in the
 # ``description`` argument. Per spec section 4.1: ``[document]`` /
@@ -256,21 +293,21 @@ def _resolve_user_id(
     trusted_resolved: str | None = None
     trusted_source: str | None = None
     if configurable_user_id:
-        trusted_resolved = validate_user_id(configurable_user_id)
+        trusted_resolved = _validate_user_id(configurable_user_id)
         trusted_source = "runtime.config.configurable.user_id"
     elif context_user_id:
-        trusted_resolved = validate_user_id(context_user_id)
+        trusted_resolved = _validate_user_id(context_user_id)
         trusted_source = "runtime.context.user_id"
     elif state_user_id:
-        trusted_resolved = validate_user_id(state_user_id)
+        trusted_resolved = _validate_user_id(state_user_id)
         trusted_source = "state.user_id"
     elif configured_user_id:
-        trusted_resolved = validate_user_id(configured_user_id)
+        trusted_resolved = _validate_user_id(configured_user_id)
         trusted_source = "configured_builder_user_id"
 
     tool_arg_matches_trusted: bool | None = None
     if tool_arg_user_id is not None and trusted_resolved is not None:
-        tool_arg_matches_trusted = validate_user_id(tool_arg_user_id) == trusted_resolved
+        tool_arg_matches_trusted = _validate_user_id(tool_arg_user_id) == trusted_resolved
 
     diagnostics: dict[str, Any] = {
         "tool_arg_user_id_present": bool(tool_arg_user_id),
@@ -297,10 +334,10 @@ def _resolve_user_id(
             "[Builder] user_id falling back to LLM-supplied tool arg (%r) — all trusted sources empty. This value is NOT authenticated.",
             tool_arg_user_id,
         )
-        return validate_user_id(tool_arg_user_id), "tool_arg_fallback", diagnostics
+        return _validate_user_id(tool_arg_user_id), "tool_arg_fallback", diagnostics
 
     logger.warning("[Builder] user_id resolution fell back to 'default_user' — no source (trusted or LLM-supplied) provided a user identifier.")
-    return validate_user_id("default_user"), "default_user", diagnostics
+    return _validate_user_id("default_user"), "default_user", diagnostics
 
 
 def _is_demo_request(
@@ -430,14 +467,19 @@ def _build_delegation_context(
 
 
 def _has_active_builder_task(state: SophiaState) -> str | None:
-    """Return the task_id of any non-terminal builder task in state, else None."""
+    """Return the task_id of any non-terminal builder task in state, else None.
+
+    Uses a terminal-status blacklist (default-active) so any status the
+    LangGraph SDK writes that we haven't anticipated is treated as
+    "still running" — duplicate launches are rejected conservatively.
+    """
     async_tasks = state.get("async_tasks", {}) or {}
     for task_id, task in async_tasks.items():
         if not isinstance(task, dict):
             continue
-        status = task.get("status")
-        agent = task.get("agent_name")
-        if status in _NON_TERMINAL_TASK_STATUSES and agent == _ASYNC_BUILDER_AGENT_NAME:
+        if task.get("agent_name") != _ASYNC_BUILDER_AGENT_NAME:
+            continue
+        if task.get("status") not in _TERMINAL_TASK_STATUSES:
             return str(task_id)
     return None
 
@@ -501,6 +543,29 @@ async def _start_builder_task_impl(
 ) -> str | Command:
     """Async implementation. Mirrors ``switch_to_builder``'s shape but dispatches
     via deepagents-native ASGI transport instead of ``SubagentExecutor``."""
+    # Validate ``tool_call_id`` BEFORE dispatch. Without it we cannot
+    # construct a Command — LangGraph rejects ToolMessages whose
+    # ``tool_call_id`` doesn't match the LLM's. Launching first and falling
+    # back to a JSON-string return (the old ``switch_to_builder`` pattern)
+    # would orphan the just-created LangGraph thread/run: the lifecycle
+    # tools resolve tasks from ``state["async_tasks"]`` which we wouldn't
+    # have written. Refuse to launch instead.
+    #
+    # Codex bot review on PR-A: empty ``tool_call_id`` previously launched
+    # a real builder run and then returned a string without writing
+    # ``async_tasks`` — leaving the run untracked and unmanageable.
+    if not tool_call_id:
+        logger.error(
+            "[Builder] start_builder_task invoked without tool_call_id; "
+            "refusing to launch (would orphan the builder run)."
+        )
+        return (
+            "Cannot launch builder task right now: tool_call_id was not "
+            "injected. This is a langchain integration error — verify the "
+            "args_schema wiring on the start_builder_task tool. No "
+            "background work was started; safe to retry."
+        )
+
     state: SophiaState = runtime.state if runtime is not None else {}  # type: ignore[assignment]
     if state is None:
         state = {}  # type: ignore[assignment]
@@ -626,14 +691,6 @@ async def _start_builder_task_impl(
         trace_id,
     )
 
-    if not tool_call_id:
-        # Without a tool_call_id we cannot construct a Command — LangGraph
-        # rejects ToolMessages whose tool_call_id doesn't match the LLM's.
-        # Fall back to a plain string. The model will see the launch
-        # confirmation but companion state won't be updated this turn.
-        logger.warning("[Builder] InjectedToolCallId empty for start_builder_task — falling back to string return; async_tasks state not written this turn.")
-        return json.dumps({"task_id": task_id, "run_id": run_id, "status": "running"})
-
     return Command(
         update={
             "messages": [
@@ -681,7 +738,7 @@ def make_start_builder_task_tool(configured_user_id: str):
     priority-4 in the resolution chain (after runtime config / context /
     state but before LLM tool args).
     """
-    bound_user_id = validate_user_id(configured_user_id)
+    bound_user_id = _validate_user_id(configured_user_id)
 
     @tool("start_builder_task", args_schema=StartBuilderTaskInput)
     async def configured_start_builder_task(
