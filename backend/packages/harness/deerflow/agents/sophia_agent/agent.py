@@ -23,6 +23,7 @@ from langchain_core.runnables import RunnableConfig
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.build_awareness import BuildAwarenessMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderCommandMiddleware
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
@@ -268,6 +269,14 @@ def make_sophia_agent(config: RunnableConfig):
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
         # 13. Memory (after ritual+skill set — retrieval biased by both)
         Mem0MemoryMiddleware(user_id),
+        # 13b. Build awareness — refreshes async_tasks status from the
+        # LangGraph SDK and injects a short prompt block so Sophia answers
+        # "how's the build going?" without needing to call check_async_task,
+        # and acknowledges completion naturally instead of reciting the
+        # original task brief. Sits between Mem0 and Artifact so the prompt
+        # block is in the assembled system message but doesn't interfere
+        # with skill routing or memory retrieval.
+        BuildAwarenessMiddleware(),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
         # 15. Deterministic Builder command routing for explicit document requests
