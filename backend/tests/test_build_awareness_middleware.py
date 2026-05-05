@@ -283,3 +283,25 @@ def test_async_refresh_handles_sdk_failure_gracefully(monkeypatch):
     # The block is still rendered from the (un-refreshed) state.
     assert result is not None
     assert "in flight" in result["system_prompt_blocks"][-1].lower()
+
+
+def test_async_refresh_prunes_stale_refresh_cache(monkeypatch):
+    """Refresh TTL cache should drop task_ids no longer present in state."""
+    mw = BuildAwarenessMiddleware()
+    mw._last_refresh_at = {"stale-task": 123.0}
+
+    fake_client = MagicMock()
+    fake_client.runs = MagicMock()
+    fake_client.runs.get = AsyncMock(return_value={"status": "running"})
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    state = {
+        "async_tasks": {
+            "fresh-task": _builder_task(task_id="fresh-task", status="running", created_at_offset_min=1)
+        }
+    }
+
+    asyncio.run(mw.abefore_agent(state, _runtime()))
+
+    assert "stale-task" not in mw._last_refresh_at
+    assert "fresh-task" in mw._last_refresh_at

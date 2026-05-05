@@ -105,6 +105,17 @@ class BuildAwarenessMiddleware(AgentMiddleware[BuildAwarenessState]):
             log_middleware("BuildAwareness", "no async_tasks", _t0)
             return None
 
+        # Keep the per-process refresh cache bounded to tasks still present in
+        # state. Without this, long-lived companion processes can accumulate
+        # stale task_ids indefinitely across unrelated conversations.
+        known_task_ids = set(async_tasks.keys())
+        if self._last_refresh_at:
+            self._last_refresh_at = {
+                task_id: last
+                for task_id, last in self._last_refresh_at.items()
+                if task_id in known_task_ids
+            }
+
         # Pre-collect builder entries that need a refresh (non-terminal +
         # outside the TTL window). Skip everything else.
         refresh_targets: list[tuple[str, dict]] = []
