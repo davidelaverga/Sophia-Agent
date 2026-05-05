@@ -498,8 +498,15 @@ async def _dispatch_via_asgi(
         "builder_web_budget": builder_web_budget,
     }
 
+    # ``thread_id`` MUST be in configurable so the builder's
+    # ``ThreadDataMiddleware.before_agent`` can locate the per-thread
+    # workspace/uploads/outputs directories. The positional ``thread_id``
+    # argument to ``runs.create`` only associates the run with a thread on
+    # the LangGraph side; it does not propagate to the running graph's
+    # ``runtime.config["configurable"]``. We populate it explicitly here.
     run_config: dict[str, Any] = {
         "configurable": {
+            "thread_id": thread_id,
             "user_id": user_id,
             "parent_thread_id": parent_thread_id,
         }
