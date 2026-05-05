@@ -44,7 +44,7 @@ _DUMMY_RE = re.compile(r"\bdummy\b", re.IGNORECASE)
 
 
 class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
-    """Fast-path explicit document commands into switch_to_builder."""
+    """Fast-path explicit document commands into ``start_builder_task``."""
 
     state_schema = AgentState
 

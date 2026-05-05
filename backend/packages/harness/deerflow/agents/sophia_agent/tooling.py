@@ -20,7 +20,8 @@ def load_sophia_web_tools() -> list[BaseTool]:
       ``get_app_config`` raises ``FileNotFoundError`` in that case; we catch
       it so ``make_sophia_agent`` can still construct a working companion
       that simply has no native web tools (it will continue to delegate web
-      research to Builder via ``switch_to_builder`` as it did before B1).
+      research to Builder via ``start_builder_task`` for ``research`` /
+      ``document`` task types).
     - The config has no ``tools:`` block at all (``config.tools`` is None).
     - A configured tool fails to resolve (missing dependency, broken
       ``use:`` path, etc.). Each tool is resolved independently so a

@@ -6,12 +6,12 @@ Creates the Sophia companion agent with its middleware chain.
 import logging
 import os
 
-# deepagents v0.5 async subagents (B4). The middleware exposes 5 task-
-# management tools (`start_async_task`, `check_async_task`,
-# `update_async_task`, `cancel_async_task`, `list_async_tasks`) and is
-# attached only when ``configurable.async_builder`` is truthy, so the
-# default behaviour (sync `switch_to_builder` Command path with PR #78's
-# JSON-string fallback) is byte-identical to today.
+# deepagents v0.5 async subagents — always-on as of the Phase-1 async
+# migration. The middleware exposes four lifecycle tools
+# (``check_async_task``, ``update_async_task``, ``cancel_async_task``,
+# ``list_async_tasks``); ``start_async_task`` is filtered from the
+# model-visible tool set so the model only ever launches builds via the
+# enriched ``start_builder_task`` wrapper (regular agent tool added below).
 from deepagents.middleware.async_subagents import (
     AsyncSubAgent,
     AsyncSubAgentMiddleware,
