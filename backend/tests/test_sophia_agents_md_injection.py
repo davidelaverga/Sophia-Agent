@@ -84,26 +84,27 @@ class TestAgentsMdFile:
             )
 
     def test_names_actual_start_builder_task_input_fields(self):
-        """The exact fields ``StartBuilderTaskInput`` accepts today."""
+        """The exact fields ``start_builder_task`` accepts today
+        (parse_docstring schema)."""
         content = AGENTS_MD_PATH.read_text(encoding="utf-8")
         for field in ("description", "task_type", "user_id"):
             assert field in content, (
                 f"field {field!r} missing from AGENTS.md — the model has no "
-                "documentation for an arg the schema actually accepts."
+                "documentation for an arg the tool actually accepts."
             )
 
     def test_does_not_document_unimplemented_start_builder_task_args(self):
         """Codex bot review (PR #81 + #104): AGENTS.md cannot document args
-        that ``StartBuilderTaskInput`` does not accept. The model would call
-        ``start_builder_task(retry_attempt=1, ...)`` and the args would be
-        silently dropped, treating retries as fresh builds."""
+        that ``start_builder_task`` does not accept. The model would call
+        ``start_builder_task(retry_attempt=1, ...)`` and langchain's
+        parse_docstring schema would reject them OR silently drop them."""
         content = AGENTS_MD_PATH.read_text(encoding="utf-8")
         # Allow the explicit *denial* sentence (e.g. "There is no separate ...
         # taxonomy") which teaches the model NOT to expect these. Forbid the
         # *prescriptive* uses (declaring them as args, telling the model to
         # branch on them).
         forbidden_in_prescriptive_form = [
-            # Args that don't exist in StartBuilderTaskInput
+            # Args that don't exist in the start_builder_task signature
             "retry_attempt:",
             "retry_attempt=",
             "resume_from_task_id:",
@@ -117,8 +118,8 @@ class TestAgentsMdFile:
             assert symbol not in content, (
                 f"AGENTS.md mentions unimplemented symbol {symbol!r} in a "
                 "prescriptive form. Either remove it or implement it in the "
-                "same commit (StartBuilderTaskInput, BuilderArtifactInput, "
-                "AsyncSubAgentMiddleware)."
+                "same commit (start_builder_task signature, "
+                "BuilderArtifactInput, AsyncSubAgentMiddleware)."
             )
 
     def test_does_not_document_unimplemented_status_taxonomy(self):
