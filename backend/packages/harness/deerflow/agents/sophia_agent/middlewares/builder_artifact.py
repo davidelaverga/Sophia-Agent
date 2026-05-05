@@ -27,6 +27,7 @@ from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
@@ -955,6 +956,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 steps_completed=non_artifact_turns,
                                 reason=f"consecutive_empty_emit_rejections={consecutive_rejections}",
                             )
+                            # Fire the gateway webhook so Telegram still
+                            # receives the (degraded) artifact card.
+                            fire_completion_webhook_from_artifact(
+                                state=state,
+                                runtime=runtime,
+                                artifact=fallback,
+                                status="completed",
+                            )
                             return {
                                 "builder_result": fallback,
                                 "builder_non_artifact_turns": 0,
@@ -995,6 +1004,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         f"builder artifact captured: type={args.get('artifact_type')}, "
                         f"confidence={args.get('confidence')}",
                         _t0,
+                    )
+                    # Fire the gateway webhook so the Telegram channel adapter
+                    # (and webapp SSE) deliver the artifact bytes to the user.
+                    # Replaces the deleted ``SubagentExecutor`` terminal-flip
+                    # call site after the Phase-1 async migration.
+                    fire_completion_webhook_from_artifact(
+                        state=state,
+                        runtime=runtime,
+                        artifact=args,
+                        status="completed",
                     )
                     return {
                         "builder_result": args,
@@ -1061,6 +1080,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         steps_completed=non_artifact_turns,
                         reason="hard_ceiling",
                     )
+                    # Fire the gateway webhook so Telegram receives the
+                    # ceiling-fallback artifact (or an error card via the
+                    # phantom-success guard if no real file landed).
+                    fire_completion_webhook_from_artifact(
+                        state=state,
+                        runtime=runtime,
+                        artifact=fallback,
+                        status="completed",
+                    )
                     return {
                         "builder_result": fallback,
                         "builder_non_artifact_turns": 0,
@@ -1109,6 +1137,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
             )
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
+            # Fire the gateway webhook (phantom-success guard will likely
+            # coerce this to an error card since the fallback has no
+            # artifact_path and confidence=0.3).
+            fire_completion_webhook_from_artifact(
+                state=state,
+                runtime=runtime,
+                artifact=fallback,
+                status="completed",
+            )
             return {
                 "builder_result": fallback,
                 "builder_non_artifact_turns": 0,

@@ -23,7 +23,7 @@ import logging
 import os
 import threading
 from collections import OrderedDict
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -445,3 +445,183 @@ def reset_for_tests() -> None:
         _emitted_task_ids.clear()
     with _misconfigured_logged_lock:
         _misconfigured_logged = False
+
+
+# --- Native deepagents-dispatch path -----------------------------------------
+#
+# Post Phase-1 migration the builder runs as a native LangGraph subagent
+# (no ``SubagentExecutor``) so the legacy ``emit_completion_event(result)``
+# entry point has no caller. The two helpers below let
+# ``BuilderArtifactMiddleware`` fire the same webhook from inside the builder
+# graph itself, using the artifact dict it just captured + the run's runtime
+# config. Same wire contract on the gateway side; same dedup; same
+# phantom-success guard.
+
+_TERMINAL_STATUSES_NATIVE = frozenset({"completed", "failed", "timed_out", "cancelled"})
+
+
+def build_completion_payload_from_artifact(
+    *,
+    state: dict[str, Any],
+    runtime: Any,
+    artifact: dict[str, Any],
+    status: str = "completed",
+    error_message: str | None = None,
+) -> dict[str, Any]:
+    """Build a webhook payload from the builder's captured artifact dict.
+
+    Called from inside the builder graph (``BuilderArtifactMiddleware``)
+    instead of the deleted ``SubagentExecutor`` terminal-flip handler.
+    Mirrors the wire shape of :func:`build_completion_payload` so the
+    gateway worker, channel adapters, and frontend card are unchanged.
+
+    Args:
+        state: Builder-graph state at the moment of completion. Used for
+            ``builder_task.task_type`` (when available) and
+            ``delegation_context.task`` (used as the task_brief on retry).
+        runtime: ``langgraph.runtime.Runtime`` for the current builder run.
+            We pull ``thread_id`` (builder thread) + ``parent_thread_id``
+            (companion thread, where the Telegram chat lives) +
+            ``user_id`` from ``runtime.config["configurable"]``.
+        artifact: The captured ``emit_builder_artifact`` payload (or the
+            ``_build_ceiling_fallback`` shape on force-emit).
+        status: One of ``completed``/``failed``/``timed_out``/``cancelled``.
+            Defaults to ``completed``; pass ``failed`` on the
+            ceiling-fallback path so the Telegram card surfaces a retry.
+        error_message: Free-form error string for non-completed paths.
+    """
+    cfg = {}
+    if runtime is not None:
+        try:
+            cfg = (runtime.config or {}).get("configurable", {}) or {}
+        except Exception:  # pragma: no cover - defensive
+            cfg = {}
+
+    builder_thread_id = cfg.get("thread_id")
+    parent_thread_id = cfg.get("parent_thread_id")
+    user_id = cfg.get("user_id")
+    trace_id = (runtime.config or {}).get("metadata", {}).get("trace_id") if runtime is not None else None
+
+    artifact_path = artifact.get("artifact_path") if isinstance(artifact, dict) else None
+    artifact_filename: str | None = None
+    if isinstance(artifact_path, str) and artifact_path:
+        artifact_filename = artifact_path.rsplit("/", 1)[-1]
+
+    artifact_url = _signed_artifact_url(builder_thread_id, artifact_filename)
+
+    task_brief: str | None = None
+    delegation = state.get("delegation_context") if isinstance(state, dict) else None
+    if isinstance(delegation, dict):
+        task = delegation.get("task")
+        if isinstance(task, str) and task.strip():
+            task_brief = task.strip()
+
+    builder_task = state.get("builder_task") if isinstance(state, dict) else None
+    task_type = builder_task.get("task_type") if isinstance(builder_task, dict) else None
+    if not task_type and isinstance(delegation, dict):
+        task_type = delegation.get("task_type")
+
+    mapped_status = _map_status(status)
+
+    if _is_phantom_success(
+        status=mapped_status,
+        artifact_path=artifact_path,
+        artifact_url=artifact_url,
+        confidence=artifact.get("confidence") if isinstance(artifact, dict) else None,
+    ):
+        logger.warning(
+            "Builder-events: coercing phantom-success to error for task_id=%s "
+            "confidence=%s artifact_path=%r — builder reported success but "
+            "produced no deliverable.",
+            builder_thread_id,
+            artifact.get("confidence") if isinstance(artifact, dict) else None,
+            artifact_path,
+        )
+        mapped_status = "error"
+        if not error_message:
+            error_message = (
+                "Builder finished but couldn't produce a deliverable. "
+                "Want me to try again?"
+            )
+
+    return {
+        # ``thread_id`` in the webhook payload is the COMPANION thread (where
+        # the Telegram chat lives) — this matches the legacy contract that
+        # ``app/channels/telegram.py:_on_builder_completion`` keys off.
+        "thread_id": parent_thread_id,
+        # ``task_id`` is the builder's own thread (also the task_id stored in
+        # companion ``state["async_tasks"]``).
+        "task_id": builder_thread_id,
+        "trace_id": trace_id,
+        "agent_name": "sophia_builder",
+        "status": mapped_status,
+        "task_type": task_type,
+        "task_brief": task_brief,
+        "artifact_url": artifact_url,
+        "artifact_title": artifact.get("artifact_title") if isinstance(artifact, dict) else None,
+        "artifact_type": artifact.get("artifact_type") if isinstance(artifact, dict) else None,
+        "artifact_filename": artifact_filename,
+        "summary": artifact.get("companion_summary") if isinstance(artifact, dict) else None,
+        "user_next_action": artifact.get("user_next_action") if isinstance(artifact, dict) else None,
+        "error_message": error_message,
+        "completed_at": _iso(datetime.now(UTC)),
+        "source": "builder_artifact_middleware",
+        "user_id": user_id if isinstance(user_id, str) and user_id else None,
+    }
+
+
+def fire_completion_webhook_from_artifact(
+    *,
+    state: dict[str, Any],
+    runtime: Any,
+    artifact: dict[str, Any],
+    status: str = "completed",
+    error_message: str | None = None,
+) -> bool:
+    """Build the payload and fire the webhook on a daemon thread, exactly once.
+
+    Wraps :func:`build_completion_payload_from_artifact` with the same dedup
+    + daemon-thread machinery as :func:`emit_completion_event`. Returns
+    ``True`` when scheduled, ``False`` on dedup-hit, missing thread_id, or
+    payload-build failure.
+    """
+    if status not in _TERMINAL_STATUSES_NATIVE:
+        return False
+
+    cfg = {}
+    if runtime is not None:
+        try:
+            cfg = (runtime.config or {}).get("configurable", {}) or {}
+        except Exception:
+            cfg = {}
+    task_id = cfg.get("thread_id")  # builder thread = task_id
+    if not task_id:
+        return False
+
+    if not _try_mark_emitted(task_id):
+        return False
+
+    try:
+        payload = build_completion_payload_from_artifact(
+            state=state,
+            runtime=runtime,
+            artifact=artifact,
+            status=status,
+            error_message=error_message,
+        )
+    except Exception:
+        _release_emit_claim(task_id)
+        logger.warning(
+            "Failed to build native-dispatch builder-events payload for task_id=%s",
+            task_id,
+            exc_info=True,
+        )
+        return False
+
+    threading.Thread(
+        target=_post_webhook,
+        args=(payload,),
+        name=f"builder-events-{task_id}",
+        daemon=True,
+    ).start()
+    return True
