@@ -447,6 +447,61 @@ def reset_for_tests() -> None:
         _misconfigured_logged = False
 
 
+def _resolve_runtime_thread_id(runtime: Any) -> str | None:
+    """Find the running graph's thread_id on a ``langgraph.runtime.Runtime``.
+
+    Resolution order (first non-empty hit wins):
+
+    1. ``runtime.execution_info.thread_id`` — the canonical source per
+       ``langgraph >= 1.0``. ``langgraph/pregel/_algo.py`` populates the
+       ``ExecutionInfo`` dataclass on every task with the run's bound
+       thread identity, regardless of dispatch path. This is the
+       future-proof source — in particular it remains populated under
+       LangGraph Platform / distributed deployments where the OSS code
+       path that fills ``runtime.context`` is bypassed (see Codex bot
+       review on PR #113).
+    2. ``runtime.context["thread_id"]`` — auto-populated by
+       ``langgraph-api`` on ASGI in-process dispatch (our current path).
+       This is what made ``ThreadDataMiddleware`` work before we noticed
+       the gap; kept as a fallback so existing test stubs (which set
+       ``runtime.context``) keep working.
+    3. ``runtime.config["configurable"]["thread_id"]`` — last-resort
+       fallback for callers that pass ``thread_id`` via
+       ``runs.create(config=...)``. ``langgraph-api 0.8.1`` does not
+       forward our custom configurable keys reliably (confirmed in
+       production 2026-05-06), so this rarely fires.
+    """
+    if runtime is None:
+        return None
+
+    # 1. execution_info — canonical per langgraph >= 1.0
+    info = getattr(runtime, "execution_info", None)
+    if info is not None:
+        candidate = getattr(info, "thread_id", None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    # 2. context — proven-working in our current ASGI in-process path
+    try:
+        ctx = runtime.context if runtime.context is not None else {}
+    except Exception:  # pragma: no cover - defensive
+        ctx = {}
+    if isinstance(ctx, dict):
+        candidate = ctx.get("thread_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    # 3. config.configurable — legacy fallback
+    try:
+        cfg = (runtime.config or {}).get("configurable", {}) or {}
+    except Exception:  # pragma: no cover - defensive
+        cfg = {}
+    candidate = cfg.get("thread_id")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+    return None
+
+
 # --- Native deepagents-dispatch path -----------------------------------------
 #
 # Post Phase-1 migration the builder runs as a native LangGraph subagent
@@ -505,7 +560,10 @@ def build_completion_payload_from_artifact(
     delegation = state.get("delegation_context") if isinstance(state, dict) else None
     delegation_dict = delegation if isinstance(delegation, dict) else {}
 
-    builder_thread_id = cfg.get("thread_id")
+    # Read the builder's own thread_id via the same context-first pattern
+    # ``ThreadDataMiddleware`` uses — runtime.config.configurable is not
+    # always populated by langgraph-api 0.8.1 (see _resolve_runtime_thread_id).
+    builder_thread_id = _resolve_runtime_thread_id(runtime)
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
     parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
@@ -604,17 +662,19 @@ def fire_completion_webhook_from_artifact(
         )
         return False
 
-    cfg = {}
-    if runtime is not None:
-        try:
-            cfg = (runtime.config or {}).get("configurable", {}) or {}
-        except Exception:
-            cfg = {}
-    task_id = cfg.get("thread_id")  # builder thread = task_id
+    # Read the builder's own thread_id (= task_id) via context-first
+    # resolution. langgraph-api 0.8.1 populates ``runtime.context["thread_id"]``
+    # from the run's thread association but does NOT forward custom keys
+    # we pass via ``runs.create(config={"configurable": ...})`` — see
+    # _resolve_runtime_thread_id for the production-confirmed details.
+    task_id = _resolve_runtime_thread_id(runtime)
     if not task_id:
         logger.warning(
-            "[Builder] fire_completion_webhook: missing builder thread_id in "
-            "runtime.config.configurable; cannot dispatch webhook."
+            "[Builder] fire_completion_webhook: missing builder thread_id "
+            "in runtime.execution_info AND runtime.context AND "
+            "runtime.config.configurable; cannot dispatch webhook. "
+            "(runtime=%s)",
+            "missing" if runtime is None else "present but no thread_id",
         )
         return False
 

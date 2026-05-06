@@ -26,23 +26,60 @@ def _reset_dedup_cache():
 
 def _make_runtime(
     *,
-    builder_thread_id: str = "task-builder-1",
-    parent_thread_id: str = "thread-companion-1",
+    builder_thread_id: str | None = "task-builder-1",
+    parent_thread_id: str | None = "thread-companion-1",
     user_id: str = "alice",
     trace_id: str = "trace-1",
+    builder_thread_id_in_context: bool = True,
+    builder_thread_id_in_execution_info: bool = True,
+    include_execution_info: bool = True,
 ) -> SimpleNamespace:
-    """Build a stand-in for ``langgraph.runtime.Runtime`` matching what
-    ``start_builder_task._dispatch_via_asgi`` puts in the run config."""
-    return SimpleNamespace(
+    """Build a stand-in for ``langgraph.runtime.Runtime``.
+
+    Production reality (langgraph >= 1.0.6, confirmed 2026-05-06):
+
+    - ``runtime.execution_info.thread_id`` — canonical, populated by
+      ``pregel/_algo.py`` on every task. This is the production source
+      of truth.
+    - ``runtime.context["thread_id"]`` — auto-populated by langgraph-api
+      on ASGI in-process dispatch. Useful as a fallback when test stubs
+      pre-date the execution_info pattern, or under older langgraph.
+    - ``runtime.config["configurable"]["thread_id"]`` — legacy fallback;
+      langgraph-api 0.8.1 doesn't forward our custom keys reliably.
+
+    Defaults populate execution_info AND context (matching prod). Pass
+    flags to opt out for fallback-path coverage.
+    """
+    context: dict = {}
+    config_configurable: dict = {
+        "parent_thread_id": parent_thread_id,
+        "user_id": user_id,
+    }
+    execution_info: SimpleNamespace | None = None
+
+    if builder_thread_id is not None:
+        if builder_thread_id_in_context:
+            context["thread_id"] = builder_thread_id
+        else:
+            # Fallback path: only in config.
+            config_configurable["thread_id"] = builder_thread_id
+
+    if include_execution_info:
+        ei_thread_id = (
+            builder_thread_id if builder_thread_id_in_execution_info else None
+        )
+        execution_info = SimpleNamespace(thread_id=ei_thread_id)
+
+    runtime = SimpleNamespace(
+        context=context,
         config={
-            "configurable": {
-                "thread_id": builder_thread_id,
-                "parent_thread_id": parent_thread_id,
-                "user_id": user_id,
-            },
+            "configurable": config_configurable,
             "metadata": {"trace_id": trace_id},
-        }
+        },
     )
+    if execution_info is not None:
+        runtime.execution_info = execution_info
+    return runtime
 
 
 def _make_state(
@@ -351,3 +388,172 @@ def test_payload_falls_back_to_config_when_state_parent_thread_id_missing():
 
     assert payload["thread_id"] == "legacy-config-thread"
     assert payload["user_id"] == "legacy-user"
+
+
+# ---------- builder thread_id resolution (context-first / config-fallback) --
+
+
+def test_fire_webhook_resolves_builder_thread_id_from_context():
+    """Production scenario (langgraph-api 0.8.1): builder's own thread_id
+    arrives in ``runtime.context["thread_id"]``, NOT in
+    ``runtime.config["configurable"]["thread_id"]``. Without context-first
+    resolution the webhook silently fails — exactly the bug captured at
+    2026-05-06T20:38:18.369682Z in production logs.
+    """
+    runtime = _make_runtime(
+        builder_thread_id="ctx-builder-1",
+        builder_thread_id_in_context=True,  # default; spelling out for clarity
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+
+
+def test_fire_webhook_resolves_builder_thread_id_from_config_fallback():
+    """Legacy fallback: when context has no thread_id (older langgraph-api
+    versions or uncommon dispatch paths), runtime.config.configurable still
+    serves as the source of truth.
+    """
+    runtime = _make_runtime(
+        builder_thread_id="cfg-builder-1",
+        builder_thread_id_in_context=False,  # only in config
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+
+
+def test_fire_webhook_returns_false_when_thread_id_missing_everywhere():
+    """When neither context nor config has thread_id, refuse to dispatch
+    (we'd have nowhere to attribute the webhook payload's ``task_id``).
+    """
+    runtime = _make_runtime(builder_thread_id=None)
+    # builder_thread_id=None drops it from BOTH context and config.
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook") as mock_post:
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is False
+    mock_post.assert_not_called()
+
+
+def test_payload_uses_context_thread_id_when_config_lacks_it():
+    """``build_completion_payload_from_artifact`` puts the builder's
+    thread_id into the payload's ``task_id`` field. Verify it picks
+    context first."""
+    runtime = _make_runtime(
+        builder_thread_id="ctx-builder-2",
+        builder_thread_id_in_context=True,
+        parent_thread_id="parent-2",
+    )
+    state = _make_state(parent_thread_id="parent-2", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["task_id"] == "ctx-builder-2"
+    assert payload["thread_id"] == "parent-2"
+
+
+# ---------- execution_info canonical source (Codex bot review on PR #113) ---
+
+
+def test_resolves_thread_id_from_execution_info_when_only_source():
+    """Production-future scenario: only ``runtime.execution_info.thread_id``
+    is populated (LangGraph Platform / distributed runtime). Webhook must
+    still dispatch.
+    """
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="ei-builder-1"),
+        context={},
+        config={"configurable": {}, "metadata": {}},
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+
+
+def test_execution_info_takes_precedence_over_context_and_config():
+    """When all three sources populate thread_id with different values,
+    execution_info wins (canonical per langgraph >= 1.0)."""
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="ei-thread"),
+        context={"thread_id": "ctx-thread"},
+        config={
+            "configurable": {"thread_id": "cfg-thread", "parent_thread_id": "parent-1"},
+            "metadata": {"trace_id": "trace-1"},
+        },
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    # execution_info wins over both fallbacks.
+    assert payload["task_id"] == "ei-thread"
+
+
+def test_falls_back_to_context_when_execution_info_thread_id_is_none():
+    """Edge case: ``execution_info`` exists but ``thread_id`` is None
+    (no-checkpointer scenario per langgraph docstring). Resolver must
+    fall through to the context lookup, not return None prematurely.
+    """
+    runtime = _make_runtime(
+        builder_thread_id="ctx-thread-only",
+        builder_thread_id_in_context=True,
+        builder_thread_id_in_execution_info=False,  # execution_info.thread_id = None
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+
+
+def test_handles_runtime_without_execution_info_attribute():
+    """Defensive: older test stubs (or older langgraph) may not have
+    ``execution_info`` at all. Resolver must not crash with AttributeError.
+    """
+    runtime = _make_runtime(
+        builder_thread_id="legacy-stub-thread",
+        include_execution_info=False,  # SimpleNamespace lacks the attribute entirely
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
