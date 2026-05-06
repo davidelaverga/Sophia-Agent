@@ -481,21 +481,20 @@ def _resolve_runtime_thread_id(runtime: Any) -> str | None:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
 
-    # 2. context — proven-working in our current ASGI in-process path
-    try:
-        ctx = runtime.context if runtime.context is not None else {}
-    except Exception:  # pragma: no cover - defensive
-        ctx = {}
+    # 2. context — proven-working in our current ASGI in-process path.
+    # ``getattr`` rather than direct attribute access because production
+    # ``langgraph.runtime.Runtime`` doesn't always expose every attribute
+    # we depend on (see line-575 AttributeError on ``.config`` in production
+    # 2026-05-06).
+    ctx = getattr(runtime, "context", None) or {}
     if isinstance(ctx, dict):
         candidate = ctx.get("thread_id")
         if isinstance(candidate, str) and candidate.strip():
             return candidate
 
     # 3. config.configurable — legacy fallback
-    try:
-        cfg = (runtime.config or {}).get("configurable", {}) or {}
-    except Exception:  # pragma: no cover - defensive
-        cfg = {}
+    raw_config = getattr(runtime, "config", None)
+    cfg = (raw_config or {}).get("configurable") or {} if isinstance(raw_config, dict) else {}
     candidate = cfg.get("thread_id")
     if isinstance(candidate, str) and candidate.strip():
         return candidate
@@ -550,19 +549,28 @@ def build_completion_payload_from_artifact(
             ceiling-fallback path so the Telegram card surfaces a retry.
         error_message: Free-form error string for non-completed paths.
     """
-    cfg = {}
+    # Pull the runtime config dict ONCE, defensively. ``langgraph.runtime.Runtime``
+    # in production (langgraph >= 1.0) does NOT expose ``.config`` directly —
+    # that attribute lives on ``ToolRuntime`` / ``RunnableConfig`` paths.
+    # Production traceback (2026-05-06):
+    #   File ".../sophia/builder_events.py", line 575, in build_completion_payload_from_artifact
+    #   AttributeError: 'Runtime' object has no attribute 'config'
+    # Use ``getattr`` with default so we never assume the attribute exists.
+    runtime_config: dict[str, Any] = {}
     if runtime is not None:
         try:
-            cfg = (runtime.config or {}).get("configurable", {}) or {}
+            raw = getattr(runtime, "config", None)
+            if isinstance(raw, dict):
+                runtime_config = raw
         except Exception:  # pragma: no cover - defensive
-            cfg = {}
+            runtime_config = {}
+    cfg: dict[str, Any] = runtime_config.get("configurable") or {}
 
     delegation = state.get("delegation_context") if isinstance(state, dict) else None
     delegation_dict = delegation if isinstance(delegation, dict) else {}
 
-    # Read the builder's own thread_id via the same context-first pattern
-    # ``ThreadDataMiddleware`` uses — runtime.config.configurable is not
-    # always populated by langgraph-api 0.8.1 (see _resolve_runtime_thread_id).
+    # Read the builder's own thread_id via the canonical execution_info-first
+    # pattern (see ``_resolve_runtime_thread_id``).
     builder_thread_id = _resolve_runtime_thread_id(runtime)
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
@@ -572,7 +580,8 @@ def build_completion_payload_from_artifact(
         or cfg.get("parent_user_id")
         or cfg.get("user_id")
     )
-    trace_id = (runtime.config or {}).get("metadata", {}).get("trace_id") if runtime is not None else None
+    metadata = runtime_config.get("metadata") or {}
+    trace_id = metadata.get("trace_id") if isinstance(metadata, dict) else None
 
     artifact_path = artifact.get("artifact_path") if isinstance(artifact, dict) else None
     artifact_filename: str | None = None

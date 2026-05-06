@@ -557,3 +557,92 @@ def test_handles_runtime_without_execution_info_attribute():
         )
 
     assert result is True
+
+
+# ---------- production Runtime-shape regression (line-575 AttributeError) ---
+
+
+def test_handles_runtime_without_config_attribute_at_all():
+    """Production langgraph.runtime.Runtime does NOT expose ``.config``
+    directly — that lives on ToolRuntime / RunnableConfig paths. Confirmed
+    via 2026-05-06 traceback:
+
+        File ".../sophia/builder_events.py", line 575, in
+        build_completion_payload_from_artifact
+        AttributeError: 'Runtime' object has no attribute 'config'
+
+    The resolver and payload builder MUST handle this shape gracefully
+    using execution_info as the primary source.
+    """
+    # A runtime that mirrors production langgraph 1.x Runtime: only
+    # ``execution_info`` and ``context``; no ``config``, no ``metadata``.
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="prod-builder-thread"),
+        context={},
+    )
+    state = _make_state(parent_thread_id="prod-parent-thread", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        # Payload builder must NOT raise when runtime lacks .config.
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    # Builder thread_id resolved via execution_info.
+    assert payload["task_id"] == "prod-builder-thread"
+    # parent_thread_id resolved via state (delegation_context).
+    assert payload["thread_id"] == "prod-parent-thread"
+    assert payload["user_id"] == "alice"
+    # trace_id is None when runtime has no .config — that's expected;
+    # the webhook payload is still well-formed and dispatchable.
+    assert payload["trace_id"] is None
+
+
+def test_fire_webhook_succeeds_when_runtime_lacks_config_attribute():
+    """The end-to-end dispatcher must reach the daemon-thread step even
+    when runtime exposes no ``.config`` — the diagnostic log line must
+    fire and the dedup gate must claim the task_id.
+    """
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="prod-builder-2"),
+        context={},
+    )
+    state = _make_state(parent_thread_id="prod-parent-2", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+    # ``_post_webhook`` is patched out so the daemon thread never POSTs.
+    # The dedup contract below proves dispatch advanced past the
+    # build_payload step (which is where the AttributeError previously
+    # raised).
+    second = builder_events.fire_completion_webhook_from_artifact(
+        state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+    )
+    assert second is False  # dedup hit confirms the first call wrote to _emitted_task_ids
+
+
+def test_resolver_handles_runtime_without_config_attribute():
+    """``_resolve_runtime_thread_id`` is the load-bearing helper. Direct
+    test that it returns the execution_info thread_id when ``.config``
+    doesn't exist on the runtime at all (no AttributeError).
+    """
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="ei-only"),
+        context={},
+    )
+    assert builder_events._resolve_runtime_thread_id(runtime) == "ei-only"
+
+
+def test_resolver_handles_runtime_without_config_or_execution_info():
+    """Even with neither config nor execution_info, the resolver must
+    return None gracefully — never raise AttributeError into the caller."""
+    runtime = SimpleNamespace(context={"thread_id": "ctx-only"})
+    assert builder_events._resolve_runtime_thread_id(runtime) == "ctx-only"
+
+    bare = SimpleNamespace()
+    assert builder_events._resolve_runtime_thread_id(bare) is None
