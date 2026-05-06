@@ -490,9 +490,23 @@ async def _dispatch_via_asgi(
     thread = await client.threads.create()
     thread_id = thread["thread_id"]
 
+    # ``parent_thread_id`` and ``parent_user_id`` are also embedded in
+    # ``delegation_context`` (state) because langgraph-api 0.8.1 forwards
+    # only a subset of ``configurable`` keys to the running graph's
+    # ``runtime.config``. We confirmed in production logs (2026-05-06):
+    # ``thread_id`` and ``user_id`` propagate, but custom keys such as
+    # ``parent_thread_id`` arrive as ``None`` on the builder side. State
+    # fields ALWAYS reach the running graph, so the gateway-webhook
+    # payload reads from state with a config fallback.
+    delegation_with_parent = {
+        **delegation_context,
+        "parent_thread_id": parent_thread_id,
+        "parent_user_id": user_id,
+    }
+
     run_input: dict[str, Any] = {
         "messages": [{"role": "user", "content": description}],
-        "delegation_context": delegation_context,
+        "delegation_context": delegation_with_parent,
         "allow_web_research": allow_web_research,
         "explicit_user_urls": explicit_user_urls,
         "builder_web_budget": builder_web_budget,
@@ -508,6 +522,9 @@ async def _dispatch_via_asgi(
         "configurable": {
             "thread_id": thread_id,
             "user_id": user_id,
+            # Kept for back-compat with any code that still reads from
+            # ``runtime.config["configurable"]``. State carries the
+            # canonical value (see ``delegation_with_parent`` above).
             "parent_thread_id": parent_thread_id,
         }
     }

@@ -306,6 +306,14 @@ def test_start_builder_task_live_context_embedding(monkeypatch):
     assert run_kwargs["input"]["explicit_user_urls"] == ["https://example.com/ar-roundup-2026"]
     assert isinstance(run_kwargs["input"]["builder_web_budget"], dict)
 
+    # Production-bug fix (2026-05-06): parent_thread_id + parent_user_id
+    # MUST be embedded in delegation_context (state) because langgraph-api
+    # 0.8.1 doesn't forward custom configurable keys. Without these, the
+    # builder webhook payload's thread_id is None and Telegram delivery
+    # silently dies in _post_webhook's missing-thread_id guard.
+    assert delegation["parent_thread_id"] == "thread-1"  # _make_runtime default
+    assert delegation["parent_user_id"] == "alice"
+
 
 def test_start_builder_task_prefix_idempotent(monkeypatch):
     """If the model already prefixed the description, don't double-prefix."""

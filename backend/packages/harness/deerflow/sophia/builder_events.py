@@ -477,12 +477,17 @@ def build_completion_payload_from_artifact(
 
     Args:
         state: Builder-graph state at the moment of completion. Used for
-            ``builder_task.task_type`` (when available) and
-            ``delegation_context.task`` (used as the task_brief on retry).
+            ``builder_task.task_type``, ``delegation_context.task`` (the
+            task_brief), and — IMPORTANT — ``delegation_context.parent_thread_id``
+            and ``delegation_context.parent_user_id``. langgraph-api 0.8.1
+            forwards only a subset of ``runtime.config["configurable"]``
+            keys to the running graph; custom keys arrive as ``None``.
+            ``start_builder_task`` works around this by also embedding the
+            parent fields in ``delegation_context`` (state), which always
+            propagates. We read state first and fall back to config.
         runtime: ``langgraph.runtime.Runtime`` for the current builder run.
-            We pull ``thread_id`` (builder thread) + ``parent_thread_id``
-            (companion thread, where the Telegram chat lives) +
-            ``user_id`` from ``runtime.config["configurable"]``.
+            Used for ``thread_id`` (builder thread) and the config
+            fallback path described above.
         artifact: The captured ``emit_builder_artifact`` payload (or the
             ``_build_ceiling_fallback`` shape on force-emit).
         status: One of ``completed``/``failed``/``timed_out``/``cancelled``.
@@ -497,9 +502,18 @@ def build_completion_payload_from_artifact(
         except Exception:  # pragma: no cover - defensive
             cfg = {}
 
+    delegation = state.get("delegation_context") if isinstance(state, dict) else None
+    delegation_dict = delegation if isinstance(delegation, dict) else {}
+
     builder_thread_id = cfg.get("thread_id")
-    parent_thread_id = cfg.get("parent_thread_id")
-    user_id = cfg.get("user_id")
+    # State-first, config-fallback. State always reaches the running graph;
+    # configurable propagation is langgraph-api-version-dependent.
+    parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
+    user_id = (
+        delegation_dict.get("parent_user_id")
+        or cfg.get("parent_user_id")
+        or cfg.get("user_id")
+    )
     trace_id = (runtime.config or {}).get("metadata", {}).get("trace_id") if runtime is not None else None
 
     artifact_path = artifact.get("artifact_path") if isinstance(artifact, dict) else None
@@ -510,16 +524,14 @@ def build_completion_payload_from_artifact(
     artifact_url = _signed_artifact_url(builder_thread_id, artifact_filename)
 
     task_brief: str | None = None
-    delegation = state.get("delegation_context") if isinstance(state, dict) else None
-    if isinstance(delegation, dict):
-        task = delegation.get("task")
-        if isinstance(task, str) and task.strip():
-            task_brief = task.strip()
+    task = delegation_dict.get("task")
+    if isinstance(task, str) and task.strip():
+        task_brief = task.strip()
 
     builder_task = state.get("builder_task") if isinstance(state, dict) else None
     task_type = builder_task.get("task_type") if isinstance(builder_task, dict) else None
-    if not task_type and isinstance(delegation, dict):
-        task_type = delegation.get("task_type")
+    if not task_type:
+        task_type = delegation_dict.get("task_type")
 
     mapped_status = _map_status(status)
 
@@ -586,6 +598,10 @@ def fire_completion_webhook_from_artifact(
     payload-build failure.
     """
     if status not in _TERMINAL_STATUSES_NATIVE:
+        logger.info(
+            "[Builder] fire_completion_webhook: skipping non-terminal status=%r",
+            status,
+        )
         return False
 
     cfg = {}
@@ -596,9 +612,17 @@ def fire_completion_webhook_from_artifact(
             cfg = {}
     task_id = cfg.get("thread_id")  # builder thread = task_id
     if not task_id:
+        logger.warning(
+            "[Builder] fire_completion_webhook: missing builder thread_id in "
+            "runtime.config.configurable; cannot dispatch webhook."
+        )
         return False
 
     if not _try_mark_emitted(task_id):
+        logger.info(
+            "[Builder] fire_completion_webhook: already emitted for task_id=%s; skipping",
+            task_id,
+        )
         return False
 
     try:
@@ -617,6 +641,20 @@ def fire_completion_webhook_from_artifact(
             exc_info=True,
         )
         return False
+
+    # Permanent breadcrumb so we can audit the webhook chain end-to-end:
+    # any future "artifact didn't reach Telegram" report should start by
+    # checking whether THIS log line appeared on the builder side and then
+    # whether the gateway saw the matching POST.
+    logger.info(
+        "[Builder] fire_completion_webhook: dispatching task_id=%s "
+        "parent_thread_id=%s status=%s artifact_path=%r artifact_url_present=%s",
+        task_id,
+        payload.get("thread_id"),
+        payload.get("status"),
+        payload.get("artifact_filename"),
+        bool(payload.get("artifact_url")),
+    )
 
     threading.Thread(
         target=_post_webhook,
