@@ -447,6 +447,40 @@ def reset_for_tests() -> None:
         _misconfigured_logged = False
 
 
+def _resolve_runtime_thread_id(runtime: Any) -> str | None:
+    """Find the running graph's thread_id on a ``langgraph.runtime.Runtime``.
+
+    LangGraph populates ``runtime.context["thread_id"]`` from the thread
+    association on ``runs.create(thread_id=…)``. Custom keys we pass via
+    ``runs.create(config={"configurable": …})`` are NOT forwarded by
+    langgraph-api 0.8.1 — confirmed in production 2026-05-06 when our
+    diagnostic logged ``missing builder thread_id in runtime.config.configurable``
+    despite ``ThreadDataMiddleware.before_agent`` having read the thread_id
+    from ``runtime.context`` earlier in the same run.
+
+    Mirror that middleware's resolution order: context first, then config.
+    """
+    if runtime is None:
+        return None
+    try:
+        ctx = runtime.context if runtime.context is not None else {}
+    except Exception:  # pragma: no cover - defensive
+        ctx = {}
+    if isinstance(ctx, dict):
+        candidate = ctx.get("thread_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    try:
+        cfg = (runtime.config or {}).get("configurable", {}) or {}
+    except Exception:  # pragma: no cover - defensive
+        cfg = {}
+    candidate = cfg.get("thread_id")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+    return None
+
+
 # --- Native deepagents-dispatch path -----------------------------------------
 #
 # Post Phase-1 migration the builder runs as a native LangGraph subagent
@@ -505,7 +539,10 @@ def build_completion_payload_from_artifact(
     delegation = state.get("delegation_context") if isinstance(state, dict) else None
     delegation_dict = delegation if isinstance(delegation, dict) else {}
 
-    builder_thread_id = cfg.get("thread_id")
+    # Read the builder's own thread_id via the same context-first pattern
+    # ``ThreadDataMiddleware`` uses — runtime.config.configurable is not
+    # always populated by langgraph-api 0.8.1 (see _resolve_runtime_thread_id).
+    builder_thread_id = _resolve_runtime_thread_id(runtime)
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
     parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
@@ -604,17 +641,18 @@ def fire_completion_webhook_from_artifact(
         )
         return False
 
-    cfg = {}
-    if runtime is not None:
-        try:
-            cfg = (runtime.config or {}).get("configurable", {}) or {}
-        except Exception:
-            cfg = {}
-    task_id = cfg.get("thread_id")  # builder thread = task_id
+    # Read the builder's own thread_id (= task_id) via context-first
+    # resolution. langgraph-api 0.8.1 populates ``runtime.context["thread_id"]``
+    # from the run's thread association but does NOT forward custom keys
+    # we pass via ``runs.create(config={"configurable": ...})`` — see
+    # _resolve_runtime_thread_id for the production-confirmed details.
+    task_id = _resolve_runtime_thread_id(runtime)
     if not task_id:
         logger.warning(
-            "[Builder] fire_completion_webhook: missing builder thread_id in "
-            "runtime.config.configurable; cannot dispatch webhook."
+            "[Builder] fire_completion_webhook: missing builder thread_id "
+            "in runtime.context AND runtime.config.configurable; cannot "
+            "dispatch webhook. (runtime=%s)",
+            "missing" if runtime is None else "present but no thread_id",
         )
         return False
 

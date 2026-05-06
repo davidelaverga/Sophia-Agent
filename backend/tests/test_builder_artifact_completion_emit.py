@@ -26,22 +26,39 @@ def _reset_dedup_cache():
 
 def _make_runtime(
     *,
-    builder_thread_id: str = "task-builder-1",
-    parent_thread_id: str = "thread-companion-1",
+    builder_thread_id: str | None = "task-builder-1",
+    parent_thread_id: str | None = "thread-companion-1",
     user_id: str = "alice",
     trace_id: str = "trace-1",
+    builder_thread_id_in_context: bool = True,
 ) -> SimpleNamespace:
-    """Build a stand-in for ``langgraph.runtime.Runtime`` matching what
-    ``start_builder_task._dispatch_via_asgi`` puts in the run config."""
+    """Build a stand-in for ``langgraph.runtime.Runtime``.
+
+    Production reality (langgraph-api 0.8.1, confirmed 2026-05-06):
+    LangGraph populates ``runtime.context["thread_id"]`` from the run's
+    thread association but does NOT forward our custom keys passed via
+    ``runs.create(config={"configurable": {...}})``. Tests mirror this:
+    builder_thread_id lives in ``context`` by default; pass
+    ``builder_thread_id_in_context=False`` to put it only in ``config``
+    (the legacy fallback path).
+    """
+    context: dict = {}
+    config_configurable: dict = {
+        "parent_thread_id": parent_thread_id,
+        "user_id": user_id,
+    }
+    if builder_thread_id is not None:
+        if builder_thread_id_in_context:
+            context["thread_id"] = builder_thread_id
+        else:
+            config_configurable["thread_id"] = builder_thread_id
+
     return SimpleNamespace(
+        context=context,
         config={
-            "configurable": {
-                "thread_id": builder_thread_id,
-                "parent_thread_id": parent_thread_id,
-                "user_id": user_id,
-            },
+            "configurable": config_configurable,
             "metadata": {"trace_id": trace_id},
-        }
+        },
     )
 
 
@@ -351,3 +368,86 @@ def test_payload_falls_back_to_config_when_state_parent_thread_id_missing():
 
     assert payload["thread_id"] == "legacy-config-thread"
     assert payload["user_id"] == "legacy-user"
+
+
+# ---------- builder thread_id resolution (context-first / config-fallback) --
+
+
+def test_fire_webhook_resolves_builder_thread_id_from_context():
+    """Production scenario (langgraph-api 0.8.1): builder's own thread_id
+    arrives in ``runtime.context["thread_id"]``, NOT in
+    ``runtime.config["configurable"]["thread_id"]``. Without context-first
+    resolution the webhook silently fails — exactly the bug captured at
+    2026-05-06T20:38:18.369682Z in production logs.
+    """
+    runtime = _make_runtime(
+        builder_thread_id="ctx-builder-1",
+        builder_thread_id_in_context=True,  # default; spelling out for clarity
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+
+
+def test_fire_webhook_resolves_builder_thread_id_from_config_fallback():
+    """Legacy fallback: when context has no thread_id (older langgraph-api
+    versions or uncommon dispatch paths), runtime.config.configurable still
+    serves as the source of truth.
+    """
+    runtime = _make_runtime(
+        builder_thread_id="cfg-builder-1",
+        builder_thread_id_in_context=False,  # only in config
+    )
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is True
+
+
+def test_fire_webhook_returns_false_when_thread_id_missing_everywhere():
+    """When neither context nor config has thread_id, refuse to dispatch
+    (we'd have nowhere to attribute the webhook payload's ``task_id``).
+    """
+    runtime = _make_runtime(builder_thread_id=None)
+    # builder_thread_id=None drops it from BOTH context and config.
+    state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
+         patch.object(builder_events, "_post_webhook") as mock_post:
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert result is False
+    mock_post.assert_not_called()
+
+
+def test_payload_uses_context_thread_id_when_config_lacks_it():
+    """``build_completion_payload_from_artifact`` puts the builder's
+    thread_id into the payload's ``task_id`` field. Verify it picks
+    context first."""
+    runtime = _make_runtime(
+        builder_thread_id="ctx-builder-2",
+        builder_thread_id_in_context=True,
+        parent_thread_id="parent-2",
+    )
+    state = _make_state(parent_thread_id="parent-2", parent_user_id="alice")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["task_id"] == "ctx-builder-2"
+    assert payload["thread_id"] == "parent-2"
