@@ -993,9 +993,35 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     outputs_host_path = (
                         thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
                     )
-                    thread_id = runtime.context.get("thread_id") if runtime.context else None
+                    # Phase-1 async migration created a fresh builder thread
+                    # per build (deepagents native dispatch). The Telegram
+                    # channel adapter looks up artifact bytes via the
+                    # CONVERSATION thread_id (parent / companion), not the
+                    # ephemeral build thread, so we namespace the upload
+                    # under the parent thread to keep the storage path and
+                    # the channel-adapter download path aligned.
+                    #
+                    # Production traceback (2026-05-06T22:18:16): Telegram
+                    # downloaded from sophia_builder/<parent>/<file> and got
+                    # 400 because the file lived at sophia_builder/<builder>/<file>.
+                    # Switching to parent_thread_id here restores the legacy
+                    # SubagentExecutor convention.
+                    delegation_for_upload = (
+                        state.get("delegation_context")
+                        if isinstance(state.get("delegation_context"), dict)
+                        else {}
+                    )
+                    parent_thread_id = (
+                        delegation_for_upload.get("parent_thread_id")
+                        if isinstance(delegation_for_upload, dict)
+                        else None
+                    )
+                    builder_thread_id = (
+                        runtime.context.get("thread_id") if runtime.context else None
+                    )
+                    upload_thread_id = parent_thread_id or builder_thread_id
                     _upload_builder_outputs_to_supabase(
-                        thread_id=thread_id,
+                        thread_id=upload_thread_id,
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
                     )

@@ -646,3 +646,76 @@ def test_resolver_handles_runtime_without_config_or_execution_info():
 
     bare = SimpleNamespace()
     assert builder_events._resolve_runtime_thread_id(bare) is None
+
+
+# ---------- Option-B alignment: signed URL uses parent_thread_id ------------
+
+
+def test_signed_url_uses_parent_thread_id_when_state_has_it():
+    """``BuilderArtifactMiddleware.after_model`` uploads the artifact under
+    the PARENT thread_id (Option B; restores the pre-migration convention
+    where artifacts are conversation-scoped, not build-scoped). The signed
+    URL must point to the same path so the user-clickable URL fallback
+    works AND the channel-adapter bytes-download path lands at the right
+    Supabase key.
+
+    Production traceback (2026-05-06T22:18:16): the bytes-download
+    request hit a 400 because the file was at sophia_builder/<builder>/<file>
+    but Telegram looked at sophia_builder/<parent>/<file>. Aligning both
+    sides to parent_thread_id closes the gap.
+    """
+    runtime = _make_runtime(builder_thread_id="builder-thread")
+    state = _make_state(parent_thread_id="parent-thread", parent_user_id="alice")
+
+    captured_thread_id: list[str | None] = []
+
+    def _spy(thread_id, artifact_path):
+        captured_thread_id.append(thread_id)
+        return f"https://supabase.test/{thread_id}/{artifact_path}"
+
+    with patch.object(builder_events, "_signed_artifact_url", side_effect=_spy):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    # _signed_artifact_url called once with parent_thread_id (NOT builder_thread_id).
+    assert captured_thread_id == ["parent-thread"]
+    # Sanity: the signed URL ends up in the payload.
+    assert "parent-thread" in payload["artifact_url"]
+
+
+def test_signed_url_falls_back_to_builder_thread_id_when_parent_missing():
+    """When delegation_context lacks parent_thread_id (legacy / partial
+    state), the signed URL falls back to the builder thread_id so we
+    don't lose URL delivery entirely."""
+    state = {
+        "delegation_context": {"task": "x", "task_type": "document"},
+        "builder_task": {"task_type": "document"},
+    }
+    # NB: state has no parent_thread_id; the runtime below intentionally
+    # also lacks parent_thread_id in config so the resolver falls all
+    # the way through to builder_thread_id.
+
+    captured_thread_id: list[str | None] = []
+
+    def _spy(thread_id, artifact_path):
+        captured_thread_id.append(thread_id)
+        return f"https://supabase.test/{thread_id}/{artifact_path}"
+
+    runtime_no_parent_in_cfg = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="builder-only-thread"),
+        context={"thread_id": "builder-only-thread"},
+        config={"configurable": {}, "metadata": {}},
+    )
+
+    with patch.object(builder_events, "_signed_artifact_url", side_effect=_spy):
+        builder_events.build_completion_payload_from_artifact(
+            state=state,
+            runtime=runtime_no_parent_in_cfg,
+            artifact=_success_artifact(),
+            status="completed",
+        )
+
+    # Falls back to builder_thread_id when parent_thread_id is missing
+    # everywhere — keeps URL delivery functional even on partial state.
+    assert captured_thread_id == ["builder-only-thread"]

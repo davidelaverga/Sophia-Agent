@@ -588,7 +588,15 @@ def build_completion_payload_from_artifact(
     if isinstance(artifact_path, str) and artifact_path:
         artifact_filename = artifact_path.rsplit("/", 1)[-1]
 
-    artifact_url = _signed_artifact_url(builder_thread_id, artifact_filename)
+    # Sign against the SAME thread_id ``BuilderArtifactMiddleware`` uploads
+    # to: parent_thread_id (the conversation thread). The channel adapter's
+    # download path keys off the webhook payload's ``thread_id`` field
+    # (which is also parent_thread_id below), so this keeps the storage
+    # path, the signed URL, and the bytes-download lookup all aligned.
+    artifact_url = _signed_artifact_url(
+        parent_thread_id or builder_thread_id,
+        artifact_filename,
+    )
 
     task_brief: str | None = None
     task = delegation_dict.get("task")

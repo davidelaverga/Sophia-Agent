@@ -2456,6 +2456,133 @@ class TestBuilderArtifactMiddleware:
         assert result["builder_result"]["confidence"] == 0.9
         assert result["jump_to"] == "end"
 
+    def test_uploads_to_parent_thread_id_when_delegation_context_has_it(self, monkeypatch):
+        """Phase-1-async-migration regression (2026-05-06).
+
+        After deepagents native dispatch creates a fresh thread per build,
+        the builder's ``runtime.context["thread_id"]`` is the build's own
+        ephemeral thread (``builder-thread-X``). The Telegram channel
+        adapter, however, looks up artifact bytes via the CONVERSATION
+        thread (parent / companion). Pre-migration these were the same
+        thread because ``SubagentExecutor`` ran in the parent's context.
+
+        ``BuilderArtifactMiddleware`` must namespace the upload under the
+        parent thread (read from ``state["delegation_context"]
+        ["parent_thread_id"]``) so storage path and download path stay
+        aligned. Without this, the bytes-download hits 400 and Telegram
+        falls back to a plaintext URL — the production bug we fixed.
+        """
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+
+        captured: dict = {}
+
+        def _spy(*, thread_id, outputs_host_path, artifact_args):
+            captured["thread_id"] = thread_id
+            captured["outputs_host_path"] = outputs_host_path
+            captured["artifact_args"] = artifact_args
+
+        monkeypatch.setattr(
+            builder_artifact, "_upload_builder_outputs_to_supabase", _spy
+        )
+        # Stub the webhook fire so we don't try to POST during a unit test.
+        monkeypatch.setattr(
+            builder_artifact, "fire_completion_webhook_from_artifact", lambda **_: None
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/doc.md",
+                    "artifact_type": "document",
+                    "confidence": 0.9,
+                },
+            }
+        ]
+        state = {
+            "messages": [msg],
+            "delegation_context": {
+                "task": "Build a doc",
+                "task_type": "document",
+                "parent_thread_id": "parent-companion-thread",
+            },
+            "thread_data": {"outputs_path": "/tmp/outputs"},
+        }
+
+        # Bypass artifact-file existence check (real path doesn't exist
+        # on disk in unit tests). The check uses a private helper; patch
+        # it to always-true so we exercise the upload path.
+        monkeypatch.setattr(
+            mw,
+            "_artifact_files_exist",
+            lambda args, state, runtime: True,
+        )
+
+        runtime = _make_runtime(thread_id="builder-ephemeral-thread")
+        mw.after_model(state, runtime)
+
+        # Upload happened at the PARENT thread, not the builder thread.
+        assert captured["thread_id"] == "parent-companion-thread"
+
+    def test_falls_back_to_runtime_thread_id_when_parent_missing(self, monkeypatch):
+        """Defensive: if ``state["delegation_context"]`` lacks
+        ``parent_thread_id`` (legacy or partial state), upload still
+        happens — at the runtime thread_id — rather than silently
+        skipping. Better to namespace under the wrong thread than lose
+        the upload entirely.
+        """
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            builder_artifact,
+            "_upload_builder_outputs_to_supabase",
+            lambda *, thread_id, outputs_host_path, artifact_args: captured.update(
+                thread_id=thread_id
+            ),
+        )
+        monkeypatch.setattr(
+            builder_artifact, "fire_completion_webhook_from_artifact", lambda **_: None
+        )
+
+        mw = BuilderArtifactMiddleware()
+        monkeypatch.setattr(
+            mw, "_artifact_files_exist", lambda args, state, runtime: True
+        )
+
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/doc.md",
+                    "artifact_type": "document",
+                    "confidence": 0.9,
+                },
+            }
+        ]
+        state = {
+            "messages": [msg],
+            # delegation_context exists but has no parent_thread_id
+            "delegation_context": {"task": "x", "task_type": "document"},
+            "thread_data": {"outputs_path": "/tmp/outputs"},
+        }
+
+        runtime = _make_runtime(thread_id="builder-ephemeral-thread")
+        mw.after_model(state, runtime)
+
+        assert captured["thread_id"] == "builder-ephemeral-thread"
+
     def test_fallback_on_no_tool_call(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
         mw = BuilderArtifactMiddleware()
