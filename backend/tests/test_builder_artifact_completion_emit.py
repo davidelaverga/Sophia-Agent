@@ -45,9 +45,29 @@ def _make_runtime(
     )
 
 
-def _make_state(*, task_brief: str = "Build a one-pager about X", task_type: str = "document") -> dict:
+def _make_state(
+    *,
+    task_brief: str = "Build a one-pager about X",
+    task_type: str = "document",
+    parent_thread_id: str | None = None,
+    parent_user_id: str | None = None,
+) -> dict:
+    """Build a state dict matching what ``start_builder_task._dispatch_via_asgi``
+    puts in ``input["delegation_context"]``.
+
+    PR-fix (2026-05-06): ``parent_thread_id`` + ``parent_user_id`` are now
+    embedded in delegation_context because langgraph-api 0.8.1 does not
+    forward custom ``configurable`` keys to the running graph's
+    ``runtime.config``. Tests cover both the state-present path AND the
+    legacy state-absent / config-fallback path.
+    """
+    delegation: dict = {"task": task_brief, "task_type": task_type}
+    if parent_thread_id is not None:
+        delegation["parent_thread_id"] = parent_thread_id
+    if parent_user_id is not None:
+        delegation["parent_user_id"] = parent_user_id
     return {
-        "delegation_context": {"task": task_brief, "task_type": task_type},
+        "delegation_context": delegation,
         "builder_task": {"task_type": task_type},
     }
 
@@ -225,3 +245,78 @@ def test_payload_handles_missing_state_fields():
     assert payload["task_brief"] is None
     assert payload["task_type"] is None
     assert payload["thread_id"] == "thread-companion-1"  # from runtime config
+
+
+# ---------- state-first plumbing (the actual prod-bug fix) ------------------
+
+
+def test_payload_reads_parent_thread_id_from_state_when_config_missing():
+    """Production scenario: langgraph-api 0.8.1 doesn't propagate custom
+    configurable keys, so parent_thread_id arrives None in
+    runtime.config.configurable. State must carry the canonical value.
+    """
+    # Runtime simulates the broken propagation: only thread_id and user_id
+    # made it through; parent_thread_id was dropped.
+    runtime = SimpleNamespace(
+        config={
+            "configurable": {
+                "thread_id": "t-build",
+                "user_id": "alice",
+                # parent_thread_id intentionally absent
+            },
+            "metadata": {"trace_id": "trace-1"},
+        }
+    )
+    state = _make_state(
+        parent_thread_id="real-companion-thread",
+        parent_user_id="alice",
+    )
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/foo.md"):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    # Without the state fallback, this would be None and _post_webhook
+    # would early-return, dropping the Telegram delivery silently.
+    assert payload["thread_id"] == "real-companion-thread"
+    assert payload["user_id"] == "alice"
+
+
+def test_payload_state_takes_precedence_over_config():
+    """When both state and config have parent_thread_id, state wins.
+
+    This matters for the deliberate redundancy: ``start_builder_task``
+    writes parent_thread_id to BOTH state (canonical) and config
+    (back-compat). State is the source of truth.
+    """
+    runtime = _make_runtime(parent_thread_id="config-thread", user_id="config-user")
+    state = _make_state(parent_thread_id="state-thread", parent_user_id="state-user")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["thread_id"] == "state-thread"
+    assert payload["user_id"] == "state-user"
+
+
+def test_payload_falls_back_to_config_when_state_parent_thread_id_missing():
+    """When state.delegation_context omits parent_thread_id, the runtime
+    config value is used as a fallback (covers the legacy pre-PR behaviour).
+    """
+    runtime = _make_runtime(parent_thread_id="legacy-config-thread", user_id="legacy-user")
+    # State has delegation_context.task but NO parent_thread_id key.
+    state = {
+        "delegation_context": {"task": "Build something", "task_type": "document"},
+        "builder_task": {"task_type": "document"},
+    }
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["thread_id"] == "legacy-config-thread"
+    assert payload["user_id"] == "legacy-user"
