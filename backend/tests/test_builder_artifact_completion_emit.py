@@ -302,6 +302,37 @@ def test_payload_state_takes_precedence_over_config():
     assert payload["user_id"] == "state-user"
 
 
+
+
+def test_payload_user_id_falls_back_to_parent_user_id_config_key():
+    """If state omits parent_user_id, prefer configurable.parent_user_id.
+
+    Some callers may set the parent-specific key in config; payload building
+    should honor it before the generic user_id fallback.
+    """
+    runtime = SimpleNamespace(
+        config={
+            "configurable": {
+                "thread_id": "t-build",
+                "parent_thread_id": "legacy-config-thread",
+                "parent_user_id": "parent-user",
+                "user_id": "generic-user",
+            },
+            "metadata": {"trace_id": "trace-1"},
+        }
+    )
+    state = {
+        "delegation_context": {"task": "Build something", "task_type": "document"},
+        "builder_task": {"task_type": "document"},
+    }
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert payload["thread_id"] == "legacy-config-thread"
+    assert payload["user_id"] == "parent-user"
 def test_payload_falls_back_to_config_when_state_parent_thread_id_missing():
     """When state.delegation_context omits parent_thread_id, the runtime
     config value is used as a fallback (covers the legacy pre-PR behaviour).

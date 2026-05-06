@@ -509,7 +509,11 @@ def build_completion_payload_from_artifact(
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
     parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
-    user_id = delegation_dict.get("parent_user_id") or cfg.get("user_id")
+    user_id = (
+        delegation_dict.get("parent_user_id")
+        or cfg.get("parent_user_id")
+        or cfg.get("user_id")
+    )
     trace_id = (runtime.config or {}).get("metadata", {}).get("trace_id") if runtime is not None else None
 
     artifact_path = artifact.get("artifact_path") if isinstance(artifact, dict) else None
