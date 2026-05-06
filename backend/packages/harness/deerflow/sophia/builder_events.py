@@ -1,20 +1,28 @@
 """Builder completion event publisher.
 
-Bridges the LangGraph process (where ``SubagentExecutor`` runs the builder
-in a background thread) to the Gateway process (which fans events out to
-the webapp via SSE and to channel adapters like Telegram).
+Bridges the LangGraph process (where the builder runs as a deepagents
+async-subagent) to the Gateway process (which fans events out to the
+webapp via SSE and to channel adapters like Telegram).
 
 Why a webhook and not shared state: the LangGraph and Gateway processes
 are deployed separately (different containers in production). The
 webhook keeps the contract explicit and testable — a single POST per
 terminal task transition. Failures are logged and never block the
-companion's own completion path.
+builder's own completion path.
 
-The webhook fires *exactly once* per task_id even if the underlying
-result object is touched multiple times during cleanup. Dedup is process-
-local; if the LangGraph process restarts mid-run, the gateway worker can
-recover the last event from its 5-minute TTL cache (see
-``app/gateway/workers/builder_events.py``).
+The webhook fires *exactly once* per task_id even if
+``BuilderArtifactMiddleware.after_model`` is exercised multiple times
+during cleanup. Dedup is process-local; if the LangGraph process
+restarts mid-run, the gateway worker can recover the last event from
+its 5-minute TTL cache (see ``app/gateway/workers/builder_events.py``).
+
+The single live entry point is :func:`fire_completion_webhook_from_artifact`,
+which builds the wire payload from the captured ``emit_builder_artifact``
+dict via :func:`build_completion_payload_from_artifact`. The legacy
+``SubagentResult``-based path (``emit_completion_event`` + the original
+``build_completion_payload``) was removed when ``SubagentExecutor`` exited
+the builder hot path in the Phase-1 async migration; the helpers below
+deliberately do NOT take a ``SubagentResult`` parameter.
 """
 
 from __future__ import annotations
@@ -24,12 +32,9 @@ import os
 import threading
 from collections import OrderedDict
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import httpx
-
-if TYPE_CHECKING:  # pragma: no cover - type-only import
-    from deerflow.subagents.executor import SubagentResult
 
 logger = logging.getLogger(__name__)
 
@@ -84,11 +89,6 @@ def _release_emit_claim(task_id: str) -> None:
         _emitted_task_ids.pop(task_id, None)
 
 
-# Agent names whose terminal events we surface as builder-completion cards.
-# Extend this set when PR 2 retrofits the deepagents async path.
-_OBSERVED_AGENT_NAMES = frozenset({"sophia_builder"})
-
-
 def _gateway_url() -> str:
     return os.environ.get("SOPHIA_GATEWAY_URL", _DEFAULT_GATEWAY_URL).rstrip("/")
 
@@ -141,13 +141,8 @@ def _warn_if_misconfigured(payload: dict[str, Any]) -> None:
     )
 
 
-def should_emit_for_agent(agent_name: str | None) -> bool:
-    """Decide whether terminal events from this agent should fan out as cards."""
-    return isinstance(agent_name, str) and agent_name in _OBSERVED_AGENT_NAMES
-
-
 def _map_status(status_value: str) -> str:
-    """Normalize ``SubagentStatus.value`` strings to the card's enum."""
+    """Normalize internal status strings to the card's enum surface."""
     if status_value == "completed":
         return "success"
     if status_value == "failed":
@@ -174,27 +169,6 @@ def _signed_artifact_url(thread_id: str | None, artifact_path: str | None) -> st
     except Exception:  # pragma: no cover - defensive: never let this raise
         logger.debug("Failed to mint signed artifact URL", exc_info=True)
         return None
-
-
-def _extract_task_brief(result: SubagentResult) -> str | None:
-    """Pull the original user task brief from the result's final state.
-
-    ``delegation_context.task`` is populated by ``switch_to_builder`` when it
-    queues the handoff and survives across summarization (it lives in
-    durable state, not just messages). The retry button on the failure card
-    needs this so the parent companion can re-issue the same task.
-    """
-    final_state = getattr(result, "final_state", None)
-    if isinstance(final_state, dict):
-        delegation = final_state.get("delegation_context")
-        if isinstance(delegation, dict):
-            task = delegation.get("task")
-            if isinstance(task, str) and task.strip():
-                return task.strip()
-    description = getattr(result, "description", None)
-    if isinstance(description, str) and description.strip():
-        return description.strip()
-    return None
 
 
 # PR-A: phantom-success detection thresholds.
@@ -245,104 +219,6 @@ def _is_phantom_success(
     return confidence_value < _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
 
 
-def build_completion_payload(
-    result: SubagentResult,
-    *,
-    agent_name: str | None = None,
-) -> dict[str, Any]:
-    """Build the webhook payload from a terminal SubagentResult.
-
-    Single source of truth for the wire contract — both PR 1 (sync builder)
-    and PR 2 (async deepagents) emit the same shape so the gateway worker
-    and frontend card don't need to branch.
-
-    PR-A: detects "phantom success" (status=success but no artifact_path,
-    no artifact_url, and confidence below the threshold) and coerces it to
-    status=error with a retry-friendly error_message. Without this, the
-    frontend would render a success card with a broken Open button when
-    the builder gave up without producing a deliverable.
-    """
-    # Local import to avoid circular: subagents.executor → sophia.builder_events
-    from deerflow.subagents.executor import _extract_builder_result_from_task_result
-
-    builder_result = _extract_builder_result_from_task_result(result) or {}
-    artifact_path = builder_result.get("artifact_path")
-    artifact_title = builder_result.get("artifact_title")
-    artifact_type = builder_result.get("artifact_type")
-    confidence = builder_result.get("confidence")
-
-    artifact_filename = None
-    if isinstance(artifact_path, str) and artifact_path:
-        # ``artifact_path`` from the builder is the virtual path (e.g.
-        # ``/mnt/user-data/outputs/foo.md``). Supabase keys the artifact by
-        # filename only — match the existing upload logic in
-        # ``BuilderArtifactMiddleware``.
-        artifact_filename = artifact_path.rsplit("/", 1)[-1]
-
-    artifact_url = _signed_artifact_url(getattr(result, "thread_id", None), artifact_filename)
-
-    status_value = getattr(getattr(result, "status", None), "value", None)
-    if status_value is None:
-        status_value = str(getattr(result, "status", ""))
-
-    task_type = None
-    final_state = getattr(result, "final_state", None)
-    if isinstance(final_state, dict):
-        builder_task = final_state.get("builder_task")
-        if isinstance(builder_task, dict):
-            task_type = builder_task.get("task_type")
-
-    mapped_status = _map_status(status_value)
-    error_message: str | None = getattr(result, "error", None)
-
-    if _is_phantom_success(
-        status=mapped_status,
-        artifact_path=artifact_path,
-        artifact_url=artifact_url,
-        confidence=confidence,
-    ):
-        logger.warning(
-            "Builder-events: coercing phantom-success to error for "
-            "task_id=%s confidence=%s artifact_path=%r — builder reported "
-            "success but produced no deliverable.",
-            getattr(result, "task_id", None),
-            confidence,
-            artifact_path,
-        )
-        mapped_status = "error"
-        if not error_message:
-            error_message = (
-                "Builder finished but couldn’t produce a deliverable. "
-                "Want me to try again?"
-            )
-
-    # The originating user is recorded on the SubagentResult as ``owner_id``
-    # (set by ``execute_async``). Carry it on the event so the gateway-side
-    # companion-wakeup worker can route the synthetic turn to the correct
-    # user without having to round-trip ``client.threads.get_state``.
-    owner_id = getattr(result, "owner_id", None)
-
-    return {
-        "thread_id": getattr(result, "thread_id", None),
-        "task_id": getattr(result, "task_id", None),
-        "trace_id": getattr(result, "trace_id", None),
-        "agent_name": agent_name,
-        "status": mapped_status,
-        "task_type": task_type,
-        "task_brief": _extract_task_brief(result),
-        "artifact_url": artifact_url,
-        "artifact_title": artifact_title,
-        "artifact_type": artifact_type,
-        "artifact_filename": artifact_filename,
-        "summary": builder_result.get("companion_summary"),
-        "user_next_action": builder_result.get("user_next_action"),
-        "error_message": error_message,
-        "completed_at": _iso(getattr(result, "completed_at", None)),
-        "source": "subagent_executor",
-        "user_id": owner_id if isinstance(owner_id, str) and owner_id else None,
-    }
-
-
 def _post_webhook(payload: dict[str, Any]) -> None:
     """Fire the POST. Called on a daemon thread so the executor never blocks."""
     if not payload.get("thread_id"):
@@ -373,66 +249,6 @@ def _post_webhook(payload: dict[str, Any]) -> None:
             payload.get("task_id"),
             exc_info=True,
         )
-
-
-def emit_completion_event(
-    result: SubagentResult,
-    *,
-    agent_name: str | None,
-) -> bool:
-    """Publish a terminal event for the given result, exactly once per task_id.
-
-    Returns ``True`` when the event was scheduled for delivery, ``False``
-    otherwise (already fired, agent not observed, no terminal status, etc.).
-    The actual HTTP POST runs on a daemon thread so callers — typically the
-    subagent executor's terminal-flip path — never block.
-    """
-    # Local import to dodge the executor → sophia → executor import cycle.
-    from deerflow.subagents.executor import SubagentStatus
-
-    status = getattr(result, "status", None)
-    if status not in {
-        SubagentStatus.COMPLETED,
-        SubagentStatus.FAILED,
-        SubagentStatus.TIMED_OUT,
-        SubagentStatus.CANCELLED,
-    }:
-        return False
-
-    if not should_emit_for_agent(agent_name):
-        return False
-
-    task_id = getattr(result, "task_id", None)
-    if not task_id:
-        return False
-
-    # Claim the dedup slot atomically. If another terminal write already
-    # fired for this task_id, return early.
-    if not _try_mark_emitted(task_id):
-        return False
-
-    try:
-        payload = build_completion_payload(result, agent_name=agent_name)
-    except Exception:
-        # Payload build failed (malformed result state, etc.). Roll back
-        # the dedup claim so a subsequent retry for the same task_id can
-        # still deliver — otherwise a transient bug here would permanently
-        # silence the user-visible completion card.
-        _release_emit_claim(task_id)
-        logger.warning(
-            "Failed to build builder-events payload for task_id=%s",
-            task_id,
-            exc_info=True,
-        )
-        return False
-
-    threading.Thread(
-        target=_post_webhook,
-        args=(payload,),
-        name=f"builder-events-{task_id}",
-        daemon=True,
-    ).start()
-    return True
 
 
 def reset_for_tests() -> None:
