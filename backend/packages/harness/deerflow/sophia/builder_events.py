@@ -450,18 +450,38 @@ def reset_for_tests() -> None:
 def _resolve_runtime_thread_id(runtime: Any) -> str | None:
     """Find the running graph's thread_id on a ``langgraph.runtime.Runtime``.
 
-    LangGraph populates ``runtime.context["thread_id"]`` from the thread
-    association on ``runs.create(thread_id=…)``. Custom keys we pass via
-    ``runs.create(config={"configurable": …})`` are NOT forwarded by
-    langgraph-api 0.8.1 — confirmed in production 2026-05-06 when our
-    diagnostic logged ``missing builder thread_id in runtime.config.configurable``
-    despite ``ThreadDataMiddleware.before_agent`` having read the thread_id
-    from ``runtime.context`` earlier in the same run.
+    Resolution order (first non-empty hit wins):
 
-    Mirror that middleware's resolution order: context first, then config.
+    1. ``runtime.execution_info.thread_id`` — the canonical source per
+       ``langgraph >= 1.0``. ``langgraph/pregel/_algo.py`` populates the
+       ``ExecutionInfo`` dataclass on every task with the run's bound
+       thread identity, regardless of dispatch path. This is the
+       future-proof source — in particular it remains populated under
+       LangGraph Platform / distributed deployments where the OSS code
+       path that fills ``runtime.context`` is bypassed (see Codex bot
+       review on PR #113).
+    2. ``runtime.context["thread_id"]`` — auto-populated by
+       ``langgraph-api`` on ASGI in-process dispatch (our current path).
+       This is what made ``ThreadDataMiddleware`` work before we noticed
+       the gap; kept as a fallback so existing test stubs (which set
+       ``runtime.context``) keep working.
+    3. ``runtime.config["configurable"]["thread_id"]`` — last-resort
+       fallback for callers that pass ``thread_id`` via
+       ``runs.create(config=...)``. ``langgraph-api 0.8.1`` does not
+       forward our custom configurable keys reliably (confirmed in
+       production 2026-05-06), so this rarely fires.
     """
     if runtime is None:
         return None
+
+    # 1. execution_info — canonical per langgraph >= 1.0
+    info = getattr(runtime, "execution_info", None)
+    if info is not None:
+        candidate = getattr(info, "thread_id", None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    # 2. context — proven-working in our current ASGI in-process path
     try:
         ctx = runtime.context if runtime.context is not None else {}
     except Exception:  # pragma: no cover - defensive
@@ -471,6 +491,7 @@ def _resolve_runtime_thread_id(runtime: Any) -> str | None:
         if isinstance(candidate, str) and candidate.strip():
             return candidate
 
+    # 3. config.configurable — legacy fallback
     try:
         cfg = (runtime.config or {}).get("configurable", {}) or {}
     except Exception:  # pragma: no cover - defensive
@@ -650,8 +671,9 @@ def fire_completion_webhook_from_artifact(
     if not task_id:
         logger.warning(
             "[Builder] fire_completion_webhook: missing builder thread_id "
-            "in runtime.context AND runtime.config.configurable; cannot "
-            "dispatch webhook. (runtime=%s)",
+            "in runtime.execution_info AND runtime.context AND "
+            "runtime.config.configurable; cannot dispatch webhook. "
+            "(runtime=%s)",
             "missing" if runtime is None else "present but no thread_id",
         )
         return False
