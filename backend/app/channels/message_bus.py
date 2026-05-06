@@ -188,7 +188,7 @@ class MessageBus:
         Each channel adapter that surfaces completion cards (Telegram first,
         Slack/Feishu later) subscribes here. The callback receives the raw
         webhook payload from
-        ``deerflow.sophia.builder_events.build_completion_payload``.
+        ``deerflow.sophia.builder_events.build_completion_payload_from_artifact``.
         Adapters are responsible for the channel-specific rendering and
         thread→chat_id reverse lookup (via ``app.channels.store``).
         """

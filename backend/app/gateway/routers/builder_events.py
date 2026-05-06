@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 class BuilderCompletionEvent(BaseModel):
     """Wire contract for the LangGraph-process webhook.
 
-    Mirrors ``deerflow.sophia.builder_events.build_completion_payload``.
+    Mirrors ``deerflow.sophia.builder_events.build_completion_payload_from_artifact``.
     """
 
     thread_id: str = Field(..., description="Parent companion thread id.")
