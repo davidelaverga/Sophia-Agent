@@ -26,6 +26,48 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-07 · [phase-1-async-migration + phase-3-lite] · PRs #104–#116
+**Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `sophia_async_migration_telegram_diagnostic_spec.md`
+
+### What Changed (consolidated across the PR train)
+- **Phase 1 — async-subagent migration.** Replaced the legacy sync `switch_to_builder` + `SubagentExecutor` + `BuilderSessionMiddleware` + `_install_fetch_last_ai_patch` stack with deepagents v0.5 native `AsyncSubAgentMiddleware`. Companion now dispatches builder work via a new wrapper [`start_builder_task`](backend/packages/harness/deerflow/sophia/tools/start_builder_task.py) over LangGraph SDK ASGI in-process transport. `start_async_task` is filtered from the model-visible tool set; the four lifecycle tools (`check`/`update`/`cancel`/`list_async_task`) stay native. `BuilderCommandMiddleware` synthesizes `start_builder_task` (was `switch_to_builder`). Net deletion ≈1.4k LOC of compensation code.
+- **Phase 3 Lite — Telegram delivery + build awareness.** Added `BuildAwarenessMiddleware` (companion side, between `Mem0` and `Artifact`) that refreshes `state["async_tasks"]` via `langgraph_sdk.runs.get` with a 10s TTL cache and injects a short prompt block (active / just-finished / errored). `BuilderArtifactMiddleware.after_model` now fires `fire_completion_webhook_from_artifact` to the gateway webhook on every terminal path (success, ceiling fallback, consecutive-rejection short-circuit, plain-text end), restoring Telegram artifact delivery without needing the deleted `SubagentExecutor` terminal-flip handler.
+- **Artifact namespacing convention.** Builder artifacts upload to Supabase under the **parent (companion) thread_id**, not the ephemeral builder thread. `_signed_artifact_url` and `BuilderArtifactMiddleware._upload_builder_outputs_to_supabase` both read `state["delegation_context"]["parent_thread_id"]` first, fall back to runtime.context. Aligns the upload path, signed URL, webhook payload `thread_id`, and channel-adapter `download_artifact()` lookup so they all key off the same Supabase namespace.
+- **Skill-file contract update.** [`skills/public/sophia/AGENTS.md`](skills/public/sophia/AGENTS.md) rewritten to teach `start_builder_task` + `async_tasks` lifecycle. (This file is in every companion + builder system prompt — without the rewrite the model would call the deleted tool by name.)
+- **Dead-code cleanup (PR #116).** Removed `emit_completion_event` + `build_completion_payload(SubagentResult)` + `_extract_task_brief` + `should_emit_for_agent` + `_OBSERVED_AGENT_NAMES` from `sophia/builder_events.py`; removed `_emit_builder_completion_event` + 4 call sites + cancel-path block from `subagents/executor.py`; deleted `tests/test_builder_events_publisher.py` (~630 LOC of legacy-only tests). Eliminates one circular dependency (`subagents.executor ↔ sophia.builder_events`) per Sentrux.
+
+### What We Learned
+- **Phase-1 was a 4-layer iceberg** in production. Each fix uncovered the next layer:
+  1. **PR #107** — `Annotated[str, InjectedToolCallId]` is silently dropped under `@tool(args_schema=…)`. Source must be `runtime.tool_call_id`.
+  2. **PR #108** — `runtime: ToolRuntime[X, Y] | None` annotation also breaks injection (Union origin masks the ToolRuntime type). Bare `runtime: ToolRuntime` is the working pattern.
+  3. **PR #109** — `@tool(args_schema=…)` *itself* disables typed-parameter auto-injection. The fix is `@tool(name, parse_docstring=True)` with field descriptions in the docstring's `Args:` section. Multi-line descriptions break the parser if prose contains `word:` patterns — keep entries terse.
+  4. **PR #110** — passing `thread_id` via `runs.create(config={"configurable": …})` doesn't propagate to the running graph's `runtime.config["configurable"]` on `langgraph-api 0.8.x`. State (passed via `input=…`) does propagate; that's the canonical channel for cross-graph values.
+- **`runtime.execution_info.thread_id` is the canonical source per langgraph >= 1.0.** `runtime.context["thread_id"]` happens to work on the ASGI in-process path but is NOT populated under LangGraph Platform / distributed deployments. Always probe `execution_info` first, then `context`, then `config.configurable` (mirroring `ThreadDataMiddleware`).
+- **`langgraph.runtime.Runtime` does not always expose `.config`.** The attribute lives on `ToolRuntime` / `RunnableConfig` paths; production middlewares MUST use `getattr(runtime, "config", None)` defensively. We crashed once because a single unwrapped read in `build_completion_payload_from_artifact` raised `AttributeError` and silently killed the whole webhook chain.
+- **The "deleted SubagentExecutor" left a hidden coupling**: `SubagentExecutor.execute_async`'s terminal-flip handler called `emit_completion_event` which fed the Telegram delivery webhook. After we deleted SubagentExecutor for the builder path, the webhook trigger went silent and Telegram delivery broke even though everything else looked fine. The fix wasn't to resurrect the executor — it was to call the webhook from inside `BuilderArtifactMiddleware.after_model`, which already runs at every builder terminal point.
+- **deepagents native dispatch creates a fresh thread per build**, breaking the pre-migration implicit assumption that "the artifact lives at the thread_id the channel adapter knows about". Restoring that implicit alignment requires explicitly namespacing the upload at the parent thread_id (Option B), which is also more semantically correct: artifacts belong to the conversation, not the ephemeral build thread.
+- **Diagnostic logging at every guard is cheap and saved hours.** PR #112 added a permanent `[Builder] fire_completion_webhook: dispatching task_id=… parent_thread_id=… status=… artifact_url_present=…` log line plus explicit logs at each early-exit (non-terminal status, missing thread_id, dedup hit). Every subsequent failure was diagnosed in one log line. Worth doing prophylactically on any chain that fans out into a daemon thread / network call.
+- **`@tool(parse_docstring=True)` precedent is in-repo.** [`task_tool.py`](backend/packages/harness/deerflow/tools/builtins/task_tool.py) and [`setup_agent_tool.py`](backend/packages/harness/deerflow/tools/builtins/setup_agent_tool.py) both use it. Should have copied that pattern from the start instead of going straight to `@tool(args_schema=…)`. Lesson: when adding a new tool that needs `runtime` / `tool_call_id` injection, mirror an existing tool that does it successfully.
+- **Sentrux gate's `Quality` metric can rise even on a deletion-only PR** (see PR #116: `5459 → 5918` despite removing ~870 LOC) — but EXIT=0 with `cycles 2 → 1` indicates a real architectural improvement. The absolute Quality number is noisy; the cycle / coupling deltas are the load-bearing signals.
+
+### CLAUDE.md Updates
+- Root CLAUDE.md: tools list (`switch_to_builder` → `start_builder_task` + four lifecycle tools); `start_builder_task` section rewritten; SophiaState includes `async_tasks` + `delegation_context` as primary builder lifecycle fields; middleware chain now lists `BuildAwarenessMiddleware` and `AsyncSubAgentMiddleware`.
+- backend/CLAUDE.md: Sophia Companion + Builder section now documents `BuildAwarenessMiddleware`, the parent-thread-id artifact-namespacing convention, and the three-tier thread-id resolution order (`execution_info` → `context` → `config.configurable`).
+
+### Skills Created / Modified
+- [`skills/public/sophia/AGENTS.md`](skills/public/sophia/AGENTS.md) rewritten — full pivot from `switch_to_builder` semantics to `start_builder_task` + `async_tasks` lifecycle. (Production-blocker: this file is system-prompt-injected on every companion + builder turn.)
+
+### GEPA Log Entry
+- N/A (no companion-prompt skill files changed beyond AGENTS.md, which is contract-shaped not behaviour-shaped).
+
+### Active diagnostic breadcrumbs (keep)
+- `[Builder] start_builder_task dispatching: task_type=… parent_thread=… …` — companion-side, fires on every dispatch
+- `[Builder] start_builder_task launched: task_id=… run_id=… trace=…` — companion-side, post-SDK
+- `[Builder] fire_completion_webhook: dispatching task_id=… parent_thread_id=… status=… artifact_url_present=…` — builder-side, fires on every terminal path
+- `[Builder] fire_completion_webhook: missing builder thread_id …` — builder-side, fires on the rare AttributeError / unresolved-thread path
+
+---
+
 ## 2026-04-13 · [builder-web-research] · PR #[pending]
 **Author:** Codex · **Track:** backend · **Spec:** docs/specs/01_architecture_overview.md, docs/specs/04_backend_integration.md, docs/specs/07_builder_handoff_spec.md
 
