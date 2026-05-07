@@ -113,6 +113,7 @@ class OutboundMessage:
 
 OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
 BuilderCompletionCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
+ReviewNotificationCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
 
 class MessageBus:
@@ -127,12 +128,21 @@ class MessageBus:
     asynchronously after the parent companion run already returned. Each
     channel adapter that wants to render completion cards subscribes via
     ``subscribe_builder_completion``.
+
+    Memory-review notifications ride a third track for the same reason:
+    the Telegram session tracker publishes a ``review_notification`` event
+    after the offline pipeline completes; channel adapters subscribe and
+    render a LoginUrl-button DM. Keeping this on the bus instead of a
+    direct module import keeps ``app.channels.telegram_session_tracker``
+    independent of ``app.channels.service`` (would otherwise close a
+    ``service → manager → tracker → service`` cycle).
     """
 
     def __init__(self) -> None:
         self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue()
         self._outbound_listeners: list[OutboundCallback] = []
         self._builder_completion_listeners: list[BuilderCompletionCallback] = []
+        self._review_notification_listeners: list[ReviewNotificationCallback] = []
 
     # -- inbound -----------------------------------------------------------
 
@@ -220,6 +230,49 @@ class MessageBus:
                     payload.get("task_id"),
                 )
 
+    # -- review notification (Telegram memory review handoff) --------------
+
+    def subscribe_review_notification(
+        self, callback: ReviewNotificationCallback
+    ) -> None:
+        """Register a coroutine listener for memory-review notifications."""
+        self._review_notification_listeners.append(callback)
+
+    def unsubscribe_review_notification(
+        self, callback: ReviewNotificationCallback
+    ) -> None:
+        self._review_notification_listeners = [
+            cb for cb in self._review_notification_listeners if cb is not callback
+        ]
+
+    async def publish_review_notification(self, payload: dict[str, Any]) -> None:
+        """Fan a memory-review notification out to subscribed adapters.
+
+        Payload keys (set by ``telegram_review_notifier``):
+          - ``channel``: target channel name (e.g. ``"telegram"``)
+          - ``chat_id``: chat to deliver into
+          - ``session_id``: the just-finalized session
+          - ``review_url``: the URL to put on the inline-keyboard button
+          - ``use_login_url``: bool — Telegram LoginUrl button vs plain URL
+
+        Best-effort: failures are logged, never raised.
+        """
+        logger.info(
+            "[Bus] review_notification dispatching: channel=%s chat_id=%s session_id=%s listeners=%d",
+            payload.get("channel"),
+            payload.get("chat_id"),
+            payload.get("session_id"),
+            len(self._review_notification_listeners),
+        )
+        for callback in self._review_notification_listeners:
+            try:
+                await callback(payload)
+            except Exception:
+                logger.exception(
+                    "Error in review_notification callback for chat_id=%s",
+                    payload.get("chat_id"),
+                )
+
 
 # ---------------------------------------------------------------------------
 # Module-level convenience for the gateway router
@@ -251,3 +304,20 @@ async def publish_builder_completion(payload: dict[str, Any]) -> None:
         logger.debug("publish_builder_completion: no global bus installed; skipping channel fan-out")
         return
     await bus.publish_builder_completion(payload)
+
+
+async def publish_review_notification(payload: dict[str, Any]) -> None:
+    """Publish a memory-review notification to the process-wide bus.
+
+    Used by the Telegram session tracker after the offline pipeline
+    finalizes a session. Best-effort: a missing global bus is logged and
+    swallowed — the trace + handoff already wrote to disk so the user is
+    not stranded, just unnotified.
+    """
+    bus = _global_bus
+    if bus is None:
+        logger.debug(
+            "publish_review_notification: no global bus installed; skipping fan-out"
+        )
+        return
+    await bus.publish_review_notification(payload)

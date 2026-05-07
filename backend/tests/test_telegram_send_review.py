@@ -135,3 +135,65 @@ class TestSendReviewNotification:
             review_url="https://app.example.com/x",
         )
         assert ok is False
+
+
+@pytest.mark.anyio
+class TestOnReviewNotification:
+    """Bus-subscriber path: ``_on_review_notification`` filters non-Telegram
+    payloads, validates required fields, and forwards to
+    ``send_review_notification`` with the right kwargs.
+    """
+
+    async def test_telegram_payload_invokes_send(self, channel):
+        send = _attach_fake_application(channel)
+
+        await channel._on_review_notification(
+            {
+                "channel": "telegram",
+                "chat_id": "100",
+                "session_id": "sess-abc",
+                "review_url": "https://app.example.com/api/auth/telegram-login?session=sess-abc",
+                "use_login_url": True,
+            }
+        )
+
+        send.assert_awaited_once()
+        kwargs = send.call_args.kwargs
+        assert kwargs["chat_id"] == 100
+        # The button is the LoginUrl variant.
+        button = kwargs["reply_markup"].inline_keyboard[0][0]
+        assert button.login_url is not None
+
+    async def test_non_telegram_payload_is_ignored(self, channel):
+        send = _attach_fake_application(channel)
+
+        await channel._on_review_notification(
+            {"channel": "slack", "chat_id": "100", "session_id": "s", "review_url": "x"}
+        )
+
+        send.assert_not_awaited()
+
+    async def test_missing_fields_are_logged_not_sent(self, channel):
+        send = _attach_fake_application(channel)
+
+        await channel._on_review_notification(
+            {"channel": "telegram", "chat_id": "100"}  # missing session_id, review_url
+        )
+
+        send.assert_not_awaited()
+
+    async def test_handler_swallows_send_exception(self, channel):
+        send = _attach_fake_application(channel)
+        send.side_effect = RuntimeError("transport down")
+
+        # Must not raise — the bus must be able to keep dispatching to
+        # other subscribers.
+        await channel._on_review_notification(
+            {
+                "channel": "telegram",
+                "chat_id": "100",
+                "session_id": "s",
+                "review_url": "https://x/y",
+                "use_login_url": True,
+            }
+        )

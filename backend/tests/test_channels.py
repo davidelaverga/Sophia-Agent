@@ -128,6 +128,62 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_review_notification_callback(self):
+        bus = MessageBus()
+        received: list[dict] = []
+
+        async def callback(payload):
+            received.append(payload)
+
+        async def go():
+            bus.subscribe_review_notification(callback)
+            await bus.publish_review_notification(
+                {
+                    "channel": "telegram",
+                    "chat_id": "100",
+                    "session_id": "sess-1",
+                    "review_url": "https://x/y",
+                    "use_login_url": True,
+                }
+            )
+            assert len(received) == 1
+            assert received[0]["session_id"] == "sess-1"
+
+        _run(go())
+
+    def test_unsubscribe_review_notification(self):
+        bus = MessageBus()
+        received: list[dict] = []
+
+        async def callback(payload):
+            received.append(payload)
+
+        async def go():
+            bus.subscribe_review_notification(callback)
+            bus.unsubscribe_review_notification(callback)
+            await bus.publish_review_notification({"channel": "telegram"})
+            assert received == []
+
+        _run(go())
+
+    def test_review_notification_error_does_not_crash(self):
+        bus = MessageBus()
+        received: list[dict] = []
+
+        async def bad(payload):
+            raise ValueError("boom")
+
+        async def good(payload):
+            received.append(payload)
+
+        async def go():
+            bus.subscribe_review_notification(bad)
+            bus.subscribe_review_notification(good)
+            await bus.publish_review_notification({"channel": "telegram"})
+            assert len(received) == 1
+
+        _run(go())
+
     def test_inbound_message_defaults(self):
         msg = InboundMessage(channel_name="test", chat_id="c", user_id="u", text="hi")
         assert msg.msg_type == InboundMessageType.CHAT

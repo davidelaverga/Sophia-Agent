@@ -157,15 +157,6 @@ class ChannelService:
             logger.exception("Failed to start channel %s", name)
             return False
 
-    def get_channel(self, name: str) -> Any | None:
-        """Return the running channel instance by name, or None.
-
-        Used by cross-channel callers (e.g. the Telegram review notifier)
-        that need to invoke channel-specific helpers without poking at
-        the private ``_channels`` dict.
-        """
-        return self._channels.get(name)
-
     def get_status(self) -> dict[str, Any]:
         """Return status information for all channels."""
         channels_status = {}

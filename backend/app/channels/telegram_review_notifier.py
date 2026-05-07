@@ -1,9 +1,9 @@
-"""Send the "memories ready to review" DM after a Telegram session ends.
+"""Build + publish the "memories ready to review" notification payload.
 
 Wired into ``app.channels.telegram_session_tracker._check_inactive_chats``:
-fires once per finalized session, using the Telegram primary bot to deliver
-an inline-keyboard button that opens the web app's recap page authenticated
-as the canonical user.
+fires once per finalized session, builds the LoginUrl (or plain-URL
+one-time-token fallback), and publishes the payload to the process-wide
+``MessageBus`` for the Telegram channel adapter to render.
 
 Two delivery modes (selected by env / availability):
 
@@ -17,6 +17,13 @@ Two delivery modes (selected by env / availability):
 
 Best-effort: any failure logs and returns. Never raises into the tracker
 loop — pipeline finalization must not be blocked on a notification error.
+
+Architecture note: this module deliberately does NOT import from
+``app.channels.service`` or ``app.channels.telegram``. Instead it
+publishes to the process-wide bus via ``publish_review_notification``;
+the Telegram adapter subscribes on startup. That indirection breaks
+what would otherwise be a ``service → manager → tracker → notifier →
+service`` cycle (caught by Sentrux as a score regression).
 """
 
 from __future__ import annotations
@@ -24,6 +31,8 @@ from __future__ import annotations
 import logging
 import os
 from urllib.parse import urlencode, urljoin
+
+from app.channels.message_bus import publish_review_notification
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +64,12 @@ async def enqueue_review_notification(
     user_id: str,
     session_id: str,
 ) -> bool:
-    """Send a memory-review DM for the just-finalized session.
+    """Build the URL + publish a review-notification event on the bus.
 
-    Returns True if the message reached Telegram, False on any failure
-    (skip, missing config, transport error, etc.). Never raises.
+    Returns True if the event was published (a subscriber may still fail
+    asynchronously — the bus swallows those errors), False on a config
+    short-circuit (flag disabled, base URL unset, invalid args, no bus).
+    Never raises.
     """
     if not _flag_enabled(_ENV_FEATURE_FLAG, default=True):
         logger.info(
@@ -84,24 +95,6 @@ async def enqueue_review_notification(
             chat_id,
             session_id,
         )
-        return False
-
-    # Resolve the running Telegram channel. Best-effort — if the channel
-    # service isn't running (e.g. tests, gateway-only deploy) we skip.
-    try:
-        from app.channels.service import get_channel_service
-    except ImportError:
-        logger.warning("telegram_review_notifier.no_channel_service")
-        return False
-
-    service = get_channel_service()
-    if service is None:
-        logger.info("telegram_review_notifier.channel_service_not_started")
-        return False
-
-    channel = service.get_channel("telegram")
-    if channel is None:
-        logger.info("telegram_review_notifier.no_telegram_channel chat_id=%s", chat_id)
         return False
 
     use_login_url = _flag_enabled(_ENV_USE_LOGIN_URL, default=True)
@@ -130,17 +123,21 @@ async def enqueue_review_notification(
             {"token": record.token, "session": session_id},
         )
 
+    payload = {
+        "channel": "telegram",
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "review_url": review_url,
+        "use_login_url": use_login_url,
+    }
     try:
-        return await channel.send_review_notification(
-            chat_id=chat_id,
-            session_id=session_id,
-            review_url=review_url,
-            use_login_url=use_login_url,
-        )
+        await publish_review_notification(payload)
     except Exception:
         logger.exception(
-            "telegram_review_notifier.send_failed chat_id=%s session_id=%s",
+            "telegram_review_notifier.publish_failed chat_id=%s session_id=%s",
             chat_id,
             session_id,
         )
         return False
+    return True
