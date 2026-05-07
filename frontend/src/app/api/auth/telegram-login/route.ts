@@ -2,9 +2,9 @@
  * Telegram Login URL handoff.
  *
  * Lands here when a Telegram user taps the "Open Review" button on a
- * "memories ready" DM (see ``backend/app/channels/telegram_review_notifier.py``).
- * Telegram appends an HMAC-signed identity payload to the URL we set on
- * the LoginUrl button.
+ * "memories ready" DM (published by the Telegram session tracker over
+ * the channel ``MessageBus``). Telegram appends an HMAC-signed identity
+ * payload to the URL we set on the LoginUrl button.
  *
  * Flow (this PR — minimal):
  *   1. Verify the HMAC payload using SHA256(BOT_TOKEN) as the HMAC key.
@@ -17,16 +17,118 @@
  *
  * Follow-up PR (deferred): use a Better Auth plugin to mint a session
  * directly from the Telegram-attested payload, skipping Google entirely
- * for already-bound users. Tracked in the plan file at
- * ~/.claude/plans/users-davidelaverga-desktop-sophia-asyn-peppy-riddle.md
- * — see "Open TBDs" section.
+ * for already-bound users.
+ *
+ * The HMAC verifier and the session-id safety check are exported from
+ * this file (rather than living in a sibling ``_lib/`` module) because
+ * (a) only this route + its sibling token-fallback route consume them
+ * and (b) keeping a single file is friendlier to the Sentrux quality
+ * gate than a thin ``_lib`` indirection.
  */
+
+import crypto from "crypto"
 
 import { NextResponse, type NextRequest } from "next/server"
 
-import { isSafeSessionId, verifyTelegramAuth } from "../_lib/telegram-verify"
-
 export const dynamic = "force-dynamic"
+
+// ---------------------------------------------------------------------------
+// HMAC verification (https://core.telegram.org/widgets/login#checking-authorization)
+// ---------------------------------------------------------------------------
+
+export type TelegramAuthPayload = {
+  id: string
+  auth_date: string
+  hash: string
+  first_name?: string
+  last_name?: string
+  username?: string
+  photo_url?: string
+}
+
+export type VerificationResult =
+  | { ok: true; telegramUserId: string; authDateSeconds: number }
+  | { ok: false; reason: VerificationError }
+
+export type VerificationError =
+  | "missing_hash"
+  | "missing_id"
+  | "missing_auth_date"
+  | "expired"
+  | "invalid_hash"
+  | "missing_bot_token"
+
+const _AUTH_DATE_WINDOW_SECONDS = 300
+
+const _REQUIRED = ["hash", "id", "auth_date"] as const
+const _MISSING_REASON: Record<string, VerificationError> = {
+  hash: "missing_hash",
+  id: "missing_id",
+  auth_date: "missing_auth_date",
+}
+
+export function verifyTelegramAuth(
+  params: Record<string, string>,
+  botToken: string,
+  now?: number,
+): VerificationResult {
+  if (!botToken) return { ok: false, reason: "missing_bot_token" }
+  for (const key of _REQUIRED) {
+    if (!params[key]) return { ok: false, reason: _MISSING_REASON[key] }
+  }
+  const authDate = Number.parseInt(params.auth_date, 10)
+  if (!Number.isFinite(authDate)) return { ok: false, reason: "missing_auth_date" }
+
+  const nowSeconds = now ?? Math.floor(Date.now() / 1000)
+  if (nowSeconds - authDate > _AUTH_DATE_WINDOW_SECONDS) {
+    return { ok: false, reason: "expired" }
+  }
+
+  // Build the data check string: every param except ``hash``, sorted by key.
+  const dataCheckString = Object.entries(params)
+    .filter(([key]) => key !== "hash")
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n")
+
+  const secretKey = crypto.createHash("sha256").update(botToken).digest()
+  const expectedHash = crypto
+    .createHmac("sha256", secretKey)
+    .update(dataCheckString)
+    .digest("hex")
+
+  if (expectedHash.length !== params.hash.length) {
+    return { ok: false, reason: "invalid_hash" }
+  }
+  let matches = false
+  try {
+    matches = crypto.timingSafeEqual(
+      Buffer.from(expectedHash, "hex"),
+      Buffer.from(params.hash, "hex"),
+    )
+  } catch {
+    matches = false
+  }
+  if (!matches) return { ok: false, reason: "invalid_hash" }
+
+  return { ok: true, telegramUserId: params.id, authDateSeconds: authDate }
+}
+
+/**
+ * Validate a session-id query param so we never redirect to an arbitrary
+ * same-origin path injected by an attacker. Sophia session ids are
+ * UUID4 hex (32 chars); we accept 16-64 hex/dash chars for flexibility.
+ */
+const _SESSION_ID_RE = /^[a-f0-9-]{16,64}$/i
+
+export function isSafeSessionId(value: string | null | undefined): value is string {
+  if (!value) return false
+  return _SESSION_ID_RE.test(value)
+}
+
+// ---------------------------------------------------------------------------
+// Route handler.
+// ---------------------------------------------------------------------------
 
 function errorResponse(status: number, reason: string): NextResponse {
   return NextResponse.json({ ok: false, reason }, { status })
@@ -42,13 +144,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const botToken = process.env.TELEGRAM_BOT_TOKEN || ""
   if (!botToken) {
-    // Configuration error, not user-facing.
     return errorResponse(500, "bot_token_not_configured")
   }
 
-  // Collect the Telegram-supplied params for the HMAC check. Telegram
-  // sends id, first_name, last_name?, username?, photo_url?, auth_date,
-  // and hash. We pull every search param except ``session`` (our own).
   const params: Record<string, string> = {}
   for (const [key, value] of url.searchParams.entries()) {
     if (key === "session") continue
@@ -60,19 +158,14 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return errorResponse(400, result.reason)
   }
 
-  // Redirect to the recap page; AuthGate handles the rest. ``next=`` is
-  // a same-origin path-only value so the AuthGate's redirect-back
-  // (Phase D) cannot be hijacked.
   const recapPath = `/recap/${session}`
   const redirectUrl = new URL(recapPath, url.origin)
   redirectUrl.searchParams.set("next", recapPath)
   redirectUrl.searchParams.set("from", "telegram")
 
   const response = NextResponse.redirect(redirectUrl, 302)
-  // Tag the request so observability can correlate the tap → recap.
-  // Telegram ids are not sensitive on their own (the user just shared
-  // their tap with us), but keep the cookie httpOnly to prevent any JS
-  // leakage and short-lived (60s).
+  // Short-lived correlation cookie so observability can match tap → recap.
+  // Telegram ids are not sensitive on their own; httpOnly + 60s TTL.
   response.cookies.set("sophia-telegram-handoff", result.telegramUserId, {
     httpOnly: true,
     sameSite: "lax",

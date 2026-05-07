@@ -110,3 +110,4 @@ class TestDeleteLink:
         response = client.delete("/api/sophia/user-test/telegram/link")
         assert response.status_code == 204
         assert store.resolve_user_id("telegram", "42") is None
+

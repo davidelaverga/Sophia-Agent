@@ -3,8 +3,9 @@
 Mirrors ``app.gateway.inactivity_watcher`` (which finalizes web sessions on
 10-min idle) but keys on Telegram ``chat_id`` instead of LangGraph
 ``thread_id``. The watcher fires the offline pipeline for each chat that
-has gone idle, pauses the persisted session record, and triggers the
-"memories ready" review notification (Phase B).
+has gone idle, pauses the persisted session record, and publishes the
+"memories ready" review notification via the bus (the Telegram channel
+adapter subscribes and renders the LoginUrl-button DM).
 
 A "session" on Telegram is bounded by the inactivity timer. The first
 inbound message after the previous session's finalization mints a fresh
@@ -15,15 +16,27 @@ and Mem0 candidates land under the right user.
 In-memory state resets on server restart. The pipeline's own idempotency
 guard prevents double processing if a chat happens to be re-tracked with
 the same ``session_id`` after a transient failure.
+
+Architecture note: this module owns the review-notification *payload
+construction* too (``enqueue_review_notification`` below). Earlier
+versions split that into a separate ``telegram_review_notifier`` module,
+but the only caller was this one and the split added a cross-module
+edge that Sentrux flagged as a quality regression. The two responsibilities
+are tightly coupled (the tracker is the only thing that knows when a
+session ends, and notification IS what "ending a session" means here),
+so keeping them in one module is the more honest layering.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 import uuid
+from urllib.parse import urlencode, urljoin
 
+from app.channels.message_bus import publish_review_notification
 from deerflow.sophia.session_store import SessionRecord, SessionStore
 
 logger = logging.getLogger(__name__)
@@ -31,6 +44,13 @@ logger = logging.getLogger(__name__)
 # Configurable thresholds (matched to ``inactivity_watcher``).
 INACTIVITY_TIMEOUT = 600  # 10 minutes
 CHECK_INTERVAL = 60
+
+# Public env knobs for the review notification. Documented in
+# ``backend/CLAUDE.md`` and ``.env.example``.
+_ENV_BASE_URL = "SOPHIA_WEB_BASE_URL"
+_ENV_FEATURE_FLAG = "TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED"
+
+_DEFAULT_PATH = "/api/auth/telegram-login"
 
 # In-memory chat tracking. Keyed by chat_id.
 _active_chats: dict[str, dict] = {}
@@ -62,7 +82,7 @@ def register_activity(
     The web pattern in ``app.gateway.routers.sessions`` keeps session_id
     knowledge on the server side too.
     """
-    if not chat_id or not user_id or not thread_id:
+    if not all((chat_id, user_id, thread_id)):
         # Defensive: don't track unmappable chats. Manager should always
         # provide all three.
         logger.debug(
@@ -74,7 +94,7 @@ def register_activity(
         return ""
 
     existing = _active_chats.get(chat_id)
-    if existing is not None and existing.get("user_id") == user_id:
+    if existing and existing.get("user_id") == user_id:
         # Same user, same chat, still within the live window — just reset
         # the timer. Keep the existing session_id.
         existing["last_active"] = _now()
@@ -156,6 +176,76 @@ def _pause_tracked_session(user_id: str, session_id: str) -> None:
         )
 
 
+# ---------------------------------------------------------------------------
+# Review notification — payload construction + bus publish.
+# ---------------------------------------------------------------------------
+
+
+def _flag_enabled(name: str, *, default: bool = True) -> bool:
+    raw = os.getenv(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _join_url(base: str, path: str, params: dict[str, str]) -> str:
+    base = base.rstrip("/") + "/"
+    relative = path.lstrip("/")
+    qs = urlencode(params)
+    return urljoin(base, relative) + ("?" + qs if qs else "")
+
+
+def _resolve_review_url(chat_id: str, session_id: str) -> str | None:
+    """Return the review URL for the LoginUrl button, or None if unconfigured."""
+    if not _flag_enabled(_ENV_FEATURE_FLAG, default=True):
+        return None
+    base_url = os.getenv(_ENV_BASE_URL, "").strip()
+    if not (base_url and chat_id and session_id):
+        return None
+    return _join_url(base_url, _DEFAULT_PATH, {"session": session_id})
+
+
+async def enqueue_review_notification(
+    chat_id: str, user_id: str, session_id: str,
+) -> bool:
+    """Build the review URL + publish a notification on the bus.
+
+    Uses Telegram's HMAC-signed LoginUrl button — the host of
+    ``SOPHIA_WEB_BASE_URL`` must be registered with ``@BotFather /setdomain``
+    for this to render. Returns True if the event was published, False on
+    a config short-circuit. Never raises.
+    """
+    review_url = _resolve_review_url(chat_id, session_id)
+    if review_url is None:
+        logger.info(
+            "telegram_session_tracker.review_skipped chat_id=%s session_id=%s",
+            chat_id, session_id,
+        )
+        return False
+    payload = {
+        "channel": "telegram",
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "session_id": session_id,
+        "review_url": review_url,
+        "use_login_url": True,
+    }
+    try:
+        await publish_review_notification(payload)
+        return True
+    except Exception:
+        logger.exception(
+            "telegram_session_tracker.review_publish_failed chat_id=%s session_id=%s",
+            chat_id, session_id,
+        )
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Watcher loop.
+# ---------------------------------------------------------------------------
+
+
 async def _check_inactive_chats() -> None:
     now = _now()
     idle = [
@@ -168,63 +258,20 @@ async def _check_inactive_chats() -> None:
         session_id = info["session_id"]
         thread_id = info["thread_id"]
         logger.info(
-            "telegram_session_tracker.idle chat_id=%s user_id=%s session_id=%s thread_id=%s",
-            chat_id,
-            user_id,
-            session_id,
-            thread_id,
+            "telegram_session_tracker.idle chat_id=%s session_id=%s",
+            chat_id, session_id,
         )
         try:
             from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
-            await asyncio.to_thread(
-                run_offline_pipeline,
-                user_id,
-                session_id,
-                thread_id,
-                None,  # thread_state — pipeline fetches from LangGraph if None
-            )
-        except Exception:
-            logger.warning(
-                "telegram_session_tracker.pipeline_failed chat_id=%s session_id=%s",
-                chat_id,
-                session_id,
-                exc_info=True,
-            )
-
-        try:
+            await asyncio.to_thread(run_offline_pipeline, user_id, session_id, thread_id, None)
             _pause_tracked_session(user_id, session_id)
+            await enqueue_review_notification(chat_id, user_id, session_id)
         except Exception:
             logger.warning(
-                "telegram_session_tracker.pause_failed chat_id=%s session_id=%s",
-                chat_id,
-                session_id,
-                exc_info=True,
+                "telegram_session_tracker.finalize_partial_failure chat_id=%s session_id=%s",
+                chat_id, session_id, exc_info=True,
             )
-
-        # Phase B (review notification) — best-effort. Imported lazily so
-        # tests / older deployments without the notifier still load this
-        # module fine. Notifier may be sync or async; await if it's a
-        # coroutine.
-        try:
-            from app.channels.telegram_review_notifier import (
-                enqueue_review_notification,
-            )
-
-            result = enqueue_review_notification(chat_id, user_id, session_id)
-            if asyncio.iscoroutine(result):
-                await result
-        except ImportError:
-            # Notifier not yet deployed — fine, Phase A still finalizes.
-            logger.debug("telegram_session_tracker.notifier_unavailable")
-        except Exception:
-            logger.warning(
-                "telegram_session_tracker.notify_failed chat_id=%s session_id=%s",
-                chat_id,
-                session_id,
-                exc_info=True,
-            )
-
         _active_chats.pop(chat_id, None)
 
 

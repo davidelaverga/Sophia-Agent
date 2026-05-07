@@ -273,6 +273,35 @@ def _supabase_delete_bindings_for_user(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _drop_key_from_index(
+    index: dict[str, set[tuple[ChannelName, str]]],
+    index_key: str | None,
+    chat_key: tuple[ChannelName, str],
+) -> None:
+    """Remove ``chat_key`` from ``index[index_key]``; clean empty slots."""
+    if not index_key:
+        return
+    keys = index.get(index_key)
+    if keys is None:
+        return
+    keys.discard(chat_key)
+    if not keys:
+        index.pop(index_key, None)
+
+
+def _drop_binding_from_indexes(binding: UserBinding, chat_key: tuple[ChannelName, str]) -> None:
+    """Remove ``binding`` from both the user-id and telegram-user-id reverse indexes."""
+    _drop_key_from_index(_bindings_by_user, binding.user_id, chat_key)
+    _drop_key_from_index(_bindings_by_telegram_user_id, binding.telegram_user_id, chat_key)
+
+
+def _add_binding_to_indexes(binding: UserBinding, chat_key: tuple[ChannelName, str]) -> None:
+    """Add ``binding`` to the user-id and (when present) telegram-user-id reverse indexes."""
+    _bindings_by_user.setdefault(binding.user_id, set()).add(chat_key)
+    if binding.telegram_user_id:
+        _bindings_by_telegram_user_id.setdefault(binding.telegram_user_id, set()).add(chat_key)
+
+
 def bind_chat(
     channel: ChannelName,
     chat_id: str,
@@ -301,36 +330,14 @@ def bind_chat(
     with _lock:
         old = _bindings_by_chat.pop(key, None)
         if old is not None:
-            user_keys = _bindings_by_user.get(old.user_id)
-            if user_keys is not None:
-                user_keys.discard(key)
-                if not user_keys:
-                    _bindings_by_user.pop(old.user_id, None)
-            if old.telegram_user_id:
-                tg_keys = _bindings_by_telegram_user_id.get(old.telegram_user_id)
-                if tg_keys is not None:
-                    tg_keys.discard(key)
-                    if not tg_keys:
-                        _bindings_by_telegram_user_id.pop(old.telegram_user_id, None)
+            _drop_binding_from_indexes(old, key)
         # Bound the total binding count.
         while len(_bindings_by_chat) >= _MAX_BINDINGS:
             oldest_key, oldest = min(_bindings_by_chat.items(), key=lambda kv: kv[1].created_at)
             _bindings_by_chat.pop(oldest_key, None)
-            user_keys = _bindings_by_user.get(oldest.user_id)
-            if user_keys is not None:
-                user_keys.discard(oldest_key)
-                if not user_keys:
-                    _bindings_by_user.pop(oldest.user_id, None)
-            if oldest.telegram_user_id:
-                tg_keys = _bindings_by_telegram_user_id.get(oldest.telegram_user_id)
-                if tg_keys is not None:
-                    tg_keys.discard(oldest_key)
-                    if not tg_keys:
-                        _bindings_by_telegram_user_id.pop(oldest.telegram_user_id, None)
+            _drop_binding_from_indexes(oldest, oldest_key)
         _bindings_by_chat[key] = binding
-        _bindings_by_user.setdefault(binding.user_id, set()).add(key)
-        if binding.telegram_user_id:
-            _bindings_by_telegram_user_id.setdefault(binding.telegram_user_id, set()).add(key)
+        _add_binding_to_indexes(binding, key)
     logger.info(
         "telegram_link.bind channel=%s chat_id=%s user_id=%s tg_username=%s",
         channel,
@@ -401,27 +408,19 @@ def unbind_user(user_id: str, channel: ChannelName = "telegram") -> int:
     """Remove all bindings for ``user_id`` on ``channel``. Returns count removed."""
     if not user_id:
         return 0
+    normalized = user_id.strip()
     removed = 0
     with _lock:
-        keys = list(_bindings_by_user.get(user_id.strip(), set()))
+        keys = list(_bindings_by_user.get(normalized, set()))
         for key in keys:
             if key[0] != channel:
                 continue
             old = _bindings_by_chat.pop(key, None)
-            user_keys = _bindings_by_user.get(user_id.strip())
-            if user_keys is not None:
-                user_keys.discard(key)
-                if not user_keys:
-                    _bindings_by_user.pop(user_id.strip(), None)
-            if old is not None and old.telegram_user_id:
-                tg_keys = _bindings_by_telegram_user_id.get(old.telegram_user_id)
-                if tg_keys is not None:
-                    tg_keys.discard(key)
-                    if not tg_keys:
-                        _bindings_by_telegram_user_id.pop(old.telegram_user_id, None)
+            if old is not None:
+                _drop_binding_from_indexes(old, key)
             removed += 1
     if removed > 0:
-        _supabase_delete_bindings_for_user(user_id.strip())
+        _supabase_delete_bindings_for_user(normalized)
     return removed
 
 
@@ -434,17 +433,7 @@ def unbind_chat(channel: ChannelName, chat_id: str) -> bool:
         binding = _bindings_by_chat.pop(key, None)
         if binding is None:
             return False
-        user_keys = _bindings_by_user.get(binding.user_id)
-        if user_keys is not None:
-            user_keys.discard(key)
-            if not user_keys:
-                _bindings_by_user.pop(binding.user_id, None)
-        if binding.telegram_user_id:
-            tg_keys = _bindings_by_telegram_user_id.get(binding.telegram_user_id)
-            if tg_keys is not None:
-                tg_keys.discard(key)
-                if not tg_keys:
-                    _bindings_by_telegram_user_id.pop(binding.telegram_user_id, None)
+        _drop_binding_from_indexes(binding, key)
     _supabase_delete_binding(channel, str(chat_id))
     return True
 
@@ -497,31 +486,16 @@ def _install_binding_locked(binding: UserBinding) -> None:
     while len(_bindings_by_chat) >= _MAX_BINDINGS and key not in _bindings_by_chat:
         oldest_key, oldest = min(_bindings_by_chat.items(), key=lambda kv: kv[1].created_at)
         _bindings_by_chat.pop(oldest_key, None)
-        user_keys = _bindings_by_user.get(oldest.user_id)
-        if user_keys is not None:
-            user_keys.discard(oldest_key)
-            if not user_keys:
-                _bindings_by_user.pop(oldest.user_id, None)
-        if oldest.telegram_user_id:
-            tg_keys = _bindings_by_telegram_user_id.get(oldest.telegram_user_id)
-            if tg_keys is not None:
-                tg_keys.discard(oldest_key)
-                if not tg_keys:
-                    _bindings_by_telegram_user_id.pop(oldest.telegram_user_id, None)
-    # If a binding for this exact key already exists, drop its reverse-index
-    # entries before overwriting so a rebound chat (with a different
-    # telegram_user_id) doesn't leave a dangling index pointer.
+        _drop_binding_from_indexes(oldest, oldest_key)
+    # If a binding for this exact key already exists with a *different*
+    # telegram_user_id, drop its reverse-index entry before overwriting
+    # (a rebound chat with a different tg user must not leave a dangling
+    # pointer in the reverse index).
     existing = _bindings_by_chat.get(key)
-    if existing is not None and existing.telegram_user_id and existing.telegram_user_id != binding.telegram_user_id:
-        tg_keys = _bindings_by_telegram_user_id.get(existing.telegram_user_id)
-        if tg_keys is not None:
-            tg_keys.discard(key)
-            if not tg_keys:
-                _bindings_by_telegram_user_id.pop(existing.telegram_user_id, None)
+    if existing is not None and existing.telegram_user_id != binding.telegram_user_id:
+        _drop_key_from_index(_bindings_by_telegram_user_id, existing.telegram_user_id, key)
     _bindings_by_chat[key] = binding
-    _bindings_by_user.setdefault(binding.user_id, set()).add(key)
-    if binding.telegram_user_id:
-        _bindings_by_telegram_user_id.setdefault(binding.telegram_user_id, set()).add(key)
+    _add_binding_to_indexes(binding, key)
 
 
 def load_bindings_from_supabase() -> int:

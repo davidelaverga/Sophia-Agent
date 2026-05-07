@@ -637,35 +637,20 @@ class TelegramChannel(Channel):
         """Bus subscriber: render a memory-review DM in the originating chat.
 
         Filters on ``payload["channel"] == "telegram"`` so a multi-channel
-        deployment (Slack/Feishu) doesn't echo the same DM through every
-        adapter. Best-effort: any failure logs and returns — pipeline
-        finalization already wrote the trace + handoff, so the user is
-        not stranded if Telegram is briefly unreachable.
+        deployment doesn't echo the same DM through every adapter.
+        Best-effort: any failure logs and returns.
         """
         if payload.get("channel") != "telegram":
             return
         chat_id = payload.get("chat_id")
         session_id = payload.get("session_id")
         review_url = payload.get("review_url")
-        if not isinstance(chat_id, str) or not isinstance(session_id, str) or not isinstance(review_url, str):
-            logger.warning(
-                "[Telegram] review_notification missing required fields: %r", payload
-            )
+        if not (isinstance(chat_id, str) and isinstance(session_id, str) and isinstance(review_url, str)):
+            logger.warning("[Telegram] review_notification missing fields: %r", payload)
             return
-        use_login_url = bool(payload.get("use_login_url", True))
-        try:
-            await self.send_review_notification(
-                chat_id=chat_id,
-                session_id=session_id,
-                review_url=review_url,
-                use_login_url=use_login_url,
-            )
-        except Exception:
-            logger.exception(
-                "[Telegram] review_notification handler error chat=%s session=%s",
-                chat_id,
-                session_id,
-            )
+        await self.send_review_notification(
+            chat_id=chat_id, session_id=session_id, review_url=review_url,
+        )
 
     async def send_review_notification(
         self,
@@ -674,87 +659,65 @@ class TelegramChannel(Channel):
         review_url: str,
         *,
         text: str = "Your memories from this session are ready to review.",
-        button_label: str = "Open Review",
-        use_login_url: bool = True,
     ) -> bool:
-        """Send the "memories ready" DM with an inline-keyboard review button.
+        """Send the "memories ready" DM with a Telegram LoginUrl button.
 
-        Called by ``app.channels.telegram_review_notifier`` from the
-        gateway's main loop after the offline pipeline finalizes a
-        Telegram session. Bot calls are loop-affine to ``_tg_loop``, so
-        this method always hops via ``_run_bot_call_on_telegram_loop``.
-
-        ``use_login_url=True`` produces a Telegram-attested LoginUrl
-        button (HMAC payload appended on tap; requires the URL host to
-        be registered with ``@BotFather /setdomain``). Set to False to
-        send a plain URL button — used by the one-time-token fallback
-        in ``telegram_review_notifier`` when LoginUrl is not configured.
-
-        Returns True on success. Best-effort: any failure logs and
-        returns False so the caller can decide whether to retry.
+        Best-effort: any failure logs and returns False. Bot calls are
+        loop-affine to ``_tg_loop``, so this method always hops via
+        ``_run_bot_call_on_telegram_loop``.
         """
         if not self._application or not self._tg_loop:
             return False
-
-        try:
-            from telegram import (
-                InlineKeyboardButton,
-                InlineKeyboardMarkup,
-                LoginUrl,
-            )
-        except ImportError:
-            logger.warning("[Telegram] python-telegram-bot not installed; skipping review notification")
+        keyboard = self._build_review_keyboard(review_url)
+        if keyboard is None:
             return False
-
-        if use_login_url:
-            button = InlineKeyboardButton(
-                button_label,
-                login_url=LoginUrl(url=review_url, forward_text=button_label),
-            )
-        else:
-            button = InlineKeyboardButton(button_label, url=review_url)
-        keyboard = InlineKeyboardMarkup([[button]])
-
         safe_text = self._truncate_for_telegram(text, limit=_TELEGRAM_TEXT_LIMIT)
-        bot = self._application.bot
-
-        async def _send():
-            try:
-                int_chat_id = int(chat_id)
-            except (TypeError, ValueError):
-                logger.warning("[Telegram] review notification: invalid chat_id=%r", chat_id)
-                return False
-            try:
-                sent = await bot.send_message(
-                    chat_id=int_chat_id,
-                    text=safe_text,
-                    reply_markup=keyboard,
-                )
-                self._last_bot_message[str(chat_id)] = sent.message_id
-                logger.info(
-                    "[Telegram] review notification sent chat=%s session=%s use_login_url=%s",
-                    chat_id,
-                    session_id,
-                    use_login_url,
-                )
-                return True
-            except Exception:
-                logger.exception(
-                    "[Telegram] review notification send failed chat=%s session=%s",
-                    chat_id,
-                    session_id,
-                )
-                return False
-
+        coro = self._send_review_message(chat_id, session_id, safe_text, keyboard)
         try:
-            return bool(await self._run_bot_call_on_telegram_loop(_send()))
+            return bool(await self._run_bot_call_on_telegram_loop(coro))
         except Exception:
             logger.exception(
                 "[Telegram] review notification dispatch error chat=%s session=%s",
-                chat_id,
-                session_id,
+                chat_id, session_id,
             )
             return False
+
+    @staticmethod
+    def _build_review_keyboard(review_url: str):
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LoginUrl
+        except ImportError:
+            logger.warning("[Telegram] python-telegram-bot not installed; skipping review")
+            return None
+        button = InlineKeyboardButton(
+            "Open Review",
+            login_url=LoginUrl(url=review_url, forward_text="Open Review"),
+        )
+        return InlineKeyboardMarkup([[button]])
+
+    async def _send_review_message(
+        self, chat_id: str, session_id: str, text: str, keyboard,
+    ) -> bool:
+        try:
+            int_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            logger.warning("[Telegram] review notification: invalid chat_id=%r", chat_id)
+            return False
+        try:
+            sent = await self._application.bot.send_message(
+                chat_id=int_chat_id, text=text, reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception(
+                "[Telegram] review notification send failed chat=%s session=%s",
+                chat_id, session_id,
+            )
+            return False
+        self._last_bot_message[str(chat_id)] = sent.message_id
+        logger.info(
+            "[Telegram] review notification sent chat=%s session=%s", chat_id, session_id,
+        )
+        return True
 
     # -- builder completion fan-out --------------------------------------
 

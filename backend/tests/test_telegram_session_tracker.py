@@ -1,29 +1,38 @@
 """Unit tests for ``app.channels.telegram_session_tracker``.
 
-Mirrors ``tests/test_inactivity_watcher.py`` (if any) in spirit: cover
-session-id minting, timer reset, idle-firing, failure isolation, and
-notification dispatch.
+Covers session-id minting, timer reset, idle-firing, failure isolation,
+and the in-module review-notification publish path (both LoginUrl and
+plain-token fallback). Notification publishing is asserted at the
+``publish_review_notification`` boundary because the tracker now owns
+the URL construction directly.
 """
 
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.channels import telegram_session_tracker as tracker
+from app.channels import message_bus, telegram_session_tracker as tracker
 from deerflow.sophia.session_store import SessionStore
 
 
 @pytest.fixture(autouse=True)
 def _reset(tmp_path, monkeypatch):
-    # Redirect SessionStore writes to a temp dir so tests don't litter
-    # ``users/`` in the repo root.
     fresh_store = SessionStore(base_path=tmp_path)
     monkeypatch.setattr(tracker, "_store", fresh_store)
     tracker.reset_watcher()
     yield
     tracker.reset_watcher()
+
+
+@pytest.fixture(autouse=True)
+def _reset_telegram_link_store():
+    from app.gateway import telegram_link_store
+
+    telegram_link_store.clear_all()
+    yield
+    telegram_link_store.clear_all()
 
 
 class TestRegisterActivity:
@@ -47,9 +56,9 @@ class TestRegisterActivity:
 
     def test_rebind_to_different_user_mints_new_session_id(self):
         """If the same chat is reused under a different canonical user
-        (e.g. the user re-ran /start with a different webapp account),
-        the tracker must mint a fresh session — old user's data must
-        not bleed into the new user's trace."""
+        (e.g. /start with a different webapp account), the tracker must
+        mint a fresh session — old user data must not bleed into the new
+        user's trace."""
         sid_a = tracker.register_activity(
             chat_id="100", user_id="user-a", thread_id="thread-1"
         )
@@ -71,7 +80,7 @@ class TestRegisterActivity:
         assert tracker.register_activity("c", "u", "") == ""
         assert tracker.get_active_chat_count() == 0
 
-    def test_session_record_is_persisted_on_first_activity(self, monkeypatch):
+    def test_session_record_is_persisted_on_first_activity(self):
         sid = tracker.register_activity(
             chat_id="100", user_id="user-1", thread_id="thread-1"
         )
@@ -90,6 +99,106 @@ class TestUnregister:
 
 
 @pytest.mark.anyio
+class TestEnqueueReviewNotification:
+    async def test_disabled_by_feature_flag(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED", "false")
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        spy = AsyncMock()
+        monkeypatch.setattr(tracker, "publish_review_notification", spy)
+
+        ok = await tracker.enqueue_review_notification("100", "user-1", "sess-1")
+        assert ok is False
+        spy.assert_not_awaited()
+
+    async def test_skips_when_base_url_unset(self, monkeypatch):
+        monkeypatch.delenv("SOPHIA_WEB_BASE_URL", raising=False)
+        monkeypatch.delenv("TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED", raising=False)
+        spy = AsyncMock()
+        monkeypatch.setattr(tracker, "publish_review_notification", spy)
+
+        ok = await tracker.enqueue_review_notification("100", "user-1", "sess-1")
+        assert ok is False
+        spy.assert_not_awaited()
+
+    async def test_login_url_payload_shape(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        monkeypatch.delenv("TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED", raising=False)
+        monkeypatch.delenv("TELEGRAM_REVIEW_USE_LOGIN_URL", raising=False)
+        spy = AsyncMock()
+        monkeypatch.setattr(tracker, "publish_review_notification", spy)
+
+        ok = await tracker.enqueue_review_notification("100", "user-1", "sess-abc")
+        assert ok is True
+        spy.assert_awaited_once()
+        (payload,) = spy.call_args.args
+        assert payload["channel"] == "telegram"
+        assert payload["chat_id"] == "100"
+        assert payload["user_id"] == "user-1"
+        assert payload["session_id"] == "sess-abc"
+        assert payload["use_login_url"] is True
+        assert payload["review_url"] == (
+            "https://app.example.com/api/auth/telegram-login?session=sess-abc"
+        )
+
+    async def test_handles_trailing_slash_on_base(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com/")
+        monkeypatch.delenv("TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED", raising=False)
+        monkeypatch.delenv("TELEGRAM_REVIEW_USE_LOGIN_URL", raising=False)
+        spy = AsyncMock()
+        monkeypatch.setattr(tracker, "publish_review_notification", spy)
+
+        await tracker.enqueue_review_notification("100", "user-1", "sess-abc")
+        (payload,) = spy.call_args.args
+        assert "//api" not in payload["review_url"].replace("https://", "")
+
+    async def test_swallows_publish_exception(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        spy = AsyncMock(side_effect=RuntimeError("bus down"))
+        monkeypatch.setattr(tracker, "publish_review_notification", spy)
+
+        ok = await tracker.enqueue_review_notification("100", "user-1", "sess-1")
+        assert ok is False
+
+    async def test_invalid_chat_or_session_returns_false(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        spy = AsyncMock()
+        monkeypatch.setattr(tracker, "publish_review_notification", spy)
+
+        assert (
+            await tracker.enqueue_review_notification("", "user-1", "sess-1") is False
+        )
+        assert (
+            await tracker.enqueue_review_notification("100", "user-1", "") is False
+        )
+        spy.assert_not_awaited()
+
+    async def test_payload_reaches_real_bus_subscriber(self, monkeypatch):
+        """Integration: end-to-end across the real bus."""
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        monkeypatch.delenv("TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED", raising=False)
+        monkeypatch.delenv("TELEGRAM_REVIEW_USE_LOGIN_URL", raising=False)
+
+        bus = message_bus.MessageBus()
+        message_bus.set_global_bus(bus)
+        try:
+            received: list[dict] = []
+
+            async def listener(payload):
+                received.append(payload)
+
+            bus.subscribe_review_notification(listener)
+            ok = await tracker.enqueue_review_notification(
+                "100", "user-1", "sess-abc"
+            )
+            assert ok is True
+            assert len(received) == 1
+            assert received[0]["session_id"] == "sess-abc"
+            assert received[0]["use_login_url"] is True
+        finally:
+            message_bus.set_global_bus(None)
+
+
+@pytest.mark.anyio
 class TestInactivityFiring:
     async def test_idle_chat_fires_pipeline(self, monkeypatch):
         called: dict = {}
@@ -99,13 +208,15 @@ class TestInactivityFiring:
             called["session_id"] = session_id
             called["thread_id"] = thread_id
 
+        # Suppress the publish so this test only asserts the pipeline call.
+        monkeypatch.setattr(tracker, "publish_review_notification", AsyncMock())
+
         with patch(
             "deerflow.sophia.offline_pipeline.run_offline_pipeline", fake_pipeline
         ):
             sid = tracker.register_activity(
                 chat_id="100", user_id="user-1", thread_id="thread-1"
             )
-            # Force the entry past the timeout window.
             tracker._active_chats["100"]["last_active"] -= tracker.INACTIVITY_TIMEOUT + 1
             await tracker._check_inactive_chats()
 
@@ -114,7 +225,6 @@ class TestInactivityFiring:
             "session_id": sid,
             "thread_id": "thread-1",
         }
-        # Entry was popped after firing.
         assert tracker.get_active_chat_count() == 0
 
     async def test_active_chat_does_not_fire(self, monkeypatch):
@@ -123,13 +233,14 @@ class TestInactivityFiring:
         def fake_pipeline(*a, **kw):
             calls.append(a)
 
+        monkeypatch.setattr(tracker, "publish_review_notification", AsyncMock())
+
         with patch(
             "deerflow.sophia.offline_pipeline.run_offline_pipeline", fake_pipeline
         ):
             tracker.register_activity(
                 chat_id="100", user_id="user-1", thread_id="thread-1"
             )
-            # Don't advance time; entry is fresh.
             await tracker._check_inactive_chats()
 
         assert calls == []
@@ -139,65 +250,30 @@ class TestInactivityFiring:
         def boom(*a, **kw):
             raise RuntimeError("pipeline broken")
 
-        with patch(
-            "deerflow.sophia.offline_pipeline.run_offline_pipeline", boom
-        ):
+        monkeypatch.setattr(tracker, "publish_review_notification", AsyncMock())
+
+        with patch("deerflow.sophia.offline_pipeline.run_offline_pipeline", boom):
             tracker.register_activity(
                 chat_id="100", user_id="user-1", thread_id="thread-1"
             )
             tracker._active_chats["100"]["last_active"] -= tracker.INACTIVITY_TIMEOUT + 1
             await tracker._check_inactive_chats()
 
-        # Even on pipeline error, the entry is popped and the session paused.
         assert tracker.get_active_chat_count() == 0
 
-    async def test_notification_is_called_after_pipeline(self, monkeypatch):
-        calls: list = []
+    async def test_notify_runs_after_pipeline(self, monkeypatch):
+        order: list[str] = []
 
         def fake_pipeline(*a, **kw):
-            calls.append(("pipeline", a))
+            order.append("pipeline")
 
-        def fake_enqueue(chat_id, user_id, session_id):
-            calls.append(("notify", chat_id, user_id, session_id))
+        async def fake_publish(payload):
+            order.append("notify")
 
-        # Dynamically inject a fake notifier module so the lazy import
-        # inside _check_inactive_chats finds it.
-        import sys
-        import types
-
-        fake_module = types.ModuleType("app.channels.telegram_review_notifier")
-        fake_module.enqueue_review_notification = fake_enqueue
-        monkeypatch.setitem(sys.modules, "app.channels.telegram_review_notifier", fake_module)
-
-        with patch(
-            "deerflow.sophia.offline_pipeline.run_offline_pipeline", fake_pipeline
-        ):
-            sid = tracker.register_activity(
-                chat_id="100", user_id="user-1", thread_id="thread-1"
-            )
-            tracker._active_chats["100"]["last_active"] -= tracker.INACTIVITY_TIMEOUT + 1
-            await tracker._check_inactive_chats()
-
-        # Notification must run AFTER the pipeline.
-        assert [c[0] for c in calls] == ["pipeline", "notify"]
-        notify_call = calls[1]
-        assert notify_call[1] == "100"
-        assert notify_call[2] == "user-1"
-        assert notify_call[3] == sid
-
-    async def test_notification_failure_is_swallowed(self, monkeypatch):
-        def fake_pipeline(*a, **kw):
-            return None
-
-        def boom(*a, **kw):
-            raise RuntimeError("notifier broken")
-
-        import sys
-        import types
-
-        fake_module = types.ModuleType("app.channels.telegram_review_notifier")
-        fake_module.enqueue_review_notification = boom
-        monkeypatch.setitem(sys.modules, "app.channels.telegram_review_notifier", fake_module)
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        monkeypatch.delenv("TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED", raising=False)
+        monkeypatch.delenv("TELEGRAM_REVIEW_USE_LOGIN_URL", raising=False)
+        monkeypatch.setattr(tracker, "publish_review_notification", fake_publish)
 
         with patch(
             "deerflow.sophia.offline_pipeline.run_offline_pipeline", fake_pipeline
@@ -208,5 +284,23 @@ class TestInactivityFiring:
             tracker._active_chats["100"]["last_active"] -= tracker.INACTIVITY_TIMEOUT + 1
             await tracker._check_inactive_chats()
 
-        # Even if the notifier errors, cleanup completes.
+        assert order == ["pipeline", "notify"]
+
+    async def test_notify_failure_is_swallowed(self, monkeypatch):
+        async def boom(payload):
+            raise RuntimeError("bus down")
+
+        monkeypatch.setenv("SOPHIA_WEB_BASE_URL", "https://app.example.com")
+        monkeypatch.setattr(tracker, "publish_review_notification", boom)
+
+        with patch(
+            "deerflow.sophia.offline_pipeline.run_offline_pipeline",
+            lambda *a, **kw: None,
+        ):
+            tracker.register_activity(
+                chat_id="100", user_id="user-1", thread_id="thread-1"
+            )
+            tracker._active_chats["100"]["last_active"] -= tracker.INACTIVITY_TIMEOUT + 1
+            await tracker._check_inactive_chats()
+
         assert tracker.get_active_chat_count() == 0
