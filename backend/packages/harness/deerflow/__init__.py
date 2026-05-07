@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import warnings
 
+
 # LangChain's tool runtime wrapper emits ``PydanticSerializationUnexpectedValue``
 # on the ``context`` RunnableConfig field every time a tool is invoked with
 # a non-None context dict (``{'thread_id': ..., 'sandbox_id': 'local'}``).

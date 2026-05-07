@@ -53,7 +53,7 @@ _WEBHOOK_TIMEOUT_SECONDS = 2.0
 # enough that no real session collides with itself: at peak Sophia rates
 # (~1 task per minute), 10k entries cover a week of continuous work.
 _EMITTED_CACHE_MAX = 10_000
-_emitted_task_ids: "OrderedDict[str, None]" = OrderedDict()
+_emitted_task_ids: OrderedDict[str, None] = OrderedDict()
 _emitted_lock = threading.Lock()
 
 

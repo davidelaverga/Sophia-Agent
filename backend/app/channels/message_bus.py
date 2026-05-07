@@ -226,10 +226,10 @@ class MessageBus:
 # ---------------------------------------------------------------------------
 
 
-_global_bus: "MessageBus | None" = None
+_global_bus: MessageBus | None = None
 
 
-def set_global_bus(bus: "MessageBus | None") -> None:
+def set_global_bus(bus: MessageBus | None) -> None:
     """Register (or clear) the process-wide bus.
 
     Channels register themselves on this bus during their startup. The
@@ -240,7 +240,7 @@ def set_global_bus(bus: "MessageBus | None") -> None:
     _global_bus = bus
 
 
-def get_global_bus() -> "MessageBus | None":
+def get_global_bus() -> MessageBus | None:
     return _global_bus
 
 
