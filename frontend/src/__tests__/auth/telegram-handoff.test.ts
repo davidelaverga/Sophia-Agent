@@ -279,6 +279,25 @@ describe("/api/auth/telegram-login GET", () => {
     )
     expect(response.status).toBe(500)
   })
+
+  it("redirects without cookie when user declined LoginUrl (no hash param)", async () => {
+    // Telegram's LoginUrl button: when the user taps and then declines
+    // the consent prompt, Telegram redirects to our URL with NO auth
+    // params at all. We must NOT 400 — that dead-ends the handoff.
+    // Instead redirect to /recap and let AuthGate handle Google sign-in.
+    const { GET } = await loadRoute()
+    const session = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
+
+    const response = await GET(buildRequest({ session }) as never)
+    expect(response.status).toBe(302)
+    const location = response.headers.get("location") ?? ""
+    expect(location).toContain(`/recap/${session}`)
+    expect(location).toContain(`next=%2Frecap%2F${session}`)
+    expect(location).toContain("from=telegram")
+    // No correlation cookie — we have no Telegram-attested identity.
+    const setCookie = response.headers.get("set-cookie") ?? ""
+    expect(setCookie).not.toContain("sophia-telegram-handoff")
+  })
 })
 
 // ---------------------------------------------------------------------------

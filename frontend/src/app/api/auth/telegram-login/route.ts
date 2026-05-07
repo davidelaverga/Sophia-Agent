@@ -134,6 +134,14 @@ function errorResponse(status: number, reason: string): NextResponse {
   return NextResponse.json({ ok: false, reason }, { status })
 }
 
+function buildRecapRedirect(session: string, origin: string): URL {
+  const recapPath = `/recap/${session}`
+  const redirectUrl = new URL(recapPath, origin)
+  redirectUrl.searchParams.set("next", recapPath)
+  redirectUrl.searchParams.set("from", "telegram")
+  return redirectUrl
+}
+
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const url = new URL(request.url)
   const session = url.searchParams.get("session")
@@ -153,17 +161,22 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     params[key] = value
   }
 
+  // If the user declined the LoginUrl consent prompt, Telegram redirects
+  // back to our URL with NO auth payload (no ``hash``/``id``/``auth_date``).
+  // Treat that as a soft pass-through: redirect to /recap/{session} with
+  // ``from=telegram`` for observability and let AuthGate complete the
+  // Google sign-in. No correlation cookie because we have no Telegram-
+  // attested identity in this branch.
+  if (!params.hash) {
+    return NextResponse.redirect(buildRecapRedirect(session, url.origin), 302)
+  }
+
   const result = verifyTelegramAuth(params, botToken)
   if (!result.ok) {
     return errorResponse(400, result.reason)
   }
 
-  const recapPath = `/recap/${session}`
-  const redirectUrl = new URL(recapPath, url.origin)
-  redirectUrl.searchParams.set("next", recapPath)
-  redirectUrl.searchParams.set("from", "telegram")
-
-  const response = NextResponse.redirect(redirectUrl, 302)
+  const response = NextResponse.redirect(buildRecapRedirect(session, url.origin), 302)
   // Short-lived correlation cookie so observability can match tap → recap.
   // Telegram ids are not sensitive on their own; httpOnly + 60s TTL.
   response.cookies.set("sophia-telegram-handoff", result.telegramUserId, {
