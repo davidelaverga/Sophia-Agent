@@ -27,6 +27,7 @@ from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
@@ -955,6 +956,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 steps_completed=non_artifact_turns,
                                 reason=f"consecutive_empty_emit_rejections={consecutive_rejections}",
                             )
+                            # Fire the gateway webhook so Telegram still
+                            # receives the (degraded) artifact card.
+                            fire_completion_webhook_from_artifact(
+                                state=state,
+                                runtime=runtime,
+                                artifact=fallback,
+                                status="completed",
+                            )
                             return {
                                 "builder_result": fallback,
                                 "builder_non_artifact_turns": 0,
@@ -984,9 +993,35 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     outputs_host_path = (
                         thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
                     )
-                    thread_id = runtime.context.get("thread_id") if runtime.context else None
+                    # Phase-1 async migration created a fresh builder thread
+                    # per build (deepagents native dispatch). The Telegram
+                    # channel adapter looks up artifact bytes via the
+                    # CONVERSATION thread_id (parent / companion), not the
+                    # ephemeral build thread, so we namespace the upload
+                    # under the parent thread to keep the storage path and
+                    # the channel-adapter download path aligned.
+                    #
+                    # Production traceback (2026-05-06T22:18:16): Telegram
+                    # downloaded from sophia_builder/<parent>/<file> and got
+                    # 400 because the file lived at sophia_builder/<builder>/<file>.
+                    # Switching to parent_thread_id here restores the legacy
+                    # SubagentExecutor convention.
+                    delegation_for_upload = (
+                        state.get("delegation_context")
+                        if isinstance(state.get("delegation_context"), dict)
+                        else {}
+                    )
+                    parent_thread_id = (
+                        delegation_for_upload.get("parent_thread_id")
+                        if isinstance(delegation_for_upload, dict)
+                        else None
+                    )
+                    builder_thread_id = (
+                        runtime.context.get("thread_id") if runtime.context else None
+                    )
+                    upload_thread_id = parent_thread_id or builder_thread_id
                     _upload_builder_outputs_to_supabase(
-                        thread_id=thread_id,
+                        thread_id=upload_thread_id,
                         outputs_host_path=outputs_host_path,
                         artifact_args=args,
                     )
@@ -995,6 +1030,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         f"builder artifact captured: type={args.get('artifact_type')}, "
                         f"confidence={args.get('confidence')}",
                         _t0,
+                    )
+                    # Fire the gateway webhook so the Telegram channel adapter
+                    # (and webapp SSE) deliver the artifact bytes to the user.
+                    # Replaces the deleted ``SubagentExecutor`` terminal-flip
+                    # call site after the Phase-1 async migration.
+                    fire_completion_webhook_from_artifact(
+                        state=state,
+                        runtime=runtime,
+                        artifact=args,
+                        status="completed",
                     )
                     return {
                         "builder_result": args,
@@ -1061,6 +1106,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         steps_completed=non_artifact_turns,
                         reason="hard_ceiling",
                     )
+                    # Fire the gateway webhook so Telegram receives the
+                    # ceiling-fallback artifact (or an error card via the
+                    # phantom-success guard if no real file landed).
+                    fire_completion_webhook_from_artifact(
+                        state=state,
+                        runtime=runtime,
+                        artifact=fallback,
+                        status="completed",
+                    )
                     return {
                         "builder_result": fallback,
                         "builder_non_artifact_turns": 0,
@@ -1109,6 +1163,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
             )
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
+            # Fire the gateway webhook (phantom-success guard will likely
+            # coerce this to an error card since the fallback has no
+            # artifact_path and confidence=0.3).
+            fire_completion_webhook_from_artifact(
+                state=state,
+                runtime=runtime,
+                artifact=fallback,
+                status="completed",
+            )
             return {
                 "builder_result": fallback,
                 "builder_non_artifact_turns": 0,

@@ -12,9 +12,6 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-# Apply defensive langchain patches *before* importing anything that builds
-# the agent graph. See deerflow.agents._langchain_patches for details.
-from deerflow.agents import _langchain_patches  # noqa: F401
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
