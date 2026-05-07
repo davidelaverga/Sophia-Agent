@@ -280,6 +280,16 @@ describe("/api/auth/telegram-login GET", () => {
     expect(response.status).toBe(500)
   })
 
+
+  it("rejects partial auth payloads with 400", async () => {
+    const { GET } = await loadRoute()
+    const session = "a1b2c3d4e5f60718a1b2c3d4e5f60718"
+
+    const response = await GET(
+      buildRequest({ session, id: "10000" }) as never,
+    )
+    expect(response.status).toBe(400)
+  })
   it("redirects without cookie when user declined LoginUrl (no hash param)", async () => {
     // Telegram's LoginUrl button: when the user taps and then declines
     // the consent prompt, Telegram redirects to our URL with NO auth

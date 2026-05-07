@@ -167,7 +167,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   // ``from=telegram`` for observability and let AuthGate complete the
   // Google sign-in. No correlation cookie because we have no Telegram-
   // attested identity in this branch.
-  if (!params.hash) {
+  const hasAnyAuthField = Boolean(params.hash || params.id || params.auth_date)
+  if (!hasAnyAuthField) {
     return NextResponse.redirect(buildRecapRedirect(session, url.origin), 302)
   }
 
