@@ -81,17 +81,19 @@ sophia/  (fork of bytedance/deer-flow)
 └── .env
 ```
 ---
-## The 14-Middleware Chain — Order Is Law
+## Companion Middleware Chain — Order Is Law
+The conceptual chain (consult `backend/packages/harness/deerflow/agents/sophia_agent/agent.py` for the exact production list, which also includes `MessageCoercionMiddleware`, `TurnCountMiddleware`, `WebResearchGuidanceMiddleware`, `BuilderCommandMiddleware`, `PromptAssemblyMiddleware`, `DanglingToolCallMiddleware`, `AnthropicPromptCachingMiddleware`):
 ```python
 middlewares = [
     # 1. Infrastructure
     ThreadDataMiddleware(),
     # 2. Crisis fast-path — BEFORE any expensive middleware
     CrisisCheckMiddleware(),
-    # 3. Always-loaded identity files
+    # 3. Always-loaded identity files (incl. AGENTS.md = companion ↔ builder contract)
     FileInjectionMiddleware(SKILLS_PATH / "soul.md"),
     FileInjectionMiddleware(SKILLS_PATH / "voice.md",       skip_on_crisis=True),
     FileInjectionMiddleware(SKILLS_PATH / "techniques.md",  skip_on_crisis=True),
+    FileInjectionMiddleware(SKILLS_PATH / "AGENTS.md"),
     # 4. Platform signal — sets state["platform"] for all downstream
     PlatformContextMiddleware(),
     # 5–6. User context
@@ -105,8 +107,17 @@ middlewares = [
     SkillRouterMiddleware(SKILLS_PATH / "skills"),
     # 11. Memory — after ritual+skill set (retrieval biased by both)
     Mem0MemoryMiddleware(user_id),
+    # 11b. Build awareness — refreshes async_tasks status from SDK and injects
+    #      short prompt block so Sophia answers "how's the build going?"
+    #      without needing to call check_async_task. Sits between Mem0 and
+    #      Artifact so the block lands in the assembled system message.
+    BuildAwarenessMiddleware(),
     # 12. Artifact system
     ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
+    # 12b. deepagents AsyncSubAgentMiddleware — always-on. Owns lifecycle
+    #      (check/update/cancel/list_async_task). start_async_task is
+    #      filtered; the model launches builds via start_builder_task.
+    AsyncSubAgentMiddleware(...),
     # 13–14. DeerFlow (adapted)
     SophiaTitleMiddleware(),
     SophiaSummarizationMiddleware(),
@@ -152,7 +163,10 @@ class SophiaState(TypedDict):
     previous_artifact: dict | None
     # Memory
     injected_memories: list[str]   # memory IDs for trace logging
-    # Builder
+    # Builder lifecycle (post-migration: deepagents async-subagent path)
+    async_tasks: dict[str, dict]   # canonical: keyed by builder thread_id; agent_name="sophia_builder"
+    delegation_context: dict | None  # task brief + parent_thread_id seeded by start_builder_task
+    # Legacy fields (kept for in-flight thread compatibility — primary lifecycle is async_tasks)
     builder_task: dict | None
     builder_result: dict | None
 ```
@@ -218,17 +232,21 @@ if ritual:
 ## Tools Available to Companion
 ```python
 tools = [
-    emit_artifact,       # REQUIRED every turn — carries TTS emotion + session continuity
-    switch_to_builder,   # delegates to sophia_builder (lead_agent) via task()
-    retrieve_memories,   # targeted deep retrieval (reflect flow, specific queries)
+    emit_artifact,        # REQUIRED every turn — carries TTS emotion + session continuity
+    start_builder_task,   # delegates to sophia_builder via deepagents AsyncSubAgentMiddleware
+    retrieve_memories,    # targeted deep retrieval (reflect flow, specific queries)
 ]
+# Plus the four lifecycle tools native to deepagents AsyncSubAgentMiddleware:
+# check_async_task / update_async_task / cancel_async_task / list_async_tasks.
+# (start_async_task is filtered out — the model only launches via the
+# enriched start_builder_task wrapper.)
 ```
 ### emit_artifact — 13 required fields
 `session_goal`, `active_goal`, `next_step`, `takeaway`, `reflection` (nullable), `tone_estimate` (0–4.0), `tone_target` (tone_estimate + 0.5, max 4.0), `active_tone_band`, `skill_loaded`, `ritual_phase`, `voice_emotion_primary`, `voice_emotion_secondary`, `voice_speed` (slow|gentle|normal|engaged|energetic).
 Voice speeds → Cartesia values: slow=0.8, gentle=0.9, normal=1.0, engaged=1.05, energetic=1.15.
 Artifact arrives **after** the text stream completes. It updates the emotion for the **next** TTS call.
-### switch_to_builder
-Companion asks all clarifying questions first, then calls `switch_to_builder` with complete specs. Builder cannot interrupt the parent graph for clarification. Companion stays live and relays progress while builder works asynchronously.
+### start_builder_task
+Companion asks all clarifying questions first, then calls `start_builder_task(description, task_type)` with a complete brief. The wrapper (in `deerflow.sophia.tools.start_builder_task`) enriches the description with live session context (memories, emotional state, ritual, explicit URLs) before dispatching to the `sophia_builder` graph via LangGraph SDK ASGI in-process transport. It writes a row to `state["async_tasks"]` keyed by builder thread_id and returns immediately. Lifecycle (check / update / cancel / list) is owned by deepagents' native `AsyncSubAgentMiddleware`. Builder artifacts are uploaded to Supabase under the **parent (companion) thread_id** so the channel adapter's bytes-download path stays aligned with the upload path; `BuildAwarenessMiddleware` (companion side) refreshes `async_tasks` status from the SDK on companion turns and injects a short prompt block so Sophia answers "how's the build going?" naturally without polling.
 ---
 ## Platform Values and Effects
 | Value | Who sets it | What adapts downstream |
