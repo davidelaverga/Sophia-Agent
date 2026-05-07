@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 import {
   isSafeSessionId,
+  isVerificationFailure,
   verifyTelegramAuth,
 } from "../../app/api/auth/telegram-login/route"
 import {
@@ -34,7 +35,11 @@ function signPayload(
     .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
     .map(([key, value]) => `${key}=${value}`)
     .join("\n")
-  const secretKey = crypto.createHash("sha256").update(botToken).digest()
+  // See route.ts for why ``Uint8Array.from`` is needed here (Buffer →
+  // BinaryLike type mismatch under newer @types/node).
+  const secretKey = Uint8Array.from(
+    crypto.createHash("sha256").update(botToken).digest(),
+  )
   return crypto
     .createHmac("sha256", secretKey)
     .update(dataCheckString)
@@ -76,7 +81,7 @@ describe("verifyTelegramAuth", () => {
 
     const result = verifyTelegramAuth(params, FAKE_BOT_TOKEN, now)
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe("invalid_hash")
+    if (isVerificationFailure(result)) expect(result.reason).toBe("invalid_hash")
   })
 
   it("rejects a payload signed with a different bot token", () => {
@@ -86,7 +91,7 @@ describe("verifyTelegramAuth", () => {
 
     const result = verifyTelegramAuth(params, FAKE_BOT_TOKEN, now)
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe("invalid_hash")
+    if (isVerificationFailure(result)) expect(result.reason).toBe("invalid_hash")
   })
 
   it("rejects when auth_date is older than 5 minutes", () => {
@@ -97,7 +102,7 @@ describe("verifyTelegramAuth", () => {
 
     const result = verifyTelegramAuth(params, FAKE_BOT_TOKEN, now)
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe("expired")
+    if (isVerificationFailure(result)) expect(result.reason).toBe("expired")
   })
 
   it("rejects when missing required fields", () => {
@@ -112,7 +117,7 @@ describe("verifyTelegramAuth", () => {
       "",
     )
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe("missing_bot_token")
+    if (isVerificationFailure(result)) expect(result.reason).toBe("missing_bot_token")
   })
 
   it("rejects mismatched-length hashes without throwing", () => {
@@ -123,7 +128,7 @@ describe("verifyTelegramAuth", () => {
       now,
     )
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toBe("invalid_hash")
+    if (isVerificationFailure(result)) expect(result.reason).toBe("invalid_hash")
   })
 
   it("includes optional Telegram fields in the data check string", () => {

@@ -58,6 +58,19 @@ export type VerificationError =
   | "invalid_hash"
   | "missing_bot_token"
 
+/**
+ * Type-guard predicate. Required because ``tsconfig.json`` has
+ * ``strict: false`` (and thus ``strictNullChecks: false``), under which
+ * TypeScript will NOT narrow a discriminated union from a plain
+ * ``if (!result.ok)`` check. Callers that need ``result.reason`` must
+ * gate access through this guard.
+ */
+export function isVerificationFailure(
+  r: VerificationResult,
+): r is { ok: false; reason: VerificationError } {
+  return !r.ok
+}
+
 const _AUTH_DATE_WINDOW_SECONDS = 300
 
 const _REQUIRED = ["hash", "id", "auth_date"] as const
@@ -91,7 +104,14 @@ export function verifyTelegramAuth(
     .map(([key, value]) => `${key}=${value}`)
     .join("\n")
 
-  const secretKey = crypto.createHash("sha256").update(botToken).digest()
+  // ``Uint8Array.from(buffer)`` materializes a Uint8Array<ArrayBuffer>
+  // (no ``ArrayBufferLike`` ambiguity). Newer @types/node typings narrow
+  // ``Buffer extends Uint8Array<ArrayBufferLike>`` which fails to satisfy
+  // ``crypto.BinaryLike``'s ``Uint8Array<ArrayBuffer>``. Runtime semantics
+  // are identical — same bytes, same HMAC.
+  const secretKey = Uint8Array.from(
+    crypto.createHash("sha256").update(botToken).digest(),
+  )
   const expectedHash = crypto
     .createHmac("sha256", secretKey)
     .update(dataCheckString)
@@ -103,8 +123,8 @@ export function verifyTelegramAuth(
   let matches = false
   try {
     matches = crypto.timingSafeEqual(
-      Buffer.from(expectedHash, "hex"),
-      Buffer.from(params.hash, "hex"),
+      Uint8Array.from(Buffer.from(expectedHash, "hex")),
+      Uint8Array.from(Buffer.from(params.hash, "hex")),
     )
   } catch {
     matches = false
@@ -173,7 +193,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   }
 
   const result = verifyTelegramAuth(params, botToken)
-  if (!result.ok) {
+  if (isVerificationFailure(result)) {
     return errorResponse(400, result.reason)
   }
 
