@@ -894,6 +894,31 @@ class ChannelManager:
         if thread_id is None:
             thread_id = await self._create_thread(client, msg)
 
+        # Register activity for Telegram so the offline pipeline fires on
+        # 10-min idle (mirrors the web ``inactivity_watcher`` pattern). The
+        # tracker mints a fresh session_id on first activity for a chat
+        # and persists a ``SessionRecord`` so traces / handoffs / Mem0
+        # candidates land under a stable session id.
+        if msg.channel_name == "telegram":
+            try:
+                from app.channels.telegram_session_tracker import register_activity
+                from app.gateway.telegram_link_store import resolve_user_id
+
+                canonical_user_id = (
+                    resolve_user_id("telegram", msg.chat_id) or msg.user_id
+                )
+                register_activity(
+                    chat_id=msg.chat_id,
+                    user_id=canonical_user_id,
+                    thread_id=thread_id,
+                )
+            except Exception:
+                # Never let session tracking break message delivery.
+                logger.warning(
+                    "[Manager] telegram session tracker register_activity failed",
+                    exc_info=True,
+                )
+
         assistant_id, run_config, run_context = self._resolve_run_params(msg, thread_id)
         if msg.channel_name == "feishu":
             await self._handle_streaming_chat(

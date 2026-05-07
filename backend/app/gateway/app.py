@@ -100,6 +100,19 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("Failed to start inactivity watcher")
 
+    # Start Telegram-side session tracker (mirrors the web watcher but
+    # keys on chat_id; fires the offline pipeline + memory-review
+    # notification on 10-min Telegram idle).
+    try:
+        from app.channels.telegram_session_tracker import (
+            start_watcher as start_telegram_watcher,
+        )
+
+        await start_telegram_watcher()
+        logger.info("Telegram session tracker started")
+    except Exception:
+        logger.exception("Failed to start Telegram session tracker")
+
     yield
 
     # Stop inactivity watcher
@@ -109,6 +122,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await stop_watcher()
     except Exception:
         logger.exception("Failed to stop inactivity watcher")
+
+    try:
+        from app.channels.telegram_session_tracker import (
+            stop_watcher as stop_telegram_watcher,
+        )
+
+        await stop_telegram_watcher()
+    except Exception:
+        logger.exception("Failed to stop Telegram session tracker")
 
     # Stop channel service on shutdown
     try:
@@ -250,6 +272,12 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Telegram link API is mounted at /api/sophia/{user_id}/telegram/*
     app.include_router(telegram_link.router)
+
+    # Internal Telegram review endpoint (one-time-token redeem). Guarded
+    # by X-Sophia-Internal-Token header — see routers/telegram_review.py.
+    from app.gateway.routers import telegram_review
+
+    app.include_router(telegram_review.router)
 
     # Channels API is mounted at /api/channels
     app.include_router(channels.router)

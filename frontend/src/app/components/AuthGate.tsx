@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode } from "react"
 
 import { authBypassEnabled } from "@/app/lib/auth/dev-bypass"
+import { resolveSafeCallbackURL } from "@/app/lib/auth/safe-redirect"
 import { authClient } from "@/server/better-auth/client"
 
 import { useCopy, useTranslation } from "../copy"
@@ -907,7 +908,7 @@ export function AuthGate({
     try {
       await authClient.signIn.social({
         provider: "google",
-        callbackURL: "/",
+        callbackURL: resolveSafeCallbackURL(),
       })
     } catch {
       setIsLoggingIn(false)
