@@ -347,7 +347,11 @@ def _write_offline_recap(
         "ended_at": datetime.now(UTC).isoformat(),
         "turn_count": turn_count,
         "status": "processing",
-        "recap_artifacts": None,
+        # Empty dict (NOT None) so the frontend's mapper doesn't early-null-
+        # return on the recap envelope. With ``None`` the page treats the
+        # whole recap as unrenderable and the hydration step that pulls
+        # Mem0 candidates from ``/api/memory/recent`` never runs.
+        "recap_artifacts": {},
     }
     recap_path.parent.mkdir(parents=True, exist_ok=True)
     recap_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

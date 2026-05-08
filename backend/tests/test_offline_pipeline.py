@@ -674,7 +674,9 @@ class TestWriteOfflineRecap:
         assert payload["context_mode"] == "work"
         assert payload["turn_count"] == 6
         assert payload["status"] == "processing"
-        assert payload["recap_artifacts"] is None
+        # Empty dict (NOT None) so the frontend mapper accepts the envelope
+        # and the hydration step gets a chance to merge Mem0 candidates.
+        assert payload["recap_artifacts"] == {}
         assert payload["ended_at"]  # ISO string set
 
     def test_skips_when_recap_already_exists(self, tmp_path, monkeypatch):
