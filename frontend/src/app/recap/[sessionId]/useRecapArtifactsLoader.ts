@@ -354,16 +354,10 @@ export function useRecapArtifactsLoader({
             const shouldRetryFetchedMemories = shouldRetryMemories(mapped.endedAt || (typeof data?.ended_at === 'string' ? data.ended_at : null));
 
             if (!hasMappedMemories && shouldRetryFetchedMemories) {
-              if (await sessionHasReviewedMemories(artifactsPayload, sessionId)) {
-                if (hasRecentEndHint) {
-                  clearRecentSessionEndHint();
-                }
-                setArtifacts(sessionId, mapped);
-                useSessionHistoryStore.getState().markRecapViewed(sessionId);
-                setStatus('reviewed');
-                return;
-              }
-
+              // Freshly ended sessions can briefly return an envelope with no
+              // artifacts while the offline pipeline is still writing. Always
+              // retry first in this window so we do not prematurely mark the
+              // recap as reviewed from stale approved memories.
               setArtifacts(sessionId, mapped);
 
               if (scheduleMemoryRetry(shouldRetryFetchedMemories)) {
