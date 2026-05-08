@@ -590,6 +590,44 @@ class TestSerializeMessages:
             {"role": "assistant", "content": "I hear you."},
         ]
 
+    def test_falls_back_to_type_field_for_langchain_serialized_dicts(self):
+        """LangGraph's ``GET /threads/{id}/state`` returns LangChain
+        BaseMessage objects serialized as JSON dicts with ``type`` (NOT
+        ``role``). Without this fallback, the dict branch leaves role
+        blank, the extractor drops every message, and a Telegram session
+        with real content produces 0 Mem0 memories. Regression guard."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {
+                "type": "human",
+                "content": "I had a great conversation today.",
+                "additional_kwargs": {},
+                "response_metadata": {},
+            },
+            {
+                "type": "ai",
+                "content": "That sounds wonderful.",
+                "additional_kwargs": {},
+                "response_metadata": {},
+            },
+        ])
+        assert out == [
+            {"role": "user", "content": "I had a great conversation today."},
+            {"role": "assistant", "content": "That sounds wonderful."},
+        ]
+
+    def test_role_takes_precedence_over_type_when_both_present(self):
+        """If a message somehow has both keys, ``role`` wins. Defensive
+        — keeps channel-adapter-built dicts deterministic even if a
+        future LangChain version started emitting both."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {"role": "human", "type": "ai", "content": "hi"},
+        ])
+        assert out == [{"role": "user", "content": "hi"}]
+
     def test_flattens_list_content_in_dict_messages(self):
         """Telegram inbounds with attachments arrive as list-of-content-blocks.
         We extract the text blocks; image / pdf blocks are dropped at this layer

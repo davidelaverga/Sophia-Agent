@@ -428,18 +428,28 @@ def _flatten_content(content: Any) -> str:
 def _serialize_messages(messages: list) -> list[dict]:
     """Normalize messages to ``[{"role": ..., "content": ...}]``.
 
-    Handles both LangChain ``BaseMessage`` objects and dicts. Critically,
-    the dict branch ALSO normalizes role values (Telegram/Slack/Feishu
-    inbounds arrive as ``{"role": "human", ...}``) and flattens
-    list-shaped content. Without that, ``extraction._format_transcript``
-    silently drops every channel-originated message because it only
-    accepts ``role == "user"`` — that was the production bug where 6
-    messages produced 0 memories on a Telegram session.
+    Handles three shapes:
+
+    1. **LangChain ``BaseMessage`` objects** — uses ``msg.type``
+       (``"human"`` / ``"ai"`` / ``"system"``).
+    2. **LangChain JSON-serialized dicts** — what ``GET /threads/{id}/state``
+       returns from the LangGraph server: ``{"type": "human", "content": ...}``
+       (no ``role`` key).
+    3. **Channel-adapter raw dicts** — what ``ChannelManager`` builds for
+       the agent input: ``{"role": "human", "content": ...}``.
+
+    The dict branch tries ``role`` first, then falls back to ``type``.
+    Without the fallback, every message fetched via LangGraph's HTTP
+    state endpoint stays with a blank role after serialization, then
+    ``extraction._format_transcript`` drops them all (it only accepts
+    ``role == "user"`` / ``"assistant"`` / ``"ai"``). That was the
+    production bug where 6+ Telegram messages produced 0 memories
+    even after the original role-normalization fix landed.
     """
     result: list[dict] = []
     for msg in messages:
         if isinstance(msg, dict):
-            role = msg.get("role", "")
+            role = msg.get("role") or msg.get("type", "")
             content = msg.get("content", "")
         else:
             role = getattr(msg, "type", "unknown")
