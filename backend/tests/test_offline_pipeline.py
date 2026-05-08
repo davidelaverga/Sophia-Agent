@@ -628,6 +628,19 @@ class TestSerializeMessages:
         ])
         assert out == [{"role": "user", "content": "hi"}]
 
+    def test_reads_content_from_data_payload_for_langchain_wire_shape(self):
+        """LangChain JSON payloads can place content under ``data.content``.
+        We should still preserve transcript text for extraction."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {
+                "type": "human",
+                "data": {"content": "content from data payload"},
+            },
+        ])
+        assert out == [{"role": "user", "content": "content from data payload"}]
+
     def test_flattens_list_content_in_dict_messages(self):
         """Telegram inbounds with attachments arrive as list-of-content-blocks.
         We extract the text blocks; image / pdf blocks are dropped at this layer

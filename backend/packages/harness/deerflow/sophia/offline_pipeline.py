@@ -450,7 +450,9 @@ def _serialize_messages(messages: list) -> list[dict]:
     for msg in messages:
         if isinstance(msg, dict):
             role = msg.get("role") or msg.get("type", "")
-            content = msg.get("content", "")
+            content = msg.get("content")
+            if content is None and isinstance(msg.get("data"), dict):
+                content = msg["data"].get("content", "")
         else:
             role = getattr(msg, "type", "unknown")
             content = getattr(msg, "content", "")
