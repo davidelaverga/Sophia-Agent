@@ -393,6 +393,8 @@ GET    /api/sophia/{user_id}/journal
 - Run the offline pipeline only once per session. Use the `processed_sessions` set.
 - `smart_opener_assembly.md` must not reference `{cross_platform_memories}` — that placeholder was removed in v7.0.
 - `GET /api/sophia/{user_id}/memories/recent?status=pending_review` must apply the local review metadata overlay before deciding whether Mem0 detail hydration is needed. If the overlay already supplies `metadata.status`, avoid per-memory `client.get(...)` calls or recap loads regress into an N+1 Mem0 path.
+- The offline pipeline's `_serialize_messages` must accept three message shapes: LangChain `BaseMessage` objects (use `msg.type`), LangChain JSON-serialized dicts from `GET /threads/{id}/state` (`{"type": "human"}`, no `role`), and channel-adapter raw dicts (`{"role": "human"}`). The dict branch reads `msg.get("role") or msg.get("type", "")` and routes through `_ROLE_MAP`. Skip any of these and `extraction._format_transcript` silently drops the messages, producing 0 Mem0 candidates from a real conversation.
+- Offline-pipeline recap envelopes must write `recap_artifacts: {}` (truthy empty dict), never `null`. The frontend recap mapper early-null-returns on `null`, so the loader never reaches `status='ready'` even when the gateway returns 200.
 ### Luis
 - `runs/stream` not `runs/wait` — always. The ~0.6s difference matters on voice.
 - Artifact arrives after text. It updates the emotion for the **next** TTS call. Design `SophiaTTS` plugin accordingly.

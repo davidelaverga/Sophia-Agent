@@ -64,9 +64,17 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 - `telegram_review_notifier.no_base_url …` — fires when the bot can't construct a review URL because `SOPHIA_WEB_BASE_URL` is unset (= silent no-op, deliberate)
 - `[Telegram] review notification sent chat=… session=… use_login_url=…` — bot-side success log
 
+### Post-PR follow-ups (May 8, end-to-end live)
+After the initial PR landed, six follow-up commits made the flow actually render in production. Three of them are load-bearing lessons worth carrying forward:
+
+- **Offline pipeline must accept three message shapes, not two.** `_serialize_messages` now handles (a) LangChain `BaseMessage` objects (`msg.type`), (b) LangChain JSON-serialized dicts from `GET /threads/{id}/state` (`{"type": "human"}` — no `role`), and (c) channel-adapter raw dicts (`{"role": "human"}`). The dict branch reads `msg.get("role") or msg.get("type", "")` and routes through `_ROLE_MAP`. The original PR only handled (a) + (c); the LangGraph HTTP wire shape silently dropped every Telegram message at `extraction._format_transcript`, producing 0 Mem0 candidates from real conversations.
+- **`recap_artifacts: {}` not `null`.** The frontend recap mapper early-null-returns on `null`, so the loader never reaches `status='ready'` and the user sees "Recap not found" even though the gateway returned 200. Truthy empty dict lets hydration synthesize a payload from session metadata and merge Mem0 candidates from `/api/memory/recent`. Backstop in `useRecapArtifactsLoader` synthesizes the payload from session metadata when the gateway returns a sparse envelope, so any future writer that emits `null` or omits the field can't re-trigger the bug.
+- **Sparse recaps need a retry window before being marked reviewed.** Telegram-originated recaps land sparse (no LLM-synthesized takeaway / reflection) until Mem0 candidates hydrate. The loader keeps retrying until either the candidates arrive or the retry window expires; only then do we mark the recap reviewed.
+
+Other fixes (terse): codex P1 — `register_activity` moved to AFTER `runs.wait` so stale-thread recovery can't strand the tracker on an old thread_id (afb7265a); codex P2 — declined LoginUrl (no `hash` param) now 302s to `/recap` with `from=telegram` instead of returning 400 (78c96b9b → refined in c9a3667b which also fixed Vercel `Buffer→BinaryLike` typing under newer `@types/node`).
+
 ### Open follow-ups
 - **Skip Google entirely for already-bound users**: write a Better Auth plugin (`frontend/src/server/better-auth/plugins/telegram.ts`) that exposes a server-only endpoint guarded by `X-Sophia-Internal-Token`. The endpoint calls `ctx.context.internalAdapter.createSession(userId)` + `setSessionCookie(ctx, {session, user})` and returns the Set-Cookie headers. The frontend redeem route forwards those headers + 302s to `/recap/{session}`. This is the "fully seamless" UX the user originally asked about. Deferred only because of the Better Auth plugin lift.
-- **Production domain registration with @BotFather** (`/setdomain` for `@Sophia_EI_bot` pointing at the prod web host). One-time manual step. Without it the LoginUrl button silently fails to render and the notifier's plain-token fallback (`TELEGRAM_REVIEW_USE_LOGIN_URL=false`) must be used instead.
 - **Telegram session "active conversation" detection** could be tighter than 10 minutes — a user actively typing replies should reset the timer immediately, but if they go silent for >10 min mid-conversation we currently end the session. Match the web behavior for now; revisit if the alpha shows it's wrong.
 
 ---
