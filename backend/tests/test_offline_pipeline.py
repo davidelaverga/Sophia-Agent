@@ -59,6 +59,7 @@ _PATCHES = {
     "smart_opener": "deerflow.sophia.offline_pipeline.generate_smart_opener",
     "handoff": "deerflow.sophia.offline_pipeline.generate_handoff",
     "identity": "deerflow.sophia.offline_pipeline.maybe_update_identity",
+    "recap": "deerflow.sophia.offline_pipeline._write_offline_recap",
 }
 
 
@@ -80,6 +81,7 @@ def mock_steps():
     mocks["reconcile"].return_value = 0
     mocks["smart_opener"].return_value = "How are you feeling today?"
     mocks["identity"].return_value = False
+    mocks["recap"].return_value = "ok"
 
     yield mocks
 
@@ -111,6 +113,7 @@ class TestHappyPath:
         assert steps["smart_opener"] == "ok"
         assert steps["notification"] == "ok"
         assert steps["handoff"] == "ok"
+        assert steps["recap"] == "ok"
         assert steps["identity"] == "ok"
         assert steps["visual_check"] == "ok"
 
@@ -561,3 +564,240 @@ class TestStateFetchFallback:
 
         assert result["status"] == "error"
         assert result["reason"] == "no_thread_state"
+
+
+# ==================================================================
+# Fix 1: _serialize_messages normalization
+# ==================================================================
+#
+# Regression guard for the production bug where 6 messages from a
+# Telegram session produced 0 memories: dict-shaped messages with
+# ``role="human"`` were passed through unchanged, then ``extraction.
+# _format_transcript`` silently dropped them because it only accepts
+# ``role == "user"``.
+
+
+class TestSerializeMessages:
+    def test_normalizes_human_role_in_dict_messages(self):
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {"role": "human", "content": "I had a tough day."},
+            {"role": "ai", "content": "I hear you."},
+        ])
+        assert out == [
+            {"role": "user", "content": "I had a tough day."},
+            {"role": "assistant", "content": "I hear you."},
+        ]
+
+    def test_falls_back_to_type_field_for_langchain_serialized_dicts(self):
+        """LangGraph's ``GET /threads/{id}/state`` returns LangChain
+        BaseMessage objects serialized as JSON dicts with ``type`` (NOT
+        ``role``). Without this fallback, the dict branch leaves role
+        blank, the extractor drops every message, and a Telegram session
+        with real content produces 0 Mem0 memories. Regression guard."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {
+                "type": "human",
+                "content": "I had a great conversation today.",
+                "additional_kwargs": {},
+                "response_metadata": {},
+            },
+            {
+                "type": "ai",
+                "content": "That sounds wonderful.",
+                "additional_kwargs": {},
+                "response_metadata": {},
+            },
+        ])
+        assert out == [
+            {"role": "user", "content": "I had a great conversation today."},
+            {"role": "assistant", "content": "That sounds wonderful."},
+        ]
+
+    def test_role_takes_precedence_over_type_when_both_present(self):
+        """If a message somehow has both keys, ``role`` wins. Defensive
+        — keeps channel-adapter-built dicts deterministic even if a
+        future LangChain version started emitting both."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {"role": "human", "type": "ai", "content": "hi"},
+        ])
+        assert out == [{"role": "user", "content": "hi"}]
+
+    def test_reads_content_from_data_payload_for_langchain_wire_shape(self):
+        """LangChain JSON payloads can place content under ``data.content``.
+        We should still preserve transcript text for extraction."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {
+                "type": "human",
+                "data": {"content": "content from data payload"},
+            },
+        ])
+        assert out == [{"role": "user", "content": "content from data payload"}]
+
+    def test_flattens_list_content_in_dict_messages(self):
+        """Telegram inbounds with attachments arrive as list-of-content-blocks.
+        We extract the text blocks; image / pdf blocks are dropped at this layer
+        (the extractor only looks at text)."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {
+                "role": "human",
+                "content": [
+                    {"type": "text", "text": "Look at this photo of my notebook"},
+                    {"type": "image", "source": {"type": "base64", "data": "..."}},
+                ],
+            },
+        ])
+        assert out == [
+            {"role": "user", "content": "Look at this photo of my notebook"},
+        ]
+
+    def test_passes_user_assistant_roles_through_unchanged(self):
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ])
+        assert out == [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+        ]
+
+    def test_preserves_unknown_role_unchanged(self):
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([{"role": "tool", "content": "result"}])
+        assert out == [{"role": "tool", "content": "result"}]
+
+    def test_handles_langchain_basemessage_objects(self):
+        """Regression: the BaseMessage path was working; we shouldn't break it."""
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        msg = MagicMock()
+        msg.type = "human"
+        msg.content = "from langchain"
+        out = _serialize_messages([msg])
+        assert out == [{"role": "user", "content": "from langchain"}]
+
+    def test_empty_content_yields_empty_string(self):
+        from deerflow.sophia.offline_pipeline import _serialize_messages
+
+        out = _serialize_messages([{"role": "human", "content": None}])
+        assert out == [{"role": "user", "content": ""}]
+
+
+# ==================================================================
+# Fix 2: _write_offline_recap envelope
+# ==================================================================
+
+
+class TestWriteOfflineRecap:
+    def test_writes_minimal_envelope_when_file_missing(self, tmp_path, monkeypatch):
+        from deerflow.sophia import offline_pipeline as module
+
+        monkeypatch.setattr(module, "USERS_DIR", tmp_path)
+        result = module._write_offline_recap(
+            user_id="user-1",
+            session_id="sess-1",
+            thread_id="thread-1",
+            session_metadata={"context_mode": "work"},
+            turn_count=6,
+        )
+        assert result == "ok"
+
+        recap_path = tmp_path / "user-1" / "recaps" / "sess-1.json"
+        assert recap_path.exists()
+
+        import json
+
+        payload = json.loads(recap_path.read_text())
+        assert payload["session_id"] == "sess-1"
+        assert payload["thread_id"] == "thread-1"
+        assert payload["context_mode"] == "work"
+        assert payload["turn_count"] == 6
+        assert payload["status"] == "processing"
+        # Empty dict (NOT None) so the frontend mapper accepts the envelope
+        # and the hydration step gets a chance to merge Mem0 candidates.
+        assert payload["recap_artifacts"] == {}
+        assert payload["ended_at"]  # ISO string set
+
+    def test_skips_when_recap_already_exists(self, tmp_path, monkeypatch):
+        """Web flow's richer recap takes priority — never overwrite."""
+        from deerflow.sophia import offline_pipeline as module
+
+        monkeypatch.setattr(module, "USERS_DIR", tmp_path)
+
+        recap_path = tmp_path / "user-1" / "recaps" / "sess-1.json"
+        recap_path.parent.mkdir(parents=True, exist_ok=True)
+        recap_path.write_text('{"status": "ready", "recap_artifacts": {"takeaway": "from web"}}')
+
+        result = module._write_offline_recap(
+            user_id="user-1",
+            session_id="sess-1",
+            thread_id="thread-1",
+            session_metadata={},
+            turn_count=0,
+        )
+        assert result == "skipped_exists"
+        # Web-side payload preserved.
+        assert "from web" in recap_path.read_text()
+
+    def test_pulls_started_at_from_session_store(self, tmp_path, monkeypatch):
+        from deerflow.sophia import offline_pipeline as module
+
+        monkeypatch.setattr(module, "USERS_DIR", tmp_path)
+
+        fake_record = MagicMock()
+        fake_record.created_at = "2026-05-08T15:00:00+00:00"
+        fake_store = MagicMock()
+        fake_store.get = MagicMock(return_value=fake_record)
+        fake_session_store_cls = MagicMock(return_value=fake_store)
+        with patch(
+            "deerflow.sophia.session_store.SessionStore", fake_session_store_cls
+        ):
+            module._write_offline_recap(
+                user_id="user-1",
+                session_id="sess-1",
+                thread_id="thread-1",
+                session_metadata={},
+                turn_count=0,
+            )
+
+        import json
+
+        payload = json.loads((tmp_path / "user-1" / "recaps" / "sess-1.json").read_text())
+        assert payload["started_at"] == "2026-05-08T15:00:00+00:00"
+
+    def test_handles_session_store_failure_gracefully(self, tmp_path, monkeypatch):
+        """SessionStore lookup error must NOT crash the pipeline; just leave
+        ``started_at`` null."""
+        from deerflow.sophia import offline_pipeline as module
+
+        monkeypatch.setattr(module, "USERS_DIR", tmp_path)
+
+        with patch(
+            "deerflow.sophia.session_store.SessionStore",
+            side_effect=RuntimeError("disk gone"),
+        ):
+            result = module._write_offline_recap(
+                user_id="user-1",
+                session_id="sess-1",
+                thread_id="thread-1",
+                session_metadata={},
+                turn_count=0,
+            )
+        assert result == "ok"
+
+        import json
+
+        payload = json.loads((tmp_path / "user-1" / "recaps" / "sess-1.json").read_text())
+        assert payload["started_at"] is None

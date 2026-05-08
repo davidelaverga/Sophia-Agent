@@ -9,6 +9,56 @@ import { useCopy, useTranslation } from "../copy"
 import { useVisualTier } from "../hooks/useVisualTier"
 import { useAuth } from "../providers"
 
+// ---------------------------------------------------------------------------
+// Same-origin redirect-back validation for Better Auth ``signIn.social``.
+// Honors ``?next=`` query params (e.g. when a Telegram review link lands
+// the user on /recap/{X} with no Better Auth session) without exposing
+// an open-redirect vector. Exported so the unit tests for these
+// behaviors live next to the consumer.
+// ---------------------------------------------------------------------------
+
+const _SAFE_PATH_MAX_LEN = 256
+
+export function isSafeReturnPath(
+  value: string | null | undefined,
+): value is string {
+  if (typeof value !== "string") return false
+  if (!value || value.length > _SAFE_PATH_MAX_LEN) return false
+  if (!value.startsWith("/")) return false
+  if (value.startsWith("//") || value.startsWith("/\\")) return false
+  if (value.includes("\\")) return false
+  return true
+}
+
+/**
+ * Pick the post-Google-login destination, in order:
+ * 1. ``?next=`` query param when same-origin path-only.
+ * 2. Current ``pathname`` (no query) when not root, so users who
+ *    bookmarked a deep page round-trip back to it.
+ * 3. ``/`` fallback.
+ *
+ * Stripping the query in step 2 is intentional — echoing an unsafe
+ * ``?next=//evil.com`` verbatim to Better Auth would leave the user
+ * on that URL after Google auth, where other parts of the app might
+ * later read ``next`` and trust it. SSR-safe: returns ``/`` outside a
+ * browser.
+ */
+export function resolveSafeCallbackURL(): string {
+  if (typeof window === "undefined") return "/"
+  let next: string | null = null
+  try {
+    next = new URL(window.location.href).searchParams.get("next")
+  } catch {
+    next = null
+  }
+  if (isSafeReturnPath(next)) return next
+
+  const pathname = window.location.pathname
+  if (isSafeReturnPath(pathname) && pathname !== "/") return pathname
+
+  return "/"
+}
+
 type AuthState = "checking" | "unauthenticated" | "authenticated"
 
 type TrailPoint = {
@@ -907,7 +957,7 @@ export function AuthGate({
     try {
       await authClient.signIn.social({
         provider: "google",
-        callbackURL: "/",
+        callbackURL: resolveSafeCallbackURL(),
       })
     } catch {
       setIsLoggingIn(false)

@@ -26,6 +26,59 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-07 · [phase-2-telegram-memory-handoff] · PRs #[pending]
+**Author:** Claude Code (with Davide) · **Track:** backend + frontend · **Spec:** `~/Desktop/sophia_async_migration_telegram_diagnostic_spec.md` (Phase 2) + plan at `~/.claude/plans/users-davidelaverga-desktop-sophia-asyn-peppy-riddle.md`
+
+### What Changed
+- **Telegram session-end pipeline** ([backend/app/channels/telegram_session_tracker.py](backend/app/channels/telegram_session_tracker.py)). Mirrors `inactivity_watcher` but keys on `chat_id`. On 10-min idle: mints a fresh `session_id` (UUID4 hex) + persists a `SessionRecord`, fires `run_offline_pipeline`, calls `_pause_tracked_session`, then enqueues the review notification. Activity is registered from [`backend/app/channels/manager.py`](backend/app/channels/manager.py) (Telegram-only branch). Watcher started/stopped in the gateway lifespan alongside the existing web watcher.
+- **"Memories ready" notifier** ([backend/app/channels/telegram_review_notifier.py](backend/app/channels/telegram_review_notifier.py)). Async function the tracker awaits. Resolves the running Telegram channel via the new public `ChannelService.get_channel(name)` getter and calls `TelegramChannel.send_review_notification(...)` (added in [backend/app/channels/telegram.py](backend/app/channels/telegram.py)). Two delivery modes: a Telegram-attested `LoginUrl` button (default) or a one-time-token plain URL (fallback when `/setdomain` isn't configured). Message body capped at 4096 chars via the existing `_truncate_for_telegram` helper. Cross-loop hop reuses `_run_bot_call_on_telegram_loop` so bot calls run on the polling loop.
+- **Reverse-binding index** in [backend/app/gateway/telegram_link_store.py](backend/app/gateway/telegram_link_store.py). New `_bindings_by_telegram_user_id` dict + `resolve_user_id_by_telegram_user_id()` lookup. Maintained from `bind_chat`, `_install_binding_locked` (rehydration), `unbind_chat`, `unbind_user`, and `clear_all`. Picks the freshest binding when a single Telegram user has multiple chats.
+- **Frontend handoff route** ([frontend/src/app/api/auth/telegram-login/route.ts](frontend/src/app/api/auth/telegram-login/route.ts)). Verifies the Telegram HMAC payload (key = `SHA256(TELEGRAM_BOT_TOKEN)`), validates the `session` query param against a UUID-shape regex (no open redirect), enforces a 5-minute `auth_date` window via `crypto.timingSafeEqual`, sets a 60-second `sophia-telegram-handoff` correlation cookie, and 302-redirects to `/recap/{session}?next=/recap/{session}&from=telegram`.
+- **Plain-URL fallback route** ([frontend/src/app/api/auth/telegram-token/route.ts](frontend/src/app/api/auth/telegram-token/route.ts)) calls a new internal gateway endpoint [`/api/sophia/internal/redeem-telegram-review-token`](backend/app/gateway/routers/telegram_review.py) (guarded by `X-Sophia-Internal-Token`) which validates the token via the existing `pop_link_token`. Closed-by-default — if `SOPHIA_INTERNAL_TOKEN` is unset, the endpoint returns 503.
+- **AuthGate `?next=` plumbing** ([frontend/src/app/components/AuthGate.tsx](frontend/src/app/components/AuthGate.tsx)) calls a new [`resolveSafeCallbackURL`](frontend/src/app/lib/auth/safe-redirect.ts) helper that prefers a same-origin `?next=` value and falls back to `pathname` (intentionally stripping the query string to avoid echoing unsafe `?next=` values). Same-origin validation rejects protocol-relative, scheme-prefixed, backslash-injecting values and anything over 256 chars.
+- **Tests added (145 pass; 116 backend + 29 frontend).** Reverse index: 8 cases incl. rehydration. Tracker: 12 cases incl. concurrent chats and async failure isolation. Notifier: 10 cases incl. fallback-mode URL construction. Send helper: 6 cases incl. LoginUrl vs plain-URL button shape. Internal redeem: 7 cases. HMAC verifier: 13 cases incl. timing-safe length-mismatch handling. Safe-redirect: 11 cases. Login route: 5 end-to-end cases incl. tampered-hash and expired-auth_date rejection.
+
+### What We Learned
+- **The auth fence is two-token deep**: Better Auth session cookie (Google OAuth) + a separate `sophia-backend-token` httpOnly cookie minted by a "legacy bridge" Next.js route. Trying to "skip Google" from a Telegram-attested payload requires a Better Auth plugin that mints a session via `auth.$context → internalAdapter.createSession(userId)` + `setSessionCookie(ctx, ...)`. We deferred that to a follow-up — this PR ships the simpler "verify HMAC, redirect with ?next, let AuthGate handle Google sign-in" path because the user explicitly accepted that fallback behavior in the original ask. Telegram-attested-login-without-Google is the next optimization, not a blocker.
+- **Closed-by-default for shared-secret endpoints**: when `SOPHIA_INTERNAL_TOKEN` is unset, `_check_internal_secret` returns 503 instead of accepting any caller. The naive read ("if there's no expected value, no value matches → reject") was right and the test (`test_unset_secret_returns_503`) caught the explicit branch where I needed to handle empty-expected separately.
+- **`pathname + search` is the wrong fallback for callbackURL**: if the current URL contains an unsafe `?next=//evil.com`, echoing the full pathname+search to Better Auth round-trips the unsafe param back. The unit test caught this immediately (vs. only catching it via review). Fix: drop the search entirely from the fallback. Cheap win, would have shipped a quietly bad redirect otherwise.
+- **`crypto.timingSafeEqual` throws on mismatched-length inputs.** Solution: pre-check `expectedHash.length !== hash.length` before calling, so a malformed `hash` query param (e.g. `?hash=deadbeef`) returns `invalid_hash` instead of an unhandled exception. A single try/catch around the call would also work but length-checking is cheaper and more honest about what we're doing.
+- **The session-id idempotency guard cuts both ways.** `run_offline_pipeline`'s `processed_sessions` set prevents double-processing — but it also silently no-ops on a *reused* session_id. That's why the tracker mints a fresh UUID4 per chat per inactivity window rather than reusing some stable `(chat_id, day)` key. Documented in the tracker docstring.
+- **Cross-loop bot calls are a recurring pattern.** PTB-bot internals are loop-affine to `_tg_loop` (the polling thread's loop). Anything dispatched from the main gateway loop has to hop via `_run_bot_call_on_telegram_loop`. This is the third place that uses the same pattern (inbound file reader, builder completion, now review notification). Worth extracting if a fourth shows up.
+- **`pytest.mark.anyio` (not `asyncio`) is the convention here.** Setting up async test plugins is a one-line difference but a five-minute debug if you guess wrong.
+
+### CLAUDE.md Updates
+- backend/CLAUDE.md: added a "Telegram → web memory review handoff" paragraph documenting the new flow, the BotFather `/setdomain` requirement, and the `TELEGRAM_REVIEW_USE_LOGIN_URL` fallback knob.
+- .env.example: documented `SOPHIA_WEB_BASE_URL`, `TELEGRAM_REVIEW_NOTIFICATIONS_ENABLED`, `TELEGRAM_REVIEW_USE_LOGIN_URL`, `SOPHIA_INTERNAL_TOKEN` with usage guidance.
+- frontend/CLAUDE.md: no changes needed (auth architecture already documented; this PR didn't change it).
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no companion / builder prompt files changed).
+
+### Active diagnostic breadcrumbs (keep)
+- `telegram_session_tracker.session_started chat_id=… user_id=… session_id=… thread_id=…` — fires on each new tracked session
+- `telegram_session_tracker.idle chat_id=… user_id=… session_id=… thread_id=…` — fires when the watcher detects a chat past its window
+- `telegram_review_notifier.no_base_url …` — fires when the bot can't construct a review URL because `SOPHIA_WEB_BASE_URL` is unset (= silent no-op, deliberate)
+- `[Telegram] review notification sent chat=… session=… use_login_url=…` — bot-side success log
+
+### Post-PR follow-ups (May 8, end-to-end live)
+After the initial PR landed, six follow-up commits made the flow actually render in production. Three of them are load-bearing lessons worth carrying forward:
+
+- **Offline pipeline must accept three message shapes, not two.** `_serialize_messages` now handles (a) LangChain `BaseMessage` objects (`msg.type` / `msg.content`), (b) LangChain JSON-serialized dicts from `GET /threads/{id}/state` (`{"type": "human", ...}` — no `role`, and `content` is either top-level or nested under `data.content` depending on the wire encoder), and (c) channel-adapter raw dicts (`{"role": "human", "content": ...}`). The dict branch reads `msg.get("role") or msg.get("type", "")` for role and falls back to `msg["data"]["content"]` when top-level `content` is `None`. The original PR only handled (a) + (c); the LangGraph HTTP wire shape silently dropped every Telegram message at `extraction._format_transcript`, producing 0 Mem0 candidates from real conversations.
+- **`recap_artifacts: {}` not `null`.** The frontend recap mapper early-null-returns on `null`, so the loader never reaches `status='ready'` and the user sees "Recap not found" even though the gateway returned 200. Truthy empty dict lets hydration synthesize a payload from session metadata and merge Mem0 candidates from `/api/memory/recent`. Backstop in `useRecapArtifactsLoader` synthesizes the payload from session metadata when the gateway returns a sparse envelope, so any future writer that emits `null` or omits the field can't re-trigger the bug.
+- **Sparse recaps need a retry window before being marked reviewed.** Telegram-originated recaps land sparse (no LLM-synthesized takeaway / reflection) until Mem0 candidates hydrate. The loader keeps retrying until either the candidates arrive or the retry window expires; only then do we mark the recap reviewed.
+
+Other fixes (terse): codex P1 — `register_activity` moved to AFTER `runs.wait` so stale-thread recovery can't strand the tracker on an old thread_id (afb7265a); codex P2 — declined LoginUrl (no `hash` param) now 302s to `/recap` with `from=telegram` instead of returning 400 (78c96b9b → refined in c9a3667b which also fixed Vercel `Buffer→BinaryLike` typing under newer `@types/node`).
+
+### Open follow-ups
+- **Skip Google entirely for already-bound users**: write a Better Auth plugin (`frontend/src/server/better-auth/plugins/telegram.ts`) that exposes a server-only endpoint guarded by `X-Sophia-Internal-Token`. The endpoint calls `ctx.context.internalAdapter.createSession(userId)` + `setSessionCookie(ctx, {session, user})` and returns the Set-Cookie headers. The frontend redeem route forwards those headers + 302s to `/recap/{session}`. This is the "fully seamless" UX the user originally asked about. Deferred only because of the Better Auth plugin lift.
+- **Telegram session "active conversation" detection** could be tighter than 10 minutes — a user actively typing replies should reset the timer immediately, but if they go silent for >10 min mid-conversation we currently end the session. Match the web behavior for now; revisit if the alpha shows it's wrong.
+
+---
+
 ## 2026-05-07 · [phase-1-async-migration + phase-3-lite] · PRs #104–#116
 **Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `sophia_async_migration_telegram_diagnostic_spec.md`
 

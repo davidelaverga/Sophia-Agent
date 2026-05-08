@@ -97,7 +97,7 @@ describe('useRecapArtifactsLoader', () => {
 
     await flushEffects();
 
-    expect(setArtifacts).toHaveBeenCalledWith(
+    expect(setArtifacts).toHaveBeenLastCalledWith(
       'sess-recent-404',
       expect.objectContaining({ takeaway: 'You found your footing again.' }),
     );
@@ -118,6 +118,8 @@ describe('useRecapArtifactsLoader', () => {
           recap_artifacts: null,
         }),
       )
+      // Pending-review lookup after sparse recap envelope; still empty on first pass.
+      .mockResolvedValueOnce(jsonResponse({ memories: [], count: 0, fallbackApplied: true }))
       .mockResolvedValueOnce(
         jsonResponse({
           session_id: 'sess-processing',
@@ -163,7 +165,7 @@ describe('useRecapArtifactsLoader', () => {
 
     await flushEffects();
 
-    expect(setArtifacts).toHaveBeenCalledWith(
+    expect(setArtifacts).toHaveBeenLastCalledWith(
       'sess-processing',
       expect.objectContaining({
         takeaway: 'A clean ending still counts.',
@@ -220,7 +222,7 @@ describe('useRecapArtifactsLoader', () => {
       '/api/memory/recent?status=pending_review&session_id=sess-memory-review&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
       expect.objectContaining({ method: 'GET' }),
     );
-    expect(setArtifacts).toHaveBeenCalledWith(
+    expect(setArtifacts).toHaveBeenLastCalledWith(
       'sess-memory-review',
       expect.objectContaining({
         takeaway: 'You found the cleaner thread under the noise.',
@@ -286,7 +288,7 @@ describe('useRecapArtifactsLoader', () => {
       '/api/memory/recent?status=approved&session_id=sess-reviewed&started_at=2026-03-03T19%3A46%3A00.000Z&ended_at=2026-03-03T20%3A00%3A00.000Z',
       expect.objectContaining({ method: 'GET' }),
     );
-    expect(setArtifacts).toHaveBeenCalledWith(
+    expect(setArtifacts).toHaveBeenLastCalledWith(
       'sess-reviewed',
       expect.objectContaining({ takeaway: 'The important part already landed.' }),
     );

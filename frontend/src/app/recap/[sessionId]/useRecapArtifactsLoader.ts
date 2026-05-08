@@ -317,6 +317,24 @@ export function useRecapArtifactsLoader({
               }
             : null;
 
+          // Backstop for sparse recap envelopes (e.g. Telegram-originated
+          // sessions where ``recap_artifacts`` is null and there are no
+          // top-level takeaway/reflection/memory_candidates). Without this,
+          // ``mapBackendArtifactsToRecapV1`` early-null-returns and the
+          // page falls into the empty state even though the gateway DID
+          // return a valid 200 with session metadata. Synthesizing an
+          // empty artifactsPayload lets the hydration step pull pending
+          // Mem0 candidates from /api/memory/recent and populate the page.
+          const sessionMetadataOnly = !nestedArtifacts && !hasTopLevelArtifacts && data
+            ? {
+                session_id: (data?.session_id as string | undefined) || sessionId,
+                session_type: (data?.session_type as string | undefined),
+                context_mode: (data?.context_mode as string | undefined) || (data?.preset_context as string | undefined),
+                started_at: (data?.started_at as string | undefined),
+                ended_at: (data?.ended_at as string | undefined),
+              }
+            : null;
+
           const artifactsPayload = nestedArtifacts
             ? {
                 ...nestedArtifacts,
@@ -326,7 +344,7 @@ export function useRecapArtifactsLoader({
                 started_at: (data?.started_at as string | undefined),
                 ended_at: (data?.ended_at as string | undefined),
               }
-            : fallbackTopLevelArtifacts;
+            : fallbackTopLevelArtifacts ?? sessionMetadataOnly;
 
           const hydratedArtifactsPayload = await hydratePayloadWithRecentMemories(artifactsPayload, sessionId);
           const mapped = mapBackendArtifactsToRecapV1(hydratedArtifactsPayload, sessionId);
@@ -336,16 +354,10 @@ export function useRecapArtifactsLoader({
             const shouldRetryFetchedMemories = shouldRetryMemories(mapped.endedAt || (typeof data?.ended_at === 'string' ? data.ended_at : null));
 
             if (!hasMappedMemories && shouldRetryFetchedMemories) {
-              if (await sessionHasReviewedMemories(artifactsPayload, sessionId)) {
-                if (hasRecentEndHint) {
-                  clearRecentSessionEndHint();
-                }
-                setArtifacts(sessionId, mapped);
-                useSessionHistoryStore.getState().markRecapViewed(sessionId);
-                setStatus('reviewed');
-                return;
-              }
-
+              // Freshly ended sessions can briefly return an envelope with no
+              // artifacts while the offline pipeline is still writing. Always
+              // retry first in this window so we do not prematurely mark the
+              // recap as reviewed from stale approved memories.
               setArtifacts(sessionId, mapped);
 
               if (scheduleMemoryRetry(shouldRetryFetchedMemories)) {

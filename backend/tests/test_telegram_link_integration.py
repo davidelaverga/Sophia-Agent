@@ -228,3 +228,145 @@ class TestChannelManagerIdentity:
         assert msg.user_id == "user-x"
         # No metadata churn when id already canonical.
         assert "platform_user_id" not in msg.metadata
+
+
+# ---------------------------------------------------------------------------
+# TelegramChannel.send_review_notification + _on_review_notification.
+# Tests the bot-side message construction (LoginUrl button vs plain URL,
+# text truncation, error swallowing) without spinning up a real polling
+# loop, plus the bus-subscriber path.
+# ---------------------------------------------------------------------------
+
+
+def _attach_fake_application(ch: TelegramChannel):
+    """Wire a mock bot into ``ch`` without starting polling."""
+    from unittest.mock import AsyncMock
+
+    bot = MagicMock()
+    bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=999))
+    ch._application = SimpleNamespace(bot=bot)
+    fake_loop = MagicMock()
+    fake_loop.is_running = MagicMock(return_value=False)
+    ch._tg_loop = fake_loop
+    return bot.send_message
+
+
+@pytest.fixture
+def review_channel() -> TelegramChannel:
+    return TelegramChannel(bus=MessageBus(), config={"bot_token": "test-token"})
+
+
+@pytest.mark.anyio
+class TestSendReviewNotification:
+    async def test_returns_false_when_no_application(self, review_channel):
+        ok = await review_channel.send_review_notification(
+            chat_id="100",
+            session_id="sess-abc",
+            review_url="https://app.example.com/api/auth/telegram-login?session=sess-abc",
+        )
+        assert ok is False
+
+    async def test_login_url_button(self, review_channel):
+        send = _attach_fake_application(review_channel)
+        ok = await review_channel.send_review_notification(
+            chat_id="100",
+            session_id="sess-abc",
+            review_url="https://app.example.com/api/auth/telegram-login?session=sess-abc",
+        )
+        assert ok is True
+        send.assert_awaited_once()
+        kwargs = send.call_args.kwargs
+        assert kwargs["chat_id"] == 100
+        assert "Your memories" in kwargs["text"]
+        button = kwargs["reply_markup"].inline_keyboard[0][0]
+        assert button.login_url is not None
+        assert button.login_url.url == (
+            "https://app.example.com/api/auth/telegram-login?session=sess-abc"
+        )
+        assert button.url is None
+
+    async def test_truncates_text_to_telegram_limit(self, review_channel):
+        from app.channels.telegram import _TELEGRAM_TEXT_LIMIT
+
+        send = _attach_fake_application(review_channel)
+        oversized = "x" * (_TELEGRAM_TEXT_LIMIT + 50)
+        ok = await review_channel.send_review_notification(
+            chat_id="100",
+            session_id="s",
+            review_url="https://app.example.com/x",
+            text=oversized,
+        )
+        assert ok is True
+        sent_text = send.call_args.kwargs["text"]
+        assert len(sent_text) <= _TELEGRAM_TEXT_LIMIT
+        assert sent_text.endswith("…")
+
+    async def test_invalid_chat_id_returns_false(self, review_channel):
+        _attach_fake_application(review_channel)
+        ok = await review_channel.send_review_notification(
+            chat_id="not-an-int",
+            session_id="s",
+            review_url="https://app.example.com/x",
+        )
+        assert ok is False
+
+    async def test_send_exception_returns_false(self, review_channel):
+        send = _attach_fake_application(review_channel)
+        send.side_effect = RuntimeError("transport down")
+        ok = await review_channel.send_review_notification(
+            chat_id="100",
+            session_id="s",
+            review_url="https://app.example.com/x",
+        )
+        assert ok is False
+
+
+@pytest.mark.anyio
+class TestOnReviewNotification:
+    """Bus-subscriber path: ``_on_review_notification`` filters non-Telegram
+    payloads, validates required fields, and forwards to
+    ``send_review_notification`` with the right kwargs.
+    """
+
+    async def test_telegram_payload_invokes_send(self, review_channel):
+        send = _attach_fake_application(review_channel)
+        await review_channel._on_review_notification(
+            {
+                "channel": "telegram",
+                "chat_id": "100",
+                "session_id": "sess-abc",
+                "review_url": "https://app.example.com/api/auth/telegram-login?session=sess-abc",
+                "use_login_url": True,
+            }
+        )
+        send.assert_awaited_once()
+        button = send.call_args.kwargs["reply_markup"].inline_keyboard[0][0]
+        assert button.login_url is not None
+
+    async def test_non_telegram_payload_is_ignored(self, review_channel):
+        send = _attach_fake_application(review_channel)
+        await review_channel._on_review_notification(
+            {"channel": "slack", "chat_id": "100", "session_id": "s", "review_url": "x"}
+        )
+        send.assert_not_awaited()
+
+    async def test_missing_fields_are_logged_not_sent(self, review_channel):
+        send = _attach_fake_application(review_channel)
+        await review_channel._on_review_notification(
+            {"channel": "telegram", "chat_id": "100"}  # missing session_id + review_url
+        )
+        send.assert_not_awaited()
+
+    async def test_handler_swallows_send_exception(self, review_channel):
+        send = _attach_fake_application(review_channel)
+        send.side_effect = RuntimeError("transport down")
+        # Must not raise — the bus needs to keep dispatching.
+        await review_channel._on_review_notification(
+            {
+                "channel": "telegram",
+                "chat_id": "100",
+                "session_id": "s",
+                "review_url": "https://x/y",
+                "use_login_url": True,
+            }
+        )

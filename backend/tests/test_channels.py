@@ -128,6 +128,62 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_review_notification_callback(self):
+        bus = MessageBus()
+        received: list[dict] = []
+
+        async def callback(payload):
+            received.append(payload)
+
+        async def go():
+            bus.subscribe_review_notification(callback)
+            await bus.publish_review_notification(
+                {
+                    "channel": "telegram",
+                    "chat_id": "100",
+                    "session_id": "sess-1",
+                    "review_url": "https://x/y",
+                    "use_login_url": True,
+                }
+            )
+            assert len(received) == 1
+            assert received[0]["session_id"] == "sess-1"
+
+        _run(go())
+
+    def test_unsubscribe_review_notification(self):
+        bus = MessageBus()
+        received: list[dict] = []
+
+        async def callback(payload):
+            received.append(payload)
+
+        async def go():
+            bus.subscribe_review_notification(callback)
+            bus.unsubscribe_review_notification(callback)
+            await bus.publish_review_notification({"channel": "telegram"})
+            assert received == []
+
+        _run(go())
+
+    def test_review_notification_error_does_not_crash(self):
+        bus = MessageBus()
+        received: list[dict] = []
+
+        async def bad(payload):
+            raise ValueError("boom")
+
+        async def good(payload):
+            received.append(payload)
+
+        async def go():
+            bus.subscribe_review_notification(bad)
+            bus.subscribe_review_notification(good)
+            await bus.publish_review_notification({"channel": "telegram"})
+            assert len(received) == 1
+
+        _run(go())
+
     def test_inbound_message_defaults(self):
         msg = InboundMessage(channel_name="test", chat_id="c", user_id="u", text="hi")
         assert msg.msg_type == InboundMessageType.CHAT
@@ -517,6 +573,68 @@ class TestChannelManager:
             assert [call.args[0] for call in mock_client.runs.wait.call_args_list] == ["stale-thread", "fresh-thread"]
             assert outbound_received[0].thread_id == "fresh-thread"
             assert outbound_received[0].text == "Recovered thread response"
+
+        _run(go())
+
+    def test_handle_chat_registers_telegram_activity_with_recovered_thread_id(self):
+        """Regression: register_activity must capture the FINAL (post-recovery)
+        thread_id, not the stale one. Otherwise the inactivity finalizer would
+        try to recap against the dead thread and miss the just-completed turn.
+        """
+        from app.channels import telegram_session_tracker as tracker
+        from app.channels.manager import ChannelManager
+        from app.gateway import telegram_link_store as link_store
+
+        async def go():
+            tracker.reset_watcher()
+            link_store.clear_all()
+            try:
+                bus = MessageBus()
+                store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+                store.set_thread_id("telegram", "chat-stale", "stale-thread", user_id="user-x")
+                manager = ChannelManager(bus=bus, store=store)
+
+                outbound_received: list = []
+                bus.subscribe_outbound(lambda msg: outbound_received.append(msg) or None)
+
+                recovered_result = {
+                    "messages": [
+                        {"type": "human", "content": "hi"},
+                        {"type": "ai", "content": "ok"},
+                    ]
+                }
+                mock_client = _make_mock_langgraph_client(thread_id="fresh-thread")
+                mock_client.threads.get = AsyncMock(
+                    side_effect=_make_http_status_error(404, '{"detail":"Thread not found."}')
+                )
+                mock_client.runs.wait = AsyncMock(
+                    side_effect=[_make_http_status_error(404), recovered_result]
+                )
+                manager._client = mock_client
+
+                async def capture_outbound(msg):
+                    outbound_received.append(msg)
+
+                bus.subscribe_outbound(capture_outbound)
+                await manager.start()
+                await bus.publish_inbound(
+                    InboundMessage(
+                        channel_name="telegram",
+                        chat_id="chat-stale",
+                        user_id="user-x",
+                        text="hi",
+                    )
+                )
+                await _wait_for(lambda: len(outbound_received) >= 1)
+                await manager.stop()
+
+                # Tracker should hold the RECOVERED thread_id, not the stale one.
+                tracked = tracker._active_chats.get("chat-stale")
+                assert tracked is not None
+                assert tracked["thread_id"] == "fresh-thread"
+            finally:
+                tracker.reset_watcher()
+                link_store.clear_all()
 
         _run(go())
 

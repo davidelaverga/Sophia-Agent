@@ -139,6 +139,76 @@ class TestBindings:
             store.bind_chat("telegram", "chat", "user..bad")
 
 
+class TestReverseTelegramUserIndex:
+    """Reverse lookup by telegram_user_id — used by the LoginUrl handoff."""
+
+    def test_resolve_hit_after_bind(self, monkeypatch):
+        # Skip Supabase mirroring side-effects.
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat(
+            "telegram",
+            "chat-1",
+            "user-1",
+            telegram_user_id="tg-42",
+            telegram_username="alice",
+        )
+        assert store.resolve_user_id_by_telegram_user_id("tg-42") == "user-1"
+
+    def test_resolve_miss_returns_none(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat("telegram", "chat-1", "user-1", telegram_user_id="tg-42")
+        assert store.resolve_user_id_by_telegram_user_id("tg-other") is None
+
+    def test_resolve_empty_telegram_user_id_returns_none(self):
+        assert store.resolve_user_id_by_telegram_user_id("") is None
+
+    def test_binding_without_telegram_user_id_is_not_indexed(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat("telegram", "chat-1", "user-1")  # no telegram_user_id
+        # The chat is bound but the reverse index has no entry for "" or any id.
+        assert store.resolve_user_id_by_telegram_user_id("") is None
+        # And the chat-side resolution still works.
+        assert store.resolve_user_id("telegram", "chat-1") == "user-1"
+
+    def test_unbind_chat_clears_reverse_index(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat("telegram", "chat-1", "user-1", telegram_user_id="tg-42")
+        assert store.resolve_user_id_by_telegram_user_id("tg-42") == "user-1"
+        store.unbind_chat("telegram", "chat-1")
+        assert store.resolve_user_id_by_telegram_user_id("tg-42") is None
+
+    def test_unbind_user_clears_reverse_index(self, monkeypatch):
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat("telegram", "chat-1", "user-1", telegram_user_id="tg-42")
+        store.bind_chat("telegram", "chat-2", "user-1", telegram_user_id="tg-43")
+        store.unbind_user("user-1")
+        assert store.resolve_user_id_by_telegram_user_id("tg-42") is None
+        assert store.resolve_user_id_by_telegram_user_id("tg-43") is None
+
+    def test_rebinding_chat_to_different_telegram_user_id_updates_index(self, monkeypatch):
+        """If a chat rebinds with a different tg user, the old index entry must drop."""
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat("telegram", "chat-1", "user-1", telegram_user_id="tg-old")
+        store.bind_chat("telegram", "chat-1", "user-2", telegram_user_id="tg-new")
+        assert store.resolve_user_id_by_telegram_user_id("tg-old") is None
+        assert store.resolve_user_id_by_telegram_user_id("tg-new") == "user-2"
+
+    def test_picks_freshest_binding_when_telegram_user_id_has_multiple_chats(
+        self, monkeypatch
+    ):
+        """Same Telegram user redeems /start twice with different webapp accounts.
+
+        Pick the binding with the most recent created_at — that is the one
+        the user most recently authorized.
+        """
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        store.bind_chat("telegram", "chat-old", "user-a", telegram_user_id="tg-42")
+        # Force a strictly-greater created_at so the ordering is deterministic.
+        time.sleep(0.01)
+        store.bind_chat("telegram", "chat-new", "user-b", telegram_user_id="tg-42")
+        assert store.resolve_user_id_by_telegram_user_id("tg-42") == "user-b"
+
+
 class TestSupabasePersistence:
     def test_upsert_no_op_when_supabase_not_configured(self, monkeypatch):
         monkeypatch.delenv("SUPABASE_URL", raising=False)
@@ -339,6 +409,26 @@ class TestSupabaseRehydration:
         with patch("app.gateway.telegram_link_store.httpx.Client", fake):
             loaded = store.load_bindings_from_supabase()
         assert loaded == 0
+
+    def test_rehydration_populates_telegram_user_id_index(self, monkeypatch):
+        """Reverse-index lookup must work on bindings restored from Supabase."""
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "sk-test")
+        rows = [
+            {
+                "channel": "telegram",
+                "chat_id": "100",
+                "user_id": "user-1",
+                "telegram_user_id": "tg-1",
+                "telegram_username": "alice",
+                "created_at": 1000.0,
+            },
+        ]
+        fake, _ = self._fake_client_returning([rows])
+        with patch("app.gateway.telegram_link_store.httpx.Client", fake):
+            store.load_bindings_from_supabase()
+
+        assert store.resolve_user_id_by_telegram_user_id("tg-1") == "user-1"
 
     def test_pagination_terminates_when_batch_is_short(self, monkeypatch):
         monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")

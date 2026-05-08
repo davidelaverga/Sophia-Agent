@@ -378,6 +378,7 @@ See the [MCP Server Guide](backend/docs/MCP_SERVER.md) for detailed instructions
 
 DeerFlow supports receiving tasks from messaging apps. Channels auto-start when configured — no public IP required for any of them.
 For Telegram builder completions, artifacts are uploaded as bytes (not URL fetches), and completion text is clamped to Telegram limits (caption 1024 chars, message 4096 chars) to avoid `BadRequest` delivery failures.
+Telegram chats also trigger the Sophia offline pipeline after 10 minutes of inactivity: handoffs, Mem0 candidates, and a sparse recap envelope are written, then the bot DMs the user a `LoginUrl` button into `/recap/{session_id}` for memory review. Requires `/setdomain` configured in BotFather against the host of `SOPHIA_WEB_BASE_URL`.
 
 | Channel | Transport | Difficulty |
 |---------|-----------|------------|

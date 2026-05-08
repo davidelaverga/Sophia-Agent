@@ -941,6 +941,24 @@ class ChannelManager:
             len(artifacts),
         )
 
+        # Register Telegram activity AFTER runs.wait completes so the tracker
+        # sees the FINAL thread_id (post any ``_recover_stale_thread`` swap).
+        # If we registered before the loop, a stale-thread retry would leave
+        # the tracker pointing at the dead thread, and a subsequent inactivity
+        # finalization would fail recap generation against the wrong thread.
+        if msg.channel_name == "telegram":
+            try:
+                from app.channels.telegram_session_tracker import register_activity
+                from app.gateway.telegram_link_store import resolve_user_id
+
+                register_activity(
+                    chat_id=msg.chat_id,
+                    user_id=resolve_user_id("telegram", msg.chat_id) or msg.user_id,
+                    thread_id=thread_id,
+                )
+            except Exception:
+                logger.warning("[Manager] telegram register_activity failed", exc_info=True)
+
         response_text, attachments = _prepare_artifact_delivery(thread_id, response_text, artifacts)
 
         if not response_text:

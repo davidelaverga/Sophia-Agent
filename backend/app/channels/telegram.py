@@ -89,6 +89,9 @@ class TelegramChannel(Channel):
         # Builder completion cards (sync `switch_to_builder` and async
         # deepagents path) ride a parallel pub/sub channel — see PR plan.
         self.bus.subscribe_builder_completion(self._on_builder_completion)
+        # Memory-review notifications (Telegram session-end → /recap).
+        # Tracker publishes; we render the LoginUrl button DM here.
+        self.bus.subscribe_review_notification(self._on_review_notification)
 
         # Build the application
         app = ApplicationBuilder().token(bot_token).build()
@@ -136,6 +139,7 @@ class TelegramChannel(Channel):
         self._running = False
         self.bus.unsubscribe_outbound(self._on_outbound)
         self.bus.unsubscribe_builder_completion(self._on_builder_completion)
+        self.bus.unsubscribe_review_notification(self._on_review_notification)
         if self._tg_loop and self._tg_loop.is_running():
             self._tg_loop.call_soon_threadsafe(self._tg_loop.stop)
         if self._thread:
@@ -626,6 +630,94 @@ class TelegramChannel(Channel):
             )
 
         return downloaded
+
+    # -- memory review handoff ------------------------------------------
+
+    async def _on_review_notification(self, payload: dict[str, Any]) -> None:
+        """Bus subscriber: render a memory-review DM in the originating chat.
+
+        Filters on ``payload["channel"] == "telegram"`` so a multi-channel
+        deployment doesn't echo the same DM through every adapter.
+        Best-effort: any failure logs and returns.
+        """
+        if payload.get("channel") != "telegram":
+            return
+        chat_id = payload.get("chat_id")
+        session_id = payload.get("session_id")
+        review_url = payload.get("review_url")
+        if not (isinstance(chat_id, str) and isinstance(session_id, str) and isinstance(review_url, str)):
+            logger.warning("[Telegram] review_notification missing fields: %r", payload)
+            return
+        await self.send_review_notification(
+            chat_id=chat_id, session_id=session_id, review_url=review_url,
+        )
+
+    async def send_review_notification(
+        self,
+        chat_id: str,
+        session_id: str,
+        review_url: str,
+        *,
+        text: str = "Your memories from this session are ready to review.",
+    ) -> bool:
+        """Send the "memories ready" DM with a Telegram LoginUrl button.
+
+        Best-effort: any failure logs and returns False. Bot calls are
+        loop-affine to ``_tg_loop``, so this method always hops via
+        ``_run_bot_call_on_telegram_loop``.
+        """
+        if not self._application or not self._tg_loop:
+            return False
+        keyboard = self._build_review_keyboard(review_url)
+        if keyboard is None:
+            return False
+        safe_text = self._truncate_for_telegram(text, limit=_TELEGRAM_TEXT_LIMIT)
+        coro = self._send_review_message(chat_id, session_id, safe_text, keyboard)
+        try:
+            return bool(await self._run_bot_call_on_telegram_loop(coro))
+        except Exception:
+            logger.exception(
+                "[Telegram] review notification dispatch error chat=%s session=%s",
+                chat_id, session_id,
+            )
+            return False
+
+    @staticmethod
+    def _build_review_keyboard(review_url: str):
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LoginUrl
+        except ImportError:
+            logger.warning("[Telegram] python-telegram-bot not installed; skipping review")
+            return None
+        button = InlineKeyboardButton(
+            "Open Review",
+            login_url=LoginUrl(url=review_url, forward_text="Open Review"),
+        )
+        return InlineKeyboardMarkup([[button]])
+
+    async def _send_review_message(
+        self, chat_id: str, session_id: str, text: str, keyboard,
+    ) -> bool:
+        try:
+            int_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            logger.warning("[Telegram] review notification: invalid chat_id=%r", chat_id)
+            return False
+        try:
+            sent = await self._application.bot.send_message(
+                chat_id=int_chat_id, text=text, reply_markup=keyboard,
+            )
+        except Exception:
+            logger.exception(
+                "[Telegram] review notification send failed chat=%s session=%s",
+                chat_id, session_id,
+            )
+            return False
+        self._last_bot_message[str(chat_id)] = sent.message_id
+        logger.info(
+            "[Telegram] review notification sent chat=%s session=%s", chat_id, session_id,
+        )
+        return True
 
     # -- builder completion fan-out --------------------------------------
 

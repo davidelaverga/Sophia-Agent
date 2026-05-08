@@ -1,6 +1,6 @@
 """Telegram deep-link token issuance + binding management.
 
-Webapp flow:
+Webapp flow (user-scoped):
 
     POST   /api/sophia/{user_id}/telegram/link  -> { url, token, expires_at }
     GET    /api/sophia/{user_id}/telegram/link  -> { linked, telegram_username? }

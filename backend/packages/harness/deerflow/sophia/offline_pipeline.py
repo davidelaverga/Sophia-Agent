@@ -17,14 +17,17 @@ The pipeline is idempotent via a module-level ``_processed_sessions`` set.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
-from deerflow.agents.sophia_agent.utils import validate_user_id
+from deerflow.agents.sophia_agent.paths import USERS_DIR
+from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
 from deerflow.sophia.extraction import extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
@@ -220,6 +223,29 @@ def run_offline_pipeline(
         steps["handoff"] = "error"
 
     # ------------------------------------------------------------------
+    # Step 5b: Recap envelope
+    # ------------------------------------------------------------------
+    # Channel-originated sessions (Telegram today, iOS / future channels
+    # tomorrow) never trigger the web flow's POST /sessions/{id}/end, so
+    # without this step they would have no ``users/{user_id}/recaps/{session_id}.json``
+    # and the frontend ``/recap/<session>`` page would 404. The recap we
+    # write here is sparse (status="processing", recap_artifacts=null) —
+    # the frontend's ``hydratePayloadWithRemoteMemories`` then pulls the
+    # Mem0 candidates from ``/api/memory/recent?session_id=...`` and shows
+    # them.  Idempotency guard: never overwrite an existing file, because
+    # the web flow writes a richer envelope with takeaway / reflection
+    # synthesized via a client-side LLM call.
+    try:
+        steps["recap"] = _write_offline_recap(
+            user_id, session_id, thread_id, session_metadata, len(messages),
+        )
+    except Exception:
+        logger.error(
+            "Pipeline step 'recap' failed for session %s", session_id, exc_info=True,
+        )
+        steps["recap"] = "error"
+
+    # ------------------------------------------------------------------
     # Step 6: Identity update
     # ------------------------------------------------------------------
     try:
@@ -269,6 +295,72 @@ def reset_processed_sessions() -> None:
 # ------------------------------------------------------------------
 
 
+def _write_offline_recap(
+    user_id: str,
+    session_id: str,
+    thread_id: str,
+    session_metadata: dict[str, Any],
+    turn_count: int,
+) -> str:
+    """Write a minimal recap envelope so ``/recap/<session>`` can load.
+
+    Mirrors the shape of ``_build_session_recap_payload`` in
+    ``app/gateway/routers/sophia.py`` so the frontend reads both
+    web-originated and offline-originated recaps through the same
+    contract.  Status is always ``"processing"`` and ``recap_artifacts``
+    is ``null`` — those fields require a synchronous LLM synthesis the
+    offline pipeline doesn't perform.  The frontend treats this case
+    correctly: it hydrates the memory candidates from
+    ``/api/memory/recent`` and shows them; takeaway / reflection are
+    blank for offline-only sessions.
+
+    Idempotent: returns ``"skipped_exists"`` when a recap is already on
+    disk (web flow writes a richer one and must always win).  Raises on
+    filesystem errors so the caller's try/except can record them.
+    """
+    recap_path = safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
+    if recap_path.exists():
+        logger.info(
+            "Recap already exists for %s/%s — skipping offline write", user_id, session_id,
+        )
+        return "skipped_exists"
+
+    started_at: str | None = None
+    try:
+        from deerflow.sophia.session_store import SessionStore
+
+        record = SessionStore().get(user_id, session_id)
+        if record is not None:
+            started_at = record.created_at
+    except Exception:
+        logger.warning(
+            "session.finalization recap_session_lookup_failed user=%s session=%s",
+            user_id, session_id, exc_info=True,
+        )
+
+    payload = {
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "session_type": "open",
+        "context_mode": session_metadata.get("context_mode", "life"),
+        "started_at": started_at,
+        "ended_at": datetime.now(UTC).isoformat(),
+        "turn_count": turn_count,
+        "status": "processing",
+        # Empty dict (NOT None) so the frontend's mapper doesn't early-null-
+        # return on the recap envelope. With ``None`` the page treats the
+        # whole recap as unrenderable and the hydration step that pulls
+        # Mem0 candidates from ``/api/memory/recent`` never runs.
+        "recap_artifacts": {},
+    }
+    recap_path.parent.mkdir(parents=True, exist_ok=True)
+    recap_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    logger.info(
+        "Recap written for user %s session %s at %s", user_id, session_id, recap_path,
+    )
+    return "ok"
+
+
 def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
     """Extract session-level metadata from thread_state.
 
@@ -312,30 +404,61 @@ def _extract_artifacts(thread_state: dict[str, Any]) -> list[dict]:
     return artifacts
 
 
-def _serialize_messages(messages: list) -> list[dict]:
-    """Convert LangChain BaseMessage objects to plain dicts.
+_ROLE_MAP = {"human": "user", "ai": "assistant", "system": "system"}
 
-    The extraction module expects ``[{"role": ..., "content": ...}]``.
+
+def _flatten_content(content: Any) -> str:
+    """Reduce content to a plain string for transcript / extraction use.
+
+    Channel adapters (Telegram, Slack) deliver multimodal user turns as
+    Anthropic content-block lists: ``[{"type": "text", "text": "..."},
+    {"type": "image", ...}]``. The extractor only inspects text, so we
+    join the text blocks and drop the rest. Plain strings pass through
+    unchanged.
+    """
+    if isinstance(content, list):
+        return " ".join(
+            p.get("text", "")
+            for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return str(content or "")
+
+
+def _serialize_messages(messages: list) -> list[dict]:
+    """Normalize messages to ``[{"role": ..., "content": ...}]``.
+
+    Handles three shapes:
+
+    1. **LangChain ``BaseMessage`` objects** — uses ``msg.type``
+       (``"human"`` / ``"ai"`` / ``"system"``).
+    2. **LangChain JSON-serialized dicts** — what ``GET /threads/{id}/state``
+       returns from the LangGraph server: ``{"type": "human", "content": ...}``
+       (no ``role`` key).
+    3. **Channel-adapter raw dicts** — what ``ChannelManager`` builds for
+       the agent input: ``{"role": "human", "content": ...}``.
+
+    The dict branch tries ``role`` first, then falls back to ``type``.
+    Without the fallback, every message fetched via LangGraph's HTTP
+    state endpoint stays with a blank role after serialization, then
+    ``extraction._format_transcript`` drops them all (it only accepts
+    ``role == "user"`` / ``"assistant"`` / ``"ai"``). That was the
+    production bug where 6+ Telegram messages produced 0 memories
+    even after the original role-normalization fix landed.
     """
     result: list[dict] = []
     for msg in messages:
-        # Already a dict?
         if isinstance(msg, dict):
-            result.append(msg)
-            continue
-
-        role = getattr(msg, "type", "unknown")
-        content = getattr(msg, "content", "")
-        if isinstance(content, list):
-            content = " ".join(
-                p.get("text", "") for p in content if isinstance(p, dict)
-            )
-
-        # Map LangChain types to role strings
-        role_map = {"human": "user", "ai": "assistant", "system": "system"}
+            role = msg.get("role") or msg.get("type", "")
+            content = msg.get("content")
+            if content is None and isinstance(msg.get("data"), dict):
+                content = msg["data"].get("content", "")
+        else:
+            role = getattr(msg, "type", "unknown")
+            content = getattr(msg, "content", "")
         result.append({
-            "role": role_map.get(role, role),
-            "content": str(content),
+            "role": _ROLE_MAP.get(role, role),
+            "content": _flatten_content(content),
         })
     return result
 

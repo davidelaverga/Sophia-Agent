@@ -86,6 +86,12 @@ _lock = threading.RLock()
 _tokens: dict[str, LinkTokenRecord] = {}
 _bindings_by_chat: dict[tuple[ChannelName, str], UserBinding] = {}
 _bindings_by_user: dict[str, set[tuple[ChannelName, str]]] = {}
+# Reverse index: telegram_user_id -> set of (channel, chat_id) keys.
+# Used by the Telegram->web review handoff (login_url button) to resolve the
+# canonical user_id from the Telegram-attested ``id`` payload without a
+# Supabase round-trip on every redeem. Only populated when ``bind_chat`` is
+# called with a non-empty ``telegram_user_id``.
+_bindings_by_telegram_user_id: dict[str, set[tuple[ChannelName, str]]] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +273,35 @@ def _supabase_delete_bindings_for_user(user_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _drop_key_from_index(
+    index: dict[str, set[tuple[ChannelName, str]]],
+    index_key: str | None,
+    chat_key: tuple[ChannelName, str],
+) -> None:
+    """Remove ``chat_key`` from ``index[index_key]``; clean empty slots."""
+    if not index_key:
+        return
+    keys = index.get(index_key)
+    if keys is None:
+        return
+    keys.discard(chat_key)
+    if not keys:
+        index.pop(index_key, None)
+
+
+def _drop_binding_from_indexes(binding: UserBinding, chat_key: tuple[ChannelName, str]) -> None:
+    """Remove ``binding`` from both the user-id and telegram-user-id reverse indexes."""
+    _drop_key_from_index(_bindings_by_user, binding.user_id, chat_key)
+    _drop_key_from_index(_bindings_by_telegram_user_id, binding.telegram_user_id, chat_key)
+
+
+def _add_binding_to_indexes(binding: UserBinding, chat_key: tuple[ChannelName, str]) -> None:
+    """Add ``binding`` to the user-id and (when present) telegram-user-id reverse indexes."""
+    _bindings_by_user.setdefault(binding.user_id, set()).add(chat_key)
+    if binding.telegram_user_id:
+        _bindings_by_telegram_user_id.setdefault(binding.telegram_user_id, set()).add(chat_key)
+
+
 def bind_chat(
     channel: ChannelName,
     chat_id: str,
@@ -295,22 +330,14 @@ def bind_chat(
     with _lock:
         old = _bindings_by_chat.pop(key, None)
         if old is not None:
-            user_keys = _bindings_by_user.get(old.user_id)
-            if user_keys is not None:
-                user_keys.discard(key)
-                if not user_keys:
-                    _bindings_by_user.pop(old.user_id, None)
+            _drop_binding_from_indexes(old, key)
         # Bound the total binding count.
         while len(_bindings_by_chat) >= _MAX_BINDINGS:
             oldest_key, oldest = min(_bindings_by_chat.items(), key=lambda kv: kv[1].created_at)
             _bindings_by_chat.pop(oldest_key, None)
-            user_keys = _bindings_by_user.get(oldest.user_id)
-            if user_keys is not None:
-                user_keys.discard(oldest_key)
-                if not user_keys:
-                    _bindings_by_user.pop(oldest.user_id, None)
+            _drop_binding_from_indexes(oldest, oldest_key)
         _bindings_by_chat[key] = binding
-        _bindings_by_user.setdefault(binding.user_id, set()).add(key)
+        _add_binding_to_indexes(binding, key)
     logger.info(
         "telegram_link.bind channel=%s chat_id=%s user_id=%s tg_username=%s",
         channel,
@@ -332,6 +359,39 @@ def resolve_user_id(channel: ChannelName, chat_id: str) -> str | None:
     return binding.user_id if binding else None
 
 
+def resolve_user_id_by_telegram_user_id(
+    telegram_user_id: str, *, channel: ChannelName = "telegram"
+) -> str | None:
+    """Return canonical user_id for a given Telegram-side ``id``, or None.
+
+    Used by the Telegram->web review handoff: when a user taps the LoginUrl
+    button, Telegram appends ``id=<telegram_user_id>`` to our redirect URL
+    after HMAC-verifying the payload. The frontend calls this lookup (via
+    a guarded gateway endpoint or direct Supabase read in the same process)
+    to find the canonical ``user_id`` to mint a Better Auth session for.
+
+    Returns the user_id of the most recently bound chat for that telegram
+    user. A single Telegram user normally maps to a single chat, but if
+    there are multiple bindings (e.g. /start was redeemed twice with
+    different webapp accounts) we pick the freshest by ``created_at`` —
+    that is the binding the user most recently authorized, and it matches
+    the contract a human would expect: "the link the user just clicked
+    points to the account the user most recently linked".
+    """
+    if not telegram_user_id:
+        return None
+    with _lock:
+        keys = _bindings_by_telegram_user_id.get(telegram_user_id, set())
+        candidates = [
+            _bindings_by_chat[k]
+            for k in keys
+            if k[0] == channel and k in _bindings_by_chat
+        ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda b: b.created_at).user_id
+
+
 def get_binding_for_user(user_id: str, channel: ChannelName = "telegram") -> UserBinding | None:
     """Return the first binding for ``user_id`` on ``channel``, or None."""
     if not user_id:
@@ -348,21 +408,19 @@ def unbind_user(user_id: str, channel: ChannelName = "telegram") -> int:
     """Remove all bindings for ``user_id`` on ``channel``. Returns count removed."""
     if not user_id:
         return 0
+    normalized = user_id.strip()
     removed = 0
     with _lock:
-        keys = list(_bindings_by_user.get(user_id.strip(), set()))
+        keys = list(_bindings_by_user.get(normalized, set()))
         for key in keys:
             if key[0] != channel:
                 continue
-            _bindings_by_chat.pop(key, None)
-            user_keys = _bindings_by_user.get(user_id.strip())
-            if user_keys is not None:
-                user_keys.discard(key)
-                if not user_keys:
-                    _bindings_by_user.pop(user_id.strip(), None)
+            old = _bindings_by_chat.pop(key, None)
+            if old is not None:
+                _drop_binding_from_indexes(old, key)
             removed += 1
     if removed > 0:
-        _supabase_delete_bindings_for_user(user_id.strip())
+        _supabase_delete_bindings_for_user(normalized)
     return removed
 
 
@@ -375,11 +433,7 @@ def unbind_chat(channel: ChannelName, chat_id: str) -> bool:
         binding = _bindings_by_chat.pop(key, None)
         if binding is None:
             return False
-        user_keys = _bindings_by_user.get(binding.user_id)
-        if user_keys is not None:
-            user_keys.discard(key)
-            if not user_keys:
-                _bindings_by_user.pop(binding.user_id, None)
+        _drop_binding_from_indexes(binding, key)
     _supabase_delete_binding(channel, str(chat_id))
     return True
 
@@ -432,13 +486,16 @@ def _install_binding_locked(binding: UserBinding) -> None:
     while len(_bindings_by_chat) >= _MAX_BINDINGS and key not in _bindings_by_chat:
         oldest_key, oldest = min(_bindings_by_chat.items(), key=lambda kv: kv[1].created_at)
         _bindings_by_chat.pop(oldest_key, None)
-        user_keys = _bindings_by_user.get(oldest.user_id)
-        if user_keys is not None:
-            user_keys.discard(oldest_key)
-            if not user_keys:
-                _bindings_by_user.pop(oldest.user_id, None)
+        _drop_binding_from_indexes(oldest, oldest_key)
+    # If a binding for this exact key already exists with a *different*
+    # telegram_user_id, drop its reverse-index entry before overwriting
+    # (a rebound chat with a different tg user must not leave a dangling
+    # pointer in the reverse index).
+    existing = _bindings_by_chat.get(key)
+    if existing is not None and existing.telegram_user_id != binding.telegram_user_id:
+        _drop_key_from_index(_bindings_by_telegram_user_id, existing.telegram_user_id, key)
     _bindings_by_chat[key] = binding
-    _bindings_by_user.setdefault(binding.user_id, set()).add(key)
+    _add_binding_to_indexes(binding, key)
 
 
 def load_bindings_from_supabase() -> int:
@@ -524,3 +581,4 @@ def clear_all() -> None:
         _tokens.clear()
         _bindings_by_chat.clear()
         _bindings_by_user.clear()
+        _bindings_by_telegram_user_id.clear()

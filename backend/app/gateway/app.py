@@ -100,15 +100,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("Failed to start inactivity watcher")
 
+    # Start Telegram-side session tracker (mirrors the web watcher but
+    # keys on chat_id; fires the offline pipeline + memory-review
+    # notification on 10-min Telegram idle).
+    try:
+        from app.channels.telegram_session_tracker import start_watcher as start_tg_watcher
+
+        await start_tg_watcher()
+        logger.info("Telegram session tracker started")
+    except Exception:
+        logger.exception("Failed to start Telegram session tracker")
+
     yield
 
-    # Stop inactivity watcher
+    # Stop watchers
     try:
+        from app.channels.telegram_session_tracker import stop_watcher as stop_tg_watcher
         from app.gateway.inactivity_watcher import stop_watcher
 
         await stop_watcher()
+        await stop_tg_watcher()
     except Exception:
-        logger.exception("Failed to stop inactivity watcher")
+        logger.exception("Failed to stop watchers")
 
     # Stop channel service on shutdown
     try:
