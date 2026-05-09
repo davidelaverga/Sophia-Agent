@@ -12,12 +12,11 @@ from __future__ import annotations
 import pytest
 
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
-    BuilderTaskMiddleware,
     _NORMALIZED_BRIEF_MAX_CHARS,
     _SYNTHETIC_DELEGATION_SOURCE,
     _VALID_BRIEF_TASK_TYPES,
+    BuilderTaskMiddleware,
 )
-
 
 # ---------------------------------------------------------------------------
 # Test fixtures: a fake Anthropic client returning structured tool-use blocks

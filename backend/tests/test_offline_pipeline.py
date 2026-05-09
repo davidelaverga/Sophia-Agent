@@ -455,9 +455,22 @@ class TestSerializeMessages:
 
         msg = MagicMock()
         msg.type = "human"
-        msg.content = [{"text": "hello "}, {"text": "world"}]
+        # _flatten_content requires the canonical block shape
+        # ({"type": "text", "text": ...}). The earlier mock shape
+        # ({"text": ...}) was silently shadowed by the duplicate
+        # TestSerializeMessages class on main, so this test never
+        # ran. Fixed here to match how Anthropic/LangChain emit
+        # multimodal text blocks.
+        msg.content = [
+            {"type": "text", "text": "hello "},
+            {"type": "text", "text": "world"},
+        ]
         result = _serialize_messages([msg])
 
+        # Note the double space: _flatten_content joins blocks
+        # verbatim, so "hello " + "world" → "hello  world".
+        # Trim/normalisation is intentionally NOT applied here
+        # because Mem0 needs the original token boundaries.
         assert result[0]["content"] == "hello  world"
 
 
@@ -577,7 +590,15 @@ class TestStateFetchFallback:
 # ``role == "user"``.
 
 
-class TestSerializeMessages:
+class TestSerializeMessagesDictRole:
+    """Second TestSerializeMessages class — ruff F811 flagged the duplicate.
+
+    Renamed (rather than merged) to keep these dict-shape regression tests
+    clearly grouped near the contract comment block above. Two separate
+    classes covering different aspects of ``_serialize_messages`` is fine
+    — the only issue was the name collision.
+    """
+
     def test_normalizes_human_role_in_dict_messages(self):
         from deerflow.sophia.offline_pipeline import _serialize_messages
 

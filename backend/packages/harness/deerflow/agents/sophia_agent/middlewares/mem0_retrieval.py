@@ -47,13 +47,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any, NotRequired, override
+from typing import NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.agents.sophia_agent.utils import extract_last_human_text, log_middleware
 from deerflow.sophia.mem0_client import search_memories
 
 logger = logging.getLogger(__name__)
@@ -123,8 +123,37 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             log_middleware("BuilderMem0Retrieval", "no query — skipping", _t0)
             return None
 
+        results = await self._safe_search(user_id, query)
+        if not results:
+            # _safe_search logs the specific reason (timeout/error/empty)
+            log_middleware("BuilderMem0Retrieval", "no results", _t0)
+            return None
+
+        memory_ids, memory_contents = self._collect_snippets(results)
+        if not memory_contents:
+            log_middleware("BuilderMem0Retrieval", "no usable contents", _t0)
+            return None
+
+        update = self._build_state_update(state, memory_ids, memory_contents)
+        log_middleware(
+            "BuilderMem0Retrieval",
+            f"injected {len(memory_contents)} snippets "
+            f"(total contents={len(update['injected_memory_contents'])})",
+            _t0,
+        )
+        return update
+
+    # --- async-path helpers ---------------------------------------------
+
+    async def _safe_search(self, user_id: str, query: str) -> list | None:
+        """Run search_memories with timeout + error swallow.
+
+        Returns the raw results list, or None on timeout / error / no
+        results. Caller logs at log_middleware level; this method emits
+        WARNING-level structured-log lines for diagnostics.
+        """
         try:
-            results = await asyncio.wait_for(
+            return await asyncio.wait_for(
                 asyncio.to_thread(
                     search_memories,
                     user_id,
@@ -135,67 +164,67 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
                 ),
                 timeout=self.timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "mem0_retrieval.timeout user_id=%s timeout_s=%.2f query_len=%d",
                 user_id,
                 self.timeout_seconds,
                 len(query),
             )
-            log_middleware("BuilderMem0Retrieval", "timeout", _t0)
             return None
         except Exception:
-            logger.warning(
-                "mem0_retrieval.error user_id=%s",
-                user_id,
-                exc_info=True,
-            )
-            log_middleware("BuilderMem0Retrieval", "error", _t0)
+            logger.warning("mem0_retrieval.error user_id=%s", user_id, exc_info=True)
             return None
 
-        if not results:
-            log_middleware("BuilderMem0Retrieval", "no results", _t0)
-            return None
+    @staticmethod
+    def _collect_snippets(results: list) -> tuple[list[str], list[str]]:
+        """Extract (memory_ids, memory_contents) from raw Mem0 search results.
 
+        Drops non-dict entries silently. Truncates each content snippet
+        to ``_MAX_SNIPPET_CHARS`` so a single multi-paragraph memory can't
+        dominate the prompt budget.
+        """
         memory_ids: list[str] = []
         memory_contents: list[str] = []
         for entry in results:
             if not isinstance(entry, dict):
                 continue
             entry_id = entry.get("id")
-            entry_content = entry.get("content")
             if isinstance(entry_id, str) and entry_id:
                 memory_ids.append(entry_id)
+            entry_content = entry.get("content")
             if isinstance(entry_content, str) and entry_content.strip():
                 snippet = entry_content.strip()
                 if len(snippet) > _MAX_SNIPPET_CHARS:
                     snippet = snippet[: _MAX_SNIPPET_CHARS - 1] + "…"
                 memory_contents.append(snippet)
+        return memory_ids, memory_contents
 
-        if not memory_contents:
-            log_middleware("BuilderMem0Retrieval", "no usable contents", _t0)
-            return None
+    def _build_state_update(
+        self,
+        state: BuilderMem0RetrievalState,
+        memory_ids: list[str],
+        memory_contents: list[str],
+    ) -> dict:
+        """Build the dict returned from ``abefore_agent``.
 
-        # Merge with anything start_builder_task already injected (companion
-        # path puts up to 5 snippets here). Deduplicate by content while
-        # preserving order — companion-side snippets first, then ours.
+        Merges with anything ``start_builder_task`` already injected
+        (companion path puts up to 5 snippets in
+        ``injected_memory_contents``). Dedup preserves order —
+        companion-side snippets first, then ours. Also appends a
+        ``<memory>`` block to ``system_prompt_blocks`` so PromptAssembly
+        at the end of the chain naturally includes it in the system
+        message.
+        """
         existing_contents = state.get("injected_memory_contents") or []
         merged_contents = self._dedupe_preserve_order(existing_contents, memory_contents)
 
         existing_ids = state.get("injected_memories") or []
         merged_ids = self._dedupe_preserve_order(existing_ids, memory_ids)
 
-        # Append a <memory> block to system_prompt_blocks. PromptAssembly
-        # at the end of the chain joins these into the system message.
         block = self._format_memory_block(memory_contents)
         blocks = list(state.get("system_prompt_blocks", []) or [])
         blocks.append(block)
-
-        log_middleware(
-            "BuilderMem0Retrieval",
-            f"injected {len(memory_contents)} snippets (total contents={len(merged_contents)})",
-            _t0,
-        )
 
         return {
             "injected_memory_contents": merged_contents,
@@ -207,30 +236,46 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
 
     @staticmethod
     def _resolve_user_id(state: BuilderMem0RetrievalState, runtime: Runtime) -> str | None:
-        """Resolve user_id from state then runtime context/configurable."""
-        candidate = state.get("user_id")
-        if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()
+        """Resolve user_id from state then runtime context/configurable.
 
-        if runtime is not None:
+        Priority: state.user_id → runtime.context.user_id →
+        runtime.config.configurable.user_id. Each lookup is wrapped in a
+        small try/except so a missing-attr / wrong-shape runtime never
+        crashes the middleware (it's best-effort by design).
+        """
+        for source in BuilderMem0RetrievalMiddleware._user_id_sources(state, runtime):
             try:
-                ctx = getattr(runtime, "context", None) or {}
-                if isinstance(ctx, dict):
-                    candidate = ctx.get("user_id")
-                    if isinstance(candidate, str) and candidate.strip():
-                        return candidate.strip()
+                value = source()
             except Exception:
-                pass
-            try:
-                config = getattr(runtime, "config", None) or {}
-                configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
-                if isinstance(configurable, dict):
-                    candidate = configurable.get("user_id")
-                    if isinstance(candidate, str) and candidate.strip():
-                        return candidate.strip()
-            except Exception:
-                pass
+                continue
+            if isinstance(value, str) and value.strip():
+                return value.strip()
         return None
+
+    @staticmethod
+    def _user_id_sources(
+        state: BuilderMem0RetrievalState, runtime: Runtime
+    ) -> list:
+        """Return an ordered list of zero-arg callables that yield user_id candidates.
+
+        Each callable returns either a non-empty string or None/anything
+        else (rejected by the type check in ``_resolve_user_id``). The
+        list-of-callables shape keeps ``_resolve_user_id`` linear (one
+        loop) instead of a nested-try/except staircase.
+        """
+        return [
+            lambda: state.get("user_id"),
+            lambda: ((getattr(runtime, "context", None) or {}).get("user_id"))
+            if runtime is not None
+            else None,
+            lambda: (
+                ((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get(
+                    "user_id"
+                )
+            )
+            if runtime is not None
+            else None,
+        ]
 
     @staticmethod
     def _resolve_query(state: BuilderMem0RetrievalState) -> str | None:
@@ -247,42 +292,8 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
                 value = delegation.get(field)
                 if isinstance(value, str) and value.strip():
                     return value.strip()
-
-        # Walk messages backward for the last human turn. Supports both
-        # raw dict messages (from runs.wait input) and BaseMessage objects.
-        for msg in reversed(state.get("messages") or []):
-            text = BuilderMem0RetrievalMiddleware._extract_human_text(msg)
-            if text:
-                return text
-        return None
-
-    @staticmethod
-    def _extract_human_text(msg: Any) -> str | None:
-        """Return the text content of ``msg`` iff it's a human message."""
-        # LangChain BaseMessage shape (e.g. HumanMessage instance).
-        msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)
-        content = getattr(msg, "content", None)
-
-        if msg_type is None and isinstance(msg, dict):
-            msg_type = msg.get("type") or msg.get("role")
-            content = msg.get("content")
-
-        if msg_type not in {"human", "user"}:
-            return None
-
-        if isinstance(content, str) and content.strip():
-            return content.strip()
-        if isinstance(content, list):
-            parts: list[str] = []
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(str(block.get("text", "")))
-                elif isinstance(block, str):
-                    parts.append(block)
-            text = "".join(parts).strip()
-            if text:
-                return text
-        return None
+        # Shared helper — same primitive used by BuilderTaskMiddleware.
+        return extract_last_human_text(state.get("messages"))
 
     @staticmethod
     def _dedupe_preserve_order(existing: list[str], new: list[str]) -> list[str]:

@@ -109,3 +109,73 @@ def extract_last_message_text(messages: list) -> str:
             return " ".join(parts)
 
     return ""
+
+
+# ---------------------------------------------------------------------------
+# Shared "last human message" extraction (Builder synthesis + Mem0 retrieval).
+#
+# Two builder middlewares need the same primitive: walk a messages list
+# backwards, find the latest human turn, and return its text. Keeping the
+# logic inline in each middleware bumps both functions over CC=15 (sentrux
+# threshold). Splitting into small helpers below keeps each piece at CC<=5
+# and lets both call sites share a single 1-line wrapper.
+# ---------------------------------------------------------------------------
+
+
+def _read_msg_role_and_content(msg) -> tuple[str | None, object]:
+    """Read role + content from a LangChain BaseMessage OR a dict.
+
+    Supports both the LangChain object shape (``msg.type`` / ``msg.content``)
+    and the raw dict shape (``msg["type"]`` or ``msg["role"]``) used by
+    LangGraph SDK ``runs.wait`` results and channel-adapter inputs.
+    """
+    msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)
+    content = getattr(msg, "content", None)
+    if msg_type is None and isinstance(msg, dict):
+        msg_type = msg.get("type") or msg.get("role")
+        content = msg.get("content")
+    return msg_type, content
+
+
+def _flatten_message_text(content: object) -> str | None:
+    """Return the trimmed text of ``content`` or None when empty.
+
+    Handles plain strings AND content-block lists (the multimodal shape
+    Anthropic uses, e.g. ``[{"type": "text", "text": "..."}]``). Drops
+    blocks that aren't text.
+    """
+    if isinstance(content, str):
+        text = content.strip()
+        return text or None
+    if isinstance(content, list):
+        parts = [_block_text_or_empty(block) for block in content]
+        text = "".join(parts).strip()
+        return text or None
+    return None
+
+
+def _block_text_or_empty(block) -> str:
+    if isinstance(block, dict) and block.get("type") == "text":
+        return str(block.get("text", ""))
+    if isinstance(block, str):
+        return block
+    return ""
+
+
+def extract_last_human_text(messages) -> str | None:
+    """Return the trimmed text of the last human message, or None.
+
+    Used by ``BuilderTaskMiddleware`` (synthesise delegation_context from
+    the user's first message) and ``BuilderMem0RetrievalMiddleware``
+    (build the Mem0 search query when no delegation_context exists yet).
+    Both call sites collapsed into this one helper to stay under
+    sentrux's complexity threshold.
+    """
+    for msg in reversed(messages or []):
+        msg_type, content = _read_msg_role_and_content(msg)
+        if msg_type not in {"human", "user"}:
+            continue
+        text = _flatten_message_text(content)
+        if text:
+            return text
+    return None

@@ -8,13 +8,11 @@ timeout / error / no-user-id.
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
-    BuilderMem0RetrievalMiddleware,
     _MAX_SNIPPET_CHARS,
+    BuilderMem0RetrievalMiddleware,
 )
 
 

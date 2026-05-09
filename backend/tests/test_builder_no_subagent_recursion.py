@@ -12,8 +12,6 @@ the positive case (a contaminated list raises).
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 
@@ -50,6 +48,7 @@ class TestRecursionGuardRaises:
 
         # Re-import the module so the guard re-evaluates on the patched list.
         import importlib
+
         import deerflow.agents.sophia_agent.builder_agent as ba
 
         importlib.reload(ba)

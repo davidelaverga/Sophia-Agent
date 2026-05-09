@@ -456,7 +456,7 @@ class TelegramWorkChannel(Channel):
                 ),
                 timeout=self._run_timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "[TelegramWork] runs.wait timed out after %ds chat_id=%s thread_id=%s",
                 self._run_timeout_seconds,
@@ -613,75 +613,101 @@ class TelegramWorkChannel(Channel):
         1. ``emit_builder_artifact`` tool-call args ``companion_summary``
            (the structured payload Builder produces on completion).
         2. The last AI message text (free-form summary if no artifact emit).
+
+        Both passes are split into helpers to keep this method's
+        cyclomatic complexity under sentrux's threshold; the helpers
+        are also independently testable.
         """
         messages = TelegramWorkChannel._messages_from_result(result)
+        return (
+            TelegramWorkChannel._companion_summary_from_artifact_call(messages)
+            or TelegramWorkChannel._last_ai_text(messages)
+        )
 
-        # First pass: look for emit_builder_artifact's companion_summary.
-        for msg in reversed(messages):
-            if not isinstance(msg, dict):
-                continue
-            if msg.get("type") != "ai":
-                continue
-            for tc in msg.get("tool_calls") or []:
-                if isinstance(tc, dict) and tc.get("name") == "emit_builder_artifact":
-                    args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                    summary = args.get("companion_summary")
-                    if isinstance(summary, str) and summary.strip():
-                        return summary.strip()
+    @staticmethod
+    def _companion_summary_from_artifact_call(messages: list) -> str | None:
+        """Find the latest ``emit_builder_artifact`` call's companion_summary.
 
-        # Second pass: last AI message text content.
+        Returns None when no such call is present, when its args are
+        malformed, or when ``companion_summary`` is empty.
+        """
+        for tool_call in TelegramWorkChannel._iter_artifact_tool_calls(messages):
+            args = tool_call.get("args") if isinstance(tool_call.get("args"), dict) else {}
+            summary = args.get("companion_summary")
+            if isinstance(summary, str) and summary.strip():
+                return summary.strip()
+        return None
+
+    @staticmethod
+    def _last_ai_text(messages: list) -> str | None:
+        """Walk messages backward for the latest AI text reply.
+
+        Stops at the most recent human message so we don't bleed text
+        from a prior turn. Handles both string content and the
+        Anthropic content-block list shape (``[{"type": "text", ...}]``).
+        """
         for msg in reversed(messages):
             if not isinstance(msg, dict):
                 continue
             if msg.get("type") == "human":
-                break  # don't return text from prior turns
+                return None  # don't return text from prior turns
             if msg.get("type") != "ai":
                 continue
-            content = msg.get("content")
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-            if isinstance(content, list):
-                parts = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(block.get("text", ""))
-                    elif isinstance(block, str):
-                        parts.append(block)
-                text = "".join(parts).strip()
-                if text:
-                    return text
+            text = TelegramWorkChannel._flatten_ai_content(msg.get("content"))
+            if text:
+                return text
         return None
+
+    @staticmethod
+    def _flatten_ai_content(content: Any) -> str | None:
+        """Coerce ``content`` (str | list-of-blocks | other) to a stripped string."""
+        if isinstance(content, str):
+            text = content.strip()
+            return text or None
+        if isinstance(content, list):
+            parts = [TelegramWorkChannel._block_text(block) for block in content]
+            text = "".join(parts).strip()
+            return text or None
+        return None
+
+    @staticmethod
+    def _block_text(block: Any) -> str:
+        if isinstance(block, dict) and block.get("type") == "text":
+            return str(block.get("text", ""))
+        if isinstance(block, str):
+            return block
+        return ""
+
+    @staticmethod
+    def _iter_artifact_tool_calls(messages: list):
+        """Yield ``emit_builder_artifact`` tool-call dicts (newest first)."""
+        for msg in reversed(messages):
+            if not isinstance(msg, dict) or msg.get("type") != "ai":
+                continue
+            for tc in msg.get("tool_calls") or []:
+                if isinstance(tc, dict) and tc.get("name") == "emit_builder_artifact":
+                    yield tc
 
     @staticmethod
     def _extract_artifact_filename(result: Any) -> str | None:
         """Return the basename of artifact_path from emit_builder_artifact."""
         messages = TelegramWorkChannel._messages_from_result(result)
-        for msg in reversed(messages):
-            if not isinstance(msg, dict) or msg.get("type") != "ai":
-                continue
-            for tc in msg.get("tool_calls") or []:
-                if not isinstance(tc, dict) or tc.get("name") != "emit_builder_artifact":
-                    continue
-                args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                path = args.get("artifact_path")
-                if isinstance(path, str) and path.strip():
-                    return path.rsplit("/", 1)[-1]
+        for tc in TelegramWorkChannel._iter_artifact_tool_calls(messages):
+            args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+            path = args.get("artifact_path")
+            if isinstance(path, str) and path.strip():
+                return path.rsplit("/", 1)[-1]
         return None
 
     @staticmethod
     def _extract_artifact_title(result: Any) -> str | None:
         """Return artifact_title from emit_builder_artifact (used as caption)."""
         messages = TelegramWorkChannel._messages_from_result(result)
-        for msg in reversed(messages):
-            if not isinstance(msg, dict) or msg.get("type") != "ai":
-                continue
-            for tc in msg.get("tool_calls") or []:
-                if not isinstance(tc, dict) or tc.get("name") != "emit_builder_artifact":
-                    continue
-                args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                title = args.get("artifact_title")
-                if isinstance(title, str) and title.strip():
-                    return title.strip()
+        for tc in TelegramWorkChannel._iter_artifact_tool_calls(messages):
+            args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+            title = args.get("artifact_title")
+            if isinstance(title, str) and title.strip():
+                return title.strip()
         return None
 
     @staticmethod

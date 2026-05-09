@@ -36,7 +36,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.agents.sophia_agent.utils import extract_last_human_text, log_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,34 @@ _VALID_BRIEF_TASK_TYPES = (
     "research", "code", "writing", "data_analysis", "visual", "other",
 )
 
+# Tool schema for the Anthropic structured-output classifier call. Lifted to
+# module level so ``_invoke_classifier`` stays focused on the SDK call shape
+# (keeps both functions under sentrux's complexity threshold).
+_CLASSIFY_BRIEF_TOOL_SCHEMA: dict[str, Any] = {
+    "name": "classify_brief",
+    "description": "Return classification fields for the brief.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["task_type", "demo_mode", "normalized_brief"],
+        "properties": {
+            "task_type": {
+                "type": "string",
+                "enum": list(_VALID_BRIEF_TASK_TYPES),
+                "description": "Top-level Builder task category.",
+            },
+            "demo_mode": {
+                "type": "boolean",
+                "description": "True when the user is testing/exploring rather than requesting real work.",
+            },
+            "normalized_brief": {
+                "type": "string",
+                "description": "1-3 sentence cleaned-up restatement of the user's request, ≤500 chars.",
+            },
+        },
+    },
+}
+
 
 # PR #94: max number of files to enumerate in the CRITICAL endgame block.
 # Keeps the prompt budget bounded even on chaotic builds with dozens of
@@ -68,7 +96,7 @@ _ENDGAME_MAX_FILES = 10
 _VISUAL_TASK_TYPES = frozenset({"presentation", "visual_report"})
 
 
-def _list_outputs_for_prompt(state: "BuilderTaskState") -> list[dict[str, Any]]:
+def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     """Return up to ``_ENDGAME_MAX_FILES`` recent files in the builder's
     ``outputs/`` directory, sorted by mtime descending.
 
@@ -291,17 +319,39 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         Cost: ~$0.0001 per call (Haiku, ~1k input + ~200 output tokens).
         Latency: ~200-400ms p95.
         """
-        fallback = {
-            "task_type": "other",
-            "demo_mode": False,
-            "normalized_brief": user_brief.strip()[:_NORMALIZED_BRIEF_MAX_CHARS],
-        }
+        fallback = self._classify_fallback(user_brief)
 
         api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
         if not api_key:
             logger.warning("builder_task.classify_no_api_key — using fallback")
             return fallback
 
+        prompt = self._render_classification_prompt(user_brief)
+        if prompt is None:
+            return fallback
+
+        payload = await self._invoke_classifier(api_key, prompt)
+        if payload is None:
+            return fallback
+
+        return self._validate_classification(payload, user_brief)
+
+    @staticmethod
+    def _classify_fallback(user_brief: str) -> dict[str, Any]:
+        return {
+            "task_type": "other",
+            "demo_mode": False,
+            "normalized_brief": user_brief.strip()[:_NORMALIZED_BRIEF_MAX_CHARS],
+        }
+
+    @staticmethod
+    def _render_classification_prompt(user_brief: str) -> str | None:
+        """Load and substitute the classifier prompt template.
+
+        Returns None when the template is unreadable (logs a warning so
+        the operator can fix the deployment); caller treats None as
+        "use fallback".
+        """
         try:
             template = _BRIEF_CLASSIFICATION_PROMPT_PATH.read_text(encoding="utf-8")
         except OSError:
@@ -310,15 +360,22 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 _BRIEF_CLASSIFICATION_PROMPT_PATH,
                 exc_info=True,
             )
-            return fallback
+            return None
+        return template.replace("{user_brief}", user_brief.strip())
 
-        prompt = template.replace("{user_brief}", user_brief.strip())
+    async def _invoke_classifier(self, api_key: str, prompt: str) -> dict | None:
+        """Call Haiku with the classify_brief tool; return the input payload or None.
 
+        Wraps the SDK call + response parsing so ``_classify_brief`` stays
+        a clean orchestration sequence (under sentrux's complexity threshold).
+        Returns None on import error, transport error, or when the response
+        contains no usable tool_use block.
+        """
         try:
             from anthropic import AsyncAnthropic
         except ImportError:
             logger.warning("builder_task.classify_anthropic_missing — using fallback")
-            return fallback
+            return None
 
         try:
             client = AsyncAnthropic(api_key=api_key)
@@ -326,30 +383,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 model=_BRIEF_CLASSIFICATION_MODEL,
                 max_tokens=_BRIEF_CLASSIFICATION_MAX_TOKENS,
                 messages=[{"role": "user", "content": prompt}],
-                tools=[{
-                    "name": "classify_brief",
-                    "description": "Return classification fields for the brief.",
-                    "input_schema": {
-                        "type": "object",
-                        "additionalProperties": False,
-                        "required": ["task_type", "demo_mode", "normalized_brief"],
-                        "properties": {
-                            "task_type": {
-                                "type": "string",
-                                "enum": list(_VALID_BRIEF_TASK_TYPES),
-                                "description": "Top-level Builder task category.",
-                            },
-                            "demo_mode": {
-                                "type": "boolean",
-                                "description": "True when the user is testing/exploring rather than requesting real work.",
-                            },
-                            "normalized_brief": {
-                                "type": "string",
-                                "description": "1-3 sentence cleaned-up restatement of the user's request, ≤500 chars.",
-                            },
-                        },
-                    },
-                }],
+                tools=[_CLASSIFY_BRIEF_TOOL_SCHEMA],
                 tool_choice={"type": "tool", "name": "classify_brief"},
             )
         except Exception as exc:
@@ -358,23 +392,35 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 type(exc).__name__,
                 exc_info=True,
             )
-            return fallback
+            return None
 
+        payload = self._extract_classify_payload(response)
+        if payload is None:
+            logger.warning("builder_task.classify_no_tool_use_block — using fallback")
+        return payload
+
+    @staticmethod
+    def _extract_classify_payload(response: Any) -> dict | None:
+        """Pull the classify_brief tool_use payload dict out of a response.
+
+        Handles the common SDK shapes: input as dict (default) or input as
+        JSON string (some Anthropic SDK paths). Returns None when no
+        usable block is found.
+        """
         for block in getattr(response, "content", []) or []:
-            block_type = getattr(block, "type", None)
-            block_name = getattr(block, "name", None)
-            if block_type == "tool_use" and block_name == "classify_brief":
-                payload = getattr(block, "input", None)
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                    except json.JSONDecodeError:
-                        payload = None
-                if isinstance(payload, dict):
-                    return self._validate_classification(payload, user_brief)
-
-        logger.warning("builder_task.classify_no_tool_use_block — using fallback")
-        return fallback
+            if getattr(block, "type", None) != "tool_use":
+                continue
+            if getattr(block, "name", None) != "classify_brief":
+                continue
+            payload = getattr(block, "input", None)
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:
+                    return None
+            if isinstance(payload, dict):
+                return payload
+        return None
 
     @staticmethod
     def _validate_classification(payload: dict[str, Any], user_brief: str) -> dict[str, Any]:
@@ -398,48 +444,44 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
     @staticmethod
     def _extract_last_human_text(state: BuilderTaskState) -> str | None:
-        """Return the text content of the last human message, or None."""
-        for msg in reversed(state.get("messages") or []):
-            msg_type = getattr(msg, "type", None) or getattr(msg, "role", None)
-            content = getattr(msg, "content", None)
-            if msg_type is None and isinstance(msg, dict):
-                msg_type = msg.get("type") or msg.get("role")
-                content = msg.get("content")
-            if msg_type not in {"human", "user"}:
-                continue
-            if isinstance(content, str) and content.strip():
-                return content.strip()
-            if isinstance(content, list):
-                parts: list[str] = []
-                for block in content:
-                    if isinstance(block, dict) and block.get("type") == "text":
-                        parts.append(str(block.get("text", "")))
-                    elif isinstance(block, str):
-                        parts.append(block)
-                text = "".join(parts).strip()
-                if text:
-                    return text
-        return None
+        """Return the trimmed text of the last human message, or None.
+
+        Thin delegate to ``deerflow.agents.sophia_agent.utils.extract_last_human_text``;
+        the shared helper is also used by ``BuilderMem0RetrievalMiddleware``
+        and keeps both call sites under sentrux's complexity threshold.
+        """
+        return extract_last_human_text(state.get("messages"))
 
     @staticmethod
     def _resolve_thread_id(runtime: Runtime) -> str | None:
-        """Best-effort thread_id extraction for log lines."""
+        """Best-effort thread_id extraction for log lines.
+
+        Walks two candidate sources (runtime.context, then
+        runtime.config.configurable) via a list-of-callables pattern so
+        the function stays linear instead of nested-try/except.
+        """
         if runtime is None:
             return None
-        try:
-            ctx = getattr(runtime, "context", None) or {}
-            if isinstance(ctx, dict) and ctx.get("thread_id"):
-                return str(ctx["thread_id"])
-        except Exception:
-            pass
-        try:
-            cfg = getattr(runtime, "config", None) or {}
-            configurable = cfg.get("configurable", {}) if isinstance(cfg, dict) else {}
-            if isinstance(configurable, dict) and configurable.get("thread_id"):
-                return str(configurable["thread_id"])
-        except Exception:
-            pass
+        for source in BuilderTaskMiddleware._thread_id_sources(runtime):
+            try:
+                value = source()
+            except Exception:
+                continue
+            if value:
+                return str(value)
         return None
+
+    @staticmethod
+    def _thread_id_sources(runtime: Runtime) -> list:
+        """Ordered list of zero-arg callables yielding thread_id candidates."""
+        return [
+            lambda: (getattr(runtime, "context", None) or {}).get("thread_id"),
+            lambda: (
+                ((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get(
+                    "thread_id"
+                )
+            ),
+        ]
 
     @override
     def before_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:

@@ -13,7 +13,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.channels import message_bus, telegram_session_tracker as tracker
+from app.channels import message_bus
+from app.channels import telegram_session_tracker as tracker
 from deerflow.sophia.session_store import SessionStore
 
 
