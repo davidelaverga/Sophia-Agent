@@ -175,8 +175,20 @@ class TestAgentsMdInjection:
         assert "SKILLS_PATH / \"AGENTS.md\", False" in src
 
     def test_builder_agent_includes_agents_md(self):
+        # The middleware chain assembly was extracted from builder_agent.py
+        # to builder_middlewares.py (Phase B god-files cleanup). The
+        # FileInjectionMiddleware wiring for AGENTS.md now lives there.
+        # builder_agent.py imports build_builder_middleware_chain — the
+        # contract is preserved but the literal moved.
         src = _read_source(
-            "packages/harness/deerflow/agents/sophia_agent/builder_agent.py"
+            "packages/harness/deerflow/agents/sophia_agent/builder_middlewares.py"
         )
         assert "AGENTS.md" in src
         assert "SKILLS_PATH / \"AGENTS.md\", False" in src
+
+        # Sanity: builder_agent.py still routes through the helper that
+        # wires the file injection — guards against accidental decoupling.
+        agent_src = _read_source(
+            "packages/harness/deerflow/agents/sophia_agent/builder_agent.py"
+        )
+        assert "build_builder_middleware_chain" in agent_src
