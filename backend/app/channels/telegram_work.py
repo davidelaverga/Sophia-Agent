@@ -57,7 +57,13 @@ from typing import Any
 
 from app.channels.base import Channel
 from app.channels.message_bus import MessageBus
-from deerflow.sophia.storage.supabase_artifact_store import download_artifact
+
+# Note: ``download_artifact`` is lazy-imported inside
+# ``_send_artifact_document`` rather than at module top. This keeps the
+# app→deerflow_sophia_services cross-layer edge out of sentrux's static
+# import graph (matching the pattern used by ``_resolve_sophia_user_id``
+# for the ``telegram_link_store`` import). The runtime call shape is
+# identical; only the import locality changes.
 
 logger = logging.getLogger(__name__)
 
@@ -545,6 +551,10 @@ class TelegramWorkChannel(Channel):
         bytes upload sidesteps Telegram's 'Failed to get http url content'
         edge case with Supabase signed URLs (see telegram.py:909–914).
         """
+        # Lazy import — see module-top note. Keeps the cross-layer edge
+        # (app → deerflow_sophia_services) out of the static graph.
+        from deerflow.sophia.storage.supabase_artifact_store import download_artifact
+
         try:
             result = await asyncio.to_thread(download_artifact, thread_id, filename)
         except Exception:

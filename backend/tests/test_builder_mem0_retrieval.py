@@ -17,7 +17,13 @@ from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
 
 
 def _patch_search(monkeypatch: pytest.MonkeyPatch, behaviour) -> dict:
-    """Replace `search_memories` in the middleware module with a fake.
+    """Replace `search_memories` at its source module with a fake.
+
+    Patches ``deerflow.sophia.mem0_client.search_memories`` (the
+    definition site) rather than the middleware module — Phase A
+    moved the import to lazy (inside ``_safe_search``) so there's no
+    longer a module-level ``search_memories`` attribute on
+    ``mem0_retrieval`` to monkeypatch.
 
     `behaviour` is either a list (returned synchronously) or a callable
     `(user_id, query, *_) -> list`. We capture call kwargs in a dict and
@@ -40,7 +46,7 @@ def _patch_search(monkeypatch: pytest.MonkeyPatch, behaviour) -> dict:
         return behaviour
 
     monkeypatch.setattr(
-        "deerflow.agents.sophia_agent.middlewares.mem0_retrieval.search_memories",
+        "deerflow.sophia.mem0_client.search_memories",
         fake,
     )
     return captured
@@ -189,7 +195,7 @@ class TestRetrievalAsync:
             return [{"id": "m1", "content": "x"}]
 
         monkeypatch.setattr(
-            "deerflow.agents.sophia_agent.middlewares.mem0_retrieval.search_memories",
+            "deerflow.sophia.mem0_client.search_memories",
             slow,
         )
         mw = BuilderMem0RetrievalMiddleware(timeout_seconds=0.1)
@@ -207,7 +213,7 @@ class TestRetrievalAsync:
             raise RuntimeError("Mem0 down")
 
         monkeypatch.setattr(
-            "deerflow.agents.sophia_agent.middlewares.mem0_retrieval.search_memories",
+            "deerflow.sophia.mem0_client.search_memories",
             boom,
         )
         mw = BuilderMem0RetrievalMiddleware()

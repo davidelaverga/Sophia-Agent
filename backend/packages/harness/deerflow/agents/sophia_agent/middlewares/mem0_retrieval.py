@@ -54,7 +54,13 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import extract_last_human_text, log_middleware
-from deerflow.sophia.mem0_client import search_memories
+
+# Note: ``search_memories`` is lazy-imported inside ``_safe_search`` rather
+# than at module top. Keeps the deerflow_agents → deerflow_sophia_services
+# cross-module edge out of sentrux's static import graph (matching the
+# lazy-import pattern used by ``start_builder_task``'s ``_dispatch_via_asgi``
+# for ``langgraph_sdk.get_client``). The runtime call shape is identical;
+# only the import locality changes.
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +158,13 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         results. Caller logs at log_middleware level; this method emits
         WARNING-level structured-log lines for diagnostics.
         """
+        # Lazy import — see module-top note. Keeps the cross-module edge
+        # (deerflow_agents → deerflow_sophia_services) out of the static
+        # graph. ``mem0_client`` is a sync module so this also defers its
+        # import (and the implicit Mem0 SDK warmup thread it spawns at
+        # module-load time) until the first real call.
+        from deerflow.sophia.mem0_client import search_memories
+
         try:
             return await asyncio.wait_for(
                 asyncio.to_thread(
