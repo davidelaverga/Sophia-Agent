@@ -10,9 +10,9 @@ import threading
 from io import BytesIO
 from typing import Any
 
+from app.channels._sophia_artifact_bridge import download_artifact
 from app.channels.base import Channel
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage, ResolvedAttachment
-from deerflow.sophia.storage.supabase_artifact_store import download_artifact
 
 logger = logging.getLogger(__name__)
 

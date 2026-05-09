@@ -58,12 +58,11 @@ from typing import Any
 from app.channels.base import Channel
 from app.channels.message_bus import MessageBus
 
-# Note: ``download_artifact`` is lazy-imported inside
-# ``_send_artifact_document`` rather than at module top. This keeps the
-# app→deerflow_sophia_services cross-layer edge out of sentrux's static
-# import graph (matching the pattern used by ``_resolve_sophia_user_id``
-# for the ``telegram_link_store`` import). The runtime call shape is
-# identical; only the import locality changes.
+# Note: artifact download routes through ``app.channels._sophia_artifact_bridge``
+# (Phase-C cleanup) so both Telegram channels share one app→deerflow_sophia_services
+# crossing instead of importing it twice. The bridge import is lazy inside
+# ``_send_artifact_document`` to match the pattern ``_resolve_sophia_user_id``
+# uses for ``telegram_link_store``.
 
 logger = logging.getLogger(__name__)
 
@@ -551,9 +550,13 @@ class TelegramWorkChannel(Channel):
         bytes upload sidesteps Telegram's 'Failed to get http url content'
         edge case with Supabase signed URLs (see telegram.py:909–914).
         """
-        # Lazy import — see module-top note. Keeps the cross-layer edge
-        # (app → deerflow_sophia_services) out of the static graph.
-        from deerflow.sophia.storage.supabase_artifact_store import download_artifact
+        # Lazy import via the Phase-C bridge — both Telegram channels
+        # share one cross-layer edge (app → deerflow_sophia_services)
+        # routed through ``app.channels._sophia_artifact_bridge`` instead
+        # of each channel reaching into ``deerflow.sophia.storage``
+        # independently. The lazy locality is preserved (no top-level
+        # bridge import in this file).
+        from app.channels._sophia_artifact_bridge import download_artifact
 
         try:
             result = await asyncio.to_thread(download_artifact, thread_id, filename)
