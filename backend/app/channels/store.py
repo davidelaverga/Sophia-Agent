@@ -1,4 +1,29 @@
-"""ChannelStore — persists IM chat-to-DeerFlow thread mappings."""
+"""ChannelStore — persists IM chat-to-DeerFlow thread mappings.
+
+**Channel-name prefix discipline** (load-bearing — keep in mind when
+adding new channels):
+
+The store key is ``<channel_name>:<chat_id>[:<topic_id>]``. The
+``channel_name`` prefix is the ONLY thing that prevents two channels
+from collapsing onto the same thread for the same external chat_id.
+A user who DMs both ``@Sophia_EI_bot`` (channel ``"telegram"``) and
+``@Sophia_Work_bot`` (channel ``"telegram_work"``) gets two distinct
+LangGraph threads — correct behaviour, because the two threads target
+different graphs (``lead_agent`` / ``sophia_companion`` vs
+``sophia_builder``).
+
+When adding a new channel, pick a name that is unique across all
+channels in ``app.channels.service._CHANNEL_REGISTRY``. Reusing
+``"telegram"`` for a sibling Telegram bot would collide thread keys
+silently. The Phase-3 ``telegram_work`` channel is the canonical
+example of doing this right.
+
+Private-chat key shape: ``<channel>:<chat_id>`` (NO ``:topic_id`` —
+``_key()`` returns this form when ``topic_id`` is None or empty). This
+also avoids upstream deer-flow issue #1101, where private-chat
+messages got a unique ``topic_id = msg_id`` per message and every turn
+spawned a new thread.
+"""
 
 from __future__ import annotations
 

@@ -461,7 +461,7 @@ checkpointer:
 #   telegram:
 #     enabled: false
 #     bot_token: $TELEGRAM_BOT_TOKEN
-#     worker_bot_token: $TELEGRAM_WORKER_BOT_TOKEN  # optional sibling worker bot for group-chat builder posts (dual-bot Phase 1; unwired in v1)
+#     worker_bot_token: $TELEGRAM_WORKER_BOT_TOKEN  # legacy field — superseded by the telegram_work block below; kept for back-compat. The TelegramChannel logs whether this is set but does not wire it.
 #     bot_username: $TELEGRAM_BOT_USERNAME  # e.g. Sophia_EI_bot; needed for t.me deep-link flow
 #     allowed_users: []               # empty = allow all
 #
@@ -480,3 +480,29 @@ checkpointer:
 #           context:
 #             thinking_enabled: true
 #             subagent_enabled: true
+#
+#   # Builder-as-Main Work bot — Stage 1 of the Phase-3 Telegram diagnostic.
+#   # When enabled, DMs to @Sophia_Work_bot bypass the companion graph and
+#   # dispatch directly to sophia_builder via runs.wait. Returns a placeholder
+#   # ("🔨 Working on your request…") immediately, edits it with the final
+#   # response when the build completes, and streams the artifact (if any) as
+#   # a follow-up document. No companion mediation, no delegation_context from
+#   # companion — BuilderTaskMiddleware synthesises one via a single Haiku
+#   # classifier call when delegation_context is missing.
+#   #
+#   # Identity binding is shared with the EI bot via app.gateway.telegram_link_store
+#   # (resolve_user_id("telegram", chat_id)) — so a user already bound through
+#   # @Sophia_EI_bot is recognised here too. Unbound users get a friendly prompt
+#   # directing them to DM the EI bot first.
+#   #
+#   # Channel-store keys for this channel use the prefix "telegram_work:" so
+#   # threads stay isolated from the EI bot's "telegram:" threads.
+#   #
+#   # Spec: docs/specs/sophia_builder_as_main_work_bot_spec.md
+#   telegram_work:
+#     enabled: false                         # WORK_BOT_BUILDER_AS_MAIN_ENABLED equivalent — flip to true after Stage-1A dark deploy
+#     bot_token: $TELEGRAM_WORKER_BOT_TOKEN
+#     bot_username: $TELEGRAM_WORKER_BOT_USERNAME    # e.g. Sophia_Work_bot, used in placeholders / unbound prompts
+#     pilot_user_id: ""                      # Stage-1B gate: when set, only this Sophia user_id can use the channel; everyone else gets the "not enabled" placeholder. Clear to remove the gate.
+#     allowed_users: []                      # additional Telegram user-id allowlist; empty = allow all (subject to enabled + pilot_user_id)
+#     run_timeout_seconds: 900               # 15-minute hard ceiling on runs.wait; matches Builder's hard turn-budget ceiling

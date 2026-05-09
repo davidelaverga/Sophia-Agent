@@ -19,6 +19,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArt
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import BuilderMem0RetrievalMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
 from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
@@ -151,7 +152,19 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
             ),
         # 2. User personalization — identity file shapes what builder creates
             UserIdentityMiddleware(user_id),
-        # 3. Task briefing — translates companion artifact into builder guidance
+        # 2b. Mem0 brief-scoped retrieval (Phase-3 Stage 1).
+        #     Pre-fetch top-K user memories so Builder has context regardless of
+        #     entry path — companion-subagent (start_builder_task) OR
+        #     Builder-as-Main (TelegramWorkChannel). On the companion path it
+        #     adds an additional brief-scoped retrieval on top of the 5
+        #     snippets start_builder_task already embeds. On the Work-bot path
+        #     it's the only memory injection.
+        #     2.0s timeout, errors swallowed → never blocks the run.
+            BuilderMem0RetrievalMiddleware(),
+        # 3. Task briefing — translates companion artifact into builder guidance.
+        #     On the Builder-as-Main path (no delegation_context on input), this
+        #     middleware's `abefore_agent` runs a single Haiku classifier call
+        #     to synthesise delegation_context before rendering the briefing.
             BuilderTaskMiddleware(),
         # 4. Builder-only web research rules and state initialization
             BuilderResearchPolicyMiddleware(),
@@ -207,6 +220,25 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         render_markdown_to_pdf,
         emit_builder_artifact,
     ]
+
+    # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
+    # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and
+    # must NEVER spawn deer-flow native subagents (no `task` tool). Both
+    # would create unbounded Builder→Builder recursion that cannot be
+    # safely budgeted. Stage 3 may relax this for specific specialist
+    # subagents — when it does, the relaxation must be threaded through
+    # the registry layer, not added back to this tool list silently.
+    _forbidden_tool_names = {"task", "start_async_task"}
+    _present_forbidden = sorted(
+        {t.name for t in tools if getattr(t, "name", None) in _forbidden_tool_names}
+    )
+    if _present_forbidden:
+        raise RuntimeError(
+            "Builder tool list contains forbidden subagent-spawning tools "
+            f"({_present_forbidden}). This violates Stage-1 spec D7/C2 "
+            "(Builder must not recurse). Remove the tool or revisit the "
+            "recursion-prevention strategy in builder_agent.py."
+        )
 
     agent = create_agent(
         model=model,
