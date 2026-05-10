@@ -335,7 +335,8 @@ class TelegramWorkChannel(Channel):
 
         # 1. Resolve canonical Sophia user_id (3-step: forward fast-path,
         #    then EI-binding reverse lookup with auto-bind on first hit).
-        sophia_user_id = self._resolve_sophia_user_id(
+        sophia_user_id = await asyncio.to_thread(
+            self._resolve_sophia_user_id,
             chat_id=chat_id,
             telegram_user_id=telegram_user_id,
             telegram_username=telegram_username,
