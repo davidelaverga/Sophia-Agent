@@ -247,6 +247,33 @@ Voice speeds → Cartesia values: slow=0.8, gentle=0.9, normal=1.0, engaged=1.05
 Artifact arrives **after** the text stream completes. It updates the emotion for the **next** TTS call.
 ### start_builder_task
 Companion asks all clarifying questions first, then calls `start_builder_task(description, task_type)` with a complete brief. The wrapper (in `deerflow.sophia.tools.start_builder_task`) enriches the description with live session context (memories, emotional state, ritual, explicit URLs) before dispatching to the `sophia_builder` graph via LangGraph SDK ASGI in-process transport. It writes a row to `state["async_tasks"]` keyed by builder thread_id and returns immediately. Lifecycle (check / update / cancel / list) is owned by deepagents' native `AsyncSubAgentMiddleware`. Builder artifacts are uploaded to Supabase under the **parent (companion) thread_id** so the channel adapter's bytes-download path stays aligned with the upload path; `BuildAwarenessMiddleware` (companion side) refreshes `async_tasks` status from the SDK on companion turns and injects a short prompt block so Sophia answers "how's the build going?" naturally without polling.
+
+### Builder-as-Main DM (Stage 1, Phase 3 Telegram diagnostic)
+Sophia's Builder graph is also reachable directly via DMs to `@Sophia_Work_bot`. The `TelegramWorkChannel` (in `backend/app/channels/telegram_work.py`, registered as `telegram_work` in the channel service) bypasses the companion entirely:
+
+- **Inbound**: text message → 3-step identity resolver in `_resolve_sophia_user_id`: forward fast-path `resolve_user_id("telegram", chat_id)` → reverse lookup `resolve_user_id_by_telegram_user_id(tg_user_id)` → auto-bind via `bind_chat`. **Telegram assigns a different chat_id per bot DM**, so a user already bound via @Sophia_EI_bot's deep-link won't hit the forward lookup with the Work-DM chat_id, but the reverse index (populated by EI's `bind_chat` call alongside the forward index) bridges them by Telegram `user.id`. Auto-bind persists `(channel="telegram", chat_id=<Work-DM>)` so subsequent Work DMs hit the fast path. Failure of the persistence call is swallowed with WARNING — the in-flight build proceeds with the resolved user_id either way.
+- **Thread**: `ChannelStore` keyed by `telegram_work:{chat_id}` (NO `:topic_id` in private chats — see prefix-discipline comment in `app/channels/store.py`). Distinct from EI's `telegram:{chat_id}` so the two surfaces stay isolated.
+- **Dispatch**: `client.runs.wait(thread_id, "sophia_builder", input={"messages": [...]})` directly — no `delegation_context` on input.
+- **Synthesis**: `BuilderTaskMiddleware.abefore_agent` detects missing `delegation_context` and runs a single Haiku 4.5 structured-output classifier call (`_classify_brief`) producing `{task_type, demo_mode, normalized_brief}`. The synthesised context sets `parent_thread_id: None` — the **D3 marker** that distinguishes Builder-as-Main mode from companion-subagent mode. Stage-2 stream routing will branch on this same flag.
+- **Memories**: `BuilderMem0RetrievalMiddleware` (between `UserIdentityMiddleware` and `BuilderTaskMiddleware`) pre-fetches top-K user memories scoped to the brief and injects a `<memory>` block + `injected_memory_contents`. 2.0s timeout; failure modes never block the run. Also benefits the companion-subagent path (orthogonal to the 5 snippets `start_builder_task` already embeds).
+- **Recursion guard (D7/C2)**: builder factory at `_create_builder_agent` raises `RuntimeError` if `task` or `start_async_task` is in the tool list. Builder must NEVER spawn AsyncSubAgents.
+- **Response**: blocking `runs.wait` (Stage 1 — Stage 2 will stream). Placeholder "🔨 Working on your request…" is sent immediately, then edited with the final summary; artifact (if any) is delivered as a follow-up document via the same Supabase `download_artifact` bytes-upload path the EI bot uses.
+- **Feature flag**: `channels.telegram_work.enabled` (default false). Stage 1B uses `pilot_user_id` to gate to a single Sophia user_id for smoke testing.
+
+Spec: `~/Desktop/Sophia V3 specs/sophia_builder_as_main_work_bot_spec.md`. Note: today's EI Telegram traffic still routes through `lead_agent` (per `manager.py:24` `DEFAULT_ASSISTANT_ID = "lead_agent"`), not `sophia_companion` — that's existing behaviour, untouched by this stage.
+
+### Render production deployment topology
+
+**Source of truth for `/app/config.yaml` is `config.production.yaml` in the repo root** — NOT the local `config.yaml` (which is `.gitignore`'d). `backend/Dockerfile.gateway` line 8 does `COPY config.production.yaml ./config.yaml` to bake the file into the image. `backend/Dockerfile.langgraph` does the same. Editing the local `config.yaml` does NOTHING to production. To verify the live state, SSH into the Render service shell and `cat /app/config.yaml`.
+
+**Both services load this same file** — gateway AND langgraph each call `AppConfig.from_file()` at startup, which calls `resolve_env_variables` ([packages/harness/deerflow/config/app_config.py:188-190](backend/packages/harness/deerflow/config/app_config.py)) which **raises a hard `ValueError` on any missing `$VAR`**. There is no tolerant fallback syntax. **Any new `$VAR` reference in `config.production.yaml` requires the env var to be set on EVERY service that loads the file.** When in doubt, hardcode public values (e.g., `bot_username: Sophia_Work_bot`) — secrets like tokens still use `$VAR`.
+
+**Required env vars on Render** (declared in `render.yaml` with `sync: false` = "operator-set in dashboard"):
+- **sophia-gateway**: `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN`
+- **sophia-langgraph**: `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, plus any token referenced by `config.production.yaml` (currently `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WORKER_BOT_TOKEN`)
+
+**The `runs.wait` 400 trap** — when calling `client.runs.wait` from a channel adapter (HTTP-mode SDK against the langgraph service), set `thread_id` / `user_id` / `channel` in `context` ONLY, NEVER also in `config["configurable"]`. langgraph-api 0.7+ rejects both-channels payloads with HTTP 400 in <1ms before the run starts. See [manager.py:633-645](backend/app/channels/manager.py) for the working pattern; the regression-guard test is in `tests/test_telegram_work_channel.py::TestDispatchPayloadShape`. `start_builder_task.py` is allowed to set `configurable` because it dispatches via SDK ASGI in-process transport (`get_client(url=None)`), which has different validation.
+
 ---
 ## Platform Values and Effects
 | Value | Who sets it | What adapts downstream |

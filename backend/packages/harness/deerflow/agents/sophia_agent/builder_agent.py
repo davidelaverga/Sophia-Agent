@@ -1,8 +1,19 @@
 """Sophia builder agent factory.
 
-Creates the builder agent with its dedicated middleware chain.
-The builder executes file-creation tasks delegated by the companion
-via switch_to_builder, using DeerFlow's sandbox tools.
+Creates the builder agent. The middleware chain assembly lives in
+``builder_middlewares.py`` so this file's import fan-out stays below
+sentrux's god-files threshold; everything related to which middlewares
+run, in what order, and with what parameters is owned there.
+
+This file owns:
+- The ``make_sophia_builder`` LangGraph entry point (registered in
+  ``langgraph.json``).
+- The ``ChatAnthropic`` model construction.
+- The Builder's tool list (sandbox + web + artifact tools).
+- The D7/C2 recursion guard that asserts ``task`` and
+  ``start_async_task`` are never in the tool list (Builder must not
+  recurse — see Stage-1 spec D7/C2).
+- The agent recursion-limit tuning.
 """
 
 import logging
@@ -12,16 +23,7 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
-from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
-from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
-from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
-from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
-from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
-from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
-from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
-from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
-from deerflow.agents.sophia_agent.paths import SKILLS_PATH
+from deerflow.agents.sophia_agent.builder_middlewares import build_builder_middleware_chain
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.config.app_config import get_app_config
@@ -75,31 +77,6 @@ def _resolve_builder_model_name(model_name: str | None) -> tuple[str, str]:
     return DEFAULT_BUILDER_MODEL, "default"
 
 
-def _create_builder_todo_middleware() -> TodoMiddleware:
-    """Create Todo middleware configured for always-plan builder execution."""
-    return TodoMiddleware(
-        system_prompt="""
-<builder_todo_system>
-You are the Sophia builder. Keep a live todo list while executing delegated build tasks.
-- Use `write_todos` only for genuinely multi-step work.
-- Create the initial todo list once near the start, then keep working.
-- Do NOT rewrite the todo list after every small tool call.
-- Update todos only when the plan materially changes, a major milestone finishes, or right before the final handoff.
-- Keep at least one item in progress until the task is finished.
-- Mark items completed as soon as a meaningful step is done.
-</builder_todo_system>
-""",
-        tool_description=(
-            "Use this tool to maintain your execution todo list while building. "
-            "Create it once for multi-step work, then update it only at meaningful milestones."
-        ),
-        reminder_instruction=(
-            "Only call `write_todos` again if the plan materially changed, a major milestone finished, "
-            "or you are preparing the final handoff."
-        ),
-    )
-
-
 def _create_builder_agent(user_id: str, model_name: str | None = None):
     """Create the Sophia builder agent with its dedicated middleware chain.
 
@@ -139,40 +116,8 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         timeout=120.0,
         max_retries=1,
     )
-    middlewares = build_subagent_runtime_middlewares(lazy_init=True)
-    middlewares.extend(
-        [
-        # 1. Values — soul.md (the builder doesn't speak, so voice.md isn't
-        #    needed) plus AGENTS.md, the small shared companion↔builder
-        #    coordination contract that is also injected on the companion side.
-            FileInjectionMiddleware(
-                (SKILLS_PATH / "soul.md", False),
-                (SKILLS_PATH / "AGENTS.md", False),
-            ),
-        # 2. User personalization — identity file shapes what builder creates
-            UserIdentityMiddleware(user_id),
-        # 3. Task briefing — translates companion artifact into builder guidance
-            BuilderTaskMiddleware(),
-        # 4. Builder-only web research rules and state initialization
-            BuilderResearchPolicyMiddleware(),
-        # 5. Planning — todo list always enabled for delegated build execution
-            _create_builder_todo_middleware(),
-        # 6. Builder artifact capture — after-model reads emit_builder_artifact
-            BuilderArtifactMiddleware(),
-        # 7. Prompt assembly — assembles system_prompt_blocks into system message
-            PromptAssemblyMiddleware(),
-        # 8. Dangling tool-call patching — runs inside wrap_model_call to
-        #    insert synthetic ToolMessages for any AIMessage tool_use block
-        #    that lacks its corresponding tool_result. Anthropic 400s with
-        #    `unexpected tool_use_id found in tool_result blocks` when this
-        #    invariant breaks (it can after a sandbox crash, user interrupt,
-        #    or summarization injecting a HumanMessage between the AI tool_use
-        #    and its tool_result). MUST sit AFTER PromptAssemblyMiddleware so
-        #    the patched message list reaches the model. The chain-membership
-        #    assertion in test_sophia_builder_flow.py locks this position.
-            DanglingToolCallMiddleware(),
-        ]
-    )
+
+    middlewares = build_builder_middleware_chain(user_id=user_id)
 
     # Guarded builder tools: sandbox/file ops + web research + artifact tools.
     # ``render_markdown_to_pdf`` (Phase B) replaces the model writing
@@ -207,6 +152,25 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
         render_markdown_to_pdf,
         emit_builder_artifact,
     ]
+
+    # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
+    # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and
+    # must NEVER spawn deer-flow native subagents (no `task` tool). Both
+    # would create unbounded Builder→Builder recursion that cannot be
+    # safely budgeted. Stage 3 may relax this for specific specialist
+    # subagents — when it does, the relaxation must be threaded through
+    # the registry layer, not added back to this tool list silently.
+    _forbidden_tool_names = {"task", "start_async_task"}
+    _present_forbidden = sorted(
+        {t.name for t in tools if getattr(t, "name", None) in _forbidden_tool_names}
+    )
+    if _present_forbidden:
+        raise RuntimeError(
+            "Builder tool list contains forbidden subagent-spawning tools "
+            f"({_present_forbidden}). This violates Stage-1 spec D7/C2 "
+            "(Builder must not recurse). Remove the tool or revisit the "
+            "recursion-prevention strategy in builder_agent.py."
+        )
 
     agent = create_agent(
         model=model,

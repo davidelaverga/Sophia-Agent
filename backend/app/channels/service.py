@@ -16,6 +16,13 @@ _CHANNEL_REGISTRY: dict[str, str] = {
     "feishu": "app.channels.feishu:FeishuChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
+    # Builder-as-Main DM surface for @Sophia_Work_bot. See
+    # docs/specs/sophia_builder_as_main_work_bot_spec.md and
+    # app/channels/telegram_work.py for the channel contract.
+    # Distinct prefix ("telegram_work" vs "telegram") keeps the Work bot's
+    # ChannelStore threads isolated from EI threads — see the prefix
+    # discipline note in app/channels/store.py.
+    "telegram_work": "app.channels.telegram_work:TelegramWorkChannel",
 }
 
 

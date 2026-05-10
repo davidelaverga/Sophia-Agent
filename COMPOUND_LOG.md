@@ -290,3 +290,94 @@ Other fixes (terse): codex P1 — `register_activity` moved to AFTER `runs.wait`
 
 ### GEPA Log Entry
 - N/A
+
+## 2026-05-10 · [phase-3-stage-1-builder-as-main-work-bot] · PR #120
+**Author:** Claude Code (with Davide) · **Track:** backend + deployment · **Spec:** `~/Desktop/Sophia V3 specs/sophia_builder_as_main_work_bot_spec.md` (Phase 3, Stage 1)
+
+### What Changed
+- **`TelegramWorkChannel`** ([backend/app/channels/telegram_work.py](backend/app/channels/telegram_work.py)) — sibling channel registered as `"telegram_work"` in [service.py](backend/app/channels/service.py)'s registry. Owns its own polling thread + `Application` for `@Sophia_Work_bot`. Inbound DMs bypass the bus + ChannelManager and dispatch directly to `sophia_builder` via `client.runs.wait`. Placeholder + edit pattern for blocking response (Stage 1 — streaming deferred to Stage 2). Channel name `"telegram_work"` keeps store keys isolated from EI's `"telegram"` namespace per the prefix-discipline note in [store.py](backend/app/channels/store.py).
+- **3-step identity resolver** in `TelegramWorkChannel._resolve_sophia_user_id`: forward fast-path (`resolve_user_id("telegram", chat_id)`) → reverse lookup (`resolve_user_id_by_telegram_user_id(tg_user_id)`) → auto-bind via `bind_chat`. Means any user already bound through @Sophia_EI_bot's deep-link is auto-recognised by Work bot on first DM (Stage 1C "any EI-bound user welcome" works without any webapp changes). Different chat_ids per bot (Telegram assigns one per bot DM); the reverse index bridges them by Telegram user.id. `_auto_bind_work_dm` swallows binding errors with WARNING so failure of the persistence call doesn't block the in-flight build.
+- **`BuilderTaskMiddleware.abefore_agent`** synthesises `delegation_context` via single Haiku 4.5 structured-output classifier call when missing on input — `parent_thread_id: None` is the **D3 marker** that distinguishes Builder-as-Main mode from companion-subagent mode. Classifier prompt at [agents/sophia_agent/prompts/builder_brief_classification.md](backend/packages/harness/deerflow/agents/sophia_agent/prompts/builder_brief_classification.md). Conservative fallback on any failure (no API key, template missing, SDK error, malformed response) so the Builder run always proceeds.
+- **`BuilderMem0RetrievalMiddleware`** ([packages/harness/deerflow/agents/sophia_agent/middlewares/mem0_retrieval.py](backend/packages/harness/deerflow/agents/sophia_agent/middlewares/mem0_retrieval.py)) — pre-fetches top-K user memories scoped to the current brief via Mem0. 2.0s timeout, swallow-all-errors. Helps both paths: Work-bot DM (sole memory injection) AND companion-subagent (orthogonal to the 5 snippets `start_builder_task` already embeds). Inserted between `UserIdentityMiddleware` and `BuilderTaskMiddleware` in the builder chain. Writes both `injected_memory_contents` and a `<memory>` block to `system_prompt_blocks` (which `PromptAssemblyMiddleware` at the end of the chain naturally absorbs).
+- **D7/C2 recursion guard** at `_create_builder_agent` in [builder_agent.py](backend/packages/harness/deerflow/agents/sophia_agent/builder_agent.py) raises `RuntimeError` if `task` or `start_async_task` is in the tool list. Stage 3 may relax this for specific specialist subagents, but the relaxation must be threaded through the registry layer, not added back to the tool list silently.
+- **`builder_middlewares.py`** extracted from `builder_agent.py` (Phase B cleanup) — `build_builder_middleware_chain(user_id)` owns the 9 middleware imports + composition. Drops `builder_agent.py`'s import fan-out from 19 to ~9 (removed it from sentrux's god-files list).
+- **`_sophia_artifact_bridge.py`** (Phase C cleanup) — single re-export of `download_artifact` from `deerflow.sophia.storage`. Both `telegram.py` (EI bot — D2-relaxed for a 1-line import substitution) and `telegram_work.py` route through it. Cuts duplicate cross-layer edges.
+- **Production deployment wiring** — added `channels.telegram_work` block to `config.production.yaml` (the file `Dockerfile.gateway:8` copies to `/app/config.yaml`); declared `TELEGRAM_WORKER_BOT_TOKEN` on the gateway service in `render.yaml`. Hardcoded `bot_username: Sophia_Work_bot` in YAML (NOT env-var-resolved) because the langgraph service ALSO loads this file and the config resolver hard-fails on any missing `$VAR`.
+- **Tests added**: 8 new test files / classes covering work-channel construction, identity binding (forward / reverse / auto-bind / failure), summary + artifact extraction, synthetic delegation (3 classifier scenarios + fallback paths), Mem0 retrieval (timeout / error / dedup / truncate), recursion guard, and the **dispatch payload shape regression guard**. Total suite: 1591 pass / 0 regressions.
+
+### What We Learned
+
+#### Render deployment topology — read this BEFORE editing config files
+
+The repo's root `config.yaml` is **`.gitignore`'d**. The actual production config is **`config.production.yaml`** (tracked). It gets copied to `/app/config.yaml` inside the container by `backend/Dockerfile.gateway:8` via `COPY config.production.yaml ./config.yaml`. Editing the local `config.yaml` does NOTHING to production.
+
+**Both services load this same file.** `Dockerfile.langgraph` and `Dockerfile.gateway` both run from a base image that has `config.production.yaml` baked in. The `langgraph_api` runtime calls `AppConfig.from_file(...)` which calls `resolve_env_variables` which **raises a hard `ValueError` on any missing `$VAR`** (see [packages/harness/deerflow/config/app_config.py:188-190](backend/packages/harness/deerflow/config/app_config.py)). There is no tolerant fallback syntax.
+
+This means: **any new `$VAR` reference in `config.production.yaml` requires the env var to be set on EVERY service that loads the file** (langgraph + gateway minimum). When in doubt, hardcode the value in YAML if it's not a secret. We hit this with `bot_username` and ended up hardcoding it — the cosmetic public bot name doesn't need to be an env var.
+
+`render.yaml` declares which env vars MUST be set on each service in the dashboard (`sync: false` = "operator-set, Render won't auto-populate"). Currently the gateway needs: `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN`. Langgraph needs `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, plus any token referenced by `config.production.yaml` (currently `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WORKER_BOT_TOKEN`).
+
+To verify what your live `/app/config.yaml` looks like, SSH into the Render service and run `cat /app/config.yaml`. The file timestamp matches the deploy time — confirms it's baked in at image build, not externally mounted.
+
+#### langgraph-api 0.7+ runs.wait validation rejects both-channels payloads
+
+`runs.wait` (and `runs.create`) returns HTTP 400 in <1ms (pure validation, before the run starts) when the request sets BOTH `config["configurable"]` AND `context` with overlapping keys:
+
+```
+"Cannot specify both configurable and context. Prefer setting context alone."
+(langgraph_api/models/run.py:225-228)
+```
+
+Pattern to use (mirrors [manager.py:633-645](backend/app/channels/manager.py)):
+```python
+run_config = {"recursion_limit": 100}                    # NO "configurable" key
+run_context = {"thread_id": ..., "user_id": ..., ...}    # single source of truth
+result = await client.runs.wait(thread_id, assistant_id,
+                                input=..., config=run_config, context=run_context)
+```
+
+langgraph-api copies `context` → `configurable` server-side via `configurable = context.copy()` (run.py:233), so factories like `make_sophia_builder(config)` still read `cfg["configurable"]["user_id"]` correctly. The Stage 1 PR shipped a buggy version of this that set both, and every real DM to @Sophia_Work_bot crashed with the 400 the moment a user said anything past `/start`. Fixed in commit `34018743`. Regression-guard test in [tests/test_telegram_work_channel.py::TestDispatchPayloadShape](backend/tests/test_telegram_work_channel.py) asserts `"configurable" not in call.kwargs["config"]` so this can't sneak back in.
+
+`start_builder_task.py` is allowed to set `configurable` because it dispatches via the SDK ASGI in-process transport (`get_client(url=None)`), which has different validation than the HTTP-mode SDK client used by channel adapters.
+
+#### Sentrux scoring — what actually moves quality_signal in v0.5.7
+
+The blocking gate (`sentrux gate .`) does **NOT** fail on small `quality_signal` deltas. It fails on **categorical** regressions: cycles count, god-files count, complex-functions count, coupling threshold breaches. The gate has internal tolerance bands; we shipped `+14 quality_signal vs main` with `✓ No degradation detected` because no categorical axis crossed a threshold.
+
+What we tried, ranked by impact (CI scan results, NOT local — they can disagree by ~5-10 points; CI is authoritative):
+
+| Action | quality_signal Δ (CI) | god_files Δ | Architectural value |
+|---|---|---|---|
+| Lazy-import cross-layer deps (Phase A) | **0** | 0 | small (defers SDK init) |
+| Extract sub-module to drop file fan-out (Phase B) | **+1** | **-1** | real (removes one god-file) |
+| Bridge module to consolidate cross-layer edges (Phase C) | **+1** | 0 | real (one crossing point for future swap) |
+
+**Bottom line:** sentrux's geometric mean penalises **file-count overhead** roughly equal to (or slightly more than) the per-axis modularity / coupling gains. Within-module file extraction nets out **roughly neutral** on `quality_signal` while genuinely improving structure. **Lazy imports do nothing for the score** — sentrux v0.5.7's parser walks function bodies via Python's full AST. Don't bother lazy-importing for sentrux purposes.
+
+What DID matter for clearing the gate the first time:
+1. **Cyclomatic complexity threshold is CC ≥ 16** in v0.5.7. Functions at C(15) are fine; D(20+) trip it. Refactor by extracting helpers — easy mechanical wins. We had 4 functions over the threshold and got them all under by splitting into 3-5 small named helpers each.
+2. **Lint must be clean**. `make lint` (ruff) is a hard gate. Auto-fix what `--fix` will fix; manually rename for `F811` duplicate definitions (which pytest may have been silently shadowing — surfacing them can also reveal pre-existing latent test bugs, as it did for us).
+3. **God-files threshold is fan-out > 15**. Extract collaborators into sibling modules; `builder_agent.py` went from 19 → 9 by moving the middleware chain to `builder_middlewares.py`.
+
+Local sentrux: `mcp__sentrux__rescan` then `mcp__sentrux__health`. CI uses the same `sentrux v0.5.7` binary. `CI scan` and `local scan` can disagree by ~5-10 points on `quality_signal` — the local incremental scan and the CI clean-checkout scan compute slightly different file sets. Trust CI.
+
+#### Cross-bot Telegram identity binding works without webapp changes
+
+The identity store at [app/gateway/telegram_link_store.py](backend/app/gateway/telegram_link_store.py) maintains TWO indexes: `_bindings_by_chat[(channel, chat_id)]` (forward) AND `_bindings_by_telegram_user_id[tg_user_id]` (reverse). Both are populated by every `bind_chat` call. When a user DMs `@Sophia_Work_bot`, the chat_id is different from their @Sophia_EI_bot DM (Telegram assigns per-bot chat_ids), so the forward lookup misses. But `update.effective_user.id` is the same Telegram identity in both DMs. The reverse lookup bridges them and we auto-bind the new (channel, Work-DM-chat-id) → user_id pair so subsequent forward lookups hit fast.
+
+Net result: any user already bound through EI's `/start` deep-link flow is auto-recognised by Work bot on first DM. **No webapp UI changes needed for Stage 1C "any EI-bound user welcome".** A standalone Work-bot deep-link flow (for brand-new users who never use EI) would be a Stage 2 webapp PR.
+
+#### `pytest.mark.anyio` (not `asyncio`) is the convention here
+
+Continues to be true. Anyio plugin is what's installed; `@pytest.mark.asyncio` silently produces "tests skipped" results. Worth a 1-minute check if a fresh async test "passes" suspiciously fast.
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md`: extended the existing "Builder-as-Main DM (Stage 1, Phase 3 Telegram diagnostic)" section with a "Render deployment topology" subsection (config.production.yaml as source-of-truth, Dockerfile.gateway:8 COPY, env-var requirements per service, the `runs.wait` 400 trap reference).
+- `backend/CLAUDE.md`: added a "Render production deployment" subsection covering the same topology + the `runs.wait` 400 gotcha + sentrux scoring learnings + cross-bot identity resolver implementation.
+- `README.md`: extended IM Channels section with `telegram_work` block + added a "Production deployment (Render)" subsection covering the config.production.yaml ↔ /app/config.yaml mapping and required env vars per service.
+
+### Skills Created / Modified
+- New: `backend/packages/harness/deerflow/agents/sophia_agent/prompts/builder_brief_classification.md` — single-Haiku-call classifier prompt loaded by `BuilderTaskMiddleware._classify_brief` when no companion-supplied delegation_context is on input. Used only on the Builder-as-Main path. Verbatim from spec §6.4. Per-request agent prompt (NOT a pipeline prompt — distinct from `sophia/prompts/` which CLAUDE.md hard constraint #8 reserves for the offline pipeline).
+
+### GEPA Log Entry
+- `builder_brief_classification.md` is a per-request agent prompt, not a target for GEPA optimization. Tone delta not applicable (Builder doesn't speak; classifier output is structured tool-call). No trace pair needed; behavior is deterministic given the same user_brief input.
