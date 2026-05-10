@@ -417,17 +417,34 @@ channels:
     enabled: true
     bot_token: $TELEGRAM_BOT_TOKEN
     allowed_users: []
+
+  # Optional second Telegram bot — Builder-as-Main DM surface for
+  # @Sophia_Work_bot. Bypasses the companion graph and dispatches
+  # directly to sophia_builder via runs.wait. Identity binding is
+  # shared with the EI bot above (anyone bound through @Sophia_EI_bot's
+  # /start deep-link is auto-recognised here on first DM).
+  telegram_work:
+    enabled: true
+    bot_token: $TELEGRAM_WORKER_BOT_TOKEN
+    bot_username: Sophia_Work_bot         # hardcoded — see Production deployment notes
+    pilot_user_id: ""                     # empty = any EI-bound user welcome
+    allowed_users: []
+    run_timeout_seconds: 900              # 15 min — matches Builder hard ceiling
 ```
 
 Set the corresponding API keys in your `.env` file:
 
 ```bash
 TELEGRAM_BOT_TOKEN=123456789:ABCdefGHIjklMNOpqrSTUvwxYZ
+TELEGRAM_BOT_USERNAME=Sophia_EI_bot          # for webapp deep-link generation
+TELEGRAM_WORKER_BOT_TOKEN=987654321:XYZ...   # for the Work bot (optional — only if telegram_work.enabled)
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_APP_TOKEN=xapp-...
 FEISHU_APP_ID=cli_xxxx
 FEISHU_APP_SECRET=your_app_secret
 ```
+
+**Two bots, one user:** The EI bot (`@Sophia_EI_bot`) is the conversational surface — emotional attunement, ritual routing, memory injection. The Work bot (`@Sophia_Work_bot`) is the direct line to the Builder — research, document generation, code, presentations. A user binds once via the webapp's "Connect Telegram" deep-link (which routes through EI bot's `/start`); from then on, both bots recognise them automatically. See `docs/specs/sophia_builder_as_main_work_bot_spec.md` for the architectural detail.
 
 | Command | Description |
 |---------|-------------|
@@ -438,6 +455,46 @@ FEISHU_APP_SECRET=your_app_secret
 | `/help` | Show help |
 
 > Messages without a command prefix are treated as regular chat — DeerFlow creates a thread and responds conversationally.
+
+### Production deployment (Render)
+
+Sophia ships with a `render.yaml` that defines three Docker services: `sophia-langgraph` (LangGraph runtime, port 2024), `sophia-gateway` (FastAPI gateway + IM channel manager, port 8001), and `sophia-voice` (Vision Agents WebRTC server). Each service builds from a dedicated Dockerfile in `backend/`.
+
+**Critical: production config lives at `config.production.yaml`, NOT `config.yaml`.**
+
+The repo's local `config.yaml` is `.gitignore`'d — it's per-developer scratch. The deployed config is `config.production.yaml` (tracked in git), which `Dockerfile.gateway` and `Dockerfile.langgraph` both copy to `/app/config.yaml` at image-build time:
+
+```dockerfile
+COPY config.production.yaml ./config.yaml
+```
+
+Editing the local `config.yaml` does NOTHING to production. Always edit `config.production.yaml` for changes that need to survive a deploy.
+
+**Secret resolution is strict.** `AppConfig.from_file()` raises `ValueError` on any unresolved `$VAR` reference — there's no fallback syntax. Both services load the file at startup, so any new `$VAR` in `config.production.yaml` requires the env var set on **both** the gateway and langgraph services in the Render dashboard. For public values (bot username, channel name), hardcode in YAML; for secrets (tokens, keys), use `$VAR` and ensure both services have it set.
+
+**Required Render env vars** (declared in `render.yaml` with `sync: false`, must be set per-service in the dashboard):
+
+| Service | Env vars |
+|---|---|
+| `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only) |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (any token referenced by `config.production.yaml` must be set here too) |
+| `sophia-voice` | (see `render.yaml` — STT/TTS keys, Stream credentials, etc.) |
+
+**To verify a deploy** worked, SSH into the Render service shell and run:
+
+```bash
+cat /app/config.yaml | head -60          # confirm channel blocks present
+ls -la /app/config.yaml                  # timestamp matches deploy time = baked at build
+env | grep -E "TELEGRAM|ANTHROPIC|MEM0" | sed 's/=.*$/=<set>/'   # env vars set
+```
+
+**Startup log fingerprints** (gateway service) for the Telegram channels:
+- `[TelegramWork] channel started (bot_username=Sophia_Work_bot ...)` → success
+- `Channel telegram_work is disabled, skipping` → set `enabled: true` in YAML
+- `[TelegramWork] bot_token is empty` → env var unset on this service
+- (no `telegram_work` log line at all) → `channels.telegram_work` block missing from `config.production.yaml`
+
+For the deeper architectural and operational notes (the `runs.wait` 400 trap, sentrux scoring guide, cross-bot identity binding mechanism), see [`backend/CLAUDE.md`](backend/CLAUDE.md) and [`COMPOUND_LOG.md`](COMPOUND_LOG.md).
 
 ---
 

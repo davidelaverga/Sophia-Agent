@@ -344,7 +344,65 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
+- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `telegram_work` (bot_token + bot_username + enabled + pilot_user_id; see Builder-as-Main section above)
+
+### Render production deployment
+
+**TL;DR:** the file the live containers actually load is `/app/config.yaml`, baked in at Docker build time from **`config.production.yaml`** (the tracked one in repo root) via `COPY config.production.yaml ./config.yaml` in both [Dockerfile.gateway:8](Dockerfile.gateway) and `Dockerfile.langgraph`. The repo's local `config.yaml` is `.gitignore`'d and irrelevant to production.
+
+**Critical: the config resolver hard-fails on any missing `$VAR`.** [`AppConfig.resolve_env_variables`](packages/harness/deerflow/config/app_config.py) at line 188-190 raises `ValueError` when an env var referenced via `$NAME` syntax isn't set in the process environment. There is no tolerant `${NAME:-default}` syntax. **Both services load this file at startup** — adding a `$VAR` to `config.production.yaml` requires the env var to be set on **both** the gateway service and the langgraph service in Render's dashboard (or the missing one crashes at boot).
+
+**Hardcode-vs-env-var rule:** if the value is a secret (token, key, signed URL), use `$VAR` and ensure both services have it. If the value is public (bot username, channel name, `recursion_limit`), hardcode it in YAML. We learned this the hard way with `bot_username: $TELEGRAM_WORKER_BOT_USERNAME` — adding the var only to gateway crashed langgraph; hardcoding `bot_username: Sophia_Work_bot` fixed it.
+
+**Required Render env vars** (declared in `render.yaml` with `sync: false` = "operator-set in dashboard, Render won't auto-populate"):
+
+| Service | Required env vars |
+|---|---|
+| `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, plus any token referenced by `config.production.yaml` (currently `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WORKER_BOT_TOKEN`) |
+| `sophia-voice` | (see render.yaml for the voice service envVars list) |
+
+**Deployment verification recipe** (run in the Render shell after a deploy):
+```bash
+cat /app/config.yaml | head -60   # confirm telegram_work block is present
+ls -la /app/config.yaml           # timestamp matches deploy time = baked at build
+echo "---"
+env | grep -E "TELEGRAM|ANTHROPIC|MEM0" | sed 's/=.*$/=<set>/'   # verify env vars set
+```
+
+**Startup log fingerprints** (gateway service):
+- `Channel telegram_work is disabled, skipping` → `enabled: false` in config
+- `[TelegramWork] bot_token is empty` → `$TELEGRAM_WORKER_BOT_TOKEN` env var unset
+- `[TelegramWork] channel started (bot_username=Sophia_Work_bot ...)` → success
+- (no `telegram_work` log line at all) → `channels.telegram_work` block missing from config.production.yaml
+
+**The `runs.wait` 400 trap** — channel adapters that call `client.runs.wait(...)` against the langgraph HTTP service MUST set `thread_id` / `user_id` / `channel` in `context` ONLY, NEVER also in `config["configurable"]`. langgraph-api 0.7+ rejects both-channels payloads with HTTP 400 in <1ms (pre-run validation):
+```
+"Cannot specify both configurable and context. Prefer setting context alone."
+(langgraph_api/models/run.py:225-228)
+```
+Mirror the [manager.py:633-645](app/channels/manager.py) pattern. langgraph-api copies `context` → `configurable` server-side (run.py:233), so factories like `make_sophia_builder(config)` still read `cfg["configurable"]["user_id"]` correctly. `start_builder_task.py` is allowed to set `configurable` because it dispatches via SDK ASGI in-process transport (`get_client(url=None)`), which has different validation. Regression-guard test in [tests/test_telegram_work_channel.py::TestDispatchPayloadShape](tests/test_telegram_work_channel.py).
+
+### Sentrux scoring (CI gate at `.github/workflows/sentrux-gate.yml`)
+
+The blocking gate (`sentrux gate .`) does **NOT** fail on small `quality_signal` deltas. It fails on **categorical** regressions: cycles count, god-files count, complex-functions count, coupling threshold breaches. The gate has internal tolerance bands; PR #120 shipped `+14 quality_signal vs main` with `✓ No degradation detected` because no categorical axis crossed a threshold.
+
+What actually moves the score (CI scan results, NOT local — they can disagree by ~5-10 points; CI is authoritative):
+
+| Action | quality_signal Δ (CI) | god_files Δ | Architectural value |
+|---|---|---|---|
+| Lazy-import cross-layer deps | **0** | 0 | small (defers SDK init) |
+| Extract sub-module to drop file fan-out | **+1** | **-1** | real (removes one god-file) |
+| Bridge module to consolidate cross-layer edges | **+1** | 0 | real (one crossing point) |
+
+**Sentrux v0.5.7's geometric mean penalises file-count overhead** roughly equal to (or slightly more than) per-axis modularity / coupling gains. Within-module file extraction nets out roughly neutral on `quality_signal` while genuinely improving structure. **Lazy imports do nothing for the score** — sentrux's parser walks function bodies via Python's full AST. Don't bother lazy-importing for sentrux purposes.
+
+What DID matter for clearing the gate:
+1. **Cyclomatic complexity threshold is CC ≥ 16** in v0.5.7. Functions at C(15) are fine; D(20+) trip it. Refactor by extracting helpers — easy mechanical wins.
+2. **Lint must be clean**. `make lint` (ruff) is a hard gate. Auto-fix what `--fix` will fix; manually rename for `F811` duplicate definitions (which pytest may have been silently shadowing).
+3. **God-files threshold is fan-out > 15**. Extract collaborators into sibling modules (e.g., `builder_agent.py` 19 → 9 by moving the middleware chain to `builder_middlewares.py`).
+
+Local sentrux: `mcp__sentrux__rescan` then `mcp__sentrux__health`. CI is authoritative when local and CI scans disagree.
 
 ### Memory System (`packages/harness/deerflow/agents/memory/`)
 
