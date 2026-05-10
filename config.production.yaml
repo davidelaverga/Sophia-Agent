@@ -80,13 +80,21 @@ channels:
   # deep-link flow — no separate webapp onboarding required for Stage 1C.
   #
   # Required env vars on Render (gateway service):
-  #   TELEGRAM_WORKER_BOT_TOKEN     — from BotFather, the @Sophia_Work_bot token
-  #   TELEGRAM_WORKER_BOT_USERNAME  — e.g. Sophia_Work_bot (cosmetic; falls back
-  #                                    to literal "Sophia_Work_bot" if unset)
+  #   TELEGRAM_WORKER_BOT_TOKEN     — from BotFather, the @Sophia_Work_bot token.
+  #                                    MUST be set on the gateway service.
+  #
+  # Note on bot_username: hardcoded below rather than env-var-resolved. The
+  # langgraph service ALSO loads this file (per Dockerfile.langgraph) and the
+  # config resolver raises ValueError on any missing $VAR. Hardcoding the
+  # username (which is public, not a secret) keeps the langgraph deploy safe
+  # while still being trivially editable here. Mirrors the EI bot pattern,
+  # which doesn't put bot_username in YAML at all (it's read separately by
+  # app.gateway.telegram_link_store from $TELEGRAM_BOT_USERNAME). If you
+  # rename @Sophia_Work_bot in BotFather, edit this line.
   telegram_work:
     enabled: true
     bot_token: $TELEGRAM_WORKER_BOT_TOKEN
-    bot_username: $TELEGRAM_WORKER_BOT_USERNAME
+    bot_username: Sophia_Work_bot
     pilot_user_id: ""             # empty = any EI-bound user welcome.
                                   # Set to a single canonical Sophia user_id
                                   # during Stage 1B smoke testing if you want

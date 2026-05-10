@@ -62,11 +62,13 @@ services:
       # forward → reverse-lookup → auto-bind).
       - key: TELEGRAM_WORKER_BOT_TOKEN
         sync: false
-      # Bot username (no '@') for @Sophia_Work_bot. Used in welcome text
-      # and unbound-user prompt; channel falls back to literal
-      # "Sophia_Work_bot" if unset, so this is cosmetic but recommended.
-      - key: TELEGRAM_WORKER_BOT_USERNAME
-        sync: false
+      # Note: there is intentionally NO TELEGRAM_WORKER_BOT_USERNAME env var
+      # declared here. The Work bot's username is hardcoded as
+      # "Sophia_Work_bot" in config.production.yaml because the langgraph
+      # service loads the same file and the config resolver raises
+      # ValueError on any missing $VAR. Username is public (not a secret),
+      # so no env var is needed. Rename via config.production.yaml if the
+      # BotFather-registered name changes.
 
   # ─────────────────────────────────────────────────────────────────
   # 3. Voice Server (Vision Agents — STT + TTS + WebRTC)
