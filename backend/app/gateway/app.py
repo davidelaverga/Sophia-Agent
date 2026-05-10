@@ -5,6 +5,11 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.gateway.builder_events import get_fanout
+from app.gateway.builder_events.sinks import (
+    TelegramWorkBotChatRelaySink,
+    TraceSink,
+)
 from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
     agents,
@@ -64,6 +69,29 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # See ``app/gateway/workers/companion_wakeup.py`` for the rationale.
     install_companion_wakeup(app)
     logger.info("Companion wakeup worker installed")
+
+    # Initialise the BuilderEventFanout singleton and register Stage 1A
+    # sinks. The webhook handler at /internal/builder-events publishes
+    # to this fanout in addition to the existing worker / bus / wakeup
+    # calls; sinks are an additive layer. Stage 2 sinks (Telegram Work
+    # bot chat relay, Companion chat relay, Web SSE) register here as
+    # they land. See plan §Stage 1A.
+    #
+    # Idempotent: re-running lifespan in the same process (e.g. when a
+    # test fixture creates multiple app instances) won't duplicate the
+    # TraceSink registration.
+    fanout = get_fanout()
+    if not any(s.name == "trace" for s in fanout.sinks()):
+        fanout.register(TraceSink())
+    # Stage 2A: Telegram Work bot live chat relay. Sink reads
+    # BUILDER_LIVE_STREAM_ENABLED at call time, so registering it here
+    # is always safe — when the flag is off, accepts() short-circuits.
+    if not any(s.name == "telegram_work_chat" for s in fanout.sinks()):
+        fanout.register(TelegramWorkBotChatRelaySink())
+    logger.info(
+        "BuilderEventFanout initialised: sinks=%s",
+        [s.name for s in fanout.sinks()],
+    )
 
     # NOTE: MCP tools initialization is NOT done here because:
     # 1. Gateway doesn't use MCP tools - they are used by Agents in the LangGraph Server

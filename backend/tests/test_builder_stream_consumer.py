@@ -1,0 +1,189 @@
+"""Unit tests for ``consume_builder_stream``."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
+
+import pytest
+
+from app.gateway.builder_events.fanout import BuilderEventFanout
+from app.gateway.builder_events.stream_consumer import consume_builder_stream
+from app.gateway.builder_events.types import BuilderEvent
+
+
+class _RecordingSink:
+    name = "rec"
+
+    def __init__(self) -> None:
+        self.calls: list[BuilderEvent] = []
+
+    def accepts(self, _e: BuilderEvent) -> bool:
+        return True
+
+    async def handle(self, event: BuilderEvent) -> None:
+        self.calls.append(event)
+
+
+class _StubStream:
+    """Async iterable mimicking ``lg_client.runs.stream(...)``."""
+
+    def __init__(self, parts: list[Any]) -> None:
+        self._parts = parts
+
+    def __call__(self, *_args, **_kwargs) -> AsyncIterator[Any]:
+        async def gen():
+            for part in self._parts:
+                yield part
+
+        return gen()
+
+
+class _StubLgClient:
+    def __init__(self, parts: list[Any]) -> None:
+        self.runs = type("R", (), {"stream": _StubStream(parts)})()
+
+
+@pytest.mark.anyio
+async def test_publishes_started_then_per_part_events() -> None:
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    parts = [
+        ("metadata", {"run_id": "r1"}),
+        (
+            "values",
+            {
+                "messages": [
+                    {"type": "ai", "tool_calls": [{"id": "c1", "name": "bash", "args": {}}]},
+                ]
+            },
+        ),
+        ("end", None),
+    ]
+    client = _StubLgClient(parts)
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-1",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "do it"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+
+    types = [e.event_type for e in sink.calls]
+    # started fires first, then tool_started, then either a webhook-loser
+    # synthetic completed (when the grace expires).
+    assert types[0] == "started"
+    assert "tool_started" in types
+    assert types[-1] == "completed"
+
+
+@pytest.mark.anyio
+async def test_synthetic_terminal_when_webhook_never_arrives() -> None:
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    parts = [("values", {"messages": []}), ("end", None)]
+    client = _StubLgClient(parts)
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-2",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "completed"
+    assert terminal[0].payload.get("webhook_grace_exhausted") is True
+
+
+@pytest.mark.anyio
+async def test_webhook_winning_drops_synthetic_terminal() -> None:
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    parts = [("values", {"messages": []}), ("end", None)]
+    client = _StubLgClient(parts)
+
+    async def fire_webhook_after(delay):
+        await asyncio.sleep(delay)
+        await fanout.publish(
+            BuilderEvent(
+                thread_id="tid-3",
+                parent_thread_id=None,
+                user_id="u1",
+                trace_id="trace-1",
+                event_type="completed",
+                payload={"companion_summary": "rich result"},
+                source="webhook",
+            )
+        )
+
+    webhook_task = asyncio.create_task(fire_webhook_after(0.02))
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-3",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.5,
+        consumer_timeout_seconds=5,
+    )
+    await webhook_task
+
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].source == "webhook"
+    assert terminal[0].payload["companion_summary"] == "rich result"
+
+
+@pytest.mark.anyio
+async def test_timeout_publishes_timed_out() -> None:
+    """If the stream itself stalls past the consumer timeout."""
+
+    class _StallingStream:
+        def __call__(self, *_a, **_k):
+            async def gen():
+                await asyncio.sleep(10)
+                yield ("end", None)
+
+            return gen()
+
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    client = type("C", (), {"runs": type("R", (), {"stream": _StallingStream()})()})()
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-4",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=0.05,
+    )
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "timed_out"

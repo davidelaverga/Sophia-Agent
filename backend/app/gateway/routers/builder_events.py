@@ -32,6 +32,8 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.gateway.builder_events import get_fanout
+from app.gateway.builder_events.adapters import webhook_payload_to_event
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
@@ -124,6 +126,20 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
                 payload.get("task_id"),
                 exc_info=True,
             )
+
+    # Additive: publish the same terminal event to the BuilderEventFanout
+    # so registered sinks (TraceSink, Stage-2 chat relays, etc.) can act
+    # on it. Existing worker.publish / publish_builder_completion /
+    # wakeup.wake calls above stay in place — fanout is layered on top,
+    # not replacing them. See plan §Stage 1A.
+    try:
+        await get_fanout().publish(webhook_payload_to_event(payload))
+    except Exception:
+        logger.warning(
+            "BuilderEventFanout publish failed for task_id=%s",
+            payload.get("task_id"),
+            exc_info=True,
+        )
 
     return {"delivered_subscribers": delivered}
 

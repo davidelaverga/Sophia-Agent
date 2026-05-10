@@ -99,6 +99,17 @@ class ChannelService:
         self._running = False
         logger.info("ChannelService stopped")
 
+    def get_channel(self, name: str) -> Any | None:
+        """Return the running Channel instance by name, or None.
+
+        Used by gateway-side workers / sinks (e.g.
+        ``TelegramWorkBotChatRelaySink``, ``telegram_review_notifier``)
+        that need to call channel methods cross-loop. Returns ``None``
+        if the channel isn't configured or hasn't started yet — callers
+        must handle that and treat it as "channel not available, skip".
+        """
+        return self._channels.get(name)
+
     async def restart_channel(self, name: str) -> bool:
         """Restart a specific channel. Returns True if successful."""
         if name in self._channels:

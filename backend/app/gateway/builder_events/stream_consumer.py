@@ -1,0 +1,256 @@
+"""Gateway-side stream consumer for Builder runs.
+
+Spawned per Builder run by:
+
+- ``TelegramWorkChannel._dispatch_build`` (Stage 2A — Work bot main mode)
+  when ``BUILDER_LIVE_STREAM_ENABLED`` is true.
+- ``/internal/builder-dispatched`` endpoint (Stage 2B — companion subagent
+  mode) when ``BuildAwarenessMiddleware`` notifies the gateway of a new
+  builder task.
+
+The consumer drives ``langgraph_sdk`` ``runs.stream``, converts each
+``StreamPart`` via :mod:`app.gateway.builder_events.adapters`, and
+publishes events to the process-wide :class:`BuilderEventFanout`.
+
+Lifecycle:
+
+- One ``asyncio.Task`` per run, named ``builder-stream-{thread_id}``.
+- Lives until the stream ends naturally or a global timeout fires
+  (30 min default — matches the Builder hard ceiling).
+- On stream end, waits ``_WEBHOOK_GRACE_SECONDS`` for the LangGraph
+  process's ``fire_completion_webhook_from_artifact`` POST to arrive.
+  If it does, fanout's per-thread terminal flag drops the
+  consumer-synthesised terminal as the loser of the race (the webhook
+  carries richer artifact metadata). If not, the consumer publishes a
+  best-effort synthetic terminal so chat surfaces aren't left dangling.
+
+Failures inside the consumer never propagate — the task logs and exits.
+Callers don't need to await it; the only reason to keep a reference is
+to ``cancel()`` it on gateway shutdown (handled by the lifespan).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from typing import Any
+
+from app.gateway.builder_events import get_fanout
+from app.gateway.builder_events.adapters import (
+    StreamAdapterState,
+    stream_part_to_events,
+)
+from app.gateway.builder_events.types import BuilderEvent
+
+logger = logging.getLogger(__name__)
+
+
+# Wait this long after stream end for the LangGraph webhook to arrive
+# with the canonical terminal event before synthesising one.
+_WEBHOOK_GRACE_SECONDS = 5.0
+
+# Hard ceiling on consumer lifetime — matches Builder's run-timeout.
+_CONSUMER_TIMEOUT_SECONDS = 30 * 60
+
+
+async def consume_builder_stream(
+    *,
+    lg_client: Any,
+    builder_thread_id: str,
+    parent_thread_id: str | None,
+    user_id: str,
+    trace_id: str,
+    assistant_id: str = "sophia_builder",
+    run_input: dict[str, Any] | None = None,
+    run_config: dict[str, Any] | None = None,
+    run_context: dict[str, Any] | None = None,
+    fanout=None,
+    webhook_grace_seconds: float = _WEBHOOK_GRACE_SECONDS,
+    consumer_timeout_seconds: float = _CONSUMER_TIMEOUT_SECONDS,
+) -> None:
+    """Subscribe to a Builder run's stream and publish events to fanout.
+
+    If ``run_input`` is provided, the consumer creates AND streams the
+    run in one call (``runs.stream(...)`` with input). Use this from the
+    Work bot path where the consumer owns the run lifecycle.
+
+    If ``run_input`` is ``None``, the consumer joins an already-running
+    stream (``runs.stream(thread_id)``) — used from the Stage 2B
+    companion-dispatch path where ``start_builder_task`` already created
+    the run.
+    """
+    fanout = fanout or get_fanout()
+    state = StreamAdapterState()
+    started_emitted = False
+
+    logger.info(
+        "stream_consumer.started builder_thread_id=%s parent_thread_id=%s user_id=%s",
+        builder_thread_id,
+        parent_thread_id,
+        user_id,
+    )
+
+    try:
+        await asyncio.wait_for(
+            _run_stream_loop(
+                lg_client=lg_client,
+                builder_thread_id=builder_thread_id,
+                parent_thread_id=parent_thread_id,
+                user_id=user_id,
+                trace_id=trace_id,
+                assistant_id=assistant_id,
+                run_input=run_input,
+                run_config=run_config,
+                run_context=run_context,
+                fanout=fanout,
+                state=state,
+                started_emitted_ref={"emitted": started_emitted},
+            ),
+            timeout=consumer_timeout_seconds,
+        )
+    except asyncio.CancelledError:
+        logger.info("stream_consumer.cancelled builder_thread_id=%s", builder_thread_id)
+        raise
+    except TimeoutError:
+        logger.warning(
+            "stream_consumer.timed_out builder_thread_id=%s after %ds",
+            builder_thread_id,
+            consumer_timeout_seconds,
+        )
+        await _publish_synthetic_terminal(
+            fanout,
+            builder_thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            event_type="timed_out",
+            payload={"timeout_seconds": consumer_timeout_seconds},
+        )
+        return
+    except Exception:
+        logger.warning(
+            "stream_consumer.error builder_thread_id=%s",
+            builder_thread_id,
+            exc_info=True,
+        )
+        # Don't publish synthetic failed here — the webhook usually
+        # arrives. If it doesn't, the grace-wait below would have run.
+        # We exit so the task doesn't leak.
+        return
+
+    # Stream finished naturally. Give the webhook a head start so the
+    # rich terminal event wins. If it never arrives, publish a minimal
+    # synthetic one so chat / SSE see *something*.
+    arrived = await fanout.await_terminal_dispatch(builder_thread_id, timeout=webhook_grace_seconds)
+    if arrived:
+        logger.info(
+            "stream_consumer.terminated builder_thread_id=%s outcome=webhook_won",
+            builder_thread_id,
+        )
+        return
+
+    await _publish_synthetic_terminal(
+        fanout,
+        builder_thread_id=builder_thread_id,
+        parent_thread_id=parent_thread_id,
+        user_id=user_id,
+        trace_id=trace_id,
+        event_type="completed",
+        payload={
+            "companion_summary": "Build finished, but the result wasn't returned in time.",
+            "webhook_grace_exhausted": True,
+        },
+    )
+    logger.info(
+        "stream_consumer.terminated builder_thread_id=%s outcome=synthetic",
+        builder_thread_id,
+    )
+
+
+async def _run_stream_loop(
+    *,
+    lg_client: Any,
+    builder_thread_id: str,
+    parent_thread_id: str | None,
+    user_id: str,
+    trace_id: str,
+    assistant_id: str,
+    run_input: dict[str, Any] | None,
+    run_config: dict[str, Any] | None,
+    run_context: dict[str, Any] | None,
+    fanout,
+    state: StreamAdapterState,
+    started_emitted_ref: dict[str, bool],
+) -> None:
+    stream_kwargs: dict[str, Any] = {
+        "stream_mode": ["values", "messages", "custom"],
+    }
+    if run_input is not None:
+        stream_kwargs["input"] = run_input
+    if run_config is not None:
+        stream_kwargs["config"] = run_config
+    if run_context is not None:
+        stream_kwargs["context"] = run_context
+
+    async for part in lg_client.runs.stream(builder_thread_id, assistant_id, **stream_kwargs):
+        if not started_emitted_ref["emitted"]:
+            started_emitted_ref["emitted"] = True
+            await fanout.publish(
+                BuilderEvent(
+                    thread_id=builder_thread_id,
+                    parent_thread_id=parent_thread_id,
+                    user_id=user_id,
+                    trace_id=trace_id,
+                    event_type="started",
+                    payload={
+                        "task_brief": _extract_task_brief(run_input),
+                    },
+                )
+            )
+
+        for event in stream_part_to_events(
+            part,
+            thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            adapter_state=state,
+        ):
+            await fanout.publish(event)
+
+
+async def _publish_synthetic_terminal(
+    fanout,
+    *,
+    builder_thread_id: str,
+    parent_thread_id: str | None,
+    user_id: str,
+    trace_id: str,
+    event_type: str,
+    payload: dict[str, Any],
+) -> None:
+    await fanout.publish(
+        BuilderEvent(
+            thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            event_type=event_type,  # type: ignore[arg-type]
+            payload=payload,
+            source="stream",
+        )
+    )
+
+
+def _extract_task_brief(run_input: dict[str, Any] | None) -> str:
+    if not run_input:
+        return ""
+    messages = run_input.get("messages")
+    if not isinstance(messages, list):
+        return ""
+    for msg in messages:
+        if isinstance(msg, dict) and msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                return content[:500]
+    return ""
