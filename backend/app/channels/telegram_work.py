@@ -444,17 +444,21 @@ class TelegramWorkChannel(Channel):
         run_input: dict[str, Any] = {
             "messages": [{"role": "user", "content": user_text}],
         }
-        # We deliberately set thread_id + user_id in BOTH `configurable`
-        # AND `context` — `configurable` so the builder factory's
-        # `make_sophia_builder(config)` reads `cfg.get("user_id")`
-        # correctly (see builder_agent.py:44–54), and matches the
-        # behavior of the EI bot path (manager.py:619+ resolves these).
+        # IMPORTANT: thread_id / user_id / channel go in `context` ONLY,
+        # NOT also in `config["configurable"]`. langgraph-api 0.7+ rejects
+        # requests that set BOTH with HTTP 400 "Cannot specify both
+        # configurable and context. Prefer setting context alone."
+        # (langgraph_api/models/run.py:225–228). When only `context` is
+        # supplied, langgraph-api copies it into `configurable` server-side
+        # (run.py:233 `configurable = context.copy()`), so
+        # ``make_sophia_builder(config)`` still reads
+        # ``cfg["configurable"]["user_id"]`` correctly. This mirrors
+        # ``manager.py:_resolve_run_params`` (lines 633–645) — the EI bot
+        # path that has been working in production.
+        # An earlier version of this code passed BOTH; the result was a
+        # 1ms-rejected 400 from /threads/<id>/runs/wait the moment any
+        # user DM'd @Sophia_Work_bot. Don't reintroduce.
         run_config: dict[str, Any] = {
-            "configurable": {
-                "thread_id": thread_id,
-                "user_id": sophia_user_id,
-                "channel": _CHANNEL_NAME,
-            },
             "recursion_limit": 100,
         }
         run_context: dict[str, Any] = {

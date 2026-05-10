@@ -2,14 +2,17 @@
 
 Covers Stage-1 Phase-3 behaviour: construction, feature-flag gating,
 pilot-user gate, identity binding lookup, summary/artifact extraction,
-group-chat rejection. The end-to-end runs.wait dispatch is covered by
-mocking the LangGraph SDK client; we don't spin up a real Telegram
-Application here (that would require network + valid token).
+group-chat rejection, and the runs.wait dispatch payload shape. The
+end-to-end runs.wait dispatch is covered by mocking the LangGraph SDK
+client; we don't spin up a real Telegram Application here (that would
+require network + valid token).
 """
 
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -403,3 +406,106 @@ class TestIdentityBindingLookup:
         )
         assert result == "user-abc"
         assert captured["telegram_username"] is None
+
+
+class TestDispatchPayloadShape:
+    """Regression guard for the langgraph-api 0.7+ runs.wait validation.
+
+    langgraph-api rejects (with HTTP 400, in 1ms, before the run starts)
+    any request that sets BOTH ``config["configurable"]`` AND ``context``
+    with overlapping keys. The contract — documented in ``manager.py``
+    lines 633–645 — is: put thread_id / user_id / channel in ``context``
+    ONLY. langgraph-api copies context → configurable server-side so the
+    builder factory still reads ``cfg["configurable"]["user_id"]``.
+
+    An earlier version of TelegramWorkChannel._dispatch_build set both,
+    causing 100% failure on the first real DM (``runs.wait`` returned
+    400 instantly). This test exercises the dispatch path with a stubbed
+    LangGraph SDK client and asserts the kwargs shape.
+    """
+
+    @pytest.mark.anyio
+    async def test_runs_wait_does_not_set_configurable_on_config(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ch = TelegramWorkChannel(
+            bus,
+            {
+                "enabled": True,
+                "bot_token": "tok",
+                "bot_username": "Sophia_Work_bot",
+            },
+        )
+
+        # Stub the resolver so it returns a known canonical user_id without
+        # going through telegram_link_store.
+        monkeypatch.setattr(
+            ch,
+            "_resolve_sophia_user_id",
+            lambda **_kwargs: "user-davide",
+        )
+
+        # Stub the in-memory store: existing thread, no creation needed.
+        store = MagicMock()
+        store.get_thread_id = MagicMock(return_value="thread-existing")
+        ch._store = store
+
+        # Stub the LangGraph SDK client. runs.wait captures kwargs we want
+        # to assert; threads.create is unused on this branch (existing
+        # thread).
+        runs = SimpleNamespace(wait=AsyncMock(return_value={"messages": []}))
+        threads = SimpleNamespace(create=AsyncMock())
+        ch._lg_client = SimpleNamespace(runs=runs, threads=threads)
+
+        # Stub the bot just enough for placeholder + edit + reply.
+        bot = SimpleNamespace()
+        bot.send_message = AsyncMock(return_value=SimpleNamespace(message_id=999))
+        bot.edit_message_text = AsyncMock()
+        bot.send_document = AsyncMock()
+        ch._application = SimpleNamespace(bot=bot)
+
+        await ch._dispatch_build(
+            chat_id="6075088249",
+            telegram_user_id="42",
+            user_text="research the best EVs in Europe for families",
+            reply_to_message_id=12345,
+            telegram_username="davide",
+        )
+
+        # The fix asserts both behaviours that broke production:
+        runs.wait.assert_awaited_once()
+        call = runs.wait.await_args
+
+        # Positional args: (thread_id, assistant_id)
+        assert call.args == ("thread-existing", "sophia_builder"), (
+            f"Expected positional ('thread-existing', 'sophia_builder'), got {call.args}"
+        )
+
+        kwargs = call.kwargs
+        assert "config" in kwargs and "context" in kwargs, (
+            f"Expected both config + context kwargs; got {sorted(kwargs)}"
+        )
+
+        # *** The bug *** — must NOT have configurable in config:
+        assert "configurable" not in kwargs["config"], (
+            "REGRESSION: telegram_work passed config={'configurable': ...} which "
+            "langgraph-api 0.7+ rejects with HTTP 400. See manager.py:633–645 "
+            "and the comment in telegram_work.py._dispatch_build for why "
+            "thread_id/user_id/channel must live in `context` ONLY."
+        )
+        assert kwargs["config"] == {"recursion_limit": 100}
+
+        # context is the single source of truth for thread_id/user_id/channel:
+        assert kwargs["context"]["thread_id"] == "thread-existing"
+        assert kwargs["context"]["user_id"] == "user-davide"
+        assert kwargs["context"]["channel"] == "telegram_work"
+
+        # input shape unchanged:
+        assert kwargs["input"] == {
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "research the best EVs in Europe for families",
+                }
+            ]
+        }
