@@ -281,6 +281,11 @@ class TelegramWorkChannel(Channel):
 
         chat_id = str(update.effective_chat.id)
         telegram_user_id = str(update.effective_user.id)
+        # Username is optional on Telegram (some accounts don't set one)
+        # but, when present, gets persisted to the binding row alongside
+        # the canonical user_id so we have a human-readable handle for
+        # support / audit logs later.
+        telegram_username = getattr(update.effective_user, "username", None) or None
         chat_type = getattr(update.effective_chat, "type", None)
 
         # Stage 1 supports private DMs only. Group chats with this bot
@@ -303,6 +308,7 @@ class TelegramWorkChannel(Channel):
             self._dispatch_build(
                 chat_id=chat_id,
                 telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
                 user_text=text,
                 reply_to_message_id=update.message.message_id,
             )
@@ -319,6 +325,7 @@ class TelegramWorkChannel(Channel):
         telegram_user_id: str,
         user_text: str,
         reply_to_message_id: int,
+        telegram_username: str | None = None,
     ) -> None:
         """Resolve identity → look up/create thread → placeholder → runs.wait → render."""
         bot = self._application.bot if self._application else None
@@ -326,8 +333,13 @@ class TelegramWorkChannel(Channel):
             logger.warning("[TelegramWork] dispatch invoked but bot is unset; dropping")
             return
 
-        # 1. Resolve canonical Sophia user_id from the shared binding store.
-        sophia_user_id = self._resolve_sophia_user_id(chat_id)
+        # 1. Resolve canonical Sophia user_id (3-step: forward fast-path,
+        #    then EI-binding reverse lookup with auto-bind on first hit).
+        sophia_user_id = self._resolve_sophia_user_id(
+            chat_id=chat_id,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
         if not sophia_user_id:
             await self._safe_reply(
                 bot,
@@ -609,14 +621,120 @@ class TelegramWorkChannel(Channel):
 
     # -- helpers -----------------------------------------------------------
 
-    def _resolve_sophia_user_id(self, chat_id: str) -> str | None:
-        """Resolve the canonical Sophia user_id for this chat, if bound."""
+    def _resolve_sophia_user_id(
+        self,
+        *,
+        chat_id: str,
+        telegram_user_id: str,
+        telegram_username: str | None = None,
+    ) -> str | None:
+        """Resolve canonical Sophia user_id with EI-binding fallback + auto-bind.
+
+        Three-step resolver — production-ready entry point for any
+        EI-bound user (Stage 1C rollout).
+
+        Step 1 — **forward fast path**: ``resolve_user_id("telegram", chat_id)``
+        with this Work-DM chat_id. Hits when this chat was already
+        auto-bound on a prior turn. Cheap; no Mem0 / Supabase round-trip.
+
+        Step 2 — **reverse lookup**: ``resolve_user_id_by_telegram_user_id(
+        telegram_user_id)``. Finds users who bound through
+        @Sophia_EI_bot's deep-link flow but are now DM-ing the Work bot
+        for the first time. Telegram assigns different chat_ids to
+        different bot DMs (the same human gets a separate chat_id per
+        bot), but ``update.effective_user.id`` is the same Telegram
+        identity across bots. The reverse index (populated by
+        ``bind_chat`` whenever a deep-link redemption happens, including
+        EI's) lets us cross-reference.
+
+        Step 3 — **auto-bind**: when step 2 hits, persist
+        ``(channel="telegram", chat_id=<this Work-DM>)`` so step 1
+        succeeds on subsequent turns. Best-effort: a bind failure logs
+        but does NOT block this request — we already resolved the
+        canonical user_id, so the build can proceed; only the next
+        Work-DM lookup would re-pay step 2's cost.
+
+        Returns ``None`` only when the user has never bound through ANY
+        Telegram bot. Caller sends the friendly "DM @Sophia_EI_bot
+        first" prompt.
+
+        Stage 2+ enhancement (out of scope for this PR): add a webapp
+        deep-link flow specifically for the Work bot
+        (``t.me/Sophia_Work_bot?start=<token>``) so brand-new users can
+        bind to Work without touching EI. Until then, the EI deep-link
+        is the universal entry point per spec C6.
+        """
         try:
-            from app.gateway.telegram_link_store import resolve_user_id
+            from app.gateway.telegram_link_store import (
+                bind_chat,
+                resolve_user_id,
+                resolve_user_id_by_telegram_user_id,
+            )
         except ImportError:  # pragma: no cover — defensive
             logger.warning("[TelegramWork] telegram_link_store unavailable")
             return None
-        return resolve_user_id(_BINDING_CHANNEL_KEY, chat_id)
+
+        # Step 1 — forward fast path
+        user_id = resolve_user_id(_BINDING_CHANNEL_KEY, chat_id)
+        if user_id:
+            return user_id
+
+        # Step 2 — reverse lookup via Telegram identity
+        user_id = resolve_user_id_by_telegram_user_id(telegram_user_id)
+        if not user_id:
+            return None
+
+        # Step 3 — auto-bind so future Work DMs hit the fast path
+        self._auto_bind_work_dm(
+            bind_chat=bind_chat,
+            chat_id=chat_id,
+            user_id=user_id,
+            telegram_user_id=telegram_user_id,
+            telegram_username=telegram_username,
+        )
+        return user_id
+
+    @staticmethod
+    def _auto_bind_work_dm(
+        *,
+        bind_chat,
+        chat_id: str,
+        user_id: str,
+        telegram_user_id: str,
+        telegram_username: str | None,
+    ) -> None:
+        """Persist the Work-DM chat → canonical user_id binding.
+
+        Best-effort: any failure (Supabase outage, validation reject,
+        store-side race) is logged at WARNING and swallowed so the
+        in-flight build is not blocked. Worst case is the next Work-DM
+        from the same user re-pays the reverse-lookup cost.
+        """
+        try:
+            bind_chat(
+                _BINDING_CHANNEL_KEY,
+                chat_id,
+                user_id,
+                telegram_user_id=telegram_user_id,
+                telegram_username=telegram_username,
+            )
+        except Exception:
+            logger.warning(
+                "[TelegramWork] auto-bind failed chat=%s user_id=%s tg_user_id=%s "
+                "— request still proceeds, future Work DMs will re-resolve via reverse lookup",
+                chat_id,
+                user_id,
+                telegram_user_id,
+                exc_info=True,
+            )
+            return
+        logger.info(
+            "[TelegramWork] auto-bound Work-DM chat=%s user_id=%s tg_user_id=%s "
+            "(EI binding via reverse lookup)",
+            chat_id,
+            user_id,
+            telegram_user_id,
+        )
 
     @staticmethod
     def _extract_summary(result: Any) -> str | None:

@@ -199,36 +199,207 @@ class TestTruncate:
 
 
 class TestIdentityBindingLookup:
-    def test_resolve_uses_telegram_channel_key_not_telegram_work(
+    """3-step resolver: forward fast path → reverse lookup → auto-bind.
+
+    Production-critical: the resolver is the entry point for every
+    EI-bound user who DMs @Sophia_Work_bot for the first time. Telegram
+    assigns different chat_ids per bot DM, so the same human gets a
+    different chat_id when they DM Work vs EI; only the reverse lookup
+    by Telegram user_id can bridge the two.
+    """
+
+    def test_step1_forward_lookup_hits_when_work_dm_already_bound(
         self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # Bindings are per Telegram identity, not per bot — a user bound
-        # via @Sophia_EI_bot's /start deep link must resolve here too.
-        # The lookup MUST use channel="telegram", not "telegram_work".
+        """Fast path: Work-DM was previously auto-bound — forward lookup hits."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
 
-        captured: dict = {}
+        forward_calls: list = []
+        reverse_calls: list = []
+        bind_calls: list = []
 
-        def fake_resolve(channel, chat_id):
-            captured["channel"] = channel
-            captured["chat_id"] = chat_id
-            return "user-abc"
+        def fake_forward(channel, chat_id):
+            forward_calls.append((channel, chat_id))
+            return "user-abc"  # hit
 
+        def fake_reverse(*args, **kwargs):
+            reverse_calls.append((args, kwargs))
+            return None
+
+        def fake_bind(*args, **kwargs):
+            bind_calls.append((args, kwargs))
+            return None
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.resolve_user_id", fake_forward)
         monkeypatch.setattr(
-            "app.gateway.telegram_link_store.resolve_user_id",
-            fake_resolve,
+            "app.gateway.telegram_link_store.resolve_user_id_by_telegram_user_id",
+            fake_reverse,
         )
-        result = ch._resolve_sophia_user_id("12345")
-        assert result == "user-abc"
-        assert captured["channel"] == "telegram"
-        assert captured["chat_id"] == "12345"
+        monkeypatch.setattr("app.gateway.telegram_link_store.bind_chat", fake_bind)
 
-    def test_resolve_returns_none_when_unbound(
+        result = ch._resolve_sophia_user_id(
+            chat_id="work-12345",
+            telegram_user_id="42",
+            telegram_username="davide",
+        )
+
+        assert result == "user-abc"
+        # Forward lookup with channel="telegram" (not "telegram_work")
+        assert forward_calls == [("telegram", "work-12345")]
+        # Step 2 + 3 must NOT run when step 1 hits (no wasted reverse-lookup or auto-bind)
+        assert reverse_calls == []
+        assert bind_calls == []
+
+    def test_step2_reverse_lookup_hits_for_ei_bound_user_first_work_dm(
         self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """EI-bound user DMs Work bot first time → reverse lookup hits, auto-bind fires."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
+
+        bind_calls: list = []
+
+        # Forward miss (no prior Work-DM binding)
+        monkeypatch.setattr("app.gateway.telegram_link_store.resolve_user_id", lambda *_, **__: None)
+        # Reverse hit (EI's deep-link populated _bindings_by_telegram_user_id earlier)
         monkeypatch.setattr(
-            "app.gateway.telegram_link_store.resolve_user_id",
+            "app.gateway.telegram_link_store.resolve_user_id_by_telegram_user_id",
+            lambda tg_user_id, **kw: "user-abc" if tg_user_id == "42" else None,
+        )
+
+        def fake_bind(channel, chat_id, user_id, *, telegram_user_id, telegram_username):
+            bind_calls.append({
+                "channel": channel,
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "telegram_user_id": telegram_user_id,
+                "telegram_username": telegram_username,
+            })
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.bind_chat", fake_bind)
+
+        result = ch._resolve_sophia_user_id(
+            chat_id="work-12345",
+            telegram_user_id="42",
+            telegram_username="davide",
+        )
+
+        assert result == "user-abc"
+        # Auto-bind fired with all the right fields — Work-DM chat is now
+        # in the forward index AND the reverse index gains a second
+        # binding entry pointing at the same canonical user.
+        assert len(bind_calls) == 1
+        bind_call = bind_calls[0]
+        assert bind_call["channel"] == "telegram"
+        assert bind_call["chat_id"] == "work-12345"
+        assert bind_call["user_id"] == "user-abc"
+        assert bind_call["telegram_user_id"] == "42"
+        assert bind_call["telegram_username"] == "davide"
+
+    def test_step2_reverse_lookup_misses_for_brand_new_user(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """User never bound through ANY Telegram bot → returns None (caller sends unbound prompt)."""
+        ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
+
+        bind_calls: list = []
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.resolve_user_id", lambda *_, **__: None)
+        monkeypatch.setattr(
+            "app.gateway.telegram_link_store.resolve_user_id_by_telegram_user_id",
             lambda *_, **__: None,
         )
-        assert ch._resolve_sophia_user_id("12345") is None
+        monkeypatch.setattr(
+            "app.gateway.telegram_link_store.bind_chat",
+            lambda *args, **kwargs: bind_calls.append((args, kwargs)),
+        )
+
+        result = ch._resolve_sophia_user_id(
+            chat_id="work-12345",
+            telegram_user_id="999",
+            telegram_username=None,
+        )
+        assert result is None
+        # Auto-bind MUST NOT fire when reverse lookup misses (no canonical
+        # user_id to bind to).
+        assert bind_calls == []
+
+    def test_step3_auto_bind_failure_does_not_block_request(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Auto-bind error (e.g., Supabase outage) is swallowed — caller still gets the resolved user_id."""
+        ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.resolve_user_id", lambda *_, **__: None)
+        monkeypatch.setattr(
+            "app.gateway.telegram_link_store.resolve_user_id_by_telegram_user_id",
+            lambda *_, **__: "user-abc",
+        )
+
+        def boom(*_, **__):
+            raise RuntimeError("Supabase down")
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.bind_chat", boom)
+
+        with caplog.at_level(logging.WARNING, logger="app.channels.telegram_work"):
+            result = ch._resolve_sophia_user_id(
+                chat_id="work-12345",
+                telegram_user_id="42",
+                telegram_username="davide",
+            )
+
+        # Build still proceeds with the resolved canonical user_id.
+        assert result == "user-abc"
+        # Failure logged at WARNING for ops visibility.
+        warning_messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert any("auto-bind failed" in m for m in warning_messages), warning_messages
+
+    def test_username_passthrough_when_present(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """telegram_username threads through to bind_chat verbatim when set."""
+        ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
+        captured: dict = {}
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.resolve_user_id", lambda *_, **__: None)
+        monkeypatch.setattr(
+            "app.gateway.telegram_link_store.resolve_user_id_by_telegram_user_id",
+            lambda *_, **__: "user-abc",
+        )
+
+        def fake_bind(channel, chat_id, user_id, *, telegram_user_id, telegram_username):
+            captured["telegram_username"] = telegram_username
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.bind_chat", fake_bind)
+
+        ch._resolve_sophia_user_id(
+            chat_id="work-12345",
+            telegram_user_id="42",
+            telegram_username="davide",
+        )
+        assert captured["telegram_username"] == "davide"
+
+    def test_username_can_be_none(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Telegram users without a username — telegram_username=None is valid."""
+        ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
+        captured: dict = {}
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.resolve_user_id", lambda *_, **__: None)
+        monkeypatch.setattr(
+            "app.gateway.telegram_link_store.resolve_user_id_by_telegram_user_id",
+            lambda *_, **__: "user-abc",
+        )
+
+        def fake_bind(channel, chat_id, user_id, *, telegram_user_id, telegram_username):
+            captured["telegram_username"] = telegram_username
+
+        monkeypatch.setattr("app.gateway.telegram_link_store.bind_chat", fake_bind)
+
+        result = ch._resolve_sophia_user_id(
+            chat_id="work-12345",
+            telegram_user_id="42",
+            telegram_username=None,
+        )
+        assert result == "user-abc"
+        assert captured["telegram_username"] is None
