@@ -51,6 +51,22 @@ services:
       # Bot username (no '@') used to build webapp -> Telegram deep links.
       - key: TELEGRAM_BOT_USERNAME
         sync: false
+      # @Sophia_Work_bot (Builder-as-Main DM channel) — Stage 1 of Phase 3.
+      # When TELEGRAM_WORKER_BOT_TOKEN is set AND
+      # config.production.yaml has channels.telegram_work.enabled: true,
+      # the gateway boots a second polling Application that dispatches
+      # directly to sophia_builder via runs.wait. Identity binding is
+      # shared with the EI bot via app.gateway.telegram_link_store, so any
+      # user already bound through @Sophia_EI_bot's deep-link is auto-
+      # recognised here (3-step resolver in TelegramWorkChannel:
+      # forward → reverse-lookup → auto-bind).
+      - key: TELEGRAM_WORKER_BOT_TOKEN
+        sync: false
+      # Bot username (no '@') for @Sophia_Work_bot. Used in welcome text
+      # and unbound-user prompt; channel falls back to literal
+      # "Sophia_Work_bot" if unset, so this is cosmetic but recommended.
+      - key: TELEGRAM_WORKER_BOT_USERNAME
+        sync: false
 
   # ─────────────────────────────────────────────────────────────────
   # 3. Voice Server (Vision Agents — STT + TTS + WebRTC)
