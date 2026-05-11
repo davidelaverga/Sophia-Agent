@@ -106,6 +106,68 @@ async def test_webhook_publishes_to_fanout_and_existing_paths(app: FastAPI, clie
 
 
 @pytest.mark.anyio
+async def test_webhook_accepts_null_thread_id_for_main_mode(app: FastAPI, client: httpx.AsyncClient, monkeypatch) -> None:
+    """Builder-as-main (Work bot DM): parent_thread_id is None, so the
+    LangGraph producer sends thread_id=null. The router must accept it
+    and the adapter must map it to BuilderEvent.parent_thread_id=None
+    so the Telegram Work bot sink can pick up artifact_filename and
+    deliver the document on terminal."""
+    sink = _RecordingSink()
+    get_fanout().register(sink)
+
+    async def _noop_bus_publish(_payload):
+        pass
+
+    monkeypatch.setattr(
+        "app.channels.message_bus.publish_builder_completion",
+        _noop_bus_publish,
+    )
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                # Main-mode: no companion parent thread.
+                "thread_id": None,
+                "task_id": "builder-thread-A",
+                "user_id": "davide",
+                "status": "success",
+                "artifact_filename": "report.pptx",
+                "artifact_title": "Sophia Report",
+                "artifact_url": "https://example.com/x.pptx",
+                "summary": "All done.",
+            },
+        )
+
+    assert response.status_code == 202
+
+    # Give the publish task a moment.
+    for _ in range(10):
+        if sink.calls:
+            break
+        await asyncio.sleep(0.01)
+
+    assert len(sink.calls) == 1
+    e = sink.calls[0]
+    assert e.thread_id == "builder-thread-A"  # task_id became thread_id
+    assert e.parent_thread_id is None  # main mode marker
+    assert e.event_type == "completed"
+    assert e.payload["artifact_filename"] == "report.pptx"
+    assert e.payload["artifact_title"] == "Sophia Report"
+
+
+@pytest.mark.anyio
+async def test_webhook_still_rejects_missing_task_id(app: FastAPI, client: httpx.AsyncClient) -> None:
+    """task_id remains required even though thread_id is now optional."""
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={"thread_id": "p1", "status": "success"},  # no task_id
+        )
+    assert response.status_code == 422
+
+
+@pytest.mark.anyio
 async def test_fanout_publish_failure_does_not_break_webhook(app: FastAPI, client: httpx.AsyncClient, monkeypatch) -> None:
     """A broken fanout sink must not cause the webhook to return 5xx."""
 

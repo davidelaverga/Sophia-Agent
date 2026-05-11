@@ -81,13 +81,34 @@ async def consume_builder_stream(
     """
     fanout = fanout or get_fanout()
     state = StreamAdapterState()
-    started_emitted = False
 
     logger.info(
         "stream_consumer.started builder_thread_id=%s parent_thread_id=%s user_id=%s",
         builder_thread_id,
         parent_thread_id,
         user_id,
+    )
+
+    # Publish ``started`` BEFORE the stream attempt. Two reasons:
+    #
+    # 1. Semantically a run has begun the moment this consumer is
+    #    invoked — not when the first chunk arrives.
+    # 2. Load-bearing for thread reuse. ``TelegramWorkChannel`` keeps
+    #    one thread_id per chat across builds; the fanout resets the
+    #    terminal flag on ``started``. If the run dies before yielding
+    #    any chunk (transport error, immediate API rejection), the
+    #    prior run's stale terminal flag would otherwise dedup BOTH the
+    #    webhook terminal AND our synthetic ``failed`` fallback,
+    #    leaving the placeholder stuck across consecutive runs.
+    await fanout.publish(
+        BuilderEvent(
+            thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            event_type="started",
+            payload={"task_brief": _extract_task_brief(run_input)},
+        )
     )
 
     try:
@@ -104,7 +125,6 @@ async def consume_builder_stream(
                 run_context=run_context,
                 fanout=fanout,
                 state=state,
-                started_emitted_ref={"emitted": started_emitted},
             ),
             timeout=consumer_timeout_seconds,
         )
@@ -205,8 +225,13 @@ async def _run_stream_loop(
     run_context: dict[str, Any] | None,
     fanout,
     state: StreamAdapterState,
-    started_emitted_ref: dict[str, bool],
 ) -> None:
+    """Iterate ``runs.stream`` and publish per-chunk events.
+
+    ``started`` is published by the caller before this function is
+    entered so that stream errors that prevent any chunk from arriving
+    still reset the fanout's per-thread state.
+    """
     stream_kwargs: dict[str, Any] = {
         "stream_mode": ["values", "messages", "custom"],
     }
@@ -218,21 +243,6 @@ async def _run_stream_loop(
         stream_kwargs["context"] = run_context
 
     async for part in lg_client.runs.stream(builder_thread_id, assistant_id, **stream_kwargs):
-        if not started_emitted_ref["emitted"]:
-            started_emitted_ref["emitted"] = True
-            await fanout.publish(
-                BuilderEvent(
-                    thread_id=builder_thread_id,
-                    parent_thread_id=parent_thread_id,
-                    user_id=user_id,
-                    trace_id=trace_id,
-                    event_type="started",
-                    payload={
-                        "task_brief": _extract_task_brief(run_input),
-                    },
-                )
-            )
-
         for event in stream_part_to_events(
             part,
             thread_id=builder_thread_id,

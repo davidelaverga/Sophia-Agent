@@ -47,9 +47,23 @@ class BuilderCompletionEvent(BaseModel):
     """Wire contract for the LangGraph-process webhook.
 
     Mirrors ``deerflow.sophia.builder_events.build_completion_payload_from_artifact``.
+
+    ``thread_id`` is the parent companion thread when Builder is a
+    subagent (companion → ``start_builder_task`` dispatch), and ``None``
+    in Builder-as-main mode (Work bot DM). Downstream consumers handle
+    null correctly: the SSE worker drops null-keyed events with a
+    warning (no webapp for Work bot anyway), the MessageBus channel
+    subscribers find no match (Work bot runs don't belong to other
+    channels), the companion wakeup worker skips (no companion to
+    wake), and the BuilderEventFanout adapter maps null →
+    ``BuilderEvent.parent_thread_id=None`` and uses ``task_id`` for the
+    canonical ``BuilderEvent.thread_id``.
     """
 
-    thread_id: str = Field(..., description="Parent companion thread id.")
+    thread_id: str | None = Field(
+        None,
+        description="Parent companion thread id; null in Builder-as-main mode.",
+    )
     task_id: str = Field(..., description="Subagent / async task id.")
     trace_id: str | None = None
     agent_name: str | None = None
@@ -67,8 +81,7 @@ class BuilderCompletionEvent(BaseModel):
     source: str | None = Field(None, description="Origin: subagent_executor | async_subagent_monitor")
     user_id: str | None = Field(
         None,
-        description="Originating user id, used by the companion wakeup worker to "
-        "construct a properly-attributed synthetic turn.",
+        description="Originating user id, used by the companion wakeup worker to construct a properly-attributed synthetic turn.",
     )
 
 

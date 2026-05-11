@@ -227,6 +227,73 @@ async def test_stream_exception_publishes_synthetic_failed() -> None:
 
 
 @pytest.mark.anyio
+async def test_started_published_before_stream_attempt_resets_stale_terminal() -> None:
+    """Reused thread_id (Work bot one-per-chat) + second runs.stream
+    errors immediately. The started event must publish BEFORE the
+    stream attempt so the prior run's terminal flag is cleared and
+    the synthetic 'failed' (or a webhook terminal) can fire.
+
+    Simulates the Stage 1A webhook-only flow for build 1 (no started
+    event ever published) followed by a Stage 2A streaming attempt for
+    build 2 that errors immediately."""
+
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    # Build 1: Stage 1A webhook-only — only a terminal lands. No
+    # started was ever fired. Terminal flag is set on chat-A.
+    await fanout.publish(
+        BuilderEvent(
+            thread_id="chat-A",
+            parent_thread_id=None,
+            user_id="u1",
+            trace_id="trace-1",
+            event_type="completed",
+            payload={},
+            source="webhook",
+        )
+    )
+    assert sum(1 for e in sink.calls if e.event_type == "completed") == 1
+
+    # Build 2 on the same thread. runs.stream raises before yielding a
+    # single chunk. Without the started-before-stream fix the terminal
+    # flag from build 1 would still be set and the synthetic 'failed'
+    # below would be dropped.
+    class _ErrorStream:
+        def __call__(self, *_a, **_k):
+            async def gen():
+                raise RuntimeError("immediate API rejection")
+                yield  # unreachable
+
+            return gen()
+
+    client = type("C", (), {"runs": type("R", (), {"stream": _ErrorStream()})()})()
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="chat-A",  # SAME thread as build 1
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-2",
+        run_input={"messages": [{"role": "user", "content": "build 2"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+
+    types = [e.event_type for e in sink.calls]
+    # Build 2's started cleared the stale terminal flag and a synthetic
+    # failed fired (stream raised, no webhook arrived).
+    assert types == ["completed", "started", "failed"]
+    # Sequence resets on build 2's started.
+    started_evt = next(e for e in sink.calls if e.event_type == "started")
+    failed_evt = next(e for e in sink.calls if e.event_type == "failed")
+    assert started_evt.sequence == 1
+    assert failed_evt.sequence == 2
+
+
+@pytest.mark.anyio
 async def test_stream_exception_yields_to_webhook_if_it_arrives() -> None:
     """If the webhook lands during the grace after a stream error, the
     rich webhook event wins and the synthetic ``failed`` is dropped."""
