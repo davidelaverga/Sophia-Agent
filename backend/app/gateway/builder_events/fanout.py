@@ -66,8 +66,10 @@ class BuilderEventFanout:
         self._sequence_lock = Lock()
         self._sequence_counters: OrderedDict[str, int] = OrderedDict()
         self._terminal_lock = Lock()
-        # value is (event_type, set_at_monotonic) so we can apply TTL.
-        self._terminal_flags: OrderedDict[str, tuple[str, float]] = OrderedDict()
+        # value is (event_type, set_at_monotonic, source) so we can
+        # apply TTL AND let webhook terminals override prior
+        # stream-source synthetics. See ``_mark_terminal`` for the rule.
+        self._terminal_flags: OrderedDict[str, tuple[str, float, str]] = OrderedDict()
         # Cross-loop-safe terminal signalling. Stage 2A's stream consumer
         # runs on the gateway loop; Stage 2B's CompanionWakeup also runs
         # on the gateway loop; the Work bot dispatch runs on its own
@@ -121,12 +123,19 @@ class BuilderEventFanout:
         seq = self._next_sequence(thread_id)
         event = replace(event, sequence=seq)
 
-        # Dedup terminal-vs-terminal races (stream and webhook both
-        # arriving). First to register wins within the TTL window;
-        # second is dropped. Past the TTL the flag self-clears so a
-        # subsequent run on the same thread_id publishes cleanly.
+        # Dedup terminal-vs-terminal races. Two cases are dedup'd:
+        # (a) same source twice within TTL (true duplicates, e.g.
+        #     webhook retries from the LangGraph process), and
+        # (b) a stream-source terminal arriving after a webhook one
+        #     (webhook is canonical; the stream's synthetic was just a
+        #     fallback while we awaited the webhook).
+        # Webhook terminals OVERRIDE prior stream-source synthetics —
+        # the webhook carries artifact metadata the synthetic can't,
+        # so dropping it would leave Work-bot users with the fallback
+        # text and no artifact when webhook latency exceeds the
+        # stream-end grace.
         if event.is_terminal:
-            first_terminal = self._mark_terminal(thread_id, event.event_type)
+            first_terminal = self._mark_terminal(thread_id, event.event_type, event.source)
             if first_terminal is not None:
                 logger.info(
                     "fanout.duplicate_terminal_dropped thread_id=%s first_terminal=%s incoming=%s source=%s",
@@ -216,7 +225,7 @@ class BuilderEventFanout:
             entry = self._terminal_flags.get(thread_id)
             if entry is None:
                 return False
-            _event_type, set_at = entry
+            _event_type, set_at, _source = entry
             if time.monotonic() - set_at > _TERMINAL_FLAG_TTL_SECONDS:
                 # Stale — drop lazily so the next terminal for this
                 # thread fires normally (consecutive Work bot builds).
@@ -224,18 +233,34 @@ class BuilderEventFanout:
                 return False
             return True
 
-    def _mark_terminal(self, thread_id: str, event_type: str) -> str | None:
-        """Return the previously-recorded terminal type, or ``None`` if
-        this is the first terminal for ``thread_id`` within the TTL window."""
+    def _mark_terminal(self, thread_id: str, event_type: str, source: str) -> str | None:
+        """Source-aware terminal registration.
+
+        Returns the existing terminal's type if the incoming event
+        should be deduped, else ``None`` (caller proceeds to dispatch).
+
+        Rules:
+        - Stale entries (past TTL) are treated as absent.
+        - If incoming is webhook AND existing is stream-source synthetic,
+          override: the webhook carries richer artifact metadata than
+          the stream-derived fallback could produce, so we want it to
+          land even after the synthetic already fired.
+        - Otherwise, first-within-TTL wins.
+        """
         with self._terminal_lock:
             entry = self._terminal_flags.get(thread_id)
             now = time.monotonic()
             if entry is not None:
-                existing_type, set_at = entry
+                existing_type, set_at, existing_source = entry
                 if now - set_at <= _TERMINAL_FLAG_TTL_SECONDS:
-                    return existing_type
-                # Stale terminal — treat as fresh.
-            self._terminal_flags[thread_id] = (event_type, now)
+                    if source == "webhook" and existing_source != "webhook":
+                        # Webhook overrides synthetic stream terminal.
+                        # Fall through to record the new entry.
+                        pass
+                    else:
+                        return existing_type
+                # else: stale, treat as fresh.
+            self._terminal_flags[thread_id] = (event_type, now, source)
             self._terminal_flags.move_to_end(thread_id)
             while len(self._terminal_flags) > _TERMINAL_FLAG_CACHE_MAX:
                 self._terminal_flags.popitem(last=False)

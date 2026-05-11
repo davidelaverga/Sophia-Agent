@@ -75,15 +75,20 @@ async def test_per_thread_sequence_monotonic_and_independent() -> None:
 
 
 @pytest.mark.anyio
-async def test_terminal_flag_dedup_drops_second_terminal() -> None:
+async def test_two_streams_dedup_drops_second() -> None:
+    """Two stream-source terminals on the same thread: second dropped.
+
+    (Webhook-overrides-stream semantics is tested separately —
+    ``test_webhook_overrides_synthetic_stream_terminal_within_ttl``.)"""
     fanout = BuilderEventFanout()
     sink = _RecordingSink()
     fanout.register(sink)
 
     await fanout.publish(_evt(thread_id="A", event_type="completed", source="stream"))
-    await fanout.publish(_evt(thread_id="A", event_type="completed", source="webhook"))
+    await fanout.publish(_evt(thread_id="A", event_type="completed", source="stream"))
 
-    assert [e.source for e in sink.calls] == ["stream"]
+    completed = [e for e in sink.calls if e.event_type == "completed"]
+    assert len(completed) == 1
 
 
 @pytest.mark.anyio
@@ -267,9 +272,12 @@ async def test_terminal_flag_ttl_expires_for_webhook_only_consecutive_builds(
 
 
 @pytest.mark.anyio
-async def test_late_terminal_within_ttl_still_dedupped() -> None:
-    """The stream/webhook race window (≈5s) is well inside the TTL —
-    duplicate terminals from the same run must still dedup."""
+async def test_webhook_overrides_synthetic_stream_terminal_within_ttl() -> None:
+    """A stream-source synthetic terminal is provisional. When the
+    real webhook arrives within the TTL window with the rich payload
+    (artifact metadata), it must override the synthetic so sinks can
+    deliver the artifact. Without this, Work bot users would see the
+    fallback text but never receive the artifact file."""
     fanout = BuilderEventFanout()
     sink = _RecordingSink()
     fanout.register(sink)
@@ -278,5 +286,40 @@ async def test_late_terminal_within_ttl_still_dedupped() -> None:
     await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
 
     completed = [e for e in sink.calls if e.event_type == "completed"]
+    assert len(completed) == 2
+    # Stream-source synthetic fired first (provisional fallback);
+    # webhook fired second with the real payload.
+    assert [e.source for e in completed] == ["stream", "webhook"]
+
+
+@pytest.mark.anyio
+async def test_two_webhooks_dedup_drops_second() -> None:
+    """Webhook retries (true duplicates from the LangGraph process)
+    are deduped: first webhook wins, second drops."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
+
+    completed = [e for e in sink.calls if e.event_type == "completed"]
     assert len(completed) == 1
-    assert completed[0].source == "stream"  # first-wins
+
+
+@pytest.mark.anyio
+async def test_stream_after_webhook_is_dropped() -> None:
+    """The webhook is canonical. If a stream-source synthetic somehow
+    arrives after the webhook has already fired (clock skew, multiple
+    consumers, retry path), it must NOT override the richer webhook
+    terminal."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="stream"))
+
+    completed = [e for e in sink.calls if e.event_type == "completed"]
+    assert len(completed) == 1
+    assert completed[0].source == "webhook"

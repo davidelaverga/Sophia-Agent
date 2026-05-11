@@ -60,6 +60,7 @@ def _evt(
     thread_id: str = "tid-1",
     parent_thread_id: str | None = None,
     payload: dict[str, Any] | None = None,
+    source: str = "stream",
 ) -> BuilderEvent:
     return BuilderEvent(
         thread_id=thread_id,
@@ -68,6 +69,7 @@ def _evt(
         trace_id="trace-1",
         event_type=event_type,  # type: ignore[arg-type]
         payload=payload or {},
+        source=source,  # type: ignore[arg-type]
     )
 
 
@@ -152,11 +154,17 @@ async def test_handle_renders_completed_summary_and_clears_placeholder() -> None
     )
     sink.register_placeholder("tid-1", "12345", 99)
 
-    await sink.handle(_evt(event_type="completed", payload={"companion_summary": "Built the doc."}))
+    await sink.handle(
+        _evt(
+            event_type="completed",
+            payload={"companion_summary": "Built the doc."},
+            source="webhook",
+        )
+    )
     channel.relay_builder_event_edit.assert_awaited_once()
     assert channel.relay_builder_event_edit.await_args.kwargs["text"] == "Built the doc."
 
-    # After terminal the placeholder mapping is cleared.
+    # Webhook-source terminal clears the placeholder mapping.
     assert sink.get_placeholder("tid-1") is None
 
 
@@ -196,6 +204,7 @@ async def test_handle_delivers_artifact_on_completed_with_filename() -> None:
                 "artifact_filename": "report.pptx",
                 "artifact_title": "Sophia Report",
             },
+            source="webhook",
         )
     )
     channel.relay_builder_event_edit.assert_awaited_once()
@@ -246,6 +255,60 @@ async def test_handle_artifact_failure_does_not_block_placeholder_cleanup() -> N
                 "companion_summary": "Built.",
                 "artifact_filename": "x.pptx",
             },
+            source="webhook",
         )
     )
+    assert sink.get_placeholder("tid-1") is None
+
+
+@pytest.mark.anyio
+async def test_stream_terminal_keeps_placeholder_for_late_webhook() -> None:
+    """A stream-source synthetic terminal is provisional. The sink
+    must NOT clear the placeholder mapping so a later webhook (with
+    artifact metadata) can re-render the same Telegram message and
+    deliver the file. Without this, slow-webhook scenarios would
+    leave the user with the synthetic fallback text and no artifact."""
+    channel = _FakeChannel()
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
+        channel=channel,
+    )
+    sink.register_placeholder("tid-1", "12345", 99)
+
+    # Provisional synthetic from the stream consumer's grace fallback.
+    await sink.handle(
+        _evt(
+            event_type="completed",
+            payload={
+                "companion_summary": "Build finished, but the result wasn't returned in time.",
+                "webhook_grace_exhausted": True,
+            },
+            source="stream",
+        )
+    )
+    # First edit fired but placeholder mapping survives.
+    assert channel.relay_builder_event_edit.await_count == 1
+    assert channel.relay_artifact_document.await_count == 0
+    assert sink.get_placeholder("tid-1") == ("12345", 99)
+
+    # Real webhook lands shortly after (fanout's source-aware dedup
+    # lets it through). Sink re-renders with the rich summary and
+    # delivers the artifact.
+    await sink.handle(
+        _evt(
+            event_type="completed",
+            payload={
+                "companion_summary": "Built the report.",
+                "artifact_filename": "report.pptx",
+                "artifact_title": "Sophia Report",
+            },
+            source="webhook",
+        )
+    )
+    assert channel.relay_builder_event_edit.await_count == 2
+    assert channel.relay_artifact_document.await_count == 1
+    artifact_kwargs = channel.relay_artifact_document.await_args.kwargs
+    assert artifact_kwargs["filename"] == "report.pptx"
+    # Webhook clears the placeholder.
     assert sink.get_placeholder("tid-1") is None

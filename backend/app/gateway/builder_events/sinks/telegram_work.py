@@ -182,11 +182,17 @@ class TelegramWorkBotChatRelaySink:
                         exc_info=True,
                     )
 
-            # Drop the placeholder mapping after terminal so a subsequent
-            # run on the same thread starts fresh.
-            with self._placeholders_lock:
-                self._placeholders.pop(event.thread_id, None)
-            self._last_text.pop(event.thread_id, None)
+            # Clear placeholder + last_text ONLY on webhook-source
+            # terminals. Stream-source synthetic terminals are
+            # provisional — a real webhook may arrive within the
+            # fanout's TTL window with the rich payload (artifact_url,
+            # signed summary), and the fanout will re-dispatch through
+            # this sink. Keeping the placeholder alive lets that
+            # re-render hit the same Telegram message.
+            if event.source == "webhook":
+                with self._placeholders_lock:
+                    self._placeholders.pop(event.thread_id, None)
+                self._last_text.pop(event.thread_id, None)
 
     # ---- Internals --------------------------------------------------------
 
