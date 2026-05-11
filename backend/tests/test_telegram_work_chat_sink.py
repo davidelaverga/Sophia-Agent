@@ -111,6 +111,32 @@ async def test_handle_skips_when_no_placeholder() -> None:
 
 
 @pytest.mark.anyio
+async def test_handle_started_does_not_edit_placeholder() -> None:
+    """TelegramWorkChannel posts the placeholder ("🔨 Working on your
+    request…") BEFORE spawning the consumer. The stream consumer's
+    ``started`` event used to render the same text via the sink, which
+    Telegram rejects with `400 Message is not modified`, and the
+    `_safe_edit` fallback then posts a duplicate message. The fix:
+    sink renders empty text for ``started`` so the edit is skipped.
+    The fanout still receives the ``started`` event (it's what resets
+    the per-thread terminal flag for reused thread_ids)."""
+    channel = _FakeChannel()
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
+        channel=channel,
+    )
+    sink.register_placeholder("tid-1", "12345", 99)
+
+    await sink.handle(_evt(event_type="started"))
+
+    channel.relay_builder_event_edit.assert_not_called()
+    # Placeholder mapping is untouched — subsequent phase/tool events
+    # will still find it.
+    assert sink.get_placeholder("tid-1") == ("12345", 99)
+
+
+@pytest.mark.anyio
 async def test_handle_renders_tool_started_phase_label() -> None:
     channel = _FakeChannel()
     sink, _ = _make_sink(

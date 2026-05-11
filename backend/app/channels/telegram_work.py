@@ -55,6 +55,8 @@ import threading
 from io import BytesIO
 from typing import Any
 
+import httpx
+
 from app.channels.base import Channel
 from app.channels.message_bus import MessageBus
 
@@ -400,6 +402,29 @@ class TelegramWorkChannel(Channel):
                 sophia_user_id,
             )
 
+        # 3b. Verify the (potentially reused-from-store) thread is still
+        # live on the langgraph service. The channel store JSON outlives
+        # langgraph's in-memory thread DB across redeploys, so a cached
+        # thread_id may point at a phantom; runs.wait / runs.stream would
+        # then 404. ``_ensure_thread_is_live`` mirrors the recovery
+        # pattern in ``ChannelManager._is_stale_thread_error`` +
+        # ``_recover_stale_thread`` (lines 784–810). One extra HTTP RTT
+        # on every build — cheap insurance.
+        live_thread_id = await self._ensure_thread_is_live(
+            chat_id=chat_id,
+            thread_id=thread_id,
+            sophia_user_id=sophia_user_id,
+        )
+        if live_thread_id is None:
+            await self._safe_reply(
+                bot,
+                chat_id,
+                reply_to_message_id,
+                "Hit an issue spinning up the thread. Try again in a moment?",
+            )
+            return
+        thread_id = live_thread_id
+
         # 4. Placeholder message. Telegram doesn't support partial-message
         # streaming natively; Stage 1 edits this single message at the
         # end. Stage 2 (when BUILDER_LIVE_STREAM_ENABLED=true) patches it
@@ -620,6 +645,71 @@ class TelegramWorkChannel(Channel):
             chat_id,
             sophia_user_id,
         )
+
+    async def _ensure_thread_is_live(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        sophia_user_id: str,
+    ) -> str | None:
+        """Verify ``thread_id`` exists on the langgraph service; recreate if stale.
+
+        Returns the live thread_id (possibly fresh) or ``None`` if
+        recreation itself failed. Mirrors the ``ChannelManager`` pattern
+        at lines 784-810 but inline since the Work bot bypasses the
+        manager dispatch loop.
+
+        The Render langgraph deploy uses in-memory thread storage
+        (``langgraph dev`` in Dockerfile.langgraph, no Postgres mount in
+        render.yaml). On every langgraph redeploy the thread DB is
+        wiped, but the gateway's ``ChannelStore`` JSON (at
+        ``$HOME/.deer-flow/channels/store.json``) survives. A cached
+        ``telegram_work:<chat_id>`` -> thread_id mapping then points at
+        a phantom thread, and ``runs.wait`` / ``runs.stream`` 404.
+        """
+        try:
+            await self._lg_client.threads.get(thread_id)
+            return thread_id
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            body = (exc.response.text or "")[:200]
+            logger.warning(
+                "[TelegramWork] stale thread detected: chat_id=%s stale_thread_id=%s response=%r; recreating",
+                chat_id,
+                thread_id,
+                body,
+            )
+
+        # Evict the stale mapping then create a fresh thread.
+        await asyncio.to_thread(self._store.remove, _CHANNEL_NAME, chat_id, None)
+        try:
+            thread = await self._lg_client.threads.create()
+        except Exception:
+            logger.exception(
+                "[TelegramWork] threads.create after stale-thread eviction failed chat_id=%s old_thread_id=%s",
+                chat_id,
+                thread_id,
+            )
+            return None
+        fresh_id = thread["thread_id"]
+        await asyncio.to_thread(
+            self._store.set_thread_id,
+            _CHANNEL_NAME,
+            chat_id,
+            fresh_id,
+            topic_id=None,
+            user_id=sophia_user_id,
+        )
+        logger.info(
+            "[TelegramWork] thread recreated chat_id=%s old=%s new=%s user_id=%s",
+            chat_id,
+            thread_id,
+            fresh_id,
+            sophia_user_id,
+        )
+        return fresh_id
 
     async def relay_builder_event_edit(
         self,

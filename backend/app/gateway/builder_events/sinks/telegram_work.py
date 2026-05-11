@@ -216,7 +216,14 @@ class TelegramWorkBotChatRelaySink:
         payload = event.payload
 
         if et == "started":
-            return "🔨 Working on your request…"
+            # Suppressed: TelegramWorkChannel posts the placeholder with
+            # exactly this text BEFORE spawning the consumer, so an edit
+            # here produces Telegram's `400 Message is not modified` and
+            # the `_safe_edit` fallback posts a duplicate message.
+            # ``started`` still flows through the fanout — it's what
+            # resets the per-thread terminal flag for the new run — we
+            # just don't redundantly re-render the placeholder.
+            return ""
 
         if et == "phase":
             name = payload.get("phase_name") or "Working"

@@ -26,9 +26,7 @@ def bus() -> MessageBus:
 
 
 class TestTelegramWorkChannelConstruction:
-    def test_disabled_by_default_skips_start(
-        self, bus: MessageBus, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_disabled_by_default_skips_start(self, bus: MessageBus, caplog: pytest.LogCaptureFixture) -> None:
         config = {"bot_token": "tok"}
         ch = TelegramWorkChannel(bus, config)
         assert ch.name == "telegram_work"
@@ -69,9 +67,7 @@ class TestTelegramWorkChannelConstruction:
 
 class TestSendIsBusNoop:
     @pytest.mark.anyio
-    async def test_send_logs_warning_when_routed_through_bus(
-        self, bus: MessageBus, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    async def test_send_logs_warning_when_routed_through_bus(self, bus: MessageBus, caplog: pytest.LogCaptureFixture) -> None:
         # Stage 1 directly edits placeholder; bus subscriptions aren't wired.
         # If anyone routes a bus outbound to this channel by mistake, we log
         # a warning so the misroute is visible.
@@ -211,9 +207,7 @@ class TestIdentityBindingLookup:
     by Telegram user_id can bridge the two.
     """
 
-    def test_step1_forward_lookup_hits_when_work_dm_already_bound(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_step1_forward_lookup_hits_when_work_dm_already_bound(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
         """Fast path: Work-DM was previously auto-bound — forward lookup hits."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
 
@@ -253,9 +247,7 @@ class TestIdentityBindingLookup:
         assert reverse_calls == []
         assert bind_calls == []
 
-    def test_step2_reverse_lookup_hits_for_ei_bound_user_first_work_dm(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_step2_reverse_lookup_hits_for_ei_bound_user_first_work_dm(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
         """EI-bound user DMs Work bot first time → reverse lookup hits, auto-bind fires."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
 
@@ -270,13 +262,15 @@ class TestIdentityBindingLookup:
         )
 
         def fake_bind(channel, chat_id, user_id, *, telegram_user_id, telegram_username):
-            bind_calls.append({
-                "channel": channel,
-                "chat_id": chat_id,
-                "user_id": user_id,
-                "telegram_user_id": telegram_user_id,
-                "telegram_username": telegram_username,
-            })
+            bind_calls.append(
+                {
+                    "channel": channel,
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "telegram_user_id": telegram_user_id,
+                    "telegram_username": telegram_username,
+                }
+            )
 
         monkeypatch.setattr("app.gateway.telegram_link_store.bind_chat", fake_bind)
 
@@ -298,9 +292,7 @@ class TestIdentityBindingLookup:
         assert bind_call["telegram_user_id"] == "42"
         assert bind_call["telegram_username"] == "davide"
 
-    def test_step2_reverse_lookup_misses_for_brand_new_user(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_step2_reverse_lookup_misses_for_brand_new_user(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
         """User never bound through ANY Telegram bot → returns None (caller sends unbound prompt)."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
 
@@ -326,9 +318,7 @@ class TestIdentityBindingLookup:
         # user_id to bind to).
         assert bind_calls == []
 
-    def test_step3_auto_bind_failure_does_not_block_request(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
+    def test_step3_auto_bind_failure_does_not_block_request(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
         """Auto-bind error (e.g., Supabase outage) is swallowed — caller still gets the resolved user_id."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
 
@@ -356,9 +346,7 @@ class TestIdentityBindingLookup:
         warning_messages = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
         assert any("auto-bind failed" in m for m in warning_messages), warning_messages
 
-    def test_username_passthrough_when_present(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_username_passthrough_when_present(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
         """telegram_username threads through to bind_chat verbatim when set."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
         captured: dict = {}
@@ -381,9 +369,7 @@ class TestIdentityBindingLookup:
         )
         assert captured["telegram_username"] == "davide"
 
-    def test_username_can_be_none(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_username_can_be_none(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
         """Telegram users without a username — telegram_username=None is valid."""
         ch = TelegramWorkChannel(bus, {"bot_token": "tok"})
         captured: dict = {}
@@ -425,9 +411,7 @@ class TestDispatchPayloadShape:
     """
 
     @pytest.mark.anyio
-    async def test_runs_wait_does_not_set_configurable_on_config(
-        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_runs_wait_does_not_set_configurable_on_config(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
         ch = TelegramWorkChannel(
             bus,
             {
@@ -451,10 +435,14 @@ class TestDispatchPayloadShape:
         ch._store = store
 
         # Stub the LangGraph SDK client. runs.wait captures kwargs we want
-        # to assert; threads.create is unused on this branch (existing
-        # thread).
+        # to assert; threads.get returns successfully (thread is live so
+        # _ensure_thread_is_live short-circuits); threads.create is unused
+        # on this branch (existing thread).
         runs = SimpleNamespace(wait=AsyncMock(return_value={"messages": []}))
-        threads = SimpleNamespace(create=AsyncMock())
+        threads = SimpleNamespace(
+            create=AsyncMock(),
+            get=AsyncMock(return_value={"thread_id": "thread-existing"}),
+        )
         ch._lg_client = SimpleNamespace(runs=runs, threads=threads)
 
         # Stub the bot just enough for placeholder + edit + reply.
@@ -477,14 +465,10 @@ class TestDispatchPayloadShape:
         call = runs.wait.await_args
 
         # Positional args: (thread_id, assistant_id)
-        assert call.args == ("thread-existing", "sophia_builder"), (
-            f"Expected positional ('thread-existing', 'sophia_builder'), got {call.args}"
-        )
+        assert call.args == ("thread-existing", "sophia_builder"), f"Expected positional ('thread-existing', 'sophia_builder'), got {call.args}"
 
         kwargs = call.kwargs
-        assert "config" in kwargs and "context" in kwargs, (
-            f"Expected both config + context kwargs; got {sorted(kwargs)}"
-        )
+        assert "config" in kwargs and "context" in kwargs, f"Expected both config + context kwargs; got {sorted(kwargs)}"
 
         # *** The bug *** — must NOT have configurable in config:
         assert "configurable" not in kwargs["config"], (
@@ -509,3 +493,139 @@ class TestDispatchPayloadShape:
                 }
             ]
         }
+
+
+class TestEnsureThreadIsLive:
+    """Stale-thread recovery: ChannelStore JSON outlives langgraph's
+    in-memory thread DB across redeploys, so a cached thread_id may
+    point at a phantom. ``_ensure_thread_is_live`` is the pre-flight
+    check that verifies the thread exists and recreates it if not.
+
+    Regression for a production failure on 2026-05-11 where a UUID7
+    thread_id from 2025-11 was reused months later, runs.stream 404'd,
+    and the Work bot placeholder was edited to "Hit a snag" with no
+    artifact delivery. See
+    ``~/.claude/plans/users-davidelaverga-desktop-sophia-v3-s-tingly-sonnet.md``.
+    """
+
+    def _channel(self, bus: MessageBus) -> TelegramWorkChannel:
+        return TelegramWorkChannel(
+            bus,
+            {"enabled": True, "bot_token": "tok", "bot_username": "Sophia_Work_bot"},
+        )
+
+    @pytest.mark.anyio
+    async def test_returns_existing_when_threads_get_succeeds(self, bus: MessageBus) -> None:
+        ch = self._channel(bus)
+        store = MagicMock()
+        ch._store = store
+        threads = SimpleNamespace(
+            get=AsyncMock(return_value={"thread_id": "thread-live"}),
+            create=AsyncMock(),
+        )
+        ch._lg_client = SimpleNamespace(threads=threads)
+
+        live_id = await ch._ensure_thread_is_live(
+            chat_id="12345",
+            thread_id="thread-live",
+            sophia_user_id="user-davide",
+        )
+
+        assert live_id == "thread-live"
+        threads.get.assert_awaited_once_with("thread-live")
+        threads.create.assert_not_called()
+        store.remove.assert_not_called()
+        store.set_thread_id.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_recreates_on_404(self, bus: MessageBus) -> None:
+        import httpx
+
+        ch = self._channel(bus)
+        store = MagicMock()
+        ch._store = store
+
+        request = httpx.Request("GET", "https://example/threads/stale")
+        response = httpx.Response(404, request=request, text="Thread or assistant not found")
+        not_found = httpx.HTTPStatusError("404 not found", request=request, response=response)
+        threads = SimpleNamespace(
+            get=AsyncMock(side_effect=not_found),
+            create=AsyncMock(return_value={"thread_id": "thread-fresh"}),
+        )
+        ch._lg_client = SimpleNamespace(threads=threads)
+
+        live_id = await ch._ensure_thread_is_live(
+            chat_id="12345",
+            thread_id="thread-stale",
+            sophia_user_id="user-davide",
+        )
+
+        assert live_id == "thread-fresh"
+        threads.get.assert_awaited_once_with("thread-stale")
+        store.remove.assert_called_once_with("telegram_work", "12345", None)
+        threads.create.assert_awaited_once()
+        store.set_thread_id.assert_called_once()
+        call_kwargs = store.set_thread_id.call_args
+        # Positional: (channel, chat_id, thread_id); kw: topic_id, user_id
+        assert call_kwargs.args == ("telegram_work", "12345", "thread-fresh")
+        assert call_kwargs.kwargs["topic_id"] is None
+        assert call_kwargs.kwargs["user_id"] == "user-davide"
+
+    @pytest.mark.anyio
+    async def test_returns_none_when_create_fails_after_eviction(self, bus: MessageBus) -> None:
+        import httpx
+
+        ch = self._channel(bus)
+        store = MagicMock()
+        ch._store = store
+
+        request = httpx.Request("GET", "https://example/threads/stale")
+        response = httpx.Response(404, request=request, text="Thread or assistant not found")
+        not_found = httpx.HTTPStatusError("404 not found", request=request, response=response)
+        threads = SimpleNamespace(
+            get=AsyncMock(side_effect=not_found),
+            create=AsyncMock(side_effect=RuntimeError("langgraph down")),
+        )
+        ch._lg_client = SimpleNamespace(threads=threads)
+
+        live_id = await ch._ensure_thread_is_live(
+            chat_id="12345",
+            thread_id="thread-stale",
+            sophia_user_id="user-davide",
+        )
+
+        # Caller should surface "Try again" reply.
+        assert live_id is None
+        # We DID evict before attempting to recreate.
+        store.remove.assert_called_once_with("telegram_work", "12345", None)
+        # No set_thread_id call since create failed.
+        store.set_thread_id.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_non_404_error_propagates(self, bus: MessageBus) -> None:
+        import httpx
+
+        ch = self._channel(bus)
+        store = MagicMock()
+        ch._store = store
+
+        request = httpx.Request("GET", "https://example/threads/x")
+        response = httpx.Response(503, request=request, text="Service Unavailable")
+        unavailable = httpx.HTTPStatusError("503 unavailable", request=request, response=response)
+        threads = SimpleNamespace(
+            get=AsyncMock(side_effect=unavailable),
+            create=AsyncMock(),
+        )
+        ch._lg_client = SimpleNamespace(threads=threads)
+
+        # 5xx must NOT be treated as stale-thread; eviction would lose
+        # the user's thread for a transient langgraph outage.
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            await ch._ensure_thread_is_live(
+                chat_id="12345",
+                thread_id="thread-live",
+                sophia_user_id="user-davide",
+            )
+        assert exc_info.value.response.status_code == 503
+        store.remove.assert_not_called()
+        threads.create.assert_not_called()
