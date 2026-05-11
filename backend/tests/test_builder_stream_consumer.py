@@ -345,3 +345,152 @@ async def test_stream_exception_yields_to_webhook_if_it_arrives() -> None:
     assert len(terminal) == 1
     assert terminal[0].source == "webhook"
     assert terminal[0].payload["companion_summary"] == "saved by webhook"
+
+
+# ---- run_input vs run_id mode selection -----------------------------------
+
+
+class _StubJoinStream:
+    """Mimic ``lg_client.runs.join_stream(thread_id, run_id, stream_mode=...)``."""
+
+    def __init__(self, parts: list[Any]) -> None:
+        self._parts = parts
+        self.calls: list[tuple[tuple, dict]] = []
+
+    def __call__(self, *args, **kwargs) -> AsyncIterator[Any]:
+        self.calls.append((args, kwargs))
+
+        async def gen():
+            for part in self._parts:
+                yield part
+
+        return gen()
+
+
+@pytest.mark.anyio
+async def test_join_stream_branch_when_run_input_is_none() -> None:
+    """Stage 2B contract: when ``run_id`` is provided (and ``run_input``
+    is None), attach to an existing run via ``runs.join_stream`` rather
+    than starting a new one via ``runs.stream(input=...)``."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    join = _StubJoinStream(
+        [
+            (
+                "values",
+                {
+                    "messages": [
+                        {
+                            "type": "ai",
+                            "tool_calls": [{"id": "c1", "name": "bash", "args": {}}],
+                        }
+                    ]
+                },
+            ),
+            ("end", None),
+        ]
+    )
+    create = _StubStream([])  # must NOT be called
+
+    client = type(
+        "C",
+        (),
+        {
+            "runs": type("R", (), {"stream": create, "join_stream": join})(),
+        },
+    )()
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-join",
+        parent_thread_id="parent-1",
+        user_id="u1",
+        trace_id="trace-1",
+        run_input=None,
+        run_id="run-xyz",
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+
+    # join_stream was called with the right args/kwargs.
+    assert len(join.calls) == 1
+    args, kwargs = join.calls[0]
+    assert args == ("tid-join", "run-xyz")
+    assert kwargs["stream_mode"] == ["values", "messages", "custom"]
+
+    # The stream's events flowed through fanout.
+    types = [e.event_type for e in sink.calls]
+    assert types[0] == "started"
+    assert "tool_started" in types
+
+
+@pytest.mark.anyio
+async def test_misconfiguration_both_run_input_and_run_id_publishes_failed() -> None:
+    """Caller bug: both set OR both None. Publish synthetic failed so
+    chat surfaces don't dangle, then bail."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    join = _StubJoinStream([("end", None)])
+    create = _StubStream([("end", None)])
+    client = type("C", (), {"runs": type("R", (), {"stream": create, "join_stream": join})()})()
+
+    # Both set.
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-bad",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        run_id="run-xyz",
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+
+    assert len(join.calls) == 0  # neither path invoked
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "failed"
+    assert terminal[0].payload["error_type"] == "ConfigurationError"
+
+
+@pytest.mark.anyio
+async def test_misconfiguration_neither_run_input_nor_run_id_publishes_failed() -> None:
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    client = type(
+        "C",
+        (),
+        {
+            "runs": type(
+                "R",
+                (),
+                {"stream": _StubStream([]), "join_stream": _StubJoinStream([])},
+            )(),
+        },
+    )()
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-bad",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input=None,
+        run_id=None,
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "failed"

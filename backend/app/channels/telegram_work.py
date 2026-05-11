@@ -655,10 +655,23 @@ class TelegramWorkChannel(Channel):
     ) -> str | None:
         """Verify ``thread_id`` exists on the langgraph service; recreate if stale.
 
-        Returns the live thread_id (possibly fresh) or ``None`` if
-        recreation itself failed. Mirrors the ``ChannelManager`` pattern
-        at lines 784-810 but inline since the Work bot bypasses the
-        manager dispatch loop.
+        Returns the live thread_id (possibly fresh), or ``None`` to
+        signal the caller to abort dispatch with a "try again" reply.
+
+        Three outcomes:
+
+        - **Thread is live** → return the original ``thread_id``.
+        - **404 from langgraph** → genuinely stale. Evict the channel
+          store mapping, create a fresh thread, return the new id (or
+          ``None`` if creation itself fails).
+        - **Any other error** (non-404 HTTP status, network failure,
+          timeout) → langgraph is unreachable / transiently broken. Do
+          NOT evict — the thread may still exist on the server. Return
+          ``None`` so the caller surfaces "try again in a moment" to
+          the user instead of silently dropping the request.
+
+        Mirrors the ``ChannelManager`` pattern at lines 784-810 but
+        inline since the Work bot bypasses the manager dispatch loop.
 
         The Render langgraph deploy uses in-memory thread storage
         (``langgraph dev`` in Dockerfile.langgraph, no Postgres mount in
@@ -673,7 +686,16 @@ class TelegramWorkChannel(Channel):
             return thread_id
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code != 404:
-                raise
+                # Transient or auth error. The thread may still exist;
+                # do NOT evict. Surface "try again" to the user via the
+                # None return.
+                logger.warning(
+                    "[TelegramWork] thread probe failed HTTP %d for chat_id=%s thread_id=%s; not evicting (transient)",
+                    exc.response.status_code,
+                    chat_id,
+                    thread_id,
+                )
+                return None
             body = (exc.response.text or "")[:200]
             logger.warning(
                 "[TelegramWork] stale thread detected: chat_id=%s stale_thread_id=%s response=%r; recreating",
@@ -681,6 +703,16 @@ class TelegramWorkChannel(Channel):
                 thread_id,
                 body,
             )
+        except Exception:
+            # Network failure, timeout, langgraph unreachable.
+            # Same policy: don't evict, signal retry.
+            logger.warning(
+                "[TelegramWork] thread probe failed (non-HTTP) for chat_id=%s thread_id=%s; not evicting",
+                chat_id,
+                thread_id,
+                exc_info=True,
+            )
+            return None
 
         # Evict the stale mapping then create a fresh thread.
         await asyncio.to_thread(self._store.remove, _CHANNEL_NAME, chat_id, None)

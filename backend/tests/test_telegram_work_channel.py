@@ -602,7 +602,11 @@ class TestEnsureThreadIsLive:
         store.set_thread_id.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_non_404_error_propagates(self, bus: MessageBus) -> None:
+    async def test_non_404_http_error_returns_none_without_eviction(self, bus: MessageBus) -> None:
+        """Transient HTTP error (5xx) on the thread probe must NOT
+        evict the cached thread (it may still exist) and must NOT
+        propagate (the caller would silently drop the user's message).
+        Returning None lets the caller surface 'try again' to the user."""
         import httpx
 
         ch = self._channel(bus)
@@ -618,14 +622,38 @@ class TestEnsureThreadIsLive:
         )
         ch._lg_client = SimpleNamespace(threads=threads)
 
-        # 5xx must NOT be treated as stale-thread; eviction would lose
-        # the user's thread for a transient langgraph outage.
-        with pytest.raises(httpx.HTTPStatusError) as exc_info:
-            await ch._ensure_thread_is_live(
-                chat_id="12345",
-                thread_id="thread-live",
-                sophia_user_id="user-davide",
-            )
-        assert exc_info.value.response.status_code == 503
+        live_id = await ch._ensure_thread_is_live(
+            chat_id="12345",
+            thread_id="thread-live",
+            sophia_user_id="user-davide",
+        )
+
+        assert live_id is None  # caller will reply "try again"
+        store.remove.assert_not_called()  # thread NOT evicted
+        threads.create.assert_not_called()  # no recreation on transient
+
+    @pytest.mark.anyio
+    async def test_network_error_returns_none_without_eviction(self, bus: MessageBus) -> None:
+        """Non-HTTP failure (e.g. ConnectError / timeout) on the probe
+        must also be treated as transient: don't evict, return None."""
+        import httpx
+
+        ch = self._channel(bus)
+        store = MagicMock()
+        ch._store = store
+
+        threads = SimpleNamespace(
+            get=AsyncMock(side_effect=httpx.ConnectError("connection refused")),
+            create=AsyncMock(),
+        )
+        ch._lg_client = SimpleNamespace(threads=threads)
+
+        live_id = await ch._ensure_thread_is_live(
+            chat_id="12345",
+            thread_id="thread-live",
+            sophia_user_id="user-davide",
+        )
+
+        assert live_id is None
         store.remove.assert_not_called()
         threads.create.assert_not_called()

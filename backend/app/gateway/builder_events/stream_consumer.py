@@ -62,6 +62,7 @@ async def consume_builder_stream(
     trace_id: str,
     assistant_id: str = "sophia_builder",
     run_input: dict[str, Any] | None = None,
+    run_id: str | None = None,
     run_config: dict[str, Any] | None = None,
     run_context: dict[str, Any] | None = None,
     fanout=None,
@@ -70,23 +71,54 @@ async def consume_builder_stream(
 ) -> None:
     """Subscribe to a Builder run's stream and publish events to fanout.
 
-    If ``run_input`` is provided, the consumer creates AND streams the
-    run in one call (``runs.stream(...)`` with input). Use this from the
-    Work bot path where the consumer owns the run lifecycle.
+    Two modes selected by which argument is provided:
 
-    If ``run_input`` is ``None``, the consumer joins an already-running
-    stream (``runs.stream(thread_id)``) — used from the Stage 2B
-    companion-dispatch path where ``start_builder_task`` already created
-    the run.
+    - **Create-and-stream** (``run_input`` provided, ``run_id`` ignored).
+      Calls ``client.runs.stream(thread_id, assistant_id, input=...)``
+      which creates AND streams the run in one call. Use this from the
+      Work bot path where the consumer owns the run lifecycle.
+    - **Join-existing-stream** (``run_id`` provided, ``run_input`` is
+      ``None``). Calls ``client.runs.join_stream(thread_id, run_id)``
+      to attach to an already-created run's output. Used from the
+      Stage 2B companion-dispatch path where ``start_builder_task``
+      already called ``runs.create``.
+
+    Exactly one of ``run_input`` and ``run_id`` must be set; otherwise
+    a synthetic ``failed`` is published immediately and the function
+    returns.
     """
     fanout = fanout or get_fanout()
     state = StreamAdapterState()
 
+    if (run_input is None) == (run_id is None):
+        # Both set or both None — caller bug. Publish a synthetic
+        # failed so chat surfaces don't dangle, then bail.
+        logger.error(
+            "stream_consumer.misconfigured builder_thread_id=%s run_input_set=%s run_id_set=%s; exactly one of run_input or run_id must be provided",
+            builder_thread_id,
+            run_input is not None,
+            run_id is not None,
+        )
+        await _publish_synthetic_terminal(
+            fanout,
+            builder_thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            event_type="failed",
+            payload={
+                "error_message": "Stream consumer misconfigured (need exactly one of run_input or run_id)",
+                "error_type": "ConfigurationError",
+            },
+        )
+        return
+
     logger.info(
-        "stream_consumer.started builder_thread_id=%s parent_thread_id=%s user_id=%s",
+        "stream_consumer.started builder_thread_id=%s parent_thread_id=%s user_id=%s mode=%s",
         builder_thread_id,
         parent_thread_id,
         user_id,
+        "create" if run_input is not None else "join",
     )
 
     # Publish ``started`` BEFORE the stream attempt. Two reasons:
@@ -121,6 +153,7 @@ async def consume_builder_stream(
                 trace_id=trace_id,
                 assistant_id=assistant_id,
                 run_input=run_input,
+                run_id=run_id,
                 run_config=run_config,
                 run_context=run_context,
                 fanout=fanout,
@@ -221,28 +254,47 @@ async def _run_stream_loop(
     trace_id: str,
     assistant_id: str,
     run_input: dict[str, Any] | None,
+    run_id: str | None,
     run_config: dict[str, Any] | None,
     run_context: dict[str, Any] | None,
     fanout,
     state: StreamAdapterState,
 ) -> None:
-    """Iterate ``runs.stream`` and publish per-chunk events.
+    """Iterate the stream and publish per-chunk events.
 
-    ``started`` is published by the caller before this function is
-    entered so that stream errors that prevent any chunk from arriving
-    still reset the fanout's per-thread state.
+    Branches on which arg was supplied:
+
+    - ``run_input`` provided → ``runs.stream(thread_id, assistant_id,
+      input=...)`` creates AND streams in one call (Work bot path).
+    - ``run_id`` provided → ``runs.join_stream(thread_id, run_id, ...)``
+      attaches to an already-created run's output (Stage 2B companion
+      dispatch path).
+
+    Caller (``consume_builder_stream``) has already validated that
+    exactly one is set and has published the ``started`` event so the
+    fanout's per-thread state is reset before any SDK call runs.
     """
-    stream_kwargs: dict[str, Any] = {
-        "stream_mode": ["values", "messages", "custom"],
-    }
-    if run_input is not None:
-        stream_kwargs["input"] = run_input
-    if run_config is not None:
-        stream_kwargs["config"] = run_config
-    if run_context is not None:
-        stream_kwargs["context"] = run_context
+    stream_modes = ["values", "messages", "custom"]
 
-    async for part in lg_client.runs.stream(builder_thread_id, assistant_id, **stream_kwargs):
+    if run_input is not None:
+        stream_kwargs: dict[str, Any] = {"stream_mode": stream_modes}
+        stream_kwargs["input"] = run_input
+        if run_config is not None:
+            stream_kwargs["config"] = run_config
+        if run_context is not None:
+            stream_kwargs["context"] = run_context
+        stream = lg_client.runs.stream(builder_thread_id, assistant_id, **stream_kwargs)
+    else:
+        # run_id is not None (validated by consume_builder_stream).
+        # join_stream takes no assistant_id, input, config, or context —
+        # the run already exists and carries its own state.
+        stream = lg_client.runs.join_stream(
+            builder_thread_id,
+            run_id,
+            stream_mode=stream_modes,
+        )
+
+    async for part in stream:
         for event in stream_part_to_events(
             part,
             thread_id=builder_thread_id,
