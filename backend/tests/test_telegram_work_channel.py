@@ -10,6 +10,7 @@ require network + valid token).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -631,6 +632,35 @@ class TestEnsureThreadIsLive:
         assert live_id is None  # caller will reply "try again"
         store.remove.assert_not_called()  # thread NOT evicted
         threads.create.assert_not_called()  # no recreation on transient
+
+    @pytest.mark.anyio
+    async def test_helper_passes_through_when_main_loop_unset(self, bus: MessageBus) -> None:
+        """_run_lg_call_on_main_loop must await the coro directly when
+        self._main_loop is None (test fixtures, single-loop unit tests).
+        Otherwise the existing TestEnsureThreadIsLive cases would have
+        hung waiting on a never-running loop."""
+        ch = self._channel(bus)
+        assert ch._main_loop is None
+
+        async def _coro():
+            return "value"
+
+        result = await ch._run_lg_call_on_main_loop(_coro())
+        assert result == "value"
+
+    @pytest.mark.anyio
+    async def test_helper_passes_through_when_already_on_main_loop(self, bus: MessageBus) -> None:
+        """When the caller is already on _main_loop, no hop is needed —
+        the coro is awaited directly. This is the production path for
+        Stage 2A's stream consumer (which is scheduled on _main_loop)."""
+        ch = self._channel(bus)
+        ch._main_loop = asyncio.get_running_loop()
+
+        async def _coro():
+            return "value"
+
+        result = await ch._run_lg_call_on_main_loop(_coro())
+        assert result == "value"
 
     @pytest.mark.anyio
     async def test_network_error_returns_none_without_eviction(self, bus: MessageBus) -> None:

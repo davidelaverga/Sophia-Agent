@@ -372,7 +372,7 @@ class TelegramWorkChannel(Channel):
             )
         else:
             try:
-                thread = await self._lg_client.threads.create()
+                thread = await self._run_lg_call_on_main_loop(self._lg_client.threads.create())
             except Exception:
                 logger.exception(
                     "[TelegramWork] threads.create failed chat_id=%s user_id=%s",
@@ -410,10 +410,17 @@ class TelegramWorkChannel(Channel):
         # pattern in ``ChannelManager._is_stale_thread_error`` +
         # ``_recover_stale_thread`` (lines 784–810). One extra HTTP RTT
         # on every build — cheap insurance.
-        live_thread_id = await self._ensure_thread_is_live(
-            chat_id=chat_id,
-            thread_id=thread_id,
-            sophia_user_id=sophia_user_id,
+        #
+        # The whole call is hopped to ``self._main_loop`` so the inner
+        # ``lg_client.threads.{get,create}`` awaits land on the same
+        # loop the Stage 2A stream consumer uses — keeps httpx
+        # connection-pool affinity stable.
+        live_thread_id = await self._run_lg_call_on_main_loop(
+            self._ensure_thread_is_live(
+                chat_id=chat_id,
+                thread_id=thread_id,
+                sophia_user_id=sophia_user_id,
+            )
         )
         if live_thread_id is None:
             await self._safe_reply(
@@ -488,12 +495,14 @@ class TelegramWorkChannel(Channel):
 
         try:
             result = await asyncio.wait_for(
-                self._lg_client.runs.wait(
-                    thread_id,
-                    _DEFAULT_BUILDER_ASSISTANT_ID,
-                    input=run_input,
-                    config=run_config,
-                    context=run_context,
+                self._run_lg_call_on_main_loop(
+                    self._lg_client.runs.wait(
+                        thread_id,
+                        _DEFAULT_BUILDER_ASSISTANT_ID,
+                        input=run_input,
+                        config=run_config,
+                        context=run_context,
+                    )
                 ),
                 timeout=self._run_timeout_seconds,
             )
@@ -1185,6 +1194,46 @@ class TelegramWorkChannel(Channel):
             return await coro
 
         future = asyncio.run_coroutine_threadsafe(coro, tg_loop)
+        try:
+            return await asyncio.wrap_future(future)
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+        except Exception:
+            if isinstance(future, concurrent.futures.Future):
+                future.cancel()
+            raise
+
+    async def _run_lg_call_on_main_loop(self, coro):
+        """Run a langgraph_sdk coroutine on ``self._main_loop`` when called cross-loop.
+
+        ``self._lg_client`` is a single ``httpx.AsyncClient`` whose
+        connection pool binds to whichever asyncio loop first awaits it.
+        The Work bot has two loops:
+
+        - ``_tg_loop`` — PTB polling thread, where ``_dispatch_build``
+          runs synchronously in response to a Telegram update.
+        - ``self._main_loop`` — gateway loop, where Stage 2A's stream
+          consumer runs (spawned via ``asyncio.run_coroutine_threadsafe``).
+
+        If the first ``lg_client`` call happens on ``_tg_loop`` (e.g.
+        ``threads.get``, ``threads.create``) and a later call happens
+        on ``main_loop`` (the stream consumer), httpx raises
+        ``RuntimeError: <asyncio.locks.Event ...> is bound to a different
+        event loop``. This helper hops every ``lg_client`` call to
+        ``main_loop`` so the connection pool stays affine to one loop.
+        """
+        main_loop = self._main_loop
+        if main_loop is None or not main_loop.is_running():
+            return await coro
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+        if current_loop is main_loop:
+            return await coro
+
+        future = asyncio.run_coroutine_threadsafe(coro, main_loop)
         try:
             return await asyncio.wrap_future(future)
         except asyncio.CancelledError:
