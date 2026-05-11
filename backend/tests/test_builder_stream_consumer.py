@@ -187,3 +187,94 @@ async def test_timeout_publishes_timed_out() -> None:
     terminal = [e for e in sink.calls if e.is_terminal]
     assert len(terminal) == 1
     assert terminal[0].event_type == "timed_out"
+
+
+@pytest.mark.anyio
+async def test_stream_exception_publishes_synthetic_failed() -> None:
+    """If runs.stream raises before the webhook fires, the consumer
+    must publish a synthetic ``failed`` so the placeholder isn't stuck."""
+
+    class _ErrorStream:
+        def __call__(self, *_a, **_k):
+            async def gen():
+                raise RuntimeError("network blip")
+                yield  # unreachable; makes this an async generator
+
+            return gen()
+
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    client = type("C", (), {"runs": type("R", (), {"stream": _ErrorStream()})()})()
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-err",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.05,
+        consumer_timeout_seconds=5,
+    )
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "failed"
+    assert terminal[0].payload.get("stream_exception") is True
+    assert "RuntimeError" in (terminal[0].payload.get("error_message") or "")
+
+
+@pytest.mark.anyio
+async def test_stream_exception_yields_to_webhook_if_it_arrives() -> None:
+    """If the webhook lands during the grace after a stream error, the
+    rich webhook event wins and the synthetic ``failed`` is dropped."""
+
+    class _ErrorStream:
+        def __call__(self, *_a, **_k):
+            async def gen():
+                raise RuntimeError("blip")
+                yield
+
+            return gen()
+
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    client = type("C", (), {"runs": type("R", (), {"stream": _ErrorStream()})()})()
+
+    async def fire_webhook_after(delay):
+        await asyncio.sleep(delay)
+        await fanout.publish(
+            BuilderEvent(
+                thread_id="tid-err2",
+                parent_thread_id=None,
+                user_id="u1",
+                trace_id="trace-1",
+                event_type="completed",
+                payload={"companion_summary": "saved by webhook"},
+                source="webhook",
+            )
+        )
+
+    webhook_task = asyncio.create_task(fire_webhook_after(0.02))
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-err2",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.5,
+        consumer_timeout_seconds=5,
+    )
+    await webhook_task
+
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].source == "webhook"
+    assert terminal[0].payload["companion_summary"] == "saved by webhook"

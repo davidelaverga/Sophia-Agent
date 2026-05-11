@@ -127,15 +127,40 @@ async def consume_builder_stream(
             payload={"timeout_seconds": consumer_timeout_seconds},
         )
         return
-    except Exception:
+    except Exception as exc:
+        # Don't leave the chat surface stuck. If the webhook arrives
+        # during the grace, its rich payload wins via fanout dedup; if
+        # not, fall back to a synthetic ``failed`` so the placeholder /
+        # SSE clients see a definitive terminal.
         logger.warning(
-            "stream_consumer.error builder_thread_id=%s",
+            "stream_consumer.error builder_thread_id=%s; awaiting webhook grace before synthesising failed",
             builder_thread_id,
             exc_info=True,
         )
-        # Don't publish synthetic failed here — the webhook usually
-        # arrives. If it doesn't, the grace-wait below would have run.
-        # We exit so the task doesn't leak.
+        arrived = await fanout.await_terminal_dispatch(builder_thread_id, timeout=webhook_grace_seconds)
+        if arrived:
+            logger.info(
+                "stream_consumer.terminated builder_thread_id=%s outcome=webhook_won_after_error",
+                builder_thread_id,
+            )
+            return
+        await _publish_synthetic_terminal(
+            fanout,
+            builder_thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            event_type="failed",
+            payload={
+                "error_message": f"Stream consumer error: {type(exc).__name__}",
+                "error_type": type(exc).__name__,
+                "stream_exception": True,
+            },
+        )
+        logger.info(
+            "stream_consumer.terminated builder_thread_id=%s outcome=synthetic_failed",
+            builder_thread_id,
+        )
         return
 
     # Stream finished naturally. Give the webhook a head start so the

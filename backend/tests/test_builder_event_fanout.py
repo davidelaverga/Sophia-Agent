@@ -201,3 +201,82 @@ async def test_await_terminal_dispatch_times_out_when_no_terminal() -> None:
 
     result = await fanout.await_terminal_dispatch("never", timeout=0.05)
     assert result is False
+
+
+@pytest.mark.anyio
+async def test_started_event_resets_terminal_flag_for_consecutive_run() -> None:
+    """Same thread_id, two builds: TelegramWorkChannel reuses one
+    thread per chat. The second build's ``started`` must clear the
+    prior run's terminal flag so its events fire normally."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    # Build 1: terminal fires.
+    await fanout.publish(_evt(thread_id="chat-A", event_type="started"))
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed"))
+    # Build 2 on the same thread.
+    await fanout.publish(_evt(thread_id="chat-A", event_type="started"))
+    await fanout.publish(_evt(thread_id="chat-A", event_type="phase"))
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed"))
+
+    types = [e.event_type for e in sink.calls]
+    # Both builds' terminals are present.
+    assert types.count("completed") == 2
+    # Build 2's phase event fires (not dropped by stale terminal).
+    assert "phase" in types
+    # Sequence resets per run.
+    sequences = [(e.event_type, e.sequence) for e in sink.calls]
+    assert sequences[0] == ("started", 1)
+    assert sequences[2] == ("started", 1)  # second started resets seq
+
+
+@pytest.mark.anyio
+async def test_terminal_flag_ttl_expires_for_webhook_only_consecutive_builds(
+    monkeypatch,
+) -> None:
+    """Stage 1A: no streaming, only webhooks. Two webhook-only builds
+    on the same Work bot chat thread_id, separated by > TTL, must both
+    publish their terminals."""
+    import app.gateway.builder_events.fanout as fanout_mod
+
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    base = 1000.0
+    current = [base]
+
+    def fake_monotonic() -> float:
+        return current[0]
+
+    monkeypatch.setattr(fanout_mod.time, "monotonic", fake_monotonic)
+
+    # Build 1 terminal lands.
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
+    assert sink.calls[-1].event_type == "completed"
+
+    # Advance time past the TTL.
+    current[0] = base + fanout_mod._TERMINAL_FLAG_TTL_SECONDS + 1.0
+
+    # Build 2's webhook (no ``started`` ever fired). With TTL the flag
+    # has self-cleared and the second terminal publishes cleanly.
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
+    completed = [e for e in sink.calls if e.event_type == "completed"]
+    assert len(completed) == 2
+
+
+@pytest.mark.anyio
+async def test_late_terminal_within_ttl_still_dedupped() -> None:
+    """The stream/webhook race window (≈5s) is well inside the TTL —
+    duplicate terminals from the same run must still dedup."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="stream"))
+    await fanout.publish(_evt(thread_id="chat-A", event_type="completed", source="webhook"))
+
+    completed = [e for e in sink.calls if e.event_type == "completed"]
+    assert len(completed) == 1
+    assert completed[0].source == "stream"  # first-wins

@@ -126,26 +126,20 @@ class TelegramWorkChannel(Channel):
             return
 
         if not self._enabled:
-            logger.info(
-                "[TelegramWork] channel is disabled (channels.telegram_work.enabled=false); skipping start"
-            )
+            logger.info("[TelegramWork] channel is disabled (channels.telegram_work.enabled=false); skipping start")
             # We deliberately mark the channel as "not running" so the
             # service status reflects the disabled state. Returning before
             # setting self._running keeps stop() a no-op.
             return
 
         if not self._bot_token:
-            logger.error(
-                "[TelegramWork] bot_token is empty; set channels.telegram_work.bot_token (or $TELEGRAM_WORKER_BOT_TOKEN) and restart"
-            )
+            logger.error("[TelegramWork] bot_token is empty; set channels.telegram_work.bot_token (or $TELEGRAM_WORKER_BOT_TOKEN) and restart")
             return
 
         try:
             from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
         except ImportError:
-            logger.error(
-                "[TelegramWork] python-telegram-bot is not installed. Install it with: uv add python-telegram-bot"
-            )
+            logger.error("[TelegramWork] python-telegram-bot is not installed. Install it with: uv add python-telegram-bot")
             return
 
         # Look up the shared store + LangGraph SDK client from the service
@@ -156,9 +150,7 @@ class TelegramWorkChannel(Channel):
 
         service = get_channel_service()
         if service is None:
-            logger.error(
-                "[TelegramWork] ChannelService is not started yet; cannot resolve store/langgraph_url"
-            )
+            logger.error("[TelegramWork] ChannelService is not started yet; cannot resolve store/langgraph_url")
             return
 
         self._store = service.store
@@ -254,10 +246,7 @@ class TelegramWorkChannel(Channel):
         if not self._check_user(update.effective_user.id):
             return
         await update.message.reply_text(
-            f"Hi, I'm {self._bot_username} — Sophia's Builder. "
-            "Send me a build request (research, document, code, presentation, …) "
-            "and I'll handle it directly. For emotional / conversational chats, "
-            "DM @Sophia_EI_bot instead."
+            f"Hi, I'm {self._bot_username} — Sophia's Builder. Send me a build request (research, document, code, presentation, …) and I'll handle it directly. For emotional / conversational chats, DM @Sophia_EI_bot instead."
         )
 
     async def _cmd_help(self, update, context) -> None:
@@ -265,8 +254,8 @@ class TelegramWorkChannel(Channel):
             return
         await update.message.reply_text(
             "I'm the direct line to Sophia's Builder. Just send me a request "
-            "in plain English — \"research the best electric cars for European "
-            "families\", \"write a one-page brief on X\", etc. — and I'll "
+            'in plain English — "research the best electric cars for European '
+            'families", "write a one-page brief on X", etc. — and I\'ll '
             "produce a deliverable. No back-and-forth needed; be specific in "
             "the first message."
         )
@@ -293,10 +282,7 @@ class TelegramWorkChannel(Channel):
         # nudge so users aren't confused.
         if chat_type != "private":
             try:
-                await update.message.reply_text(
-                    f"@{self._bot_username} only handles 1:1 DMs in Stage 1. "
-                    "Open a private chat with me to launch a build."
-                )
+                await update.message.reply_text(f"@{self._bot_username} only handles 1:1 DMs in Stage 1. Open a private chat with me to launch a build.")
             except Exception:
                 logger.debug("[TelegramWork] group nudge failed", exc_info=True)
             return
@@ -346,11 +332,7 @@ class TelegramWorkChannel(Channel):
                 bot,
                 chat_id,
                 reply_to_message_id,
-                (
-                    "I can't find your Sophia account yet. Please DM "
-                    "@Sophia_EI_bot first and follow the /start link from "
-                    "the webapp to bind your Telegram — then come back here."
-                ),
+                ("I can't find your Sophia account yet. Please DM @Sophia_EI_bot first and follow the /start link from the webapp to bind your Telegram — then come back here."),
             )
             logger.info(
                 "[TelegramWork] unbound user — chat_id=%s telegram_user_id=%s",
@@ -366,11 +348,7 @@ class TelegramWorkChannel(Channel):
                 bot,
                 chat_id,
                 reply_to_message_id,
-                (
-                    f"@{self._bot_username} is in limited preview right now. "
-                    "DM @Sophia_EI_bot for now — the Work bot DM surface "
-                    "will roll out to everyone soon."
-                ),
+                (f"@{self._bot_username} is in limited preview right now. DM @Sophia_EI_bot for now — the Work bot DM surface will roll out to everyone soon."),
             )
             logger.info(
                 "[TelegramWork] pilot gate rejected user_id=%s (pilot=%s) chat_id=%s",
@@ -382,9 +360,7 @@ class TelegramWorkChannel(Channel):
 
         # 3. Look up or create the LangGraph thread. No topic_id in private
         # chats — Spec D5 / upstream issue #1101.
-        thread_id = await asyncio.to_thread(
-            self._store.get_thread_id, _CHANNEL_NAME, chat_id, None
-        )
+        thread_id = await asyncio.to_thread(self._store.get_thread_id, _CHANNEL_NAME, chat_id, None)
         if thread_id:
             logger.info(
                 "[TelegramWork] reusing thread chat_id=%s thread_id=%s user_id=%s",
@@ -507,11 +483,7 @@ class TelegramWorkChannel(Channel):
                 bot,
                 chat_id,
                 placeholder_message_id,
-                (
-                    "The build took longer than the per-task ceiling and was "
-                    "cut short. Send the request again to retry, or break it "
-                    "into smaller chunks."
-                ),
+                ("The build took longer than the per-task ceiling and was cut short. Send the request again to retry, or break it into smaller chunks."),
             )
             return
         except Exception as exc:
@@ -576,9 +548,7 @@ class TelegramWorkChannel(Channel):
                 sink = s  # type: ignore[assignment]
                 break
         if sink is None:
-            logger.warning(
-                "[TelegramWork] no telegram_work_chat sink registered; falling back to runs.wait"
-            )
+            logger.warning("[TelegramWork] no telegram_work_chat sink registered; falling back to runs.wait")
             try:
                 result = await asyncio.wait_for(
                     self._lg_client.runs.wait(
@@ -596,7 +566,9 @@ class TelegramWorkChannel(Channel):
                     thread_id,
                 )
                 await self._safe_edit(
-                    bot, chat_id, placeholder_message_id,
+                    bot,
+                    chat_id,
+                    placeholder_message_id,
                     "Hit a snag and couldn't finish. Try again?",
                 )
                 return
@@ -622,7 +594,9 @@ class TelegramWorkChannel(Channel):
                 thread_id,
             )
             await self._safe_edit(
-                bot, chat_id, placeholder_message_id,
+                bot,
+                chat_id,
+                placeholder_message_id,
                 "Couldn't start the build pipeline. Try again?",
             )
             return
@@ -663,8 +637,38 @@ class TelegramWorkChannel(Channel):
         if bot is None:
             logger.debug("[TelegramWork] relay_edit no bot available")
             return
+        await self._run_bot_call_on_telegram_loop(self._safe_edit(bot, chat_id, message_id, text))
+
+    async def relay_artifact_document(
+        self,
+        *,
+        chat_id: str,
+        thread_id: str,
+        filename: str,
+        caption: str | None,
+    ) -> None:
+        """Cross-loop artifact delivery for the streaming path.
+
+        Stage 1 (blocking ``runs.wait``) calls ``_send_artifact_document``
+        directly from ``_render_builder_result``. Stage 2A's streaming
+        path has no equivalent landing point — the sink lives on the
+        gateway loop and the placeholder is the only user-visible
+        surface it owns. This method gives the sink a way to also
+        deliver the artifact file once the terminal event lands, using
+        the same Supabase bytes-download path Stage 1 already trusts.
+        """
+        bot = getattr(self._application, "bot", None) if self._application else None
+        if bot is None:
+            logger.debug("[TelegramWork] relay_artifact_document no bot available")
+            return
         await self._run_bot_call_on_telegram_loop(
-            self._safe_edit(bot, chat_id, message_id, text)
+            self._send_artifact_document(
+                bot=bot,
+                chat_id=chat_id,
+                thread_id=thread_id,
+                filename=filename,
+                caption=caption,
+            )
         )
 
     async def _render_builder_result(
@@ -873,8 +877,7 @@ class TelegramWorkChannel(Channel):
             )
         except Exception:
             logger.warning(
-                "[TelegramWork] auto-bind failed chat=%s user_id=%s tg_user_id=%s "
-                "— request still proceeds, future Work DMs will re-resolve via reverse lookup",
+                "[TelegramWork] auto-bind failed chat=%s user_id=%s tg_user_id=%s — request still proceeds, future Work DMs will re-resolve via reverse lookup",
                 chat_id,
                 user_id,
                 telegram_user_id,
@@ -882,8 +885,7 @@ class TelegramWorkChannel(Channel):
             )
             return
         logger.info(
-            "[TelegramWork] auto-bound Work-DM chat=%s user_id=%s tg_user_id=%s "
-            "(EI binding via reverse lookup)",
+            "[TelegramWork] auto-bound Work-DM chat=%s user_id=%s tg_user_id=%s (EI binding via reverse lookup)",
             chat_id,
             user_id,
             telegram_user_id,
@@ -903,10 +905,7 @@ class TelegramWorkChannel(Channel):
         are also independently testable.
         """
         messages = TelegramWorkChannel._messages_from_result(result)
-        return (
-            TelegramWorkChannel._companion_summary_from_artifact_call(messages)
-            or TelegramWorkChannel._last_ai_text(messages)
-        )
+        return TelegramWorkChannel._companion_summary_from_artifact_call(messages) or TelegramWorkChannel._last_ai_text(messages)
 
     @staticmethod
     def _companion_summary_from_artifact_call(messages: list) -> str | None:

@@ -161,9 +161,29 @@ class TelegramWorkBotChatRelaySink:
                 exc_info=True,
             )
 
-        # Drop the placeholder mapping after terminal so a subsequent
-        # run on the same thread starts fresh.
+        # On terminal with an artifact, deliver the file too — Stage 1's
+        # _render_builder_result handled this; the streaming path skips
+        # _render_builder_result so the sink takes over.
         if event.is_terminal:
+            artifact_filename = event.payload.get("artifact_filename")
+            if artifact_filename:
+                try:
+                    await channel.relay_artifact_document(
+                        chat_id=chat_id,
+                        thread_id=event.thread_id,
+                        filename=str(artifact_filename),
+                        caption=event.payload.get("artifact_title"),
+                    )
+                except Exception:
+                    logger.warning(
+                        "telegram_work_chat.sink artifact_failed thread_id=%s filename=%s",
+                        event.thread_id,
+                        artifact_filename,
+                        exc_info=True,
+                    )
+
+            # Drop the placeholder mapping after terminal so a subsequent
+            # run on the same thread starts fresh.
             with self._placeholders_lock:
                 self._placeholders.pop(event.thread_id, None)
             self._last_text.pop(event.thread_id, None)

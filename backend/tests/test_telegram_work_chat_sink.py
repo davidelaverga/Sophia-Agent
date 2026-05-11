@@ -16,6 +16,7 @@ from app.gateway.builder_events.types import BuilderEvent
 class _FakeChannel:
     def __init__(self) -> None:
         self.relay_builder_event_edit = AsyncMock()
+        self.relay_artifact_document = AsyncMock()
 
 
 class _FakeService:
@@ -173,3 +174,78 @@ async def test_handle_renders_failed_with_error_message() -> None:
     channel.relay_builder_event_edit.assert_awaited_once()
     text = channel.relay_builder_event_edit.await_args.kwargs["text"]
     assert "boom" in text
+
+
+@pytest.mark.anyio
+async def test_handle_delivers_artifact_on_completed_with_filename() -> None:
+    """Stage 2A streaming path must deliver the artifact file too —
+    Stage 1's _render_builder_result is skipped in streaming mode."""
+    channel = _FakeChannel()
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
+        channel=channel,
+    )
+    sink.register_placeholder("tid-1", "12345", 99)
+
+    await sink.handle(
+        _evt(
+            event_type="completed",
+            payload={
+                "companion_summary": "Built the doc.",
+                "artifact_filename": "report.pptx",
+                "artifact_title": "Sophia Report",
+            },
+        )
+    )
+    channel.relay_builder_event_edit.assert_awaited_once()
+    channel.relay_artifact_document.assert_awaited_once()
+    kwargs = channel.relay_artifact_document.await_args.kwargs
+    assert kwargs["chat_id"] == "12345"
+    assert kwargs["thread_id"] == "tid-1"
+    assert kwargs["filename"] == "report.pptx"
+    assert kwargs["caption"] == "Sophia Report"
+
+
+@pytest.mark.anyio
+async def test_handle_skips_artifact_when_no_filename() -> None:
+    """Failures and artifact-less completions: no relay_artifact_document call."""
+    channel = _FakeChannel()
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
+        channel=channel,
+    )
+    sink.register_placeholder("tid-1", "12345", 99)
+
+    await sink.handle(_evt(event_type="failed", payload={"error_message": "boom"}))
+    channel.relay_artifact_document.assert_not_called()
+
+    sink.register_placeholder("tid-1", "12345", 99)  # re-register after clear
+    await sink.handle(_evt(event_type="completed", payload={"companion_summary": "Done."}))
+    channel.relay_artifact_document.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_handle_artifact_failure_does_not_block_placeholder_cleanup() -> None:
+    """If artifact delivery raises, the placeholder mapping still
+    clears so the next run on the same thread isn't stuck."""
+    channel = _FakeChannel()
+    channel.relay_artifact_document.side_effect = RuntimeError("supabase down")
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
+        channel=channel,
+    )
+    sink.register_placeholder("tid-1", "12345", 99)
+
+    await sink.handle(
+        _evt(
+            event_type="completed",
+            payload={
+                "companion_summary": "Built.",
+                "artifact_filename": "x.pptx",
+            },
+        )
+    )
+    assert sink.get_placeholder("tid-1") is None

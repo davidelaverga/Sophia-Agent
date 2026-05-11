@@ -30,6 +30,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
+import time
 from collections import OrderedDict
 from dataclasses import replace
 from threading import Lock
@@ -47,6 +48,15 @@ _SEQUENCE_CACHE_MAX = 10_000
 _TERMINAL_FLAG_CACHE_MAX = 10_000
 _TERMINAL_EVENT_CACHE_MAX = 10_000
 
+# Terminal flag TTL. Purpose: dedup the stream-vs-webhook race for one
+# run (the race window is at most ``_WEBHOOK_GRACE_SECONDS`` ≈ 5s on
+# the consumer side). After this TTL the flag self-clears so a future
+# run on the SAME thread_id (e.g. consecutive @Sophia_Work_bot DMs
+# which share a thread per chat) can publish its own terminal cleanly.
+# Stage 2A's stream consumer also resets the flag eagerly on ``started``;
+# the TTL is the Stage 1A safety net where no ``started`` ever fires.
+_TERMINAL_FLAG_TTL_SECONDS = 30.0
+
 
 class BuilderEventFanout:
     """Single-process Builder event router."""
@@ -56,7 +66,8 @@ class BuilderEventFanout:
         self._sequence_lock = Lock()
         self._sequence_counters: OrderedDict[str, int] = OrderedDict()
         self._terminal_lock = Lock()
-        self._terminal_flags: OrderedDict[str, str] = OrderedDict()
+        # value is (event_type, set_at_monotonic) so we can apply TTL.
+        self._terminal_flags: OrderedDict[str, tuple[str, float]] = OrderedDict()
         # Cross-loop-safe terminal signalling. Stage 2A's stream consumer
         # runs on the gateway loop; Stage 2B's CompanionWakeup also runs
         # on the gateway loop; the Work bot dispatch runs on its own
@@ -90,6 +101,13 @@ class BuilderEventFanout:
             )
             return
 
+        # ``started`` marks a new run boundary on a (potentially reused)
+        # thread_id. TelegramWorkChannel keeps one thread_id per chat
+        # and reuses it across builds; a fresh run must clear stale
+        # terminal/sequence state so its own events fire normally.
+        if event.event_type == "started":
+            self._reset_run_state(thread_id)
+
         # Drop late mid-flight events for threads already terminal.
         if not event.is_terminal and self._is_terminal(thread_id):
             logger.debug(
@@ -104,7 +122,9 @@ class BuilderEventFanout:
         event = replace(event, sequence=seq)
 
         # Dedup terminal-vs-terminal races (stream and webhook both
-        # arriving). First to register wins; second is dropped.
+        # arriving). First to register wins within the TTL window;
+        # second is dropped. Past the TTL the flag self-clears so a
+        # subsequent run on the same thread_id publishes cleanly.
         if event.is_terminal:
             first_terminal = self._mark_terminal(thread_id, event.event_type)
             if first_terminal is not None:
@@ -191,20 +211,54 @@ class BuilderEventFanout:
             return current
 
     def _is_terminal(self, thread_id: str) -> bool:
+        """True iff a terminal was recorded for ``thread_id`` within TTL."""
         with self._terminal_lock:
-            return thread_id in self._terminal_flags
+            entry = self._terminal_flags.get(thread_id)
+            if entry is None:
+                return False
+            _event_type, set_at = entry
+            if time.monotonic() - set_at > _TERMINAL_FLAG_TTL_SECONDS:
+                # Stale — drop lazily so the next terminal for this
+                # thread fires normally (consecutive Work bot builds).
+                self._terminal_flags.pop(thread_id, None)
+                return False
+            return True
 
     def _mark_terminal(self, thread_id: str, event_type: str) -> str | None:
         """Return the previously-recorded terminal type, or ``None`` if
-        this is the first terminal for ``thread_id``."""
+        this is the first terminal for ``thread_id`` within the TTL window."""
         with self._terminal_lock:
-            if thread_id in self._terminal_flags:
-                return self._terminal_flags[thread_id]
-            self._terminal_flags[thread_id] = event_type
+            entry = self._terminal_flags.get(thread_id)
+            now = time.monotonic()
+            if entry is not None:
+                existing_type, set_at = entry
+                if now - set_at <= _TERMINAL_FLAG_TTL_SECONDS:
+                    return existing_type
+                # Stale terminal — treat as fresh.
+            self._terminal_flags[thread_id] = (event_type, now)
             self._terminal_flags.move_to_end(thread_id)
             while len(self._terminal_flags) > _TERMINAL_FLAG_CACHE_MAX:
                 self._terminal_flags.popitem(last=False)
             return None
+
+    def _reset_run_state(self, thread_id: str) -> None:
+        """Clear terminal + sequence + terminal-future state for a new
+        run on ``thread_id``. Called when ``started`` arrives.
+
+        SSE consumers can detect the reset because the next event has
+        ``sequence=1``; their stored ``Last-Event-ID`` semantics need to
+        treat ``event_type=="started"`` as a run-boundary signal."""
+        with self._terminal_lock:
+            self._terminal_flags.pop(thread_id, None)
+        with self._sequence_lock:
+            self._sequence_counters.pop(thread_id, None)
+        with self._terminal_futures_lock:
+            old_future = self._terminal_futures.pop(thread_id, None)
+        # Cancel any pending waiter on the prior run's future so they
+        # don't deadlock waiting for a terminal that will never fire on
+        # this future. New future is allocated lazily on next access.
+        if old_future is not None and not old_future.done():
+            old_future.cancel()
 
     def _get_or_create_terminal_future(self, thread_id: str) -> concurrent.futures.Future:
         with self._terminal_futures_lock:
