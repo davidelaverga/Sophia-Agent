@@ -3,8 +3,20 @@ FROM python:3.12-slim
 
 ARG NODE_MAJOR=22
 
+# System dependencies:
+#   - curl, build-essential, gnupg, ca-certificates: Node.js repo setup
+#   - nodejs: Builder's chart-visualization skill + readabilipy's jsdom
+#     extraction (web research)
+#   - pandoc + texlive-xetex + recommended fonts/latex: Builder's
+#     `render_markdown_to_pdf` tool shells out to `pandoc` with
+#     `--pdf-engine=xelatex`. Without these the tool returns
+#     `error_type="pandoc_missing"` and PDF artifacts are never produced.
+#     The `-recommended` packages keep image growth bounded (~700MB)
+#     while covering common Unicode + standard layout cases. CJK or
+#     exotic font support would need `texlive-fonts-extra`.
 RUN apt-get update && apt-get install -y \
     curl build-essential gnupg ca-certificates \
+    pandoc texlive-xetex texlive-fonts-recommended texlive-latex-recommended \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.gpg \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" > /etc/apt/sources.list.d/nodesource.list \
@@ -20,6 +32,24 @@ COPY skills ./skills
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync"
+
+# Repair readabilipy's bundled jsdom install. The wheel ships
+# `javascript/node_modules/jsdom/package.json` but the unpacked
+# layout is sometimes incomplete (`lib/api.js` missing), which makes
+# `simple_json_from_html_string(html, use_readability=True)` raise
+# `CalledProcessError` and fall back to the pure-Python extractor.
+# Re-running `npm install` from readabilipy's javascript dir restores
+# a complete `node_modules` tree. The if/else guards against a future
+# readabilipy major-version bump that drops the bundled JS directory
+# (skip, don't fail), while still letting genuine npm install errors
+# fail the build (don't mask them with `|| echo`).
+RUN if [ -d /app/backend/.venv/lib/python3.12/site-packages/readabilipy/javascript ]; then \
+        cd /app/backend/.venv/lib/python3.12/site-packages/readabilipy/javascript && \
+        rm -rf node_modules && \
+        npm install --no-audit --no-fund --silent ; \
+    else \
+        echo "readabilipy javascript dir not found; skipping jsdom repair" ; \
+    fi
 
 ENV PYTHONPATH=.
 
