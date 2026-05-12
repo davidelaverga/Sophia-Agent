@@ -119,10 +119,7 @@ def _warn_if_misconfigured(payload: dict[str, Any]) -> None:
         # Operator set the URL explicitly — assume they know what they did.
         return
 
-    looks_deployed = any(
-        os.environ.get(var)
-        for var in ("RENDER", "RENDER_EXTERNAL_URL", "FLY_APP_NAME", "K_SERVICE")
-    )
+    looks_deployed = any(os.environ.get(var) for var in ("RENDER", "RENDER_EXTERNAL_URL", "FLY_APP_NAME", "K_SERVICE"))
     if not looks_deployed:
         return
 
@@ -220,9 +217,34 @@ def _is_phantom_success(
 
 
 def _post_webhook(payload: dict[str, Any]) -> None:
-    """Fire the POST. Called on a daemon thread so the executor never blocks."""
-    if not payload.get("thread_id"):
-        # No parent thread → nothing for the gateway to route to.
+    """Fire the POST. Called on a daemon thread so the executor never blocks.
+
+    The webhook is fired for every terminal Builder run regardless of
+    whether ``payload["thread_id"]`` (the parent companion thread) is
+    set:
+
+    - When set, the gateway routes via ``MessageBus`` to the originating
+      channel (EI bot / Slack / Feishu) — Stage 1 contract, keyed on
+      ``thread_id``.
+    - When ``None`` (Builder-as-main mode, e.g. ``@Sophia_Work_bot`` DMs
+      where ``BuilderTaskMiddleware`` synthesises a ``delegation_context``
+      with ``parent_thread_id=None`` — the D3 marker), the gateway's
+      ``BuilderEventFanout`` still routes via ``payload["task_id"]``
+      (the builder's own thread) to the ``TelegramWorkBotChatRelaySink``
+      which delivers the artifact file.
+
+    The earlier ``if not payload.get("thread_id"): return`` short-circuit
+    was correct under Stage 1 (the only consumer needed a parent thread
+    to route to) but silently dropped every Work-bot Stage 2A webhook —
+    the artifact upload completed on Supabase but never reached the
+    user's Telegram chat. See plan at
+    ``~/.claude/plans/users-davidelaverga-desktop-sophia-v3-s-tingly-sonnet.md``.
+    """
+    if not payload.get("task_id"):
+        # Without task_id the gateway has no identity to key the event
+        # to. This is a logic bug upstream we never expect to hit — log
+        # so it's visible if it ever does.
+        logger.warning("Builder-events webhook skipped: payload missing task_id")
         return
     _warn_if_misconfigured(payload)
     url = f"{_gateway_url()}{_WEBHOOK_PATH}"
@@ -391,11 +413,7 @@ def build_completion_payload_from_artifact(
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
     parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
-    user_id = (
-        delegation_dict.get("parent_user_id")
-        or cfg.get("parent_user_id")
-        or cfg.get("user_id")
-    )
+    user_id = delegation_dict.get("parent_user_id") or cfg.get("parent_user_id") or cfg.get("user_id")
     metadata = runtime_config.get("metadata") or {}
     trace_id = metadata.get("trace_id") if isinstance(metadata, dict) else None
 
@@ -433,19 +451,14 @@ def build_completion_payload_from_artifact(
         confidence=artifact.get("confidence") if isinstance(artifact, dict) else None,
     ):
         logger.warning(
-            "Builder-events: coercing phantom-success to error for task_id=%s "
-            "confidence=%s artifact_path=%r — builder reported success but "
-            "produced no deliverable.",
+            "Builder-events: coercing phantom-success to error for task_id=%s confidence=%s artifact_path=%r — builder reported success but produced no deliverable.",
             builder_thread_id,
             artifact.get("confidence") if isinstance(artifact, dict) else None,
             artifact_path,
         )
         mapped_status = "error"
         if not error_message:
-            error_message = (
-                "Builder finished but couldn't produce a deliverable. "
-                "Want me to try again?"
-            )
+            error_message = "Builder finished but couldn't produce a deliverable. Want me to try again?"
 
     return {
         # ``thread_id`` in the webhook payload is the COMPANION thread (where
@@ -503,10 +516,7 @@ def fire_completion_webhook_from_artifact(
     task_id = _resolve_runtime_thread_id(runtime)
     if not task_id:
         logger.warning(
-            "[Builder] fire_completion_webhook: missing builder thread_id "
-            "in runtime.execution_info AND runtime.context AND "
-            "runtime.config.configurable; cannot dispatch webhook. "
-            "(runtime=%s)",
+            "[Builder] fire_completion_webhook: missing builder thread_id in runtime.execution_info AND runtime.context AND runtime.config.configurable; cannot dispatch webhook. (runtime=%s)",
             "missing" if runtime is None else "present but no thread_id",
         )
         return False
@@ -540,8 +550,7 @@ def fire_completion_webhook_from_artifact(
     # checking whether THIS log line appeared on the builder side and then
     # whether the gateway saw the matching POST.
     logger.info(
-        "[Builder] fire_completion_webhook: dispatching task_id=%s "
-        "parent_thread_id=%s status=%s artifact_path=%r artifact_url_present=%s",
+        "[Builder] fire_completion_webhook: dispatching task_id=%s parent_thread_id=%s status=%s artifact_path=%r artifact_url_present=%s",
         task_id,
         payload.get("thread_id"),
         payload.get("status"),

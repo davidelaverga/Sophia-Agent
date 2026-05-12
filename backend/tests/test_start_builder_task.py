@@ -308,9 +308,13 @@ def test_start_builder_task_live_context_embedding(monkeypatch):
 
     # Production-bug fix (2026-05-06): parent_thread_id + parent_user_id
     # MUST be embedded in delegation_context (state) because langgraph-api
-    # 0.8.1 doesn't forward custom configurable keys. Without these, the
-    # builder webhook payload's thread_id is None and Telegram delivery
-    # silently dies in _post_webhook's missing-thread_id guard.
+    # 0.8.1 doesn't forward custom configurable keys. For companion-
+    # dispatched builds, the gateway's MessageBus routes EI bot artifact
+    # delivery off the webhook payload's ``thread_id`` (= parent_thread_id);
+    # without it, the EI bot has no chat to deliver to.
+    # (Builder-as-main mode where parent_thread_id is intentionally None
+    # is now handled by the gateway's BuilderEventFanout via task_id —
+    # see _post_webhook in deerflow/sophia/builder_events.py.)
     assert delegation["parent_thread_id"] == "thread-1"  # _make_runtime default
     assert delegation["parent_user_id"] == "alice"
 
