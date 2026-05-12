@@ -179,6 +179,55 @@ def test_phantom_success_coerces_to_error():
     assert "try again" in payload["error_message"].lower()
 
 
+def test_plain_text_fallback_confidence_triggers_phantom_coercion():
+    """Regression for the @Sophia_Work_bot "The build task was completed."
+    no-file failure (2026-05-12).
+
+    The "AI ended with plain text" fallback in
+    ``BuilderArtifactMiddleware`` builds an artifact with no
+    ``artifact_path`` AND no ``artifact_url``. For this case to be
+    coerced to ``status=error`` (so the user sees "Hit a snag" with a
+    retry CTA instead of a misleading "completed" card), the
+    fallback's ``confidence`` must be strictly less than
+    ``_PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD = 0.3``.
+
+    Prior bug: the fallback used ``confidence: 0.3`` which is on the
+    boundary (the check is strict ``<``). It now uses 0.2. This test
+    pins the contract by exercising the exact shape the middleware
+    produces and asserting coercion fires.
+    """
+    # The fallback shape (copy of the literal at
+    # backend/packages/harness/deerflow/agents/sophia_agent/middlewares/
+    # builder_artifact.py around line 1145-1170 — the "AI message with NO
+    # tool calls" branch).
+    plain_text_fallback = {
+        "artifact_path": None,
+        "artifact_type": "unknown",
+        "artifact_title": "Build task completed",
+        "steps_completed": 0,
+        "decisions_made": [],
+        "companion_summary": "The build task was completed.",
+        "companion_tone_hint": "Neutral — no builder context available.",
+        "user_next_action": None,
+        "confidence": 0.2,  # MUST stay < 0.3 to trip the phantom check
+    }
+
+    runtime = _make_runtime()
+    state = _make_state()
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state,
+            runtime=runtime,
+            artifact=plain_text_fallback,
+            status="completed",
+        )
+
+    assert payload["status"] == "error", "The plain-text fallback must be coerced to status=error so the user gets an honest 'Hit a snag' card instead of a misleading 'completed' card with no file attached."
+    assert payload["error_message"] is not None
+    assert "try again" in payload["error_message"].lower()
+
+
 def test_failed_status_passes_through():
     runtime = _make_runtime()
     state = _make_state()
