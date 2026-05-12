@@ -43,8 +43,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # readabilipy major-version bump that drops the bundled JS directory
 # (skip, don't fail), while still letting genuine npm install errors
 # fail the build (don't mask them with `|| echo`).
-RUN if [ -d /app/backend/.venv/lib/python3.12/site-packages/readabilipy/javascript ]; then \
-        cd /app/backend/.venv/lib/python3.12/site-packages/readabilipy/javascript && \
+RUN JS_DIR="$(cd /app/backend && uv run python -c "import importlib.util,pathlib;spec=importlib.util.find_spec('readabilipy');print((pathlib.Path(spec.origin).resolve().parent/'javascript') if spec and spec.origin else '')")" \
+    && if [ -n "$JS_DIR" ] && [ -d "$JS_DIR" ]; then \
+        cd "$JS_DIR" && \
         rm -rf node_modules && \
         npm install --no-audit --no-fund --silent ; \
     else \
