@@ -584,13 +584,25 @@ class TelegramWorkChannel(Channel):
         if sink is None:
             logger.warning("[TelegramWork] no telegram_work_chat sink registered; falling back to runs.wait")
             try:
+                # Route through ``_run_lg_call_on_main_loop`` so the
+                # httpx connection pool inside ``self._lg_client`` stays
+                # affine to ``self._main_loop`` — same reason the Stage
+                # 1 ``runs.wait`` path above (line ~497) and the stale-
+                # thread probe / ``threads.create`` calls all hop. This
+                # branch is degraded-mode (sink missing) but still runs
+                # on ``_tg_loop`` directly without the hop would raise
+                # ``RuntimeError: <asyncio.locks.Event ...> is bound to
+                # a different event loop`` exactly when the user needs
+                # the fallback to work.
                 result = await asyncio.wait_for(
-                    self._lg_client.runs.wait(
-                        thread_id,
-                        _DEFAULT_BUILDER_ASSISTANT_ID,
-                        input=run_input,
-                        config=run_config,
-                        context=run_context,
+                    self._run_lg_call_on_main_loop(
+                        self._lg_client.runs.wait(
+                            thread_id,
+                            _DEFAULT_BUILDER_ASSISTANT_ID,
+                            input=run_input,
+                            config=run_config,
+                            context=run_context,
+                        )
                     ),
                     timeout=self._run_timeout_seconds,
                 )
