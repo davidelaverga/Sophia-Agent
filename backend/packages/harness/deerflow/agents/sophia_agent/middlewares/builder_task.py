@@ -37,6 +37,10 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import extract_last_human_text, log_middleware
+from deerflow.sophia.builder_web_policy import (
+    extract_explicit_user_urls,
+    should_allow_builder_web_research,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,8 +309,19 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             classification = await self._classify_brief(last_human)
             raw_task_type = classification.get("task_type", "other")
             mapped_task_type = _CLASSIFIER_TASK_TYPE_MAP.get(raw_task_type, "document")
+            normalized_brief = classification["normalized_brief"]
+            # Resolve web-research policy per task_type using the same helper
+            # the companion-dispatched path uses (start_builder_task.py).
+            # Without this, the Work bot DM path hardcoded
+            # allow_web_research=False — BuilderResearchPolicyMiddleware
+            # reads delegation_context verbatim and does NOT reconsider, so
+            # research tasks degraded to "couldn't fetch" skeletons.
+            allow_web_research = should_allow_builder_web_research(
+                mapped_task_type, normalized_brief
+            )
+            explicit_urls = extract_explicit_user_urls(normalized_brief)
             synthesized = {
-                "task_brief": classification["normalized_brief"],
+                "task_brief": normalized_brief,
                 # Use the mapped value so downstream prompt branches
                 # (visual pre-flight, research output requirements) fire
                 # consistently with the companion-dispatched path. See
@@ -314,7 +329,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "task_type": mapped_task_type,
                 "_classifier_raw_task_type": raw_task_type,  # diagnostic
                 "demo_mode": classification["demo_mode"],
-                "normalized_brief": classification["normalized_brief"],
+                "normalized_brief": normalized_brief,
                 "source": _SYNTHETIC_DELEGATION_SOURCE,
                 "parent_thread_id": None,  # D3 — Builder-as-Main mode marker
                 "companion_artifact": None,
@@ -322,7 +337,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "ritual_phase": None,
                 "memories_for_builder": None,
                 "relevant_memories": [],
-                "allow_web_research": False,  # Policy MW will reconsider per task_type
+                "allow_web_research": allow_web_research,
+                "explicit_user_urls": explicit_urls,
             }
             # Mutate state so the sync render below sees it. Returning a
             # dict from this hook merges into state before the next hook
@@ -331,12 +347,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             state["delegation_context"] = synthesized
 
             logger.info(
-                "builder_task.synthetic_delegation thread_id=%s task_type=%s raw_task_type=%s demo_mode=%s brief_len=%d",
+                "builder_task.synthetic_delegation thread_id=%s task_type=%s raw_task_type=%s demo_mode=%s brief_len=%d allow_web_research=%s explicit_urls=%d",
                 self._resolve_thread_id(runtime),
                 synthesized["task_type"],
                 raw_task_type,
                 synthesized["demo_mode"],
                 len(synthesized["normalized_brief"]),
+                synthesized["allow_web_research"],
+                len(synthesized["explicit_user_urls"]),
             )
 
         # Delegate to the sync rendering path so the briefing block is
@@ -632,6 +650,28 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "the operator sets OPENAI_API_KEY).\n"
                 "- companion_tone_hint: 'apologetic-pragmatic'.\n"
                 "</missing_capability>"
+            )
+
+        # Builder-as-Main voice: when there's no companion in front, the
+        # companion_summary from emit_builder_artifact is shown to the user
+        # verbatim (TelegramWorkBotChatRelaySink renders payload.companion_summary
+        # directly). The Builder's default contract has it write that field
+        # for a downstream companion to rewrite, so without this hint the
+        # main-mode build delivers detached third-person text like
+        # "The builder couldn't fetch...". Inject only when parent_thread_id
+        # is None — companion-dispatched runs keep their existing behavior.
+        parent_thread_id = delegation_context.get("parent_thread_id")
+        if parent_thread_id is None:
+            sections.append(
+                "<builder_as_main_voice>\n"
+                "This build has no parent companion — emit_builder_artifact.companion_summary "
+                "is shown directly to the user verbatim, in Sophia's voice. Write it in FIRST "
+                "PERSON (\"I couldn't fetch the article…\", \"I drafted a structural skeleton…\") "
+                "rather than third person (\"The builder couldn't fetch…\", \"Sophia produced…\"). "
+                "You ARE Sophia in this run; do not refer to yourself, the builder, or any "
+                "internal agent as a separate entity. Use the same warm, concrete tone Sophia "
+                "uses across the rest of the product — never robotic reporter language.\n"
+                "</builder_as_main_voice>"
             )
 
         sections.append(

@@ -328,6 +328,143 @@ class TestClassifierTaskTypeMapping:
         assert not missing, f"new classifier task_type(s) {sorted(missing)} missing from _CLASSIFIER_TASK_TYPE_MAP; add an explicit mapping."
 
 
+class TestWebResearchPolicyResolution:
+    """Regression: in Builder-as-Main mode, `_classify_brief` must resolve
+    `allow_web_research` per task_type using `should_allow_builder_web_research`
+    (the same helper the companion path uses). Previously this field was
+    hardcoded False, causing research tasks to degrade to "couldn't fetch"
+    skeletons even when the user explicitly asked for web research."""
+
+    @pytest.mark.anyio
+    async def test_research_task_resolves_allow_web_research_true(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        _patch_anthropic(
+            monkeypatch,
+            [
+                _FakeBlock(
+                    "tool_use",
+                    name="classify_brief",
+                    input_={
+                        "task_type": "research",
+                        "demo_mode": False,
+                        "normalized_brief": "Research the latest AR glasses launching in 2026.",
+                    },
+                )
+            ],
+        )
+        mw = BuilderTaskMiddleware()
+        state = {"messages": [{"type": "human", "content": "research AR glasses"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+        delegation = result["delegation_context"]
+        assert delegation["task_type"] == "research"
+        assert delegation["allow_web_research"] is True
+
+    @pytest.mark.anyio
+    async def test_code_task_resolves_allow_web_research_true_via_document_mapping(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`code` (classifier) maps to `document` (downstream enum), and
+        `should_allow_builder_web_research("document", ...)` returns True
+        per PR-C F5 (documents default to research-on). Pinning this
+        decision so a future enum change doesn't silently flip behavior."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        _patch_anthropic(
+            monkeypatch,
+            [
+                _FakeBlock(
+                    "tool_use",
+                    name="classify_brief",
+                    input_={
+                        "task_type": "code",
+                        "demo_mode": False,
+                        "normalized_brief": "Write a Python script at /mnt/user-data/outputs/foo.py.",
+                    },
+                )
+            ],
+        )
+        mw = BuilderTaskMiddleware()
+        state = {"messages": [{"type": "human", "content": "write a script"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+        delegation = result["delegation_context"]
+        assert delegation["task_type"] == "document"
+        # Documents default to research-ON via should_allow_builder_web_research.
+        assert delegation["allow_web_research"] is True
+
+    @pytest.mark.anyio
+    async def test_explicit_user_urls_extracted_from_brief(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        _patch_anthropic(
+            monkeypatch,
+            [
+                _FakeBlock(
+                    "tool_use",
+                    name="classify_brief",
+                    input_={
+                        "task_type": "research",
+                        "demo_mode": False,
+                        "normalized_brief": "Summarize the blog post at https://example.com/post.md inline.",
+                    },
+                )
+            ],
+        )
+        mw = BuilderTaskMiddleware()
+        state = {"messages": [{"type": "human", "content": "summarize this https://example.com/post.md"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+        delegation = result["delegation_context"]
+        assert delegation["explicit_user_urls"] == ["https://example.com/post.md"]
+
+
+class TestBuilderAsMainVoiceBlock:
+    """When `parent_thread_id is None` (Builder-as-Main / Work bot DM
+    path), the Builder must write `companion_summary` in first person —
+    the Telegram sink renders it verbatim to the user. Without this
+    prompt block, the model defaults to third-person reporter voice
+    ("The builder couldn't fetch..."), which sounds wrong since Sophia
+    IS the builder in this mode."""
+
+    @pytest.mark.anyio
+    async def test_main_mode_injects_builder_as_main_voice_block(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        _patch_anthropic(
+            monkeypatch,
+            [
+                _FakeBlock(
+                    "tool_use",
+                    name="classify_brief",
+                    input_={
+                        "task_type": "research",
+                        "demo_mode": False,
+                        "normalized_brief": "Summarize X.",
+                    },
+                )
+            ],
+        )
+        mw = BuilderTaskMiddleware()
+        state = {"messages": [{"type": "human", "content": "summarize X"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+        # parent_thread_id is None on the synthesised Builder-as-Main path.
+        assert result["delegation_context"]["parent_thread_id"] is None
+        blocks = result["system_prompt_blocks"]
+        assert any("<builder_as_main_voice>" in b for b in blocks), "main-mode build is missing the first-person voice prompt block"
+
+    def test_companion_mode_omits_builder_as_main_voice_block(self) -> None:
+        """Companion-dispatched runs (parent_thread_id set) must NOT
+        receive the block — the companion rewrites the third-person
+        summary in its own voice, per the AGENTS.md contract."""
+        mw = BuilderTaskMiddleware()
+        state = {
+            "messages": [{"type": "human", "content": "build something"}],
+            "delegation_context": {
+                "task_type": "research",
+                "task_brief": "Research X",
+                "parent_thread_id": "thr_companion_abc123",
+                "companion_artifact": {"tone_estimate": 2.5},
+            },
+        }
+        result = mw.before_agent(state, runtime=None)
+        assert isinstance(result, dict)
+        blocks = result["system_prompt_blocks"]
+        assert not any("<builder_as_main_voice>" in b for b in blocks), "companion-dispatched run should NOT inject the first-person voice block"
+
+
 class TestLastHumanTextExtraction:
     def test_extracts_dict_human(self) -> None:
         state = {"messages": [{"type": "human", "content": "hi"}]}
