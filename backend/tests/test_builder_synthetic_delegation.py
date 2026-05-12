@@ -12,9 +12,11 @@ from __future__ import annotations
 import pytest
 
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
+    _CLASSIFIER_TASK_TYPE_MAP,
     _NORMALIZED_BRIEF_MAX_CHARS,
     _SYNTHETIC_DELEGATION_SOURCE,
     _VALID_BRIEF_TASK_TYPES,
+    _VISUAL_TASK_TYPES,
     BuilderTaskMiddleware,
 )
 
@@ -69,9 +71,7 @@ def _patch_anthropic(monkeypatch: pytest.MonkeyPatch, blocks_or_exc) -> None:
 
 class TestSyntheticDelegation:
     @pytest.mark.anyio
-    async def test_existing_delegation_context_bypasses_classifier(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_existing_delegation_context_bypasses_classifier(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Companion path: delegation_context is already populated. The
         # async hook should NOT call Haiku; it just delegates to sync render.
         called: dict = {"count": 0}
@@ -99,9 +99,7 @@ class TestSyntheticDelegation:
         assert "system_prompt_blocks" in result
 
     @pytest.mark.anyio
-    async def test_missing_delegation_synthesises_via_haiku(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_missing_delegation_synthesises_via_haiku(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
         _patch_anthropic(
             monkeypatch,
@@ -142,9 +140,7 @@ class TestSyntheticDelegation:
         assert any("<builder_briefing>" in b for b in result["system_prompt_blocks"])
 
     @pytest.mark.anyio
-    async def test_demo_mode_classification(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_demo_mode_classification(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
         _patch_anthropic(
             monkeypatch,
@@ -173,9 +169,7 @@ class TestSyntheticDelegation:
 
 class TestClassifierFallback:
     @pytest.mark.anyio
-    async def test_no_api_key_falls_back_to_user_brief(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_no_api_key_falls_back_to_user_brief(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         mw = BuilderTaskMiddleware()
         out = await mw._classify_brief("research electric cars")
@@ -184,9 +178,7 @@ class TestClassifierFallback:
         assert out["normalized_brief"] == "research electric cars"
 
     @pytest.mark.anyio
-    async def test_anthropic_call_failure_falls_back(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_anthropic_call_failure_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
         _patch_anthropic(monkeypatch, RuntimeError("API down"))
         mw = BuilderTaskMiddleware()
@@ -195,9 +187,7 @@ class TestClassifierFallback:
         assert out["normalized_brief"] == "write me a brief"
 
     @pytest.mark.anyio
-    async def test_no_tool_use_block_falls_back(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_no_tool_use_block_falls_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Anthropic returns text only — no tool_use block. Should fallback.
         monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
         _patch_anthropic(monkeypatch, [_FakeBlock("text")])
@@ -217,7 +207,8 @@ class TestValidation:
     def test_each_valid_task_type_passes_through(self) -> None:
         for tt in _VALID_BRIEF_TASK_TYPES:
             out = BuilderTaskMiddleware._validate_classification(
-                {"task_type": tt, "demo_mode": False, "normalized_brief": "y"}, "y",
+                {"task_type": tt, "demo_mode": False, "normalized_brief": "y"},
+                "y",
             )
             assert out["task_type"] == tt
 
@@ -242,6 +233,99 @@ class TestValidation:
             "y",
         )
         assert out["demo_mode"] is True
+
+
+class TestClassifierTaskTypeMapping:
+    """Regression: the Haiku classifier emits six task_types but the
+    Builder graph branches on the companion-dispatched five-value enum.
+    `_classify_brief` must map classifier output through
+    `_CLASSIFIER_TASK_TYPE_MAP` before writing it into
+    `delegation_context["task_type"]` so the visual pre-flight gate
+    and research-output-requirements block fire consistently across
+    both dispatch paths."""
+
+    # The downstream enum the Builder system prompt branches on. Mirrors
+    # `start_builder_task`'s Literal type. Kept inline to lock the
+    # contract — if either side changes, this test fails loudly.
+    _BUILDER_DOWNSTREAM_TASK_TYPES = frozenset({"document", "research", "presentation", "frontend", "visual_report"})
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("raw_task_type", list(_VALID_BRIEF_TASK_TYPES))
+    async def test_every_classifier_output_maps_to_downstream_enum(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        raw_task_type: str,
+    ) -> None:
+        """For each of the 6 classifier outputs, the synthesised
+        delegation_context's task_type must be one of the 5 downstream
+        enum values. Otherwise the visual / research / etc. prompt
+        branches in BuilderTaskMiddleware won't fire."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        _patch_anthropic(
+            monkeypatch,
+            [
+                _FakeBlock(
+                    "tool_use",
+                    name="classify_brief",
+                    input_={
+                        "task_type": raw_task_type,
+                        "demo_mode": False,
+                        "normalized_brief": "Write a markdown file at /mnt/user-data/outputs/foo.md about X.",
+                    },
+                )
+            ],
+        )
+
+        mw = BuilderTaskMiddleware()
+        state = {"messages": [{"type": "human", "content": "build something"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+        delegation = result["delegation_context"]
+
+        mapped = delegation["task_type"]
+        assert mapped in self._BUILDER_DOWNSTREAM_TASK_TYPES, f"classifier output {raw_task_type!r} mapped to {mapped!r}, which is not in the downstream enum {sorted(self._BUILDER_DOWNSTREAM_TASK_TYPES)}"
+        # The raw classifier value is preserved for diagnostics.
+        assert delegation["_classifier_raw_task_type"] == raw_task_type
+
+    @pytest.mark.anyio
+    async def test_visual_maps_to_visual_report_so_preflight_gate_fires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """`visual` (classifier) must map to `visual_report` (downstream)
+        so the OPENAI_API_KEY-missing pre-flight short-circuit at
+        builder_task.py:587 fires for visual builds. Without this
+        mapping, visual classifications would loop for 21 minutes
+        through the hard turn cap on environments without the
+        image-generation key."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key")
+        _patch_anthropic(
+            monkeypatch,
+            [
+                _FakeBlock(
+                    "tool_use",
+                    name="classify_brief",
+                    input_={
+                        "task_type": "visual",
+                        "demo_mode": False,
+                        "normalized_brief": "Produce a PPTX deck at /mnt/user-data/outputs/x.pptx covering Y.",
+                    },
+                )
+            ],
+        )
+
+        mw = BuilderTaskMiddleware()
+        state = {"messages": [{"type": "human", "content": "make me slides"}]}
+        result = await mw.abefore_agent(state, runtime=None)
+        delegation = result["delegation_context"]
+
+        assert delegation["task_type"] == "visual_report"
+        assert delegation["task_type"] in _VISUAL_TASK_TYPES
+
+    def test_map_covers_every_classifier_output(self) -> None:
+        """If a new task_type is added to `_VALID_BRIEF_TASK_TYPES`,
+        a corresponding entry in `_CLASSIFIER_TASK_TYPE_MAP` is
+        mandatory. Otherwise the `.get(..., "document")` fallback
+        silently buckets it as a generic document — which may be
+        correct but should be an explicit choice, not a default."""
+        missing = set(_VALID_BRIEF_TASK_TYPES) - set(_CLASSIFIER_TASK_TYPE_MAP.keys())
+        assert not missing, f"new classifier task_type(s) {sorted(missing)} missing from _CLASSIFIER_TASK_TYPE_MAP; add an explicit mapping."
 
 
 class TestLastHumanTextExtraction:

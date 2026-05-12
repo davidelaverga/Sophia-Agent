@@ -69,10 +69,7 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
                 # Match both the host (``skills/<name>/``) and container
                 # (``/mnt/skills/<name>/``) layouts so this works in
                 # local-sandbox and aio-sandbox modes alike.
-                if (
-                    f"/skills/{skill_name}/" in cmd
-                    or f"/mnt/skills/{skill_name}/" in cmd
-                ):
+                if f"/skills/{skill_name}/" in cmd or f"/mnt/skills/{skill_name}/" in cmd:
                     logger.info("[BuilderSkill] script_invoked: skill=%s", skill_name)
                     break
 
@@ -87,7 +84,7 @@ def _extract_output_relative_path(artifact_path: str | None) -> str | None:
     normalized = artifact_path.strip()
     if not normalized.startswith(_OUTPUTS_VIRTUAL_PREFIX):
         return None
-    relative = normalized[len(_OUTPUTS_VIRTUAL_PREFIX):].lstrip("/")
+    relative = normalized[len(_OUTPUTS_VIRTUAL_PREFIX) :].lstrip("/")
     if not relative:
         return None
 
@@ -305,11 +302,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         aren't user-facing deliverables.
         """
         thread_data = state.get("thread_data") or {}
-        outputs_host_path = (
-            thread_data.get("outputs_path")
-            if isinstance(thread_data, dict)
-            else None
-        )
+        outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
         if not isinstance(outputs_host_path, str) or not outputs_host_path:
             # No outputs dir configured — assume the model hasn't written
             # anything. Returning False routes through the safer path
@@ -382,31 +375,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         promoted_type = "unknown"
         try:
             thread_data_local = state.get("thread_data") or {}
-            outputs_host_path_local = (
-                thread_data_local.get("outputs_path")
-                if isinstance(thread_data_local, dict)
-                else None
-            )
+            outputs_host_path_local = thread_data_local.get("outputs_path") if isinstance(thread_data_local, dict) else None
             if outputs_host_path_local:
                 outputs_root_local = Path(outputs_host_path_local)
                 if outputs_root_local.is_dir():
                     _PROMOTE_EXTS = (
-                        ".pdf", ".pptx", ".docx", ".xlsx",
-                        ".png", ".jpg", ".jpeg", ".svg",
-                        ".html", ".zip",
+                        ".pdf",
+                        ".pptx",
+                        ".docx",
+                        ".xlsx",
+                        ".png",
+                        ".jpg",
+                        ".jpeg",
+                        ".svg",
+                        ".html",
+                        ".zip",
                     )
-                    candidates = [
-                        p for p in outputs_root_local.rglob("*")
-                        if p.is_file()
-                        and not p.name.startswith("_")
-                        and p.suffix.lower() in _PROMOTE_EXTS
-                    ]
+                    candidates = [p for p in outputs_root_local.rglob("*") if p.is_file() and not p.name.startswith("_") and p.suffix.lower() in _PROMOTE_EXTS]
                     if builder_task_started_at_ms:
                         min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                        candidates = [
-                            p for p in candidates
-                            if p.stat().st_mtime >= min_mtime
-                        ]
+                        candidates = [p for p in candidates if p.stat().st_mtime >= min_mtime]
                     if candidates:
                         candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                         best = candidates[0]
@@ -425,36 +413,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if promoted_path is None:
             try:
                 thread_data_local = state.get("thread_data") or {}
-                outputs_host_path_local = (
-                    thread_data_local.get("outputs_path")
-                    if isinstance(thread_data_local, dict)
-                    else None
-                )
+                outputs_host_path_local = thread_data_local.get("outputs_path") if isinstance(thread_data_local, dict) else None
                 if outputs_host_path_local:
                     outputs_root_local = Path(outputs_host_path_local)
                     if outputs_root_local.is_dir():
-                        gen_candidates = [
-                            p for p in outputs_root_local.rglob("*")
-                            if p.is_file()
-                            and p.name.startswith("_generate_")
-                            and p.suffix.lower() == ".py"
-                        ]
+                        gen_candidates = [p for p in outputs_root_local.rglob("*") if p.is_file() and p.name.startswith("_generate_") and p.suffix.lower() == ".py"]
                         if builder_task_started_at_ms:
                             min_mtime = (builder_task_started_at_ms / 1000.0) - 5.0
-                            gen_candidates = [
-                                p for p in gen_candidates
-                                if p.stat().st_mtime >= min_mtime
-                            ]
+                            gen_candidates = [p for p in gen_candidates if p.stat().st_mtime >= min_mtime]
                         if gen_candidates:
-                            gen_candidates.sort(
-                                key=lambda p: p.stat().st_mtime, reverse=True
-                            )
+                            gen_candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
                             best = gen_candidates[0]
                             rel = best.relative_to(outputs_root_local).as_posix()
                             promoted_generator_path = f"/mnt/user-data/outputs/{rel}"
                             logger.warning(
-                                "BuilderArtifact: fallback promoting generator script %s "
-                                "(reason=%s, no binary deliverable found)",
+                                "BuilderArtifact: fallback promoting generator script %s (reason=%s, no binary deliverable found)",
                                 promoted_generator_path,
                                 reason,
                             )
@@ -472,10 +445,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "artifact_title": "Build task completed (recovered)",
                 "steps_completed": steps_completed,
                 "decisions_made": [],
-                "companion_summary": (
-                    "The builder ran long and didn't call emit cleanly, "
-                    "but the deliverable is on disk — I'm surfacing it now."
-                ),
+                "companion_summary": ("The builder ran long and didn't call emit cleanly, but the deliverable is on disk — I'm surfacing it now."),
                 "companion_tone_hint": "Reassuring — deliverable recovered despite rough run.",
                 "user_next_action": "Open the file and let me know if it lands.",
                 "confidence": 0.5,
@@ -487,19 +457,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "artifact_title": "Build task partial (generator script only)",
                 "steps_completed": steps_completed,
                 "decisions_made": [],
-                "companion_summary": (
-                    "I built the generator script but couldn't produce the final "
-                    "binary cleanly — sharing the script so you have something to "
-                    "work with."
-                ),
-                "companion_tone_hint": (
-                    "Honest and constructive — partial deliverable; offer to debug "
-                    "if the user shares the error from running it."
-                ),
-                "user_next_action": (
-                    "Try running `python <path>` yourself, or send me the error "
-                    "and I'll fix it."
-                ),
+                "companion_summary": ("I built the generator script but couldn't produce the final binary cleanly — sharing the script so you have something to work with."),
+                "companion_tone_hint": ("Honest and constructive — partial deliverable; offer to debug if the user shares the error from running it."),
+                "user_next_action": ("Try running `python <path>` yourself, or send me the error and I'll fix it."),
                 "confidence": 0.4,
             }
         return {
@@ -508,10 +468,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_title": "Build task force-stopped",
             "steps_completed": steps_completed,
             "decisions_made": [],
-            "companion_summary": (
-                f"The builder made {steps_completed} edits but didn't finish cleanly. "
-                "No final deliverable was produced."
-            ),
+            "companion_summary": (f"The builder made {steps_completed} edits but didn't finish cleanly. No final deliverable was produced."),
             "companion_tone_hint": "Apologetic — builder ran out of budget.",
             "user_next_action": "Tell me what to try differently and I'll run it again.",
             "confidence": 0.2,
@@ -532,11 +489,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         from prior builder tasks via ``builder_task_started_at_ms``.
         """
         thread_data = state.get("thread_data") or {}
-        outputs_host_path = (
-            thread_data.get("outputs_path")
-            if isinstance(thread_data, dict)
-            else None
-        )
+        outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
         if not isinstance(outputs_host_path, str) or not outputs_host_path:
             return False
 
@@ -600,10 +553,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             candidates.append(primary.strip())
         supporting = artifact_args.get("supporting_files")
         if isinstance(supporting, list):
-            candidates.extend(
-                path for path in supporting
-                if isinstance(path, str) and path.strip()
-            )
+            candidates.extend(path for path in supporting if isinstance(path, str) and path.strip())
 
         if not candidates:
             # Reject empty artifact_path under EITHER turn-count pressure
@@ -613,10 +563,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # promote a real file or surface a deterministic apology.
             if cls._should_force_emit(state) or cls._should_force_emit_by_clock(state, runtime):
                 logger.warning(
-                    "BuilderArtifact: rejecting empty artifact_path during "
-                    "forced-emit (non_artifact_turns=%s) — letting hard "
-                    "ceiling fallback promote a real file or surface a "
-                    "deterministic apology instead of a phantom emit.",
+                    "BuilderArtifact: rejecting empty artifact_path during forced-emit (non_artifact_turns=%s) — letting hard ceiling fallback promote a real file or surface a deterministic apology instead of a phantom emit.",
                     state.get("builder_non_artifact_turns"),
                 )
                 return False
@@ -626,11 +573,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return True
 
         thread_data = state.get("thread_data") or {}
-        outputs_host_path = (
-            thread_data.get("outputs_path")
-            if isinstance(thread_data, dict)
-            else None
-        )
+        outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
         thread_id = runtime.context.get("thread_id") if runtime.context else None
 
         for candidate in candidates:
@@ -660,8 +603,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
             # Neither local nor remote — missing.
             logger.warning(
-                "BuilderArtifact: file missing for emit verification: "
-                "path=%s local=%s supabase=%s",
+                "BuilderArtifact: file missing for emit verification: path=%s local=%s supabase=%s",
                 candidate,
                 bool(outputs_host_path and (Path(outputs_host_path) / relative).is_file()),
                 bool(thread_id and supabase_artifact_store.check_artifact_exists(thread_id, relative)),
@@ -703,16 +645,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         clock_force = self._should_force_emit_by_clock(state, runtime)
         if not (turn_force or clock_force):
             return None
-        force_reason = "turns" if turn_force and not clock_force else (
-            "wall_clock" if clock_force and not turn_force else "turns+wall_clock"
-        )
+        force_reason = "turns" if turn_force and not clock_force else ("wall_clock" if clock_force and not turn_force else "turns+wall_clock")
         non_artifact_turns = state.get("builder_non_artifact_turns")
 
         # Stage 1: a real user-facing binary is on disk → force emit.
         if self._has_output_file(state):
             logger.warning(
-                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
-                "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
+                "BuilderArtifact: forcing tool_choice=emit_builder_artifact (non_artifact_turns=%s, ceiling=%s, reason=%s)",
                 non_artifact_turns,
                 self._CEILING_FOR_FORCE,
                 force_reason,
@@ -737,9 +676,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         # Stage 3: nothing on disk at all → force write_file (PR-A).
         logger.warning(
-            "BuilderArtifact: forcing tool_choice=write_file before emit "
-            "(non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — "
-            "force prevents phantom-emit loop)",
+            "BuilderArtifact: forcing tool_choice=write_file before emit (non_artifact_turns=%s, ceiling=%s, reason=%s, no output file yet — force prevents phantom-emit loop)",
             non_artifact_turns,
             self._CEILING_FOR_FORCE,
             force_reason,
@@ -792,8 +729,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         tool_call_id = request.tool_call.get("id", "")
         logger.warning(
-            "BuilderArtifact: emit rejected in wrap_tool_call — "
-            "artifact_path %s not found. Routing back to model for retry.",
+            "BuilderArtifact: emit rejected in wrap_tool_call — artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
         return Command(
@@ -831,8 +767,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         tool_call_id = request.tool_call.get("id", "")
         logger.warning(
-            "BuilderArtifact: emit rejected in awrap_tool_call — "
-            "artifact_path %s not found. Routing back to model for retry.",
+            "BuilderArtifact: emit rejected in awrap_tool_call — artifact_path %s not found. Routing back to model for retry.",
             args.get("artifact_path"),
         )
         return Command(
@@ -902,9 +837,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # retries and terminate the run instead of spinning forever.
                     if not self._artifact_files_exist(args, state, runtime):
                         logger.warning(
-                            "BuilderArtifact: emit rejected in after_model — "
-                            "artifact_path %s not found on disk or in Supabase. "
-                            "Builder will retry via wrap_tool_call.",
+                            "BuilderArtifact: emit rejected in after_model — artifact_path %s not found on disk or in Supabase. Builder will retry via wrap_tool_call.",
                             args.get("artifact_path"),
                         )
                         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
@@ -917,12 +850,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         # fallback after _REJECTION_SHORT_CIRCUIT_AT consecutive
                         # such rejections.
                         primary = args.get("artifact_path")
-                        is_empty_path_rejection = not (
-                            isinstance(primary, str) and primary.strip()
-                        )
-                        consecutive_rejections = int(
-                            state.get("builder_consecutive_empty_emit_rejections", 0) or 0
-                        )
+                        is_empty_path_rejection = not (isinstance(primary, str) and primary.strip())
+                        consecutive_rejections = int(state.get("builder_consecutive_empty_emit_rejections", 0) or 0)
                         if is_empty_path_rejection:
                             consecutive_rejections += 1
                         else:
@@ -939,14 +868,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             },
                         )
 
-                        if (
-                            is_empty_path_rejection
-                            and consecutive_rejections >= self._REJECTION_SHORT_CIRCUIT_AT
-                        ):
+                        if is_empty_path_rejection and consecutive_rejections >= self._REJECTION_SHORT_CIRCUIT_AT:
                             logger.warning(
-                                "BuilderArtifact: short-circuiting after %d consecutive "
-                                "empty-artifact_path rejections at turn=%d (ceiling=%d) — "
-                                "routing to ceiling fallback to avoid GraphRecursionError.",
+                                "BuilderArtifact: short-circuiting after %d consecutive empty-artifact_path rejections at turn=%d (ceiling=%d) — routing to ceiling fallback to avoid GraphRecursionError.",
                                 consecutive_rejections,
                                 non_artifact_turns,
                                 self._CEILING_FOR_FORCE,
@@ -990,9 +914,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         },
                     )
                     thread_data = state.get("thread_data") or {}
-                    outputs_host_path = (
-                        thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
-                    )
+                    outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
                     # Phase-1 async migration created a fresh builder thread
                     # per build (deepagents native dispatch). The Telegram
                     # channel adapter looks up artifact bytes via the
@@ -1006,19 +928,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     # 400 because the file lived at sophia_builder/<builder>/<file>.
                     # Switching to parent_thread_id here restores the legacy
                     # SubagentExecutor convention.
-                    delegation_for_upload = (
-                        state.get("delegation_context")
-                        if isinstance(state.get("delegation_context"), dict)
-                        else {}
-                    )
-                    parent_thread_id = (
-                        delegation_for_upload.get("parent_thread_id")
-                        if isinstance(delegation_for_upload, dict)
-                        else None
-                    )
-                    builder_thread_id = (
-                        runtime.context.get("thread_id") if runtime.context else None
-                    )
+                    delegation_for_upload = state.get("delegation_context") if isinstance(state.get("delegation_context"), dict) else {}
+                    parent_thread_id = delegation_for_upload.get("parent_thread_id") if isinstance(delegation_for_upload, dict) else None
+                    builder_thread_id = runtime.context.get("thread_id") if runtime.context else None
                     upload_thread_id = parent_thread_id or builder_thread_id
                     _upload_builder_outputs_to_supabase(
                         thread_id=upload_thread_id,
@@ -1027,8 +939,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     )
                     log_middleware(
                         "BuilderArtifact",
-                        f"builder artifact captured: type={args.get('artifact_type')}, "
-                        f"confidence={args.get('confidence')}",
+                        f"builder artifact captured: type={args.get('artifact_type')}, confidence={args.get('confidence')}",
                         _t0,
                     )
                     # Fire the gateway webhook so the Telegram channel adapter
@@ -1079,10 +990,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 # Emitted exactly once per task, at the ``_SOFT_WARN_AT`` turn.
                 if non_artifact_turns == self._SOFT_WARN_AT:
                     logger.warning(
-                        "BuilderArtifact: soft ceiling warning at turn=%d "
-                        "(hard_ceiling=%d, remaining=%d). Builder should wrap up "
-                        "— emit_builder_artifact with what's on disk instead of "
-                        "continuing to iterate.",
+                        "BuilderArtifact: soft ceiling warning at turn=%d (hard_ceiling=%d, remaining=%d). Builder should wrap up — emit_builder_artifact with what's on disk instead of continuing to iterate.",
                         non_artifact_turns,
                         self._CEILING_FOR_FORCE,
                         self._CEILING_FOR_FORCE - non_artifact_turns,
@@ -1151,7 +1059,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "companion_summary": "The build task was completed.",
                 "companion_tone_hint": "Neutral \u2014 no builder context available.",
                 "user_next_action": None,
-                "confidence": 0.3,
+                # 0.2 (not 0.3) so the phantom-success guard in
+                # deerflow.sophia.builder_events fires. The check uses
+                # a strict ``<`` against ``_PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD = 0.3``
+                # so 0.3 sits exactly on the boundary and does NOT
+                # coerce. A "success" event with no artifact_path AND
+                # no artifact_url is genuinely a failure; coercion
+                # rewrites it to status=error with an error_message of
+                # "Builder finished but couldn't produce a deliverable.
+                # Want me to try again?" \u2014 better UX than the
+                # misleading "The build task was completed." card the
+                # user saw on the @Sophia_Work_bot regression.
+                # Matches the ceiling apology fallback at
+                # _build_ceiling_fallback (line 517 of this file).
+                "confidence": 0.2,
             }
             history = self._append_turn_summary(
                 state,
@@ -1163,9 +1084,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
             )
             log_middleware("BuilderArtifact", "no builder artifact tool call, using fallback", _t0)
-            # Fire the gateway webhook (phantom-success guard will likely
-            # coerce this to an error card since the fallback has no
-            # artifact_path and confidence=0.3).
+            # Fire the gateway webhook. The phantom-success guard in
+            # ``deerflow.sophia.builder_events`` coerces this to an
+            # error card (status="completed" + artifact_path=None +
+            # artifact_url=None + confidence=0.2 < 0.3 threshold).
             fire_completion_webhook_from_artifact(
                 state=state,
                 runtime=runtime,

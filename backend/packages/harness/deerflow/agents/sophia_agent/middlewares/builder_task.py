@@ -45,12 +45,15 @@ logger = logging.getLogger(__name__)
 _SYNTHETIC_DELEGATION_SOURCE = "work_bot_dm"
 _BRIEF_CLASSIFICATION_MODEL = "claude-haiku-4-5-20251001"
 _BRIEF_CLASSIFICATION_MAX_TOKENS = 512
-_BRIEF_CLASSIFICATION_PROMPT_PATH = (
-    Path(__file__).resolve().parent.parent / "prompts" / "builder_brief_classification.md"
-)
+_BRIEF_CLASSIFICATION_PROMPT_PATH = Path(__file__).resolve().parent.parent / "prompts" / "builder_brief_classification.md"
 _NORMALIZED_BRIEF_MAX_CHARS = 500
 _VALID_BRIEF_TASK_TYPES = (
-    "research", "code", "writing", "data_analysis", "visual", "other",
+    "research",
+    "code",
+    "writing",
+    "data_analysis",
+    "visual",
+    "other",
 )
 
 # Tool schema for the Anthropic structured-output classifier call. Lifted to
@@ -96,6 +99,38 @@ _ENDGAME_MAX_FILES = 10
 _VISUAL_TASK_TYPES = frozenset({"presentation", "visual_report"})
 
 
+# Map the Haiku brief classifier's task_type taxonomy onto the
+# companion-dispatched ``start_builder_task`` Literal enum the Builder
+# graph branches on.
+#
+# Why this matters: the classifier
+# (prompts/builder_brief_classification.md) emits six values
+# (``research | code | writing | data_analysis | visual | other``), but
+# the Builder's prompt assembly keys conditional blocks on the
+# companion-dispatched enum's five values
+# (``document | research | presentation | frontend | visual_report``):
+#
+#   - ``_VISUAL_TASK_TYPES`` (line above): visual pre-flight gate fires
+#     only for ``{"presentation", "visual_report"}`` — raw ``"visual"``
+#     misses, so a classified visual build never gets the
+#     OPENAI_API_KEY-missing short-circuit.
+#   - Research-output-requirements block in ``before_agent`` fires only
+#     for ``task_type == "research"`` — already aligned for that one.
+#
+# Mapping the classifier output through this dict before writing it into
+# ``state["delegation_context"]["task_type"]`` makes both dispatch paths
+# behave consistently in the Builder graph. The raw classifier value is
+# preserved under ``_classifier_raw_task_type`` for diagnostics.
+_CLASSIFIER_TASK_TYPE_MAP: dict[str, str] = {
+    "research": "research",
+    "writing": "document",
+    "code": "document",
+    "data_analysis": "document",
+    "visual": "visual_report",
+    "other": "document",
+}
+
+
 def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     """Return up to ``_ENDGAME_MAX_FILES`` recent files in the builder's
     ``outputs/`` directory, sorted by mtime descending.
@@ -114,9 +149,7 @@ def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     prompt assembly).
     """
     thread_data = state.get("thread_data") or {}
-    outputs_host_path = (
-        thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
-    )
+    outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
     if not isinstance(outputs_host_path, str) or not outputs_host_path:
         return []
 
@@ -126,9 +159,16 @@ def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
         min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
 
     _DELIVERABLE_EXTS = {
-        ".pdf", ".pptx", ".docx", ".xlsx",
-        ".png", ".jpg", ".jpeg", ".svg",
-        ".html", ".zip",
+        ".pdf",
+        ".pptx",
+        ".docx",
+        ".xlsx",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".svg",
+        ".html",
+        ".zip",
     }
     _INTERMEDIATE_EXTS = {".json", ".csv", ".tsv", ".txt"}
 
@@ -237,9 +277,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     state_schema = BuilderTaskState
 
     @override
-    async def abefore_agent(
-        self, state: BuilderTaskState, runtime: Runtime
-    ) -> dict | None:
+    async def abefore_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:
         """Async hook — synthesise delegation_context if missing, then render.
 
         - When ``delegation_context`` is already populated (companion path),
@@ -265,9 +303,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 return self.before_agent(state, runtime)
 
             classification = await self._classify_brief(last_human)
+            raw_task_type = classification.get("task_type", "other")
+            mapped_task_type = _CLASSIFIER_TASK_TYPE_MAP.get(raw_task_type, "document")
             synthesized = {
                 "task_brief": classification["normalized_brief"],
-                "task_type": classification["task_type"],
+                # Use the mapped value so downstream prompt branches
+                # (visual pre-flight, research output requirements) fire
+                # consistently with the companion-dispatched path. See
+                # _CLASSIFIER_TASK_TYPE_MAP above for the rationale.
+                "task_type": mapped_task_type,
+                "_classifier_raw_task_type": raw_task_type,  # diagnostic
                 "demo_mode": classification["demo_mode"],
                 "normalized_brief": classification["normalized_brief"],
                 "source": _SYNTHETIC_DELEGATION_SOURCE,
@@ -286,9 +331,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             state["delegation_context"] = synthesized
 
             logger.info(
-                "builder_task.synthetic_delegation thread_id=%s task_type=%s demo_mode=%s brief_len=%d",
+                "builder_task.synthetic_delegation thread_id=%s task_type=%s raw_task_type=%s demo_mode=%s brief_len=%d",
                 self._resolve_thread_id(runtime),
                 synthesized["task_type"],
+                raw_task_type,
                 synthesized["demo_mode"],
                 len(synthesized["normalized_brief"]),
             )
@@ -476,11 +522,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         """Ordered list of zero-arg callables yielding thread_id candidates."""
         return [
             lambda: (getattr(runtime, "context", None) or {}).get("thread_id"),
-            lambda: (
-                ((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get(
-                    "thread_id"
-                )
-            ),
+            lambda: (((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get("thread_id")),
         ]
 
     @override
@@ -501,18 +543,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         relevant_memories: list[str] = delegation_context.get("relevant_memories") or []
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
-        allow_web_research = bool(
-            state.get("allow_web_research", delegation_context.get("allow_web_research", False))
-        )
-        tracked_sources = [
-            source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
-        ]
+        allow_web_research = bool(state.get("allow_web_research", delegation_context.get("allow_web_research", False)))
+        tracked_sources = [source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)]
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
-        recent_tool_names = [
-            str(name).strip()
-            for name in (state.get("builder_last_tool_names") or [])
-            if str(name).strip()
-        ]
+        recent_tool_names = [str(name).strip() for name in (state.get("builder_last_tool_names") or []) if str(name).strip()]
 
         # Wall-clock budget awareness — sourced from extra_configurable which
         # SubagentExecutor merges into initial state (see executor.py:835).
@@ -530,11 +564,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             started_ms = state.get("builder_task_kickoff_ms") or 0
         wall_clock_pct: int | None = None
         wall_clock_elapsed_s: int | None = None
-        if (
-            builder_timeout_seconds > 0
-            and isinstance(started_ms, (int, float))
-            and started_ms > 0
-        ):
+        if builder_timeout_seconds > 0 and isinstance(started_ms, (int, float)) and started_ms > 0:
             elapsed_ms = max(0, int(time.time() * 1000) - int(started_ms))
             wall_clock_elapsed_s = int(elapsed_ms / 1000)
             wall_clock_pct = int(round(elapsed_ms / (builder_timeout_seconds * 1000) * 100))
@@ -554,7 +584,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             ritual_section = self._ritual_guidance(active_ritual, ritual_phase)
             safe_phase = html.escape(str(ritual_phase or "none"), quote=True)
             if ritual_section:
-                sections.append(f"<ritual_guidance ritual=\"{active_ritual}\" phase=\"{safe_phase}\">\n{ritual_section}\n</ritual_guidance>")
+                sections.append(f'<ritual_guidance ritual="{active_ritual}" phase="{safe_phase}">\n{ritual_section}\n</ritual_guidance>')
 
         # Session context from companion artifact
         session_fields = {
@@ -655,10 +685,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
 
         if tracked_sources:
-            source_lines = [
-                f"- {source.get('title', source.get('url', 'Untitled'))} — {source.get('url', '')}"
-                for source in tracked_sources[:8]
-            ]
+            source_lines = [f"- {source.get('title', source.get('url', 'Untitled'))} — {source.get('url', '')}" for source in tracked_sources[:8]]
             sections.append("<tracked_sources>\n" + "\n".join(source_lines) + "\n</tracked_sources>")
 
         # Completion instruction — always present, includes budget so the model
@@ -749,17 +776,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         if non_artifact_turns > 0:
             joined_tools = ", ".join(recent_tool_names) if recent_tool_names else "unknown"
-            escalation = (
-                "<builder_endgame>\n"
-                f"Turn budget: {non_artifact_turns}/{_HARD_CEILING} used. "
-                f"{remaining} turn(s) remaining before forced termination.\n"
-                f"Most recent tool calls: {joined_tools}.\n"
-            )
+            escalation = f"<builder_endgame>\nTurn budget: {non_artifact_turns}/{_HARD_CEILING} used. {remaining} turn(s) remaining before forced termination.\nMost recent tool calls: {joined_tools}.\n"
             if wall_clock_pct is not None and wall_clock_elapsed_s is not None:
-                escalation += (
-                    f"Wall-clock: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used "
-                    f"({wall_clock_pct}%).\n"
-                )
+                escalation += f"Wall-clock: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used ({wall_clock_pct}%).\n"
             # PR-A (2026-04-27): thresholds rescaled for the bumped ceiling
             # (10 → 20). Same proportions as before — CRITICAL at the last
             # ~15% of the budget (remaining<=3), WARNING at the last ~30%
@@ -770,10 +789,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # remaining > 3. This matches BuilderArtifactMiddleware's
             # _FORCE_EMIT_WALL_CLOCK_FRACTION so the prompt and the API-level
             # tool_choice forcing agree.
-            wall_clock_critical = (
-                wall_clock_pct is not None
-                and wall_clock_pct >= 70
-            )
+            wall_clock_critical = wall_clock_pct is not None and wall_clock_pct >= 70
             if remaining <= 3 or wall_clock_critical:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
@@ -797,12 +813,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 if outputs_listing:
                     now_s = time.time()
                     file_lines: list[str] = []
-                    has_deliverable = any(
-                        item["category"] == "deliverable" for item in outputs_listing
-                    )
-                    has_generator = any(
-                        item["category"] == "generator" for item in outputs_listing
-                    )
+                    has_deliverable = any(item["category"] == "deliverable" for item in outputs_listing)
+                    has_generator = any(item["category"] == "generator" for item in outputs_listing)
                     for item in outputs_listing:
                         size_str = _format_size(item["size_bytes"])
                         age_str = _format_age(now_s, item["mtime"])
@@ -822,35 +834,15 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                                 tag = "(generator script)"
                         else:
                             tag = "(intermediate — do NOT emit as final)"
-                        file_lines.append(
-                            f"  - {item['path']}  ({size_str}, modified {age_str})  {tag}"
-                        )
-                    escalation += (
-                        "Files currently in /mnt/user-data/outputs/ that you may emit:\n"
-                        + "\n".join(file_lines)
-                        + "\n"
-                    )
+                        file_lines.append(f"  - {item['path']}  ({size_str}, modified {age_str})  {tag}")
+                    escalation += "Files currently in /mnt/user-data/outputs/ that you may emit:\n" + "\n".join(file_lines) + "\n"
                 else:
-                    escalation += (
-                        "No files were detected in /mnt/user-data/outputs/. "
-                        "Emit with artifact_path=null is INVALID — "
-                        "write at least one file before emit_builder_artifact, "
-                        "or accept the force-stop fallback.\n"
-                    )
+                    escalation += "No files were detected in /mnt/user-data/outputs/. Emit with artifact_path=null is INVALID — write at least one file before emit_builder_artifact, or accept the force-stop fallback.\n"
             elif remaining <= 6:
-                escalation += (
-                    "WARNING: Running low on turns. Wrap up edits and call "
-                    "emit_builder_artifact within the next 1-2 turns. "
-                    "Stop re-planning with write_todos; that wastes a turn.\n"
-                )
+                escalation += "WARNING: Running low on turns. Wrap up edits and call emit_builder_artifact within the next 1-2 turns. Stop re-planning with write_todos; that wastes a turn.\n"
             else:
-                escalation += (
-                    "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
-                )
-            escalation += (
-                "Do not end with plain text and do not call any tools after emit_builder_artifact.\n"
-                "</builder_endgame>"
-            )
+                escalation += "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
+            escalation += "Do not end with plain text and do not call any tools after emit_builder_artifact.\n</builder_endgame>"
             sections.append(escalation)
 
         briefing = "<builder_briefing>\n" + "\n\n".join(sections) + "\n</builder_briefing>"
@@ -860,8 +852,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         log_middleware(
             "BuilderTask",
-            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} "
-            f"non_artifact_turns={non_artifact_turns}",
+            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} non_artifact_turns={non_artifact_turns}",
             _t0,
         )
         return {"system_prompt_blocks": blocks}
@@ -947,13 +938,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 location = skill.get_container_file_path(container_base)
             except Exception:
                 location = f"{container_base}/{name}/SKILL.md"
-            items.append(
-                f"  <skill>\n"
-                f"    <name>{name}</name>\n"
-                f"    <description>{description}</description>\n"
-                f"    <location>{location}</location>\n"
-                f"  </skill>"
-            )
+            items.append(f"  <skill>\n    <name>{name}</name>\n    <description>{description}</description>\n    <location>{location}</location>\n  </skill>")
 
         return (
             "<skill_system>\n"
@@ -970,9 +955,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "4. Compose downstream artifacts (e.g. a Markdown document referencing chart "
             "images) using the skill's output paths.\n"
             "\n"
-            "<available_skills>\n"
-            + "\n".join(items)
-            + "\n</available_skills>\n"
+            "<available_skills>\n" + "\n".join(items) + "\n</available_skills>\n"
             "</skill_system>"
         )
 
@@ -980,50 +963,23 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     def _tone_guidance(tone_estimate: float, band: str) -> str:
         """Map tone_estimate to behavioral instructions for the builder."""
         if tone_estimate < 1.0 or band == "shutdown":
-            return (
-                "User is very low. Make ALL decisions yourself. Keep simple. "
-                "Minimize user input. Quality over ambition."
-            )
+            return "User is very low. Make ALL decisions yourself. Keep simple. Minimize user input. Quality over ambition."
         if tone_estimate < 1.5 or band == "grief_fear":
-            return (
-                "User is low. Make most decisions. Keep clean. "
-                "Deliverable should feel like relief."
-            )
+            return "User is low. Make most decisions. Keep clean. Deliverable should feel like relief."
         if tone_estimate < 2.5 or band == "anger_antagonism":
-            return (
-                "User is frustrated. Be direct and efficient. No flourishes. "
-                "Solve problems, don't flag them."
-            )
+            return "User is frustrated. Be direct and efficient. No flourishes. Solve problems, don't flag them."
         if tone_estimate < 3.5 or band == "engagement":
-            return (
-                "User has energy. Can be more ambitious. Include thoughtful details. "
-                "1-2 decision points OK."
-            )
+            return "User has energy. Can be more ambitious. Include thoughtful details. 1-2 decision points OK."
         # tone >= 3.5 or enthusiasm
-        return (
-            "User is high energy. Be ambitious. Add surprise element. "
-            "Don't play it safe."
-        )
+        return "User is high energy. Be ambitious. Add surprise element. Don't play it safe."
 
     @staticmethod
     def _ritual_guidance(ritual: str, phase: str | None) -> str | None:
         """Map active ritual to builder behavioral guidance."""
         guidance_map: dict[str, str] = {
-            "prepare": (
-                "User is getting ready for something important. "
-                "Output should feel like armor, not homework."
-            ),
-            "debrief": (
-                "User is processing what happened. Structure around "
-                "what happened \u2192 what worked \u2192 what didn't \u2192 what's next."
-            ),
-            "vent": (
-                "User moved from venting to action. Keep simple. "
-                "Don't add complexity."
-            ),
-            "reset": (
-                "User is clearing the deck. Output should feel clean "
-                "and forward-looking."
-            ),
+            "prepare": ("User is getting ready for something important. Output should feel like armor, not homework."),
+            "debrief": ("User is processing what happened. Structure around what happened \u2192 what worked \u2192 what didn't \u2192 what's next."),
+            "vent": ("User moved from venting to action. Keep simple. Don't add complexity."),
+            "reset": ("User is clearing the deck. Output should feel clean and forward-looking."),
         }
         return guidance_map.get(ritual)

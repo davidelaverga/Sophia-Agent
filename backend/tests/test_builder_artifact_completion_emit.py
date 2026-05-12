@@ -65,9 +65,7 @@ def _make_runtime(
             config_configurable["thread_id"] = builder_thread_id
 
     if include_execution_info:
-        ei_thread_id = (
-            builder_thread_id if builder_thread_id_in_execution_info else None
-        )
+        ei_thread_id = builder_thread_id if builder_thread_id_in_execution_info else None
         execution_info = SimpleNamespace(thread_id=ei_thread_id)
 
     runtime = SimpleNamespace(
@@ -147,9 +145,7 @@ def test_build_completion_payload_from_artifact_success_shape():
     state = _make_state(task_brief="Build a brief about X", task_type="document")
 
     with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/foo.md"):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     # ``thread_id`` in webhook = COMPANION thread (where Telegram chat lives).
     assert payload["thread_id"] == "t-parent"
@@ -176,11 +172,58 @@ def test_phantom_success_coerces_to_error():
     state = _make_state()
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_phantom_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_phantom_artifact(), status="completed")
 
     assert payload["status"] == "error"
+    assert payload["error_message"] is not None
+    assert "try again" in payload["error_message"].lower()
+
+
+def test_plain_text_fallback_confidence_triggers_phantom_coercion():
+    """Regression for the @Sophia_Work_bot "The build task was completed."
+    no-file failure (2026-05-12).
+
+    The "AI ended with plain text" fallback in
+    ``BuilderArtifactMiddleware`` builds an artifact with no
+    ``artifact_path`` AND no ``artifact_url``. For this case to be
+    coerced to ``status=error`` (so the user sees "Hit a snag" with a
+    retry CTA instead of a misleading "completed" card), the
+    fallback's ``confidence`` must be strictly less than
+    ``_PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD = 0.3``.
+
+    Prior bug: the fallback used ``confidence: 0.3`` which is on the
+    boundary (the check is strict ``<``). It now uses 0.2. This test
+    pins the contract by exercising the exact shape the middleware
+    produces and asserting coercion fires.
+    """
+    # The fallback shape (copy of the literal at
+    # backend/packages/harness/deerflow/agents/sophia_agent/middlewares/
+    # builder_artifact.py around line 1145-1170 — the "AI message with NO
+    # tool calls" branch).
+    plain_text_fallback = {
+        "artifact_path": None,
+        "artifact_type": "unknown",
+        "artifact_title": "Build task completed",
+        "steps_completed": 0,
+        "decisions_made": [],
+        "companion_summary": "The build task was completed.",
+        "companion_tone_hint": "Neutral — no builder context available.",
+        "user_next_action": None,
+        "confidence": 0.2,  # MUST stay < 0.3 to trip the phantom check
+    }
+
+    runtime = _make_runtime()
+    state = _make_state()
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state,
+            runtime=runtime,
+            artifact=plain_text_fallback,
+            status="completed",
+        )
+
+    assert payload["status"] == "error", "The plain-text fallback must be coerced to status=error so the user gets an honest 'Hit a snag' card instead of a misleading 'completed' card with no file attached."
     assert payload["error_message"] is not None
     assert "try again" in payload["error_message"].lower()
 
@@ -205,9 +248,7 @@ def test_timed_out_status_passes_through():
     runtime = _make_runtime()
     state = _make_state()
 
-    payload = builder_events.build_completion_payload_from_artifact(
-        state=state, runtime=runtime, artifact=_success_artifact(), status="timed_out"
-    )
+    payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="timed_out")
 
     assert payload["status"] == "timeout"
 
@@ -220,14 +261,9 @@ def test_fire_webhook_dedups_by_task_id():
     runtime = _make_runtime(builder_thread_id="dedup-1")
     state = _make_state()
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/x.md"), \
-         patch.object(builder_events, "_post_webhook"):
-        first = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
-        second = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/x.md"), patch.object(builder_events, "_post_webhook"):
+        first = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
+        second = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert first is True
     assert second is False  # dedup hit
@@ -240,9 +276,7 @@ def test_fire_webhook_returns_false_without_thread_id():
     runtime = SimpleNamespace(config={"configurable": {}, "metadata": {}})
     state = _make_state()
 
-    result = builder_events.fire_completion_webhook_from_artifact(
-        state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-    )
+    result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is False
 
@@ -251,9 +285,7 @@ def test_fire_webhook_returns_false_for_non_terminal_status():
     runtime = _make_runtime()
     state = _make_state()
 
-    result = builder_events.fire_completion_webhook_from_artifact(
-        state=state, runtime=runtime, artifact=_success_artifact(), status="running"
-    )
+    result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="running")
 
     assert result is False
 
@@ -263,9 +295,7 @@ def test_payload_handles_missing_task_brief():
     runtime = _make_runtime()
     state = {"delegation_context": {}, "builder_task": {"task_type": "research"}}
 
-    payload = builder_events.build_completion_payload_from_artifact(
-        state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-    )
+    payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert payload["task_brief"] is None
     assert payload["task_type"] == "research"
@@ -275,9 +305,7 @@ def test_payload_handles_missing_state_fields():
     """Defensive: empty state dict should still yield a valid payload."""
     runtime = _make_runtime()
 
-    payload = builder_events.build_completion_payload_from_artifact(
-        state={}, runtime=runtime, artifact=_success_artifact(), status="completed"
-    )
+    payload = builder_events.build_completion_payload_from_artifact(state={}, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert payload["task_brief"] is None
     assert payload["task_type"] is None
@@ -310,9 +338,7 @@ def test_payload_reads_parent_thread_id_from_state_when_config_missing():
     )
 
     with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/foo.md"):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     # Without the state fallback, this would be None and _post_webhook
     # would early-return, dropping the Telegram delivery silently.
@@ -331,14 +357,10 @@ def test_payload_state_takes_precedence_over_config():
     state = _make_state(parent_thread_id="state-thread", parent_user_id="state-user")
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert payload["thread_id"] == "state-thread"
     assert payload["user_id"] == "state-user"
-
-
 
 
 def test_payload_user_id_falls_back_to_parent_user_id_config_key():
@@ -364,12 +386,12 @@ def test_payload_user_id_falls_back_to_parent_user_id_config_key():
     }
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert payload["thread_id"] == "legacy-config-thread"
     assert payload["user_id"] == "parent-user"
+
+
 def test_payload_falls_back_to_config_when_state_parent_thread_id_missing():
     """When state.delegation_context omits parent_thread_id, the runtime
     config value is used as a fallback (covers the legacy pre-PR behaviour).
@@ -382,9 +404,7 @@ def test_payload_falls_back_to_config_when_state_parent_thread_id_missing():
     }
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert payload["thread_id"] == "legacy-config-thread"
     assert payload["user_id"] == "legacy-user"
@@ -406,11 +426,8 @@ def test_fire_webhook_resolves_builder_thread_id_from_context():
     )
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook"):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is True
 
@@ -426,11 +443,8 @@ def test_fire_webhook_resolves_builder_thread_id_from_config_fallback():
     )
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook"):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is True
 
@@ -443,11 +457,8 @@ def test_fire_webhook_returns_false_when_thread_id_missing_everywhere():
     # builder_thread_id=None drops it from BOTH context and config.
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook") as mock_post:
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook") as mock_post:
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is False
     mock_post.assert_not_called()
@@ -465,9 +476,7 @@ def test_payload_uses_context_thread_id_when_config_lacks_it():
     state = _make_state(parent_thread_id="parent-2", parent_user_id="alice")
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert payload["task_id"] == "ctx-builder-2"
     assert payload["thread_id"] == "parent-2"
@@ -488,11 +497,8 @@ def test_resolves_thread_id_from_execution_info_when_only_source():
     )
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook"):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is True
 
@@ -511,9 +517,7 @@ def test_execution_info_takes_precedence_over_context_and_config():
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     # execution_info wins over both fallbacks.
     assert payload["task_id"] == "ei-thread"
@@ -531,11 +535,8 @@ def test_falls_back_to_context_when_execution_info_thread_id_is_none():
     )
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook"):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is True
 
@@ -550,11 +551,8 @@ def test_handles_runtime_without_execution_info_attribute():
     )
     state = _make_state(parent_thread_id="parent-1", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook"):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is True
 
@@ -584,9 +582,7 @@ def test_handles_runtime_without_config_attribute_at_all():
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
         # Payload builder must NOT raise when runtime lacks .config.
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     # Builder thread_id resolved via execution_info.
     assert payload["task_id"] == "prod-builder-thread"
@@ -609,20 +605,15 @@ def test_fire_webhook_succeeds_when_runtime_lacks_config_attribute():
     )
     state = _make_state(parent_thread_id="prod-parent-2", parent_user_id="alice")
 
-    with patch.object(builder_events, "_signed_artifact_url", return_value=None), \
-         patch.object(builder_events, "_post_webhook"):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None), patch.object(builder_events, "_post_webhook"):
+        result = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     assert result is True
     # ``_post_webhook`` is patched out so the daemon thread never POSTs.
     # The dedup contract below proves dispatch advanced past the
     # build_payload step (which is where the AttributeError previously
     # raised).
-    second = builder_events.fire_completion_webhook_from_artifact(
-        state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-    )
+    second = builder_events.fire_completion_webhook_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
     assert second is False  # dedup hit confirms the first call wrote to _emitted_task_ids
 
 
@@ -674,9 +665,7 @@ def test_signed_url_uses_parent_thread_id_when_state_has_it():
         return f"https://supabase.test/{thread_id}/{artifact_path}"
 
     with patch.object(builder_events, "_signed_artifact_url", side_effect=_spy):
-        payload = builder_events.build_completion_payload_from_artifact(
-            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
-        )
+        payload = builder_events.build_completion_payload_from_artifact(state=state, runtime=runtime, artifact=_success_artifact(), status="completed")
 
     # _signed_artifact_url called once with parent_thread_id (NOT builder_thread_id).
     assert captured_thread_id == ["parent-thread"]
