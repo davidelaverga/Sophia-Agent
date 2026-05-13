@@ -52,6 +52,16 @@ _WEBHOOK_GRACE_SECONDS = 5.0
 # Hard ceiling on consumer lifetime — matches Builder's run-timeout.
 _CONSUMER_TIMEOUT_SECONDS = 30 * 60
 
+# Bounded reconnect for join-mode consumers when the stream FINs without
+# a terminal arriving (the langgraph-restart class of silent failure
+# observed in production 2026-05-13: the SSE connection closed cleanly
+# while the build was still grinding for another 35 minutes on the
+# freshly-restarted langgraph service, and the gateway consumer just
+# exited). Each reconnect re-attaches via ``runs.join_stream`` so we
+# resume getting events without losing the run.
+_RECONNECT_MAX_ATTEMPTS = 3
+_RECONNECT_BACKOFF_SECONDS = (1.0, 3.0, 7.0)
+
 
 async def consume_builder_stream(
     *,
@@ -68,6 +78,8 @@ async def consume_builder_stream(
     fanout=None,
     webhook_grace_seconds: float = _WEBHOOK_GRACE_SECONDS,
     consumer_timeout_seconds: float = _CONSUMER_TIMEOUT_SECONDS,
+    reconnect_max_attempts: int = _RECONNECT_MAX_ATTEMPTS,
+    reconnect_backoffs: tuple[float, ...] = _RECONNECT_BACKOFF_SECONDS,
 ) -> None:
     """Subscribe to a Builder run's stream and publish events to fanout.
 
@@ -145,8 +157,9 @@ async def consume_builder_stream(
         )
     )
 
+    chunks_seen = 0
     try:
-        await asyncio.wait_for(
+        chunks_seen = await asyncio.wait_for(
             _run_stream_loop(
                 lg_client=lg_client,
                 builder_thread_id=builder_thread_id,
@@ -221,15 +234,48 @@ async def consume_builder_stream(
         return
 
     # Stream finished naturally. Give the webhook a head start so the
-    # rich terminal event wins. If it never arrives, publish a minimal
-    # synthetic one so chat / SSE see *something*.
+    # rich terminal event wins. If it never arrives, try bounded
+    # reconnects (only in join-mode — the langgraph-restart class of
+    # silent failure) before publishing a minimal synthetic terminal so
+    # chat / SSE see *something*.
+    logger.info(
+        "stream_consumer.natural_end builder_thread_id=%s chunks_seen=%d waiting_for_webhook=true",
+        builder_thread_id,
+        chunks_seen,
+    )
     arrived = await fanout.await_terminal_dispatch(builder_thread_id, timeout=webhook_grace_seconds)
     if arrived:
         logger.info(
-            "stream_consumer.terminated builder_thread_id=%s outcome=webhook_won",
+            "stream_consumer.terminated builder_thread_id=%s outcome=webhook_won chunks_seen=%d",
             builder_thread_id,
+            chunks_seen,
         )
         return
+
+    # Join-mode only: the langgraph server may have restarted (or
+    # severed the connection) while the run kept going. Try to
+    # re-attach. Bounded retries with exponential backoff. Each
+    # successful reconnect re-enters the stream loop; events continue
+    # to flow to fanout. After exhausting retries (or if we're in
+    # create-and-stream mode where the consumer owns the run lifecycle
+    # so reconnect doesn't apply), fall through to synthetic completed.
+    if run_id is not None and reconnect_max_attempts > 0:
+        reconnect_arrived = await _try_reconnect_after_stream_end(
+            lg_client=lg_client,
+            builder_thread_id=builder_thread_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            trace_id=trace_id,
+            run_id=run_id,
+            fanout=fanout,
+            state=state,
+            webhook_grace_seconds=webhook_grace_seconds,
+            initial_chunks_seen=chunks_seen,
+            max_attempts=reconnect_max_attempts,
+            backoffs=reconnect_backoffs,
+        )
+        if reconnect_arrived:
+            return
 
     await _publish_synthetic_terminal(
         fanout,
@@ -245,8 +291,9 @@ async def consume_builder_stream(
         },
     )
     logger.info(
-        "stream_consumer.terminated builder_thread_id=%s outcome=synthetic",
+        "stream_consumer.terminated builder_thread_id=%s outcome=synthetic chunks_seen=%d",
         builder_thread_id,
+        chunks_seen,
     )
 
 
@@ -264,7 +311,7 @@ async def _run_stream_loop(
     run_context: dict[str, Any] | None,
     fanout,
     state: StreamAdapterState,
-) -> None:
+) -> int:
     """Iterate the stream and publish per-chunk events.
 
     Branches on which arg was supplied:
@@ -311,7 +358,17 @@ async def _run_stream_loop(
             stream_mode=stream_modes,
         )
 
+    chunks_seen = 0
     async for part in stream:
+        chunks_seen += 1
+        # DEBUG-only — INFO would churn ~50-200 lines per build.
+        event_name = part[0] if isinstance(part, tuple) and part else None
+        logger.debug(
+            "stream_loop.chunk_received builder_thread_id=%s event=%s chunks_seen=%d",
+            builder_thread_id,
+            event_name,
+            chunks_seen,
+        )
         for event in stream_part_to_events(
             part,
             thread_id=builder_thread_id,
@@ -322,6 +379,105 @@ async def _run_stream_loop(
             run_id=run_id,
         ):
             await fanout.publish(event)
+
+    logger.info(
+        "stream_loop.iterator_exhausted builder_thread_id=%s chunks_seen=%d mode=%s",
+        builder_thread_id,
+        chunks_seen,
+        "create" if run_input is not None else "join",
+    )
+    return chunks_seen
+
+
+async def _try_reconnect_after_stream_end(
+    *,
+    lg_client: Any,
+    builder_thread_id: str,
+    parent_thread_id: str | None,
+    user_id: str,
+    trace_id: str,
+    run_id: str,
+    fanout,
+    state: StreamAdapterState,
+    webhook_grace_seconds: float,
+    initial_chunks_seen: int,
+    max_attempts: int = _RECONNECT_MAX_ATTEMPTS,
+    backoffs: tuple[float, ...] = _RECONNECT_BACKOFF_SECONDS,
+) -> bool:
+    """Bounded ``runs.join_stream`` reconnect for the langgraph-restart case.
+
+    When the gateway's SSE connection closes cleanly but no terminal
+    event ever arrived, the langgraph service likely restarted (the
+    `_flush_loop` FileNotFoundError class of crash in Render's
+    inmem runtime). The run may still be live on the new langgraph
+    process. Re-attach via ``join_stream(run_id)`` and resume eventing.
+
+    Returns True when a terminal event arrived (webhook OR via a
+    successful reconnect cycle that ended naturally with a webhook
+    arrival), False when retries exhausted with no terminal — caller
+    falls through to synthetic-completed.
+    """
+    chunks_seen_total = initial_chunks_seen
+    for attempt in range(1, max_attempts + 1):
+        backoff = backoffs[min(attempt - 1, len(backoffs) - 1)] if backoffs else 0.0
+        logger.info(
+            "stream_consumer.reconnect builder_thread_id=%s run_id=%s attempt=%d backoff=%.1fs",
+            builder_thread_id,
+            run_id,
+            attempt,
+            backoff,
+        )
+        await asyncio.sleep(backoff)
+        try:
+            new_chunks = await _run_stream_loop(
+                lg_client=lg_client,
+                builder_thread_id=builder_thread_id,
+                parent_thread_id=parent_thread_id,
+                user_id=user_id,
+                trace_id=trace_id,
+                assistant_id="",  # unused in join mode
+                run_input=None,
+                run_id=run_id,
+                run_config=None,
+                run_context=None,
+                fanout=fanout,
+                state=state,
+            )
+        except Exception:
+            logger.warning(
+                "stream_consumer.reconnect builder_thread_id=%s attempt=%d status=failed",
+                builder_thread_id,
+                attempt,
+                exc_info=True,
+            )
+            continue
+        chunks_seen_total += new_chunks
+        logger.info(
+            "stream_consumer.reconnect builder_thread_id=%s attempt=%d status=ok new_chunks=%d total=%d",
+            builder_thread_id,
+            attempt,
+            new_chunks,
+            chunks_seen_total,
+        )
+        # After each successful reattach + natural end, give the
+        # webhook another chance — the run may have completed during
+        # the reconnect window.
+        arrived = await fanout.await_terminal_dispatch(builder_thread_id, timeout=webhook_grace_seconds)
+        if arrived:
+            logger.info(
+                "stream_consumer.terminated builder_thread_id=%s outcome=webhook_won_after_reconnect attempts=%d chunks_seen=%d",
+                builder_thread_id,
+                attempt,
+                chunks_seen_total,
+            )
+            return True
+    logger.warning(
+        "stream_consumer.reconnect_exhausted builder_thread_id=%s attempts=%d chunks_seen=%d",
+        builder_thread_id,
+        max_attempts,
+        chunks_seen_total,
+    )
+    return False
 
 
 async def _publish_synthetic_terminal(

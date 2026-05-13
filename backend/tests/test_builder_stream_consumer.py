@@ -413,6 +413,11 @@ async def test_join_stream_branch_when_run_input_is_none() -> None:
         fanout=fanout,
         webhook_grace_seconds=0.05,
         consumer_timeout_seconds=5,
+        # Disable reconnect for this test — it asserts a single
+        # join_stream attach. The bounded reconnect path (PR #121 fix
+        # for the langgraph-restart silent-failure class) has its own
+        # dedicated test below.
+        reconnect_max_attempts=0,
     )
 
     # join_stream was called with the right args/kwargs.
@@ -499,3 +504,206 @@ async def test_misconfiguration_neither_run_input_nor_run_id_publishes_failed() 
     terminal = [e for e in sink.calls if e.is_terminal]
     assert len(terminal) == 1
     assert terminal[0].event_type == "failed"
+
+
+# ---- Reconnect-after-EOF (Stage 2B observability + resilience) -------------
+#
+# Production 2026-05-13: langgraph crashed mid-build (FileNotFoundError in
+# _flush_loop), the SSE stream FIN'd cleanly, the gateway's `async for`
+# exited naturally with no exception, and the consumer published a
+# synthetic completed while the run was actually still going for 35 more
+# minutes on the freshly-restarted langgraph. The reconnect path
+# re-attaches via join_stream so events resume flowing.
+
+
+@pytest.mark.anyio
+async def test_natural_end_triggers_bounded_reconnect_in_join_mode(caplog) -> None:
+    """When the stream FINs cleanly without a terminal AND we're in
+    join-mode, the consumer reconnects up to ``reconnect_max_attempts``
+    times before falling through to synthetic completed."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    join = _StubJoinStream([("end", None)])  # FINs immediately, no terminal
+    create = _StubStream([])
+    client = type("C", (), {"runs": type("R", (), {"stream": create, "join_stream": join})()})()
+
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="app.gateway.builder_events.stream_consumer"):
+        await consume_builder_stream(
+            lg_client=client,
+            builder_thread_id="tid-reconn",
+            parent_thread_id="parent-1",
+            user_id="u1",
+            trace_id="trace-1",
+            run_input=None,
+            run_id="run-xyz",
+            fanout=fanout,
+            webhook_grace_seconds=0.01,
+            consumer_timeout_seconds=5,
+            reconnect_max_attempts=3,
+            reconnect_backoffs=(0.0, 0.0, 0.0),  # no waits for tests
+        )
+
+    # 1 initial attach + 3 reconnects = 4 total join_stream calls.
+    assert len(join.calls) == 4
+
+    # Reconnect attempts logged.
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("stream_consumer.reconnect" in m and "attempt=1" in m for m in messages)
+    assert any("stream_consumer.reconnect" in m and "attempt=2" in m for m in messages)
+    assert any("stream_consumer.reconnect" in m and "attempt=3" in m for m in messages)
+    assert any("reconnect_exhausted" in m for m in messages)
+
+    # After exhaustion, synthetic completed published as the canonical
+    # terminal so chat surfaces don't dangle.
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "completed"
+    assert terminal[0].payload.get("webhook_grace_exhausted") is True
+
+
+@pytest.mark.anyio
+async def test_reconnect_short_circuits_when_webhook_arrives() -> None:
+    """If the webhook lands during a reconnect cycle, the consumer
+    stops reconnecting — the canonical terminal is in flight."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    join = _StubJoinStream([("end", None)])
+    create = _StubStream([])
+    client = type("C", (), {"runs": type("R", (), {"stream": create, "join_stream": join})()})()
+
+    async def _fire_webhook() -> None:
+        await asyncio.sleep(0.05)
+        await fanout.publish(
+            BuilderEvent(
+                thread_id="tid-reconn-2",
+                parent_thread_id="parent-1",
+                user_id="u1",
+                trace_id="trace-1",
+                event_type="completed",
+                payload={"companion_summary": "real terminal"},
+                source="webhook",
+                run_id="run-xyz",
+            )
+        )
+
+    webhook_task = asyncio.create_task(_fire_webhook())
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-reconn-2",
+        parent_thread_id="parent-1",
+        user_id="u1",
+        trace_id="trace-1",
+        run_input=None,
+        run_id="run-xyz",
+        fanout=fanout,
+        webhook_grace_seconds=0.2,
+        consumer_timeout_seconds=5,
+        reconnect_max_attempts=3,
+        reconnect_backoffs=(0.2, 0.2, 0.2),
+    )
+    await webhook_task
+
+    # Exactly one completed event, and it's the webhook-source one.
+    completed_events = [e for e in sink.calls if e.event_type == "completed"]
+    assert len(completed_events) == 1
+    assert completed_events[0].source == "webhook"
+
+
+@pytest.mark.anyio
+async def test_reconnect_skipped_in_create_mode() -> None:
+    """Create-and-stream mode owns the run lifecycle — reconnect via
+    ``join_stream`` doesn't apply. After natural end + no webhook, fall
+    straight through to synthetic completed."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    create_calls: list[tuple] = []
+
+    class _CallCountingStream:
+        def __call__(self, *args, **kwargs):
+            create_calls.append((args, kwargs))
+
+            async def gen():
+                if False:
+                    yield None
+                return
+
+            return gen()
+
+    join = _StubJoinStream([])
+    client = type("C", (), {"runs": type("R", (), {"stream": _CallCountingStream(), "join_stream": join})()})()
+
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-create",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "hi"}]},
+        run_id=None,
+        fanout=fanout,
+        webhook_grace_seconds=0.01,
+        consumer_timeout_seconds=5,
+        reconnect_max_attempts=3,
+        reconnect_backoffs=(0.0, 0.0, 0.0),
+    )
+
+    # Stream was called once (the initial create). join_stream was never
+    # invoked even though we set reconnect_max_attempts=3 — create-mode
+    # doesn't reconnect.
+    assert len(create_calls) == 1
+    assert len(join.calls) == 0
+
+    # Synthetic completed published.
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "completed"
+
+
+@pytest.mark.anyio
+async def test_natural_end_logs_chunk_count(caplog) -> None:
+    """Production-side diagnostic: ``stream_loop.iterator_exhausted``
+    and ``stream_consumer.natural_end`` log lines must include the
+    per-stream chunk count so silent failures (FIN with 0 chunks) can
+    be distinguished from "stream produced output then ended"."""
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    parts = [
+        ("values", {"messages": [{"type": "ai", "tool_calls": [{"id": "c1", "name": "bash", "args": {}}]}]}),
+        ("end", None),
+    ]
+    join = _StubJoinStream(parts)
+    create = _StubStream([])
+    client = type("C", (), {"runs": type("R", (), {"stream": create, "join_stream": join})()})()
+
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="app.gateway.builder_events.stream_consumer"):
+        await consume_builder_stream(
+            lg_client=client,
+            builder_thread_id="tid-chunks",
+            parent_thread_id="parent-1",
+            user_id="u1",
+            trace_id="trace-1",
+            run_input=None,
+            run_id="run-xyz",
+            fanout=fanout,
+            webhook_grace_seconds=0.01,
+            consumer_timeout_seconds=5,
+            reconnect_max_attempts=0,  # skip reconnect for this log assertion
+        )
+
+    messages = [r.getMessage() for r in caplog.records]
+    # iterator_exhausted reflects the 2 chunks (values + end).
+    assert any("stream_loop.iterator_exhausted" in m and "chunks_seen=2" in m for m in messages)
+    # natural_end carries the same count downstream into the terminal log.
+    assert any("stream_consumer.natural_end" in m and "chunks_seen=2" in m for m in messages)

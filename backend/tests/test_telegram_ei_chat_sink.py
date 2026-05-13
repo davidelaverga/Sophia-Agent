@@ -261,6 +261,84 @@ class TestRendering:
 
 
 # ---------------------------------------------------------------------------
+# Observability — silent skips must log a named reason (Stage 2B diagnostic)
+# ---------------------------------------------------------------------------
+#
+# Production 2026-05-13: user never saw progress. We couldn't tell from
+# logs whether accepts() returned False (and which branch) or whether
+# the stream just delivered no events. These tests pin the new
+# accepts.skip / accepts.ok / handle.entered / post.attempt logs that
+# make the failure mode visible next time.
+
+
+class TestObservabilityLogs:
+    def test_accepts_skip_flag_off_logs_reason(self, caplog) -> None:
+        import logging
+
+        sink, _, _ = _make_sink(flag=False, origin={"thread_id": "parent-tid-1", "channel_name": "telegram"})
+        with caplog.at_level(logging.DEBUG, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            assert sink.accepts(_evt()) is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("accepts.skip" in m and "reason=flag_off" in m for m in messages)
+
+    def test_accepts_skip_no_parent_logs_reason(self, caplog) -> None:
+        import logging
+
+        sink, _, _ = _make_sink(flag=True, origin={"thread_id": "parent-tid-1", "channel_name": "telegram"})
+        with caplog.at_level(logging.DEBUG, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            assert sink.accepts(_evt(parent_thread_id=None)) is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("accepts.skip" in m and "reason=no_parent" in m for m in messages)
+
+    def test_accepts_skip_parent_not_bound_logs_reason(self, caplog) -> None:
+        import logging
+
+        sink, _, _ = _make_sink(flag=True, origin=None)
+        with caplog.at_level(logging.DEBUG, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            assert sink.accepts(_evt()) is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("accepts.skip" in m and "reason=parent_not_bound" in m for m in messages)
+
+    def test_accepts_skip_wrong_channel_logs_reason(self, caplog) -> None:
+        import logging
+
+        sink, _, _ = _make_sink(flag=True, origin={"thread_id": "parent-tid-1", "channel_name": "telegram_work"})
+        with caplog.at_level(logging.DEBUG, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            assert sink.accepts(_evt()) is False
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("accepts.skip" in m and "reason=wrong_channel" in m for m in messages)
+
+    def test_accepts_ok_logs(self, caplog) -> None:
+        import logging
+
+        sink, _, _ = _make_sink(flag=True, origin={"thread_id": "parent-tid-1", "channel_name": "telegram"})
+        with caplog.at_level(logging.DEBUG, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            assert sink.accepts(_evt(event_type="phase")) is True
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("accepts.ok" in m for m in messages)
+
+    @pytest.mark.anyio
+    async def test_handle_logs_entered_and_post_attempt(self, caplog) -> None:
+        """When an accepted event triggers a new placeholder post, the
+        diagnostic log trail covers: handle.entered → post.attempt →
+        post.ok. This is the production-side hook we needed in the
+        2026-05-13 silence."""
+        import logging
+
+        sink, _, channel = _make_sink(
+            flag=True,
+            origin={"thread_id": "parent-tid-1", "chat_id": "11111", "channel_name": "telegram"},
+        )
+        with caplog.at_level(logging.INFO, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            await sink.handle(_evt(event_type="tool_started", payload={"tool_name": "bash"}))
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("handle.entered" in m for m in messages)
+        assert any("post.attempt" in m for m in messages)
+        assert any("post.ok" in m and "message_id=4242" in m for m in messages)
+        channel.relay_builder_event_post.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # run_id keying — concurrency regression (Codex review 2026-05-13)
 # ---------------------------------------------------------------------------
 

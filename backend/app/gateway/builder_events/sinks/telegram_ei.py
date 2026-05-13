@@ -95,11 +95,42 @@ class TelegramEIBotChatRelaySink:
     # ---- BuilderEventSink protocol ----------------------------------------
 
     def accepts(self, event: BuilderEvent) -> bool:
+        """Return True iff this event should land on the EI bot chat surface.
+
+        Logs a named reason at DEBUG on every skip so production-side
+        silence ("user never saw progress") can be diagnosed from a
+        single grep on the gateway logs. Without this, every False path
+        was indistinguishable from "no events ever fired".
+        """
+        reason = self._classify_skip(event)
+        if reason is not None:
+            logger.debug(
+                "telegram_ei_chat.accepts.skip reason=%s parent_thread_id=%s event_type=%s run_id=%s",
+                reason,
+                event.parent_thread_id,
+                event.event_type,
+                event.run_id,
+            )
+            return False
+        logger.debug(
+            "telegram_ei_chat.accepts.ok parent_thread_id=%s event_type=%s run_id=%s",
+            event.parent_thread_id,
+            event.event_type,
+            event.run_id,
+        )
+        return True
+
+    def _classify_skip(self, event: BuilderEvent) -> str | None:
+        """Return a skip-reason string, or None when the event is accepted.
+
+        Extracted from ``accepts`` so the public method stays a flat
+        log-then-return: keeps cyclomatic complexity well under sentrux's
+        CC ≥ 16 threshold even with the added observability.
+        """
         if not self._flag_check():
-            return False
+            return "flag_off"
         if event.parent_thread_id is None:
-            # Stage 2A's Work bot sink owns the parent_thread_id=None path.
-            return False
+            return "no_parent"
         if event.event_type not in {
             "started",
             "phase",
@@ -110,15 +141,28 @@ class TelegramEIBotChatRelaySink:
             "cancelled",
             "timed_out",
         }:
-            return False
+            return "unsupported_event"
         origin = self._lookup_origin(event.parent_thread_id)
-        if not origin or origin.get("channel_name") != _EI_CHANNEL_NAME:
-            return False
-        return True
+        if not origin:
+            return "parent_not_bound"
+        if origin.get("channel_name") != _EI_CHANNEL_NAME:
+            return "wrong_channel"
+        return None
 
     async def handle(self, event: BuilderEvent) -> None:
+        logger.info(
+            "telegram_ei_chat.handle.entered event_type=%s source=%s parent_thread_id=%s run_id=%s",
+            event.event_type,
+            event.source,
+            event.parent_thread_id,
+            event.run_id,
+        )
         text = self._render_text(event)
         if not text:
+            logger.debug(
+                "telegram_ei_chat.render.empty event_type=%s",
+                event.event_type,
+            )
             return
 
         parent_thread_id = event.parent_thread_id
@@ -137,7 +181,7 @@ class TelegramEIBotChatRelaySink:
         channel = self._get_channel()
         if channel is None:
             logger.warning(
-                "telegram_ei_chat.sink no_channel parent_thread_id=%s",
+                "telegram_ei_chat.no_channel parent_thread_id=%s",
                 parent_thread_id,
             )
             return
@@ -167,15 +211,34 @@ class TelegramEIBotChatRelaySink:
         whose progress we never showed.
         """
         if event.run_id is None:
+            logger.debug(
+                "telegram_ei_chat.post.skip reason=webhook_without_run_id parent_thread_id=%s",
+                parent_thread_id,
+            )
             return
         origin = self._lookup_origin(parent_thread_id)
         if not origin:
             # Race: the parent_thread_id was bound when accepts() ran
             # but is gone now. Skip; next event will re-check.
+            logger.warning(
+                "telegram_ei_chat.post.skip reason=parent_unbound_at_post parent_thread_id=%s",
+                parent_thread_id,
+            )
             return
         chat_id = str(origin.get("chat_id") or "")
         if not chat_id:
+            logger.warning(
+                "telegram_ei_chat.post.skip reason=empty_chat_id parent_thread_id=%s",
+                parent_thread_id,
+            )
             return
+        logger.info(
+            "telegram_ei_chat.post.attempt parent_thread_id=%s run_id=%s chat_id=%s text_preview=%s",
+            parent_thread_id,
+            event.run_id,
+            chat_id,
+            text[:80].replace("\n", " "),
+        )
         try:
             message_id = await channel.relay_builder_event_post(
                 chat_id=chat_id,
@@ -183,14 +246,26 @@ class TelegramEIBotChatRelaySink:
             )
         except Exception:
             logger.warning(
-                "telegram_ei_chat.sink post_failed parent_thread_id=%s",
+                "telegram_ei_chat.post.failed parent_thread_id=%s reason=exception",
                 parent_thread_id,
                 exc_info=True,
             )
             return
         if message_id is None:
-            # post failed silently; let next event retry.
+            # post failed silently inside the channel adapter; log and let
+            # next event retry.
+            logger.warning(
+                "telegram_ei_chat.post.failed parent_thread_id=%s reason=channel_returned_none",
+                parent_thread_id,
+            )
             return
+        logger.info(
+            "telegram_ei_chat.post.ok parent_thread_id=%s run_id=%s chat_id=%s message_id=%s",
+            parent_thread_id,
+            event.run_id,
+            chat_id,
+            message_id,
+        )
         self._register_placeholder(parent_thread_id, event.run_id, chat_id, message_id)
         self._last_text[(parent_thread_id, event.run_id)] = text
 
@@ -211,6 +286,14 @@ class TelegramEIBotChatRelaySink:
         """
         chat_id, message_id = placeholder
         self._last_text[text_key] = text
+        logger.info(
+            "telegram_ei_chat.edit.attempt parent_thread_id=%s run_id=%s chat_id=%s message_id=%s event_type=%s",
+            parent_thread_id,
+            event.run_id,
+            chat_id,
+            message_id,
+            event.event_type,
+        )
         try:
             await channel.relay_builder_event_edit(
                 chat_id=chat_id,
@@ -219,11 +302,18 @@ class TelegramEIBotChatRelaySink:
             )
         except Exception:
             logger.warning(
-                "telegram_ei_chat.sink edit_failed parent_thread_id=%s event=%s",
+                "telegram_ei_chat.edit.failed parent_thread_id=%s event=%s reason=exception",
                 parent_thread_id,
                 event.event_type,
                 exc_info=True,
             )
+            return
+        logger.debug(
+            "telegram_ei_chat.edit.ok parent_thread_id=%s run_id=%s message_id=%s",
+            parent_thread_id,
+            event.run_id,
+            message_id,
+        )
 
     def _clear_terminal_state(self, parent_thread_id: str, effective_run_id: str) -> None:
         """Drop placeholder + dedup entry on webhook-source terminals.
