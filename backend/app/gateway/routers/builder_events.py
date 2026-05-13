@@ -1,12 +1,20 @@
 """Gateway endpoints for the builder completion notifier.
 
-Three endpoints:
+Four endpoints:
 
 - ``POST /internal/builder-events`` — accepts a webhook from the LangGraph
   process (``deerflow.sophia.builder_events``) when a sophia_builder task
   reaches a terminal state. Hands the payload to the per-app
   ``BuilderEventsWorker``, which fans it out to webapp SSE subscribers
   and the channel ``MessageBus``.
+
+- ``POST /internal/builder-dispatched`` — Stage 2B kick-off signal. The
+  LangGraph process fires this immediately after ``start_builder_task``
+  creates a builder thread/run via ASGI in-process transport. The
+  gateway spawns a ``consume_builder_stream`` task (join-existing mode)
+  so registered chat-relay sinks (e.g. the EI bot relay) can render
+  live progress while the build runs. No-op when
+  ``BUILDER_LIVE_STREAM_ENABLED`` is off.
 
 - ``GET /api/threads/{thread_id}/builder-events`` — Server-Sent Events
   stream for the webapp. Holds the connection open and emits one
@@ -16,7 +24,7 @@ Three endpoints:
   recovery. Returns the most recent event for the thread (if still
   inside the worker's TTL window) or ``204 No Content``.
 
-The internal POST is intended for in-cluster traffic only. Production
+The internal POSTs are intended for in-cluster traffic only. Production
 deployments should bind the gateway to a non-public interface or guard
 the path at the reverse proxy.
 """
@@ -34,6 +42,8 @@ from pydantic import BaseModel, Field
 
 from app.gateway.builder_events import get_fanout
 from app.gateway.builder_events.adapters import webhook_payload_to_event
+from app.gateway.builder_events.flags import is_live_stream_enabled
+from app.gateway.builder_events.stream_consumer import consume_builder_stream
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
@@ -83,6 +93,24 @@ class BuilderCompletionEvent(BaseModel):
         None,
         description="Originating user id, used by the companion wakeup worker to construct a properly-attributed synthetic turn.",
     )
+
+
+class BuilderDispatchedSignal(BaseModel):
+    """Wire contract for the Stage 2B "builder dispatched" kick-off.
+
+    Fired by ``start_builder_task`` (LangGraph process) immediately after
+    it creates a builder thread + run via ASGI in-process transport. The
+    gateway uses this to spin up a stream consumer in join-existing mode
+    so registered chat-relay sinks can render live progress in
+    companion's originating chat (e.g. EI bot DM) while the build runs.
+    """
+
+    builder_thread_id: str = Field(..., description="The builder's LangGraph thread id (used as task_id in webhook payloads).")
+    parent_thread_id: str = Field(..., description="Companion's thread id — the chat where progress should be rendered.")
+    user_id: str = Field(..., description="Originating user id.")
+    run_id: str = Field(..., description="The builder run id, for join_stream attachment.")
+    trace_id: str | None = None
+    assistant_id: str = Field("sophia_builder", description="LangGraph assistant id for the builder graph.")
 
 
 # ---- Routers ---------------------------------------------------------------
@@ -155,6 +183,76 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
         )
 
     return {"delivered_subscribers": delivered}
+
+
+def _resolve_langgraph_client():
+    """Return a ``langgraph_sdk`` client pointed at the langgraph service.
+
+    Reused by the dispatch-signal endpoint to spawn a stream consumer that
+    joins the existing builder run. We pull the URL off the channel
+    service so a single source of truth (``manager._langgraph_url``)
+    drives both inbound channel adapters and gateway-internal consumers.
+    """
+    from langgraph_sdk import get_client
+
+    try:
+        from app.channels.service import get_channel_service
+
+        service = get_channel_service()
+        langgraph_url = (
+            getattr(getattr(service, "manager", None), "_langgraph_url", None)
+            if service is not None
+            else None
+        )
+    except Exception:
+        langgraph_url = None
+    return get_client(url=langgraph_url or "http://localhost:2024")
+
+
+@internal_router.post(
+    "/builder-dispatched",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Stage 2B kick-off — attach a stream consumer to a companion-dispatched builder run",
+)
+async def receive_builder_dispatched(signal: BuilderDispatchedSignal) -> dict[str, Any]:
+    """Spawn a fire-and-forget stream consumer for the just-created run.
+
+    No-op when ``BUILDER_LIVE_STREAM_ENABLED`` is off — start_builder_task
+    fires this every dispatch, but the gateway only starts consuming when
+    the flag is on. Errors here are swallowed: the existing webhook +
+    blocking ``check_async_task`` flow remains the user-facing fallback
+    so a missed consumer never breaks completion delivery.
+    """
+    if not is_live_stream_enabled():
+        logger.debug(
+            "builder-dispatched: live stream disabled — skipping consumer (builder_thread_id=%s)",
+            signal.builder_thread_id,
+        )
+        return {"accepted": False, "reason": "live_stream_disabled"}
+
+    lg_client = _resolve_langgraph_client()
+
+    asyncio.create_task(
+        consume_builder_stream(
+            lg_client=lg_client,
+            builder_thread_id=signal.builder_thread_id,
+            parent_thread_id=signal.parent_thread_id,
+            user_id=signal.user_id,
+            trace_id=signal.trace_id or signal.builder_thread_id[:8],
+            assistant_id=signal.assistant_id,
+            run_id=signal.run_id,
+        ),
+        name=f"builder-stream-{signal.builder_thread_id}",
+    )
+
+    logger.info(
+        "builder-dispatched: spawned stream consumer builder_thread_id=%s parent_thread_id=%s user_id=%s run_id=%s",
+        signal.builder_thread_id,
+        signal.parent_thread_id,
+        signal.user_id,
+        signal.run_id,
+    )
+    return {"accepted": True}
 
 
 def _format_sse_event(payload: dict[str, Any]) -> bytes:

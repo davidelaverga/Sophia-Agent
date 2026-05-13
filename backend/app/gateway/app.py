@@ -7,6 +7,7 @@ from fastapi import FastAPI
 
 from app.gateway.builder_events import get_fanout
 from app.gateway.builder_events.sinks import (
+    TelegramEIBotChatRelaySink,
     TelegramWorkBotChatRelaySink,
     TraceSink,
 )
@@ -88,6 +89,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # is always safe — when the flag is off, accepts() short-circuits.
     if not any(s.name == "telegram_work_chat" for s in fanout.sinks()):
         fanout.register(TelegramWorkBotChatRelaySink())
+    # Stage 2B: Telegram EI bot live chat relay (companion-dispatched
+    # builds — shows progress in the user's chat with @Sophia_EI_bot
+    # while the build runs). Same flag-gating pattern; accepts() also
+    # short-circuits when the parent thread isn't bound to the EI bot.
+    # Artifact file delivery stays with TelegramChannel._on_builder_completion
+    # (the bus path) — this sink only renders the live progress trail.
+    if not any(s.name == "telegram_ei_chat" for s in fanout.sinks()):
+        fanout.register(TelegramEIBotChatRelaySink())
     logger.info(
         "BuilderEventFanout initialised: sinks=%s",
         [s.name for s in fanout.sinks()],

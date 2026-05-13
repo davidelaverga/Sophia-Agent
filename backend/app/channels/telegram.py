@@ -631,6 +631,102 @@ class TelegramChannel(Channel):
 
         return downloaded
 
+    # -- builder live-progress relay (Stage 2B) -------------------------
+
+    async def relay_builder_event_post(
+        self,
+        *,
+        chat_id: str,
+        text: str,
+    ) -> int | None:
+        """Post a fresh live-progress placeholder message in the EI bot chat.
+
+        Called by :class:`TelegramEIBotChatRelaySink` on the FIRST event it
+        sees for a parent_thread_id. Returns the new message_id so the
+        sink can edit it on subsequent events. Returns ``None`` on
+        failure (the sink will retry on the next event).
+
+        Best-effort + loop-affine: hops to ``_tg_loop`` because the PTB
+        ``Bot`` is bound to the polling loop.
+        """
+        if not self._application or not self._tg_loop:
+            return None
+        bot = self._application.bot
+        safe_text = self._truncate_for_telegram(text, limit=_TELEGRAM_TEXT_LIMIT)
+
+        async def _send() -> int | None:
+            try:
+                sent = await bot.send_message(chat_id=int(chat_id), text=safe_text)
+                self._last_bot_message[chat_id] = sent.message_id
+                return sent.message_id
+            except Exception:
+                logger.exception(
+                    "[Telegram] relay_builder_event_post failed chat_id=%s",
+                    chat_id,
+                )
+                return None
+
+        try:
+            return await self._run_bot_call_on_telegram_loop(_send())
+        except Exception:
+            logger.exception(
+                "[Telegram] relay_builder_event_post dispatch error chat_id=%s",
+                chat_id,
+            )
+            return None
+
+    async def relay_builder_event_edit(
+        self,
+        *,
+        chat_id: str,
+        message_id: int,
+        text: str,
+    ) -> None:
+        """Edit a previously-posted live-progress placeholder in place.
+
+        Telegram's ``edit_message_text`` is idempotent on identical content
+        and raises ``BadRequest: Message is not modified`` when the text
+        matches the current message. The sink already dedups identical
+        consecutive renders; we only handle the SDK exception path so a
+        stale placeholder (deleted by the user) falls back to a fresh
+        message instead of leaving the user without an update.
+        """
+        if not self._application or not self._tg_loop:
+            return
+        bot = self._application.bot
+        safe_text = self._truncate_for_telegram(text, limit=_TELEGRAM_TEXT_LIMIT)
+
+        async def _edit() -> None:
+            try:
+                await bot.edit_message_text(
+                    chat_id=int(chat_id),
+                    message_id=message_id,
+                    text=safe_text,
+                )
+            except Exception:
+                logger.warning(
+                    "[Telegram] relay_builder_event_edit fallback chat_id=%s message_id=%s",
+                    chat_id,
+                    message_id,
+                    exc_info=True,
+                )
+                try:
+                    sent = await bot.send_message(chat_id=int(chat_id), text=safe_text)
+                    self._last_bot_message[chat_id] = sent.message_id
+                except Exception:
+                    logger.debug(
+                        "[Telegram] relay_builder_event_edit fallback send_message also failed",
+                        exc_info=True,
+                    )
+
+        try:
+            await self._run_bot_call_on_telegram_loop(_edit())
+        except Exception:
+            logger.exception(
+                "[Telegram] relay_builder_event_edit dispatch error chat_id=%s",
+                chat_id,
+            )
+
     # -- memory review handoff ------------------------------------------
 
     async def _on_review_notification(self, payload: dict[str, Any]) -> None:

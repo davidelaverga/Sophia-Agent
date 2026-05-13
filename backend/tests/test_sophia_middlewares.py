@@ -2592,7 +2592,10 @@ class TestBuilderArtifactMiddleware:
         state = {"messages": [msg]}
         result = mw.after_model(state, _make_runtime())
         assert result is not None
-        assert result["builder_result"]["confidence"] == 0.3  # fallback
+        # Plain-text fallback uses 0.2 (strictly < 0.3 phantom-success threshold)
+        # so the artifact middleware coerces this into honest-failure metadata
+        # instead of pretending the run succeeded.
+        assert result["builder_result"]["confidence"] == 0.2
 
     def test_ignores_non_builder_tool_calls(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

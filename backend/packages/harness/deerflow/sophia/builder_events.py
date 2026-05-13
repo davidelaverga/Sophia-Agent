@@ -41,6 +41,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
+_DISPATCHED_PATH = "/internal/builder-dispatched"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
 
 
@@ -565,3 +566,91 @@ def fire_completion_webhook_from_artifact(
         daemon=True,
     ).start()
     return True
+
+
+# ---------------------------------------------------------------------------
+# Stage 2B: builder-dispatched kick-off signal
+# ---------------------------------------------------------------------------
+#
+# Fired by ``start_builder_task`` immediately after ``runs.create`` returns,
+# so the gateway can attach a stream consumer (join-existing-stream mode)
+# and registered chat-relay sinks can render live progress in companion's
+# originating chat (e.g. EI bot DM) while the build runs.
+#
+# Mirrors ``_post_webhook``'s pattern: best-effort sync POST on a daemon
+# thread, short timeout, never raises. The gateway endpoint short-circuits
+# when ``BUILDER_LIVE_STREAM_ENABLED`` is off, so firing this every
+# dispatch is safe — the cost is one ~5ms in-cluster HTTP call.
+
+
+def _post_dispatched_signal(payload: dict[str, Any]) -> None:
+    """Fire the dispatched-signal POST. Daemon-thread target — never raises."""
+    if not payload.get("builder_thread_id") or not payload.get("run_id"):
+        logger.warning(
+            "Builder-dispatched signal skipped: missing builder_thread_id/run_id (payload=%s)",
+            {k: v for k, v in payload.items() if k != "user_id"},
+        )
+        return
+    url = f"{_gateway_url()}{_DISPATCHED_PATH}"
+    try:
+        with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+            response = client.post(url, json=payload)
+            if response.status_code >= 500:
+                logger.warning(
+                    "Builder-dispatched signal returned %s for builder_thread_id=%s",
+                    response.status_code,
+                    payload.get("builder_thread_id"),
+                )
+            elif response.status_code >= 400:
+                logger.warning(
+                    "Builder-dispatched signal rejected (status=%s) for builder_thread_id=%s body=%s",
+                    response.status_code,
+                    payload.get("builder_thread_id"),
+                    response.text[:200],
+                )
+    except Exception:
+        # Best-effort: a missed dispatch signal only suppresses live
+        # progress UI. The completion webhook + check_async_task flow
+        # still deliver the final artifact regardless.
+        logger.warning(
+            "Builder-dispatched signal delivery failed for builder_thread_id=%s",
+            payload.get("builder_thread_id"),
+            exc_info=True,
+        )
+
+
+def fire_builder_dispatched_signal(
+    *,
+    builder_thread_id: str,
+    parent_thread_id: str | None,
+    user_id: str,
+    run_id: str,
+    trace_id: str | None = None,
+    assistant_id: str = "sophia_builder",
+) -> None:
+    """POST the Stage 2B kick-off signal to the gateway, fire-and-forget.
+
+    No-op when ``parent_thread_id`` is None — the Builder-as-Main / Work
+    bot path already attaches its own stream consumer in the channel
+    adapter (see :class:`TelegramWorkChannel`), so this signal would
+    duplicate. Companion-dispatched runs (parent set) need the gateway-
+    side hookup because ``start_builder_task`` runs in the langgraph
+    process where the gateway's fanout is unreachable.
+    """
+    if not parent_thread_id:
+        return
+
+    payload: dict[str, Any] = {
+        "builder_thread_id": builder_thread_id,
+        "parent_thread_id": parent_thread_id,
+        "user_id": user_id,
+        "run_id": run_id,
+        "trace_id": trace_id,
+        "assistant_id": assistant_id,
+    }
+    threading.Thread(
+        target=_post_dispatched_signal,
+        args=(payload,),
+        name=f"builder-dispatched-{builder_thread_id}",
+        daemon=True,
+    ).start()

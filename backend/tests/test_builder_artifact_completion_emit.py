@@ -810,3 +810,140 @@ def test_post_webhook_skips_when_task_id_missing(caplog):
 
     assert posted == []
     assert any("missing task_id" in r.getMessage() for r in caplog.records), "Expected a warning about the missing task_id; got: " + repr([r.getMessage() for r in caplog.records])
+
+
+# ===========================================================================
+# Stage 2B: fire_builder_dispatched_signal
+# ===========================================================================
+#
+# The dispatched signal is fired by start_builder_task right after
+# runs.create. It tells the gateway to attach a stream consumer for live
+# progress in the EI bot chat. Tests pin: payload shape, parent_thread_id
+# gating, fire-and-forget thread spawn, error tolerance.
+
+
+def test_fire_builder_dispatched_signal_posts_expected_payload():
+    """Companion-dispatched (parent_thread_id set) → POSTs the kick-off
+    signal with all five required fields plus the trace_id."""
+    posted: list[tuple[str, dict]] = []
+
+    class _StubClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, url, json):
+            posted.append((url, json))
+            return SimpleNamespace(status_code=202, text="")
+
+    with patch.object(builder_events, "httpx", SimpleNamespace(Client=_StubClient)):
+        builder_events.fire_builder_dispatched_signal(
+            builder_thread_id="builder-tid-1",
+            parent_thread_id="parent-tid-1",
+            user_id="alice",
+            run_id="run-1",
+            trace_id="trace-abc",
+            assistant_id="sophia_builder",
+        )
+        # Wait for daemon thread to fire.
+        import time
+
+        for _ in range(50):
+            if posted:
+                break
+            time.sleep(0.01)
+
+    assert len(posted) == 1
+    url, body = posted[0]
+    assert url.endswith("/internal/builder-dispatched")
+    assert body == {
+        "builder_thread_id": "builder-tid-1",
+        "parent_thread_id": "parent-tid-1",
+        "user_id": "alice",
+        "run_id": "run-1",
+        "trace_id": "trace-abc",
+        "assistant_id": "sophia_builder",
+    }
+
+
+def test_fire_builder_dispatched_signal_skips_when_parent_thread_id_none():
+    """Builder-as-Main mode (parent_thread_id=None) → no signal fired.
+
+    The Work bot channel already attaches its own consumer in the
+    channel adapter; firing here would duplicate. Helper must be a no-op
+    to prevent that.
+    """
+    posted: list[tuple[str, dict]] = []
+
+    class _StubClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, url, json):
+            posted.append((url, json))
+            return SimpleNamespace(status_code=202, text="")
+
+    with patch.object(builder_events, "httpx", SimpleNamespace(Client=_StubClient)):
+        builder_events.fire_builder_dispatched_signal(
+            builder_thread_id="builder-tid-2",
+            parent_thread_id=None,  # Work bot DM path
+            user_id="alice",
+            run_id="run-2",
+        )
+        import time
+
+        time.sleep(0.05)  # Give a putative daemon thread time to fire if it were spawned.
+
+    assert posted == []
+
+
+def test_fire_builder_dispatched_signal_swallows_transport_errors(caplog):
+    """Helper is fire-and-forget — transport errors must never propagate.
+
+    Live-progress UX is a nice-to-have; the completion webhook +
+    check_async_task flow still deliver the final result regardless. A
+    failing dispatch signal must not break the user-facing task launch.
+    """
+
+    class _BrokenClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def post(self, *_args, **_kwargs):
+            raise RuntimeError("gateway unreachable")
+
+    import logging
+
+    with patch.object(builder_events, "httpx", SimpleNamespace(Client=_BrokenClient)), caplog.at_level(logging.WARNING, logger="deerflow.sophia.builder_events"):
+        # Must not raise.
+        builder_events.fire_builder_dispatched_signal(
+            builder_thread_id="builder-tid-3",
+            parent_thread_id="parent-tid-3",
+            user_id="alice",
+            run_id="run-3",
+        )
+        import time
+
+        for _ in range(50):
+            if any("Builder-dispatched signal delivery failed" in r.getMessage() for r in caplog.records):
+                break
+            time.sleep(0.01)
+
+    assert any("Builder-dispatched signal delivery failed" in r.getMessage() for r in caplog.records)

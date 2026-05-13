@@ -684,6 +684,33 @@ async def _start_builder_task_impl(
         logger.warning("[Builder] ASGI dispatch failed: %s (trace=%s)", exc, trace_id)
         return f"Failed to launch builder task: {exc}. The user can retry; no background work was started."
 
+    # Stage 2B kick-off signal: tell the gateway to attach a stream
+    # consumer for live progress in companion's chat (EI bot DM, web UI).
+    # No-op for the Builder-as-Main / Work bot path (parent_thread_id is
+    # None there — the Work bot channel attaches its own consumer).
+    # Fire-and-forget; gateway short-circuits when the flag is off.
+    try:
+        from deerflow.sophia.builder_events import fire_builder_dispatched_signal
+
+        fire_builder_dispatched_signal(
+            builder_thread_id=task_id,
+            parent_thread_id=parent_thread_id,
+            user_id=user_id,
+            run_id=run_id,
+            trace_id=trace_id,
+            assistant_id=_ASYNC_BUILDER_AGENT_NAME,
+        )
+    except Exception:
+        # Never let a missed live-progress signal block the user-facing
+        # task launch — the webhook + check_async_task flow still
+        # deliver the final result.
+        logger.warning(
+            "[Builder] dispatched-signal scheduling failed task_id=%s (trace=%s)",
+            task_id,
+            trace_id,
+            exc_info=True,
+        )
+
     now = _utcnow_iso()
     async_task: dict[str, Any] = {
         "task_id": task_id,

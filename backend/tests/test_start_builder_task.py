@@ -13,7 +13,29 @@ import importlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import pytest
 from langgraph.types import Command
+
+
+@pytest.fixture(autouse=True)
+def _stub_dispatched_signal(monkeypatch):
+    """Stub the Stage 2B dispatched-signal helper for all tests in this file.
+
+    ``_start_builder_task_impl`` now fires ``fire_builder_dispatched_signal``
+    after a successful ``runs.create``. The helper spawns a daemon thread
+    that POSTs to the gateway; in a unit test there's no gateway running,
+    so the thread logs a connection-refused traceback to stderr.
+
+    Tests that explicitly want to inspect signal firing (see
+    ``test_start_builder_task_fires_dispatched_signal_for_companion_path``
+    and the failure-tolerance variant below) override this stub via
+    their own ``monkeypatch.setattr`` calls — fixture-level patches are
+    transparently superseded by the same-target patches inside a test.
+    """
+    monkeypatch.setattr(
+        "deerflow.sophia.builder_events.fire_builder_dispatched_signal",
+        lambda **_kwargs: None,
+    )
 
 
 def _make_runtime(
@@ -124,6 +146,81 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # builder fails with "Thread ID is required" on its first turn.
     config_payload = captured["run_kwargs"]["config"]
     assert config_payload["configurable"]["thread_id"] == "asgi-1"
+
+
+def test_start_builder_task_fires_dispatched_signal_for_companion_path(monkeypatch):
+    """Stage 2B: after a successful runs.create, the wrapper must fire
+    the dispatched signal so the gateway can attach a stream consumer
+    for live progress in the EI bot chat. Companion-dispatched only —
+    parent_thread_id is set in this runtime fixture."""
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, _captured = _make_fake_sdk_client(thread_id="asgi-2", run_id="run-2")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    signal_calls: list[dict] = []
+
+    def _capture_signal(**kwargs):
+        signal_calls.append(kwargs)
+
+    # The wrapper imports the helper lazily inside the function body, so
+    # we patch it on the module where it lives.
+    monkeypatch.setattr(
+        "deerflow.sophia.builder_events.fire_builder_dispatched_signal",
+        _capture_signal,
+    )
+
+    runtime = _make_runtime({"user_id": "alice"})
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Draft a short markdown report.",
+            task_type="document",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    assert len(signal_calls) == 1
+    call = signal_calls[0]
+    assert call["builder_thread_id"] == "asgi-2"
+    assert call["parent_thread_id"] == "thread-1"  # _make_runtime default
+    assert call["user_id"] == "alice"
+    assert call["run_id"] == "run-2"
+    assert call["assistant_id"] == "sophia_builder"
+    # trace_id flows through from runtime metadata.
+    assert call["trace_id"] == "trace-1"
+
+
+def test_start_builder_task_dispatched_signal_failure_does_not_block_launch(monkeypatch, caplog):
+    """If the dispatched-signal scheduling raises, the user-facing task
+    launch must still succeed with a logged warning. Streaming UX is
+    nice-to-have; the completion webhook stays load-bearing."""
+    import logging
+
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, _captured = _make_fake_sdk_client(thread_id="asgi-3", run_id="run-3")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    def _explode(**_kwargs):
+        raise RuntimeError("synthetic scheduler crash")
+
+    monkeypatch.setattr(
+        "deerflow.sophia.builder_events.fire_builder_dispatched_signal",
+        _explode,
+    )
+
+    runtime = _make_runtime({"user_id": "alice"})
+    with caplog.at_level(logging.WARNING):
+        response = asyncio.run(
+            module.start_builder_task.coroutine(
+                description="Draft something short.",
+                task_type="document",
+                runtime=runtime,
+            )
+        )
+
+    assert isinstance(response, Command)
+    assert "asgi-3" in response.update["async_tasks"]
+    assert any("dispatched-signal scheduling failed" in r.getMessage() for r in caplog.records)
 
 
 # ---------- duplicate protection --------------------------------------------
