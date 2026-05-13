@@ -144,42 +144,71 @@ class TelegramEIBotChatRelaySink:
 
         placeholder = self._get_placeholder(parent_thread_id, event.run_id)
         if placeholder is None:
-            # First renderable event for this (parent, run) pair — post a
-            # fresh placeholder message so subsequent events can edit it
-            # in place. We only auto-create a placeholder when the event
-            # carries a run_id (stream-source). Webhook terminals without
-            # a matching prior placeholder would otherwise spawn a
-            # post-hoc bubble for a build whose progress we never showed.
-            if event.run_id is None:
-                return
-            origin = self._lookup_origin(parent_thread_id)
-            if not origin:
-                # Race: the parent_thread_id was bound when accepts() ran
-                # but is gone now. Skip; next event will re-check.
-                return
-            chat_id = str(origin.get("chat_id") or "")
-            if not chat_id:
-                return
-            try:
-                message_id = await channel.relay_builder_event_post(
-                    chat_id=chat_id,
-                    text=text[:_TELEGRAM_TEXT_LIMIT],
-                )
-            except Exception:
-                logger.warning(
-                    "telegram_ei_chat.sink post_failed parent_thread_id=%s",
-                    parent_thread_id,
-                    exc_info=True,
-                )
-                return
-            if message_id is None:
-                # post failed silently; let next event retry.
-                return
-            self._register_placeholder(parent_thread_id, event.run_id, chat_id, message_id)
-            self._last_text[(parent_thread_id, event.run_id)] = text
+            await self._post_new_placeholder(channel, event, parent_thread_id, text)
             return
 
-        # Edit the existing placeholder.
+        await self._edit_existing_placeholder(channel, event, parent_thread_id, placeholder, text, text_key)
+
+        if event.is_terminal and event.source == "webhook" and effective_run_id is not None:
+            self._clear_terminal_state(parent_thread_id, effective_run_id)
+
+    async def _post_new_placeholder(
+        self,
+        channel,
+        event: BuilderEvent,
+        parent_thread_id: str,
+        text: str,
+    ) -> None:
+        """Post a fresh placeholder for the first event of a (parent, run) pair.
+
+        Only auto-creates when the event carries a ``run_id``
+        (stream-source) — webhook terminals without a matching prior
+        placeholder would otherwise spawn a post-hoc bubble for a build
+        whose progress we never showed.
+        """
+        if event.run_id is None:
+            return
+        origin = self._lookup_origin(parent_thread_id)
+        if not origin:
+            # Race: the parent_thread_id was bound when accepts() ran
+            # but is gone now. Skip; next event will re-check.
+            return
+        chat_id = str(origin.get("chat_id") or "")
+        if not chat_id:
+            return
+        try:
+            message_id = await channel.relay_builder_event_post(
+                chat_id=chat_id,
+                text=text[:_TELEGRAM_TEXT_LIMIT],
+            )
+        except Exception:
+            logger.warning(
+                "telegram_ei_chat.sink post_failed parent_thread_id=%s",
+                parent_thread_id,
+                exc_info=True,
+            )
+            return
+        if message_id is None:
+            # post failed silently; let next event retry.
+            return
+        self._register_placeholder(parent_thread_id, event.run_id, chat_id, message_id)
+        self._last_text[(parent_thread_id, event.run_id)] = text
+
+    async def _edit_existing_placeholder(
+        self,
+        channel,
+        event: BuilderEvent,
+        parent_thread_id: str,
+        placeholder: tuple[str, int],
+        text: str,
+        text_key: tuple[str, str],
+    ) -> None:
+        """Edit the in-place placeholder; update the dedup cache first.
+
+        Updating ``self._last_text`` before the IO keeps the dedup
+        accurate even when the edit raises (the user sees the same text
+        on retry instead of double-edits).
+        """
         chat_id, message_id = placeholder
         self._last_text[text_key] = text
         try:
@@ -196,18 +225,21 @@ class TelegramEIBotChatRelaySink:
                 exc_info=True,
             )
 
-        # Clear placeholder + last_text ONLY on webhook-source terminals.
-        # Stream-source synthetic terminals are provisional — a real
-        # webhook may arrive within the fanout's TTL with the rich
-        # payload (artifact_url, summary). Mirrors the Work bot sink's
-        # source-aware dedup.
-        if event.is_terminal and event.source == "webhook" and effective_run_id is not None:
-            cleanup_key = (parent_thread_id, effective_run_id)
-            with self._placeholders_lock:
-                self._placeholders.pop(cleanup_key, None)
-                if self._latest_run_by_parent.get(parent_thread_id) == effective_run_id:
-                    self._latest_run_by_parent.pop(parent_thread_id, None)
-            self._last_text.pop(cleanup_key, None)
+    def _clear_terminal_state(self, parent_thread_id: str, effective_run_id: str) -> None:
+        """Drop placeholder + dedup entry on webhook-source terminals.
+
+        Stream-source synthetic terminals are provisional — a real
+        webhook may arrive within the fanout's TTL with the rich payload
+        (artifact_url, summary). We keep the placeholder alive in that
+        case so the webhook re-render hits the same Telegram message.
+        Mirrors the Work bot sink's source-aware dedup.
+        """
+        cleanup_key = (parent_thread_id, effective_run_id)
+        with self._placeholders_lock:
+            self._placeholders.pop(cleanup_key, None)
+            if self._latest_run_by_parent.get(parent_thread_id) == effective_run_id:
+                self._latest_run_by_parent.pop(parent_thread_id, None)
+        self._last_text.pop(cleanup_key, None)
 
     # ---- Placeholder bookkeeping ------------------------------------------
 
