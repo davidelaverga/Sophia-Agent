@@ -562,78 +562,29 @@ class TelegramWorkChannel(Channel):
         where the fanout and lg_client connection pool were initialised.
         We hop with ``asyncio.run_coroutine_threadsafe``.
 
-        Artifact bytes-download still happens here on completion — the
-        sink only edits the placeholder, it doesn't have the channel's
-        artifact download path. We achieve "artifact follows summary" by
-        subscribing to the same builder-events bus the EI bot uses for
-        terminal delivery (see ``message_bus.publish_builder_completion``)
-        — but the bus already fires on terminal webhook in the existing
-        path, so artifact delivery is unchanged by this branch.
+        Artifact delivery stays on the existing webhook-driven
+        ``MessageBus`` subscription (same path the EI bot already uses);
+        the sink only owns the placeholder edits.
         """
-        from app.gateway.builder_events import get_fanout
-        from app.gateway.builder_events.sinks import TelegramWorkBotChatRelaySink
         from app.gateway.builder_events.stream_consumer import consume_builder_stream
 
-        # Register the placeholder with the sink so it can edit live.
-        fanout = get_fanout()
-        sink: TelegramWorkBotChatRelaySink | None = None
-        for s in fanout.sinks():
-            if getattr(s, "name", "") == "telegram_work_chat":
-                sink = s  # type: ignore[assignment]
-                break
+        sink = self._resolve_chat_relay_sink()
         if sink is None:
-            logger.warning("[TelegramWork] no telegram_work_chat sink registered; falling back to runs.wait")
-            try:
-                # Route through ``_run_lg_call_on_main_loop`` so the
-                # httpx connection pool inside ``self._lg_client`` stays
-                # affine to ``self._main_loop`` — same reason the Stage
-                # 1 ``runs.wait`` path above (line ~497) and the stale-
-                # thread probe / ``threads.create`` calls all hop. This
-                # branch is degraded-mode (sink missing) but still runs
-                # on ``_tg_loop`` directly without the hop would raise
-                # ``RuntimeError: <asyncio.locks.Event ...> is bound to
-                # a different event loop`` exactly when the user needs
-                # the fallback to work.
-                result = await asyncio.wait_for(
-                    self._run_lg_call_on_main_loop(
-                        self._lg_client.runs.wait(
-                            thread_id,
-                            _DEFAULT_BUILDER_ASSISTANT_ID,
-                            input=run_input,
-                            config=run_config,
-                            context=run_context,
-                        )
-                    ),
-                    timeout=self._run_timeout_seconds,
-                )
-            except Exception:
-                logger.exception(
-                    "[TelegramWork] streaming fallback runs.wait failed thread_id=%s",
-                    thread_id,
-                )
-                await self._safe_edit(
-                    bot,
-                    chat_id,
-                    placeholder_message_id,
-                    "Hit a snag and couldn't finish. Try again?",
-                )
-                return
-            await self._render_builder_result(
+            await self._streaming_fallback_runs_wait(
                 bot=bot,
                 chat_id=chat_id,
-                placeholder_message_id=placeholder_message_id,
                 thread_id=thread_id,
-                result=result,
+                placeholder_message_id=placeholder_message_id,
+                run_input=run_input,
+                run_config=run_config,
+                run_context=run_context,
             )
             return
 
         # Create-then-join so we know run_id BEFORE registering the
         # placeholder. The sink keys its registry by (thread_id, run_id);
         # registering by thread_id alone caused cross-run placeholder
-        # corruption when a user fired a second DM while the first build
-        # was still in flight (Codex review 2026-05-13) — the second
-        # registration would overwrite the first's mapping, and the
-        # first's stream events would then edit the second placeholder.
+        # corruption (Codex review 2026-05-13).
         main_loop = self._main_loop
         if main_loop is None or not main_loop.is_running():
             logger.warning(
@@ -648,6 +599,132 @@ class TelegramWorkChannel(Channel):
             )
             return
 
+        run_id = await self._create_streaming_run(
+            bot=bot,
+            chat_id=chat_id,
+            thread_id=thread_id,
+            placeholder_message_id=placeholder_message_id,
+            run_input=run_input,
+            run_config=run_config,
+            run_context=run_context,
+        )
+        if not run_id:
+            return
+
+        sink.register_placeholder(thread_id, run_id, chat_id, placeholder_message_id)
+
+        # Schedule the consumer on the gateway loop. We don't await it —
+        # the sink drives the chat surface; the existing webhook-driven
+        # MessageBus subscription delivers the artifact document on
+        # terminal.
+        coro = consume_builder_stream(
+            lg_client=self._lg_client,
+            builder_thread_id=thread_id,
+            parent_thread_id=None,
+            user_id=sophia_user_id,
+            trace_id="",
+            assistant_id=_DEFAULT_BUILDER_ASSISTANT_ID,
+            run_id=run_id,
+            consumer_timeout_seconds=self._run_timeout_seconds,
+        )
+        asyncio.run_coroutine_threadsafe(coro, main_loop)
+        logger.info(
+            "[TelegramWork] streaming consumer spawned thread_id=%s run_id=%s chat_id=%s user_id=%s",
+            thread_id,
+            run_id,
+            chat_id,
+            sophia_user_id,
+        )
+
+    @staticmethod
+    def _resolve_chat_relay_sink():
+        """Return the registered ``TelegramWorkBotChatRelaySink`` or None.
+
+        Extracted so ``_dispatch_streaming`` stays under sentrux's
+        cyclomatic-complexity threshold (CC ≥ 16 fails the gate).
+        """
+        from app.gateway.builder_events import get_fanout
+
+        fanout = get_fanout()
+        for s in fanout.sinks():
+            if getattr(s, "name", "") == "telegram_work_chat":
+                return s
+        return None
+
+    async def _streaming_fallback_runs_wait(
+        self,
+        *,
+        bot,
+        chat_id: str,
+        thread_id: str,
+        placeholder_message_id: int,
+        run_input: dict[str, Any],
+        run_config: dict[str, Any],
+        run_context: dict[str, Any],
+    ) -> None:
+        """Degraded-mode path when no chat-relay sink is registered.
+
+        Falls back to a blocking ``runs.wait`` so the user still gets a
+        completion edit. Routed through ``_run_lg_call_on_main_loop`` so
+        the httpx connection pool inside ``self._lg_client`` stays
+        affine to ``self._main_loop`` (same reason the stale-thread
+        probe + ``threads.create`` calls hop). Without the hop, the
+        runtime raises ``RuntimeError: <asyncio.locks.Event ...> is
+        bound to a different event loop`` exactly when the user needs
+        the fallback to work.
+        """
+        logger.warning("[TelegramWork] no telegram_work_chat sink registered; falling back to runs.wait")
+        try:
+            result = await asyncio.wait_for(
+                self._run_lg_call_on_main_loop(
+                    self._lg_client.runs.wait(
+                        thread_id,
+                        _DEFAULT_BUILDER_ASSISTANT_ID,
+                        input=run_input,
+                        config=run_config,
+                        context=run_context,
+                    )
+                ),
+                timeout=self._run_timeout_seconds,
+            )
+        except Exception:
+            logger.exception(
+                "[TelegramWork] streaming fallback runs.wait failed thread_id=%s",
+                thread_id,
+            )
+            await self._safe_edit(
+                bot,
+                chat_id,
+                placeholder_message_id,
+                "Hit a snag and couldn't finish. Try again?",
+            )
+            return
+        await self._render_builder_result(
+            bot=bot,
+            chat_id=chat_id,
+            placeholder_message_id=placeholder_message_id,
+            thread_id=thread_id,
+            result=result,
+        )
+
+    async def _create_streaming_run(
+        self,
+        *,
+        bot,
+        chat_id: str,
+        thread_id: str,
+        placeholder_message_id: int,
+        run_input: dict[str, Any],
+        run_config: dict[str, Any],
+        run_context: dict[str, Any],
+    ) -> str | None:
+        """Call ``runs.create`` and return the run_id, or None on failure.
+
+        Edits the placeholder with a "couldn't start" message on any
+        failure so the user gets immediate feedback instead of staring
+        at a stuck placeholder. Returning None signals the caller to
+        abort the dispatch without spawning a consumer.
+        """
         try:
             run = await self._run_lg_call_on_main_loop(
                 self._lg_client.runs.create(
@@ -669,7 +746,7 @@ class TelegramWorkChannel(Channel):
                 placeholder_message_id,
                 "Couldn't start the build pipeline. Try again?",
             )
-            return
+            return None
 
         run_id_value: Any = run.get("run_id") if isinstance(run, dict) else None
         run_id = str(run_id_value) if run_id_value else ""
@@ -685,32 +762,8 @@ class TelegramWorkChannel(Channel):
                 placeholder_message_id,
                 "Couldn't start the build pipeline. Try again?",
             )
-            return
-
-        sink.register_placeholder(thread_id, run_id, chat_id, placeholder_message_id)
-
-        # Schedule the consumer on the gateway loop. We don't await it —
-        # the sink drives the chat surface; the existing webhook-driven
-        # MessageBus subscription delivers the artifact document on
-        # terminal (same path the EI bot already uses).
-        coro = consume_builder_stream(
-            lg_client=self._lg_client,
-            builder_thread_id=thread_id,
-            parent_thread_id=None,
-            user_id=sophia_user_id,
-            trace_id="",
-            assistant_id=_DEFAULT_BUILDER_ASSISTANT_ID,
-            run_id=run_id,
-            consumer_timeout_seconds=self._run_timeout_seconds,
-        )
-        asyncio.run_coroutine_threadsafe(coro, main_loop)
-        logger.info(
-            "[TelegramWork] streaming consumer spawned thread_id=%s run_id=%s chat_id=%s user_id=%s",
-            thread_id,
-            run_id,
-            chat_id,
-            sophia_user_id,
-        )
+            return None
+        return run_id
 
     async def _ensure_thread_is_live(
         self,
