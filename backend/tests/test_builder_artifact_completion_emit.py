@@ -30,6 +30,7 @@ def _make_runtime(
     parent_thread_id: str | None = "thread-companion-1",
     user_id: str = "alice",
     trace_id: str = "trace-1",
+    builder_run_id: str | None = "run-1",
     builder_thread_id_in_context: bool = True,
     builder_thread_id_in_execution_info: bool = True,
     include_execution_info: bool = True,
@@ -66,7 +67,7 @@ def _make_runtime(
 
     if include_execution_info:
         ei_thread_id = builder_thread_id if builder_thread_id_in_execution_info else None
-        execution_info = SimpleNamespace(thread_id=ei_thread_id)
+        execution_info = SimpleNamespace(thread_id=ei_thread_id, run_id=builder_run_id)
 
     runtime = SimpleNamespace(
         context=context,
@@ -164,6 +165,38 @@ def test_build_completion_payload_from_artifact_success_shape():
     assert payload["user_id"] == "alice"
     assert payload["source"] == "builder_artifact_middleware"
     assert payload["trace_id"] == "trace-1"
+    # Codex review 2026-05-13: run_id is now included so the gateway
+    # fanout can dedup terminals per (thread_id, run_id) — back-to-back
+    # runs on a reused thread mustn't suppress each other.
+    assert payload["run_id"] == "run-1"
+
+
+def test_payload_run_id_resolves_from_execution_info_first():
+    """``_resolve_runtime_run_id`` mirrors the thread_id resolver's
+    priority: execution_info > context > configurable. Pin
+    execution_info as the canonical source so a future langgraph
+    upgrade that drops the configurable forwarding doesn't break the
+    fanout's per-run dedup."""
+    runtime = _make_runtime(builder_run_id="run-from-execution-info")
+    state = _make_state()
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+    assert payload["run_id"] == "run-from-execution-info"
+
+
+def test_payload_run_id_is_none_when_runtime_omits_it():
+    """Legacy / mock runtimes without execution_info.run_id fall back
+    to ``None``. The fanout's (thread_id, None) key then behaves
+    exactly like the prior thread-only scheme — backwards-compatible."""
+    runtime = _make_runtime(builder_run_id=None)
+    state = _make_state()
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+    assert payload["run_id"] is None
 
 
 def test_phantom_success_coerces_to_error():

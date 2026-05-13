@@ -340,6 +340,42 @@ def _resolve_runtime_thread_id(runtime: Any) -> str | None:
     return None
 
 
+def _resolve_runtime_run_id(runtime: Any) -> str | None:
+    """Find the current LangGraph run id on a ``runtime``.
+
+    Mirrors ``_resolve_runtime_thread_id``'s resolution order. The run
+    id is included in the webhook payload so the gateway's fanout can
+    key terminal dedup by ``(thread_id, run_id)`` instead of
+    ``thread_id`` alone — protecting back-to-back runs on a reused
+    thread (e.g. consecutive @Sophia_Work_bot DMs) from suppressing
+    each other's terminal events. Codex review 2026-05-13.
+
+    Returns ``None`` when the runtime doesn't carry the field — the
+    fanout falls back to thread-id-only keying for legacy payloads.
+    """
+    if runtime is None:
+        return None
+
+    info = getattr(runtime, "execution_info", None)
+    if info is not None:
+        candidate = getattr(info, "run_id", None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    ctx = getattr(runtime, "context", None) or {}
+    if isinstance(ctx, dict):
+        candidate = ctx.get("run_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+
+    raw_config = getattr(runtime, "config", None)
+    cfg = (raw_config or {}).get("configurable") or {} if isinstance(raw_config, dict) else {}
+    candidate = cfg.get("run_id")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate
+    return None
+
+
 # --- Native deepagents-dispatch path -----------------------------------------
 #
 # Post Phase-1 migration the builder runs as a native LangGraph subagent
@@ -409,8 +445,11 @@ def build_completion_payload_from_artifact(
     delegation_dict = delegation if isinstance(delegation, dict) else {}
 
     # Read the builder's own thread_id via the canonical execution_info-first
-    # pattern (see ``_resolve_runtime_thread_id``).
+    # pattern (see ``_resolve_runtime_thread_id``). Run_id is resolved the
+    # same way and included in the payload so the gateway's fanout can dedup
+    # terminals per-run instead of per-thread (Codex review 2026-05-13).
     builder_thread_id = _resolve_runtime_thread_id(runtime)
+    builder_run_id = _resolve_runtime_run_id(runtime)
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
     parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
@@ -469,6 +508,10 @@ def build_completion_payload_from_artifact(
         # ``task_id`` is the builder's own thread (also the task_id stored in
         # companion ``state["async_tasks"]``).
         "task_id": builder_thread_id,
+        # ``run_id`` lets the gateway fanout dedup per-run instead of
+        # per-thread; Stage 2B back-to-back runs on the same thread would
+        # otherwise suppress each other's terminals (Codex review 2026-05-13).
+        "run_id": builder_run_id,
         "trace_id": trace_id,
         "agent_name": "sophia_builder",
         "status": mapped_status,
