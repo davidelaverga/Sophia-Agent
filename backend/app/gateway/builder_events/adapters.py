@@ -86,6 +86,10 @@ def webhook_payload_to_event(payload: dict[str, Any]) -> BuilderEvent:
             "webhook_source": payload.get("source"),
         },
         source="webhook",
+        # ``run_id`` may or may not be on the payload — the existing wire
+        # contract didn't carry it. Tolerate either shape. When absent the
+        # sink falls back to most-recent-placeholder-for-thread lookup.
+        run_id=payload.get("run_id") or None,
     )
 
 
@@ -115,6 +119,7 @@ def stream_part_to_events(
     user_id: str,
     trace_id: str,
     adapter_state: StreamAdapterState,
+    run_id: str | None = None,
 ) -> list[BuilderEvent]:
     """Convert one langgraph_sdk ``StreamPart`` into zero+ BuilderEvents.
 
@@ -122,6 +127,13 @@ def stream_part_to_events(
     a bare ``(event, data)`` tuple. Unknown event types return ``[]`` —
     they're not errors, just modes we don't surface (e.g. ``metadata``,
     ``end``, ``updates``).
+
+    ``run_id`` is propagated into every emitted ``BuilderEvent``. Sinks
+    use it to disambiguate placeholders when two builds run back-to-back
+    on the same thread (Codex review 2026-05-13). The consumer knows its
+    run_id from the join-mode arg or — in create-and-stream mode — by
+    extracting it from the SDK's metadata events on the way through. We
+    only forward it; the consumer owns the discovery.
     """
     if not isinstance(part, tuple) or len(part) < 2:
         return []
@@ -136,13 +148,13 @@ def stream_part_to_events(
     base_event = event_name.split("/", 1)[0]
 
     if base_event == "values":
-        return _from_values_snapshot(data, thread_id, parent_thread_id, user_id, trace_id, adapter_state)
+        return _from_values_snapshot(data, thread_id, parent_thread_id, user_id, trace_id, adapter_state, run_id)
 
     if base_event == "messages":
-        return _from_message_chunk(data, thread_id, parent_thread_id, user_id, trace_id, adapter_state)
+        return _from_message_chunk(data, thread_id, parent_thread_id, user_id, trace_id, adapter_state, run_id)
 
     if base_event == "custom":
-        return _from_custom(data, thread_id, parent_thread_id, user_id, trace_id)
+        return _from_custom(data, thread_id, parent_thread_id, user_id, trace_id, run_id)
 
     return []
 
@@ -154,6 +166,7 @@ def _from_values_snapshot(
     user_id: str,
     trace_id: str,
     state: StreamAdapterState,
+    run_id: str | None = None,
 ) -> list[BuilderEvent]:
     """Extract tool_started / tool_completed / todo_updated from a values
     state snapshot."""
@@ -171,6 +184,7 @@ def _from_values_snapshot(
                 user_id,
                 trace_id,
                 state,
+                run_id,
             )
         )
 
@@ -185,6 +199,7 @@ def _from_values_snapshot(
                 trace_id=trace_id,
                 event_type="todo_updated",
                 payload={"todos": todos[:20]},  # cap at 20 entries
+                run_id=run_id,
             )
         )
 
@@ -198,6 +213,7 @@ def _diff_tool_events(
     user_id: str,
     trace_id: str,
     state: StreamAdapterState,
+    run_id: str | None = None,
 ) -> list[BuilderEvent]:
     events: list[BuilderEvent] = []
 
@@ -224,6 +240,7 @@ def _diff_tool_events(
                             "tool_call_id": tc_id,
                             "args_preview": _truncate(_to_text(args), _TOOL_RESULT_PREVIEW_CHARS),
                         },
+                        run_id=run_id,
                     )
                 )
 
@@ -248,6 +265,7 @@ def _diff_tool_events(
                         "success": status != "error",
                         "summary": _truncate(_to_text(content), _TOOL_RESULT_PREVIEW_CHARS),
                     },
+                    run_id=run_id,
                 )
             )
 
@@ -261,6 +279,7 @@ def _from_message_chunk(
     user_id: str,
     trace_id: str,
     state: StreamAdapterState,
+    run_id: str | None = None,
 ) -> list[BuilderEvent]:
     """Translate ``messages/partial`` payloads to ``ai_message_chunk``.
 
@@ -294,6 +313,7 @@ def _from_message_chunk(
                     "chunk_index": idx,
                     "text_delta": _truncate(text, _AI_CHUNK_TEXT_LIMIT),
                 },
+                run_id=run_id,
             )
         )
     return events
@@ -305,6 +325,7 @@ def _from_custom(
     parent_thread_id: str | None,
     user_id: str,
     trace_id: str,
+    run_id: str | None = None,
 ) -> list[BuilderEvent]:
     """Custom stream events from graph code calling ``StreamWriter``.
 
@@ -330,6 +351,7 @@ def _from_custom(
                 "phase_index": data.get("index"),
                 "phase_total": data.get("total"),
             },
+            run_id=run_id,
         )
     ]
 

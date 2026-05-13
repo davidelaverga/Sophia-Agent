@@ -62,6 +62,7 @@ def _evt(
     parent_thread_id: str | None = "parent-tid-1",
     payload: dict[str, Any] | None = None,
     source: str = "stream",
+    run_id: str | None = "run-1",
 ) -> BuilderEvent:
     return BuilderEvent(
         thread_id=thread_id,
@@ -71,6 +72,7 @@ def _evt(
         event_type=event_type,  # type: ignore[arg-type]
         payload=payload or {},
         source=source,  # type: ignore[arg-type]
+        run_id=run_id,
     )
 
 
@@ -256,3 +258,78 @@ class TestRendering:
         sink, _, _ = _make_sink(flag=True, origin={"thread_id": "p", "chat_id": "1", "channel_name": "telegram"})
         text = sink._render_text(_evt(event_type="failed", payload={"error_message": "Boom."}))
         assert "Boom." in text
+
+
+# ---------------------------------------------------------------------------
+# run_id keying — concurrency regression (Codex review 2026-05-13)
+# ---------------------------------------------------------------------------
+
+
+class TestRunIdKeying:
+    @pytest.mark.anyio
+    async def test_concurrent_runs_on_same_parent_do_not_clobber_placeholders(self) -> None:
+        """Companion duplicate-launch protection should prevent this case
+        in normal flow, but rapid retry-button presses can still trigger
+        it. Each run's events must route to its own placeholder."""
+        channel = _FakeChannel()
+        sink, _, _ = _make_sink(
+            flag=True,
+            origin={"thread_id": "parent-shared", "chat_id": "111", "channel_name": "telegram"},
+            channel=channel,
+        )
+
+        # Run A's first event lands → sink auto-posts placeholder #1.
+        channel.relay_builder_event_post.return_value = 1001
+        await sink.handle(
+            _evt(
+                event_type="tool_started",
+                parent_thread_id="parent-shared",
+                payload={"tool_name": "bash"},
+                run_id="run-A",
+            )
+        )
+        # Run B's first event lands → auto-posts placeholder #2 (different message_id).
+        channel.relay_builder_event_post.return_value = 2002
+        await sink.handle(
+            _evt(
+                event_type="tool_started",
+                parent_thread_id="parent-shared",
+                payload={"tool_name": "builder_web_search"},
+                run_id="run-B",
+            )
+        )
+
+        # Two distinct placeholders were posted.
+        assert channel.relay_builder_event_post.await_count == 2
+
+        # Subsequent run-A event edits #1, not #2.
+        await sink.handle(
+            _evt(
+                event_type="phase",
+                parent_thread_id="parent-shared",
+                payload={"phase_name": "Drafting"},
+                run_id="run-A",
+            )
+        )
+        edit_kwargs = channel.relay_builder_event_edit.await_args.kwargs
+        assert edit_kwargs["message_id"] == 1001
+
+    def test_webhook_without_run_id_falls_back_to_most_recent(self) -> None:
+        """Webhooks may arrive without run_id; sink falls back to the
+        most-recent placeholder for the parent so terminal delivery
+        works in the single-run case."""
+        sink, _, _ = _make_sink(
+            flag=True,
+            origin={"thread_id": "parent-1", "chat_id": "111", "channel_name": "telegram"},
+        )
+        # Manually register a placeholder (simulating an auto-post from a prior event).
+        sink._register_placeholder("parent-1", "run-X", "111", 555)
+        # Webhook lookup (run_id=None) → most-recent fallback hit.
+        assert sink._get_placeholder("parent-1", run_id=None) == ("111", 555)
+        # Exact run_id match → hit.
+        assert sink._get_placeholder("parent-1", run_id="run-X") == ("111", 555)
+        # Explicit miss → None (NO fallback when run_id is provided; otherwise
+        # a new run would inherit a previous run's bubble).
+        assert sink._get_placeholder("parent-1", run_id="run-unknown") is None
+        # Unbound parent → None either way.
+        assert sink._get_placeholder("parent-other") is None

@@ -627,12 +627,13 @@ class TelegramWorkChannel(Channel):
             )
             return
 
-        sink.register_placeholder(thread_id, chat_id, placeholder_message_id)
-
-        # Schedule the consumer on the gateway loop. We don't await it —
-        # the sink drives the chat surface; the existing webhook-driven
-        # MessageBus subscription delivers the artifact document on
-        # terminal (same path the EI bot already uses).
+        # Create-then-join so we know run_id BEFORE registering the
+        # placeholder. The sink keys its registry by (thread_id, run_id);
+        # registering by thread_id alone caused cross-run placeholder
+        # corruption when a user fired a second DM while the first build
+        # was still in flight (Codex review 2026-05-13) — the second
+        # registration would overwrite the first's mapping, and the
+        # first's stream events would then edit the second placeholder.
         main_loop = self._main_loop
         if main_loop is None or not main_loop.is_running():
             logger.warning(
@@ -647,6 +648,51 @@ class TelegramWorkChannel(Channel):
             )
             return
 
+        try:
+            run = await self._run_lg_call_on_main_loop(
+                self._lg_client.runs.create(
+                    thread_id,
+                    _DEFAULT_BUILDER_ASSISTANT_ID,
+                    input=run_input,
+                    config=run_config,
+                    context=run_context,
+                )
+            )
+        except Exception:
+            logger.exception(
+                "[TelegramWork] runs.create failed for streaming dispatch thread_id=%s",
+                thread_id,
+            )
+            await self._safe_edit(
+                bot,
+                chat_id,
+                placeholder_message_id,
+                "Couldn't start the build pipeline. Try again?",
+            )
+            return
+
+        run_id_value: Any = run.get("run_id") if isinstance(run, dict) else None
+        run_id = str(run_id_value) if run_id_value else ""
+        if not run_id:
+            logger.warning(
+                "[TelegramWork] runs.create returned no run_id thread_id=%s run=%r",
+                thread_id,
+                run,
+            )
+            await self._safe_edit(
+                bot,
+                chat_id,
+                placeholder_message_id,
+                "Couldn't start the build pipeline. Try again?",
+            )
+            return
+
+        sink.register_placeholder(thread_id, run_id, chat_id, placeholder_message_id)
+
+        # Schedule the consumer on the gateway loop. We don't await it —
+        # the sink drives the chat surface; the existing webhook-driven
+        # MessageBus subscription delivers the artifact document on
+        # terminal (same path the EI bot already uses).
         coro = consume_builder_stream(
             lg_client=self._lg_client,
             builder_thread_id=thread_id,
@@ -654,15 +700,14 @@ class TelegramWorkChannel(Channel):
             user_id=sophia_user_id,
             trace_id="",
             assistant_id=_DEFAULT_BUILDER_ASSISTANT_ID,
-            run_input=run_input,
-            run_config=run_config,
-            run_context=run_context,
+            run_id=run_id,
             consumer_timeout_seconds=self._run_timeout_seconds,
         )
         asyncio.run_coroutine_threadsafe(coro, main_loop)
         logger.info(
-            "[TelegramWork] streaming consumer spawned thread_id=%s chat_id=%s user_id=%s",
+            "[TelegramWork] streaming consumer spawned thread_id=%s run_id=%s chat_id=%s user_id=%s",
             thread_id,
+            run_id,
             chat_id,
             sophia_user_id,
         )

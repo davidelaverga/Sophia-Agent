@@ -52,6 +52,13 @@ class BuilderEvent:
     sequence: int = 0
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
     source: Literal["stream", "webhook"] = "stream"
+    # The langgraph run instance this event belongs to. Sinks key
+    # placeholders by ``(thread_id, run_id)`` so concurrent or back-to-back
+    # builds on the SAME thread don't clobber each other's chat surface
+    # (Codex review 2026-05-13). ``None`` is tolerated for webhook-source
+    # terminals (the existing wire shape doesn't carry run_id); sinks fall
+    # back to the most-recent placeholder for the thread in that case.
+    run_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -64,6 +71,7 @@ class BuilderEvent:
             "sequence": self.sequence,
             "timestamp": self.timestamp.isoformat(),
             "source": self.source,
+            "run_id": self.run_id,
         }
 
     @property

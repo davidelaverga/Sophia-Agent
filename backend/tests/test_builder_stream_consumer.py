@@ -419,7 +419,12 @@ async def test_join_stream_branch_when_run_input_is_none() -> None:
     assert len(join.calls) == 1
     args, kwargs = join.calls[0]
     assert args == ("tid-join", "run-xyz")
-    assert kwargs["stream_mode"] == ["values", "messages", "custom"]
+    # Codex review 2026-05-13: ``messages`` was dropped from the stream
+    # modes — no sink rendered ai_message_chunk events, and ``messages-tuple``
+    # (used by production manager.py) delivers a different shape than the
+    # legacy adapter expects. Until a sink wants AI text, we ship only
+    # the modes that drive existing surfaces.
+    assert kwargs["stream_mode"] == ["values", "custom"]
 
     # The stream's events flowed through fanout.
     types = [e.event_type for e in sink.calls]

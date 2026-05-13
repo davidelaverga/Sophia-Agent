@@ -61,6 +61,7 @@ def _evt(
     parent_thread_id: str | None = None,
     payload: dict[str, Any] | None = None,
     source: str = "stream",
+    run_id: str | None = "run-1",
 ) -> BuilderEvent:
     return BuilderEvent(
         thread_id=thread_id,
@@ -70,6 +71,7 @@ def _evt(
         event_type=event_type,  # type: ignore[arg-type]
         payload=payload or {},
         source=source,  # type: ignore[arg-type]
+        run_id=run_id,
     )
 
 
@@ -126,7 +128,7 @@ async def test_handle_started_does_not_edit_placeholder() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(_evt(event_type="started"))
 
@@ -144,7 +146,7 @@ async def test_handle_renders_tool_started_phase_label() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(_evt(event_type="tool_started", payload={"tool_name": "builder_web_search"}))
     channel.relay_builder_event_edit.assert_awaited_once()
@@ -162,7 +164,7 @@ async def test_handle_dedups_repeated_text() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     payload = {"tool_name": "bash"}
     await sink.handle(_evt(event_type="tool_started", payload=payload))
@@ -178,7 +180,7 @@ async def test_handle_renders_completed_summary_and_clears_placeholder() -> None
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(
         _evt(
@@ -202,7 +204,7 @@ async def test_handle_renders_failed_with_error_message() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(_evt(event_type="failed", payload={"error_message": "boom"}))
     channel.relay_builder_event_edit.assert_awaited_once()
@@ -220,7 +222,7 @@ async def test_handle_delivers_artifact_on_completed_with_filename() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(
         _evt(
@@ -251,12 +253,12 @@ async def test_handle_skips_artifact_when_no_filename() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(_evt(event_type="failed", payload={"error_message": "boom"}))
     channel.relay_artifact_document.assert_not_called()
 
-    sink.register_placeholder("tid-1", "12345", 99)  # re-register after clear
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)  # re-register after clear
     await sink.handle(_evt(event_type="completed", payload={"companion_summary": "Done."}))
     channel.relay_artifact_document.assert_not_called()
 
@@ -272,7 +274,7 @@ async def test_handle_artifact_failure_does_not_block_placeholder_cleanup() -> N
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     await sink.handle(
         _evt(
@@ -300,7 +302,7 @@ async def test_stream_terminal_keeps_placeholder_for_late_webhook() -> None:
         origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
         channel=channel,
     )
-    sink.register_placeholder("tid-1", "12345", 99)
+    sink.register_placeholder("tid-1", "run-1", "12345", 99)
 
     # Provisional synthetic from the stream consumer's grace fallback.
     await sink.handle(
@@ -338,3 +340,87 @@ async def test_stream_terminal_keeps_placeholder_for_late_webhook() -> None:
     assert artifact_kwargs["filename"] == "report.pptx"
     # Webhook clears the placeholder.
     assert sink.get_placeholder("tid-1") is None
+
+
+@pytest.mark.anyio
+async def test_concurrent_runs_on_same_thread_do_not_clobber_placeholders() -> None:
+    """Codex review 2026-05-13: with the previous ``register_placeholder(
+    thread_id, chat_id, message_id)`` signature, a user firing a rapid
+    second DM before the first build finished would overwrite the first
+    build's placeholder mapping. Run A's in-flight events would then
+    edit run B's message and vice versa.
+
+    With (thread_id, run_id) keying, each run's events route to its own
+    placeholder regardless of arrival order."""
+    channel = _FakeChannel()
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-shared", "channel_name": "telegram_work"},
+        channel=channel,
+    )
+
+    # User sends DM #1 → placeholder #1 posted, run-A registered.
+    sink.register_placeholder("tid-shared", "run-A", "12345", 100)
+    # User sends DM #2 before #1 finishes → placeholder #2 posted, run-B
+    # registered. WITH the bug, this would overwrite run-A's mapping.
+    sink.register_placeholder("tid-shared", "run-B", "12345", 200)
+
+    # Run A's stream emits a tool_started event with run_id="run-A".
+    await sink.handle(
+        _evt(
+            event_type="tool_started",
+            thread_id="tid-shared",
+            payload={"tool_name": "bash"},
+            run_id="run-A",
+        )
+    )
+    # Run B's stream emits its own tool_started with run_id="run-B".
+    await sink.handle(
+        _evt(
+            event_type="tool_started",
+            thread_id="tid-shared",
+            payload={"tool_name": "builder_web_search"},
+            run_id="run-B",
+        )
+    )
+
+    # Each edit routed to the correct message_id — no cross-render.
+    edit_calls = channel.relay_builder_event_edit.await_args_list
+    assert len(edit_calls) == 2
+    routed_msgs = {(c.kwargs["chat_id"], c.kwargs["message_id"]) for c in edit_calls}
+    assert routed_msgs == {("12345", 100), ("12345", 200)}
+
+    # A run's completion only clears ITS placeholder; the other survives.
+    await sink.handle(
+        _evt(
+            event_type="completed",
+            thread_id="tid-shared",
+            payload={"companion_summary": "A done."},
+            source="webhook",
+            run_id="run-A",
+        )
+    )
+    assert sink.get_placeholder("tid-shared", run_id="run-A") is None
+    assert sink.get_placeholder("tid-shared", run_id="run-B") == ("12345", 200)
+
+
+def test_webhook_without_run_id_falls_back_to_most_recent_placeholder() -> None:
+    """The existing webhook wire shape doesn't carry run_id; the sink
+    must fall back to the most-recent placeholder for the thread so
+    terminal delivery still works in the single-run case (the only case
+    this code path is exercised in production today)."""
+    sink, _ = _make_sink(
+        flag=True,
+        origin={"thread_id": "tid-1", "channel_name": "telegram_work"},
+    )
+    sink.register_placeholder("tid-1", "run-X", "12345", 77)
+
+    # Webhook lookup (run_id=None) → most-recent fallback.
+    assert sink.get_placeholder("tid-1", run_id=None) == ("12345", 77)
+    # Exact run_id match → hit.
+    assert sink.get_placeholder("tid-1", run_id="run-X") == ("12345", 77)
+    # Explicit miss → None. NO fallback when run_id is provided — that
+    # protects new runs from inheriting a stale predecessor's bubble.
+    assert sink.get_placeholder("tid-1", run_id="run-unknown") is None
+    # Lookup on an unbound thread returns None.
+    assert sink.get_placeholder("tid-other") is None

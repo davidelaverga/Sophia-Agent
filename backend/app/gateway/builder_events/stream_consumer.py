@@ -105,6 +105,7 @@ async def consume_builder_stream(
             parent_thread_id=parent_thread_id,
             user_id=user_id,
             trace_id=trace_id,
+            run_id=run_id,
             event_type="failed",
             payload={
                 "error_message": "Stream consumer misconfigured (need exactly one of run_input or run_id)",
@@ -140,6 +141,7 @@ async def consume_builder_stream(
             trace_id=trace_id,
             event_type="started",
             payload={"task_brief": _extract_task_brief(run_input)},
+            run_id=run_id,
         )
     )
 
@@ -176,6 +178,7 @@ async def consume_builder_stream(
             parent_thread_id=parent_thread_id,
             user_id=user_id,
             trace_id=trace_id,
+            run_id=run_id,
             event_type="timed_out",
             payload={"timeout_seconds": consumer_timeout_seconds},
         )
@@ -203,6 +206,7 @@ async def consume_builder_stream(
             parent_thread_id=parent_thread_id,
             user_id=user_id,
             trace_id=trace_id,
+            run_id=run_id,
             event_type="failed",
             payload={
                 "error_message": f"Stream consumer error: {type(exc).__name__}",
@@ -233,6 +237,7 @@ async def consume_builder_stream(
         parent_thread_id=parent_thread_id,
         user_id=user_id,
         trace_id=trace_id,
+        run_id=run_id,
         event_type="completed",
         payload={
             "companion_summary": "Build finished, but the result wasn't returned in time.",
@@ -274,7 +279,19 @@ async def _run_stream_loop(
     exactly one is set and has published the ``started`` event so the
     fanout's per-thread state is reset before any SDK call runs.
     """
-    stream_modes = ["values", "messages", "custom"]
+    # ``values`` powers the tool_started / tool_completed / todo_updated
+    # adapters that drive the chat-relay sinks; ``custom`` is forward-
+    # compat for ``ProgressEmitter`` phase events. We deliberately omit
+    # ``messages`` (legacy AI-text shape) and ``messages-tuple`` (the
+    # spec's token-tuple shape used by production manager.py): no sink
+    # currently renders ``ai_message_chunk`` events, and the two modes
+    # deliver incompatible payloads so picking either one bakes in a
+    # contract decision that should land with the first AI-text-rendering
+    # sink instead. Codex review 2026-05-13 flagged the prior
+    # ``["values", "messages", "custom"]`` value for divergence from
+    # production; dropping the mode entirely sidesteps the dispute
+    # without breaking the rest of the pipeline.
+    stream_modes = ["values", "custom"]
 
     if run_input is not None:
         stream_kwargs: dict[str, Any] = {"stream_mode": stream_modes}
@@ -302,6 +319,7 @@ async def _run_stream_loop(
             user_id=user_id,
             trace_id=trace_id,
             adapter_state=state,
+            run_id=run_id,
         ):
             await fanout.publish(event)
 
@@ -315,6 +333,7 @@ async def _publish_synthetic_terminal(
     trace_id: str,
     event_type: str,
     payload: dict[str, Any],
+    run_id: str | None = None,
 ) -> None:
     await fanout.publish(
         BuilderEvent(
@@ -325,6 +344,7 @@ async def _publish_synthetic_terminal(
             event_type=event_type,  # type: ignore[arg-type]
             payload=payload,
             source="stream",
+            run_id=run_id,
         )
     )
 
