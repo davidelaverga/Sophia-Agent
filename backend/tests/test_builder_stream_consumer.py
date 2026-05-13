@@ -190,6 +190,71 @@ async def test_timeout_publishes_timed_out() -> None:
 
 
 @pytest.mark.anyio
+async def test_timeout_yields_to_webhook_if_it_arrives_during_grace() -> None:
+    """Production observation 2026-05-13: the 30-min consumer timeout
+    fired ~25s BEFORE the real status=failed webhook landed (build
+    finished right at the wall-clock cap). Without a grace window the
+    sink rendered the synthetic ``timed_out`` text, then re-rendered
+    the webhook's failure summary — a double-flicker UX. Fix: the
+    timeout path now awaits the webhook for ``webhook_grace_seconds``
+    before synthesising, matching the natural-end / exception paths."""
+
+    class _StallingStream:
+        def __call__(self, *_a, **_k):
+            async def gen():
+                await asyncio.sleep(10)
+                yield ("end", None)
+
+            return gen()
+
+    fanout = BuilderEventFanout()
+    sink = _RecordingSink()
+    fanout.register(sink)
+
+    client = type("C", (), {"runs": type("R", (), {"stream": _StallingStream()})()})()
+
+    # Fire the canonical webhook 50ms after the consumer's 30ms timeout —
+    # well within the 0.2s webhook_grace_seconds. The synthetic
+    # ``timed_out`` must NOT be published; the webhook event must reach
+    # the sink instead.
+    async def _fire_webhook() -> None:
+        await asyncio.sleep(0.08)
+        await fanout.publish(
+            BuilderEvent(
+                thread_id="tid-timeout-grace",
+                parent_thread_id=None,
+                user_id="u1",
+                trace_id="trace-1",
+                event_type="failed",
+                payload={"error_message": "real webhook"},
+                source="webhook",
+            )
+        )
+
+    webhook_task = asyncio.create_task(_fire_webhook())
+    await consume_builder_stream(
+        lg_client=client,
+        builder_thread_id="tid-timeout-grace",
+        parent_thread_id=None,
+        user_id="u1",
+        trace_id="trace-1",
+        run_input={"messages": [{"role": "user", "content": "x"}]},
+        fanout=fanout,
+        webhook_grace_seconds=0.2,
+        consumer_timeout_seconds=0.03,
+    )
+    await webhook_task
+
+    # Only ONE terminal — the webhook's failed event. No synthetic
+    # timed_out flicker.
+    terminal = [e for e in sink.calls if e.is_terminal]
+    assert len(terminal) == 1
+    assert terminal[0].event_type == "failed"
+    assert terminal[0].source == "webhook"
+    assert terminal[0].payload["error_message"] == "real webhook"
+
+
+@pytest.mark.anyio
 async def test_stream_exception_publishes_synthetic_failed() -> None:
     """If runs.stream raises before the webhook fires, the consumer
     must publish a synthetic ``failed`` so the placeholder isn't stuck."""

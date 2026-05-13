@@ -232,6 +232,25 @@ class TelegramEIBotChatRelaySink:
                 parent_thread_id,
             )
             return
+
+        # Prefer claiming the EI bot's existing "Working on it..." running
+        # reply over posting a fresh placeholder. Production observation
+        # 2026-05-13: without this claim the chat stacked
+        # running-reply + sink-placeholder + companion's text in quick
+        # succession; the sink-placeholder was visually buried and users
+        # perceived "no streaming" even when edits were firing.
+        claimed_message_id = self._claim_running_reply(channel, chat_id)
+        if claimed_message_id is not None:
+            await self._adopt_running_reply(
+                channel=channel,
+                parent_thread_id=parent_thread_id,
+                run_id=event.run_id,
+                chat_id=chat_id,
+                message_id=claimed_message_id,
+                text=text,
+            )
+            return
+
         logger.info(
             "telegram_ei_chat.post.attempt parent_thread_id=%s run_id=%s chat_id=%s text_preview=%s",
             parent_thread_id,
@@ -268,6 +287,64 @@ class TelegramEIBotChatRelaySink:
         )
         self._register_placeholder(parent_thread_id, event.run_id, chat_id, message_id)
         self._last_text[(parent_thread_id, event.run_id)] = text
+
+    @staticmethod
+    def _claim_running_reply(channel, chat_id: str) -> int | None:
+        """Pop the channel's pending running reply if available.
+
+        Returns None when the channel doesn't expose the claim API
+        (older versions) or has no pending reply for this chat.
+        """
+        claim = getattr(channel, "claim_pending_running_reply", None)
+        if not callable(claim):
+            return None
+        try:
+            return claim(chat_id)
+        except Exception:
+            logger.debug("telegram_ei_chat.claim.failed chat_id=%s", chat_id, exc_info=True)
+            return None
+
+    async def _adopt_running_reply(
+        self,
+        *,
+        channel,
+        parent_thread_id: str,
+        run_id: str,
+        chat_id: str,
+        message_id: int,
+        text: str,
+    ) -> None:
+        """Take ownership of the EI bot's existing running-reply message.
+
+        Edits "Working on it..." in place with the first stream event's
+        text (typically the ``started`` event's "🔨 Working on your
+        request…") and registers the message as our placeholder so
+        subsequent events edit the same message.
+        """
+        logger.info(
+            "telegram_ei_chat.claim.ok parent_thread_id=%s run_id=%s chat_id=%s message_id=%s",
+            parent_thread_id,
+            run_id,
+            chat_id,
+            message_id,
+        )
+        try:
+            await channel.relay_builder_event_edit(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=text[:_TELEGRAM_TEXT_LIMIT],
+            )
+        except Exception:
+            logger.warning(
+                "telegram_ei_chat.claim.edit_failed parent_thread_id=%s reason=exception",
+                parent_thread_id,
+                exc_info=True,
+            )
+            # Don't register — leave the placeholder unclaimed so the
+            # next event retries via the regular post-new path.
+            return
+        self._register_placeholder(parent_thread_id, run_id, chat_id, message_id)
+        self._last_text[(parent_thread_id, run_id)] = text
 
     async def _edit_existing_placeholder(
         self,

@@ -181,10 +181,25 @@ async def consume_builder_stream(
         raise
     except TimeoutError:
         logger.warning(
-            "stream_consumer.timed_out builder_thread_id=%s after %ds",
+            "stream_consumer.timed_out builder_thread_id=%s after %ds; awaiting webhook grace before synthesising timed_out",
             builder_thread_id,
             consumer_timeout_seconds,
         )
+        # Give the canonical webhook a grace window. Production
+        # observation 2026-05-13: the 30-min consumer timeout fired
+        # ~25s BEFORE the real status=failed webhook landed (build was
+        # at turn 29 of 30 — finishing). Without this grace the sink
+        # rendered "Hit a snag…" at timeout, then re-rendered the real
+        # failure summary 25s later — a double-flicker UX. The natural-
+        # end and exception paths already do this hop; timeout was the
+        # outlier.
+        arrived = await fanout.await_terminal_dispatch(builder_thread_id, timeout=webhook_grace_seconds)
+        if arrived:
+            logger.info(
+                "stream_consumer.terminated builder_thread_id=%s outcome=webhook_won_after_timeout",
+                builder_thread_id,
+            )
+            return
         await _publish_synthetic_terminal(
             fanout,
             builder_thread_id=builder_thread_id,

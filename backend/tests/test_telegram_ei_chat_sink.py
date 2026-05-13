@@ -14,9 +14,22 @@ from app.gateway.builder_events.types import BuilderEvent
 
 
 class _FakeChannel:
-    def __init__(self, *, post_return: int | None = 4242) -> None:
+    def __init__(
+        self,
+        *,
+        post_return: int | None = 4242,
+        pending_running_reply: int | None = None,
+    ) -> None:
         self.relay_builder_event_post = AsyncMock(return_value=post_return)
         self.relay_builder_event_edit = AsyncMock()
+        self._pending_running_reply = pending_running_reply
+        self.claim_calls: list[str] = []
+
+    def claim_pending_running_reply(self, chat_id: str) -> int | None:
+        self.claim_calls.append(chat_id)
+        msg_id = self._pending_running_reply
+        self._pending_running_reply = None  # pop semantics
+        return msg_id
 
 
 class _FakeService:
@@ -316,6 +329,83 @@ class TestObservabilityLogs:
             assert sink.accepts(_evt(event_type="phase")) is True
         messages = [r.getMessage() for r in caplog.records]
         assert any("accepts.ok" in m for m in messages)
+
+    @pytest.mark.anyio
+    async def test_post_claims_pending_running_reply_when_available(self, caplog) -> None:
+        """User-facing payoff for Stage 2B production fix: when the
+        EI bot has already posted "Working on it..." (running reply),
+        the sink claims THAT message_id and edits it in place instead
+        of posting a separate "🔨 Working on your request…" message.
+        The chat now has one bubble that morphs from running-reply →
+        phase labels → final summary, instead of three stacked
+        messages."""
+        import logging
+
+        channel = _FakeChannel(pending_running_reply=12345)
+        sink, _, _ = _make_sink(
+            flag=True,
+            origin={"thread_id": "parent-tid-1", "chat_id": "111", "channel_name": "telegram"},
+            channel=channel,
+        )
+        with caplog.at_level(logging.INFO, logger="app.gateway.builder_events.sinks.telegram_ei"):
+            await sink.handle(_evt(event_type="started", payload={}))
+
+        # The claim was invoked.
+        assert channel.claim_calls == ["111"]
+        # No NEW message posted (sink adopted the existing running reply).
+        channel.relay_builder_event_post.assert_not_awaited()
+        # The running reply WAS edited with the first event's text.
+        channel.relay_builder_event_edit.assert_awaited_once()
+        edit_kwargs = channel.relay_builder_event_edit.await_args.kwargs
+        assert edit_kwargs["chat_id"] == "111"
+        assert edit_kwargs["message_id"] == 12345
+        assert "Working" in edit_kwargs["text"]
+        # claim.ok logged.
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("claim.ok" in m and "message_id=12345" in m for m in messages)
+
+    @pytest.mark.anyio
+    async def test_post_falls_through_when_no_pending_running_reply(self) -> None:
+        """No running reply available → sink posts a fresh placeholder
+        (the pre-claim behavior). Existing UX preserved when manager.py's
+        running-reply didn't fire for some reason."""
+        channel = _FakeChannel(pending_running_reply=None)
+        sink, _, _ = _make_sink(
+            flag=True,
+            origin={"thread_id": "parent-tid-1", "chat_id": "111", "channel_name": "telegram"},
+            channel=channel,
+        )
+        await sink.handle(_evt(event_type="started", payload={}))
+
+        assert channel.claim_calls == ["111"]
+        channel.relay_builder_event_post.assert_awaited_once()
+        channel.relay_builder_event_edit.assert_not_awaited()
+
+    @pytest.mark.anyio
+    async def test_claim_is_pop_semantics(self) -> None:
+        """A running reply claim is one-shot. After the first event for
+        a run adopts it, subsequent events for the SAME run edit the
+        adopted message via the normal edit path — the claim API isn't
+        re-invoked."""
+        channel = _FakeChannel(pending_running_reply=99)
+        sink, _, _ = _make_sink(
+            flag=True,
+            origin={"thread_id": "parent-tid-1", "chat_id": "111", "channel_name": "telegram"},
+            channel=channel,
+        )
+        # First event claims + adopts.
+        await sink.handle(_evt(event_type="started", payload={}))
+        assert channel.claim_calls == ["111"]
+        # Second event with different text edits the same message_id.
+        await sink.handle(_evt(event_type="tool_started", payload={"tool_name": "bash"}))
+        # Claim called only once — pop semantics.
+        assert channel.claim_calls == ["111"]
+        # Both events went through edit (the started event via adopt,
+        # the tool_started via the regular edit path).
+        assert channel.relay_builder_event_edit.await_count == 2
+        # Both edits target the claimed message_id.
+        for call in channel.relay_builder_event_edit.await_args_list:
+            assert call.kwargs["message_id"] == 99
 
     @pytest.mark.anyio
     async def test_handle_logs_entered_and_post_attempt(self, caplog) -> None:

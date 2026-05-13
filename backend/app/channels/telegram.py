@@ -53,6 +53,16 @@ class TelegramChannel(Channel):
                 pass
         # chat_id -> last sent message_id for threaded replies
         self._last_bot_message: dict[str, int] = {}
+        # chat_id -> message_id of the most recent ``"Working on it..."``
+        # reply that hasn't been claimed by a builder-stream sink yet.
+        # The Stage 2B EI sink ``TelegramEIBotChatRelaySink`` calls
+        # ``claim_pending_running_reply(chat_id)`` BEFORE posting a new
+        # placeholder; if a running reply is available, the sink edits
+        # IT instead of cluttering the chat with a second message.
+        # Production observation 2026-05-13: without this claim,
+        # the chat showed running-reply + sink-placeholder + companion's
+        # text in quick succession — three messages where one would do.
+        self._pending_running_replies: dict[str, int] = {}
         # Fire-and-forget tasks scheduled inside the bot's loop (`_tg_loop`)
         # for "Working on it..." replies. Keep strong references so the GC
         # cannot drop a running task; entries are removed on completion via
@@ -233,19 +243,42 @@ class TelegramChannel(Channel):
     # -- helpers -----------------------------------------------------------
 
     async def _send_running_reply(self, chat_id: str, reply_to_message_id: int) -> None:
-        """Send a 'Working on it...' reply to the user's message."""
+        """Send a 'Working on it...' reply to the user's message.
+
+        Captures the returned message_id into ``self._pending_running_replies``
+        so the Stage 2B builder-stream sink can CLAIM the same message and
+        edit it in place — keeping the chat tidy instead of stacking
+        running-reply + sink-placeholder + companion's text.
+        """
         if not self._application:
             return
         try:
             bot = self._application.bot
-            await bot.send_message(
+            sent = await bot.send_message(
                 chat_id=int(chat_id),
                 text="Working on it...",
                 reply_to_message_id=reply_to_message_id,
             )
+            if sent is not None:
+                self._pending_running_replies[chat_id] = sent.message_id
             logger.info("[Telegram] 'Working on it...' reply sent in chat=%s", chat_id)
         except Exception:
             logger.exception("[Telegram] failed to send running reply in chat=%s", chat_id)
+
+    def claim_pending_running_reply(self, chat_id: str) -> int | None:
+        """Pop the chat's pending running-reply message_id if any.
+
+        Called by ``TelegramEIBotChatRelaySink._post_new_placeholder``
+        before it would otherwise post a fresh "🔨 Working on your
+        request…" message. When this returns a message_id, the sink
+        edits that running-reply in place instead of cluttering the
+        chat with a second placeholder.
+
+        Pop semantics: at most one sink per running reply. The next
+        inbound message will overwrite the entry; an unclaimed running
+        reply from a prior turn just gets superseded.
+        """
+        return self._pending_running_replies.pop(chat_id, None)
 
     # -- internal ----------------------------------------------------------
 
