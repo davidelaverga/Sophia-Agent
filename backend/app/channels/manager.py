@@ -1039,12 +1039,19 @@ class ChannelManager:
         - Workshop bot enabled via env flag
         - Workshop globals (sink + cache) installed
         - The result contains a ``start_builder_task`` tool call this turn
+
+        After publishing each summon, attaches a v3 stream consumer on the
+        gateway-side ``BuilderEventFanout`` so the workshop sink receives
+        mid-flight tool_call / custom / message_delta events in addition
+        to the terminal webhook. Without this attach, the workshop sees
+        only the terminal CompletedEvent and the streaming-progress UX
+        collapses to a blocking summary.
         """
         if not msg.channel_name or not msg.channel_name.startswith("telegram"):
             return
         if not _workshop_summon_enabled():
             return
-        from app.gateway.builder_events import get_global_task_cache
+        from app.gateway.builder_events import get_global_fanout, get_global_task_cache
 
         cache = get_global_task_cache()
         if cache is None:
@@ -1056,6 +1063,7 @@ class ChannelManager:
         if not summons:
             return
 
+        fanout = get_global_fanout()
         workshop_username = _workshop_bot_username()
         for summon in summons:
             if summon.task_id in self._summoned_task_ids:
@@ -1089,6 +1097,26 @@ class ChannelManager:
                 summon.task_id,
             )
             await self.bus.publish_outbound(summon_outbound)
+
+            # task_id == builder thread_id (see start_builder_task: the
+            # async_tasks row records thread_id := task_id). The fanout
+            # call is best-effort and gated on BUILDER_LIVE_STREAM_ENABLED;
+            # failure does not block the visible summon flow above (the
+            # terminal webhook will still light up the workshop sink).
+            if fanout is not None:
+                try:
+                    await fanout.attach_stream(
+                        task_id=summon.task_id,
+                        thread_id=summon.task_id,
+                        user_id=msg.user_id,
+                        channel_origin="telegram",
+                    )
+                except Exception:
+                    logger.warning(
+                        "[Manager] fanout.attach_stream failed task_id=%s",
+                        summon.task_id,
+                        exc_info=True,
+                    )
 
     def _trim_summoned_set(self) -> None:
         if len(self._summoned_task_ids) > 1024:

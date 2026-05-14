@@ -140,19 +140,30 @@ class StreamingTextClient:
             return False
 
     async def _send_message(self, text: str) -> Any:
-        """Send the initial message. Wraps the bot SDK to keep tests trivial."""
+        """Send the initial message. Wraps the bot SDK to keep tests trivial.
+
+        Sent as plain text — see the rationale in ``_push_update``.
+        """
         send = getattr(self._bot, "send_message", None)
         if send is None:
             raise RuntimeError("StreamingTextClient: bot has no send_message method")
-        return await send(chat_id=self._chat_id, text=text, parse_mode="Markdown")
+        return await send(chat_id=self._chat_id, text=text)
 
     async def _push_update(self, text: str) -> Any:
         """Push the latest body via editMessageText.
 
-        Phase 1 implementation — see spec §22 Q1. When the Bot API
-        streaming-text method is pinned at Phase 2 kickoff, swap the
-        underlying call here; keep the rate-limit + degraded fallback
-        logic intact for spec §15.6.
+        Sent as **plain text** (no ``parse_mode``). The workshop renderer
+        splices in unescaped user / tool-arg content — URLs, file paths,
+        shell commands, search queries — that regularly contains
+        Markdown metacharacters. Markdown parse mode here would have
+        Telegram reject every such edit with ``can't parse entities``
+        and the workshop would stop rendering. Plain text avoids this
+        class of failure entirely. The renderer keeps visual hierarchy
+        via emoji + bracket-decorated headers.
+
+        When the Bot API native streaming-text method is pinned (spec
+        §22 Q1), swap this implementation; keep the rate-limit +
+        degraded fallback logic intact for spec §15.6.
         """
         edit = getattr(self._bot, "edit_message_text", None)
         if edit is None:
@@ -161,7 +172,6 @@ class StreamingTextClient:
             chat_id=self._chat_id,
             message_id=self._message_id,
             text=text,
-            parse_mode="Markdown",
         )
 
     @staticmethod

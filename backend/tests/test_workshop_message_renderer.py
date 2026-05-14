@@ -158,3 +158,35 @@ def test_state_changed_reported() -> None:
     assert result1.state_changed
     result2 = renderer.apply(_tool("read_file", {"path": "a"}, seq=2))  # hidden
     assert not result2.state_changed
+
+
+def test_render_is_plain_text_not_markdown() -> None:
+    """Phase 2 regression: the renderer must produce plain text — never
+    Markdown-formatted output. User / tool args splice in unescaped
+    content with Markdown metacharacters (URLs with underscores, file
+    paths with brackets, shell commands with backticks etc.); a single
+    such char in a Markdown-mode message would trip Telegram's
+    'can't parse entities' rejection on edit, and the streaming workshop
+    reply would stop updating mid-task.
+
+    The header is decorated with brackets — not single-asterisk bold —
+    precisely so the renderer's output is parse-mode-free.
+    """
+    renderer = WorkshopMessageRenderer()
+    # Mix in queries / URLs / commands that contain Markdown metachars
+    renderer.apply(_tool("builder_web_search", {"query": "best_EVs*Europe_2026"}, seq=1))
+    renderer.apply(_tool("builder_web_fetch", {"url": "https://ev_database.org/cars[2]"}, seq=2))
+    renderer.apply(_tool("bash", {"command": "ls -la *.md"}, seq=3))
+    body = renderer.render()
+
+    # Header must be bracket-decorated, NOT asterisk-bolded.
+    first_line = body.splitlines()[0]
+    assert first_line.startswith("[") and first_line.endswith("]")
+    # Single-asterisk header markers are exactly what we're trying to
+    # avoid — fail loudly if anyone reintroduces them.
+    assert not (first_line.startswith("*") and first_line.endswith("*"))
+    # The user content with metachars must round-trip verbatim — no
+    # escaping, but also no missing characters.
+    assert "best_EVs*Europe_2026" in body
+    assert "ev_database.org/cars[2]" in body
+    assert "ls -la *.md" in body

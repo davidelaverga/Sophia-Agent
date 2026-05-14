@@ -79,9 +79,22 @@ class WorkshopMessageState:
         self.activity_lines.append(line)
 
     def render(self) -> str:
-        header = _PHASE_HEADERS.get(self.current_phase, self.current_phase.capitalize() or "Working")
+        """Render the workshop streaming body as plain text.
+
+        We deliberately avoid Telegram's Markdown / MarkdownV2 parse modes
+        here because activity lines splice in unescaped user / tool-arg
+        content — URLs, file paths, shell commands, search queries — that
+        regularly contains Markdown metacharacters (``_``, ``*``, ``[``,
+        ``]``, ``~``, ``\\``, …). With ``parse_mode="Markdown"`` set on
+        the streaming client, Telegram would reject every such edit with
+        ``can't parse entities`` and the workshop would degrade or stop
+        rendering. Plain text + bracket-decorated header is bulletproof
+        and preserves the visual hierarchy via emoji + spacing.
+        """
+        raw_header = _PHASE_HEADERS.get(self.current_phase, self.current_phase.capitalize() or "Working")
+        header = f"[ {raw_header} ]"
         visible = self.activity_lines[-_MAX_VISIBLE_ACTIVITY_LINES:]
-        body_parts = [f"*{header}*", ""]
+        body_parts = [header, ""]
         if visible:
             body_parts.extend(visible)
         if self.summary_text:

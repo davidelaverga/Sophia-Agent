@@ -54,10 +54,17 @@ _TERMINAL_FLAG_MAX = 2048
 def _stream_enabled() -> bool:
     """Return True if v3 stream-consumer ingress should run.
 
+    Phase 2 default ON — mid-flight streaming is required for the
+    workshop UX to show progress (tool_call / custom / message_delta).
+    With the flag off the workshop receiver only ever sees the terminal
+    CompletedEvent and the streaming reply collapses to a blocking
+    summary. Operators can flip ``BUILDER_LIVE_STREAM_ENABLED=false``
+    via env to disable without code redeploy.
+
     Read at attach-time so flipping the flag on a running process is a
     no-op until next dispatch.
     """
-    return os.environ.get("BUILDER_LIVE_STREAM_ENABLED", "false").lower() in {"1", "true", "yes"}
+    return os.environ.get("BUILDER_LIVE_STREAM_ENABLED", "true").lower() not in {"0", "false", "no"}
 
 
 class BuilderEventFanout:

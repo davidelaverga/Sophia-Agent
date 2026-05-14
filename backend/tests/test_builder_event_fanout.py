@@ -176,7 +176,10 @@ async def test_publish_terminal_with_telegram_origin() -> None:
 
 @pytest.mark.anyio
 async def test_attach_stream_no_op_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("BUILDER_LIVE_STREAM_ENABLED", raising=False)
+    # Phase 2 of sophia_telegram_architecture_spec_v1: the env flag now
+    # defaults to ON in production. Operators disable via
+    # ``BUILDER_LIVE_STREAM_ENABLED=false``.
+    monkeypatch.setenv("BUILDER_LIVE_STREAM_ENABLED", "false")
     fanout = BuilderEventFanout()
 
     called: list[str] = []
@@ -202,6 +205,7 @@ async def test_attach_stream_no_op_when_flag_off(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.anyio
 async def test_attach_stream_runs_when_flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The env flag now defaults to ON; setenv preserves Phase 2 behavior.
     monkeypatch.setenv("BUILDER_LIVE_STREAM_ENABLED", "true")
     fanout = BuilderEventFanout()
     ran = asyncio.Event()
@@ -215,6 +219,30 @@ async def test_attach_stream_runs_when_flag_on(monkeypatch: pytest.MonkeyPatch) 
 
     await fanout.attach_stream(
         task_id="t",
+        thread_id="th",
+        user_id="u",
+        channel_origin="telegram",
+        consumer_factory=_consumer_factory,
+    )
+    await asyncio.wait_for(ran.wait(), timeout=1.0)
+
+
+@pytest.mark.anyio
+async def test_attach_stream_runs_with_env_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 2 default-on: leaving the env unset spawns the consumer."""
+    monkeypatch.delenv("BUILDER_LIVE_STREAM_ENABLED", raising=False)
+    fanout = BuilderEventFanout()
+    ran = asyncio.Event()
+
+    def _consumer_factory(**kwargs):  # noqa: ARG001
+        class _C:
+            async def run(self):
+                ran.set()
+
+        return _C()
+
+    await fanout.attach_stream(
+        task_id="t-default",
         thread_id="th",
         user_id="u",
         channel_origin="telegram",

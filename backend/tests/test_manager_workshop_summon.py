@@ -10,6 +10,7 @@ from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
 from app.channels.store import ChannelStore
 from app.gateway.builder_events import (
+    BuilderEventFanout,
     TaskResolutionCache,
     set_global_workshop_dependencies,
 )
@@ -154,3 +155,85 @@ async def test_skips_when_no_task_cache_singleton(
         thread_id="th",
     )
     assert published == []
+
+
+@pytest.mark.anyio
+async def test_attaches_fanout_stream_per_summon(
+    manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 2 codex-review regression: every emitted summon must also
+    register a v3 stream consumer on the fanout, otherwise the workshop
+    sink only ever sees the terminal CompletedEvent and the streaming
+    progress UX collapses to a blocking summary."""
+    monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
+    monkeypatch.setenv("BUILDER_LIVE_STREAM_ENABLED", "true")
+    cache = TaskResolutionCache()
+    fanout = BuilderEventFanout()
+    set_global_workshop_dependencies(fanout=fanout, workshop_sink=None, task_cache=cache)
+
+    attach_calls: list[dict] = []
+
+    async def _spy_attach(*, task_id, thread_id, user_id, channel_origin, consumer_factory=None):
+        attach_calls.append(
+            {
+                "task_id": task_id,
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "channel_origin": channel_origin,
+            }
+        )
+
+    monkeypatch.setattr(fanout, "attach_stream", _spy_attach)
+
+    published: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, published)
+
+    try:
+        await manager._maybe_emit_workshop_summons(
+            _inbound(),
+            _result_with_one_call(task_id="task-xyz", brief="brief"),
+            thread_id="thread",
+        )
+    finally:
+        set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
+
+    assert len(published) == 1
+    assert len(attach_calls) == 1
+    call = attach_calls[0]
+    # task_id == builder thread_id (start_builder_task writes both to the
+    # same value on the async_tasks row); the fanout reuses task_id as
+    # the v3 stream subscription target.
+    assert call["task_id"] == "task-xyz"
+    assert call["thread_id"] == "task-xyz"
+    assert call["user_id"] == "user-abc"
+    assert call["channel_origin"] == "telegram"
+
+
+@pytest.mark.anyio
+async def test_attach_failure_does_not_block_summon(
+    manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A broken fanout must not swallow the summon outbound."""
+    monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
+    cache = TaskResolutionCache()
+    fanout = BuilderEventFanout()
+    set_global_workshop_dependencies(fanout=fanout, workshop_sink=None, task_cache=cache)
+
+    async def _broken_attach(**_kw):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(fanout, "attach_stream", _broken_attach)
+
+    published: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, published)
+
+    try:
+        await manager._maybe_emit_workshop_summons(
+            _inbound(),
+            _result_with_one_call(task_id="t", brief="b"),
+            thread_id="th",
+        )
+    finally:
+        set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
+
+    assert len(published) == 1  # summon still went out
