@@ -506,3 +506,28 @@ checkpointer:
 #     pilot_user_id: ""                      # Stage-1B gate: when set, only this Sophia user_id can use the channel; everyone else gets the "not enabled" placeholder. Clear to remove the gate.
 #     allowed_users: []                      # additional Telegram user-id allowlist; empty = allow all (subject to enabled + pilot_user_id)
 #     run_timeout_seconds: 900               # 15-minute hard ceiling on runs.wait; matches Builder's hard turn-budget ceiling
+#
+#   # ---------------------------------------------------------------------
+#   # Workshop presentation layer — Phase 1 of sophia_telegram_architecture_spec_v1.
+#   # Event-driven sibling of telegram_work above. SHARES the same bot token
+#   # ($TELEGRAM_WORKER_BOT_TOKEN) — exactly one of telegram_work and
+#   # telegram_workshop may be enabled at a time. Workshop bot never accepts
+#   # direct user DMs as the primary interaction; it responds to Telegram
+#   # guest-mode dispatches when companion @-mentions it in the user chat,
+#   # and renders builder activity via Telegram's streaming-text primitive.
+#   #
+#   # Required env vars (gateway service): $TELEGRAM_WORKER_BOT_TOKEN.
+#   # Required env vars (operations toggles, optional):
+#   #   TELEGRAM_WORKSHOP_BOT_ENABLED=true|false    — master kill switch (default false)
+#   #   TELEGRAM_WORKSHOP_LOOP_PREVENTION_STRICT=true|false — never false in prod (default true)
+#   #   BUILDER_LIVE_STREAM_ENABLED=true|false      — gates v3 stream consumer (default false)
+#   #   WORKSHOP_STREAMING_UPDATE_INTERVAL_MS=750   — Telegram editMessageText rate limit
+#   #   WORKSHOP_TASK_TIMEOUT_SECONDS=900           — wall-clock task timeout
+#   #   WORKSHOP_PER_EVENT_TIMEOUT_SECONDS=30       — per-event arrival timeout
+#   #
+#   # Spec: ~/Desktop/Sophia V3 specs/sophia_telegram_architecture_spec_v1.md
+#   telegram_workshop:
+#     enabled: false                         # Phase 1 default — flip in Phase 2
+#     bot_token: $TELEGRAM_WORKER_BOT_TOKEN
+#     bot_username: Sophia_work_bot          # public — hardcoded to keep langgraph deploy safe (see note above)
+#     cold_dm_mute_minutes: 30               # spec §6.5 — cold-DM redirect mute window per user

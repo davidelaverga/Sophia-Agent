@@ -32,6 +32,7 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.gateway.builder_events.fanout import get_builder_event_fanout_or_none
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
@@ -67,6 +68,12 @@ class BuilderCompletionEvent(BaseModel):
         None,
         description="Originating user id, used by the companion wakeup worker to "
         "construct a properly-attributed synthetic turn.",
+    )
+    channel_origin: str | None = Field(
+        None,
+        description="Channel that originated the companion turn (telegram | web | voice). "
+        "Used by the BuilderEventFanout's terminal-webhook adapter to gate sinks. "
+        "When absent, falls back to 'telegram' for backward-compat with PR #120 payloads.",
     )
 
 
@@ -105,6 +112,22 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
             payload.get("task_id"),
             exc_info=True,
         )
+
+    # Phase 1 workshop architecture: forward the terminal event into the
+    # BuilderEventFanout so trace + companion-awareness + workshop sinks
+    # see it. The fanout coexists with the legacy SSE worker above; this
+    # call is best-effort (channel SSE clients keep working regardless).
+    fanout = get_builder_event_fanout_or_none(request.app)
+    if fanout is not None:
+        origin = payload.get("channel_origin") or "telegram"
+        try:
+            await fanout.publish_terminal(payload, channel_origin=origin)
+        except Exception:
+            logger.warning(
+                "BuilderEventFanout terminal publish failed for task_id=%s",
+                payload.get("task_id"),
+                exc_info=True,
+            )
 
     # Trigger a synthetic companion turn so Sophia proactively surfaces
     # the artifact in chat without the user having to send another

@@ -23,6 +23,12 @@ _CHANNEL_REGISTRY: dict[str, str] = {
     # ChannelStore threads isolated from EI threads — see the prefix
     # discipline note in app/channels/store.py.
     "telegram_work": "app.channels.telegram_work:TelegramWorkChannel",
+    # Workshop presentation layer (sophia_telegram_architecture_spec_v1).
+    # Receives Telegram guest-mode dispatches when companion @-mentions
+    # @Sophia_work_bot in the user-companion chat. Mutually exclusive
+    # with telegram_work (same bot token); enabling both is a config
+    # error caught in WorkshopTelegramChannel.start.
+    "telegram_workshop": "app.channels.telegram_workshop:WorkshopTelegramChannel",
 }
 
 

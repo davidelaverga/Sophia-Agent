@@ -105,3 +105,28 @@ channels:
                                   # ceiling. runs.wait raises asyncio.TimeoutError
                                   # past this and the placeholder is edited with
                                   # the timeout message.
+
+  # Workshop presentation layer — Phase 1 of sophia_telegram_architecture_spec_v1.
+  # When enabled, @Sophia_work_bot becomes an event-driven presentation surface
+  # for builder runs: companion @-mentions the workshop bot in the user-companion
+  # chat, Telegram dispatches a guest update, and the workshop bot opens a
+  # streaming reply that renders builder activity until completion (then
+  # attaches the artifact as a Telegram document).
+  #
+  # MUTUAL EXCLUSION: telegram_workshop and telegram_work share the same
+  # bot token ($TELEGRAM_WORKER_BOT_TOKEN). They CANNOT both run at the same
+  # time. Phase 1 default keeps telegram_workshop disabled. Phase 2 rollout:
+  # flip telegram_work.enabled=false AND telegram_workshop.enabled=true in
+  # the same deploy.
+  #
+  # Bot-username is hardcoded for the same reason as telegram_work — public
+  # value, baked into the langgraph deploy.
+  telegram_workshop:
+    enabled: false
+    bot_token: $TELEGRAM_WORKER_BOT_TOKEN
+    bot_username: Sophia_work_bot
+    # Cold-DM mute window (minutes). Spec §6.5 — when a user DMs
+    # @Sophia_work_bot directly the workshop redirects them to companion
+    # then mutes itself for this duration so accidental retries don't
+    # repeatedly trigger the redirect.
+    cold_dm_mute_minutes: 30

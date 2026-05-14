@@ -330,6 +330,23 @@ def _resolve_runtime_thread_id(runtime: Any) -> str | None:
 _TERMINAL_STATUSES_NATIVE = frozenset({"completed", "failed", "timed_out", "cancelled"})
 
 
+def _resolve_channel_origin_for_completion(
+    delegation: dict[str, Any], cfg: dict[str, Any]
+) -> str | None:
+    """Phase 1 (sophia_telegram_architecture_spec_v1) channel-origin reader.
+
+    State-first (always reaches the running graph), config-fallback (legacy
+    propagation path). Returns None on the non-channel callers (web preview
+    flows, manual runs) so the fanout's terminal adapter falls back to its
+    default origin.
+    """
+    candidate = delegation.get("channel_origin")
+    if isinstance(candidate, str) and candidate:
+        return candidate
+    cfg_candidate = cfg.get("channel") or cfg.get("channel_origin")
+    return cfg_candidate if isinstance(cfg_candidate, str) and cfg_candidate else None
+
+
 def build_completion_payload_from_artifact(
     *,
     state: dict[str, Any],
@@ -419,6 +436,12 @@ def build_completion_payload_from_artifact(
     if isinstance(task, str) and task.strip():
         task_brief = task.strip()
 
+    # Phase 1 of sophia_telegram_architecture_spec_v1: thread channel_origin
+    # through the webhook payload so the gateway's BuilderEventFanout can
+    # gate its sinks by origin. State-first (always reaches the running
+    # graph); fall back to runtime configurable for the legacy path.
+    channel_origin = _resolve_channel_origin_for_completion(delegation_dict, cfg)
+
     builder_task = state.get("builder_task") if isinstance(state, dict) else None
     task_type = builder_task.get("task_type") if isinstance(builder_task, dict) else None
     if not task_type:
@@ -470,6 +493,7 @@ def build_completion_payload_from_artifact(
         "completed_at": _iso(datetime.now(UTC)),
         "source": "builder_artifact_middleware",
         "user_id": user_id if isinstance(user_id, str) and user_id else None,
+        "channel_origin": channel_origin,
     }
 
 

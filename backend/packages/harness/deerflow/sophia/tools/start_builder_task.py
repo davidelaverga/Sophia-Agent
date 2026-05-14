@@ -416,6 +416,21 @@ def _build_enriched_description(
     return "\n\n".join(sections)
 
 
+def _resolve_channel_origin(runtime: Any) -> str | None:
+    """Pull channel_origin off the runtime config (plumbed by channel manager).
+
+    Companion turn arrives with ``configurable.channel`` set to one of
+    ``"telegram"`` / ``"web"`` / ``"voice"``; langgraph-api 0.7+ copies
+    context → configurable server-side so we read from configurable here
+    regardless of which side wrote it. None on the legacy non-channel path.
+    """
+    if runtime is None or not getattr(runtime, "config", None):
+        return None
+    cfg = runtime.config.get("configurable", {}) or {}
+    ch = cfg.get("channel") or cfg.get("channel_origin")
+    return ch if isinstance(ch, str) and ch else None
+
+
 def _build_delegation_context(
     *,
     description: str,
@@ -428,11 +443,18 @@ def _build_delegation_context(
     explicit_user_urls: list[str],
     builder_web_budget: dict[str, Any],
     handoff_resolution: dict[str, Any],
+    channel_origin: str | None = None,
 ) -> dict[str, Any]:
     """Build the ``delegation_context`` dict the builder middlewares read.
 
     Shape mirrors ``switch_to_builder``'s emission so the builder side
     (BuilderTaskMiddleware, BuilderResearchPolicyMiddleware) is unchanged.
+
+    ``channel_origin`` (Phase 1 of sophia_telegram_architecture_spec_v1)
+    is the surface that originated the companion turn — ``"telegram"`` /
+    ``"web"`` / ``"voice"``. Builder's terminal-webhook payload reads
+    this back via state so the gateway's BuilderEventFanout knows which
+    sinks should accept the event.
     """
     return {
         "task": description,
@@ -447,6 +469,7 @@ def _build_delegation_context(
         "explicit_user_urls": explicit_user_urls,
         "builder_web_budget": builder_web_budget,
         "handoff_resolution": handoff_resolution,
+        "channel_origin": channel_origin,
     }
 
 
@@ -632,6 +655,7 @@ async def _start_builder_task_impl(
     parent_model = None
     if runtime is not None and runtime.config:
         parent_model = (runtime.config.get("metadata", {}) or {}).get("model_name")
+    channel_origin = _resolve_channel_origin(runtime)
 
     enriched_description = _build_enriched_description(
         description,
@@ -654,6 +678,7 @@ async def _start_builder_task_impl(
         explicit_user_urls=explicit_user_urls,
         builder_web_budget=builder_web_budget,
         handoff_resolution=handoff_resolution,
+        channel_origin=channel_origin,
     )
 
     logger.info(
@@ -700,6 +725,12 @@ async def _start_builder_task_impl(
         "trace_id": trace_id,
         "task_type": task_type,
         "demo_mode": demo_mode,
+        # Phase 1 of sophia_telegram_architecture_spec_v1: gateway-side
+        # fanout reads channel_origin off the terminal webhook payload
+        # (sourced from state["delegation_context"]) to know which sinks
+        # accept the event. Stored on the async_tasks row for diagnostic
+        # visibility (e.g. companion's BuildAwareness prompt block).
+        "channel_origin": channel_origin,
     }
 
     logger.info(

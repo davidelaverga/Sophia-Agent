@@ -5,6 +5,13 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.gateway.builder_events import (
+    CompanionAwarenessSink,
+    CompanionContextStore,
+    TraceSink,
+    WorkshopTelegramSink,
+    install_builder_event_fanout,
+)
 from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
     agents,
@@ -21,7 +28,9 @@ from app.gateway.routers import (
     telegram_link,
     uploads,
     voice,
+    workshop_lookup,
 )
+from app.gateway.routers.workshop_lookup import install_task_resolution_cache
 from app.gateway.workers.builder_events import install_builder_events_worker
 from app.gateway.workers.companion_wakeup import install_companion_wakeup
 from deerflow.config.app_config import get_app_config
@@ -56,6 +65,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # to webapp SSE subscribers and channel adapters.
     install_builder_events_worker(app)
     logger.info("Builder events worker installed")
+
+    # Install the BuilderEventFanout — the Phase 1 foundation for the
+    # workshop-bot architecture (sophia_telegram_architecture_spec_v1).
+    # The fanout coexists with the legacy BuilderEventsWorker (which
+    # still drives the webapp SSE stream); the /internal/builder-events
+    # router publishes to BOTH so the webapp keeps working unchanged.
+    #
+    # Phase 1 registers the always-active sinks (trace + companion
+    # awareness) and the WorkshopTelegramSink stub. The workshop sink
+    # only forwards events to tasks the channel handler has registered
+    # itself for via ``register_workshop``.
+    fanout = install_builder_event_fanout(app)
+    companion_context_store = CompanionContextStore()
+    workshop_sink = WorkshopTelegramSink()
+    fanout.register_sink(TraceSink())
+    fanout.register_sink(CompanionAwarenessSink(companion_context_store))
+    fanout.register_sink(workshop_sink)
+    app.state._companion_context_store = companion_context_store
+    app.state._workshop_telegram_sink = workshop_sink
+    install_task_resolution_cache(app)
+    logger.info("BuilderEventFanout installed with sinks=%s", fanout.sink_names())
 
     # Install the companion wakeup worker. When a builder completion
     # event arrives, this worker triggers a synthetic empty turn on the
@@ -274,6 +304,11 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     # Builder events: internal POST + public SSE for completion cards
     app.include_router(builder_events.internal_router)
     app.include_router(builder_events.public_router)
+
+    # Workshop guest-dispatch lookup (Phase 1 — gated by feature flags
+    # at the channel layer; the router itself is always mounted so
+    # tests can exercise it without flag plumbing).
+    app.include_router(workshop_lookup.router)
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict:

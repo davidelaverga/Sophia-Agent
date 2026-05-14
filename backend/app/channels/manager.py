@@ -646,6 +646,17 @@ class ChannelManager:
         run_context_extras: dict[str, Any] = {"thread_id": thread_id}
         if msg.user_id:
             run_context_extras["user_id"] = msg.user_id
+        # Phase 1 of sophia_telegram_architecture_spec_v1: propagate the
+        # channel name into the runtime so downstream agent tools (notably
+        # start_builder_task) can stamp ``channel_origin`` onto
+        # delegation_context. The fanout / sinks gate on this value.
+        if msg.channel_name:
+            # Reduce all telegram_* channels (telegram, telegram_work, future
+            # telegram_workshop) to a single ``"telegram"`` origin so sinks
+            # don't have to know about every sub-channel naming variant.
+            origin = "telegram" if msg.channel_name.startswith("telegram") else msg.channel_name
+            run_context_extras["channel"] = origin
+            run_context_extras["channel_name"] = msg.channel_name
 
         run_context = _merge_dicts(
             DEFAULT_RUN_CONTEXT,
