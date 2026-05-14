@@ -35,10 +35,14 @@ class TestWorkshopStartGuards:
         assert ch.is_running is False
 
     @pytest.mark.anyio
-    async def test_env_flag_required_when_config_enabled(
+    async def test_env_flag_can_disable(
         self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("TELEGRAM_WORKSHOP_BOT_ENABLED", raising=False)
+        # Phase 2 of sophia_telegram_architecture_spec_v1: the env flag now
+        # defaults to ON in production. The operator-facing kill switch is
+        # ``TELEGRAM_WORKSHOP_BOT_ENABLED=false`` (or
+        # ``channels.telegram_workshop.enabled: false`` in config).
+        monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "false")
         ch = WorkshopTelegramChannel(bus, {"enabled": True, "bot_token": "t"})
         await ch.start()
         assert ch.is_running is False
@@ -53,13 +57,14 @@ class TestWorkshopStartGuards:
         assert ch.is_running is False
 
     @pytest.mark.anyio
-    async def test_phase_1_skeleton_runs_when_all_flags_on(
+    async def test_runs_when_all_flags_on(
         self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Polling thread is spawned but never actually contacts Telegram."""
         monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
-        # Patch the legacy-work-channel lookup to return False so the
-        # mutual-exclusion guard doesn't block.
         monkeypatch.setattr(WorkshopTelegramChannel, "_legacy_work_channel_enabled", staticmethod(lambda: False))
+        # Patch _run_polling so we don't actually try to network-init PTB.
+        monkeypatch.setattr(WorkshopTelegramChannel, "_run_polling", lambda self: None)
         ch = WorkshopTelegramChannel(bus, {"enabled": True, "bot_token": "tok"})
         await ch.start()
         assert ch.is_running is True
@@ -72,6 +77,7 @@ class TestWorkshopStartGuards:
     ) -> None:
         monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
         monkeypatch.setattr(WorkshopTelegramChannel, "_legacy_work_channel_enabled", staticmethod(lambda: True))
+        monkeypatch.setattr(WorkshopTelegramChannel, "_run_polling", lambda self: None)
         ch = WorkshopTelegramChannel(bus, {"enabled": True, "bot_token": "tok"})
         await ch.start()
         assert ch.is_running is False

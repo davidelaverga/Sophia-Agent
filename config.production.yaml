@@ -91,8 +91,15 @@ channels:
   # which doesn't put bot_username in YAML at all (it's read separately by
   # app.gateway.telegram_link_store from $TELEGRAM_BOT_USERNAME). If you
   # rename @Sophia_Work_bot in BotFather, edit this line.
+  # NOTE (sophia_telegram_architecture_spec_v1.md): the legacy
+  # Builder-as-Main DM channel (PR #120) is disabled now that the workshop
+  # presentation layer below has taken over the bot. Workshop and
+  # telegram_work share $TELEGRAM_WORKER_BOT_TOKEN — exactly one of them
+  # must be enabled at a time (WorkshopTelegramChannel.start refuses to
+  # boot if both are true). Deletion of the legacy code is deferred to a
+  # Phase 3 cleanup PR after 1 week of stable workshop production.
   telegram_work:
-    enabled: true
+    enabled: false
     bot_token: $TELEGRAM_WORKER_BOT_TOKEN
     bot_username: Sophia_Work_bot
     pilot_user_id: ""             # empty = any EI-bound user welcome.
@@ -122,7 +129,7 @@ channels:
   # Bot-username is hardcoded for the same reason as telegram_work — public
   # value, baked into the langgraph deploy.
   telegram_workshop:
-    enabled: false
+    enabled: true
     bot_token: $TELEGRAM_WORKER_BOT_TOKEN
     bot_username: Sophia_work_bot
     # Cold-DM mute window (minutes). Spec §6.5 — when a user DMs

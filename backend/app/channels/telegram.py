@@ -158,19 +158,41 @@ class TelegramChannel(Channel):
             logger.error("Invalid Telegram chat_id: %s", msg.chat_id)
             return
 
+        # Phase 2 of sophia_telegram_architecture_spec_v1: detect workshop
+        # summon messages (companion side). Suppress the "reply-to last bot
+        # message" threading so the ``@``-mention parses cleanly at the
+        # start of a fresh message; register the sent message in the
+        # gateway TaskResolutionCache so the workshop handler can resolve
+        # the matching task_id when its guest-dispatch arrives.
+        summon_meta = (msg.metadata or {}).get("workshop_summon") if isinstance(msg.metadata, dict) else None
+
         kwargs: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
 
-        # Reply to the last bot message in this chat for threading
-        reply_to = self._last_bot_message.get(msg.chat_id)
-        if reply_to:
-            kwargs["reply_to_message_id"] = reply_to
+        # Reply to the last bot message in this chat for threading — but
+        # not on summon messages (the @-mention needs to start the body).
+        if not summon_meta:
+            reply_to = self._last_bot_message.get(msg.chat_id)
+            if reply_to:
+                kwargs["reply_to_message_id"] = reply_to
 
         bot = self._application.bot
         last_exc: Exception | None = None
         for attempt in range(_max_retries):
             try:
                 sent = await bot.send_message(**kwargs)
-                self._last_bot_message[msg.chat_id] = sent.message_id
+                # Summon messages MUST NOT become the "last bot message"
+                # target — the user's next reply should attach to the
+                # companion's prior conversational message, not the
+                # @-mention. Only track non-summon sends.
+                if not summon_meta:
+                    self._last_bot_message[msg.chat_id] = sent.message_id
+                if summon_meta:
+                    self._register_workshop_summon(
+                        chat_id=chat_id,
+                        message_id=sent.message_id,
+                        task_id=str(summon_meta.get("task_id") or ""),
+                        user_id=str(summon_meta.get("user_id") or ""),
+                    )
                 return
             except Exception as exc:
                 last_exc = exc
@@ -187,6 +209,49 @@ class TelegramChannel(Channel):
 
         logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    @staticmethod
+    def _register_workshop_summon(
+        *, chat_id: int, message_id: int, task_id: str, user_id: str
+    ) -> None:
+        """Push (chat_id, message_id) → task_id into the gateway cache.
+
+        Best-effort: any failure here only affects the workshop's ability
+        to resolve THIS task, not the companion conversation.
+        """
+        if not task_id or not user_id:
+            logger.info(
+                "[Telegram] workshop summon: missing task_id or user_id, skipping cache register"
+            )
+            return
+        try:
+            from app.gateway.builder_events import get_global_task_cache
+
+            cache = get_global_task_cache()
+            if cache is None:
+                logger.warning(
+                    "[Telegram] workshop summon: gateway TaskResolutionCache unavailable; "
+                    "workshop will be unable to resolve this dispatch"
+                )
+                return
+            cache.register(
+                chat_id=chat_id,
+                message_id=message_id,
+                task_id=task_id,
+                user_id=user_id,
+            )
+            logger.info(
+                "[Telegram] workshop summon registered chat_id=%s message_id=%s task_id=%s",
+                chat_id,
+                message_id,
+                task_id,
+            )
+        except Exception:
+            logger.warning(
+                "[Telegram] workshop summon cache register failed task_id=%s",
+                task_id,
+                exc_info=True,
+            )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:

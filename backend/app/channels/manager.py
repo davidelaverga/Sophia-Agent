@@ -6,6 +6,7 @@ import asyncio
 import base64
 import logging
 import mimetypes
+import os
 import time
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
@@ -22,6 +23,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_GATEWAY_URL = "http://localhost:8001"
 DEFAULT_ASSISTANT_ID = "lead_agent"
+
+_DEFAULT_WORKSHOP_BOT_USERNAME = "Sophia_work_bot"
+
+
+def _workshop_summon_enabled() -> bool:
+    """Return True iff the master switch for workshop summon emit is on.
+
+    Phase 2 default is ``true`` so the production deploy of this PR
+    immediately starts emitting summons. Operators can flip
+    ``TELEGRAM_WORKSHOP_BOT_ENABLED=false`` to disable without redeploying.
+    """
+    return os.environ.get("TELEGRAM_WORKSHOP_BOT_ENABLED", "true").lower() not in {"0", "false", "no"}
+
+
+def _workshop_bot_username() -> str:
+    return os.environ.get("SOPHIA_WORKSHOP_BOT_USERNAME") or _DEFAULT_WORKSHOP_BOT_USERNAME
 
 # Anthropic multimodal content-block limits.
 # Source: docs.anthropic.com/en/docs/build-with-claude/vision and pdf-support.
@@ -602,6 +619,9 @@ class ChannelManager:
         # the dispatch loop (NOT on the channel's polling thread) to download
         # the bytes off the critical path.
         self._inbound_file_readers: dict[str, InboundFileReader] = {}
+        # Phase 2 of sophia_telegram_architecture_spec_v1: per-process dedup
+        # for already-emitted workshop @-mention summons. Bounded to ~1k.
+        self._summoned_task_ids: set[str] = set()
 
     def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
         """Register a per-channel async function that downloads bytes for
@@ -989,6 +1009,93 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+        # Phase 2 of sophia_telegram_architecture_spec_v1: when companion's
+        # ``start_builder_task`` tool fired on this turn, post a second
+        # message in the chat that ``@``-mentions the workshop bot with the
+        # delegation brief. Telegram dispatches a guest update; the workshop
+        # handler opens its streaming reply. Best-effort — failures do NOT
+        # block the regular outbound above.
+        try:
+            await self._maybe_emit_workshop_summons(msg, result, thread_id)
+        except Exception:
+            logger.warning(
+                "[Manager] workshop-summon emit failed channel=%s chat_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                exc_info=True,
+            )
+
+    async def _maybe_emit_workshop_summons(
+        self,
+        msg: InboundMessage,
+        result: Any,
+        thread_id: str,
+    ) -> None:
+        """Emit @Sophia_work_bot summon messages for any new builder tasks.
+
+        Gated by:
+        - Channel origin is Telegram-class (``telegram*``)
+        - Workshop bot enabled via env flag
+        - Workshop globals (sink + cache) installed
+        - The result contains a ``start_builder_task`` tool call this turn
+        """
+        if not msg.channel_name or not msg.channel_name.startswith("telegram"):
+            return
+        if not _workshop_summon_enabled():
+            return
+        from app.gateway.builder_events import get_global_task_cache
+
+        cache = get_global_task_cache()
+        if cache is None:
+            return
+
+        from app.channels.telegram_workshop_summon import extract_summons_from_result
+
+        summons = extract_summons_from_result(result)
+        if not summons:
+            return
+
+        workshop_username = _workshop_bot_username()
+        for summon in summons:
+            if summon.task_id in self._summoned_task_ids:
+                logger.info(
+                    "[Manager] workshop-summon already emitted for task_id=%s — skipping",
+                    summon.task_id,
+                )
+                continue
+            # Mark BEFORE publishing so a retry loop can't double-emit.
+            self._summoned_task_ids.add(summon.task_id)
+            self._trim_summoned_set()
+
+            summon_text = summon.render_message(workshop_username=workshop_username)
+            summon_outbound = OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text=summon_text,
+                thread_ts=msg.thread_ts,
+                metadata={
+                    "workshop_summon": {
+                        "task_id": summon.task_id,
+                        "user_id": msg.user_id,
+                    }
+                },
+            )
+            logger.info(
+                "[Manager] publishing workshop summon channel=%s chat_id=%s task_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                summon.task_id,
+            )
+            await self.bus.publish_outbound(summon_outbound)
+
+    def _trim_summoned_set(self) -> None:
+        if len(self._summoned_task_ids) > 1024:
+            # Drop the oldest entries — set has no order, but for diagnostics
+            # we don't care which ones go; the cache TTL is short anyway.
+            for stale in list(self._summoned_task_ids)[:256]:
+                self._summoned_task_ids.discard(stale)
 
     async def _handle_streaming_chat(
         self,

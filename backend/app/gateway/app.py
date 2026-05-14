@@ -11,6 +11,7 @@ from app.gateway.builder_events import (
     TraceSink,
     WorkshopTelegramSink,
     install_builder_event_fanout,
+    set_global_workshop_dependencies,
 )
 from app.gateway.config import get_gateway_config
 from app.gateway.routers import (
@@ -84,7 +85,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     fanout.register_sink(workshop_sink)
     app.state._companion_context_store = companion_context_store
     app.state._workshop_telegram_sink = workshop_sink
-    install_task_resolution_cache(app)
+    task_cache = install_task_resolution_cache(app)
+    # Expose the same instances via module-level accessors so channels
+    # (which don't have a FastAPI ``request.app`` handle) can reach the
+    # fanout / sink / cache. See app.gateway.builder_events.__init__.
+    set_global_workshop_dependencies(
+        fanout=fanout,
+        workshop_sink=workshop_sink,
+        task_cache=task_cache,
+    )
     logger.info("BuilderEventFanout installed with sinks=%s", fanout.sink_names())
 
     # Install the companion wakeup worker. When a builder completion
@@ -160,6 +169,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await stop_channel_service()
     except Exception:
         logger.exception("Failed to stop channel service")
+
+    # Clear the module-level workshop-dependency slot so a reload in
+    # tests / repl doesn't see a stale fanout from the previous lifespan.
+    set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
+
     logger.info("Shutting down API Gateway")
 
 
