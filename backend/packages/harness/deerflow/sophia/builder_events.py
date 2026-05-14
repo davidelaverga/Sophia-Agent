@@ -41,7 +41,12 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
-_WEBHOOK_TIMEOUT_SECONDS = 2.0
+# Gateway returns 202 in milliseconds (heavy work runs as background
+# tasks), so a generous timeout keeps the daemon thread patient through
+# network blips without producing false-failure logs on every artifact
+# run. The previous 2-second cap fired predictably on healthy runs
+# because the gateway synchronously awaited artifact delivery.
+_WEBHOOK_TIMEOUT_SECONDS = 10.0
 
 
 # Process-local LRU cache of task_ids that have already had their completion

@@ -197,7 +197,13 @@ async def test_last_endpoint_returns_event_after_publish(app: FastAPI, client: h
 
 @pytest.mark.anyio
 async def test_internal_post_forwards_to_channel_bus(app: FastAPI, client: httpx.AsyncClient, monkeypatch):
-    """The internal POST also fans the event out to channel adapters via the global bus."""
+    """The internal POST also fans the event out to channel adapters via the global bus.
+
+    Production note: the channel fan-out runs as a background asyncio
+    task so the webhook returns within milliseconds (the langgraph-side
+    daemon-thread timeout is short). Tests must explicitly drain to
+    observe the side effects.
+    """
     captured: list[dict] = []
 
     async def _stub_publish(payload):
@@ -218,10 +224,60 @@ async def test_internal_post_forwards_to_channel_bus(app: FastAPI, client: httpx
                 "agent_name": "sophia_builder",
             },
         )
+        await routes.drain_background_tasks()
 
     assert response.status_code == 202
     assert len(captured) == 1
     assert captured[0]["thread_id"] == "thread-3"
+
+
+@pytest.mark.anyio
+async def test_internal_post_returns_fast_when_subscriber_is_slow(
+    app: FastAPI, client: httpx.AsyncClient, monkeypatch
+):
+    """Production regression: the webhook handler must NOT block on slow
+    channel-bus subscribers (e.g. the EI bot's artifact upload, which
+    takes 5-15s for a real document).
+
+    Pre-fix behavior: the gateway awaited ``publish_builder_completion``
+    synchronously, the langgraph-side daemon thread's 2-second timeout
+    fired on every artifact-bearing run, and the connection close
+    aborted artifact delivery on the gateway side too.
+
+    Post-fix: heavy work runs as background tasks, the handler responds
+    in milliseconds, and the daemon thread sees a clean 202.
+    """
+    import time
+
+    async def _slow_publish(_payload):
+        await asyncio.sleep(2.0)  # simulate artifact upload
+
+    monkeypatch.setattr(
+        "app.channels.message_bus.publish_builder_completion",
+        _slow_publish,
+    )
+
+    async with client:
+        start = time.perf_counter()
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "thread-slow",
+                "task_id": "task-slow",
+                "status": "success",
+                "agent_name": "sophia_builder",
+            },
+        )
+        elapsed = time.perf_counter() - start
+
+        # Handler must return long before the 2-second sleep completes.
+        # Using a generous 0.5s ceiling to avoid CI flakiness; real prod
+        # latency should be <50ms.
+        assert response.status_code == 202
+        assert elapsed < 0.5, f"handler took {elapsed:.3f}s — must return fast even when subscribers are slow"
+
+        # Drain so the test cleans up its background task.
+        await routes.drain_background_tasks(timeout=5.0)
 
 
 @pytest.mark.anyio
