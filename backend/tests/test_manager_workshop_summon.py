@@ -39,8 +39,13 @@ def _inbound(channel_name: str = "telegram") -> InboundMessage:
     )
 
 
-def _result_with_one_call(*, task_id: str, brief: str) -> dict[str, Any]:
-    return {
+def _result_with_one_call(
+    *,
+    task_id: str,
+    brief: str,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
         "messages": [
             {"type": "human", "content": "do thing"},
             {
@@ -57,6 +62,17 @@ def _result_with_one_call(*, task_id: str, brief: str) -> dict[str, Any]:
             },
         ]
     }
+    if run_id is not None:
+        result["async_tasks"] = {
+            task_id: {
+                "task_id": task_id,
+                "thread_id": task_id,
+                "run_id": run_id,
+                "agent_name": "sophia_builder",
+                "status": "running",
+            }
+        }
+    return result
 
 
 @pytest.mark.anyio
@@ -173,13 +189,14 @@ async def test_attaches_fanout_stream_per_summon(
 
     attach_calls: list[dict] = []
 
-    async def _spy_attach(*, task_id, thread_id, user_id, channel_origin, consumer_factory=None):
+    async def _spy_attach(*, task_id, thread_id, user_id, channel_origin, run_id=None, consumer_factory=None):
         attach_calls.append(
             {
                 "task_id": task_id,
                 "thread_id": thread_id,
                 "user_id": user_id,
                 "channel_origin": channel_origin,
+                "run_id": run_id,
             }
         )
 
@@ -191,7 +208,7 @@ async def test_attaches_fanout_stream_per_summon(
     try:
         await manager._maybe_emit_workshop_summons(
             _inbound(),
-            _result_with_one_call(task_id="task-xyz", brief="brief"),
+            _result_with_one_call(task_id="task-xyz", brief="brief", run_id="run-deadbeef"),
             thread_id="thread",
         )
     finally:
@@ -207,6 +224,10 @@ async def test_attaches_fanout_stream_per_summon(
     assert call["thread_id"] == "task-xyz"
     assert call["user_id"] == "user-abc"
     assert call["channel_origin"] == "telegram"
+    # Production regression: run_id is REQUIRED for runs.join_stream.
+    # Without it the consumer logs and bails out, so the workshop sees
+    # only the terminal CompletedEvent.
+    assert call["run_id"] == "run-deadbeef"
 
 
 @pytest.mark.anyio

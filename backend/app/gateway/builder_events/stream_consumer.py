@@ -51,10 +51,11 @@ def _resolved_int(env_key: str, default: int) -> int:
 
 
 class StreamConsumer:
-    """One-shot consumer for a single builder thread.
+    """One-shot consumer for a single in-progress builder run.
 
-    Construction is cheap; :meth:`run` opens the stream. Callers spawn it
-    via ``asyncio.create_task``.
+    Construction is cheap; :meth:`run` opens the stream via
+    ``client.runs.join_stream(thread_id, run_id, stream_mode=[...])``.
+    Callers spawn it via ``asyncio.create_task``.
     """
 
     def __init__(
@@ -65,6 +66,7 @@ class StreamConsumer:
         user_id: str,
         channel_origin: str,
         publish: Callable[[BuilderEvent], Awaitable[None]],
+        run_id: str | None = None,
         langgraph_url: str | None = None,
         assistant_id: str | None = None,
     ) -> None:
@@ -73,6 +75,7 @@ class StreamConsumer:
         self._user_id = user_id
         self._channel_origin = channel_origin
         self._publish = publish
+        self._run_id = run_id
         self._langgraph_url = langgraph_url or os.environ.get("LANGGRAPH_URL", _DEFAULT_LANGGRAPH_URL)
         self._assistant_id = assistant_id or _DEFAULT_ASSISTANT_ID
         self._task_timeout = _resolved_int("WORKSHOP_TASK_TIMEOUT_SECONDS", _DEFAULT_TASK_TIMEOUT_SECONDS)
@@ -163,36 +166,45 @@ class StreamConsumer:
             return None
 
     async def _open_stream(self, client: Any) -> Any | None:
-        """Open the v3 thread stream.
+        """Open a v3 stream against an already-running builder run.
 
-        The SDK signature is verified at implementation kickoff (spec
-        §22 Q1). The defensive try/except covers the case where the
-        installed SDK predates v3 — the run logs and exits cleanly.
+        We use ``client.runs.join_stream(thread_id, run_id, stream_mode=[...])``
+        — NOT ``client.runs.stream(...)`` which would start a NEW run,
+        and NOT ``client.threads.stream(...)`` which doesn't exist on
+        the SDK's threads namespace.
+
+        ``run_id`` is sourced from companion state's ``async_tasks``
+        entry that ``start_builder_task`` wrote at dispatch time. When
+        absent, we cannot tail this particular run, so we log and bail
+        — the fanout's terminal-webhook ingress is the durability
+        backstop.
         """
+        if not self._run_id:
+            logger.info(
+                "StreamConsumer: no run_id supplied for task_id=%s; "
+                "cannot tail run, falling back to terminal-webhook ingress only",
+                self._task_id,
+            )
+            return None
         try:
-            return client.threads.stream(
-                thread_id=self._thread_id,
-                assistant_id=self._assistant_id,
+            return client.runs.join_stream(
+                self._thread_id,
+                self._run_id,
                 stream_mode=["messages-tuple", "updates", "custom"],
             )
-        except TypeError:
-            try:
-                return client.threads.stream(  # pragma: no cover — SDK shape fallback
-                    self._thread_id,
-                    assistant_id=self._assistant_id,
-                )
-            except Exception:
-                logger.warning(
-                    "StreamConsumer: SDK threads.stream fallback failed task_id=%s",
-                    self._task_id,
-                    exc_info=True,
-                )
-                return None
+        except AttributeError:
+            logger.warning(
+                "StreamConsumer: installed langgraph_sdk has no runs.join_stream — "
+                "is the SDK version too old? task_id=%s",
+                self._task_id,
+            )
+            return None
         except Exception:
             logger.warning(
-                "StreamConsumer: failed to open v3 stream task_id=%s thread_id=%s",
+                "StreamConsumer: failed to open v3 stream task_id=%s thread_id=%s run_id=%s",
                 self._task_id,
                 self._thread_id,
+                self._run_id,
                 exc_info=True,
             )
             return None

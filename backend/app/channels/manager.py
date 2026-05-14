@@ -1099,10 +1099,12 @@ class ChannelManager:
             await self.bus.publish_outbound(summon_outbound)
 
             # task_id == builder thread_id (see start_builder_task: the
-            # async_tasks row records thread_id := task_id). The fanout
-            # call is best-effort and gated on BUILDER_LIVE_STREAM_ENABLED;
-            # failure does not block the visible summon flow above (the
-            # terminal webhook will still light up the workshop sink).
+            # async_tasks row records thread_id := task_id). run_id is
+            # the LangGraph run id we use with ``runs.join_stream`` to
+            # tail the in-progress builder run. Best-effort: gated on
+            # BUILDER_LIVE_STREAM_ENABLED, failure does not block the
+            # visible summon flow above (the terminal webhook is the
+            # durability backstop for the workshop sink).
             if fanout is not None:
                 try:
                     await fanout.attach_stream(
@@ -1110,6 +1112,7 @@ class ChannelManager:
                         thread_id=summon.task_id,
                         user_id=msg.user_id,
                         channel_origin="telegram",
+                        run_id=summon.run_id,
                     )
                 except Exception:
                     logger.warning(

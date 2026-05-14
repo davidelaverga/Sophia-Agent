@@ -187,13 +187,25 @@ def adapt_v3_chunk(
 
 
 def _decompose_chunk(chunk: Any) -> tuple[str | None, Any]:
-    """Best-effort split of a chunk into ``(mode, body)``."""
-    if isinstance(chunk, tuple) and len(chunk) == 2:
-        mode, body = chunk
+    """Best-effort split of a chunk into ``(mode, body)``.
+
+    The LangGraph SDK's ``client.runs.join_stream`` / ``client.runs.stream``
+    yields ``StreamPart`` instances — a NamedTuple ``(event, data, id)``
+    where ``event`` is the stream-mode string (``"messages-tuple"`` /
+    ``"updates"`` / ``"custom"`` / …) and ``data`` is the mode-specific
+    payload. We also accept legacy 2-tuple and dict shapes for
+    test-fixture flexibility.
+    """
+    # StreamPart NamedTuple shape — has ``.event`` and ``.data`` attrs.
+    event_attr = getattr(chunk, "event", None)
+    data_attr = getattr(chunk, "data", None) if event_attr is not None else None
+    if isinstance(event_attr, str):
+        return event_attr, data_attr
+    if isinstance(chunk, tuple) and len(chunk) >= 2:
+        mode, body = chunk[0], chunk[1]
         if isinstance(mode, str):
             return mode, body
     if isinstance(chunk, dict):
-        # Some SDK versions yield ``{"event": <mode>, "data": <body>}``.
         mode = chunk.get("event")
         if isinstance(mode, str):
             return mode, chunk.get("data")

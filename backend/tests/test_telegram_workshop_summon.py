@@ -59,6 +59,34 @@ def test_extract_summons_returns_pair_for_one_call() -> None:
     assert len(summons) == 1
     assert summons[0].task_id == task_id
     assert summons[0].task_brief == description
+    # When async_tasks is missing the extractor returns run_id=None so
+    # the fanout falls back to terminal-webhook-only ingress.
+    assert summons[0].run_id is None
+
+
+def test_extract_summons_pulls_run_id_from_async_tasks() -> None:
+    """Production regression: run_id is required for runs.join_stream."""
+    task_id = "task-xyz"
+    run_id = "run-deadbeef"
+    result = {
+        "messages": [
+            {"type": "human", "content": "do thing"},
+            _ai_message_with_tool_call("call_1", description="brief"),
+            _start_builder_tool_message("call_1", task_id=task_id),
+        ],
+        "async_tasks": {
+            task_id: {
+                "task_id": task_id,
+                "thread_id": task_id,
+                "run_id": run_id,
+                "agent_name": "sophia_builder",
+                "status": "running",
+            }
+        },
+    }
+    summons = extract_summons_from_result(result)
+    assert len(summons) == 1
+    assert summons[0].run_id == run_id
 
 
 def test_extract_summons_scopes_to_current_turn() -> None:

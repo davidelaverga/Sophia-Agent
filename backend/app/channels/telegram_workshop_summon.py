@@ -44,10 +44,18 @@ _BRIEF_MAX_CHARS = 3500  # Telegram max - mention - newlines headroom
 
 @dataclass(frozen=True, slots=True)
 class SummonRequest:
-    """One pending @Sophia_work_bot summon, scoped to one tool call."""
+    """One pending @Sophia_work_bot summon, scoped to one tool call.
+
+    ``run_id`` is required for tailing the builder run via the
+    LangGraph SDK's ``client.runs.join_stream(thread_id, run_id, …)``.
+    It may be None when the result didn't expose async_tasks (legacy
+    paths) — in that case the fanout falls back to terminal-webhook
+    ingress only.
+    """
 
     task_id: str
     task_brief: str
+    run_id: str | None = None
 
     def render_message(self, *, workshop_username: str) -> str:
         """Render the summoning message body per spec §12.3."""
@@ -63,8 +71,10 @@ def extract_summons_from_result(result: Any) -> list[SummonRequest]:
 
     Walks ``result["messages"]`` from the end back to the most recent
     human message and pairs each ``start_builder_task`` ToolMessage with
-    its calling AIMessage to extract ``(task_id, brief)``. Returns an
-    empty list when no such calls are present in this turn's scope.
+    its calling AIMessage to extract ``(task_id, brief)``. Cross-references
+    ``result["async_tasks"]`` for ``run_id`` (needed by the workshop's v3
+    stream consumer to tail the existing run). Returns an empty list when
+    no such calls are present in this turn's scope.
     """
     messages = _extract_messages(result)
     if not messages:
@@ -74,10 +84,12 @@ def extract_summons_from_result(result: Any) -> list[SummonRequest]:
     if not tool_messages:
         return []
 
+    async_tasks = _extract_async_tasks(result)
+
     summons: list[SummonRequest] = []
     seen_task_ids: set[str] = set()
     for tool_msg in tool_messages:
-        summon = _build_summon(tool_msg, tool_calls_by_id)
+        summon = _build_summon(tool_msg, tool_calls_by_id, async_tasks)
         if summon is None or summon.task_id in seen_task_ids:
             continue
         seen_task_ids.add(summon.task_id)
@@ -126,6 +138,7 @@ def _iter_tool_calls(ai_msg: dict[str, Any]):
 def _build_summon(
     tool_msg: dict[str, Any],
     tool_calls_by_id: dict[str, dict[str, Any]],
+    async_tasks: dict[str, dict[str, Any]],
 ) -> SummonRequest | None:
     tool_call_id = tool_msg.get("tool_call_id")
     task_id = _extract_task_id(tool_msg.get("content"))
@@ -137,7 +150,35 @@ def _build_summon(
     if not brief:
         logger.debug("summon: empty brief for task_id=%s tool_call_id=%s", task_id, tool_call_id)
         return None
-    return SummonRequest(task_id=task_id, task_brief=brief)
+    run_id = _extract_run_id(async_tasks, task_id)
+    if run_id is None:
+        logger.info(
+            "summon: no run_id in async_tasks for task_id=%s — workshop will fall back to terminal-webhook-only ingress",
+            task_id,
+        )
+    return SummonRequest(task_id=task_id, task_brief=brief, run_id=run_id)
+
+
+def _extract_async_tasks(result: Any) -> dict[str, dict[str, Any]]:
+    """Pull ``async_tasks`` off a runs.wait result dict.
+
+    The state is written by ``start_builder_task`` as
+    ``{"async_tasks": {task_id: {"task_id": ..., "run_id": ..., …}}}``.
+    """
+    if not isinstance(result, dict):
+        return {}
+    raw = result.get("async_tasks")
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(v, dict)}
+
+
+def _extract_run_id(async_tasks: dict[str, dict[str, Any]], task_id: str) -> str | None:
+    entry = async_tasks.get(task_id)
+    if not isinstance(entry, dict):
+        return None
+    run_id = entry.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
 
 
 def _extract_task_id(content: Any) -> str | None:

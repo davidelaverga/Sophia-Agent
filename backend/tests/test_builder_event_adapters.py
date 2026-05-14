@@ -152,3 +152,45 @@ class TestAdaptV3Chunk:
         chunk = ("messages-tuple", (SimpleNamespace(content=""), {}))
         evt = adapt_v3_chunk(chunk, **self._base, sequence=9)
         assert evt is None
+
+    def test_stream_part_named_tuple_shape(self) -> None:
+        """Production regression: LangGraph SDK yields StreamPart(event, data, id) — a 3-tuple NamedTuple.
+
+        ``_decompose_chunk`` previously checked ``len(chunk) == 2`` which
+        rejected the SDK's real shape and silently ignored every chunk,
+        leaving the workshop with no mid-flight events at all.
+        """
+        from langgraph_sdk.schema import StreamPart
+
+        chunk = StreamPart(
+            event="messages-tuple",
+            data=(_AIMessageLike("hi from prod"), {"role": "assistant"}),
+            id="evt-1",
+        )
+        evt = adapt_v3_chunk(chunk, **self._base, sequence=10)
+        assert isinstance(evt, MessageDeltaEvent)
+        assert evt.delta == "hi from prod"
+
+    def test_stream_part_with_tool_call_update(self) -> None:
+        from langgraph_sdk.schema import StreamPart
+
+        node_state = {
+            "messages": [
+                _AIMessageLike(
+                    "",
+                    tool_calls=[{"id": "c1", "name": "builder_web_search", "args": {"query": "q"}}],
+                )
+            ]
+        }
+        chunk = StreamPart(event="updates", data={"agent": node_state}, id="evt-2")
+        evt = adapt_v3_chunk(chunk, **self._base, sequence=11)
+        assert isinstance(evt, ToolCallEvent)
+        assert evt.tool_name == "builder_web_search"
+
+    def test_stream_part_custom_event(self) -> None:
+        from langgraph_sdk.schema import StreamPart
+
+        chunk = StreamPart(event="custom", data={"name": "phase", "payload": {"phase": "drafting"}}, id="evt-3")
+        evt = adapt_v3_chunk(chunk, **self._base, sequence=12)
+        assert isinstance(evt, CustomEvent)
+        assert evt.payload == {"phase": "drafting"}

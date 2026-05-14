@@ -134,9 +134,17 @@ class BuilderEventFanout:
         thread_id: str,
         user_id: str,
         channel_origin: str,
+        run_id: str | None = None,
         consumer_factory: Any | None = None,
     ) -> None:
         """Start a background v3-stream consumer for ``task_id``.
+
+        ``run_id`` is the LangGraph run id returned by
+        ``client.runs.create(...)`` inside ``start_builder_task``. It's
+        required to tail an in-progress run via
+        ``client.runs.join_stream(thread_id, run_id, …)``. When None
+        (legacy callers), the consumer logs and skips — the fanout
+        falls back to terminal-webhook ingress for this task.
 
         Gated by ``BUILDER_LIVE_STREAM_ENABLED``. The consumer instance
         is created via ``consumer_factory`` if supplied (tests inject a
@@ -164,14 +172,16 @@ class BuilderEventFanout:
                 user_id=user_id,
                 channel_origin=channel_origin,
                 publish=self.publish,
+                run_id=run_id,
             )
             task = asyncio.create_task(consumer.run())
             task.add_done_callback(lambda _t, tid=task_id: self._stream_tasks.pop(tid, None))
             self._stream_tasks[task_id] = task
             logger.info(
-                "BuilderEventFanout.attach_stream: spawned consumer task_id=%s thread_id=%s",
+                "BuilderEventFanout.attach_stream: spawned consumer task_id=%s thread_id=%s run_id=%s",
                 task_id,
                 thread_id,
+                run_id,
             )
 
     async def cancel_stream(self, task_id: str) -> None:
