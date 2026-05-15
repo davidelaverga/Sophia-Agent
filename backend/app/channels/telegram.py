@@ -158,40 +158,40 @@ class TelegramChannel(Channel):
             logger.error("Invalid Telegram chat_id: %s", msg.chat_id)
             return
 
-        # Phase 2 of sophia_telegram_architecture_spec_v1: detect workshop
-        # summon messages (companion side). Suppress the "reply-to last bot
-        # message" threading so the ``@``-mention parses cleanly at the
-        # start of a fresh message; register the sent message in the
-        # gateway TaskResolutionCache so the workshop handler can resolve
-        # the matching task_id when its guest-dispatch arrives.
-        summon_meta = (msg.metadata or {}).get("workshop_summon") if isinstance(msg.metadata, dict) else None
+        # Phase 3 of sophia_telegram_architecture_spec_v1: detect builder
+        # progress placeholders (companion side). The placeholder text is
+        # plain ("Working on it…") with no @-mention, so it threads
+        # normally. After a successful send, bind a
+        # ``CompanionProgressReceiver`` to the sent message_id so the
+        # fanout's WorkshopTelegramSink streams renderer-projected events
+        # into this exact placeholder via editMessageText.
+        progress_meta = (
+            (msg.metadata or {}).get("builder_progress") if isinstance(msg.metadata, dict) else None
+        )
 
         kwargs: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
 
-        # Reply to the last bot message in this chat for threading — but
-        # not on summon messages (the @-mention needs to start the body).
-        if not summon_meta:
-            reply_to = self._last_bot_message.get(msg.chat_id)
-            if reply_to:
-                kwargs["reply_to_message_id"] = reply_to
+        # Reply to the last bot message in this chat for threading.
+        reply_to = self._last_bot_message.get(msg.chat_id)
+        if reply_to:
+            kwargs["reply_to_message_id"] = reply_to
 
         bot = self._application.bot
         last_exc: Exception | None = None
         for attempt in range(_max_retries):
             try:
                 sent = await bot.send_message(**kwargs)
-                # Summon messages MUST NOT become the "last bot message"
-                # target — the user's next reply should attach to the
-                # companion's prior conversational message, not the
-                # @-mention. Only track non-summon sends.
-                if not summon_meta:
+                # Progress placeholders MUST NOT become the "last bot
+                # message" target — the user's next reply should attach
+                # to the companion's prior conversational message, not
+                # the placeholder that will be edited mid-build.
+                if not progress_meta:
                     self._last_bot_message[msg.chat_id] = sent.message_id
-                if summon_meta:
-                    self._register_workshop_summon(
+                if progress_meta:
+                    self._open_progress_stream(
                         chat_id=chat_id,
                         message_id=sent.message_id,
-                        task_id=str(summon_meta.get("task_id") or ""),
-                        user_id=str(summon_meta.get("user_id") or ""),
+                        task_id=str(progress_meta.get("task_id") or ""),
                     )
                 return
             except Exception as exc:
@@ -210,45 +210,51 @@ class TelegramChannel(Channel):
         logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
 
-    @staticmethod
-    def _register_workshop_summon(
-        *, chat_id: int, message_id: int, task_id: str, user_id: str
-    ) -> None:
-        """Push (chat_id, message_id) → task_id into the gateway cache.
+    def _open_progress_stream(self, *, chat_id: int, message_id: int, task_id: str) -> None:
+        """Bind a CompanionProgressReceiver to the placeholder message.
 
-        Best-effort: any failure here only affects the workshop's ability
-        to resolve THIS task, not the companion conversation.
+        Best-effort: any failure here only affects the streaming UX for
+        THIS task, not the companion conversation. The terminal-webhook
+        path (``_on_builder_completion``) still delivers the artifact.
         """
-        if not task_id or not user_id:
+        if not task_id:
+            logger.info("[Telegram] progress stream: missing task_id, skipping receiver register")
+            return
+        if self._application is None or self._tg_loop is None:
             logger.info(
-                "[Telegram] workshop summon: missing task_id or user_id, skipping cache register"
+                "[Telegram] progress stream: application/tg_loop not ready, skipping task_id=%s",
+                task_id,
             )
             return
         try:
-            from app.gateway.builder_events import get_global_task_cache
+            from app.channels.companion_progress_receiver import CompanionProgressReceiver
+            from app.gateway.builder_events import get_global_workshop_sink
 
-            cache = get_global_task_cache()
-            if cache is None:
+            sink = get_global_workshop_sink()
+            if sink is None:
                 logger.warning(
-                    "[Telegram] workshop summon: gateway TaskResolutionCache unavailable; "
-                    "workshop will be unable to resolve this dispatch"
+                    "[Telegram] progress stream: gateway WorkshopTelegramSink unavailable; "
+                    "no live progress UX for this task"
                 )
                 return
-            cache.register(
+            receiver = CompanionProgressReceiver(
+                bot=self._application.bot,
                 chat_id=chat_id,
                 message_id=message_id,
+                tg_loop=self._tg_loop,
+                sink=sink,
                 task_id=task_id,
-                user_id=user_id,
             )
+            sink.register_workshop(task_id, receiver)
             logger.info(
-                "[Telegram] workshop summon registered chat_id=%s message_id=%s task_id=%s",
+                "[Telegram] progress stream registered chat_id=%s message_id=%s task_id=%s",
                 chat_id,
                 message_id,
                 task_id,
             )
         except Exception:
             logger.warning(
-                "[Telegram] workshop summon cache register failed task_id=%s",
+                "[Telegram] progress stream registration failed task_id=%s",
                 task_id,
                 exc_info=True,
             )

@@ -119,6 +119,19 @@ class StreamConsumer:
 
         async for chunk in self._iter_with_event_timeout(stream_iter):
             sequence += 1
+            # Phase 3 diagnostic: one log line per chunk so we can see
+            # exactly which stream_mode values deepagents 0.5 emits and
+            # whether the adapter is recognising them. Truncated to keep
+            # production logs scannable.
+            chunk_event_attr = getattr(chunk, "event", None)
+            logger.info(
+                "StreamConsumer: chunk task_id=%s seq=%d event=%s shape=%s preview=%.180s",
+                self._task_id,
+                sequence,
+                chunk_event_attr,
+                type(chunk).__name__,
+                repr(chunk),
+            )
             try:
                 event = adapt_v3_chunk(
                     chunk,
@@ -136,6 +149,12 @@ class StreamConsumer:
                 )
                 continue
             if event is None:
+                logger.info(
+                    "StreamConsumer: chunk ignored task_id=%s seq=%d event=%s — adapter could not extract BuilderEvent",
+                    self._task_id,
+                    sequence,
+                    chunk_event_attr,
+                )
                 continue
             try:
                 await self._publish(event)

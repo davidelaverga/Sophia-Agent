@@ -128,12 +128,16 @@ channels:
   #
   # Bot-username is hardcoded for the same reason as telegram_work — public
   # value, baked into the langgraph deploy.
+  # Phase 3 (sophia_telegram_architecture_spec_v1, 2026-05-15): the
+  # workshop bot's polling thread is intentionally dormant. The
+  # companion bot (@Sophia_EI_bot) owns the streaming-progress UX via
+  # a placeholder it edits live (CompanionProgressReceiver) — no
+  # bot-to-bot chat tagging, no @-mention pollution. The workshop bot
+  # code paths stay in the repo as dormant infrastructure pending a
+  # future spec (e.g. builder-asks-user-a-question). BotFather Guest
+  # Mode + Bot-to-Bot Communication stay enabled on the bot — harmless.
   telegram_workshop:
-    enabled: true
+    enabled: false
     bot_token: $TELEGRAM_WORKER_BOT_TOKEN
     bot_username: Sophia_work_bot
-    # Cold-DM mute window (minutes). Spec §6.5 — when a user DMs
-    # @Sophia_work_bot directly the workshop redirects them to companion
-    # then mutes itself for this duration so accidental retries don't
-    # repeatedly trigger the redirect.
     cold_dm_mute_minutes: 30

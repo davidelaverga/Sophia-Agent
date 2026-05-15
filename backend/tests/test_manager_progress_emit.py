@@ -1,4 +1,4 @@
-"""Tests for ChannelManager.\\_maybe_emit_workshop_summons (Phase 2)."""
+"""Tests for ChannelManager._maybe_open_progress_message (Phase 3)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,12 @@ from typing import Any
 import pytest
 
 from app.channels.manager import ChannelManager
-from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus, OutboundMessage
+from app.channels.message_bus import (
+    InboundMessage,
+    InboundMessageType,
+    MessageBus,
+    OutboundMessage,
+)
 from app.channels.store import ChannelStore
 from app.gateway.builder_events import (
     BuilderEventFanout,
@@ -75,37 +80,39 @@ def _result_with_one_call(
     return result
 
 
-@pytest.mark.anyio
-async def test_publishes_summon_outbound_with_metadata(
-    manager: ChannelManager, cache_singleton: TaskResolutionCache, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
-    published: list[OutboundMessage] = []
-
-    async def _capture(msg: OutboundMessage) -> None:
-        published.append(msg)
-
-    manager.bus.subscribe_outbound(_capture)
-
-    await manager._maybe_emit_workshop_summons(
-        _inbound(),
-        _result_with_one_call(task_id="task-1", brief="Research best EVs."),
-        thread_id="thread-1",
-    )
-
-    assert len(published) == 1
-    summon = published[0]
-    assert summon.text.startswith("@Sophia_work_bot\n\n")
-    assert "Research best EVs." in summon.text
-    assert summon.metadata.get("workshop_summon", {}).get("task_id") == "task-1"
-    assert summon.metadata.get("workshop_summon", {}).get("user_id") == "user-abc"
-
-
 async def _subscribe_capture(bus: MessageBus, sink: list[OutboundMessage]) -> None:
     async def _capture(msg: OutboundMessage) -> None:
         sink.append(msg)
 
     bus.subscribe_outbound(_capture)
+
+
+@pytest.mark.anyio
+async def test_publishes_plain_text_progress_placeholder(
+    manager: ChannelManager, cache_singleton: TaskResolutionCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Phase 3 contract: the placeholder is plain text, no @-mention, no brief."""
+    monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
+    published: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, published)
+
+    await manager._maybe_open_progress_message(
+        _inbound(),
+        _result_with_one_call(task_id="task-1", brief="Research best EVs in Europe."),
+        thread_id="thread-1",
+    )
+
+    assert len(published) == 1
+    placeholder = published[0]
+    # No @-mention, no brief dumped in chat.
+    assert "@Sophia_work_bot" not in placeholder.text
+    assert "Research best EVs in Europe." not in placeholder.text
+    # Plain-text working-on-it copy
+    assert "Working on it" in placeholder.text
+    # builder_progress metadata routes the receiver registration in telegram.py
+    progress = placeholder.metadata.get("builder_progress", {})
+    assert progress.get("task_id") == "task-1"
+    assert progress.get("user_id") == "user-abc"
 
 
 @pytest.mark.anyio
@@ -117,8 +124,8 @@ async def test_does_not_double_emit_for_same_task_id(
     await _subscribe_capture(manager.bus, published)
 
     result = _result_with_one_call(task_id="task-x", brief="brief")
-    await manager._maybe_emit_workshop_summons(_inbound(), result, thread_id="thread")
-    await manager._maybe_emit_workshop_summons(_inbound(), result, thread_id="thread")
+    await manager._maybe_open_progress_message(_inbound(), result, thread_id="thread")
+    await manager._maybe_open_progress_message(_inbound(), result, thread_id="thread")
 
     assert len(published) == 1
 
@@ -131,7 +138,7 @@ async def test_skips_non_telegram_channel(
     published: list[OutboundMessage] = []
     await _subscribe_capture(manager.bus, published)
 
-    await manager._maybe_emit_workshop_summons(
+    await manager._maybe_open_progress_message(
         _inbound(channel_name="slack"),
         _result_with_one_call(task_id="t", brief="b"),
         thread_id="th",
@@ -148,7 +155,7 @@ async def test_skips_when_env_flag_off(
     published: list[OutboundMessage] = []
     await _subscribe_capture(manager.bus, published)
 
-    await manager._maybe_emit_workshop_summons(
+    await manager._maybe_open_progress_message(
         _inbound(),
         _result_with_one_call(task_id="t", brief="b"),
         thread_id="th",
@@ -157,39 +164,30 @@ async def test_skips_when_env_flag_off(
 
 
 @pytest.mark.anyio
-async def test_skips_when_no_task_cache_singleton(
+async def test_attaches_fanout_stream_per_placeholder(
     manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
-    set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
-    published: list[OutboundMessage] = []
-    await _subscribe_capture(manager.bus, published)
-
-    await manager._maybe_emit_workshop_summons(
-        _inbound(),
-        _result_with_one_call(task_id="t", brief="b"),
-        thread_id="th",
-    )
-    assert published == []
-
-
-@pytest.mark.anyio
-async def test_attaches_fanout_stream_per_summon(
-    manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Phase 2 codex-review regression: every emitted summon must also
-    register a v3 stream consumer on the fanout, otherwise the workshop
-    sink only ever sees the terminal CompletedEvent and the streaming
-    progress UX collapses to a blocking summary."""
+    """Phase 2 regression (kept): every placeholder must also attach the v3
+    stream consumer, otherwise the workshop sink only ever sees the
+    terminal CompletedEvent and the progress UX collapses to a blocking
+    summary.
+    """
     monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
     monkeypatch.setenv("BUILDER_LIVE_STREAM_ENABLED", "true")
-    cache = TaskResolutionCache()
     fanout = BuilderEventFanout()
-    set_global_workshop_dependencies(fanout=fanout, workshop_sink=None, task_cache=cache)
+    set_global_workshop_dependencies(fanout=fanout, workshop_sink=None, task_cache=None)
 
     attach_calls: list[dict] = []
 
-    async def _spy_attach(*, task_id, thread_id, user_id, channel_origin, run_id=None, consumer_factory=None):
+    async def _spy_attach(
+        *,
+        task_id,
+        thread_id,
+        user_id,
+        channel_origin,
+        run_id=None,
+        consumer_factory=None,
+    ):
         attach_calls.append(
             {
                 "task_id": task_id,
@@ -206,7 +204,7 @@ async def test_attaches_fanout_stream_per_summon(
     await _subscribe_capture(manager.bus, published)
 
     try:
-        await manager._maybe_emit_workshop_summons(
+        await manager._maybe_open_progress_message(
             _inbound(),
             _result_with_one_call(task_id="task-xyz", brief="brief", run_id="run-deadbeef"),
             thread_id="thread",
@@ -217,28 +215,22 @@ async def test_attaches_fanout_stream_per_summon(
     assert len(published) == 1
     assert len(attach_calls) == 1
     call = attach_calls[0]
-    # task_id == builder thread_id (start_builder_task writes both to the
-    # same value on the async_tasks row); the fanout reuses task_id as
-    # the v3 stream subscription target.
     assert call["task_id"] == "task-xyz"
     assert call["thread_id"] == "task-xyz"
     assert call["user_id"] == "user-abc"
     assert call["channel_origin"] == "telegram"
     # Production regression: run_id is REQUIRED for runs.join_stream.
-    # Without it the consumer logs and bails out, so the workshop sees
-    # only the terminal CompletedEvent.
     assert call["run_id"] == "run-deadbeef"
 
 
 @pytest.mark.anyio
-async def test_attach_failure_does_not_block_summon(
+async def test_attach_failure_does_not_block_placeholder(
     manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A broken fanout must not swallow the summon outbound."""
+    """A broken fanout must not swallow the visible progress placeholder."""
     monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
-    cache = TaskResolutionCache()
     fanout = BuilderEventFanout()
-    set_global_workshop_dependencies(fanout=fanout, workshop_sink=None, task_cache=cache)
+    set_global_workshop_dependencies(fanout=fanout, workshop_sink=None, task_cache=None)
 
     async def _broken_attach(**_kw):
         raise RuntimeError("boom")
@@ -249,7 +241,7 @@ async def test_attach_failure_does_not_block_summon(
     await _subscribe_capture(manager.bus, published)
 
     try:
-        await manager._maybe_emit_workshop_summons(
+        await manager._maybe_open_progress_message(
             _inbound(),
             _result_with_one_call(task_id="t", brief="b"),
             thread_id="th",
@@ -257,4 +249,4 @@ async def test_attach_failure_does_not_block_summon(
     finally:
         set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
 
-    assert len(published) == 1  # summon still went out
+    assert len(published) == 1  # placeholder still went out

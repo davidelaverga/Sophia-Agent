@@ -59,7 +59,7 @@ Status semantics (terminal-status blacklist; default-active for forward-compat):
 Once a task is running, the model has four lifecycle tools available:
 
 - `check_async_task(task_id)` — fetch live status + result. Use only when the user asks "how's it going?" or after a clearly-long-enough wait. Do NOT poll on a timer; statuses cached in conversation history are stale.
-- `update_async_task(task_id, message)` — send new instructions to a running build (e.g. "actually, make it 2 slides not 5"). The thread_id stays the same; the builder picks up the update mid-run.
+- `update_async_task(task_id, message)` — send new instructions to a running build (e.g. "actually, make it 2 slides not 5"). **HARD INTERRUPT** — this halts the in-flight run and restarts it from scratch with the original brief + the new instructions appended. Do NOT call this without telling the user first what's about to happen, e.g.: *"Heads up — adding to a running build restarts it from scratch with both your original request and this update. Want me to proceed?"* Then call the tool only after they confirm. Use only for genuine scope changes; for clarifications the user can wait, call `check_async_task` instead.
 - `cancel_async_task(task_id)` — stop a running build at the user's request.
 - `list_async_tasks(status_filter?)` — recall task_ids after context compaction or when the user references "that document we started".
 

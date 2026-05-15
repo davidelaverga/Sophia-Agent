@@ -1,17 +1,17 @@
-"""Unit tests for the companion summon-emit helper (Phase 2)."""
+"""Unit tests for the progress-target extractor (Phase 3 of workshop architecture)."""
 
 from __future__ import annotations
 
-from app.channels.telegram_workshop_summon import (
-    SummonRequest,
-    extract_summons_from_result,
+from app.channels.telegram_workshop_progress import (
+    ProgressTarget,
+    extract_progress_targets_from_result,
 )
 
 
 def _ai_message_with_tool_call(tool_call_id: str, *, description: str) -> dict:
     return {
         "type": "ai",
-        "content": "On it — let me bring in the workshop to dig into this.",
+        "content": "On it — let me kick off the research.",
         "tool_calls": [
             {
                 "id": tool_call_id,
@@ -34,37 +34,35 @@ def _start_builder_tool_message(tool_call_id: str, *, task_id: str) -> dict:
     }
 
 
-def test_extract_summons_returns_empty_on_no_tool_calls() -> None:
+def test_extract_returns_empty_on_no_tool_calls() -> None:
     result = {
         "messages": [
             {"type": "human", "content": "hi"},
             {"type": "ai", "content": "hello back"},
         ]
     }
-    assert extract_summons_from_result(result) == []
+    assert extract_progress_targets_from_result(result) == []
 
 
-def test_extract_summons_returns_pair_for_one_call() -> None:
-    description = "Research the best electric cars in Europe for families."
+def test_extract_returns_target_for_one_call() -> None:
     task_id = "task-abc-123"
     result = {
         "messages": [
             {"type": "human", "content": "research best EVs"},
-            _ai_message_with_tool_call("call_1", description=description),
+            _ai_message_with_tool_call("call_1", description="brief"),
             _start_builder_tool_message("call_1", task_id=task_id),
             {"type": "ai", "content": "On it…"},
         ]
     }
-    summons = extract_summons_from_result(result)
-    assert len(summons) == 1
-    assert summons[0].task_id == task_id
-    assert summons[0].task_brief == description
-    # When async_tasks is missing the extractor returns run_id=None so
-    # the fanout falls back to terminal-webhook-only ingress.
-    assert summons[0].run_id is None
+    targets = extract_progress_targets_from_result(result)
+    assert len(targets) == 1
+    assert targets[0].task_id == task_id
+    # When async_tasks is missing, run_id is None and the fanout falls
+    # back to terminal-webhook-only ingress.
+    assert targets[0].run_id is None
 
 
-def test_extract_summons_pulls_run_id_from_async_tasks() -> None:
+def test_extract_pulls_run_id_from_async_tasks() -> None:
     """Production regression: run_id is required for runs.join_stream."""
     task_id = "task-xyz"
     run_id = "run-deadbeef"
@@ -84,13 +82,13 @@ def test_extract_summons_pulls_run_id_from_async_tasks() -> None:
             }
         },
     }
-    summons = extract_summons_from_result(result)
-    assert len(summons) == 1
-    assert summons[0].run_id == run_id
+    targets = extract_progress_targets_from_result(result)
+    assert len(targets) == 1
+    assert targets[0].run_id == run_id
 
 
-def test_extract_summons_scopes_to_current_turn() -> None:
-    """A prior-turn tool call must NOT be re-summoned."""
+def test_extract_scopes_to_current_turn() -> None:
+    """A prior-turn tool call must NOT trigger a new progress message."""
     result = {
         "messages": [
             # Previous turn
@@ -103,13 +101,11 @@ def test_extract_summons_scopes_to_current_turn() -> None:
             {"type": "ai", "content": "let me think about that"},
         ]
     }
-    summons = extract_summons_from_result(result)
-    # Walk stops at the most recent human message — no start_builder_task
-    # in the current turn → no summons.
-    assert summons == []
+    targets = extract_progress_targets_from_result(result)
+    assert targets == []
 
 
-def test_extract_summons_dedupes_within_turn() -> None:
+def test_extract_dedupes_within_turn() -> None:
     result = {
         "messages": [
             {"type": "human", "content": "do two things"},
@@ -119,12 +115,12 @@ def test_extract_summons_dedupes_within_turn() -> None:
             {"type": "ai", "content": "queued"},
         ]
     }
-    summons = extract_summons_from_result(result)
-    assert len(summons) == 1
-    assert summons[0].task_id == "task_1"
+    targets = extract_progress_targets_from_result(result)
+    assert len(targets) == 1
+    assert targets[0].task_id == "task_1"
 
 
-def test_extract_summons_handles_two_distinct_tasks() -> None:
+def test_extract_handles_two_distinct_tasks() -> None:
     result = {
         "messages": [
             {"type": "human", "content": "do two things at once"},
@@ -139,56 +135,29 @@ def test_extract_summons_handles_two_distinct_tasks() -> None:
             _start_builder_tool_message("c2", task_id="task_B"),
         ]
     }
-    summons = extract_summons_from_result(result)
-    assert {s.task_id for s in summons} == {"task_A", "task_B"}
-    briefs = {s.task_brief for s in summons}
-    assert "brief A" in briefs and "brief B" in briefs
+    targets = extract_progress_targets_from_result(result)
+    assert {t.task_id for t in targets} == {"task_A", "task_B"}
 
 
-def test_extract_summons_handles_list_result_shape() -> None:
+def test_extract_handles_list_result_shape() -> None:
     messages = [
         {"type": "human", "content": "hi"},
         _ai_message_with_tool_call("call_1", description="brief"),
         _start_builder_tool_message("call_1", task_id="t"),
     ]
-    summons = extract_summons_from_result(messages)
-    assert len(summons) == 1
+    targets = extract_progress_targets_from_result(messages)
+    assert len(targets) == 1
 
 
-def test_extract_summons_skips_when_brief_empty() -> None:
-    result = {
-        "messages": [
-            {"type": "human", "content": "hi"},
-            {
-                "type": "ai",
-                "tool_calls": [
-                    {"id": "c", "name": "start_builder_task", "args": {"description": ""}},
-                ],
-            },
-            _start_builder_tool_message("c", task_id="t"),
-        ]
-    }
-    assert extract_summons_from_result(result) == []
+def test_progress_target_is_frozen() -> None:
+    """Defensive shape check — receivers stash these and must not mutate."""
+    target = ProgressTarget(task_id="t", run_id="r")
+    import dataclasses
 
-
-def test_render_message_includes_at_mention_first() -> None:
-    s = SummonRequest(task_id="t", task_brief="Research best EVs.")
-    body = s.render_message(workshop_username="Sophia_work_bot")
-    assert body.startswith("@Sophia_work_bot\n\n")
-    assert "Research best EVs." in body
-
-
-def test_render_message_strips_leading_at() -> None:
-    s = SummonRequest(task_id="t", task_brief="brief")
-    body = s.render_message(workshop_username="@Sophia_work_bot")
-    assert body.startswith("@Sophia_work_bot\n\n")
-    assert "@@" not in body
-
-
-def test_render_message_truncates_long_brief() -> None:
-    long_brief = "x" * 5000
-    s = SummonRequest(task_id="t", task_brief=long_brief)
-    body = s.render_message(workshop_username="Sophia_work_bot")
-    # body is bounded by the per-summon brief cap + the @-mention prefix
-    assert len(body) < 5000
-    assert body.endswith("…")
+    assert dataclasses.is_dataclass(target)
+    # Frozen dataclass: attribute assignment raises FrozenInstanceError
+    try:
+        target.task_id = "other"  # type: ignore[misc]
+    except dataclasses.FrozenInstanceError:
+        return
+    raise AssertionError("ProgressTarget should be frozen")
