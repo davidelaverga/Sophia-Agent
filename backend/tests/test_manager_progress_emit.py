@@ -250,3 +250,42 @@ async def test_attach_failure_does_not_block_placeholder(
         set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
 
     assert len(published) == 1  # placeholder still went out
+
+
+@pytest.mark.anyio
+async def test_publish_failure_does_not_permanently_block_retries(
+    manager: ChannelManager, cache_singleton: TaskResolutionCache, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Codex P2 regression: when ``bus.publish_outbound`` raises, the
+    task MUST NOT be marked as already-summoned, otherwise a follow-up
+    turn for the same task_id is permanently blocked and the user never
+    sees the placeholder.
+
+    The bus normally swallows callback exceptions; this test simulates
+    a path where the bus itself raises (e.g. an unexpected exception in
+    its dispatch logging or a future contract change).
+    """
+    monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
+    call_count = {"n": 0}
+
+    async def _flaky_publish(_outbound):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated bus blow-up")
+        # Second call succeeds.
+
+    monkeypatch.setattr(manager.bus, "publish_outbound", _flaky_publish)
+
+    result = _result_with_one_call(task_id="task-retry", brief="brief")
+    # First attempt — publish raises, task must NOT be marked.
+    await manager._maybe_open_progress_message(_inbound(), result, thread_id="th")
+    assert "task-retry" not in manager._summoned_task_ids
+
+    # Second attempt — publish succeeds, task IS marked, no double-emit on a third call.
+    await manager._maybe_open_progress_message(_inbound(), result, thread_id="th")
+    assert "task-retry" in manager._summoned_task_ids
+    assert call_count["n"] == 2
+
+    # Third attempt — task already marked, no further publish.
+    await manager._maybe_open_progress_message(_inbound(), result, thread_id="th")
+    assert call_count["n"] == 2

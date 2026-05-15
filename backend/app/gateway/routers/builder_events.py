@@ -196,16 +196,24 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
     #
     # Use the ``_or_none`` lookup so test fixtures that install only the
     # SSE worker don't get a noisy warning on every webhook POST.
+    #
+    # Hold a strong reference in ``_BACKGROUND_TASKS`` so the GC can't
+    # collect the task mid-run (asyncio.create_task only stores a weak
+    # reference internally — without a hard ref, a long wakeup turn can
+    # vanish silently and the user never gets the proactive follow-up).
     wakeup = get_companion_wakeup_or_none(request.app)
     if wakeup is not None:
         try:
-            asyncio.create_task(wakeup.wake(payload))
+            wakeup_task = asyncio.create_task(wakeup.wake(payload))
         except Exception:
             logger.warning(
                 "Companion wakeup scheduling failed for builder event task_id=%s",
                 payload.get("task_id"),
                 exc_info=True,
             )
+        else:
+            _BACKGROUND_TASKS.add(wakeup_task)
+            wakeup_task.add_done_callback(_BACKGROUND_TASKS.discard)
 
     return {"delivered_subscribers": delivered}
 

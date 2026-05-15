@@ -1068,9 +1068,6 @@ class ChannelManager:
                     target.task_id,
                 )
                 continue
-            # Mark BEFORE publishing so a retry loop can't double-emit.
-            self._summoned_task_ids.add(target.task_id)
-            self._trim_summoned_set()
 
             placeholder_outbound = OutboundMessage(
                 channel_name=msg.channel_name,
@@ -1093,7 +1090,24 @@ class ChannelManager:
                 target.task_id,
                 target.run_id,
             )
-            await self.bus.publish_outbound(placeholder_outbound)
+            try:
+                await self.bus.publish_outbound(placeholder_outbound)
+            except Exception:
+                # Mark the task ONLY after a successful publish so a
+                # transient bus failure doesn't permanently block retries
+                # for this task_id. The single-threaded asyncio dispatch
+                # loop guarantees no concurrent re-entry for the same
+                # turn, so leaving the mark unset until after publish is
+                # safe — there's no risk of double-emit from in-flight
+                # parallel callers.
+                logger.warning(
+                    "[Manager] progress placeholder publish failed task_id=%s — leaving task unmarked so a follow-up turn can retry",
+                    target.task_id,
+                    exc_info=True,
+                )
+                continue
+            self._summoned_task_ids.add(target.task_id)
+            self._trim_summoned_set()
 
             # task_id == builder thread_id (see start_builder_task: the
             # async_tasks row records thread_id := task_id). run_id is

@@ -281,6 +281,56 @@ async def test_internal_post_returns_fast_when_subscriber_is_slow(
 
 
 @pytest.mark.anyio
+async def test_wakeup_task_held_in_background_tasks(app: FastAPI, client: httpx.AsyncClient, monkeypatch):
+    """Codex P2 regression: the companion-wakeup task scheduled via
+    ``asyncio.create_task(wakeup.wake(...))`` must hold a strong reference
+    until completion. Without it, asyncio's weak internal reference lets
+    the GC reclaim the task mid-run and Sophia's proactive completion
+    follow-up silently disappears.
+
+    The fix adds the wakeup task to ``_BACKGROUND_TASKS`` (the same set
+    the channel-fanout + fanout-publish tasks use) with a done-callback
+    to remove it on completion. This test asserts the task lands in the
+    set and stays there while running.
+    """
+    started = asyncio.Event()
+    finished = asyncio.Event()
+
+    class _StubWakeup:
+        async def wake(self, _payload):
+            started.set()
+            await finished.wait()
+
+    # Install a fake wakeup worker via the app.state slot the router checks.
+    # The attribute name must match _WAKEUP_ATTR in companion_wakeup.py.
+    app.state._companion_wakeup = _StubWakeup()
+    try:
+        async with client:
+            await client.post(
+                "/internal/builder-events",
+                json={
+                    "thread_id": "thread-wake",
+                    "task_id": "task-wake",
+                    "status": "success",
+                    "agent_name": "sophia_builder",
+                },
+            )
+
+            # Wake should have started and not yet completed.
+            await asyncio.wait_for(started.wait(), timeout=2.0)
+            # The wakeup task is held in _BACKGROUND_TASKS while running.
+            wakeup_tasks = [t for t in routes._BACKGROUND_TASKS if not t.done()]
+            assert wakeup_tasks, "wakeup task must be tracked while running"
+
+            # Release the stub so the task finishes, then confirm it gets cleared.
+            finished.set()
+            await routes.drain_background_tasks(timeout=5.0)
+            assert not [t for t in routes._BACKGROUND_TASKS if not t.done()]
+    finally:
+        delattr(app.state, "_companion_wakeup")
+
+
+@pytest.mark.anyio
 async def test_sse_format_helper_emits_data_line():
     """Unit-level coverage for the SSE wire encoder.
 
