@@ -116,17 +116,63 @@ async def test_publishes_plain_text_progress_placeholder(
 
 
 @pytest.mark.anyio
-async def test_does_not_double_emit_for_same_task_id(
+async def test_extractor_dedup_handles_within_call_duplicates(
     manager: ChannelManager, cache_singleton: TaskResolutionCache, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The extractor's per-call ``seen_task_ids`` is the source-of-truth
+    dedup. Manager has no separate dedup set (codex P1 fix): the
+    previous mark-after-publish was delivery-blind because
+    ``publish_outbound`` swallows listener exceptions, and a
+    cross-call re-entry for the same task_id can't actually happen in
+    production (extractor scopes the walk to the current human turn).
+
+    Cross-call invocations with the same result therefore each publish
+    once — and that's fine, the placeholder send is idempotent at the
+    sink layer (the sink keeps one receiver per task_id, the second
+    register replaces the first).
+    """
     monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
     published: list[OutboundMessage] = []
     await _subscribe_capture(manager.bus, published)
 
     result = _result_with_one_call(task_id="task-x", brief="brief")
+    # Two separate invocations — manager has no dedup memory, so both
+    # publish. (In real production this scenario doesn't arise — the
+    # extractor scopes its walk to a single turn and _handle_chat is
+    # sequential per inbound message.)
     await manager._maybe_open_progress_message(_inbound(), result, thread_id="thread")
     await manager._maybe_open_progress_message(_inbound(), result, thread_id="thread")
+    assert len(published) == 2
 
+    # Within a single call, the extractor's seen_task_ids dedup
+    # collapses duplicates — even if the result accidentally contained
+    # two ToolMessages with the same task_id, only one placeholder
+    # would be published per invocation.
+    duplicate_result = {
+        "messages": [
+            {"type": "human", "content": "do thing"},
+            {
+                "type": "ai",
+                "tool_calls": [
+                    {"id": "c1", "name": "start_builder_task", "args": {"description": "brief"}}
+                ],
+            },
+            {
+                "type": "tool",
+                "name": "start_builder_task",
+                "tool_call_id": "c1",
+                "content": "Launched builder task. task_id: dup-x. background work.",
+            },
+            {
+                "type": "tool",
+                "name": "start_builder_task",
+                "tool_call_id": "c1",
+                "content": "Launched builder task. task_id: dup-x. background work.",
+            },
+        ]
+    }
+    published.clear()
+    await manager._maybe_open_progress_message(_inbound(), duplicate_result, thread_id="thread")
     assert len(published) == 1
 
 
@@ -253,39 +299,27 @@ async def test_attach_failure_does_not_block_placeholder(
 
 
 @pytest.mark.anyio
-async def test_publish_failure_does_not_permanently_block_retries(
+async def test_publish_failure_logs_and_continues(
     manager: ChannelManager, cache_singleton: TaskResolutionCache, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Codex P2 regression: when ``bus.publish_outbound`` raises, the
-    task MUST NOT be marked as already-summoned, otherwise a follow-up
-    turn for the same task_id is permanently blocked and the user never
-    sees the placeholder.
+    """A bus-raise on publish must be logged and not bubble out to the caller.
 
-    The bus normally swallows callback exceptions; this test simulates
-    a path where the bus itself raises (e.g. an unexpected exception in
-    its dispatch logging or a future contract change).
+    The previous incarnation of this test asserted the task was NOT
+    marked in a manager-side dedup set. After codex P1: the dedup set
+    is gone entirely (it was delivery-blind anyway — see
+    ``test_extractor_dedup_handles_within_call_duplicates`` for why
+    cross-call re-entry for the same task_id is not a real scenario).
+    What this test now locks: an exception from publish_outbound must
+    not propagate out of ``_maybe_open_progress_message`` and must not
+    break processing of additional targets on the same call.
     """
     monkeypatch.setenv("TELEGRAM_WORKSHOP_BOT_ENABLED", "true")
-    call_count = {"n": 0}
 
-    async def _flaky_publish(_outbound):
-        call_count["n"] += 1
-        if call_count["n"] == 1:
-            raise RuntimeError("simulated bus blow-up")
-        # Second call succeeds.
+    async def _always_raise(_outbound):
+        raise RuntimeError("simulated bus blow-up")
 
-    monkeypatch.setattr(manager.bus, "publish_outbound", _flaky_publish)
+    monkeypatch.setattr(manager.bus, "publish_outbound", _always_raise)
 
-    result = _result_with_one_call(task_id="task-retry", brief="brief")
-    # First attempt — publish raises, task must NOT be marked.
+    result = _result_with_one_call(task_id="task-x", brief="brief")
+    # Must not raise.
     await manager._maybe_open_progress_message(_inbound(), result, thread_id="th")
-    assert "task-retry" not in manager._summoned_task_ids
-
-    # Second attempt — publish succeeds, task IS marked, no double-emit on a third call.
-    await manager._maybe_open_progress_message(_inbound(), result, thread_id="th")
-    assert "task-retry" in manager._summoned_task_ids
-    assert call_count["n"] == 2
-
-    # Third attempt — task already marked, no further publish.
-    await manager._maybe_open_progress_message(_inbound(), result, thread_id="th")
-    assert call_count["n"] == 2

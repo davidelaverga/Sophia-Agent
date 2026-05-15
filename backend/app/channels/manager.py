@@ -641,9 +641,6 @@ class ChannelManager:
         # the dispatch loop (NOT on the channel's polling thread) to download
         # the bytes off the critical path.
         self._inbound_file_readers: dict[str, InboundFileReader] = {}
-        # Phase 2 of sophia_telegram_architecture_spec_v1: per-process dedup
-        # for already-emitted workshop @-mention summons. Bounded to ~1k.
-        self._summoned_task_ids: set[str] = set()
 
     def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
         """Register a per-channel async function that downloads bytes for
@@ -1092,14 +1089,19 @@ class ChannelManager:
         from app.gateway.builder_events import get_global_fanout
 
         fanout = get_global_fanout()
+        # No manager-side dedup: ``extract_progress_targets_from_result``
+        # already dedupes within a single call (its ``seen_task_ids``
+        # set) and ``_maybe_open_progress_message`` is invoked once per
+        # ``_handle_chat`` call. Cross-turn re-emission for the same
+        # task_id doesn't happen because the extractor scopes its walk
+        # to the most recent human message. Previously this code
+        # maintained a process-local ``_summoned_task_ids`` set, but
+        # ``bus.publish_outbound`` swallows listener exceptions — so
+        # the mark was delivery-blind (a Telegram send failure would
+        # still mark the task, permanently blocking any future
+        # retry-path). Source of truth for "is there a live progress
+        # receiver for this task" is the sink's ``has_receiver``.
         for target in targets:
-            if target.task_id in self._summoned_task_ids:
-                logger.info(
-                    "[Manager] progress placeholder already opened for task_id=%s — skipping",
-                    target.task_id,
-                )
-                continue
-
             placeholder_outbound = OutboundMessage(
                 channel_name=msg.channel_name,
                 chat_id=msg.chat_id,
@@ -1124,21 +1126,12 @@ class ChannelManager:
             try:
                 await self.bus.publish_outbound(placeholder_outbound)
             except Exception:
-                # Mark the task ONLY after a successful publish so a
-                # transient bus failure doesn't permanently block retries
-                # for this task_id. The single-threaded asyncio dispatch
-                # loop guarantees no concurrent re-entry for the same
-                # turn, so leaving the mark unset until after publish is
-                # safe — there's no risk of double-emit from in-flight
-                # parallel callers.
                 logger.warning(
-                    "[Manager] progress placeholder publish failed task_id=%s — leaving task unmarked so a follow-up turn can retry",
+                    "[Manager] progress placeholder publish failed task_id=%s",
                     target.task_id,
                     exc_info=True,
                 )
                 continue
-            self._summoned_task_ids.add(target.task_id)
-            self._trim_summoned_set()
 
             # task_id == builder thread_id (see start_builder_task: the
             # async_tasks row records thread_id := task_id). run_id is
@@ -1162,13 +1155,6 @@ class ChannelManager:
                         target.task_id,
                         exc_info=True,
                     )
-
-    def _trim_summoned_set(self) -> None:
-        if len(self._summoned_task_ids) > 1024:
-            # Drop the oldest entries — set has no order, but for diagnostics
-            # we don't care which ones go; the cache TTL is short anyway.
-            for stale in list(self._summoned_task_ids)[:256]:
-                self._summoned_task_ids.discard(stale)
 
     async def _handle_streaming_chat(
         self,
