@@ -303,9 +303,20 @@ class WorkshopTelegramChannel(Channel):
         source_bot_id = int(from_user.id)
         text = msg.text or ""
 
+        # InteractionDepthTracker keys on ``(chat_id, root_message_id)``
+        # to count bot-to-bot hops. Using the per-hop summoning_message_id
+        # is wrong — every hop produces a fresh message_id so the counter
+        # never accumulates beyond 1 and MAX_DEPTH is effectively bypassed.
+        # Use ``chat_id`` itself as the stable root: all guest dispatches
+        # in the same chat count against one bucket. The 30-min TTL on
+        # the tracker resets the count between legitimate user turns, so
+        # a runaway loop trips MAX_DEPTH within a short window while
+        # normal cross-turn usage clears in idle time.
+        loop_root = chat_id
+
         if not self.check_loop_prevention(
             chat_id=chat_id,
-            root_message_id=summoning_message_id,
+            root_message_id=loop_root,
             source_bot_id=source_bot_id,
             text=text,
         ):

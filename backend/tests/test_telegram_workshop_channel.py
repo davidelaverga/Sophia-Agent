@@ -127,3 +127,79 @@ class TestLoopPreventionGate:
         # In non-strict mode the gate should still return True
         ok = ch.check_loop_prevention(chat_id=1, root_message_id=10, source_bot_id=100, text="another")
         assert ok is True
+
+    def test_depth_accumulates_across_hops_in_same_chat(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P1 regression: depth must accumulate across bot-to-bot
+        hops in the same chat, NOT reset on each new message_id.
+
+        Pre-fix: ``root_message_id`` was keyed to the per-hop summoning
+        message_id, which changes every hop, so MAX_DEPTH was effectively
+        bypassed. Post-fix: the guest-dispatch path uses ``chat_id``
+        itself as the stable root, so all hops in the same chat count
+        against one depth bucket.
+        """
+        from app.channels.telegram_loop_prevention import (
+            ContentDedup,
+            InteractionDepthTracker,
+            LoopPreventionGate,
+            PerSourceRateLimiter,
+        )
+
+        monkeypatch.setenv("TELEGRAM_WORKSHOP_LOOP_PREVENTION_STRICT", "true")
+        ch = WorkshopTelegramChannel(bus, {})
+        # Inject a gate with a permissive rate limiter so the test
+        # isolates the depth-tracker bug — distinct source bots and
+        # distinct text per hop already keep dedup + rate happy in
+        # principle, but tests should be deterministic.
+        ch._loop_prevention = LoopPreventionGate(
+            depth=InteractionDepthTracker(max_depth=5),
+            rate=PerSourceRateLimiter(rate_per_second=100, burst=100),
+            dedup=ContentDedup(),
+        )
+
+        chat_id = 7
+        # Five hops using ``chat_id`` as the root, matching the new
+        # production code path. Each hop has distinct text so dedup
+        # doesn't trip.
+        for i in range(5):
+            ok = ch.check_loop_prevention(
+                chat_id=chat_id,
+                root_message_id=chat_id,
+                source_bot_id=100 + i,  # vary bot id so rate is per-source happy
+                text=f"hop {i}",
+            )
+            assert ok is True, f"hop {i + 1} should pass (depth {i + 1} <= 5)"
+        # The 6th hop must be blocked — depth exceeds MAX_DEPTH=5.
+        ok = ch.check_loop_prevention(
+            chat_id=chat_id,
+            root_message_id=chat_id,
+            source_bot_id=999,
+            text="hop 5 — must be blocked",
+        )
+        assert ok is False, "depth tracker must block beyond MAX_DEPTH"
+
+    def test_depth_resets_for_distinct_chats(self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Per-chat root means cross-chat traffic does not share a bucket."""
+        from app.channels.telegram_loop_prevention import (
+            ContentDedup,
+            InteractionDepthTracker,
+            LoopPreventionGate,
+            PerSourceRateLimiter,
+        )
+
+        monkeypatch.setenv("TELEGRAM_WORKSHOP_LOOP_PREVENTION_STRICT", "true")
+        ch = WorkshopTelegramChannel(bus, {})
+        ch._loop_prevention = LoopPreventionGate(
+            depth=InteractionDepthTracker(max_depth=3),
+            rate=PerSourceRateLimiter(rate_per_second=100, burst=100),
+            dedup=ContentDedup(),
+        )
+
+        # Saturate chat 1's bucket to its cap.
+        for i in range(3):
+            ch.check_loop_prevention(chat_id=1, root_message_id=1, source_bot_id=100 + i, text=f"a{i}")
+        # Chat 2 must still be admitted — separate bucket.
+        ok = ch.check_loop_prevention(chat_id=2, root_message_id=2, source_bot_id=200, text="z")
+        assert ok is True

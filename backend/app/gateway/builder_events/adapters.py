@@ -55,6 +55,31 @@ _TERMINAL_STATUS_MAP = {
 }
 
 
+_VALID_CHANNEL_ORIGINS = frozenset({"telegram", "web", "voice"})
+
+
+def _coerce_channel_origin(value: str, task_id: str) -> str:
+    """Defensive fallback for stale payloads with raw channel_name values.
+
+    The manager (``app.channels.manager._normalize_channel_origin``) now
+    normalises before writing to ``configurable.channel``, but in-flight
+    builder runs dispatched before the fix may carry raw slack/feishu/etc.
+    values on their terminal webhook payload. Without this fallback the
+    pydantic Literal validation in ``CompletedEvent`` would reject the
+    event and the fanout would drop it silently — trace + awareness
+    sinks would never fire. Coerce + log so we can audit how often this
+    fires post-deploy.
+    """
+    if value in _VALID_CHANNEL_ORIGINS:
+        return value
+    logger.warning(
+        "adapt_terminal_webhook: coercing unknown channel_origin=%r to 'web' task_id=%s",
+        value,
+        task_id,
+    )
+    return "web"
+
+
 def adapt_terminal_webhook(
     payload: dict[str, Any],
     *,
@@ -68,11 +93,12 @@ def adapt_terminal_webhook(
     status = _resolve_terminal_status(payload.get("status"), task_id)
     user_id_raw = payload.get("user_id")
     user_id = user_id_raw if isinstance(user_id_raw, str) and user_id_raw else None
+    safe_origin = _coerce_channel_origin(channel_origin, task_id)
     return _build_completed_event(
         task_id=task_id,
         thread_id=thread_id,
         user_id=user_id,
-        channel_origin=channel_origin,
+        channel_origin=safe_origin,
         status=status,
         payload=payload,
     )

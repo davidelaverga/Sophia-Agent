@@ -36,6 +36,32 @@ def _workshop_summon_enabled() -> bool:
     """
     return os.environ.get("TELEGRAM_WORKSHOP_BOT_ENABLED", "true").lower() not in {"0", "false", "no"}
 
+
+# BuilderEvent.channel_origin only accepts these three values. Any
+# other ``msg.channel_name`` (slack, feishu, …) must map to one of
+# them or the gateway-side fanout's pydantic validation will drop the
+# terminal-webhook event entirely (silently — adapter returns None),
+# and the trace + companion-awareness sinks will never see the run.
+_BUILDER_CHANNEL_ORIGINS = {"telegram", "web", "voice"}
+
+
+def _normalize_channel_origin(channel_name: str) -> str:
+    """Map a channel adapter's ``channel_name`` to a valid origin literal.
+
+    - All telegram* channels (telegram, telegram_work, telegram_workshop)
+      collapse to ``"telegram"``.
+    - ``"voice"`` passes through as-is.
+    - Everything else (slack, feishu, future IM channels) maps to
+      ``"web"`` — the catch-all bucket for non-Telegram surfaces.
+    """
+    if not channel_name:
+        return "web"
+    if channel_name.startswith("telegram"):
+        return "telegram"
+    if channel_name in _BUILDER_CHANNEL_ORIGINS:
+        return channel_name
+    return "web"
+
 # Anthropic multimodal content-block limits.
 # Source: docs.anthropic.com/en/docs/build-with-claude/vision and pdf-support.
 # Inline image cap is 5 MB per block; we cap PDF at 10 MB to leave headroom
@@ -667,11 +693,16 @@ class ChannelManager:
         # start_builder_task) can stamp ``channel_origin`` onto
         # delegation_context. The fanout / sinks gate on this value.
         if msg.channel_name:
-            # Reduce all telegram_* channels (telegram, telegram_work, future
-            # telegram_workshop) to a single ``"telegram"`` origin so sinks
-            # don't have to know about every sub-channel naming variant.
-            origin = "telegram" if msg.channel_name.startswith("telegram") else msg.channel_name
-            run_context_extras["channel"] = origin
+            # Normalise the channel name to one of the values
+            # ``BuilderEvent.channel_origin`` accepts
+            # (``telegram | web | voice``). The raw channel_name is
+            # kept on ``channel_name`` for diagnostics. Non-telegram
+            # IM channels (slack, feishu, …) map to ``"web"`` — the
+            # fanout's terminal-webhook adapter would otherwise reject
+            # the event with a pydantic Literal-validation error, and
+            # downstream trace/awareness sinks would never fire for
+            # builder runs originating from those channels.
+            run_context_extras["channel"] = _normalize_channel_origin(msg.channel_name)
             run_context_extras["channel_name"] = msg.channel_name
 
         run_context = _merge_dicts(
