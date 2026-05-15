@@ -135,6 +135,7 @@ class BuilderEventFanout:
         user_id: str,
         channel_origin: str,
         run_id: str | None = None,
+        parent_thread_id: str | None = None,
         consumer_factory: Any | None = None,
     ) -> None:
         """Start a background v3-stream consumer for ``task_id``.
@@ -173,6 +174,7 @@ class BuilderEventFanout:
                 channel_origin=channel_origin,
                 publish=self.publish,
                 run_id=run_id,
+                parent_thread_id=parent_thread_id,
             )
             task = asyncio.create_task(consumer.run())
             task.add_done_callback(lambda _t, tid=task_id: self._stream_tasks.pop(tid, None))

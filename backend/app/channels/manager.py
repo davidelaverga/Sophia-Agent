@@ -1144,10 +1144,18 @@ class ChannelManager:
                 try:
                     await fanout.attach_stream(
                         task_id=target.task_id,
+                        # ``thread_id`` here is the builder's own thread
+                        # (== task_id) — that's what the SDK subscribes
+                        # to via ``runs.join_stream``. The ``parent_thread_id``
+                        # kwarg below is what each emitted BuilderEvent's
+                        # ``thread_id`` field is stamped with, so
+                        # per-conversation sinks (CompanionContextStore)
+                        # key on the companion thread.
                         thread_id=target.task_id,
                         user_id=msg.user_id,
                         channel_origin="telegram",
                         run_id=target.run_id,
+                        parent_thread_id=thread_id,
                     )
                 except Exception:
                     logger.warning(

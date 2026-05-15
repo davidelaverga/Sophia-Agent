@@ -171,6 +171,7 @@ def adapt_v3_chunk(
     user_id: str | None,
     channel_origin: str,
     sequence: int,
+    subagent_thread_id: str | None = None,
 ) -> BuilderEvent | None:
     """Translate a single v3 stream chunk into a BuilderEvent.
 
@@ -185,6 +186,10 @@ def adapt_v3_chunk(
 
     Unknown shapes return None and log at INFO so the adapter can be
     tuned without crashing the stream consumer.
+
+    ``thread_id`` is the **parent** thread the event should aggregate
+    under (per-conversation sinks key on this). ``subagent_thread_id``
+    is the builder's own thread, preserved for diagnostics.
     """
     mode, body = _decompose_chunk(chunk)
     if mode is None:
@@ -193,6 +198,7 @@ def adapt_v3_chunk(
     base_kwargs = {
         "task_id": task_id,
         "thread_id": thread_id,
+        "subagent_thread_id": subagent_thread_id,
         "user_id": user_id,
         "channel_origin": channel_origin,
         "timestamp_ms": _NOW_MS(),

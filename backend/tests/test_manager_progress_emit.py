@@ -232,6 +232,7 @@ async def test_attaches_fanout_stream_per_placeholder(
         user_id,
         channel_origin,
         run_id=None,
+        parent_thread_id=None,
         consumer_factory=None,
     ):
         attach_calls.append(
@@ -241,6 +242,7 @@ async def test_attaches_fanout_stream_per_placeholder(
                 "user_id": user_id,
                 "channel_origin": channel_origin,
                 "run_id": run_id,
+                "parent_thread_id": parent_thread_id,
             }
         )
 
@@ -253,7 +255,7 @@ async def test_attaches_fanout_stream_per_placeholder(
         await manager._maybe_open_progress_message(
             _inbound(),
             _result_with_one_call(task_id="task-xyz", brief="brief", run_id="run-deadbeef"),
-            thread_id="thread",
+            thread_id="companion-thread-fixture",
         )
     finally:
         set_global_workshop_dependencies(fanout=None, workshop_sink=None, task_cache=None)
@@ -262,11 +264,13 @@ async def test_attaches_fanout_stream_per_placeholder(
     assert len(attach_calls) == 1
     call = attach_calls[0]
     assert call["task_id"] == "task-xyz"
-    assert call["thread_id"] == "task-xyz"
+    assert call["thread_id"] == "task-xyz"  # SDK subscribes to the builder thread
     assert call["user_id"] == "user-abc"
     assert call["channel_origin"] == "telegram"
-    # Production regression: run_id is REQUIRED for runs.join_stream.
     assert call["run_id"] == "run-deadbeef"
+    # Codex P1 regression: parent_thread_id MUST be passed so streamed
+    # events carry the companion thread, not the builder thread.
+    assert call["parent_thread_id"] == "companion-thread-fixture"
 
 
 @pytest.mark.anyio

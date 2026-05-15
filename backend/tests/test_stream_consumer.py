@@ -125,3 +125,69 @@ async def test_open_stream_falls_back_cleanly_on_missing_method() -> None:
     )
     iterator = await consumer._open_stream(_ClientMissingJoinStream())
     assert iterator is None
+
+
+@pytest.mark.anyio
+async def test_chunk_repr_not_logged_at_info(caplog) -> None:
+    """Codex P2 regression: raw chunk ``repr`` must NOT land in INFO logs.
+
+    Stream chunks contain user content + tool args (search queries,
+    URLs, shell commands, file paths) — leaking those into standard
+    production logs is a privacy + cost hazard. The structural metadata
+    (event mode, shape, task_id, sequence) stays at INFO; the full
+    body goes to DEBUG.
+    """
+    import logging
+    from unittest.mock import MagicMock
+
+    # Replace the actual stream-iter machinery with a one-chunk stub.
+    chunk_with_sensitive_data = (
+        "messages-tuple",
+        (MagicMock(content="SECRET_QUERY_TEXT_SHOULD_NOT_LEAK"), {}),
+    )
+
+    consumer = StreamConsumer(
+        task_id="task-redact",
+        thread_id="th",
+        user_id="u",
+        channel_origin="telegram",
+        publish=_noop_publish,
+        run_id="run-z",
+    )
+
+    class _OneChunkClient:
+        class _Runs:
+            def join_stream(self, *_a, **_k):
+                async def _gen():
+                    yield chunk_with_sensitive_data
+
+                return _gen()
+
+        def __init__(self):
+            self.runs = _OneChunkClient._Runs()
+
+    import contextlib
+
+    @contextlib.asynccontextmanager
+    async def _capture():
+        with caplog.at_level(logging.INFO, logger="app.gateway.builder_events.stream_consumer"):
+            yield
+
+    async with _capture():
+        # Bypass _build_client.
+        async def _stub_client():
+            return _OneChunkClient()
+
+        consumer._build_client = _stub_client  # type: ignore[method-assign]
+        await consumer.run()
+
+    # No INFO record contains the sensitive marker.
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    for r in info_records:
+        assert "SECRET_QUERY_TEXT_SHOULD_NOT_LEAK" not in r.getMessage(), (
+            f"raw chunk content leaked into INFO logs: {r.getMessage()!r}"
+        )
+    # Structural fields ARE present at INFO (task_id, mode, shape).
+    assert any("task_id=task-redact" in r.getMessage() for r in info_records), (
+        "structural metadata should remain at INFO for diagnostics"
+    )

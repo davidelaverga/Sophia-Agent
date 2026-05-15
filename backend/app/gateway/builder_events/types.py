@@ -35,7 +35,13 @@ class BuilderEventBase(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     task_id: str
+    # The **companion / parent** thread id — sinks that aggregate
+    # per-conversation (notably ``CompanionContextStore``) key on this
+    # field. Aliased to the COMPANION thread, NOT the builder
+    # subagent's own thread. The builder thread id is kept separately
+    # on ``subagent_thread_id`` for diagnostics.
     thread_id: str
+    subagent_thread_id: str | None = None
     user_id: str | None = None
     channel_origin: ChannelOrigin = "telegram"
     timestamp_ms: int

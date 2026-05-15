@@ -56,6 +56,18 @@ class StreamConsumer:
     Construction is cheap; :meth:`run` opens the stream via
     ``client.runs.join_stream(thread_id, run_id, stream_mode=[...])``.
     Callers spawn it via ``asyncio.create_task``.
+
+    Thread-id semantics (codex P1 fix):
+    - ``thread_id`` is the **builder/subagent** thread the SDK
+      subscribes to via ``runs.join_stream`` — purely a transport
+      concern.
+    - ``parent_thread_id`` is the **companion** thread that
+      ``BuilderEvent.thread_id`` is stamped with so per-conversation
+      sinks (notably ``CompanionContextStore``) key correctly. The
+      builder thread is kept on ``BuilderEvent.subagent_thread_id``
+      for diagnostics. When ``parent_thread_id`` is None, we fall
+      back to ``thread_id`` so legacy callers behave the same way
+      they did before this fix.
     """
 
     def __init__(
@@ -67,6 +79,7 @@ class StreamConsumer:
         channel_origin: str,
         publish: Callable[[BuilderEvent], Awaitable[None]],
         run_id: str | None = None,
+        parent_thread_id: str | None = None,
         langgraph_url: str | None = None,
         assistant_id: str | None = None,
     ) -> None:
@@ -76,6 +89,10 @@ class StreamConsumer:
         self._channel_origin = channel_origin
         self._publish = publish
         self._run_id = run_id
+        # Default to the builder thread when the caller didn't supply a
+        # parent (legacy / non-subagent paths). For subagent dispatches
+        # the manager now always passes the companion thread id.
+        self._parent_thread_id = parent_thread_id or thread_id
         self._langgraph_url = langgraph_url or os.environ.get("LANGGRAPH_URL", _DEFAULT_LANGGRAPH_URL)
         self._assistant_id = assistant_id or _DEFAULT_ASSISTANT_ID
         self._task_timeout = _resolved_int("WORKSHOP_TASK_TIMEOUT_SECONDS", _DEFAULT_TASK_TIMEOUT_SECONDS)
@@ -119,27 +136,34 @@ class StreamConsumer:
 
         async for chunk in self._iter_with_event_timeout(stream_iter):
             sequence += 1
-            # Phase 3 diagnostic: one log line per chunk so we can see
-            # exactly which stream_mode values deepagents 0.5 emits and
-            # whether the adapter is recognising them. Truncated to keep
-            # production logs scannable.
             chunk_event_attr = getattr(chunk, "event", None)
+            # Phase 3 diagnostic: structural metadata at INFO (high
+            # volume on long runs, so we keep it lean), full chunk
+            # ``repr`` at DEBUG only — raw stream chunks can contain
+            # user content and tool args (search queries, file paths,
+            # bash commands), which we don't want in standard logs.
             logger.info(
-                "StreamConsumer: chunk task_id=%s seq=%d event=%s shape=%s preview=%.180s",
+                "StreamConsumer: chunk task_id=%s seq=%d event=%s shape=%s",
                 self._task_id,
                 sequence,
                 chunk_event_attr,
                 type(chunk).__name__,
+            )
+            logger.debug(
+                "StreamConsumer: chunk preview task_id=%s seq=%d body=%.180s",
+                self._task_id,
+                sequence,
                 repr(chunk),
             )
             try:
                 event = adapt_v3_chunk(
                     chunk,
                     task_id=self._task_id,
-                    thread_id=self._thread_id,
+                    thread_id=self._parent_thread_id,
                     user_id=self._user_id,
                     channel_origin=self._channel_origin,
                     sequence=sequence,
+                    subagent_thread_id=self._thread_id,
                 )
             except Exception:
                 logger.warning(
