@@ -201,3 +201,82 @@ async def test_terminal_cache_lru_bounded() -> None:
         assert "task-0" not in sink._terminal_cache
     finally:
         workshop_telegram._TERMINAL_CACHE_MAX = 256
+
+
+def test_sink_state_protected_by_lock() -> None:
+    """Codex P2 regression: ``_receivers`` / ``_terminal_cache`` /
+    ``_replay_tasks`` must be protected by a lock so cross-thread
+    access (workshop polling thread vs gateway main loop) can't race.
+
+    Stress test: concurrent register / unregister / has_receiver
+    threads must leave the sink's internal state coherent.
+    """
+    import threading
+
+    sink = WorkshopTelegramSink()
+    receivers = [_RecordingReceiver() for _ in range(50)]
+
+    def _register_loop(idx: int) -> None:
+        for _ in range(100):
+            sink.register_workshop(f"task-{idx}", receivers[idx])
+
+    def _unregister_loop(idx: int) -> None:
+        for _ in range(100):
+            sink.unregister_workshop(f"task-{idx}")
+
+    def _read_loop(idx: int) -> None:
+        for _ in range(100):
+            sink.has_receiver(f"task-{idx}")
+
+    threads = []
+    for idx in range(len(receivers)):
+        threads.append(threading.Thread(target=_register_loop, args=(idx,)))
+        threads.append(threading.Thread(target=_unregister_loop, args=(idx,)))
+        threads.append(threading.Thread(target=_read_loop, args=(idx,)))
+
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    # No crash, no corrupted state — the sink survives concurrent
+    # access. Final receiver map is whatever it is (race-dependent),
+    # but every entry that exists must reference one of our recorders
+    # and every queryable task_id must be either in or out (no
+    # mid-mutation tearing).
+    for task_id, receiver in sink._receivers.items():
+        assert receiver in receivers, f"corrupted receiver for {task_id!r}"
+
+
+def test_lock_acquired_on_register_and_unregister() -> None:
+    """Defensive: register_workshop / unregister_workshop / has_receiver
+    must acquire the lock for every mutation, not just some.
+    """
+    import threading
+
+    sink = WorkshopTelegramSink()
+    # Replace the lock with a tracking proxy that counts acquisitions.
+    real_lock = threading.Lock()
+    acquire_count = {"n": 0}
+
+    class _CountingLock:
+        def __enter__(self_inner):
+            acquire_count["n"] += 1
+            real_lock.acquire()
+            return self_inner
+
+        def __exit__(self_inner, *_a):
+            real_lock.release()
+
+    sink._lock = _CountingLock()  # type: ignore[assignment]
+
+    receiver = _RecordingReceiver()
+    sink.register_workshop("task-1", receiver)
+    sink.has_receiver("task-1")
+    sink.unregister_workshop("task-1")
+
+    # At minimum: 1 register acquisition + 1 has_receiver + 1 unregister.
+    # In practice register acquires once (and may release before the
+    # async replay schedule), has_receiver acquires once, unregister
+    # acquires once. We assert >= 3 to be robust to internal refactor.
+    assert acquire_count["n"] >= 3, f"sink lock acquired only {acquire_count['n']} times — expected >= 3"

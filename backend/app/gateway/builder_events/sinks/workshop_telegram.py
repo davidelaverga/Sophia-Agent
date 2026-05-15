@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections import OrderedDict
 from typing import Protocol
 
@@ -55,11 +56,22 @@ class WorkshopEventReceiver(Protocol):
 
 
 class WorkshopTelegramSink(BuilderEventSink):
-    """Telegram-only sink that fans events to an open workshop reply."""
+    """Telegram-only sink that fans events to an open workshop reply.
+
+    Thread safety: ``_receivers`` / ``_terminal_cache`` / ``_replay_tasks``
+    can be touched from multiple execution contexts — the fanout's
+    ``handle()`` runs on the gateway main async loop, while
+    ``register_workshop`` / ``unregister_workshop`` can be invoked from
+    the workshop bot's polling-thread loop (when the workshop bot is
+    re-enabled in a future spec). A ``threading.Lock`` guards every
+    mutation. Critical sections never await — they only manipulate the
+    dict/OrderedDict — so the lock can't deadlock against awaited I/O.
+    """
 
     name = "workshop_telegram"
 
     def __init__(self) -> None:
+        self._lock = threading.Lock()
         self._receivers: dict[str, WorkshopEventReceiver] = {}
         self._terminal_cache: OrderedDict[str, CompletedEvent] = OrderedDict()
         self._replay_tasks: set[asyncio.Task] = set()
@@ -79,36 +91,49 @@ class WorkshopTelegramSink(BuilderEventSink):
         """
         if not task_id:
             return
-        if task_id in self._receivers:
-            logger.info("WorkshopTelegramSink: replacing existing receiver for task_id=%s", task_id)
-        self._receivers[task_id] = receiver
+        # All mutations are guarded by ``_lock`` so cross-thread access
+        # from the workshop bot's polling-thread loop (when re-enabled)
+        # can't race the gateway main loop's fanout handlers.
+        with self._lock:
+            if task_id in self._receivers:
+                logger.info("WorkshopTelegramSink: replacing existing receiver for task_id=%s", task_id)
+            self._receivers[task_id] = receiver
+            cached = self._terminal_cache.pop(task_id, None)
 
-        cached = self._terminal_cache.pop(task_id, None)
         if cached is None:
             return
-        # Schedule the replay on the running loop. ``register_workshop``
-        # is sync but it's always called from within an async context
-        # (the bus dispatch on the gateway main loop, via the channel
-        # handler's ``send``).
+        # Schedule the replay OUTSIDE the lock. ``register_workshop``
+        # is sync but normally runs in an async context (bus dispatch
+        # on the gateway main loop). The receiver itself bridges to
+        # any other loop it needs via ``run_coroutine_threadsafe``.
         try:
             task = asyncio.create_task(self._replay_terminal(task_id, receiver, cached))
         except RuntimeError:
             # No running loop in this context (e.g. unit test calling
-            # register_workshop synchronously without await). Fall back
-            # to leaving the cached event in place so a future
-            # register_workshop call can pick it up.
-            self._terminal_cache[task_id] = cached
+            # register_workshop synchronously without await). Restore
+            # the cached event so a future register_workshop pass can
+            # try again.
+            with self._lock:
+                self._terminal_cache[task_id] = cached
             logger.warning(
                 "WorkshopTelegramSink: no running loop to replay cached terminal task_id=%s — left in cache",
                 task_id,
             )
             return
-        self._replay_tasks.add(task)
-        task.add_done_callback(self._replay_tasks.discard)
+        with self._lock:
+            self._replay_tasks.add(task)
+        # add_done_callback runs on the same loop that created the
+        # task; the callback only needs to remove the task from the
+        # set, so we wrap it with the lock for thread-safe discard.
+        task.add_done_callback(self._discard_replay_task)
         logger.info(
             "WorkshopTelegramSink: replaying cached terminal to late-registered receiver task_id=%s",
             task_id,
         )
+
+    def _discard_replay_task(self, task: asyncio.Task) -> None:
+        with self._lock:
+            self._replay_tasks.discard(task)
 
     def unregister_workshop(self, task_id: str) -> None:
         """Drop the receiver binding (workshop calls this on terminal).
@@ -116,12 +141,14 @@ class WorkshopTelegramSink(BuilderEventSink):
         Also drops any cached terminal for this task — once the
         receiver has finalized, the cache entry is no longer useful.
         """
-        self._receivers.pop(task_id, None)
-        self._terminal_cache.pop(task_id, None)
+        with self._lock:
+            self._receivers.pop(task_id, None)
+            self._terminal_cache.pop(task_id, None)
 
     def has_receiver(self, task_id: str) -> bool:
         """Public source-of-truth check: is a progress receiver live?"""
-        return task_id in self._receivers
+        with self._lock:
+            return task_id in self._receivers
 
     async def accepts(self, event: BuilderEvent) -> bool:
         if event.channel_origin != "telegram":
@@ -133,14 +160,20 @@ class WorkshopTelegramSink(BuilderEventSink):
         # explode memory for long builds).
         if event.type == "completed":
             return True
-        return event.task_id in self._receivers
+        with self._lock:
+            return event.task_id in self._receivers
 
     async def handle(self, event: BuilderEvent) -> None:
-        receiver = self._receivers.get(event.task_id)
+        with self._lock:
+            receiver = self._receivers.get(event.task_id)
         if receiver is None:
             if isinstance(event, CompletedEvent):
-                self._cache_terminal(event)
+                with self._lock:
+                    self._cache_terminal_locked(event)
             return
+        # ``receiver.on_event`` may await arbitrary I/O — do not hold
+        # the lock across the await. Re-entry into the sink from the
+        # receiver (e.g. ``unregister_workshop``) re-acquires safely.
         try:
             await receiver.on_event(event)
         except Exception:
@@ -151,14 +184,12 @@ class WorkshopTelegramSink(BuilderEventSink):
                 exc_info=True,
             )
 
-    def _cache_terminal(self, event: CompletedEvent) -> None:
+    def _cache_terminal_locked(self, event: CompletedEvent) -> None:
         """Stash a terminal event for a later-registering receiver.
 
-        LRU-bounded: the cache holds only terminal events (one per
-        task), and real production volume is well below the cap. The
-        bound is purely a leak guard for the degenerate case where
-        receivers never register (workshop disabled but stream still
-        attached, etc.).
+        Caller MUST hold ``self._lock``. LRU-bounded; the bound is a
+        leak guard for the degenerate case where receivers never
+        register (workshop disabled but stream still attached, etc.).
         """
         self._terminal_cache[event.task_id] = event
         self._terminal_cache.move_to_end(event.task_id)

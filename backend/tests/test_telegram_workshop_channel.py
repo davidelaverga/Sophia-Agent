@@ -203,3 +203,84 @@ class TestLoopPreventionGate:
         # Chat 2 must still be admitted — separate bucket.
         ok = ch.check_loop_prevention(chat_id=2, root_message_id=2, source_bot_id=200, text="z")
         assert ok is True
+
+    def test_legitimate_cross_task_traffic_does_not_trip_depth(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex P1 (round 2) regression: per-task scoping means 10
+        legitimate builder requests in a chat each get their own depth
+        bucket and NONE is blocked. Pre-fix (chat_id as root) would
+        have blocked the 6th request as a false loop.
+        """
+        from app.channels.telegram_loop_prevention import (
+            ContentDedup,
+            InteractionDepthTracker,
+            LoopPreventionGate,
+            PerSourceRateLimiter,
+        )
+
+        monkeypatch.setenv("TELEGRAM_WORKSHOP_LOOP_PREVENTION_STRICT", "true")
+        ch = WorkshopTelegramChannel(bus, {})
+        ch._loop_prevention = LoopPreventionGate(
+            depth=InteractionDepthTracker(max_depth=5),
+            rate=PerSourceRateLimiter(rate_per_second=100, burst=100),
+            dedup=ContentDedup(),
+        )
+
+        chat_id = 42
+        # Each builder task uses its task_id-derived hash as the
+        # root_message_id. Production code at _handle_guest_dispatch
+        # does ``loop_root = hash(task_id) & 0x7FFFFFFF``.
+        for i in range(10):
+            task_id_root = hash(f"task-{i}") & 0x7FFFFFFF
+            ok = ch.check_loop_prevention(
+                chat_id=chat_id,
+                root_message_id=task_id_root,
+                source_bot_id=100,
+                text=f"summon for task {i}",
+            )
+            assert ok is True, f"legitimate build #{i + 1} must not be blocked"
+
+    def test_repeated_dispatches_for_same_task_trip_depth(
+        self, bus: MessageBus, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Per-task scoping still catches the actual loop case:
+        multiple dispatches for the SAME task_id accumulate depth and
+        eventually trip MAX_DEPTH. A runaway loop in our architecture
+        would manifest this way (workshop bot somehow re-dispatched
+        for the same builder task).
+        """
+        from app.channels.telegram_loop_prevention import (
+            ContentDedup,
+            InteractionDepthTracker,
+            LoopPreventionGate,
+            PerSourceRateLimiter,
+        )
+
+        monkeypatch.setenv("TELEGRAM_WORKSHOP_LOOP_PREVENTION_STRICT", "true")
+        ch = WorkshopTelegramChannel(bus, {})
+        ch._loop_prevention = LoopPreventionGate(
+            depth=InteractionDepthTracker(max_depth=5),
+            rate=PerSourceRateLimiter(rate_per_second=100, burst=100),
+            dedup=ContentDedup(),
+        )
+
+        chat_id = 42
+        task_id_root = hash("task-runaway") & 0x7FFFFFFF
+        # 5 dispatches for the same task — all admitted.
+        for i in range(5):
+            ok = ch.check_loop_prevention(
+                chat_id=chat_id,
+                root_message_id=task_id_root,
+                source_bot_id=100 + i,
+                text=f"hop {i}",
+            )
+            assert ok is True, f"hop {i + 1} (depth {i + 1} <= 5) should pass"
+        # 6th — blocked.
+        ok = ch.check_loop_prevention(
+            chat_id=chat_id,
+            root_message_id=task_id_root,
+            source_bot_id=999,
+            text="hop 6 — must be blocked",
+        )
+        assert ok is False

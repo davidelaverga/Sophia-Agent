@@ -303,24 +303,10 @@ class WorkshopTelegramChannel(Channel):
         source_bot_id = int(from_user.id)
         text = msg.text or ""
 
-        # InteractionDepthTracker keys on ``(chat_id, root_message_id)``
-        # to count bot-to-bot hops. Using the per-hop summoning_message_id
-        # is wrong — every hop produces a fresh message_id so the counter
-        # never accumulates beyond 1 and MAX_DEPTH is effectively bypassed.
-        # Use ``chat_id`` itself as the stable root: all guest dispatches
-        # in the same chat count against one bucket. The 30-min TTL on
-        # the tracker resets the count between legitimate user turns, so
-        # a runaway loop trips MAX_DEPTH within a short window while
-        # normal cross-turn usage clears in idle time.
-        loop_root = chat_id
-
-        if not self.check_loop_prevention(
-            chat_id=chat_id,
-            root_message_id=loop_root,
-            source_bot_id=source_bot_id,
-            text=text,
-        ):
-            return
+        # Loop-prevention check is gated on the cache resolve below — we
+        # need the task_id to scope the depth tracker per builder task
+        # (see the loop_root construction further down). Resolve first,
+        # then run the check.
 
         from app.gateway.builder_events import get_global_task_cache, get_global_workshop_sink
 
@@ -343,6 +329,32 @@ class WorkshopTelegramChannel(Channel):
             )
             return
         task_id, user_id = resolved
+
+        # InteractionDepthTracker keys on ``(chat_id, root_message_id)``
+        # to count bot-to-bot hops. Two earlier attempts were wrong:
+        #   1. ``root_message_id = msg.message_id`` (per-hop) — each hop
+        #      produces a fresh message_id so the counter never
+        #      accumulates beyond 1 and MAX_DEPTH was bypassed.
+        #   2. ``root_message_id = chat_id`` (per-chat) — the 6th
+        #      legitimate builder request in a 30-min window tripped
+        #      MAX_DEPTH and got blocked as a "loop".
+        # The right scope is **per-task**: a single builder task can
+        # produce at most ONE legitimate workshop dispatch in our
+        # architecture; multiple dispatches for the same task_id
+        # indicate a runaway loop. Different tasks get different
+        # buckets, so legitimate cross-task usage is never blocked.
+        # Convert the string task_id to a stable 31-bit int via hash —
+        # the tracker's bucket key only needs to be unique per task,
+        # not interpretable.
+        loop_root = hash(task_id) & 0x7FFFFFFF
+
+        if not self.check_loop_prevention(
+            chat_id=chat_id,
+            root_message_id=loop_root,
+            source_bot_id=source_bot_id,
+            text=text,
+        ):
+            return
 
         logger.info(
             "[TelegramWorkshop] guest dispatch resolved chat_id=%s msg_id=%s task_id=%s user_id=%s",
