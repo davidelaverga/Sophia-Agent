@@ -62,7 +62,16 @@ class TelegramChannel(Channel):
         # asyncio tasks that subscribe to a builder run's v3 stream and
         # edit the placeholder message in this chat. Same strong-ref +
         # discard-on-done pattern as ``_background_tasks``.
-        self._progress_subscriber_tasks: set[asyncio.Task] = set()
+        #
+        # Phase 4F (codex P1 post-review): the value type is now
+        # ``asyncio.Task | concurrent.futures.Future`` because
+        # ``_spawn_progress_subscriber`` schedules the run on ``_tg_loop``
+        # — when the caller is on a different loop, that hop returns a
+        # ``concurrent.futures.Future`` (from ``run_coroutine_threadsafe``)
+        # rather than an ``asyncio.Task``. Both expose ``add_done_callback``
+        # with a single-argument callable signature compatible with
+        # ``set.discard``, so the strong-ref + discard pattern still works.
+        self._progress_subscriber_tasks: set[Any] = set()
         # Phase 4F (codex P2): configured LangGraph URL — must match the
         # one ``ChannelManager`` uses, so the progress subscriber
         # subscribes against the same langgraph service the build was
@@ -278,15 +287,50 @@ class TelegramChannel(Channel):
                 exc_info=True,
             )
             return
+        # Phase 4F (codex P1 post-review): spawn on ``_tg_loop`` so the
+        # subscriber's ``bot.edit_message_text`` calls run on the same
+        # loop the PTB Application/Bot was initialised on (learning #14
+        # in the v3 migration plan: "PTB bot I/O is loop-affine to the
+        # polling thread's ``_tg_loop``"). ``send`` can be invoked on
+        # ``_main_loop`` via the bus subscriber path; using
+        # ``asyncio.create_task`` there binds the task to the wrong loop
+        # and every ``edit_message_text`` raises "bound to a different
+        # event loop" — the placeholder never updates.
+        tg_loop = self._tg_loop
+        if tg_loop is None or not tg_loop.is_running():
+            logger.warning(
+                "[Telegram] progress subscriber requested but _tg_loop unavailable "
+                "(running=%s); skipping task_id=%s",
+                tg_loop.is_running() if tg_loop is not None else False,
+                task_id,
+            )
+            return
+
         try:
-            task = asyncio.create_task(subscriber.run())
-            self._progress_subscriber_tasks.add(task)
-            task.add_done_callback(self._progress_subscriber_tasks.discard)
+            current_loop: asyncio.AbstractEventLoop | None
+            try:
+                current_loop = asyncio.get_running_loop()
+            except RuntimeError:
+                current_loop = None
+
+            if current_loop is tg_loop:
+                # Already on the bot's loop — normal create_task is fine
+                # and gives us an asyncio.Task handle.
+                handle: Any = asyncio.create_task(subscriber.run())
+            else:
+                # Different loop — hop via run_coroutine_threadsafe.
+                # Returns concurrent.futures.Future, which also supports
+                # add_done_callback for the strong-ref discard pattern.
+                handle = asyncio.run_coroutine_threadsafe(subscriber.run(), tg_loop)
+
+            self._progress_subscriber_tasks.add(handle)
+            handle.add_done_callback(self._progress_subscriber_tasks.discard)
             logger.info(
-                "[Telegram] progress subscriber spawned chat_id=%s message_id=%s task_id=%s",
+                "[Telegram] progress subscriber spawned chat_id=%s message_id=%s task_id=%s loop_hop=%s",
                 chat_id,
                 message_id,
                 task_id,
+                "yes" if current_loop is not tg_loop else "no",
             )
         except RuntimeError:
             logger.warning(

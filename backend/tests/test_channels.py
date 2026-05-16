@@ -1927,11 +1927,110 @@ class TestChannelService:
 
         _run(go())
 
+    def test_spawn_progress_subscriber_routes_through_tg_loop(self):
+        """Codex P1 (post-Phase-4F): ``send`` is invoked by the bus
+        subscriber on ``_main_loop``, but PTB bot calls are loop-affine
+        to the polling thread's ``_tg_loop`` (learning #14 in the v3
+        migration plan). The subscriber's ``bot.edit_message_text``
+        calls must run on ``_tg_loop`` or they raise "bound to a
+        different event loop" and the placeholder never updates.
+
+        This test verifies that when ``_spawn_progress_subscriber`` is
+        called from a loop different from ``_tg_loop``, it hops via
+        ``asyncio.run_coroutine_threadsafe`` instead of using
+        ``asyncio.create_task`` on the wrong loop.
+        """
+        import concurrent.futures
+        import threading
+
+        import app.channels.telegram_progress_subscriber as subscriber_module
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        # Build a real, running asyncio loop on a background thread to
+        # stand in for ``_tg_loop``. The subscriber's coroutine is never
+        # awaited to completion — we cancel immediately after spawn.
+        tg_loop = asyncio.new_event_loop()
+        tg_thread_ready = threading.Event()
+
+        def _run_tg_loop():
+            asyncio.set_event_loop(tg_loop)
+            tg_thread_ready.set()
+            tg_loop.run_forever()
+
+        tg_thread = threading.Thread(target=_run_tg_loop, daemon=True)
+        tg_thread.start()
+        tg_thread_ready.wait(timeout=2.0)
+        ch._tg_loop = tg_loop
+
+        # Stub subscriber that records which loop it runs on.
+        seen_loop: dict[str, object] = {}
+
+        class _RecordingSubscriber:
+            def __init__(self, **_kwargs):  # type: ignore[no-untyped-def]
+                self._task_id = _kwargs.get("task_id")
+
+            async def run(self) -> None:
+                try:
+                    seen_loop["loop"] = asyncio.get_running_loop()
+                except RuntimeError:
+                    seen_loop["loop"] = None
+
+        original = subscriber_module.BuilderProgressSubscriber
+        subscriber_module.BuilderProgressSubscriber = _RecordingSubscriber  # type: ignore[assignment]
+        try:
+            async def go():
+                # Sanity: the calling loop is NOT _tg_loop.
+                caller_loop = asyncio.get_running_loop()
+                assert caller_loop is not tg_loop
+
+                ch._spawn_progress_subscriber(
+                    bot=MagicMock(),
+                    chat_id=1,
+                    message_id=2,
+                    meta={"task_id": "t-cross-loop", "run_id": "r"},
+                )
+
+                # The subscriber should be tracked as a
+                # ``concurrent.futures.Future`` (cross-loop hop), NOT a
+                # plain ``asyncio.Task`` bound to the caller's loop.
+                handles = list(ch._progress_subscriber_tasks)
+                assert len(handles) == 1
+                handle = handles[0]
+                assert isinstance(handle, concurrent.futures.Future), (
+                    f"cross-loop spawn must use run_coroutine_threadsafe "
+                    f"(returns concurrent.futures.Future), got: {type(handle).__name__}"
+                )
+
+                # Wait briefly for the subscriber to enter run() so it
+                # records the loop it's actually on.
+                deadline = asyncio.get_event_loop().time() + 1.0
+                while "loop" not in seen_loop and asyncio.get_event_loop().time() < deadline:
+                    await asyncio.sleep(0.02)
+                assert seen_loop.get("loop") is tg_loop, (
+                    f"subscriber.run() must execute on _tg_loop; "
+                    f"got: {seen_loop.get('loop')!r}"
+                )
+
+            _run(go())
+        finally:
+            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
+            tg_loop.call_soon_threadsafe(tg_loop.stop)
+            tg_thread.join(timeout=2.0)
+            tg_loop.close()
+
     def test_spawn_progress_subscriber_passes_configured_langgraph_url(self):
         """Codex P2 regression at the spawn site: the URL TelegramChannel
         captures from config MUST flow through to BuilderProgressSubscriber's
         constructor. Asserts the kwarg shape directly rather than the
-        end-to-end network behaviour."""
+        end-to-end network behaviour.
+
+        Phase 4F (codex P1 post-review): the spawn now routes through
+        ``_tg_loop``. This test pretends the test's own loop IS
+        ``_tg_loop`` so the spawn takes the "same loop" branch and
+        creates a plain asyncio.Task that's easy to cancel cleanly.
+        """
         import app.channels.telegram_progress_subscriber as subscriber_module
         from app.channels.telegram import TelegramChannel
 
@@ -1946,21 +2045,24 @@ class TestChannelService:
                 captured.update(kwargs)
                 self._task_id = kwargs.get("task_id")
 
-            async def run(self) -> None:  # pragma: no cover - never awaited here
-                return None
+            async def run(self) -> None:
+                # Park forever — the test cancels immediately after spawn.
+                await asyncio.sleep(60)
 
         original = subscriber_module.BuilderProgressSubscriber
         subscriber_module.BuilderProgressSubscriber = _FakeSubscriber  # type: ignore[assignment]
         try:
             async def go():
+                # Pretend the test loop IS _tg_loop so the spawn path
+                # takes the "same loop" branch (asyncio.create_task).
+                ch._tg_loop = asyncio.get_running_loop()
                 ch._spawn_progress_subscriber(
                     bot=MagicMock(),
                     chat_id=123,
                     message_id=456,
                     meta={"task_id": "t-1", "run_id": "r-1"},
                 )
-                # Drain the fire-and-forget task tracker so the test loop
-                # doesn't leak pending tasks.
+                # Drain the fire-and-forget task tracker.
                 for task in list(ch._progress_subscriber_tasks):
                     task.cancel()
                     try:

@@ -605,7 +605,17 @@ class ChannelManager:
         # Phase 4D of the v3 streaming migration: per-process dedup of
         # builder task_ids we've already emitted a progress placeholder
         # for. Bounded to ~1k (see ``_trim_progress_set``).
-        self._progress_task_ids: set[str] = set()
+        #
+        # Phase 4F (codex P2 post-review): backed by ``dict[str, None]``
+        # (NOT ``set``) because dict iteration order is insertion-ordered
+        # in CPython 3.7+ and guaranteed by the Python language spec.
+        # The previous ``set`` implementation evicted arbitrary entries
+        # under the trim path — including just-added in-flight task_ids
+        # — which let the same active build re-emit duplicate "Working
+        # on it…" placeholders on the next companion turn. With a dict
+        # we evict the OLDEST entries (FIFO) which are the safest to
+        # drop: those builds have long since terminated.
+        self._progress_task_ids: dict[str, None] = {}
 
     # Phase 4F (codex P1): mirror of ``_TERMINAL_TASK_STATUSES`` defined in
     # ``deerflow.sophia.tools.start_builder_task`` (single source of truth
@@ -1096,16 +1106,40 @@ class ChannelManager:
                 continue
             # Mark AFTER successful publish so a transient bus failure
             # doesn't permanently block retries for this task_id.
-            self._progress_task_ids.add(str(task_id))
+            # Insertion order is preserved by dict (Phase 4F codex P2);
+            # the trim path relies on it for FIFO eviction.
+            self._progress_task_ids[str(task_id)] = None
             self._trim_progress_set()
 
     def _trim_progress_set(self) -> None:
-        if len(self._progress_task_ids) > 1024:
-            # Drop ~25% oldest entries; set has no order but for
-            # diagnostics we don't care which go (task_ids are unique).
-            stale = list(self._progress_task_ids)[:256]
-            for tid in stale:
-                self._progress_task_ids.discard(tid)
+        """Evict the OLDEST 25% of dedup entries when the cap is hit.
+
+        Phase 4F (codex P2 post-review): backed by a dict so iteration
+        order == insertion order (guaranteed by the Python language spec
+        since 3.7). Without this, the previous ``set`` implementation
+        evicted hash-table-order entries — including just-added in-flight
+        task_ids — and a still-active build would re-emit duplicate
+        "Working on it…" placeholders on the next companion turn.
+
+        FIFO eviction is correct because the oldest entries are the
+        longest-completed builds: their async_tasks rows have already
+        terminated and re-emitting for them is forbidden by the
+        terminal-status gate added in the same review cycle. Even if a
+        future legitimate re-dispatch of an evicted task_id occurs, the
+        worst case is one extra placeholder — not the stuck-forever
+        duplicate the bug otherwise produces for an active run.
+        """
+        if len(self._progress_task_ids) <= 1024:
+            return
+        # Iterate keys in insertion order (oldest first) and drop the
+        # first 256. ``itertools.islice`` over a dict yields its keys in
+        # the same order ``iter(d)`` does, so this is the cheap O(256)
+        # path even when the dict holds 1024+ entries.
+        from itertools import islice
+
+        stale = list(islice(self._progress_task_ids, 256))
+        for tid in stale:
+            self._progress_task_ids.pop(tid, None)
 
     async def _handle_streaming_chat(
         self,
