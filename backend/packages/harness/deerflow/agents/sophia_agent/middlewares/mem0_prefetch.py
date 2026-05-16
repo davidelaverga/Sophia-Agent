@@ -375,11 +375,6 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
             log_middleware("Mem0Retrieval", "skipped (voice warmup)", _t0)
             return None
 
-        # Avoid double-work if async path already ran (e.g. both hooks invoked).
-        if state.get("prefetched_memories") is not None:
-            log_middleware("Mem0Retrieval", "skipped (already prefetched)", _t0)
-            return None
-
         results, search_ms = self._run_search(state, runtime)
         if not results:
             log_middleware("Mem0Retrieval", f"no memories (search: {search_ms:.0f}ms)", _t0)
@@ -403,10 +398,6 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
 
         if self._user_id == _VOICE_WARMUP_USER_ID:
             log_middleware("Mem0Retrieval", "skipped (voice warmup)", _t0)
-            return None
-
-        if state.get("prefetched_memories") is not None:
-            log_middleware("Mem0Retrieval", "skipped (already prefetched)", _t0)
             return None
 
         try:

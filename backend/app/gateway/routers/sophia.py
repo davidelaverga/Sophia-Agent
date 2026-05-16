@@ -596,34 +596,19 @@ async def list_memories(
 )
 async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
     _validate_user(user_id)
-    client = _get_mem0_client()
     try:
+        from deerflow.sophia.mem0_client import add_memories
+
         memory_metadata = dict(body.metadata or {})
         if body.category and "category" not in memory_metadata:
             memory_metadata["category"] = body.category
 
-        add_kwargs = {
-            "messages": [{"role": "user", "content": body.text}],
-            "user_id": user_id,
-        }
-        if memory_metadata:
-            add_kwargs["metadata"] = memory_metadata
-
-        try:
-            result = client.add(**add_kwargs)
-        except TypeError:
-            add_kwargs.pop("metadata", None)
-            result = client.add(**add_kwargs)
-
-        from deerflow.sophia.mem0_client import invalidate_user_cache
-        invalidate_user_cache(user_id)
-
-        if isinstance(result, dict):
-            created = result.get("results", [result])
-        elif isinstance(result, list):
-            created = result
-        else:
-            created = [result] if result else []
+        created = add_memories(
+            user_id=user_id,
+            messages=[{"role": "user", "content": body.text}],
+            session_id="manual-create",
+            metadata=memory_metadata or None,
+        )
 
         first = created[0] if created else None
         if isinstance(first, dict) and first.get("id"):
