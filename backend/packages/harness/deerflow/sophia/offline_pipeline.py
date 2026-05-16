@@ -369,19 +369,20 @@ def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
     configurable = thread_state.get("configurable", {})
 
     # Upgrade A: derive session_start_unix from earliest message timestamp
-    # or fallback to now.
+    # or fallback to now. Scan all messages because the first entry may
+    # be a system/summary message that lacks a timestamp.
     session_start_unix: int | None = None
     messages = thread_state.get("messages", [])
-    if messages:
-        first_msg = messages[0]
-        if isinstance(first_msg, dict):
-            ts = first_msg.get("timestamp")
-            if isinstance(ts, (int, float)):
-                session_start_unix = int(ts)
+    for msg in messages:
+        ts: int | float | None = None
+        if isinstance(msg, dict):
+            ts = msg.get("timestamp")
         else:
-            ts = getattr(first_msg, "timestamp", None)
-            if isinstance(ts, (int, float)):
-                session_start_unix = int(ts)
+            ts = getattr(msg, "timestamp", None)
+        if isinstance(ts, (int, float)):
+            ts_int = int(ts)
+            if session_start_unix is None or ts_int < session_start_unix:
+                session_start_unix = ts_int
 
     return {
         "platform": (

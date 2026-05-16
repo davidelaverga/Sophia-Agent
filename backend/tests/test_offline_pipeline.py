@@ -384,6 +384,35 @@ class TestBuildSessionMetadata:
         assert meta["context_mode"] == "life"
         assert meta["ritual"] is None
 
+    def test_session_start_unix_from_earliest_timestamped_message(self):
+        """When first message lacks timestamp, scan all for earliest valid one."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "hello", "timestamp": 1715900000},
+                {"role": "assistant", "content": "hi", "timestamp": 1715900100},
+            ],
+            "platform": "voice",
+        }
+        meta = _build_session_metadata(state)
+        assert meta["session_start_unix"] == 1715900000
+
+    def test_session_start_unix_picks_earliest_across_all_messages(self):
+        """Multiple messages with timestamps — pick the earliest."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "hello", "timestamp": 1715900500},
+                {"role": "assistant", "content": "hi", "timestamp": 1715900100},
+                {"role": "user", "content": "bye", "timestamp": 1715900200},
+            ],
+        }
+        meta = _build_session_metadata(state)
+        assert meta["session_start_unix"] == 1715900100
+
 
 class TestBuildSessionSummary:
     def test_builds_transcript_from_messages(self):
