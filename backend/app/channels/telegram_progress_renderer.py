@@ -51,6 +51,11 @@ _PHASE_LABELS: dict[str, str] = {
     "drafting": "Drafting",
     "finalizing": "Finalizing",
     "done": "Done",
+    # Phase 4F: non-terminal degraded states so the placeholder
+    # honestly reflects "we couldn't observe the run" or
+    # "subscriber gave up but the build may still be going".
+    "stalled": "Still working",
+    "stopped": "Stopped",
 }
 
 
@@ -250,7 +255,7 @@ class ProgressRenderer:
         )
 
     def mark_done(self, summary: str = "") -> RenderResult:
-        """Caller signals the run has ended.
+        """Caller signals the run has ended successfully (natural stream end).
 
         The stream itself doesn't carry a "terminal" event the renderer
         can rely on — the SDK iterator just stops. The subscriber's
@@ -262,6 +267,38 @@ class ProgressRenderer:
         self.state.terminal = True
         if summary:
             self.state.summary_text = _shorten(summary, 600)
+        return RenderResult(state_changed=self._snapshot() != before, terminal=True)
+
+    def mark_stalled(self, reason: str = "") -> RenderResult:
+        """Subscriber signals the stream went silent but the run may still be live.
+
+        Phase 4F: per-event / total timeouts must NOT push ``[ Done ]``
+        because the builder may still be working — the artifact
+        delivery path (`_on_builder_completion`) is independent. The
+        placeholder ends on ``[ Still working — <reason> ]`` so the
+        user knows the live progress is gone but the deliverable may
+        still arrive.
+        """
+        before = self._snapshot()
+        self.state.current_phase = "stalled"
+        # NOT terminal — keep ``self.state.terminal`` False so any later
+        # legitimate stream-completion event can still finalize.
+        if reason:
+            self.state.summary_text = _shorten(f"({reason})", 600)
+        return RenderResult(state_changed=self._snapshot() != before, terminal=False)
+
+    def mark_stopped(self, reason: str = "") -> RenderResult:
+        """Subscriber signals a hard exit (error / cancel) — terminal.
+
+        Unlike ``mark_stalled`` this DOES set ``terminal=True`` because
+        the subscriber will not push further edits. The artifact path
+        is still independent and may still deliver.
+        """
+        before = self._snapshot()
+        self.state.current_phase = "stopped"
+        self.state.terminal = True
+        if reason:
+            self.state.summary_text = _shorten(f"({reason})", 600)
         return RenderResult(state_changed=self._snapshot() != before, terminal=True)
 
 

@@ -201,7 +201,12 @@ async def test_subscriber_rate_limits_consecutive_edits(monkeypatch: pytest.Monk
 
 @pytest.mark.anyio
 async def test_subscriber_per_event_timeout_closes_stream(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A stalled stream (no events arriving) ends cleanly at the per-event timeout."""
+    """A stalled stream (no events arriving) ends cleanly at the per-event timeout.
+
+    Phase 4F: the placeholder must NOT show ``[ Done ]`` on per-event
+    timeout — that misleads the user when the builder is still running.
+    It shows ``[ Still working ]`` (with reason) instead.
+    """
 
     class _StallStream:
         def __aiter__(self):
@@ -238,13 +243,101 @@ async def test_subscriber_per_event_timeout_closes_stream(monkeypatch: pytest.Mo
 
     monkeypatch.setattr(subscriber, "_build_client", _stub_build_client)
     await subscriber.run()
-    # Final "Done" edit still posted even on stall.
-    assert any("[ Done ]" in e["text"] for e in bot.edits)
+    # Final edit MUST be "[ Still working ]" — NOT "[ Done ]".
+    assert bot.edits, "subscriber must push at least one final edit"
+    final = bot.edits[-1]["text"]
+    assert "[ Still working ]" in final, (
+        f"per-event timeout must NOT show '[ Done ]' (build may still be live); "
+        f"got: {final!r}"
+    )
+    assert "[ Done ]" not in final, "stall outcome must never finalize as Done"
+
+
+@pytest.mark.anyio
+async def test_subscriber_natural_completion_marks_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 4F: when the stream iterator exhausts naturally (StopAsyncIteration),
+    the subscriber finalizes as ``[ Done ]`` — that's the only outcome that
+    should claim completion.
+    """
+    bot = _FakeBot()
+    chunks = [
+        _FakeStreamPart("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_search", "args": {"query": "x"}}
+            ])]}
+        }),
+    ]
+    subscriber = _build_subscriber(bot, monkeypatch, chunks=chunks)
+    await subscriber.run()
+    assert bot.edits
+    final = bot.edits[-1]["text"]
+    assert "[ Done ]" in final
+    assert "[ Still working ]" not in final
+    assert "[ Stopped ]" not in final
+
+
+@pytest.mark.anyio
+async def test_subscriber_cancelled_marks_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Phase 4F: explicit ``asyncio.CancelledError`` produces ``[ Stopped ]``.
+
+    The subscriber's task may be cancelled (channel shutdown, supervisor
+    teardown). The placeholder should reflect that, not falsely claim Done.
+    """
+
+    class _SlowStream:
+        def __aiter__(self):
+            async def _gen():
+                # Long enough to outlast our cancel
+                await asyncio.sleep(60)
+                yield None  # pragma: no cover
+
+            return _gen()
+
+    class _SlowClient:
+        class _Runs:
+            def join_stream(self, *_a, **_k):
+                return _SlowStream()
+
+        def __init__(self) -> None:
+            self.runs = _SlowClient._Runs()
+
+    bot = _FakeBot()
+    subscriber = BuilderProgressSubscriber(
+        bot=bot,
+        chat_id=1,
+        message_id=2,
+        thread_id="th",
+        run_id="run",
+        task_id="task",
+    )
+    subscriber._per_event_timeout_s = 30  # long enough that cancel hits first
+    subscriber._total_timeout_s = 30
+
+    async def _stub_build_client():
+        return _SlowClient()
+
+    monkeypatch.setattr(subscriber, "_build_client", _stub_build_client)
+
+    task = asyncio.create_task(subscriber.run())
+    # Let the subscriber enter its inner loop.
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert bot.edits, "subscriber must push a final edit even on cancel"
+    final = bot.edits[-1]["text"]
+    assert "[ Stopped ]" in final
+    assert "[ Done ]" not in final
 
 
 @pytest.mark.anyio
 async def test_subscriber_no_sdk_returns_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If langgraph_sdk is unavailable the subscriber bails without crashing."""
+    """If langgraph_sdk is unavailable the subscriber bails without crashing.
+
+    No-SDK is treated as natural completion (nothing to stream) → ``[ Done ]``
+    edit, so the placeholder doesn't sit on "Working on it…" forever.
+    """
     bot = _FakeBot()
     subscriber = BuilderProgressSubscriber(
         bot=bot,

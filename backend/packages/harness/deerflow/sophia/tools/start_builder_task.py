@@ -536,6 +536,22 @@ async def _dispatch_via_asgi(
         assistant_id=_ASYNC_BUILDER_AGENT_NAME,
         input=run_input,
         config=run_config,
+        # stream_resumable=True is REQUIRED for the gateway-side
+        # ``BuilderProgressSubscriber`` to see events via the HTTP
+        # ``runs.join_stream`` consumer. Without it, the run produces
+        # events internally but the langgraph server does NOT buffer
+        # them for late-joining HTTP subscribers, and ``join_stream``
+        # opens a 200 OK connection that never receives a chunk.
+        #
+        # Asymmetry note: this dispatch uses the SDK ASGI in-process
+        # transport (``get_client(url=None)``); the subscriber dispatches
+        # over HTTP. The ASGI transport bypasses the resumability buffer
+        # the HTTP join_stream consumer depends on. Enabling resumability
+        # here is what lets the HTTP path see anything.
+        #
+        # Regression: ``tests/test_start_builder_task.py::
+        # test_dispatch_sets_stream_resumable_true``.
+        stream_resumable=True,
     )
     return thread_id, run["run_id"]
 

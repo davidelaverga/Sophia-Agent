@@ -3036,16 +3036,24 @@ class TestBuilderArtifactMiddleware:
         assert builder_result["confidence"] == 0.5
 
     def test_hard_ceiling_apology_when_no_binary_or_generator(self, tmp_path):
-        """If neither a binary nor a generator script is on disk, the
-        original confidence=0.2 apology stays. Avoids accidentally
-        promoting unrelated artifacts.
+        """If neither a binary nor a generator script nor a text deliverable
+        is on disk, the original confidence=0.2 apology stays. Avoids
+        accidentally promoting unrelated artifacts.
+
+        Phase 4F (2026-05-16): ``_PROMOTE_EXTS`` was extended to include
+        ``.md / .txt / .csv / .json / .yaml / .yml`` so markdown deep
+        dives are recovered. The fixture here therefore uses ``.log``
+        — a developer-debug extension that is intentionally NOT in the
+        promotion list, preserving the test's "nothing promotable"
+        intent.
         """
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        # Some unrelated junk that is neither a preferred binary nor a generator
-        (outputs_dir / "scratch.txt").write_text("not a deliverable")
+        # A non-deliverable log file — not in _PROMOTE_EXTS, so it must
+        # NOT be promoted by the ceiling fallback.
+        (outputs_dir / "scratch.log").write_text("not a deliverable")
 
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()

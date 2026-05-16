@@ -390,10 +390,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if outputs_host_path_local:
                 outputs_root_local = Path(outputs_host_path_local)
                 if outputs_root_local.is_dir():
+                    # Promotion priority is left-to-right; the mtime sort
+                    # below then picks the most-recently-written file
+                    # within the set, so a fresh ``.pdf`` will still win
+                    # over an older ``.md``. The text extensions were
+                    # added in PR #126 Phase 4F after a production
+                    # markdown-deep-dive failed because ``.md`` wasn't in
+                    # the list — the model emitted ``artifact_path=None``
+                    # under force-emit, the short-circuit kicked in, the
+                    # ceiling fallback scanned outputs/ but found nothing
+                    # promotable, and the run coerced to error instead of
+                    # delivering the markdown the builder had written.
                     _PROMOTE_EXTS = (
+                        # Binary deliverables — high signal, listed first.
                         ".pdf", ".pptx", ".docx", ".xlsx",
                         ".png", ".jpg", ".jpeg", ".svg",
                         ".html", ".zip",
+                        # Text deliverables — markdown deep dives, JSON/CSV
+                        # data reports, YAML specs.
+                        ".md", ".txt", ".csv", ".json", ".yaml", ".yml",
                     )
                     candidates = [
                         p for p in outputs_root_local.rglob("*")

@@ -160,6 +160,34 @@ class TestTerminalRendering:
         assert result.terminal is True
         assert "[ Done ]" in r.render()
 
+    def test_mark_stalled_renders_still_working_and_is_not_terminal(self) -> None:
+        """Phase 4F: per-event / total timeout MUST NOT pretend the
+        build is done. The build may still be running — the streaming
+        UX merely lost the live signal. ``terminal=False`` lets a later
+        legitimate completion still overwrite it; the artifact-delivery
+        path is independent and may still deliver.
+        """
+        r = ProgressRenderer()
+        result = r.mark_stalled(reason="no events for 120s")
+        assert result.terminal is False
+        body = r.render()
+        assert "[ Still working ]" in body
+        assert "no events for 120s" in body
+        # Crucially: NOT "[ Done ]".
+        assert "[ Done ]" not in body
+
+    def test_mark_stopped_renders_stopped_header_and_is_terminal(self) -> None:
+        """Phase 4F: ``cancelled`` / ``error`` are terminal — the subscriber
+        won't push more edits — but they MUST NOT claim Done. The artifact
+        delivery path is still independent and may still deliver."""
+        r = ProgressRenderer()
+        result = r.mark_stopped(reason="cancelled")
+        assert result.terminal is True
+        body = r.render()
+        assert "[ Stopped ]" in body
+        assert "cancelled" in body
+        assert "[ Done ]" not in body
+
 
 class TestLineDeduplication:
     def test_adjacent_identical_lines_collapsed(self) -> None:

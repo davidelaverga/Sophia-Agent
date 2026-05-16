@@ -94,6 +94,13 @@ class BuilderProgressSubscriber:
         Exceptions are logged and swallowed — the artifact-delivery
         path via ``_on_builder_completion`` is independent and is the
         durability backstop.
+
+        Phase 4F: tracks the exit reason ("outcome") so the final
+        placeholder edit reflects reality. A per-event timeout does
+        NOT mean the build is done — it means the gateway lost the
+        live signal. ``mark_stalled`` keeps the placeholder honest
+        ("still working, no events for Ns") instead of pushing a
+        misleading "[ Done ]" edit.
         """
         if not _streaming_enabled():
             logger.info(
@@ -109,35 +116,67 @@ class BuilderProgressSubscriber:
             self._chat_id,
             self._message_id,
         )
+        # Inner outcome is mutated by ``_run_inner`` (or left at its
+        # default if we never get there). The outer try/except may
+        # overwrite it on timeout / cancel / error.
+        self._outcome: str = "stream_complete"
         try:
             await asyncio.wait_for(self._run_inner(), timeout=self._total_timeout_s)
         except TimeoutError:
+            self._outcome = "total_timeout"
             logger.warning(
                 "[ProgressSubscriber] total timeout exceeded task_id=%s timeout=%ds",
                 self._task_id,
                 self._total_timeout_s,
             )
         except asyncio.CancelledError:
+            self._outcome = "cancelled"
             logger.info("[ProgressSubscriber] cancelled task_id=%s", self._task_id)
             raise
         except Exception:
+            self._outcome = "error"
             logger.warning(
                 "[ProgressSubscriber] run raised task_id=%s",
                 self._task_id,
                 exc_info=True,
             )
         finally:
-            # Always push the final state (even on error / timeout) so the
-            # placeholder doesn't sit on "Working on it…" forever.
+            # Push a final edit appropriate to the exit reason. The
+            # placeholder must not sit on "Working on it…" forever, but
+            # it ALSO must not lie about completion when we merely lost
+            # the live signal.
             try:
-                self._renderer.mark_done()
+                self._finalize(self._outcome)
                 await self._push_edit(force=True)
             except Exception:
                 logger.warning(
-                    "[ProgressSubscriber] final edit failed task_id=%s",
+                    "[ProgressSubscriber] final edit failed task_id=%s outcome=%s",
                     self._task_id,
+                    self._outcome,
                     exc_info=True,
                 )
+
+    def _finalize(self, outcome: str) -> None:
+        """Map an exit reason onto the renderer's terminal call.
+
+        ``stream_complete`` → ``[ Done ]``       (natural iterator exhaustion)
+        ``per_event_timeout`` / ``total_timeout`` → ``[ Still working ]``
+            (NOT terminal — the build may keep going; artifact path is independent)
+        ``error`` / ``cancelled`` → ``[ Stopped ]`` (terminal — subscriber won't edit again)
+        """
+        if outcome == "stream_complete":
+            self._renderer.mark_done()
+            return
+        if outcome == "per_event_timeout":
+            self._renderer.mark_stalled(reason=f"no events for {self._per_event_timeout_s}s")
+            return
+        if outcome == "total_timeout":
+            self._renderer.mark_stalled(
+                reason=f"hit {self._total_timeout_s // 60}-min ceiling"
+            )
+            return
+        # error / cancelled / unknown
+        self._renderer.mark_stopped(reason=outcome)
 
     async def _run_inner(self) -> None:
         client = await self._build_client()
@@ -157,13 +196,19 @@ class BuilderProgressSubscriber:
                 await self._push_edit()
             if result.terminal:
                 # Renderer self-marked terminal (rare — most streams
-                # just end via stop-iteration).
+                # just end via stop-iteration). Treat as natural exit.
+                self._outcome = "stream_complete"
                 return
         logger.info(
             "[ProgressSubscriber] stream completed task_id=%s chunks=%d",
             self._task_id,
             chunk_count,
         )
+        # Reach here only on natural iterator exhaustion (StopAsyncIteration)
+        # or per-event timeout. ``_iter_with_event_timeout`` sets
+        # ``self._outcome = "per_event_timeout"`` on the timeout path; on
+        # natural completion the outcome stays at its default
+        # ``"stream_complete"``.
 
     async def _build_client(self) -> Any | None:
         try:
@@ -205,12 +250,19 @@ class BuilderProgressSubscriber:
         A long bash build can run silently for minutes; the per-event
         timeout is generous (120s default) so quiet builds don't get
         cut off. The total timeout is the real ceiling.
+
+        Phase 4F: on per-event timeout we record
+        ``self._outcome = "per_event_timeout"`` so the finalizer can
+        choose ``[ Still working ]`` instead of the misleading
+        ``[ Done ]`` edit. ``StopAsyncIteration`` is natural completion
+        and leaves the outcome at its ``"stream_complete"`` default.
         """
         iterator = stream_iter.__aiter__()
         while True:
             try:
                 chunk = await asyncio.wait_for(iterator.__anext__(), timeout=self._per_event_timeout_s)
             except TimeoutError:
+                self._outcome = "per_event_timeout"
                 logger.warning(
                     "[ProgressSubscriber] per-event timeout task_id=%s timeout=%ds — closing stream",
                     self._task_id,
@@ -220,6 +272,7 @@ class BuilderProgressSubscriber:
             except StopAsyncIteration:
                 return
             except Exception:
+                self._outcome = "error"
                 logger.warning(
                     "[ProgressSubscriber] iterator raised task_id=%s",
                     self._task_id,
