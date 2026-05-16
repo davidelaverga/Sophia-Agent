@@ -1132,16 +1132,34 @@ class ChannelManager:
                 task_id,
                 run_id,
             )
+            # Phase 4F (codex P1 post-review, fourth pass): use the
+            # delivery-confirming strict variant. ``publish_outbound``
+            # SWALLOWS listener exceptions (v3-migration learning #3),
+            # so a Telegram ``send`` failure (transient network /
+            # Telegram API 5xx) would otherwise look successful here
+            # and the dedup key would be marked. Subsequent turns
+            # would then skip re-emitting and the run gets NO live
+            # progress subscriber at all. ``publish_outbound_strict``
+            # returns False if any listener raised; we then skip
+            # marking the dedup so the next companion turn retries.
             try:
-                await self.bus.publish_outbound(placeholder)
+                delivered = await self.bus.publish_outbound_strict(placeholder)
             except Exception:
                 logger.warning(
-                    "[Manager] placeholder publish failed task_id=%s — will retry on a future turn",
+                    "[Manager] placeholder publish raised task_id=%s — will retry on a future turn",
                     task_id,
                     exc_info=True,
                 )
                 continue
-            # Mark AFTER successful publish so a transient bus failure
+            if not delivered:
+                logger.warning(
+                    "[Manager] placeholder delivery failed (listener raised) task_id=%s run_id=%s "
+                    "— will retry on a future turn",
+                    task_id,
+                    run_id,
+                )
+                continue
+            # Mark AFTER confirmed delivery so a transient send failure
             # doesn't permanently block retries for this (task_id, run_id).
             # Insertion order is preserved by dict (Phase 4F codex P2);
             # the trim path relies on it for FIFO eviction.

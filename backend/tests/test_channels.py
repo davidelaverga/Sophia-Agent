@@ -128,6 +128,61 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_publish_outbound_strict_returns_true_when_all_listeners_succeed(self):
+        """``publish_outbound_strict`` reports delivery status to the caller.
+
+        Phase 4F codex P1 post-review (fourth pass): the swallow-flavored
+        ``publish_outbound`` hides Telegram send failures from callers
+        that need delivery confirmation. The strict variant returns
+        a bool so callers like ``ChannelManager._maybe_open_progress_placeholders``
+        can decide whether to mark dedup or retry next turn.
+        """
+        bus = MessageBus()
+        received: list[OutboundMessage] = []
+
+        async def good(msg):
+            received.append(msg)
+
+        async def go():
+            bus.subscribe_outbound(good)
+            bus.subscribe_outbound(good)
+            out = OutboundMessage(channel_name="test", chat_id="c", thread_id="t", text="ok")
+            delivered = await bus.publish_outbound_strict(out)
+            assert delivered is True
+            assert len(received) == 2
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_false_when_any_listener_raises(self):
+        """Even if other listeners succeed, a single raise flips delivered=False.
+
+        Conservative semantics: the manager skips marking dedup on
+        False so a follow-up turn retries. The bus still iterates the
+        rest of the listeners — unrelated channels still get the
+        message — so the False signal is "delivery is uncertain for
+        SOMEONE", not "delivery failed everywhere".
+        """
+        bus = MessageBus()
+        delivered_to: list[str] = []
+
+        async def failing(_msg):
+            raise RuntimeError("simulated network error")
+
+        async def succeeding(msg):
+            delivered_to.append(msg.channel_name)
+
+        async def go():
+            bus.subscribe_outbound(failing)
+            bus.subscribe_outbound(succeeding)
+            out = OutboundMessage(channel_name="t", chat_id="c", thread_id="th", text="x")
+            delivered = await bus.publish_outbound_strict(out)
+            assert delivered is False
+            # The good listener still ran — we don't short-circuit on
+            # a failing listener.
+            assert delivered_to == ["t"]
+
+        _run(go())
+
     def test_review_notification_callback(self):
         bus = MessageBus()
         received: list[dict] = []

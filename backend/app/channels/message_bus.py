@@ -176,7 +176,13 @@ class MessageBus:
         self._outbound_listeners = [cb for cb in self._outbound_listeners if cb is not callback]
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        """Dispatch an outbound message to all registered listeners."""
+        """Dispatch an outbound message to all registered listeners.
+
+        Listener exceptions are CAUGHT AND LOGGED, not raised (this is
+        v3-migration learning #3: a Telegram send failure is invisible
+        to callers that rely on the bus return). Callers that need
+        delivery confirmation should use ``publish_outbound_strict``.
+        """
         logger.info(
             "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
             msg.channel_name,
@@ -189,6 +195,46 @@ class MessageBus:
                 await callback(msg)
             except Exception:
                 logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
+
+    async def publish_outbound_strict(self, msg: OutboundMessage) -> bool:
+        """Dispatch like ``publish_outbound`` but report listener failures.
+
+        Returns ``True`` only when ALL listeners completed without
+        raising. Returns ``False`` if at least one listener raised —
+        the bus still iterates the rest (so unaffected channels still
+        receive the message) but the boolean tells the caller "at
+        least one consumer failed; don't treat this as delivered".
+
+        Use this for delivery-sensitive paths like the builder progress
+        placeholder. Phase 4F codex P1 (post-review, fourth pass):
+        ``_maybe_open_progress_placeholders`` previously trusted
+        ``publish_outbound`` to surface Telegram send errors — but the
+        bus swallows listener exceptions, so a transient send failure
+        looked successful and the dedup key was marked. The placeholder
+        never reached Telegram and the dedup gate then blocked all
+        future retries, so the run got no live progress subscriber at
+        all. Routing through this strict variant lets the manager skip
+        the dedup mark on listener failure, preserving the retry-on-
+        next-turn path the Phase-4F codex P2 fix already established.
+        """
+        logger.info(
+            "[Bus] outbound dispatching (strict): channel=%s, chat_id=%s, listeners=%d, text_len=%d",
+            msg.channel_name,
+            msg.chat_id,
+            len(self._outbound_listeners),
+            len(msg.text),
+        )
+        all_ok = True
+        for callback in self._outbound_listeners:
+            try:
+                await callback(msg)
+            except Exception:
+                all_ok = False
+                logger.exception(
+                    "Error in outbound callback (strict) for channel=%s",
+                    msg.channel_name,
+                )
+        return all_ok
 
     # -- builder completion ------------------------------------------------
 

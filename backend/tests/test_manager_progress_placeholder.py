@@ -88,15 +88,22 @@ async def test_dedup_avoids_double_emission(manager: ChannelManager) -> None:
 async def test_publish_failure_leaves_task_unmarked_for_retry(
     manager: ChannelManager, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """If publish raises, the task is NOT marked — a follow-up turn retries."""
+    """If the strict publish raises (bus-level failure, NOT listener
+    failure), the task is NOT marked — a follow-up turn retries.
+
+    Phase 4F codex P1 (post-review, fourth pass): the manager now
+    calls ``publish_outbound_strict``. Patch that method, not the
+    swallow-flavored ``publish_outbound``.
+    """
     flaky = {"calls": 0}
 
     async def _flaky_publish(_msg):
         flaky["calls"] += 1
         if flaky["calls"] == 1:
             raise RuntimeError("simulated bus failure")
+        return True  # subsequent calls: delivered=True
 
-    monkeypatch.setattr(manager.bus, "publish_outbound", _flaky_publish)
+    monkeypatch.setattr(manager.bus, "publish_outbound_strict", _flaky_publish)
 
     result = _result_with_task(task_id="t-retry", run_id="r")
     await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
@@ -105,6 +112,72 @@ async def test_publish_failure_leaves_task_unmarked_for_retry(
     # Second attempt — publish succeeds, task marked.
     await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
     assert ("t-retry", "r") in manager._progress_task_ids
+
+
+@pytest.mark.anyio
+async def test_listener_failure_does_not_mark_dedup(
+    manager: ChannelManager,
+) -> None:
+    """Codex P1 (post-Phase-4F review, fourth pass) regression: the
+    real Telegram listener raises on transient send failures (network
+    error, Telegram 5xx). ``publish_outbound`` swallows those — but
+    ``publish_outbound_strict`` returns False.
+
+    The manager MUST NOT mark the dedup on False, because that would
+    permanently block retries and the run would get no live progress
+    subscriber at all. Subsequent turns retry; the dedup is only
+    marked when a listener actually accepted the placeholder without
+    raising.
+    """
+    # Subscribe a listener that always raises — simulates a Telegram
+    # channel whose ``send`` is hitting transient errors.
+    async def _failing_listener(_msg):
+        raise RuntimeError("simulated transient Telegram send failure")
+
+    manager.bus.subscribe_outbound(_failing_listener)
+
+    result = _result_with_task(task_id="t-flaky-listener", run_id="r-1")
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+
+    # Listener raised → strict returned False → dedup NOT marked.
+    assert ("t-flaky-listener", "r-1") not in manager._progress_task_ids, (
+        "listener failure must NOT mark the dedup — retry on next turn"
+    )
+
+    # Now swap in a successful listener and retry on the next turn.
+    # (Simulates the network issue resolving.)
+    manager.bus.unsubscribe_outbound(_failing_listener)
+    delivered_msgs: list[OutboundMessage] = []
+
+    async def _good_listener(msg):
+        delivered_msgs.append(msg)
+
+    manager.bus.subscribe_outbound(_good_listener)
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    assert len(delivered_msgs) == 1
+    assert ("t-flaky-listener", "r-1") in manager._progress_task_ids
+
+
+@pytest.mark.anyio
+async def test_listener_failure_with_mixed_listeners_still_does_not_mark(
+    manager: ChannelManager,
+) -> None:
+    """Even if SOME listeners succeed, a single raising listener flips
+    delivered=False and the dedup stays unmarked. Conservative for the
+    placeholder path: better to retry one too many times than to
+    permanently silence a run."""
+    async def _failing(_msg):
+        raise RuntimeError("boom")
+
+    async def _ok(_msg):
+        return None
+
+    manager.bus.subscribe_outbound(_failing)
+    manager.bus.subscribe_outbound(_ok)
+
+    result = _result_with_task(task_id="t-mixed", run_id="r")
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    assert ("t-mixed", "r") not in manager._progress_task_ids
 
 
 @pytest.mark.anyio
