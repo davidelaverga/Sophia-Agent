@@ -383,6 +383,58 @@ class TestChannelBase:
 
         _run(go())
 
+    def test_on_outbound_propagates_send_failure(self):
+        """Phase 4F codex P1 post-review (fifth pass): when ``send``
+        raises, ``Channel._on_outbound`` MUST re-raise after logging so
+        the bus's ``publish_outbound_strict`` sees the failure and
+        flips ``delivered=False``. The previous swallow-and-return
+        suppressed the exception inside the channel base class, which
+        defeated the strict variant entirely — a Telegram send error
+        looked like successful delivery to the manager's placeholder
+        path and the dedup got marked for a placeholder that never
+        actually reached the user.
+
+        The bus's own iteration-level catch (in ``publish_outbound``)
+        still keeps other channels' listeners running when one fails
+        — that's the right place for cross-cutting safety.
+        """
+        class _FailingChannel(Channel):
+            def __init__(self, bus_):
+                super().__init__(name="failing", bus=bus_, config={})
+
+            async def start(self):
+                self._running = True
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def stop(self):
+                self._running = False
+                self.bus.unsubscribe_outbound(self._on_outbound)
+
+            async def send(self, msg):
+                raise RuntimeError("simulated send failure")
+
+        bus = MessageBus()
+        ch = _FailingChannel(bus)
+
+        async def go():
+            await ch.start()
+            msg = OutboundMessage(
+                channel_name="failing", chat_id="c1", thread_id="t1", text="hi"
+            )
+            # publish_outbound STILL catches at its layer (preserving
+            # non-strict semantics). The bus shouldn't re-raise here.
+            await bus.publish_outbound(msg)
+
+            # publish_outbound_strict MUST see the propagated exception
+            # and return False.
+            delivered = await bus.publish_outbound_strict(msg)
+            assert delivered is False, (
+                "channel send raising MUST flip delivered=False through "
+                "the strict variant — see codex P1 post-review fifth pass"
+            )
+
+        _run(go())
+
 
 # ---------------------------------------------------------------------------
 # _extract_response_text tests

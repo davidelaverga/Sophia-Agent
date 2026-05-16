@@ -87,17 +87,29 @@ class Channel(ABC):
     async def _on_outbound(self, msg: OutboundMessage) -> None:
         """Outbound callback registered with the bus.
 
-        Only forwards messages targeted at this channel.
-        Sends the text message first, then uploads any file attachments.
-        File uploads are skipped entirely when the text send fails to avoid
-        partial deliveries (files without accompanying text).
+        Only forwards messages targeted at this channel. Sends the text
+        message first, then uploads any file attachments. File uploads
+        are skipped entirely when the text send fails to avoid partial
+        deliveries (files without accompanying text).
+
+        Phase 4F (codex P1 post-review, fifth pass): the text-send
+        exception is logged AND RE-RAISED. The bus's
+        ``publish_outbound`` already has its own iteration-level catch
+        (so a single channel's failure doesn't crash other channels'
+        listeners), and ``publish_outbound_strict`` needs the
+        propagated exception to flip ``all_ok=False`` for delivery-
+        sensitive callers. Catching here too was redundant defensive
+        coding that hid send failures from the manager's placeholder
+        path. File-upload failures remain non-fatal (advisory) — they
+        are independent attachments and a failed upload should not
+        flip delivery to False for the text payload.
         """
         if msg.channel_name == self.name:
             try:
                 await self.send(msg)
             except Exception:
                 logger.exception("Failed to send outbound message on channel %s", self.name)
-                return  # Do not attempt file uploads when the text message failed
+                raise
 
             for attachment in msg.attachments:
                 try:

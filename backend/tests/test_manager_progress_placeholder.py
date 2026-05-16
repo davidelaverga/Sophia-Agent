@@ -159,6 +159,60 @@ async def test_listener_failure_does_not_mark_dedup(
 
 
 @pytest.mark.anyio
+async def test_real_channel_send_failure_does_not_mark_dedup(
+    manager: ChannelManager,
+) -> None:
+    """End-to-end regression for codex P1 fifth pass: a real
+    ``Channel`` subclass whose ``send`` raises must flip the dedup
+    decision to False all the way through the chain:
+
+        manager._maybe_open_progress_placeholders
+            → bus.publish_outbound_strict
+                → Channel._on_outbound (subscribed)
+                    → self.send (raises)
+                ← _on_outbound RE-RAISES (codex P1 fifth pass)
+            ← strict returns False
+        ← manager skips dedup mark
+
+    Before the fifth-pass fix, ``Channel._on_outbound`` caught the
+    exception and returned silently, so the strict variant saw no
+    raise and returned True — the manager marked the dedup for a
+    placeholder that never reached the user, and subsequent turns
+    skipped re-emitting indefinitely.
+    """
+    from app.channels.base import Channel
+
+    class _BrokenChannel(Channel):
+        def __init__(self, bus_):
+            super().__init__(name="telegram", bus=bus_, config={})
+
+        async def start(self):
+            self._running = True
+            self.bus.subscribe_outbound(self._on_outbound)
+
+        async def stop(self):
+            self._running = False
+            self.bus.unsubscribe_outbound(self._on_outbound)
+
+        async def send(self, _msg):
+            raise RuntimeError("simulated transient Telegram API error")
+
+    channel = _BrokenChannel(manager.bus)
+    await channel.start()
+    try:
+        result = _result_with_task(task_id="t-real-fail", run_id="r-1")
+        await manager._maybe_open_progress_placeholders(
+            _inbound(), result, thread_id="th"
+        )
+        assert ("t-real-fail", "r-1") not in manager._progress_task_ids, (
+            "real Channel.send failure must flip delivered=False through "
+            "the strict variant and leave the dedup unmarked"
+        )
+    finally:
+        await channel.stop()
+
+
+@pytest.mark.anyio
 async def test_listener_failure_with_mixed_listeners_still_does_not_mark(
     manager: ChannelManager,
 ) -> None:
