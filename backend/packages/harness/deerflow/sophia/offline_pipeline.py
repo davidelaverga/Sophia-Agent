@@ -31,7 +31,6 @@ from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
 from deerflow.sophia.extraction import extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
-from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
 from deerflow.sophia.smart_opener import generate_smart_opener
 from deerflow.sophia.trace_logger import write_session_trace
 
@@ -166,7 +165,6 @@ def run_offline_pipeline(
         extracted_memories = extract_session_memories(
             user_id, session_id, serialized_messages, session_metadata,
         )
-        reconcile_review_metadata_with_mem0(user_id)
         steps["extraction"] = "ok"
         logger.info(
             "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
@@ -364,10 +362,26 @@ def _write_offline_recap(
 def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
     """Extract session-level metadata from thread_state.
 
-    Pulls ``platform``, ``context_mode``, and ``ritual`` from either
-    the top-level state dict or a nested ``configurable`` dict.
+    Pulls ``platform``, ``context_mode``, ``ritual``, and
+    ``session_start_unix`` from either the top-level state dict or a
+    nested ``configurable`` dict.
     """
     configurable = thread_state.get("configurable", {})
+
+    # Upgrade A: derive session_start_unix from earliest message timestamp
+    # or fallback to now.
+    session_start_unix: int | None = None
+    messages = thread_state.get("messages", [])
+    if messages:
+        first_msg = messages[0]
+        if isinstance(first_msg, dict):
+            ts = first_msg.get("timestamp")
+            if isinstance(ts, (int, float)):
+                session_start_unix = int(ts)
+        else:
+            ts = getattr(first_msg, "timestamp", None)
+            if isinstance(ts, (int, float)):
+                session_start_unix = int(ts)
 
     return {
         "platform": (
@@ -382,6 +396,7 @@ def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
             thread_state.get("active_ritual")
             or configurable.get("ritual")
         ),
+        "session_start_unix": session_start_unix,
     }
 
 

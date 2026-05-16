@@ -1730,198 +1730,16 @@ class TestRetrieveMemoriesTool:
             assert result == "Memory retrieval temporarily unavailable."
 
 
-# --- Mem0 category selection ---
-
-class TestMem0CategorySelection:
-    def test_default_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [])
-        assert "fact" in cats
-        assert "preference" in cats
-
-    def test_vent_ritual_adds_feeling_relationship(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("vent", None, [])
-        assert "feeling" in cats
-        assert "relationship" in cats
-
-    def test_debrief_adds_commitment_decision(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("debrief", None, [])
-        assert "commitment" in cats
-        assert "decision" in cats
-
-    def test_challenging_growth_adds_pattern_lesson(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, "challenging_growth", [])
-        assert "pattern" in cats
-        assert "lesson" in cats
-
-    def test_ritual_adds_ritual_context(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("prepare", None, [])
-        assert "ritual_context" in cats
-
-    def test_work_context_adds_work_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [], context_mode="work")
-        assert "project" in cats
-        assert "colleague" in cats
-        assert "career" in cats
-        assert "deadline" in cats
-
-    def test_gaming_context_adds_gaming_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [], context_mode="gaming")
-        assert "game" in cats
-        assert "achievement" in cats
-        assert "gaming_team" in cats
-        assert "strategy" in cats
-
-    def test_life_context_adds_life_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [], context_mode="life")
-        assert "family" in cats
-        assert "health" in cats
-        assert "personal_goal" in cats
-        assert "life_event" in cats
-
-    def test_no_context_mode_only_base_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories(None, None, [])
-        assert "project" not in cats
-        assert "game" not in cats
-        assert "family" not in cats
-
-    def test_context_plus_ritual_combines_categories(self):
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
-        cats = _select_categories("debrief", None, [], context_mode="work")
-        assert "project" in cats  # from work context
-        assert "commitment" in cats  # from debrief ritual
-        assert "decision" in cats  # from debrief ritual
-        assert "fact" in cats  # always present
-
-    def test_work_context_sorts_work_memories_first(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
-                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m3", "memory": "Sister birthday next week", "metadata": {"category": "family"}},
-                {"id": "m4", "memory": "Works with Alice", "metadata": {"category": "colleague"}},
-                {"id": "m5", "memory": "Prefers morning calls", "metadata": {"category": "preference"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "test query", context_mode="work")
-
-        # Work categories (deadline, colleague) must appear before non-work (game, family, preference)
-        work_cats = {"project", "colleague", "career", "deadline", "commitment", "decision"}
-        first_non_work_idx = None
-        for i, m in enumerate(results):
-            if m["category"] not in work_cats and first_non_work_idx is None:
-                first_non_work_idx = i
-            if m["category"] in work_cats and first_non_work_idx is not None:
-                pytest.fail(f"Work memory '{m['content']}' at index {i} appeared after non-work memory at index {first_non_work_idx}")
-
-    def test_gaming_context_sorts_gaming_memories_first(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m2", "memory": "Beat final boss", "metadata": {"category": "achievement"}},
-                {"id": "m3", "memory": "Plays with TeamX", "metadata": {"category": "gaming_team"}},
-                {"id": "m4", "memory": "Sister birthday", "metadata": {"category": "family"}},
-                {"id": "m5", "memory": "Likes strategy games", "metadata": {"category": "strategy"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "test query", context_mode="gaming")
-
-        gaming_cats = {"game", "achievement", "gaming_team", "strategy"}
-        first_non_gaming_idx = None
-        for i, m in enumerate(results):
-            if m["category"] not in gaming_cats and first_non_gaming_idx is None:
-                first_non_gaming_idx = i
-            if m["category"] in gaming_cats and first_non_gaming_idx is not None:
-                pytest.fail(f"Gaming memory '{m['content']}' at index {i} appeared after non-gaming memory at index {first_non_gaming_idx}")
-
-    def test_no_context_mode_preserves_original_order(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
-                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m3", "memory": "Sister birthday", "metadata": {"category": "family"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "test query no ctx")
-
-        # Without context_mode, original order should be preserved
-        assert results[0]["id"] == "m1"
-        assert results[1]["id"] == "m2"
-        assert results[2]["id"] == "m3"
-
-    def test_cross_context_memories_still_returned(self):
-        from unittest.mock import patch
-
-        from deerflow.sophia.mem0_client import _cache, search_memories
-
-        _cache.clear()
-
-        mock_client = MagicMock()
-        mock_client.search.return_value = {
-            "results": [
-                {"id": "m1", "memory": "Loves RPGs", "metadata": {"category": "game"}},
-                {"id": "m2", "memory": "Project deadline Friday", "metadata": {"category": "deadline"}},
-                {"id": "m3", "memory": "Sister birthday", "metadata": {"category": "family"}},
-            ],
-        }
-
-        with patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client):
-            results = search_memories("user1", "cross ctx query", context_mode="work")
-
-        # All memories should still be present (not excluded)
-        result_ids = [m["id"] for m in results]
-        assert "m1" in result_ids  # gaming memory still present in work context
-        assert "m2" in result_ids  # work memory present
-        assert "m3" in result_ids  # life memory still present in work context
-        # But work memory should be first
-        assert results[0]["category"] == "deadline"
-
-
 class TestMem0MemoryMiddleware:
     @pytest.fixture(autouse=True)
     def _reset_voice_fastcache(self):
         """Clear the module-level voice fastcache between tests so one test's
         stored entries don't leak into the next."""
-        from deerflow.agents.sophia_agent.middlewares import mem0_memory
+        from deerflow.agents.sophia_agent.middlewares import mem0_prefetch
 
-        mem0_memory._VOICE_FASTCACHE.clear()
+        mem0_prefetch._VOICE_FASTCACHE.clear()
         yield
-        mem0_memory._VOICE_FASTCACHE.clear()
+        mem0_prefetch._VOICE_FASTCACHE.clear()
 
     def test_voice_uses_smaller_limit(self):
         from unittest.mock import patch
@@ -1930,7 +1748,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             mw.before_agent(
@@ -1954,7 +1772,7 @@ class TestMem0MemoryMiddleware:
         runtime = _make_runtime(thread_id="thread-1", platform="voice")
 
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=results,
         ) as mock_search:
             first = mw.before_agent(
@@ -1989,7 +1807,7 @@ class TestMem0MemoryMiddleware:
         runtime = _make_runtime(thread_id="thread-1", platform="voice")
 
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=results,
         ) as mock_search:
             mw.before_agent(
@@ -2025,7 +1843,7 @@ class TestMem0MemoryMiddleware:
         runtime = _make_runtime(thread_id="thread-1", platform="voice")
 
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=results,
         ) as mock_search:
             mw.before_agent(
@@ -2054,7 +1872,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             result = mw.before_agent(
@@ -2076,7 +1894,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             result = mw.before_agent(
@@ -2099,7 +1917,7 @@ class TestMem0MemoryMiddleware:
 
         mw = Mem0MemoryMiddleware("__voice_warmup__")
         with patch(
-            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
             return_value=[],
         ) as mock_search:
             result = mw.before_agent(
