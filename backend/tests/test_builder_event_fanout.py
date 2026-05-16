@@ -252,6 +252,98 @@ async def test_attach_stream_runs_with_env_default(monkeypatch: pytest.MonkeyPat
 
 
 @pytest.mark.anyio
+async def test_done_callback_does_not_clobber_newer_registration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P2 regression: when consumer A finishes and a fresh
+    consumer B is registered for the SAME task_id before A's
+    done-callback fires, the callback must NOT remove B's entry.
+
+    Pre-fix: ``task.add_done_callback(lambda ... self._stream_tasks.pop(tid))``
+    unconditionally popped, so B's registration was clobbered, B
+    became untracked, ``cancel_stream`` couldn't find it, and a
+    later ``attach_stream`` would spawn a third consumer for the
+    same task_id.
+    """
+    monkeypatch.setenv("BUILDER_LIVE_STREAM_ENABLED", "true")
+    fanout = BuilderEventFanout()
+
+    a_ran = asyncio.Event()
+    a_release = asyncio.Event()
+    b_ran = asyncio.Event()
+    b_release = asyncio.Event()
+
+    consumer_count = {"n": 0}
+
+    def _factory(**kwargs):  # noqa: ARG001
+        consumer_count["n"] += 1
+        idx = consumer_count["n"]
+
+        class _C:
+            async def run(self):
+                if idx == 1:
+                    a_ran.set()
+                    await a_release.wait()  # A finishes when we say so
+                else:
+                    b_ran.set()
+                    await b_release.wait()
+
+        return _C()
+
+    # Spawn consumer A.
+    await fanout.attach_stream(
+        task_id="race-x",
+        thread_id="th",
+        user_id="u",
+        channel_origin="telegram",
+        consumer_factory=_factory,
+    )
+    await asyncio.wait_for(a_ran.wait(), timeout=1.0)
+    task_a = fanout._stream_tasks["race-x"]
+
+    # Let A finish, but don't yet run the done-callback. We grab the
+    # task object before its callback fires by waiting only enough
+    # for ``run()`` to return; the callback is queued but not yet
+    # executed in the same tick.
+    a_release.set()
+    # One tick: a_release wakes A's run(); A returns; done-callback queued.
+    await asyncio.sleep(0)
+    assert task_a.done()
+    # The callback may or may not have fired yet depending on the
+    # event-loop scheduler. To force the race condition, we'll
+    # IMMEDIATELY register B before yielding more — we manually
+    # invoke the body of ``attach_stream`` minus the gate check
+    # since A is "done" so the existing.done() branch admits B.
+    await fanout.attach_stream(
+        task_id="race-x",
+        thread_id="th",
+        user_id="u",
+        channel_origin="telegram",
+        consumer_factory=_factory,
+    )
+    task_b = fanout._stream_tasks["race-x"]
+    assert task_b is not task_a, "B must be a fresh task, not a stale reference"
+    assert not task_b.done()
+
+    # Now force A's done-callback to actually fire. Yield twice to
+    # ensure all queued callbacks process.
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    # Post-fix invariant: B is STILL in the registry, NOT clobbered
+    # by A's late callback.
+    assert fanout._stream_tasks.get("race-x") is task_b, (
+        "consumer B was clobbered by consumer A's late done-callback — "
+        "identity check missing on cleanup"
+    )
+
+    # cancel_stream still finds B correctly.
+    b_release.set()  # let B finish naturally too
+    await asyncio.sleep(0.05)
+    await fanout.cancel_stream("race-x")
+
+
+@pytest.mark.anyio
 async def test_tool_call_event_routed_through_fanout() -> None:
     fanout = BuilderEventFanout()
     sink = _RecordingSink()

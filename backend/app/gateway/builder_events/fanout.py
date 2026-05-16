@@ -177,7 +177,17 @@ class BuilderEventFanout:
                 parent_thread_id=parent_thread_id,
             )
             task = asyncio.create_task(consumer.run())
-            task.add_done_callback(lambda _t, tid=task_id: self._stream_tasks.pop(tid, None))
+            # Identity-checked cleanup. The done-callback runs at some
+            # later event-loop tick, possibly AFTER a subsequent
+            # ``attach_stream`` call for the same task_id has replaced
+            # this entry with a fresh consumer. Without the identity
+            # guard, the late callback would pop the NEWER task from
+            # the registry, leaving it untracked: subsequent
+            # ``attach_stream`` calls could spawn duplicates and
+            # ``cancel_stream`` could no longer find the live task.
+            task.add_done_callback(
+                lambda completed, tid=task_id: self._cleanup_stream_slot(tid, completed)
+            )
             self._stream_tasks[task_id] = task
             logger.info(
                 "BuilderEventFanout.attach_stream: spawned consumer task_id=%s thread_id=%s run_id=%s",
@@ -185,6 +195,25 @@ class BuilderEventFanout:
                 thread_id,
                 run_id,
             )
+
+    def _cleanup_stream_slot(self, task_id: str, completed: asyncio.Task[None]) -> None:
+        """Clear ``_stream_tasks[task_id]`` only if it still references ``completed``.
+
+        The done-callback can fire after a newer consumer has been
+        registered under the same task_id (e.g. attach_stream → run
+        finishes → callback queued → second attach_stream registers a
+        new task → original callback runs). Unconditionally popping
+        would clobber the newer task. Identity check is the fix.
+
+        Runs on the gateway main event loop. The ``_stream_tasks`` dict
+        is only mutated under either the async ``_stream_lock`` (in
+        attach_stream / cancel_stream) or directly from this callback;
+        Python dict operations are atomic at the language level within
+        a single event loop, so no additional lock is needed here.
+        """
+        current = self._stream_tasks.get(task_id)
+        if current is completed:
+            self._stream_tasks.pop(task_id, None)
 
     async def cancel_stream(self, task_id: str) -> None:
         async with self._stream_lock:
