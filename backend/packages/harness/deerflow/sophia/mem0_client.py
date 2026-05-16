@@ -544,17 +544,27 @@ def _normalize_get_all_result(result: object) -> list[dict]:
 def _normalize_paginated_result(result: object) -> tuple[list[dict], str | None]:
     """Normalize a paginated v3 response to (results_list, next_cursor).
 
-    Handles the common Mem0 v3 envelope shape::
-        {"count": N, "next": "c2...", "previous": None, "results": [...]}
-    as well as bare single-event dicts (from get_event) and plain lists.
+    Handles three shapes:
+    1. Paginated envelope from get_events::
+        {"count": N, "next": "c2...", "results": [{"id": "evt_1", "status": "SUCCEEDED"}]}
+    2. Single event from get_event::
+        {"id": "evt_1", "status": "SUCCEEDED", "results": [{"id": "mem_1"}]}
+    3. Bare dict/list returns.
+
+    For shape 2, we return the event dict itself (not the inner results)
+    so callers can inspect status before extracting memories.
     """
     if isinstance(result, dict):
         if "results" in result:
+            # get_event returns a single event with a top-level status key;
+            # get_events returns a paginated envelope with a count key.
+            if "status" in result or "event_id" in result:
+                return [result], None
+            # Paginated envelope — extract the results array and cursor.
             nested = result["results"]
             results = nested if isinstance(nested, list) else [nested]
             return results, result.get("next")
-        # Bare single-event dict (e.g. from get_event) — no results key but
-        # carries event-like fields such as id, status, memory, data, etc.
+        # Bare single-event dict (from get_event without results key)
         if any(k in result for k in ("id", "status", "memory", "data", "result", "event_id")):
             return [result], None
         return [], None
