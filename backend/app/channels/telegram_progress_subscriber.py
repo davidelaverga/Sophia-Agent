@@ -247,10 +247,24 @@ class BuilderProgressSubscriber:
 
     def _open_stream(self, client: Any) -> Any | None:
         try:
+            # Phase 4G (post-failure restoration): use ``messages-tuple``
+            # not ``messages``. PR #120's working stream consumer
+            # ([archive](backend/app/gateway/builder_events/stream_consumer.py
+            # at commit d08774ef, deleted in Phase 4C) used
+            # ``["messages-tuple", "updates", "custom"]`` and delivered
+            # live phase events ("drafting", "researching", "writing
+            # file") inside the placeholder. PR #126's switch to
+            # ``["messages", "updates", "custom"]`` was the regression —
+            # ``messages`` mode emits only complete messages and the
+            # ``langgraph_runtime_inmem`` backend may not replay them
+            # for late-joining HTTP subscribers, while
+            # ``messages-tuple`` emits per-token deltas and is the
+            # documented streaming path. Both modes are valid
+            # ``StreamMode`` values per ``langgraph_sdk.schema``.
             return client.runs.join_stream(
                 self._thread_id,
                 self._run_id,
-                stream_mode=["messages", "updates", "custom"],
+                stream_mode=["messages-tuple", "updates", "custom"],
             )
         except Exception:
             logger.warning(

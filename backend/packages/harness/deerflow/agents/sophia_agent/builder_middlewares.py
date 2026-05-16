@@ -39,6 +39,7 @@ from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingTo
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
@@ -106,12 +107,15 @@ def build_builder_middleware_chain(user_id: str) -> list[AgentMiddleware]:
        Haiku classifier call) into the ``<builder_briefing>`` block.
     6. ``BuilderResearchPolicyMiddleware`` — builder-only web research
        rules and budget initialisation.
-    7. ``_create_builder_todo_middleware()`` — always-on planning.
-    8. ``BuilderArtifactMiddleware`` — captures emit_builder_artifact
+    7. ``BuilderProgressMiddleware`` (Phase 4G) — emits ``custom``-mode
+       phase events to the langgraph stream so the gateway-side
+       ``BuilderProgressSubscriber`` can render live phase headers.
+    8. ``_create_builder_todo_middleware()`` — always-on planning.
+    9. ``BuilderArtifactMiddleware`` — captures emit_builder_artifact
        and uploads to Supabase under the parent thread_id.
-    9. ``PromptAssemblyMiddleware`` — concatenates system_prompt_blocks
-       into the system message.
-    10. ``DanglingToolCallMiddleware`` — patches dangling AIMessage
+    10. ``PromptAssemblyMiddleware`` — concatenates system_prompt_blocks
+        into the system message.
+    11. ``DanglingToolCallMiddleware`` — patches dangling AIMessage
         tool_use blocks. MUST sit AFTER PromptAssembly so the patched
         message list reaches the model.
     """
@@ -126,6 +130,17 @@ def build_builder_middleware_chain(user_id: str) -> list[AgentMiddleware]:
             BuilderMem0RetrievalMiddleware(),
             BuilderTaskMiddleware(),
             BuilderResearchPolicyMiddleware(),
+            # Phase 4G — emits ``custom``-mode phase events
+            # (``starting`` / ``researching`` / ``drafting`` /
+            # ``finalizing`` / ``done``) into the langgraph stream so
+            # ``BuilderProgressSubscriber`` (gateway-side) renders the
+            # live UX the user described: phase headers + emoji-prefixed
+            # tool-call activity lines inside the Telegram placeholder.
+            # Position: after research-policy (so brief is built before
+            # we emit ``starting``), before todo + artifact (so the
+            # tool-call inspection in ``after_model`` runs against the
+            # raw model output before artifact rewrites it).
+            BuilderProgressMiddleware(),
             _create_builder_todo_middleware(),
             BuilderArtifactMiddleware(),
             PromptAssemblyMiddleware(),

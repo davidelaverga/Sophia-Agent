@@ -96,11 +96,16 @@ async def test_subscriber_uses_runs_join_stream(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(subscriber, "_build_client", _stub_build_client)
     await subscriber.run()
 
+    # Phase 4G: ``messages-tuple`` (PR #120's working mode) replaces
+    # ``messages``. See _open_stream docstring for the regression
+    # history. The ``updates`` mode is the actual signal source for
+    # tool-call activity lines; ``custom`` is for builder-side phase
+    # events emitted via ``get_stream_writer`` (Phase 4G Stage 2).
     assert client.runs.join_stream_calls == [
         {
             "thread_id": "th-1",
             "run_id": "run-1",
-            "stream_mode": ["messages", "updates", "custom"],
+            "stream_mode": ["messages-tuple", "updates", "custom"],
         }
     ]
 
