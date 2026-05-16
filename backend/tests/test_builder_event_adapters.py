@@ -69,10 +69,14 @@ class TestAdaptTerminalWebhook:
 
     def test_channel_origin_default_and_override(self) -> None:
         payload = {"task_id": "t", "thread_id": "th", "status": "success"}
+        # Default origin is "web" (the catch-all), NOT "telegram" — so
+        # an unknown payload never lands in the Telegram-only sink.
+        # Codex P2 regression: see test_default_origin_is_web below.
         evt = adapt_terminal_webhook(payload)
-        assert evt is not None and evt.channel_origin == "telegram"
-        evt = adapt_terminal_webhook(payload, channel_origin="web")
         assert evt is not None and evt.channel_origin == "web"
+        # Explicit override still works.
+        evt = adapt_terminal_webhook(payload, channel_origin="telegram")
+        assert evt is not None and evt.channel_origin == "telegram"
 
 
 class _AIMessageLike:

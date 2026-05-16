@@ -281,6 +281,60 @@ async def test_internal_post_returns_fast_when_subscriber_is_slow(
 
 
 @pytest.mark.anyio
+async def test_unknown_channel_origin_defaults_to_web_not_telegram(
+    app: FastAPI, client: httpx.AsyncClient, monkeypatch
+):
+    """Codex P2 regression: a webhook payload WITHOUT ``channel_origin``
+    must route through the fanout as ``"web"``, not ``"telegram"``.
+
+    Pre-fix: the router defaulted to ``"telegram"`` for missing origin,
+    so legacy / non-Telegram terminal events ended up in the
+    Telegram-only ``WorkshopTelegramSink`` and could churn its bounded
+    (LRU=256) terminal-event cache, evicting real Telegram terminals
+    before late receivers register.
+
+    Post-fix: missing origin → ``"web"``. ``WorkshopTelegramSink.accepts``
+    gates on ``channel_origin == "telegram"`` so a ``"web"`` event is
+    rejected at the sink and never touches the terminal cache.
+    """
+    # Install a workshop sink + fanout the same way the gateway lifespan does.
+    from app.gateway.builder_events import (
+        BuilderEventFanout,
+        WorkshopTelegramSink,
+    )
+
+    fanout = BuilderEventFanout()
+    sink = WorkshopTelegramSink()
+    fanout.register_sink(sink)
+    app.state._builder_event_fanout = fanout
+
+    try:
+        async with client:
+            response = await client.post(
+                "/internal/builder-events",
+                json={
+                    "thread_id": "thread-no-origin",
+                    "task_id": "task-no-origin",
+                    "status": "success",
+                    "agent_name": "sophia_builder",
+                    # NOTE: channel_origin intentionally omitted
+                },
+            )
+            assert response.status_code == 202
+            await routes.drain_background_tasks(timeout=5.0)
+    finally:
+        delattr(app.state, "_builder_event_fanout")
+
+    # The terminal event must NOT have landed in the Telegram sink's
+    # cache — the default origin is "web", and the sink's accepts()
+    # gates on origin == "telegram".
+    assert "task-no-origin" not in sink._terminal_cache, (
+        "non-Telegram terminal polluted the Telegram-only cache — "
+        "channel_origin default is wrong"
+    )
+
+
+@pytest.mark.anyio
 async def test_wakeup_task_held_in_background_tasks(app: FastAPI, client: httpx.AsyncClient, monkeypatch):
     """Codex P2 regression: the companion-wakeup task scheduled via
     ``asyncio.create_task(wakeup.wake(...))`` must hold a strong reference

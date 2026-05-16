@@ -120,8 +120,14 @@ class BuilderEventFanout:
             return_exceptions=False,
         )
 
-    async def publish_terminal(self, payload: dict[str, Any], *, channel_origin: str = "telegram") -> None:
-        """Convenience wrapper for the existing ``/internal/builder-events`` router."""
+    async def publish_terminal(self, payload: dict[str, Any], *, channel_origin: str = "web") -> None:
+        """Convenience wrapper for the existing ``/internal/builder-events`` router.
+
+        Defaults to ``"web"`` for an unspecified origin so a misrouted
+        terminal event never lands in the Telegram-only sink by mistake.
+        Real callers (the router) pass the origin from the payload
+        explicitly with a ``"web"`` fallback that matches.
+        """
         event = adapt_terminal_webhook(payload, channel_origin=channel_origin)
         if event is None:
             return

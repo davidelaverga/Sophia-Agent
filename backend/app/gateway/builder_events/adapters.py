@@ -83,9 +83,16 @@ def _coerce_channel_origin(value: str, task_id: str) -> str:
 def adapt_terminal_webhook(
     payload: dict[str, Any],
     *,
-    channel_origin: str = "telegram",
+    channel_origin: str = "web",
 ) -> CompletedEvent | None:
-    """Translate a builder-completion webhook payload into a CompletedEvent."""
+    """Translate a builder-completion webhook payload into a CompletedEvent.
+
+    Defaults to ``"web"`` for an unspecified origin. Defaulting to
+    ``"telegram"`` would misroute non-Telegram events through the
+    Telegram sink (whose terminal-event cache is LRU-bounded at 256),
+    and a stream of misclassified payloads could evict real Telegram
+    terminals before late receivers register.
+    """
     ids = _validate_terminal_ids(payload)
     if ids is None:
         return None

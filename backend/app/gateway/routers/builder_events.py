@@ -180,7 +180,15 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
 
     background_tasks.append(asyncio.create_task(_fan_out_to_channels(payload)))
     if fanout is not None:
-        origin = payload.get("channel_origin") or "telegram"
+        # Default to ``"web"`` (the catch-all bucket the manager's
+        # ``_normalize_channel_origin`` also uses) when the payload
+        # lacks ``channel_origin``. Defaulting to ``"telegram"`` would
+        # misroute non-Telegram builder completions through the
+        # Telegram-only ``WorkshopTelegramSink``, whose terminal-event
+        # cache is LRU-bounded at 256 — misclassified events churn the
+        # cache and can evict real Telegram terminals before a late
+        # receiver registers, breaking the fast-run race protection.
+        origin = payload.get("channel_origin") or "web"
         background_tasks.append(
             asyncio.create_task(_publish_to_fanout(fanout, payload, origin))
         )
