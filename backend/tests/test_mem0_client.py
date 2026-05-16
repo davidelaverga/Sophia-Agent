@@ -272,6 +272,30 @@ class TestAddMemories:
                 assert result[0]["id"] == "mem_1"
                 mock_wait.assert_called_once_with("user1", ["evt_1", "evt_2"])
 
+    def test_add_uses_event_id_when_mem0_v3_returns_event_id(self):
+        """Mem0 v3 async add returns event_id (not id) — must still poll."""
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [
+            {"event_id": "evt_v3_1", "memory": None},
+            {"event_id": "evt_v3_2", "memory": None},
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "mem_1"}, {"id": "mem_2"}],
+            ) as mock_wait:
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+                assert len(result) == 2
+                mock_wait.assert_called_once_with("user1", ["evt_v3_1", "evt_v3_2"])
+
     def test_add_passes_run_id_as_session_id(self):
         from deerflow.sophia.mem0_client import add_memories
 
