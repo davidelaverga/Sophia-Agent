@@ -607,6 +607,21 @@ class ChannelManager:
         # for. Bounded to ~1k (see ``_trim_progress_set``).
         self._progress_task_ids: set[str] = set()
 
+    # Phase 4F (codex P1): mirror of ``_TERMINAL_TASK_STATUSES`` defined in
+    # ``deerflow.sophia.tools.start_builder_task`` (single source of truth
+    # for builder-task status semantics). Mirrored locally to avoid
+    # reaching across the app→deerflow boundary for a tiny stable set.
+    # Keep in sync — drift risk is low (terminal statuses don't change).
+    _TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
+        "success",
+        "completed",
+        "error",
+        "failed",
+        "cancelled",
+        "timeout",
+        "timed_out",
+    })
+
     def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
         """Register a per-channel async function that downloads bytes for
         ``InboundMessage.files``. See ``ChannelService._start_channel`` for
@@ -1028,6 +1043,22 @@ class ChannelManager:
             if task_record.get("agent_name") != "sophia_builder":
                 continue
             if task_id in self._progress_task_ids:
+                continue
+            # Codex P1 (post-Phase-4F review): ``async_tasks`` is merged
+            # across companion turns and persisted on the thread, so
+            # historical builder rows survive long after they terminate.
+            # On a gateway restart the per-process ``_progress_task_ids``
+            # dedup is empty, and without a status gate every completed
+            # historical task would re-emit a "Working on it…"
+            # placeholder for an already-finished run. Skip terminal
+            # statuses — they will not produce stream events for the
+            # subscriber to consume, and the user would only see a stuck
+            # placeholder.
+            raw_status = task_record.get("status")
+            if (
+                isinstance(raw_status, str)
+                and raw_status.strip().lower() in self._TERMINAL_TASK_STATUSES
+            ):
                 continue
             run_id = task_record.get("run_id")
             if not isinstance(run_id, str) or not run_id:

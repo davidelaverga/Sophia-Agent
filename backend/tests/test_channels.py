@@ -1887,6 +1887,131 @@ class TestChannelService:
         assert service.manager._channel_sessions["telegram"]["assistant_id"] == "mobile_agent"
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
 
+    def test_telegram_inherits_service_langgraph_url(self):
+        """Codex P2 regression: ``channels.langgraph_url`` must be threaded
+        into the TelegramChannel constructor so the BuilderProgressSubscriber
+        subscribes against the same LangGraph endpoint the manager uses to
+        dispatch. Otherwise the subscriber falls back to ``LANGGRAPH_URL``
+        env / ``http://localhost:2024`` and may hit a different service.
+        """
+        from app.channels.service import ChannelService
+        from app.channels.telegram import TelegramChannel
+
+        service = ChannelService(
+            channels_config={
+                "langgraph_url": "http://internal-langgraph:2024",
+                "telegram": {"enabled": False, "bot_token": "x"},
+            }
+        )
+        # Force a real TelegramChannel instantiation through _start_channel
+        # without actually starting the bot (which needs network/token).
+        # We patch ``start`` to a no-op coroutine so the channel just lands
+        # in the service registry and we can inspect its _langgraph_url.
+        async def go():
+            original_start = TelegramChannel.start
+
+            async def _noop_start(self):  # type: ignore[no-untyped-def]
+                self._running = True
+
+            try:
+                TelegramChannel.start = _noop_start  # type: ignore[assignment]
+                # Override enabled=True for this one test
+                service._config["telegram"]["enabled"] = True
+                await service._start_channel("telegram", service._config["telegram"])
+            finally:
+                TelegramChannel.start = original_start  # type: ignore[assignment]
+
+            channel = service._channels.get("telegram")
+            assert channel is not None
+            assert channel._langgraph_url == "http://internal-langgraph:2024"
+
+        _run(go())
+
+    def test_spawn_progress_subscriber_passes_configured_langgraph_url(self):
+        """Codex P2 regression at the spawn site: the URL TelegramChannel
+        captures from config MUST flow through to BuilderProgressSubscriber's
+        constructor. Asserts the kwarg shape directly rather than the
+        end-to-end network behaviour."""
+        import app.channels.telegram_progress_subscriber as subscriber_module
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(
+            bus=MessageBus(),
+            config={"bot_token": "x", "langgraph_url": "http://configured:2024"},
+        )
+        captured: dict[str, object] = {}
+
+        class _FakeSubscriber:
+            def __init__(self, **kwargs: object) -> None:
+                captured.update(kwargs)
+                self._task_id = kwargs.get("task_id")
+
+            async def run(self) -> None:  # pragma: no cover - never awaited here
+                return None
+
+        original = subscriber_module.BuilderProgressSubscriber
+        subscriber_module.BuilderProgressSubscriber = _FakeSubscriber  # type: ignore[assignment]
+        try:
+            async def go():
+                ch._spawn_progress_subscriber(
+                    bot=MagicMock(),
+                    chat_id=123,
+                    message_id=456,
+                    meta={"task_id": "t-1", "run_id": "r-1"},
+                )
+                # Drain the fire-and-forget task tracker so the test loop
+                # doesn't leak pending tasks.
+                for task in list(ch._progress_subscriber_tasks):
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+
+            _run(go())
+        finally:
+            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
+
+        assert captured.get("langgraph_url") == "http://configured:2024"
+        assert captured.get("task_id") == "t-1"
+        assert captured.get("run_id") == "r-1"
+
+    def test_telegram_per_channel_langgraph_url_overrides_service_default(self):
+        """If a channel sets its own ``langgraph_url`` in config, that wins
+        over the service-level default. Useful for dev/staging where the
+        manager and channel may target different services."""
+        from app.channels.service import ChannelService
+        from app.channels.telegram import TelegramChannel
+
+        service = ChannelService(
+            channels_config={
+                "langgraph_url": "http://service-default:2024",
+                "telegram": {
+                    "enabled": False,
+                    "bot_token": "x",
+                    "langgraph_url": "http://channel-override:2024",
+                },
+            }
+        )
+
+        async def go():
+            original_start = TelegramChannel.start
+
+            async def _noop_start(self):  # type: ignore[no-untyped-def]
+                self._running = True
+
+            try:
+                TelegramChannel.start = _noop_start  # type: ignore[assignment]
+                service._config["telegram"]["enabled"] = True
+                await service._start_channel("telegram", service._config["telegram"])
+            finally:
+                TelegramChannel.start = original_start  # type: ignore[assignment]
+
+            channel = service._channels["telegram"]
+            assert channel._langgraph_url == "http://channel-override:2024"
+
+        _run(go())
+
 
 # ---------------------------------------------------------------------------
 # Slack send retry tests

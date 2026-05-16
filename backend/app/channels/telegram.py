@@ -63,6 +63,16 @@ class TelegramChannel(Channel):
         # edit the placeholder message in this chat. Same strong-ref +
         # discard-on-done pattern as ``_background_tasks``.
         self._progress_subscriber_tasks: set[asyncio.Task] = set()
+        # Phase 4F (codex P2): configured LangGraph URL — must match the
+        # one ``ChannelManager`` uses, so the progress subscriber
+        # subscribes against the same langgraph service the build was
+        # dispatched on. ``ChannelService._start_channel`` injects this
+        # into the per-channel config dict from
+        # ``channels.langgraph_url``; a per-channel override is also
+        # honored. Falls back to the env var the subscriber reads
+        # internally if neither is set.
+        cfg_url = config.get("langgraph_url")
+        self._langgraph_url: str | None = cfg_url.strip() if isinstance(cfg_url, str) and cfg_url.strip() else None
         # Dual-bot architecture, Phase 1: surface whether a sibling worker bot
         # token is configured. Phase 1 is config-only — no second client is
         # built, no behavior changes. Phase 3 of the spec wires this token to
@@ -250,6 +260,16 @@ class TelegramChannel(Channel):
                 thread_id=task_id,
                 run_id=run_id,
                 task_id=task_id,
+                # Codex P2 (post-Phase-4F review): use the configured
+                # ``channels.langgraph_url`` (matching ChannelManager's
+                # dispatch URL) instead of the subscriber's internal
+                # ``LANGGRAPH_URL`` env fallback. Otherwise deployments
+                # where the config URL differs from the env var send
+                # ``runs.join_stream`` to the wrong endpoint and the
+                # subscriber sees zero chunks. ``None`` here keeps the
+                # subscriber's env-var fallback for dev runs that don't
+                # set the config key.
+                langgraph_url=self._langgraph_url,
             )
         except Exception:
             logger.warning(

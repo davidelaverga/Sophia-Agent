@@ -152,3 +152,89 @@ async def test_skips_non_builder_async_task(manager: ChannelManager) -> None:
     }
     await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
     assert captured == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "terminal_status",
+    ["success", "completed", "error", "failed", "cancelled", "timeout", "timed_out"],
+)
+async def test_skips_terminal_status_tasks(
+    manager: ChannelManager, terminal_status: str
+) -> None:
+    """Codex P1 regression: historical builder rows from past turns persist
+    in ``async_tasks``. On a gateway restart the per-process dedup set
+    ``_progress_task_ids`` is empty, so without a status gate every
+    completed-but-still-in-state task would re-emit a "Working on it…"
+    placeholder for an already-finished run. Terminal statuses must be
+    skipped entirely.
+    """
+    captured: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, captured)
+
+    result: dict[str, Any] = {
+        "async_tasks": {
+            "historical-task": {
+                "task_id": "historical-task",
+                "thread_id": "historical-task",
+                "agent_name": "sophia_builder",
+                "run_id": "old-run",
+                "status": terminal_status,
+            }
+        }
+    }
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    assert captured == [], (
+        f"terminal status {terminal_status!r} must not re-emit a placeholder"
+    )
+    # And the task must NOT be added to the dedup set — that would silently
+    # block a future legitimate (re-)dispatch of a task with the same id.
+    assert "historical-task" not in manager._progress_task_ids
+
+
+@pytest.mark.anyio
+async def test_terminal_status_check_is_case_insensitive(
+    manager: ChannelManager,
+) -> None:
+    """Different middlewares may write status as "Completed" / "ERROR" /
+    " success "; the gate normalizes before comparing."""
+    captured: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, captured)
+
+    result: dict[str, Any] = {
+        "async_tasks": {
+            "t-cased": {
+                "task_id": "t-cased",
+                "thread_id": "t-cased",
+                "agent_name": "sophia_builder",
+                "run_id": "r",
+                "status": "  Completed  ",
+            }
+        }
+    }
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    assert captured == []
+
+
+@pytest.mark.anyio
+async def test_unknown_status_is_treated_as_active(manager: ChannelManager) -> None:
+    """Default-active is the safer behaviour: an unrecognized status like
+    ``pending`` / ``interrupted`` / future LangGraph states must NOT be
+    treated as terminal — they're still-active runs we should subscribe to.
+    Mirrors the duplicate-launch protection in start_builder_task."""
+    captured: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, captured)
+
+    result: dict[str, Any] = {
+        "async_tasks": {
+            "t-pending": {
+                "task_id": "t-pending",
+                "thread_id": "t-pending",
+                "agent_name": "sophia_builder",
+                "run_id": "r",
+                "status": "pending",
+            }
+        }
+    }
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    assert len(captured) == 1
