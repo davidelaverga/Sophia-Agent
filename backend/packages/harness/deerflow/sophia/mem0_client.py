@@ -410,11 +410,16 @@ def wait_for_pending_events(
                 events = _normalize_get_all_result(events_result)
                 for evt in events:
                     evt_id = evt.get("id")
-                    if evt_id in pending:
-                        mem = evt.get("memory") or evt
-                        if isinstance(mem, dict):
-                            resolved.append(mem)
-                        pending.discard(evt_id)
+                    if evt_id not in pending:
+                        continue
+                    status = evt.get("status", evt.get("event_status", "")).upper()
+                    # Only resolve when the event has reached a terminal state.
+                    if status not in ("SUCCEEDED", "FAILED", "COMPLETED"):
+                        continue
+                    mem = _extract_memory_from_event(evt)
+                    if isinstance(mem, dict):
+                        resolved.append(mem)
+                    pending.discard(evt_id)
             else:
                 # Fallback: get_all returns memories keyed by memory id.
                 # Since memory ids != event ids we cannot match them;
@@ -439,6 +444,35 @@ def wait_for_pending_events(
             len(pending),
         )
     return resolved
+
+
+def _extract_memory_from_event(evt: dict) -> dict | None:
+    """Extract the actual memory record from a v3 event payload.
+
+    Mem0 v3 get_events returns event wrappers that may nest the resolved
+    memory under several different keys depending on the SDK version and
+    event type.  We try the most common paths and fall back to the event
+    itself only if none of them yield a dict.
+    """
+    # Path 1: event.memory is already a memory dict
+    mem = evt.get("memory")
+    if isinstance(mem, dict):
+        return mem
+    # Path 2: event.data.memory (some SDK versions nest deeper)
+    data = evt.get("data")
+    if isinstance(data, dict):
+        mem = data.get("memory")
+        if isinstance(mem, dict):
+            return mem
+    # Path 3: event.result (alternative naming)
+    mem = evt.get("result")
+    if isinstance(mem, dict):
+        return mem
+    # Path 4: the event itself has memory-like keys — use it as-is
+    # but only if it looks like a memory record, not a raw event wrapper.
+    if "memory" in evt or "content" in evt or "metadata" in evt:
+        return evt
+    return None
 
 
 def _normalize_add_result(result: object) -> list[dict]:
