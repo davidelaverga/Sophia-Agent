@@ -361,7 +361,8 @@ class TestAddMemories:
             )
             call_kwargs = mock_client.add.call_args.kwargs
             assert call_kwargs["metadata"]["review_status"] == "pending_review"
-            assert "status" not in call_kwargs["metadata"]
+            # status is preserved for gateway backward compatibility (Codex P1)
+            assert call_kwargs["metadata"]["status"] == "pending_review"
 
     def test_dict_with_results_key_normalized(self):
         from deerflow.sophia.mem0_client import add_memories
@@ -430,13 +431,16 @@ class TestAddMemories:
 
 
 class TestWaitForPendingEvents:
-    def test_resolves_when_memories_appear(self):
+    def test_resolves_via_get_events_when_available(self):
+        """Event-native path: match pending event_ids against event.id."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
         mock_client = MagicMock()
-        mock_client.get_all.return_value = {
+        mock_client.get_events.return_value = {
             "count": 1,
-            "results": [{"id": "evt_1", "memory": "resolved"}],
+            "results": [
+                {"id": "evt_1", "memory": {"id": "mem_1", "memory": "resolved"}}
+            ],
         }
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
@@ -445,12 +449,31 @@ class TestWaitForPendingEvents:
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
-            assert result[0]["id"] == "evt_1"
+            assert result[0]["id"] == "mem_1"
+
+    def test_fallback_to_get_all_when_no_get_events(self):
+        """Fallback path: get_all returns memories; we cannot map memory ids
+        back to event ids, so we return all available memories."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_all"])
+        mock_client.get_all.return_value = {
+            "count": 1,
+            "results": [{"id": "mem_1", "memory": "resolved"}],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
 
     def test_returns_empty_on_timeout(self):
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=["get_all"])
         mock_client.get_all.return_value = {"count": 0, "results": []}
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client

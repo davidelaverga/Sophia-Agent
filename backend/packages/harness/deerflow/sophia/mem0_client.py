@@ -294,9 +294,11 @@ def add_memories(
 
     resolved_metadata = dict(metadata) if metadata else {}
 
-    # Translate legacy "status" -> "review_status" if present
+    # Translate legacy "status" -> "review_status" if present, BUT
+    # keep "status" too — the gateway review path still queries by
+    # metadata.status (e.g. GET /memories/recent?status=pending_review).
     if "status" in resolved_metadata and "review_status" not in resolved_metadata:
-        resolved_metadata["review_status"] = resolved_metadata.pop("status")
+        resolved_metadata["review_status"] = resolved_metadata["status"]
 
     # Compute expiration from importance if not already set
     if "expiration_date" not in resolved_metadata:
@@ -360,16 +362,34 @@ def wait_for_pending_events(
     resolved: list[dict] = []
     pending = set(event_ids)
 
+    # v3 async event IDs are different from memory IDs.
+    # If the client exposes get_events() we can poll by event_id directly.
+    # Otherwise we fall back to get_all() — we cannot map memory ids back
+    # to event ids, so we return all available memories as best-effort.
+    has_get_events = hasattr(client, "get_events")
+
     while pending and time.monotonic() < deadline:
         try:
-            # v3 get_all with user_id filter
-            result = client.get_all(filters={"user_id": user_id})
-            all_memories = _normalize_get_all_result(result)
-            for mem in all_memories:
-                mem_id = mem.get("id")
-                if mem_id in pending:
-                    resolved.append(mem)
-                    pending.discard(mem_id)
+            if has_get_events:
+                # Event-native API: match pending event_ids against event.id
+                events_result = client.get_events(filters={"user_id": user_id})
+                events = _normalize_get_all_result(events_result)
+                for evt in events:
+                    evt_id = evt.get("id")
+                    if evt_id in pending:
+                        mem = evt.get("memory") or evt
+                        if isinstance(mem, dict):
+                            resolved.append(mem)
+                        pending.discard(evt_id)
+            else:
+                # Fallback: get_all returns memories keyed by memory id.
+                # Since memory ids != event ids we cannot match them;
+                # return all available memories and clear pending.
+                result = client.get_all(filters={"user_id": user_id})
+                all_memories = _normalize_get_all_result(result)
+                if all_memories:
+                    resolved.extend(all_memories)
+                    pending.clear()
         except Exception:
             logger.warning(
                 "Mem0 poll for pending events failed for user %s", user_id, exc_info=True
