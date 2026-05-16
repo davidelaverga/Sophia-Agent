@@ -346,10 +346,12 @@ def add_memories(
     # Extract event IDs from the async add response and block until they
     # resolve so the offline pipeline does not report completion before
     # the memories are actually queryable.
+    # Mem0 v3 returns `event_id` (not `id`) for queued async writes, so
+    # we accept both keys.
     event_ids = [
-        item.get("id")
+        item.get("event_id") or item.get("id")
         for item in normalized
-        if isinstance(item, dict) and item.get("id")
+        if isinstance(item, dict) and (item.get("event_id") or item.get("id"))
     ]
     if event_ids:
         resolved = wait_for_pending_events(user_id, event_ids)
