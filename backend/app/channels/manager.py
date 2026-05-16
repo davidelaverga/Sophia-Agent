@@ -603,25 +603,49 @@ class ChannelManager:
         # the bytes off the critical path.
         self._inbound_file_readers: dict[str, InboundFileReader] = {}
         # Phase 4D of the v3 streaming migration: per-process dedup of
-        # builder task_ids we've already emitted a progress placeholder
-        # for. Bounded to ~1k (see ``_trim_progress_set``).
+        # builder runs we've already emitted a progress placeholder for.
+        # Bounded to ~1k (see ``_trim_progress_set``).
         #
-        # Phase 4F (codex P2 post-review): backed by ``dict[str, None]``
+        # Phase 4F (codex P2 post-review): backed by ``dict[..., None]``
         # (NOT ``set``) because dict iteration order is insertion-ordered
         # in CPython 3.7+ and guaranteed by the Python language spec.
         # The previous ``set`` implementation evicted arbitrary entries
-        # under the trim path — including just-added in-flight task_ids
-        # — which let the same active build re-emit duplicate "Working
+        # under the trim path — including just-added in-flight ids —
+        # which let the same active build re-emit duplicate "Working
         # on it…" placeholders on the next companion turn. With a dict
-        # we evict the OLDEST entries (FIFO) which are the safest to
-        # drop: those builds have long since terminated.
-        self._progress_task_ids: dict[str, None] = {}
+        # we evict the OLDEST entries (FIFO).
+        #
+        # Phase 4F (codex P1 post-review, second pass): the key is
+        # ``(task_id, run_id)``, NOT ``task_id`` alone. ``update_async_task``
+        # interrupts the active run and creates a new run on the SAME
+        # task_id (see deepagents ``async_subagents.py::update_async_task``
+        # — writes the same task_id back to ``async_tasks`` with the new
+        # ``run_id``). Deduping on task_id alone would silently skip the
+        # replacement run's placeholder; the original subscriber stays
+        # attached to the interrupted run (which produces no further
+        # events) while the new run has no subscriber at all — Telegram
+        # progress freezes mid-task even though work continues.
+        self._progress_task_ids: dict[tuple[str, str], None] = {}
 
-    # Phase 4F (codex P1): mirror of ``_TERMINAL_TASK_STATUSES`` defined in
-    # ``deerflow.sophia.tools.start_builder_task`` (single source of truth
-    # for builder-task status semantics). Mirrored locally to avoid
-    # reaching across the app→deerflow boundary for a tiny stable set.
-    # Keep in sync — drift risk is low (terminal statuses don't change).
+    # Phase 4F (codex P1+P2 post-review): manager-local terminal-status
+    # set for the placeholder gate. **Intentionally diverges** from
+    # ``_TERMINAL_TASK_STATUSES`` in ``deerflow.sophia.tools.start_builder_task``
+    # — the two sets answer different questions:
+    #
+    # - ``start_builder_task``: "is this build truly finished, so a
+    #   duplicate launch is safe?" Default-active: ``interrupted``
+    #   counts as still-active so a duplicate launch is BLOCKED.
+    # - this manager set: "is this row inert enough that we should
+    #   NOT subscribe to its run?" ``interrupted`` runs produce no
+    #   further events (the run is suspended awaiting resume, or was
+    #   already replaced by a new run with a fresh run_id). Subscribing
+    #   would just yield ``[ Still working ]`` after the per-event
+    #   timeout. Treat as terminal here.
+    #
+    # When a user resumes an interrupted task via ``update_async_task``,
+    # the new run_id flows through this gate normally — the (task_id,
+    # new_run_id) tuple is fresh in the dedup dict, so a placeholder
+    # fires for the replacement run. That's the codex P1 fix above.
     _TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
         "success",
         "completed",
@@ -630,6 +654,9 @@ class ChannelManager:
         "cancelled",
         "timeout",
         "timed_out",
+        # Codex P2 post-review: see comment above for why this diverges
+        # from the start_builder_task set.
+        "interrupted",
     })
 
     def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
@@ -1052,8 +1079,6 @@ class ChannelManager:
                 continue
             if task_record.get("agent_name") != "sophia_builder":
                 continue
-            if task_id in self._progress_task_ids:
-                continue
             # Codex P1 (post-Phase-4F review): ``async_tasks`` is merged
             # across companion turns and persisted on the thread, so
             # historical builder rows survive long after they terminate.
@@ -1063,7 +1088,9 @@ class ChannelManager:
             # placeholder for an already-finished run. Skip terminal
             # statuses — they will not produce stream events for the
             # subscriber to consume, and the user would only see a stuck
-            # placeholder.
+            # placeholder. ``interrupted`` is in the manager set even
+            # though it's NOT in start_builder_task's set (see class
+            # comment on ``_TERMINAL_TASK_STATUSES``).
             raw_status = task_record.get("status")
             if (
                 isinstance(raw_status, str)
@@ -1072,6 +1099,16 @@ class ChannelManager:
                 continue
             run_id = task_record.get("run_id")
             if not isinstance(run_id, str) or not run_id:
+                continue
+            # Codex P1 (post-Phase-4F review, second pass): dedup by
+            # (task_id, run_id). ``update_async_task`` keeps the same
+            # task_id and writes a NEW run_id into the same async_tasks
+            # row. Dedup on task_id alone would skip the replacement
+            # run's placeholder — original subscriber stays attached to
+            # the interrupted run (no further events), new run has no
+            # subscriber, Telegram progress freezes mid-task.
+            dedup_key: tuple[str, str] = (str(task_id), run_id)
+            if dedup_key in self._progress_task_ids:
                 continue
 
             placeholder = OutboundMessage(
@@ -1105,10 +1142,10 @@ class ChannelManager:
                 )
                 continue
             # Mark AFTER successful publish so a transient bus failure
-            # doesn't permanently block retries for this task_id.
+            # doesn't permanently block retries for this (task_id, run_id).
             # Insertion order is preserved by dict (Phase 4F codex P2);
             # the trim path relies on it for FIFO eviction.
-            self._progress_task_ids[str(task_id)] = None
+            self._progress_task_ids[dedup_key] = None
             self._trim_progress_set()
 
     def _trim_progress_set(self) -> None:

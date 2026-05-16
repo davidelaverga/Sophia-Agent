@@ -100,10 +100,11 @@ async def test_publish_failure_leaves_task_unmarked_for_retry(
 
     result = _result_with_task(task_id="t-retry", run_id="r")
     await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
-    assert "t-retry" not in manager._progress_task_ids
+    # Phase 4F codex P1 post-review: dedup key is (task_id, run_id).
+    assert ("t-retry", "r") not in manager._progress_task_ids
     # Second attempt — publish succeeds, task marked.
     await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
-    assert "t-retry" in manager._progress_task_ids
+    assert ("t-retry", "r") in manager._progress_task_ids
 
 
 @pytest.mark.anyio
@@ -157,7 +158,20 @@ async def test_skips_non_builder_async_task(manager: ChannelManager) -> None:
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     "terminal_status",
-    ["success", "completed", "error", "failed", "cancelled", "timeout", "timed_out"],
+    [
+        "success",
+        "completed",
+        "error",
+        "failed",
+        "cancelled",
+        "timeout",
+        "timed_out",
+        # Phase 4F codex P2 post-review: ``interrupted`` runs are
+        # suspended (awaiting resume) or already replaced by a new run
+        # — either way they produce no further stream events, so
+        # subscribing would just stall.
+        "interrupted",
+    ],
 )
 async def test_skips_terminal_status_tasks(
     manager: ChannelManager, terminal_status: str
@@ -187,9 +201,10 @@ async def test_skips_terminal_status_tasks(
     assert captured == [], (
         f"terminal status {terminal_status!r} must not re-emit a placeholder"
     )
-    # And the task must NOT be added to the dedup set — that would silently
+    # And the task must NOT be added to the dedup dict — that would silently
     # block a future legitimate (re-)dispatch of a task with the same id.
-    assert "historical-task" not in manager._progress_task_ids
+    # Phase 4F codex P1 post-review: dedup key is (task_id, run_id).
+    assert ("historical-task", "old-run") not in manager._progress_task_ids
 
 
 @pytest.mark.anyio
@@ -251,24 +266,18 @@ def test_trim_progress_set_evicts_oldest_not_arbitrary(
 
     This test fills the dedup storage past the 1024 cap, then verifies
     that the OLDEST entries are gone and the NEWEST are still tracked.
+
+    Phase 4F codex P1 post-review: keys are ``(task_id, run_id)`` tuples.
     """
     # Fill the structure past the cap with deterministically-ordered keys.
-    # The manager's bookkeeping does:  self._progress_task_ids[k] = None
-    # so we mirror that pattern instead of going through the full
-    # placeholder path (which requires Telegram-channel msg + bus + etc).
     for i in range(1100):
-        manager._progress_task_ids[f"t-{i:04d}"] = None
+        manager._progress_task_ids[(f"t-{i:04d}", "r")] = None
         manager._trim_progress_set()
 
-    # After the final trim the size must be at most 1024 (cap) - 256
-    # (evicted on the last overflow) + 1 (the just-added one) = 769,
-    # OR somewhere between that and the cap depending on how many
-    # times the trim fired across the 1100 insertions. The contract
-    # the test really cares about is: oldest gone, newest present.
-    assert "t-0000" not in manager._progress_task_ids, (
+    assert ("t-0000", "r") not in manager._progress_task_ids, (
         "FIFO trim must evict the oldest entries"
     )
-    assert "t-1099" in manager._progress_task_ids, (
+    assert ("t-1099", "r") in manager._progress_task_ids, (
         "FIFO trim must NEVER evict the most-recently-added entry"
     )
     # And the cap is respected.
@@ -278,7 +287,60 @@ def test_trim_progress_set_evicts_oldest_not_arbitrary(
 def test_trim_progress_set_no_op_when_under_cap(manager: ChannelManager) -> None:
     """Trim is a no-op when the structure is at or under 1024 entries."""
     for i in range(500):
-        manager._progress_task_ids[f"t-{i:04d}"] = None
+        manager._progress_task_ids[(f"t-{i:04d}", "r")] = None
     before = dict(manager._progress_task_ids)
     manager._trim_progress_set()
     assert manager._progress_task_ids == before
+
+
+@pytest.mark.anyio
+async def test_update_flow_new_run_id_re_emits_placeholder(
+    manager: ChannelManager,
+) -> None:
+    """Codex P1 (post-Phase-4F, second pass) regression: ``update_async_task``
+    keeps the same task_id but creates a new run with a new run_id.
+    With dedup-by-task_id-alone, the second placeholder would be
+    silently skipped — original subscriber stays on the interrupted
+    run (no events), new run has no subscriber, Telegram freezes.
+
+    Dedup by ``(task_id, run_id)`` ensures the replacement run gets
+    its own placeholder + subscriber.
+    """
+    captured: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, captured)
+
+    # Turn 1: original dispatch — task_id=t-1, run_id=r-1.
+    result_1 = _result_with_task(task_id="t-1", run_id="r-1")
+    await manager._maybe_open_progress_placeholders(_inbound(), result_1, thread_id="th")
+    assert len(captured) == 1
+    assert captured[0].metadata["builder_progress"]["run_id"] == "r-1"
+
+    # Turn 2: user fired ``update_async_task`` — same task_id, new run_id.
+    # The deepagents middleware overwrites async_tasks[task_id] with the
+    # new run record (see deepagents async_subagents.py::update_async_task).
+    result_2 = _result_with_task(task_id="t-1", run_id="r-2")
+    await manager._maybe_open_progress_placeholders(_inbound(), result_2, thread_id="th")
+    assert len(captured) == 2, (
+        "update_async_task (new run_id on same task_id) MUST trigger a "
+        "second placeholder so a fresh subscriber attaches to the replacement run"
+    )
+    assert captured[1].metadata["builder_progress"]["run_id"] == "r-2"
+    # And both dedup keys are tracked.
+    assert ("t-1", "r-1") in manager._progress_task_ids
+    assert ("t-1", "r-2") in manager._progress_task_ids
+
+
+@pytest.mark.anyio
+async def test_same_task_id_same_run_id_still_dedups(
+    manager: ChannelManager,
+) -> None:
+    """The dedup key is ``(task_id, run_id)`` so an identical
+    (task_id, run_id) pair on a subsequent turn is still skipped.
+    """
+    captured: list[OutboundMessage] = []
+    await _subscribe_capture(manager.bus, captured)
+
+    result = _result_with_task(task_id="t-1", run_id="r-1")
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
+    assert len(captured) == 1
