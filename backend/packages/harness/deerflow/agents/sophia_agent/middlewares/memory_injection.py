@@ -73,5 +73,6 @@ class MemoryInjectionMiddleware(AgentMiddleware[MemoryInjectionState]):
         log_middleware("MemoryInjection", f"{len(memory_lines)} memories injected", _t0)
         return {
             "injected_memories": memory_ids,
+            "injected_memory_contents": memory_lines,
             "system_prompt_blocks": list(state.get("system_prompt_blocks", [])) + [block],
         }

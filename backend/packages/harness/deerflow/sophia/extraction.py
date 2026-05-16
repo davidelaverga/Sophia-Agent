@@ -189,6 +189,7 @@ def extract_session_memories(
             "importance": importance_label,
             "importance_score": importance_score,
             "confidence": entry.get("confidence", 0.5),
+            "status": "pending_review",
             "review_status": "pending_review",
             "platform": platform,
             "context_mode": context_mode,
