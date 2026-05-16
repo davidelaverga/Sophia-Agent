@@ -162,6 +162,12 @@ class BuilderProgressSubscriber:
         ``stream_complete`` → ``[ Done ]``       (natural iterator exhaustion)
         ``per_event_timeout`` / ``total_timeout`` → ``[ Still working ]``
             (NOT terminal — the build may keep going; artifact path is independent)
+        ``client_init_failed`` / ``stream_open_failed`` → ``[ Still working ]``
+            (codex P1 post-Phase-4F: a setup failure means we never joined
+            the stream, NOT that the run finished. The build is presumed
+            alive on the langgraph service; the artifact-delivery path is
+            independent. Saying ``[ Done ]`` here would be a regression of
+            the same defect Bug 2 fixed for timeouts.)
         ``error`` / ``cancelled`` → ``[ Stopped ]`` (terminal — subscriber won't edit again)
         """
         if outcome == "stream_complete":
@@ -175,15 +181,27 @@ class BuilderProgressSubscriber:
                 reason=f"hit {self._total_timeout_s // 60}-min ceiling"
             )
             return
+        if outcome == "client_init_failed":
+            self._renderer.mark_stalled(reason="couldn't connect to progress stream")
+            return
+        if outcome == "stream_open_failed":
+            self._renderer.mark_stalled(reason="couldn't open progress stream")
+            return
         # error / cancelled / unknown
         self._renderer.mark_stopped(reason=outcome)
 
     async def _run_inner(self) -> None:
         client = await self._build_client()
         if client is None:
+            # Codex P1 (post-Phase-4F): record setup failure so the
+            # finalizer doesn't claim ``[ Done ]`` while the run may
+            # still be live. ``client is None`` covers both "SDK not
+            # installed" and "get_client raised" — see ``_build_client``.
+            self._outcome = "client_init_failed"
             return
         stream_iter = self._open_stream(client)
         if stream_iter is None:
+            self._outcome = "stream_open_failed"
             return
 
         chunk_count = 0

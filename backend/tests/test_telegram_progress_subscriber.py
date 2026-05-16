@@ -332,11 +332,17 @@ async def test_subscriber_cancelled_marks_stopped(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.anyio
-async def test_subscriber_no_sdk_returns_cleanly(monkeypatch: pytest.MonkeyPatch) -> None:
-    """If langgraph_sdk is unavailable the subscriber bails without crashing.
+async def test_subscriber_no_sdk_marks_stalled_not_done(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Codex P1 (post-Phase-4F): if ``_build_client`` returns None
+    (SDK unavailable / client construction failed) the subscriber MUST
+    finalize as ``[ Still working ]``, NOT ``[ Done ]``. We never joined
+    the stream — the run is presumed alive on the langgraph service.
+    Pretending it's Done is a misleading user-visible state regression.
 
-    No-SDK is treated as natural completion (nothing to stream) → ``[ Done ]``
-    edit, so the placeholder doesn't sit on "Working on it…" forever.
+    The placeholder doesn't sit forever on "Working on it…" — it gets
+    a final ``[ Still working — couldn't connect to progress stream ]``
+    edit that accurately reflects "we lost the live signal" without
+    claiming completion.
     """
     bot = _FakeBot()
     subscriber = BuilderProgressSubscriber(
@@ -354,5 +360,51 @@ async def test_subscriber_no_sdk_returns_cleanly(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(subscriber, "_build_client", _stub_build_client_returns_none)
     # Must not raise.
     await subscriber.run()
-    # Final-state edit is still attempted as a safety net.
-    assert any("[ Done ]" in e["text"] for e in bot.edits)
+    # Final-state edit is attempted as a safety net — but MUST NOT say Done.
+    assert bot.edits, "subscriber must push a final edit even on setup failure"
+    final = bot.edits[-1]["text"]
+    assert "[ Still working ]" in final
+    assert "couldn't connect to progress stream" in final
+    assert "[ Done ]" not in final
+
+
+@pytest.mark.anyio
+async def test_subscriber_open_stream_failure_marks_stalled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex P1 (post-Phase-4F): if ``runs.join_stream`` raises (transient
+    network error, langgraph 502, etc.) the subscriber returns from
+    ``_open_stream`` with ``None``. Same defect class as the no-SDK path:
+    must finalize as ``[ Still working ]``, not ``[ Done ]`` — the build
+    is alive, we just couldn't open the stream.
+    """
+
+    class _BrokenRunsClient:
+        def join_stream(self, *_args, **_kwargs):
+            raise RuntimeError("simulated transient network error")
+
+    class _BrokenClient:
+        def __init__(self) -> None:
+            self.runs = _BrokenRunsClient()
+
+    bot = _FakeBot()
+    subscriber = BuilderProgressSubscriber(
+        bot=bot,
+        chat_id=1,
+        message_id=2,
+        thread_id="th",
+        run_id="run",
+        task_id="task",
+    )
+
+    async def _stub_build_client():
+        return _BrokenClient()
+
+    monkeypatch.setattr(subscriber, "_build_client", _stub_build_client)
+    # Must not raise — _open_stream catches and returns None.
+    await subscriber.run()
+    assert bot.edits
+    final = bot.edits[-1]["text"]
+    assert "[ Still working ]" in final
+    assert "couldn't open progress stream" in final
+    assert "[ Done ]" not in final
