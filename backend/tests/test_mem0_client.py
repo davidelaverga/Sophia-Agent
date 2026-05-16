@@ -539,7 +539,7 @@ class TestWaitForPendingEvents:
         """Event-native path: only resolves events with SUCCEEDED status."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=["get_events"])
         mock_client.get_events.return_value = {
             "count": 1,
             "results": [
@@ -563,7 +563,7 @@ class TestWaitForPendingEvents:
         """Events with PENDING status are not resolved — polling continues."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=["get_events"])
         mock_client.get_events.return_value = {
             "count": 1,
             "results": [
@@ -587,7 +587,7 @@ class TestWaitForPendingEvents:
         """Events with FAILED status are terminal and resolved if memory is present."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=["get_events"])
         mock_client.get_events.return_value = {
             "count": 1,
             "results": [
@@ -611,7 +611,7 @@ class TestWaitForPendingEvents:
         """Mem0 v3 may carry memory outputs in event.results."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=["get_events"])
         mock_client.get_events.return_value = {
             "count": 1,
             "results": [
@@ -661,7 +661,7 @@ class TestWaitForPendingEvents:
         """Some SDK versions nest the memory under event.data.memory."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
-        mock_client = MagicMock()
+        mock_client = MagicMock(spec=["get_events"])
         mock_client.get_events.return_value = {
             "count": 1,
             "results": [
@@ -700,6 +700,116 @@ class TestWaitForPendingEvents:
             assert len(result) == 1
             assert result[0]["id"] == "mem_1"
 
+    def test_paginated_get_events_follows_next_cursor(self):
+        """Walk every page until pending IDs are found or pages exhausted."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_events"])
+        # Page 1: no matching event
+        mock_client.get_events.side_effect = [
+            {
+                "count": 1,
+                "next": "cursor_2",
+                "results": [{"id": "evt_old", "status": "SUCCEEDED", "memory": {"id": "mem_old"}}],
+            },
+            # Page 2: contains the pending event
+            {
+                "count": 1,
+                "next": None,
+                "results": [
+                    {
+                        "id": "evt_1",
+                        "status": "SUCCEEDED",
+                        "memory": {"id": "mem_1", "memory": "resolved"},
+                    }
+                ],
+            },
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
+            # Verify both pages were fetched with cursor
+            assert mock_client.get_events.call_count == 2
+            assert mock_client.get_events.call_args_list[0].kwargs.get("cursor") is None
+            assert mock_client.get_events.call_args_list[1].kwargs.get("cursor") == "cursor_2"
+
+    def test_per_id_get_event_polling(self):
+        """When SDK exposes get_event(), poll each pending ID individually."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_event"])
+        mock_client.get_event.side_effect = [
+            {
+                "id": "evt_1",
+                "status": "SUCCEEDED",
+                "memory": {"id": "mem_1", "memory": "resolved"},
+            },
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
+            mock_client.get_event.assert_called_once_with(event_id="evt_1")
+
+    def test_get_event_ignores_non_terminal_events(self):
+        """Per-ID polling skips PENDING events and keeps them in pending."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_event"])
+        mock_client.get_event.side_effect = [
+            {
+                "id": "evt_1",
+                "status": "PENDING",
+                "memory": None,
+            },
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.2, poll_interval=0.1
+            )
+            # Non-terminal → stays pending, times out with nothing
+            assert result == []
+
+    def test_multiple_memories_from_event_results(self):
+        """P2: an event.results list with multiple memories returns all of them."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_events"])
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "results": [
+                        {"id": "mem_1", "memory": "fact A"},
+                        {"id": "mem_2", "memory": "fact B"},
+                        {"id": "mem_3", "memory": "fact C"},
+                    ],
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 3
+            ids = [r["id"] for r in result]
+            assert ids == ["mem_1", "mem_2", "mem_3"]
+
     def test_returns_empty_on_timeout(self):
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
@@ -712,6 +822,49 @@ class TestWaitForPendingEvents:
                 "user1", ["evt_1"], timeout_seconds=0.2, poll_interval=0.1
             )
             assert result == []
+
+
+class TestNormalizePaginatedResult:
+    def test_envelope_with_next_cursor(self):
+        from deerflow.sophia.mem0_client import _normalize_paginated_result
+
+        envelope = {
+            "count": 2,
+            "next": "c2abc",
+            "previous": None,
+            "results": [
+                {"id": "m1", "memory": "a"},
+                {"id": "m2", "memory": "b"},
+            ],
+        }
+        results, cursor = _normalize_paginated_result(envelope)
+        assert len(results) == 2
+        assert cursor == "c2abc"
+
+    def test_envelope_without_next(self):
+        from deerflow.sophia.mem0_client import _normalize_paginated_result
+
+        envelope = {
+            "count": 1,
+            "results": [{"id": "m1", "memory": "a"}],
+        }
+        results, cursor = _normalize_paginated_result(envelope)
+        assert len(results) == 1
+        assert cursor is None
+
+    def test_bare_list(self):
+        from deerflow.sophia.mem0_client import _normalize_paginated_result
+
+        results, cursor = _normalize_paginated_result([{"id": "m1"}])
+        assert len(results) == 1
+        assert cursor is None
+
+    def test_empty_dict(self):
+        from deerflow.sophia.mem0_client import _normalize_paginated_result
+
+        results, cursor = _normalize_paginated_result({})
+        assert results == []
+        assert cursor is None
 
 
 class TestExpirationForImportance:

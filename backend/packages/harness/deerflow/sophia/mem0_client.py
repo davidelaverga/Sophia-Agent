@@ -399,32 +399,51 @@ def wait_for_pending_events(
     pending = set(event_ids)
 
     # v3 async event IDs are different from memory IDs.
-    # If the client exposes get_events() we can poll by event_id directly.
-    # Otherwise we fall back to get_all() — we cannot map memory ids back
-    # to event ids, so we return all available memories as best-effort.
+    # Prefer per-ID get_event() when the SDK supports it — avoids
+    # pagination issues with busy projects.  Fall back to paginated
+    # get_events() or get_all() otherwise.
+    has_get_event = hasattr(client, "get_event")
     has_get_events = hasattr(client, "get_events")
 
     while pending and time.monotonic() < deadline:
         try:
-            if has_get_events:
-                # Event-native API: match pending event_ids against event.id
-                events_result = client.get_events(filters={"user_id": user_id})
-                events = _normalize_get_all_result(events_result)
-                for evt in events:
-                    evt_id = evt.get("id")
-                    if evt_id not in pending:
-                        continue
-                    status = evt.get("status", evt.get("event_status", "")).upper()
-                    # Only resolve when the event has reached a terminal state.
-                    if status not in ("SUCCEEDED", "FAILED", "COMPLETED"):
-                        continue
-                    mem = _extract_memory_from_event(evt)
-                    if isinstance(mem, dict):
-                        resolved.append(mem)
-                    pending.discard(evt_id)
+            if has_get_event:
+                # Per-ID polling: exact lookup, no pagination problems.
+                for evt_id in list(pending):
+                    event_result = client.get_event(event_id=evt_id)
+                    events, _ = _normalize_paginated_result(event_result)
+                    for evt in events:
+                        status = evt.get("status", evt.get("event_status", "")).upper()
+                        if status not in ("SUCCEEDED", "FAILED", "COMPLETED"):
+                            continue
+                        resolved.extend(_extract_memories_from_event(evt))
+                        pending.discard(evt_id)
+            elif has_get_events:
+                # Paginated get_events: walk every page so newly-queued
+                # events cannot be off-page and missed.
+                cursor = None
+                while True:
+                    page_kwargs: dict[str, Any] = {
+                        "filters": {"user_id": user_id},
+                    }
+                    if cursor:
+                        page_kwargs["cursor"] = cursor
+                    events_result = client.get_events(**page_kwargs)
+                    events, cursor = _normalize_paginated_result(events_result)
+                    for evt in events:
+                        evt_id = evt.get("id")
+                        if evt_id not in pending:
+                            continue
+                        status = evt.get("status", evt.get("event_status", "")).upper()
+                        if status not in ("SUCCEEDED", "FAILED", "COMPLETED"):
+                            continue
+                        resolved.extend(_extract_memories_from_event(evt))
+                        pending.discard(evt_id)
+                    if not cursor or not pending:
+                        break
             else:
                 # Fallback: get_all returns memories keyed by memory id.
-                # Since memory ids != event ids we cannot match them;
+                # Since memory ids != event ids we cannot map them;
                 # return all available memories and clear pending.
                 result = client.get_all(filters={"user_id": user_id})
                 all_memories = _normalize_get_all_result(result)
@@ -448,49 +467,54 @@ def wait_for_pending_events(
     return resolved
 
 
-def _extract_memory_from_event(evt: dict) -> dict | None:
-    """Extract the actual memory record from a v3 event payload.
+def _extract_memories_from_event(evt: dict) -> list[dict]:
+    """Extract all memory records from a v3 event payload.
 
     Mem0 v3 get_events returns event wrappers that may nest the resolved
     memory under several different keys depending on the SDK version and
-    event type.  We try known paths before falling back.
+    event type.  We try known paths and return every memory dict found.
 
     A raw event wrapper always carries a top-level ``status`` key, so we
     use that as a discriminator — if ``status`` is present we treat the dict
     as an event and keep drilling, never returning the wrapper itself.
     """
+    memories: list[dict] = []
+
     # Path 1: event.memory — most common, event nests one memory dict
     mem = evt.get("memory")
     if isinstance(mem, dict):
-        return mem
+        memories.append(mem)
 
     # Path 2: event.data.memory — some SDK versions nest deeper
     data = evt.get("data")
     if isinstance(data, dict):
         mem = data.get("memory")
         if isinstance(mem, dict):
-            return mem
+            memories.append(mem)
 
     # Path 3: event.result — alternative SDK naming
     mem = evt.get("result")
     if isinstance(mem, dict):
-        return mem
+        memories.append(mem)
 
-    # Path 4: event.results — v3 may return memory outputs here
+    # Path 4: event.results — v3 may return multiple memory outputs here
     results = evt.get("results")
-    if isinstance(results, list) and results:
-        first = results[0]
-        if isinstance(first, dict):
-            return first
-    if isinstance(results, dict):
-        return results
+    if isinstance(results, list):
+        for item in results:
+            if isinstance(item, dict):
+                memories.append(item)
+    elif isinstance(results, dict):
+        memories.append(results)
+
+    if memories:
+        return memories
 
     # Path 5: the event itself is the memory record — NOT a raw wrapper.
     # Memory records have memory/content fields; event wrappers have status.
     if ("memory" in evt or "content" in evt) and "status" not in evt:
-        return evt
+        return [evt]
 
-    return None
+    return []
 
 
 def _normalize_add_result(result: object) -> list[dict]:
@@ -515,6 +539,28 @@ def _normalize_get_all_result(result: object) -> list[dict]:
     if isinstance(result, list):
         return result
     return []
+
+
+def _normalize_paginated_result(result: object) -> tuple[list[dict], str | None]:
+    """Normalize a paginated v3 response to (results_list, next_cursor).
+
+    Handles the common Mem0 v3 envelope shape::
+        {"count": N, "next": "c2...", "previous": None, "results": [...]}
+    as well as bare single-event dicts (from get_event) and plain lists.
+    """
+    if isinstance(result, dict):
+        if "results" in result:
+            nested = result["results"]
+            results = nested if isinstance(nested, list) else [nested]
+            return results, result.get("next")
+        # Bare single-event dict (e.g. from get_event) — no results key but
+        # carries event-like fields such as id, status, memory, data, etc.
+        if any(k in result for k in ("id", "status", "memory", "data", "result", "event_id")):
+            return [result], None
+        return [], None
+    if isinstance(result, list):
+        return result, None
+    return [], None
 
 
 # ---------------------------------------------------------------------------
