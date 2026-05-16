@@ -511,15 +511,91 @@ class TestAddMemories:
 
 
 class TestWaitForPendingEvents:
-    def test_resolves_via_get_events_when_available(self):
-        """Event-native path: match pending event_ids against event.id."""
+    def test_resolves_via_get_events_when_succeeded(self):
+        """Event-native path: only resolves events with SUCCEEDED status."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
         mock_client = MagicMock()
         mock_client.get_events.return_value = {
             "count": 1,
             "results": [
-                {"id": "evt_1", "memory": {"id": "mem_1", "memory": "resolved"}}
+                {
+                    "id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "memory": {"id": "mem_1", "memory": "resolved"},
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
+
+    def test_ignores_pending_events(self):
+        """Events with PENDING status are not resolved — polling continues."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock()
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "PENDING",
+                    "memory": None,
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.2, poll_interval=0.1
+            )
+            # evt_1 never reached SUCCEEDED — should time out with nothing
+            assert result == []
+
+    def test_resolves_failed_events_with_memory(self):
+        """Events with FAILED status are terminal and resolved if memory is present."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock()
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "FAILED",
+                    "memory": {"id": "mem_1", "memory": "resolved"},
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
+
+    def test_extracts_memory_from_nested_data_path(self):
+        """Some SDK versions nest the memory under event.data.memory."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock()
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "data": {"memory": {"id": "mem_1", "memory": "resolved"}},
+                }
             ],
         }
         with patch(
