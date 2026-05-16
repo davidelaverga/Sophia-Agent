@@ -248,24 +248,48 @@ class TestSearchMemories:
 
 
 class TestAddMemories:
-    def test_successful_add_returns_result(self):
+    def test_successful_add_returns_resolved_memories(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
         mock_client.add.return_value = [
-            {"id": "new_m1", "memory": "extracted fact"},
-            {"id": "new_m2", "memory": "extracted feeling"},
+            {"id": "evt_1", "memory": {"id": "mem_1", "content": "extracted fact"}},
+            {"id": "evt_2", "memory": {"id": "mem_2", "content": "extracted feeling"}},
         ]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "I love coffee"}],
-                session_id="sess_123",
-            )
-            assert len(result) == 2
-            assert result[0]["id"] == "new_m1"
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "mem_1"}, {"id": "mem_2"}],
+            ) as mock_wait:
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "I love coffee"}],
+                    session_id="sess_123",
+                )
+                assert len(result) == 2
+                assert result[0]["id"] == "mem_1"
+                mock_wait.assert_called_once_with("user1", ["evt_1", "evt_2"])
+
+    def test_add_passes_run_id_as_session_id(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"id": "evt_1", "memory": "hello"}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "mem_1"}],
+            ):
+                add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_abc",
+                )
+                assert mock_client.add.call_args.kwargs["run_id"] == "sess_abc"
 
     def test_add_with_no_api_key_returns_empty(self):
         from deerflow.sophia.mem0_client import add_memories
@@ -301,133 +325,189 @@ class TestAddMemories:
         mock_client.search.return_value = [
             {"id": "m1", "memory": "old fact", "metadata": {}}
         ]
-        mock_client.add.return_value = [{"id": "new_m1", "memory": "new fact"}]
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "new_m1", "content": "new fact"}}]
 
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            # Populate cache
-            search_memories("user1", "query")
-            with mod._cache_lock:
-                assert len(mod._cache) == 1
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "new_m1"}],
+            ):
+                # Populate cache
+                search_memories("user1", "query")
+                with mod._cache_lock:
+                    assert len(mod._cache) == 1
 
-            # Add memories — should invalidate cache
-            add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-            )
-            with mod._cache_lock:
-                assert len(mod._cache) == 0
+                # Add memories — should invalidate cache
+                add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+                with mod._cache_lock:
+                    assert len(mod._cache) == 0
 
     def test_metadata_passed_directly_to_v3_add(self):
         """v3 SDK add() receives metadata natively — no REST backfill."""
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "mem_1", "memory": "hello"}]
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "mem_1", "content": "hello"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-                metadata={"importance": "structural", "review_status": "pending_review"},
-            )
-            call_kwargs = mock_client.add.call_args.kwargs
-            assert call_kwargs["messages"] == [{"role": "user", "content": "hello"}]
-            assert call_kwargs["user_id"] == "user1"
-            assert call_kwargs["metadata"] == {
-                "importance": "structural",
-                "review_status": "pending_review",
-            }
-            assert "async_mode" not in call_kwargs
-            assert result[0]["id"] == "mem_1"
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "mem_1"}],
+            ):
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                    metadata={"importance": "structural", "review_status": "pending_review"},
+                )
+                call_kwargs = mock_client.add.call_args.kwargs
+                assert call_kwargs["messages"] == [{"role": "user", "content": "hello"}]
+                assert call_kwargs["user_id"] == "user1"
+                assert call_kwargs["run_id"] == "sess_123"
+                assert call_kwargs["metadata"] == {
+                    "importance": "structural",
+                    "review_status": "pending_review",
+                }
+                assert "async_mode" not in call_kwargs
+                assert result[0]["id"] == "mem_1"
 
     def test_metadata_status_translated_to_review_status(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "mem_1", "memory": "hello"}]
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "mem_1", "content": "hello"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-                metadata={"status": "pending_review"},
-            )
-            call_kwargs = mock_client.add.call_args.kwargs
-            assert call_kwargs["metadata"]["review_status"] == "pending_review"
-            # status is preserved for gateway backward compatibility (Codex P1)
-            assert call_kwargs["metadata"]["status"] == "pending_review"
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "mem_1"}],
+            ):
+                add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                    metadata={"status": "pending_review"},
+                )
+                call_kwargs = mock_client.add.call_args.kwargs
+                assert call_kwargs["metadata"]["review_status"] == "pending_review"
+                # status is preserved for gateway backward compatibility (Codex P1)
+                assert call_kwargs["metadata"]["status"] == "pending_review"
+                assert call_kwargs["run_id"] == "sess_123"
 
     def test_dict_with_results_key_normalized(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = {"results": [{"id": "m1", "memory": "fact"}]}
+        mock_client.add.return_value = {"results": [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]}
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-            )
-            assert len(result) == 1
-            assert result[0]["id"] == "m1"
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "m1"}],
+            ):
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+                assert len(result) == 1
+                assert result[0]["id"] == "m1"
 
     def test_contextual_importance_gets_expiration_date(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "m1", "memory": "fact"}]
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-                metadata={"importance_score": 0.3, "review_status": "pending_review"},
-            )
-            call_kwargs = mock_client.add.call_args.kwargs
-            assert "expiration_date" in call_kwargs["metadata"]
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "m1"}],
+            ):
+                add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                    metadata={"importance_score": 0.3, "review_status": "pending_review"},
+                )
+                call_kwargs = mock_client.add.call_args.kwargs
+                assert "expiration_date" in call_kwargs["metadata"]
 
     def test_timestamp_passed_when_provided(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "m1", "memory": "fact"}]
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-                metadata={"review_status": "pending_review"},
-                timestamp=1715900000,
-            )
-            assert mock_client.add.call_args.kwargs["timestamp"] == 1715900000
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "m1"}],
+            ):
+                add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                    metadata={"review_status": "pending_review"},
+                    timestamp=1715900000,
+                )
+                assert mock_client.add.call_args.kwargs["timestamp"] == 1715900000
+                assert mock_client.add.call_args.kwargs["run_id"] == "sess_123"
 
     def test_add_without_metadata_works(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "m1", "memory": "fact"}]
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = add_memories(
-                user_id="user1",
-                messages=[{"role": "user", "content": "hello"}],
-                session_id="sess_123",
-            )
-            assert result[0]["id"] == "m1"
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "m1"}],
+            ):
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+                assert result[0]["id"] == "m1"
+                assert mock_client.add.call_args.kwargs["run_id"] == "sess_123"
+
+    def test_add_falls_back_to_raw_result_when_wait_times_out(self):
+        """If wait_for_pending_events returns empty, add_memories falls back
+        to the raw normalized add result so callers still have event IDs."""
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[],
+            ) as mock_wait:
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+                mock_wait.assert_called_once_with("user1", ["evt_1"])
+                # Falls back to raw normalized result (event id, not memory id)
+                assert len(result) == 1
+                assert result[0]["id"] == "evt_1"
 
 
 class TestWaitForPendingEvents:
