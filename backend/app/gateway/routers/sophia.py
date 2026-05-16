@@ -413,6 +413,45 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
     ]
 
 
+def _is_memory_record(item: dict) -> bool:
+    """Return True if ``item`` is a resolved Mem0 memory dict, not an event wrapper."""
+    if not isinstance(item, dict):
+        return False
+    # Event wrappers carry event_id and lack memory/content.
+    # Memory records have either memory, content, or metadata with category.
+    if item.get("event_id") and not item.get("memory") and not item.get("content"):
+        return False
+    if not item.get("memory") and not item.get("content") and not item.get("metadata"):
+        return False
+    return True
+
+
+def _get_all_paginated(client, filters: dict) -> list[dict]:
+    """Fetch all pages from Mem0 v3 get_all and return a flat list of memories."""
+    all_results: list[dict] = []
+    cursor: str | None = None
+    page_count = 0
+    while True:
+        kwargs: dict = {"filters": filters}
+        if cursor is not None:
+            kwargs["cursor"] = cursor
+        result = client.get_all(**kwargs)
+        page_count += 1
+        if isinstance(result, dict):
+            results = result.get("results", [])
+            all_results.extend(results if isinstance(results, list) else [results])
+            cursor = result.get("next")
+        elif isinstance(result, list):
+            all_results.extend(result)
+            break
+        else:
+            break
+        if not cursor:
+            break
+    logger.debug("get_all paginated | pages=%d | total=%d", page_count, len(all_results))
+    return all_results
+
+
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
     return safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
 
@@ -568,8 +607,7 @@ async def list_memories(
             user_id,
             status or "<none>",
         )
-        result = client.get_all(filters={"user_id": user_id})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id})
         memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
@@ -615,7 +653,7 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
             raise HTTPException(status_code=503, detail="Memory service unavailable")
 
         first = created[0]
-        if isinstance(first, dict) and first.get("id"):
+        if isinstance(first, dict) and _is_memory_record(first) and first.get("id"):
             if memory_metadata:
                 upsert_review_metadata(
                     user_id,
@@ -627,22 +665,14 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
                 )
             return _to_memory_item(first)
 
-        if memory_metadata:
-            upsert_review_metadata(
-                user_id,
-                memory_id=first.get("id") if isinstance(first, dict) else None,
-                content=body.text,
-                metadata=memory_metadata,
-                session_id="manual-create",
-                sync_state="manual",
-            )
-
-        return MemoryItem(
-            id=str(first.get("id", "")) if isinstance(first, dict) else "",
-            content=body.text,
-            category=body.category or memory_metadata.get("category"),
-            metadata=memory_metadata or None,
+        # add_memories returned an event wrapper (not a resolved memory) —
+        # treat as a failure to persist.
+        logger.warning(
+            "Mem0 create_memory returned non-memory for user %s: %s",
+            user_id,
+            first,
         )
+        raise HTTPException(status_code=503, detail="Memory service unavailable")
     except Exception as e:
         logger.warning("Failed to create memory for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -837,8 +867,7 @@ async def journal(
                 filters: dict = {"user_id": user_id}
                 if selected_category:
                     filters["categories"] = selected_category
-                result = client.get_all(filters=filters)
-                memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+                memories_raw = _get_all_paginated(client, filters)
                 memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
                 memories_raw = [
                     memory
@@ -855,8 +884,7 @@ async def journal(
             filters = {"user_id": user_id}
             if selected_category:
                 filters["categories"] = selected_category
-            result = client.get_all(filters=filters)
-            memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+            memories_raw = _get_all_paginated(client, filters)
             memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
         memories_raw = _sort_memories_desc(memories_raw)
@@ -966,8 +994,7 @@ async def visual_decisions(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        result = client.get_all(filters={"user_id": user_id, "categories": "decision"})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id, "categories": "decision"})
         items = [_to_memory_item(m) for m in memories_raw]
         return CategoryMemoryResponse(memories=items, count=len(items))
     except Exception as e:
@@ -984,8 +1011,7 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        result = client.get_all(filters={"user_id": user_id, "categories": "commitment"})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id, "categories": "commitment"})
         items = [_to_memory_item(m) for m in memories_raw]
         return CategoryMemoryResponse(memories=items, count=len(items))
     except Exception as e:
