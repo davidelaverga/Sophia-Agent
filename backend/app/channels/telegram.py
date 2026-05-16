@@ -58,6 +58,11 @@ class TelegramChannel(Channel):
         # cannot drop a running task; entries are removed on completion via
         # `task.add_done_callback(self._background_tasks.discard)`.
         self._background_tasks: set[asyncio.Task] = set()
+        # Phase 4D of the v3 streaming migration: per-task ``BuilderProgressSubscriber``
+        # asyncio tasks that subscribe to a builder run's v3 stream and
+        # edit the placeholder message in this chat. Same strong-ref +
+        # discard-on-done pattern as ``_background_tasks``.
+        self._progress_subscriber_tasks: set[asyncio.Task] = set()
         # Dual-bot architecture, Phase 1: surface whether a sibling worker bot
         # token is configured. Phase 1 is config-only — no second client is
         # built, no behavior changes. Phase 3 of the spec wires this token to
@@ -158,19 +163,39 @@ class TelegramChannel(Channel):
             logger.error("Invalid Telegram chat_id: %s", msg.chat_id)
             return
 
+        # Phase 4D of the v3 streaming migration: detect builder progress
+        # placeholders. Skips reply-to threading (the placeholder is its
+        # own anchor) and spawns a ``BuilderProgressSubscriber`` after
+        # successful send so live edits land on the captured message_id.
+        progress_meta = (msg.metadata or {}).get("builder_progress") if isinstance(msg.metadata, dict) else None
+
         kwargs: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
 
-        # Reply to the last bot message in this chat for threading
-        reply_to = self._last_bot_message.get(msg.chat_id)
-        if reply_to:
-            kwargs["reply_to_message_id"] = reply_to
+        # Reply to the last bot message in this chat for threading — but
+        # not on progress placeholders, which are their own anchor for
+        # subsequent edits.
+        if not progress_meta:
+            reply_to = self._last_bot_message.get(msg.chat_id)
+            if reply_to:
+                kwargs["reply_to_message_id"] = reply_to
 
         bot = self._application.bot
         last_exc: Exception | None = None
         for attempt in range(_max_retries):
             try:
                 sent = await bot.send_message(**kwargs)
-                self._last_bot_message[msg.chat_id] = sent.message_id
+                # Progress placeholders MUST NOT become the "last bot message"
+                # target — the user's next reply should attach to the prior
+                # conversational message, not the placeholder.
+                if not progress_meta:
+                    self._last_bot_message[msg.chat_id] = sent.message_id
+                if progress_meta:
+                    self._spawn_progress_subscriber(
+                        bot=bot,
+                        chat_id=chat_id,
+                        message_id=sent.message_id,
+                        meta=progress_meta,
+                    )
                 return
             except Exception as exc:
                 last_exc = exc
@@ -187,6 +212,67 @@ class TelegramChannel(Channel):
 
         logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
         raise last_exc  # type: ignore[misc]
+
+    def _spawn_progress_subscriber(
+        self,
+        *,
+        bot: Any,
+        chat_id: int,
+        message_id: int,
+        meta: dict[str, Any],
+    ) -> None:
+        """Spawn a v3 progress subscriber for one builder task.
+
+        Runs on the EI bot's ``_tg_loop`` so bot calls are loop-affine.
+        The subscriber holds itself alive via the asyncio task created
+        below; we don't track it in a registry because the run is bounded
+        by ``BUILDER_PROGRESS_TOTAL_TIMEOUT_S`` (30 min default) and
+        Telegram doesn't need a cancel surface — the user just gets a
+        final-state edit when the run ends.
+        """
+        task_id = str(meta.get("task_id") or "")
+        run_id = str(meta.get("run_id") or "")
+        if not task_id or not run_id:
+            logger.warning(
+                "[Telegram] progress placeholder missing task_id or run_id — skipping subscriber"
+            )
+            return
+        try:
+            from app.channels.telegram_progress_subscriber import BuilderProgressSubscriber
+
+            subscriber = BuilderProgressSubscriber(
+                bot=bot,
+                chat_id=chat_id,
+                message_id=message_id,
+                # The builder's own thread_id == task_id (per
+                # start_builder_task's async_tasks row shape — learning #18
+                # in the v3 migration plan).
+                thread_id=task_id,
+                run_id=run_id,
+                task_id=task_id,
+            )
+        except Exception:
+            logger.warning(
+                "[Telegram] failed to construct progress subscriber task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+            return
+        try:
+            task = asyncio.create_task(subscriber.run())
+            self._progress_subscriber_tasks.add(task)
+            task.add_done_callback(self._progress_subscriber_tasks.discard)
+            logger.info(
+                "[Telegram] progress subscriber spawned chat_id=%s message_id=%s task_id=%s",
+                chat_id,
+                message_id,
+                task_id,
+            )
+        except RuntimeError:
+            logger.warning(
+                "[Telegram] no running loop to spawn progress subscriber task_id=%s",
+                task_id,
+            )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:

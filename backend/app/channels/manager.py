@@ -602,6 +602,10 @@ class ChannelManager:
         # the dispatch loop (NOT on the channel's polling thread) to download
         # the bytes off the critical path.
         self._inbound_file_readers: dict[str, InboundFileReader] = {}
+        # Phase 4D of the v3 streaming migration: per-process dedup of
+        # builder task_ids we've already emitted a progress placeholder
+        # for. Bounded to ~1k (see ``_trim_progress_set``).
+        self._progress_task_ids: set[str] = set()
 
     def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
         """Register a per-channel async function that downloads bytes for
@@ -978,6 +982,99 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+        # Phase 4D of the v3 streaming migration: when companion's
+        # ``start_builder_task`` tool ran this turn, publish a
+        # placeholder outbound carrying a ``builder_progress`` marker.
+        # ``telegram.py:send`` recognises the marker, captures the
+        # ``message_id`` after sending, and spawns a
+        # ``BuilderProgressSubscriber`` that subscribes to the builder
+        # run's v3 stream and edits the placeholder live.
+        try:
+            await self._maybe_open_progress_placeholders(msg, result, thread_id)
+        except Exception:
+            logger.warning(
+                "[Manager] progress-placeholder emit failed channel=%s chat_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                exc_info=True,
+            )
+
+    async def _maybe_open_progress_placeholders(
+        self,
+        msg: InboundMessage,
+        result: Any,
+        thread_id: str,
+    ) -> None:
+        """Publish "Working on it…" placeholders for new builder tasks.
+
+        Only fires on Telegram-class channels (per spec — the streaming
+        UX is Telegram-only in this phase). Pulls newly-launched builder
+        tasks off ``result["async_tasks"]`` (written by
+        ``start_builder_task``) and emits one placeholder per task with
+        a metadata marker the channel uses to wire up the subscriber.
+        """
+        if not msg.channel_name or not msg.channel_name.startswith("telegram"):
+            return
+        if not isinstance(result, dict):
+            return
+        async_tasks = result.get("async_tasks")
+        if not isinstance(async_tasks, dict) or not async_tasks:
+            return
+
+        for task_id, task_record in async_tasks.items():
+            if not isinstance(task_record, dict):
+                continue
+            if task_record.get("agent_name") != "sophia_builder":
+                continue
+            if task_id in self._progress_task_ids:
+                continue
+            run_id = task_record.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+
+            placeholder = OutboundMessage(
+                channel_name=msg.channel_name,
+                chat_id=msg.chat_id,
+                thread_id=thread_id,
+                text="Working on it — I'll show progress here. ☕",
+                thread_ts=msg.thread_ts,
+                metadata={
+                    "builder_progress": {
+                        "task_id": str(task_id),
+                        "run_id": run_id,
+                        "user_id": msg.user_id,
+                    }
+                },
+            )
+            logger.info(
+                "[Manager] publishing builder progress placeholder channel=%s chat_id=%s task_id=%s run_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                task_id,
+                run_id,
+            )
+            try:
+                await self.bus.publish_outbound(placeholder)
+            except Exception:
+                logger.warning(
+                    "[Manager] placeholder publish failed task_id=%s — will retry on a future turn",
+                    task_id,
+                    exc_info=True,
+                )
+                continue
+            # Mark AFTER successful publish so a transient bus failure
+            # doesn't permanently block retries for this task_id.
+            self._progress_task_ids.add(str(task_id))
+            self._trim_progress_set()
+
+    def _trim_progress_set(self) -> None:
+        if len(self._progress_task_ids) > 1024:
+            # Drop ~25% oldest entries; set has no order but for
+            # diagnostics we don't care which go (task_ids are unique).
+            stale = list(self._progress_task_ids)[:256]
+            for tid in stale:
+                self._progress_task_ids.discard(tid)
 
     async def _handle_streaming_chat(
         self,
