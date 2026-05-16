@@ -1065,6 +1065,13 @@ class ChannelManager:
         tasks off ``result["async_tasks"]`` (written by
         ``start_builder_task``) and emits one placeholder per task with
         a metadata marker the channel uses to wire up the subscriber.
+
+        The gating / placeholder-construction / delivery-confirmation
+        logic is split into helpers (``_progress_candidate_run_id``,
+        ``_build_progress_placeholder``, ``_publish_placeholder_strict``)
+        to keep this function's cyclomatic complexity below the sentrux
+        threshold (CC ≥ 16) — the codex-review cycle on PR #126 added
+        enough branches here to trip it.
         """
         if not msg.channel_name or not msg.channel_name.startswith("telegram"):
             return
@@ -1075,96 +1082,118 @@ class ChannelManager:
             return
 
         for task_id, task_record in async_tasks.items():
-            if not isinstance(task_record, dict):
+            run_id = self._progress_candidate_run_id(task_id, task_record)
+            if run_id is None:
                 continue
-            if task_record.get("agent_name") != "sophia_builder":
-                continue
-            # Codex P1 (post-Phase-4F review): ``async_tasks`` is merged
-            # across companion turns and persisted on the thread, so
-            # historical builder rows survive long after they terminate.
-            # On a gateway restart the per-process ``_progress_task_ids``
-            # dedup is empty, and without a status gate every completed
-            # historical task would re-emit a "Working on it…"
-            # placeholder for an already-finished run. Skip terminal
-            # statuses — they will not produce stream events for the
-            # subscriber to consume, and the user would only see a stuck
-            # placeholder. ``interrupted`` is in the manager set even
-            # though it's NOT in start_builder_task's set (see class
-            # comment on ``_TERMINAL_TASK_STATUSES``).
-            raw_status = task_record.get("status")
-            if (
-                isinstance(raw_status, str)
-                and raw_status.strip().lower() in self._TERMINAL_TASK_STATUSES
-            ):
-                continue
-            run_id = task_record.get("run_id")
-            if not isinstance(run_id, str) or not run_id:
-                continue
-            # Codex P1 (post-Phase-4F review, second pass): dedup by
-            # (task_id, run_id). ``update_async_task`` keeps the same
-            # task_id and writes a NEW run_id into the same async_tasks
-            # row. Dedup on task_id alone would skip the replacement
-            # run's placeholder — original subscriber stays attached to
-            # the interrupted run (no further events), new run has no
-            # subscriber, Telegram progress freezes mid-task.
-            dedup_key: tuple[str, str] = (str(task_id), run_id)
-            if dedup_key in self._progress_task_ids:
-                continue
-
-            placeholder = OutboundMessage(
-                channel_name=msg.channel_name,
-                chat_id=msg.chat_id,
-                thread_id=thread_id,
-                text="Working on it — I'll show progress here. ☕",
-                thread_ts=msg.thread_ts,
-                metadata={
-                    "builder_progress": {
-                        "task_id": str(task_id),
-                        "run_id": run_id,
-                        "user_id": msg.user_id,
-                    }
-                },
-            )
-            logger.info(
-                "[Manager] publishing builder progress placeholder channel=%s chat_id=%s task_id=%s run_id=%s",
-                msg.channel_name,
-                msg.chat_id,
-                task_id,
-                run_id,
-            )
-            # Phase 4F (codex P1 post-review, fourth pass): use the
-            # delivery-confirming strict variant. ``publish_outbound``
-            # SWALLOWS listener exceptions (v3-migration learning #3),
-            # so a Telegram ``send`` failure (transient network /
-            # Telegram API 5xx) would otherwise look successful here
-            # and the dedup key would be marked. Subsequent turns
-            # would then skip re-emitting and the run gets NO live
-            # progress subscriber at all. ``publish_outbound_strict``
-            # returns False if any listener raised; we then skip
-            # marking the dedup so the next companion turn retries.
-            try:
-                delivered = await self.bus.publish_outbound_strict(placeholder)
-            except Exception:
-                logger.warning(
-                    "[Manager] placeholder publish raised task_id=%s — will retry on a future turn",
-                    task_id,
-                    exc_info=True,
-                )
-                continue
-            if not delivered:
-                logger.warning(
-                    "[Manager] placeholder delivery failed (listener raised) task_id=%s run_id=%s "
-                    "— will retry on a future turn",
-                    task_id,
-                    run_id,
-                )
+            task_id_str = str(task_id)
+            placeholder = self._build_progress_placeholder(msg, thread_id, task_id_str, run_id)
+            if not await self._publish_placeholder_strict(placeholder, task_id_str, run_id):
                 continue
             # Mark AFTER confirmed delivery so a transient send failure
             # doesn't permanently block retries for this (task_id, run_id).
             # Insertion order is preserved by dict (Phase 4F codex P2);
             # the trim path relies on it for FIFO eviction.
-            self._progress_task_ids[dedup_key] = None
+            self._progress_task_ids[(task_id_str, run_id)] = None
             self._trim_progress_set()
+
+    def _progress_candidate_run_id(
+        self, task_id: Any, task_record: Any
+    ) -> str | None:
+        """Return the ``run_id`` we should emit a placeholder for, else None.
+
+        Gating chain (any False → skip):
+
+        - record is a dict
+        - ``agent_name == "sophia_builder"`` (codex earlier: skip non-builder)
+        - ``status`` is not in the manager's ``_TERMINAL_TASK_STATUSES``
+          (codex P1+P2 earlier: skip historical / interrupted rows)
+        - ``run_id`` is a non-empty string
+        - ``(task_id, run_id)`` is not already in the dedup dict
+          (codex P1 post-review second pass: dedup includes run_id
+          so ``update_async_task`` flow still emits for the new run)
+        """
+        if not isinstance(task_record, dict):
+            return None
+        if task_record.get("agent_name") != "sophia_builder":
+            return None
+        raw_status = task_record.get("status")
+        if (
+            isinstance(raw_status, str)
+            and raw_status.strip().lower() in self._TERMINAL_TASK_STATUSES
+        ):
+            return None
+        run_id = task_record.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        if (str(task_id), run_id) in self._progress_task_ids:
+            return None
+        return run_id
+
+    def _build_progress_placeholder(
+        self,
+        msg: InboundMessage,
+        thread_id: str,
+        task_id: str,
+        run_id: str,
+    ) -> OutboundMessage:
+        """Construct the "Working on it…" placeholder for a builder task."""
+        return OutboundMessage(
+            channel_name=msg.channel_name,
+            chat_id=msg.chat_id,
+            thread_id=thread_id,
+            text="Working on it — I'll show progress here. ☕",
+            thread_ts=msg.thread_ts,
+            metadata={
+                "builder_progress": {
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "user_id": msg.user_id,
+                }
+            },
+        )
+
+    async def _publish_placeholder_strict(
+        self,
+        placeholder: OutboundMessage,
+        task_id: str,
+        run_id: str,
+    ) -> bool:
+        """Publish via ``publish_outbound_strict`` + log.
+
+        Returns ``True`` only when delivery is confirmed (caller should
+        mark the dedup). Returns ``False`` on bus-level raise OR on
+        any listener exception (caller should NOT mark — the next
+        companion turn will retry). Phase 4F codex P1 post-review
+        (fourth pass): the bus's swallow-flavored ``publish_outbound``
+        hid Telegram send failures from this caller, so the dedup
+        could be marked for a placeholder that never reached Telegram
+        — permanently blocking retries.
+        """
+        logger.info(
+            "[Manager] publishing builder progress placeholder channel=%s chat_id=%s task_id=%s run_id=%s",
+            placeholder.channel_name,
+            placeholder.chat_id,
+            task_id,
+            run_id,
+        )
+        try:
+            delivered = await self.bus.publish_outbound_strict(placeholder)
+        except Exception:
+            logger.warning(
+                "[Manager] placeholder publish raised task_id=%s — will retry on a future turn",
+                task_id,
+                exc_info=True,
+            )
+            return False
+        if not delivered:
+            logger.warning(
+                "[Manager] placeholder delivery failed (listener raised) task_id=%s run_id=%s "
+                "— will retry on a future turn",
+                task_id,
+                run_id,
+            )
+            return False
+        return True
 
     def _trim_progress_set(self) -> None:
         """Evict the OLDEST 25% of dedup entries when the cap is hit.
