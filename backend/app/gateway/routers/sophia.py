@@ -610,7 +610,11 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
             metadata=memory_metadata or None,
         )
 
-        first = created[0] if created else None
+        if not created:
+            logger.warning("Mem0 add returned empty for user %s — memory not persisted", user_id)
+            raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+        first = created[0]
         if isinstance(first, dict) and first.get("id"):
             if memory_metadata:
                 upsert_review_metadata(

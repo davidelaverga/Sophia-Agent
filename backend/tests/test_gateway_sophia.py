@@ -330,17 +330,15 @@ class TestCreateMemory:
             sync_state="manual",
         )
 
-    def test_create_memory_empty_result_returns_item_without_id(self, client):
-        """When add_memories returns empty (e.g. timeout), return item with text."""
+    def test_create_memory_empty_result_returns_503(self, client):
+        """When add_memories returns empty (Mem0 unavailable), return 503."""
         with patch("deerflow.sophia.mem0_client.add_memories", return_value=[]):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Keeps going", "metadata": {"status": "approved"}},
             )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["id"] == ""
-        assert data["content"] == "Keeps going"
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Memory service unavailable"
 
     def test_create_memory_invalid_user_returns_400(self, client):
         resp = client.post(
