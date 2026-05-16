@@ -171,9 +171,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
                     search_memories,
                     user_id,
                     query,
-                    None,  # categories — None keeps all
-                    None,  # context_mode — None keeps all
-                    self.top_k,
+                    limit=self.top_k,
                 ),
                 timeout=self.timeout_seconds,
             )

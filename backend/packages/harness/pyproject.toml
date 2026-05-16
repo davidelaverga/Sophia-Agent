@@ -31,7 +31,7 @@ dependencies = [
     "langchain-google-genai>=4.2.1",
     "langgraph-checkpoint-sqlite>=3.0.3",
     "langgraph-sdk>=0.3.0",
-    "mem0ai>=1.0.0",
+    "mem0ai>=2.0.2",
     "deepagents>=0.6.0,<0.7.0",
 ]
 

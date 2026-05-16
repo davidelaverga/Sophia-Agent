@@ -30,6 +30,8 @@ from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMid
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.lifecycle_tool_observer import LifecycleToolObserverMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
+from deerflow.agents.sophia_agent.middlewares.memory_injection import MemoryInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
 from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
 from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
@@ -319,30 +321,35 @@ def make_sophia_agent(config: RunnableConfig):
         PlatformContextMiddleware(),
         # 6. Derive prior completed turns before first-turn-only middleware runs.
         TurnCountMiddleware(),
-        # 7-8. User context
+        # 7. Mem0 retrieval — prefetch memories early so the search can
+        # overlap with the expensive calibration middlewares below.
+        # Upgrade E: split from Mem0MemoryMiddleware into retrieval + injection.
+        Mem0RetrievalMiddleware(user_id),
+        # 8-9. User context
         UserIdentityMiddleware(user_id),
         SessionStateMiddleware(user_id),
-        # 9-11. Calibration (order matters: tone -> context -> ritual -> skill)
+        # 10-12. Calibration (order matters: tone -> context -> ritual -> skill)
         ToneGuidanceMiddleware(SKILLS_PATH / "tone_guidance.md"),
         ContextAdaptationMiddleware(SKILLS_PATH / "context", context_mode),
         RitualMiddleware(SKILLS_PATH / "rituals", ritual),
-        # 12. Skill routing (reads tone band + ritual from state)
+        # 13. Skill routing (reads tone band + ritual from state)
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
-        # 13. Memory (after ritual+skill set — retrieval biased by both)
-        Mem0MemoryMiddleware(user_id),
         # 13b. Build awareness — refreshes async_tasks status from the
         # LangGraph SDK and injects a short prompt block so Sophia answers
         # "how's the build going?" without needing to call check_async_task,
         # and acknowledges completion naturally instead of reciting the
-        # original task brief. Sits between Mem0 and Artifact so the prompt
-        # block is in the assembled system message but doesn't interfere
-        # with skill routing or memory retrieval.
+        # original task brief. Sits between SkillRouter and MemoryInjection
+        # so the prompt block is in the assembled system message.
         BuildAwarenessMiddleware(),
-        # 13c. Lifecycle-tool observability — emits one structured log line per
+        # 13c. Memory injection — formats prefetched memories into the
+        # system prompt. Runs after BuildAwareness so both blocks land in
+        # the same assembled system message.
+        MemoryInjectionMiddleware(),
+        # 13d. Lifecycle-tool observability — emits one structured log line per
         # tool_call for any of the five lifecycle tools so we can measure
-        # tool-selection health post-deploy. Positioned after BuildAwareness
-        # (so the active-build block has shaped this turn) and before
-        # ArtifactMiddleware. Purely observational; never mutates state.
+        # tool-selection health post-deploy. Positioned after MemoryInjection
+        # (sees the fully shaped turn) and before ArtifactMiddleware. Purely
+        # observational; never mutates state.
         LifecycleToolObserverMiddleware(),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),

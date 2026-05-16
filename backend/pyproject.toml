@@ -16,7 +16,7 @@ dependencies = [
     "python-telegram-bot>=21.0",
     "langgraph-sdk>=0.1.51",
     "markdown-to-mrkdwn>=0.3.1",
-    "mem0ai>=1.0.9",
+    "mem0ai>=2.0.2",
     # Builder document-generation runtime.
     # These libraries are imported by skill scripts the builder executes
     # (ppt-generation, data-analysis, image-generation) and by any PDF/DOCX
