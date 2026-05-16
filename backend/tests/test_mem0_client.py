@@ -607,6 +607,56 @@ class TestWaitForPendingEvents:
             assert len(result) == 1
             assert result[0]["id"] == "mem_1"
 
+    def test_extracts_memory_from_results_path(self):
+        """Mem0 v3 may carry memory outputs in event.results."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock()
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "results": [{"id": "mem_1", "memory": "resolved"}],
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
+            assert result[0]["memory"] == "resolved"
+
+    def test_event_wrapper_with_metadata_is_not_returned_as_memory(self):
+        """Events always have metadata; we must not return the wrapper as a memory."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock()
+        # Terminal event with only metadata, no memory/content — nothing extractable
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "metadata": {"user_id": "user1"},
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            # Event is terminal so removed from pending, but no memory extracted
+            assert result == []
+
     def test_extracts_memory_from_nested_data_path(self):
         """Some SDK versions nest the memory under event.data.memory."""
         from deerflow.sophia.mem0_client import wait_for_pending_events

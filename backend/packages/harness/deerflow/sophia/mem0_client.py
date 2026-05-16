@@ -453,27 +453,43 @@ def _extract_memory_from_event(evt: dict) -> dict | None:
 
     Mem0 v3 get_events returns event wrappers that may nest the resolved
     memory under several different keys depending on the SDK version and
-    event type.  We try the most common paths and fall back to the event
-    itself only if none of them yield a dict.
+    event type.  We try known paths before falling back.
+
+    A raw event wrapper always carries a top-level ``status`` key, so we
+    use that as a discriminator — if ``status`` is present we treat the dict
+    as an event and keep drilling, never returning the wrapper itself.
     """
-    # Path 1: event.memory is already a memory dict
+    # Path 1: event.memory — most common, event nests one memory dict
     mem = evt.get("memory")
     if isinstance(mem, dict):
         return mem
-    # Path 2: event.data.memory (some SDK versions nest deeper)
+
+    # Path 2: event.data.memory — some SDK versions nest deeper
     data = evt.get("data")
     if isinstance(data, dict):
         mem = data.get("memory")
         if isinstance(mem, dict):
             return mem
-    # Path 3: event.result (alternative naming)
+
+    # Path 3: event.result — alternative SDK naming
     mem = evt.get("result")
     if isinstance(mem, dict):
         return mem
-    # Path 4: the event itself has memory-like keys — use it as-is
-    # but only if it looks like a memory record, not a raw event wrapper.
-    if "memory" in evt or "content" in evt or "metadata" in evt:
+
+    # Path 4: event.results — v3 may return memory outputs here
+    results = evt.get("results")
+    if isinstance(results, list) and results:
+        first = results[0]
+        if isinstance(first, dict):
+            return first
+    if isinstance(results, dict):
+        return results
+
+    # Path 5: the event itself is the memory record — NOT a raw wrapper.
+    # Memory records have memory/content fields; event wrappers have status.
+    if ("memory" in evt or "content" in evt) and "status" not in evt:
         return evt
+
     return None
 
 
