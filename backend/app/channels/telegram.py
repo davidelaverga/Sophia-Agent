@@ -24,6 +24,28 @@ _TELEGRAM_CAPTION_LIMIT = 1024
 _TELEGRAM_TEXT_LIMIT = 4096
 
 
+class ProgressSubscriberSpawnError(RuntimeError):
+    """Raised when ``_spawn_progress_subscriber`` cannot attach a subscriber.
+
+    Phase 4G codex P2 post-review: the prior implementation silently
+    logged and returned on missing metadata / construction failure /
+    ``_tg_loop`` unavailable / scheduling-failure paths. That let
+    ``send()`` complete successfully — the bus's strict-publish
+    returned True, and ``ChannelManager._maybe_open_progress_placeholders``
+    marked ``(task_id, run_id)`` as delivered. The placeholder landed
+    in Telegram but had no subscriber to update it, AND the dedup
+    blocked retries on subsequent turns — progress froze for the
+    entire run.
+
+    Raising surfaces the failure to ``send()``, which re-raises into
+    the bus listener (``Channel._on_outbound`` propagates exceptions
+    after the codex fifth-pass fix), and the bus's
+    ``publish_outbound_strict`` flips to ``False``. The manager then
+    skips the dedup mark, so the next companion turn retries the
+    whole flow — fresh placeholder + fresh subscriber attempt.
+    """
+
+
 def _looks_like_link_token(value: str) -> bool:
     return bool(_LINK_TOKEN_RE.match(value or ""))
 
@@ -199,23 +221,19 @@ class TelegramChannel(Channel):
                 kwargs["reply_to_message_id"] = reply_to
 
         bot = self._application.bot
+        # Phase 4G codex P2 post-review: separate the bot-API retry loop
+        # from the post-send subscriber-spawn step. The send may fail
+        # transiently (network / Telegram 5xx) and benefit from retry;
+        # a subscriber-spawn failure means the message ALREADY landed
+        # in Telegram, so retrying would double-send. Spawn errors
+        # propagate to the bus listener so the strict-publish path
+        # flips delivered=False and the manager skips the dedup mark.
         last_exc: Exception | None = None
+        sent = None
         for attempt in range(_max_retries):
             try:
                 sent = await bot.send_message(**kwargs)
-                # Progress placeholders MUST NOT become the "last bot message"
-                # target — the user's next reply should attach to the prior
-                # conversational message, not the placeholder.
-                if not progress_meta:
-                    self._last_bot_message[msg.chat_id] = sent.message_id
-                if progress_meta:
-                    self._spawn_progress_subscriber(
-                        bot=bot,
-                        chat_id=chat_id,
-                        message_id=sent.message_id,
-                        meta=progress_meta,
-                    )
-                return
+                break
             except Exception as exc:
                 last_exc = exc
                 if attempt < _max_retries - 1:
@@ -228,9 +246,28 @@ class TelegramChannel(Channel):
                         exc,
                     )
                     await asyncio.sleep(delay)
+        else:
+            logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
+            raise last_exc  # type: ignore[misc]
 
-        logger.error("[Telegram] send failed after %d attempts: %s", _max_retries, last_exc)
-        raise last_exc  # type: ignore[misc]
+        # Bot send succeeded — do post-send work exactly once. Any
+        # exception from here propagates to the bus listener WITHOUT
+        # triggering a re-send (the message already landed).
+        assert sent is not None  # for type checkers; break guarantees this
+        # Progress placeholders MUST NOT become the "last bot message"
+        # target — the user's next reply should attach to the prior
+        # conversational message, not the placeholder.
+        if not progress_meta:
+            self._last_bot_message[msg.chat_id] = sent.message_id
+        if progress_meta:
+            # May raise ProgressSubscriberSpawnError; propagate so the
+            # manager's strict-publish path sees the failure.
+            self._spawn_progress_subscriber(
+                bot=bot,
+                chat_id=chat_id,
+                message_id=sent.message_id,
+                meta=progress_meta,
+            )
 
     def _spawn_progress_subscriber(
         self,
@@ -248,14 +285,20 @@ class TelegramChannel(Channel):
         by ``BUILDER_PROGRESS_TOTAL_TIMEOUT_S`` (30 min default) and
         Telegram doesn't need a cancel surface — the user just gets a
         final-state edit when the run ends.
+
+        Phase 4G codex P2 post-review: raises ``ProgressSubscriberSpawnError``
+        on any failure path so the caller (``send``) propagates the
+        exception to the bus listener. The bus's strict-publish then
+        flips ``delivered=False`` and the manager skips the dedup mark,
+        triggering a retry on the next companion turn instead of leaving
+        a placeholder with no subscriber AND blocking future emissions.
         """
         task_id = str(meta.get("task_id") or "")
         run_id = str(meta.get("run_id") or "")
         if not task_id or not run_id:
-            logger.warning(
-                "[Telegram] progress placeholder missing task_id or run_id — skipping subscriber"
+            raise ProgressSubscriberSpawnError(
+                f"progress placeholder missing task_id or run_id (meta={meta!r})"
             )
-            return
         try:
             from app.channels.telegram_progress_subscriber import BuilderProgressSubscriber
 
@@ -272,21 +315,18 @@ class TelegramChannel(Channel):
                 # Codex P2 (post-Phase-4F review): use the configured
                 # ``channels.langgraph_url`` (matching ChannelManager's
                 # dispatch URL) instead of the subscriber's internal
-                # ``LANGGRAPH_URL`` env fallback. Otherwise deployments
-                # where the config URL differs from the env var send
-                # ``runs.join_stream`` to the wrong endpoint and the
-                # subscriber sees zero chunks. ``None`` here keeps the
-                # subscriber's env-var fallback for dev runs that don't
-                # set the config key.
+                # ``LANGGRAPH_URL`` env fallback.
                 langgraph_url=self._langgraph_url,
             )
-        except Exception:
+        except Exception as exc:
             logger.warning(
                 "[Telegram] failed to construct progress subscriber task_id=%s",
                 task_id,
                 exc_info=True,
             )
-            return
+            raise ProgressSubscriberSpawnError(
+                f"subscriber construction failed task_id={task_id}: {exc}"
+            ) from exc
         # Phase 4F (codex P1 post-review): spawn on ``_tg_loop`` so the
         # subscriber's ``bot.edit_message_text`` calls run on the same
         # loop the PTB Application/Bot was initialised on (learning #14
@@ -298,13 +338,10 @@ class TelegramChannel(Channel):
         # event loop" — the placeholder never updates.
         tg_loop = self._tg_loop
         if tg_loop is None or not tg_loop.is_running():
-            logger.warning(
-                "[Telegram] progress subscriber requested but _tg_loop unavailable "
-                "(running=%s); skipping task_id=%s",
-                tg_loop.is_running() if tg_loop is not None else False,
-                task_id,
+            raise ProgressSubscriberSpawnError(
+                f"_tg_loop unavailable (running={tg_loop.is_running() if tg_loop is not None else False}); "
+                f"cannot schedule subscriber task_id={task_id}"
             )
-            return
 
         try:
             current_loop: asyncio.AbstractEventLoop | None
@@ -332,11 +369,18 @@ class TelegramChannel(Channel):
                 task_id,
                 "yes" if current_loop is not tg_loop else "no",
             )
-        except RuntimeError:
+        except Exception as exc:
+            # Includes RuntimeError ("no running loop") and any
+            # scheduling-side issue from create_task /
+            # run_coroutine_threadsafe.
             logger.warning(
-                "[Telegram] no running loop to spawn progress subscriber task_id=%s",
+                "[Telegram] failed to schedule progress subscriber task_id=%s",
                 task_id,
+                exc_info=True,
             )
+            raise ProgressSubscriberSpawnError(
+                f"subscriber scheduling failed task_id={task_id}: {exc}"
+            ) from exc
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:
