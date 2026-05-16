@@ -282,8 +282,13 @@ def add_memories(
 
     metadata is passed directly to the v3 add() call (no REST backfill).
     importance is translated into expiration_date automatically.
-    Returns a list of event/pending dicts rather than fully resolved
-    memory objects — downstream code should not assume immediate IDs.
+    session_id is persisted as run_id so session-scoped recap retrieval
+    remains exact.
+
+    v3 add() is async-by-default; this helper blocks until pending
+    events resolve (up to a default timeout) and returns the resolved
+    memory dicts.  If the timeout elapses it falls back to the raw
+    add-result payload so callers still have event IDs for later polling.
 
     Thread-safe: invalidates the user cache so subsequent searches reflect
     the new data.
@@ -312,6 +317,7 @@ def add_memories(
     add_kwargs: dict[str, Any] = {
         "messages": messages,
         "user_id": user_id,
+        "run_id": session_id,
     }
     if resolved_metadata:
         add_kwargs["metadata"] = resolved_metadata
@@ -336,6 +342,34 @@ def add_memories(
         first_item.get("id") if isinstance(first_item, dict) else None,
         sorted(resolved_metadata.keys()) if resolved_metadata else None,
     )
+
+    # Extract event IDs from the async add response and block until they
+    # resolve so the offline pipeline does not report completion before
+    # the memories are actually queryable.
+    event_ids = [
+        item.get("id")
+        for item in normalized
+        if isinstance(item, dict) and item.get("id")
+    ]
+    if event_ids:
+        resolved = wait_for_pending_events(user_id, event_ids)
+        if resolved:
+            logger.info(
+                "session.finalization mem0_add_resolved user_id=%s session_id=%s "
+                "resolved_count=%s",
+                user_id,
+                session_id,
+                len(resolved),
+            )
+            invalidate_user_cache(user_id)
+            return resolved
+        logger.warning(
+            "session.finalization mem0_add_timeout user_id=%s session_id=%s "
+            "event_ids=%s — returning raw add result",
+            user_id,
+            session_id,
+            event_ids,
+        )
 
     invalidate_user_cache(user_id)
     return normalized
