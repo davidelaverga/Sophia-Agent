@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import pytest
 
+pytest.importorskip("langgraph", reason="langgraph required for builder middleware tests")
+
 from deerflow.agents.sophia_agent.middlewares.mem0_retrieval import (
     _MAX_SNIPPET_CHARS,
     BuilderMem0RetrievalMiddleware,

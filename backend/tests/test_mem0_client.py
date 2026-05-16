@@ -1,11 +1,14 @@
 """Tests for Mem0 v3 client wrapper — cache, client singleton, and search."""
 
+import pytest
+
+pytest.importorskip("cachetools", reason="cachetools required for mem0_client tests")
+
 import threading
 import time
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
-import pytest
 from cachetools import TTLCache
 
 
