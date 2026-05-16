@@ -303,9 +303,10 @@ class TestListMemories:
 # ---------------------------------------------------------------------------
 
 class TestCreateMemory:
-    def test_create_memory_returns_item(self, client, mock_mem0, mock_review_store):
-        mock_mem0.add.return_value = [{"id": "m1", "memory": "Likes pizza", "categories": ["food"]}]
-        with patch("deerflow.sophia.mem0_client.invalidate_user_cache") as mock_invalidate:
+    def test_create_memory_returns_item(self, client, mock_review_store):
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"id": "m1", "memory": "Likes pizza", "categories": ["food"]}
+        ]) as mock_add:
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Likes pizza", "category": "food", "metadata": {"status": "approved"}},
@@ -314,8 +315,12 @@ class TestCreateMemory:
         data = resp.json()
         assert data["id"] == "m1"
         assert data["content"] == "Likes pizza"
-        mock_mem0.add.assert_called_once()
-        mock_invalidate.assert_called_once_with("test_user")
+        mock_add.assert_called_once()
+        call_kwargs = mock_add.call_args[1]
+        assert call_kwargs["user_id"] == "test_user"
+        assert call_kwargs["session_id"] == "manual-create"
+        assert call_kwargs["messages"] == [{"role": "user", "content": "Likes pizza"}]
+        assert call_kwargs["metadata"] == {"status": "approved", "category": "food"}
         mock_review_store["upsert"].assert_called_once_with(
             "test_user",
             memory_id="m1",
@@ -325,15 +330,17 @@ class TestCreateMemory:
             sync_state="manual",
         )
 
-    def test_create_memory_falls_back_without_metadata(self, client, mock_mem0):
-        mock_mem0.add.side_effect = [TypeError("metadata unsupported"), [{"id": "m2", "memory": "Keeps going"}]]
-        with patch("deerflow.sophia.mem0_client.invalidate_user_cache"):
+    def test_create_memory_empty_result_returns_item_without_id(self, client):
+        """When add_memories returns empty (e.g. timeout), return item with text."""
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[]):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Keeps going", "metadata": {"status": "approved"}},
             )
         assert resp.status_code == 200
-        assert mock_mem0.add.call_count == 2
+        data = resp.json()
+        assert data["id"] == ""
+        assert data["content"] == "Keeps going"
 
     def test_create_memory_invalid_user_returns_400(self, client):
         resp = client.post(
