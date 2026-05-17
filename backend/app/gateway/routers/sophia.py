@@ -37,8 +37,6 @@ _background_tasks: set = set()
 _session_store = SessionStore()
 _LEGACY_SESSION_USER_ID = "dev-user"
 _MEM0_GET_ALL_PAGE_SIZE = 100
-_MEM0_GET_ALL_MAX_PAGES = 5
-_MEM0_GET_ALL_MAX_RESULTS = _MEM0_GET_ALL_PAGE_SIZE * _MEM0_GET_ALL_MAX_PAGES
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +427,8 @@ def _is_memory_record(item: dict) -> bool:
     # Memory records have either memory, content, or metadata with category.
     if item.get("event_id") and not item.get("memory") and not item.get("content"):
         return False
+    if item.get("id"):
+        return True
     if not item.get("memory") and not item.get("content") and not item.get("metadata"):
         return False
     return True
@@ -467,36 +467,47 @@ def _get_all_paginated(
     client,
     filters: dict,
     page_size: int = _MEM0_GET_ALL_PAGE_SIZE,
-    max_pages: int = _MEM0_GET_ALL_MAX_PAGES,
-    max_results: int = _MEM0_GET_ALL_MAX_RESULTS,
+    max_pages: int | None = None,
+    max_results: int | None = None,
 ) -> list[dict]:
-    """Fetch bounded pages from Mem0 v3 get_all and return a flat list."""
+    """Fetch pages from Mem0 v3 get_all and return a flat list."""
     all_results: list[dict] = []
     page_size = max(1, min(page_size, _MEM0_GET_ALL_PAGE_SIZE))
-    max_pages = max(1, max_pages)
-    max_results = max(1, max_results)
+    if max_pages is not None:
+        max_pages = max(1, max_pages)
+    if max_results is not None:
+        max_results = max(1, max_results)
     page = 1
     page_count = 0
-    while page_count < max_pages and len(all_results) < max_results:
+    while True:
+        if max_pages is not None and page_count >= max_pages:
+            break
+        if max_results is not None and len(all_results) >= max_results:
+            break
         result = client.get_all(filters=filters, page=page, page_size=page_size)
         page_count += 1
         if isinstance(result, dict):
             results = result.get("results", [])
-            remaining = max_results - len(all_results)
             if isinstance(results, list):
-                all_results.extend(results[:remaining])
+                if max_results is None:
+                    all_results.extend(results)
+                else:
+                    all_results.extend(results[: max_results - len(all_results)])
             elif results:
                 all_results.append(results)
-            if not result.get("next") or len(all_results) >= max_results:
+            if not result.get("next"):
                 break
             page += 1
         elif isinstance(result, list):
-            all_results.extend(result[: max_results - len(all_results)])
+            if max_results is None:
+                all_results.extend(result)
+            else:
+                all_results.extend(result[: max_results - len(all_results)])
             break
         else:
             break
     logger.debug(
-        "get_all paginated | pages=%d | total=%d | max_pages=%d | max_results=%d",
+        "get_all paginated | pages=%d | total=%d | max_pages=%s | max_results=%s",
         page_count,
         len(all_results),
         max_pages,

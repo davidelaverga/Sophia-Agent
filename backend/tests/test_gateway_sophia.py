@@ -231,6 +231,20 @@ class TestListMemories:
         assert result == [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}]
         assert mock_client.get_all.call_count == 2
 
+    def test_get_all_pagination_defaults_do_not_cap_at_five_pages(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": f"m{page}"}], "next": f"page-{page + 1}" if page < 6 else None}
+            for page in range(1, 7)
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"})
+
+        assert [item["id"] for item in result] == ["m1", "m2", "m3", "m4", "m5", "m6"]
+        assert mock_client.get_all.call_count == 6
+
     def test_with_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Needs review", "metadata": None},
@@ -436,6 +450,28 @@ class TestCreateMemory:
             )
         assert resp.status_code == 503
         assert resp.json()["detail"] == "Memory service unavailable"
+
+    def test_create_memory_accepts_id_only_resolved_memory(self, client, mock_review_store):
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"id": "mem_1"}
+        ]):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Resolved memory", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["id"] == "mem_1"
+        assert data["content"] == ""
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            memory_id="mem_1",
+            content="Resolved memory",
+            metadata={"status": "approved"},
+            session_id="manual-create",
+            sync_state="manual",
+        )
 
     def test_create_memory_pending_event_returns_202(self, client, mock_review_store):
         """Async Mem0 add event wrappers are accepted, not treated as failures."""
