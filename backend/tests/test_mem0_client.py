@@ -559,6 +559,30 @@ class TestWaitForPendingEvents:
             assert len(result) == 1
             assert result[0]["id"] == "mem_1"
 
+    def test_resolves_via_get_events_with_event_id_key(self):
+        """Mem0 v3 get_events may key event wrappers by event_id, not id."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_events"])
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "event_id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "memory": {"id": "mem_1", "memory": "resolved"},
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+            assert len(result) == 1
+            assert result[0]["id"] == "mem_1"
+
     def test_ignores_pending_events(self):
         """Events with PENDING status are not resolved — polling continues."""
         from deerflow.sophia.mem0_client import wait_for_pending_events

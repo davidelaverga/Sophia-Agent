@@ -431,7 +431,7 @@ def wait_for_pending_events(
                     events_result = client.get_events(**page_kwargs)
                     events, cursor = _normalize_paginated_result(events_result)
                     for evt in events:
-                        evt_id = evt.get("id")
+                        evt_id = evt.get("event_id") or evt.get("id")
                         if evt_id not in pending:
                             continue
                         status = evt.get("status", evt.get("event_status", "")).upper()
