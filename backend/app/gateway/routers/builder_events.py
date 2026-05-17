@@ -49,6 +49,18 @@ class BuilderCompletionEvent(BaseModel):
 
     thread_id: str = Field(..., description="Parent companion thread id.")
     task_id: str = Field(..., description="Subagent / async task id.")
+    run_id: str | None = Field(
+        None,
+        description=(
+            "LangGraph run id of the terminating run. Phase 4I post-review "
+            "(codex P1): plumbed through so ``_on_builder_completion`` can "
+            "pass it to ``BuilderProgressRegistry.mark_done`` / ``mark_stopped`` "
+            "for run-id matching — a delayed terminal from a previous run "
+            "(interrupted via ``update_async_task``) must NOT close the new "
+            "run's placeholder. Optional for back-compat with any in-flight "
+            "payload from a pre-4I langgraph deploy."
+        ),
+    )
     trace_id: str | None = None
     agent_name: str | None = None
     status: str = Field(..., description="success | error | timeout | cancelled")

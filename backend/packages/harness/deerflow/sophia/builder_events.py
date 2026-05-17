@@ -317,6 +317,38 @@ def _resolve_runtime_thread_id(runtime: Any) -> str | None:
     return None
 
 
+def _resolve_runtime_run_id(runtime: Any) -> str | None:
+    """Find the running graph's run_id on a ``langgraph.runtime.Runtime``.
+
+    Phase 4I post-review (codex P1): symmetric counterpart to
+    ``_resolve_runtime_thread_id`` for the LangGraph ``run_id``.
+    ``runtime.execution_info.run_id`` is populated by
+    ``pregel/_algo.py`` on every task and is the canonical source.
+
+    Returns ``None`` if no run_id can be found — callers MUST treat
+    this as "skip the run_id check" (back-compat with the in-flight
+    payload path before this helper landed).
+    """
+    if runtime is None:
+        return None
+    info = getattr(runtime, "execution_info", None)
+    if info is not None:
+        candidate = getattr(info, "run_id", None)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    # No reliable fallback — run_id isn't in context or
+    # config.configurable in practice. The execution_info source is
+    # populated unconditionally in langgraph >= 1.0 so the fallback
+    # only matters for legacy test stubs (which can set
+    # ``runtime.context["run_id"]`` if they need to).
+    ctx = getattr(runtime, "context", None) or {}
+    if isinstance(ctx, dict):
+        candidate = ctx.get("run_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate
+    return None
+
+
 # --- Native deepagents-dispatch path -----------------------------------------
 #
 # Post Phase-1 migration the builder runs as a native LangGraph subagent
@@ -388,6 +420,15 @@ def build_completion_payload_from_artifact(
     # Read the builder's own thread_id via the canonical execution_info-first
     # pattern (see ``_resolve_runtime_thread_id``).
     builder_thread_id = _resolve_runtime_thread_id(runtime)
+    # Phase 4I post-review (codex P1): read the run_id too so the
+    # webhook payload carries it. ``_on_builder_completion`` on the
+    # gateway side uses it to validate against the registry entry's
+    # stored run_id — without this plumbing, a delayed terminal from
+    # an interrupted previous run (``update_async_task`` flow) would
+    # still close the NEW run's placeholder because the registry
+    # mark_done/mark_stopped checks would short-circuit on
+    # ``run_id=None``.
+    builder_run_id = _resolve_runtime_run_id(runtime)
     # State-first, config-fallback. State always reaches the running graph;
     # configurable propagation is langgraph-api-version-dependent.
     parent_thread_id = delegation_dict.get("parent_thread_id") or cfg.get("parent_thread_id")
@@ -455,6 +496,14 @@ def build_completion_payload_from_artifact(
         # ``task_id`` is the builder's own thread (also the task_id stored in
         # companion ``state["async_tasks"]``).
         "task_id": builder_thread_id,
+        # ``run_id`` is the LangGraph run identifier for the run that
+        # is terminating now. Phase 4I post-review (codex P1): used
+        # by the gateway-side ``BuilderProgressRegistry`` to drop
+        # stale-run terminals (interrupted runs from
+        # ``update_async_task``) so they don't close the new run's
+        # placeholder. ``None`` only on pre-4I in-flight payloads;
+        # registry treats None as "skip the check" (back-compat).
+        "run_id": builder_run_id,
         "trace_id": trace_id,
         "agent_name": "sophia_builder",
         "status": mapped_status,

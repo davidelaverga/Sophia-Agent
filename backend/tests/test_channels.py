@@ -2171,6 +2171,112 @@ class TestChannelService:
             f"_run_bot_call_on_telegram_loop; got {len(hop_calls)} hops"
         )
 
+    def test_on_builder_completion_plumbs_payload_run_id_to_mark_done(self):
+        """Codex P1 (post-Phase-4I review) end-to-end lock:
+        ``_on_builder_completion`` must read ``payload["run_id"]``
+        and pass it to ``registry.mark_done`` / ``mark_stopped`` so
+        the registry can drop stale terminals from interrupted runs.
+
+        Locks both halves of the plumbing:
+        1. The pydantic model accepts ``run_id`` (otherwise it's
+           dropped by Pydantic's default ``extra="ignore"``).
+        2. ``_on_builder_completion`` forwards ``payload["run_id"]``
+           to the registry's mark_done call (not ``None``).
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+        registry.register_task(
+            task_id="t-1",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-NEW",
+        )
+
+        recorded: list[dict] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            recorded.append({"task_id": task_id, "summary": summary, "run_id": run_id})
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-1",
+                "task_id": "t-1",
+                "run_id": "r-NEW",  # carried through from payload
+                "status": "success",
+                "summary": "All done.",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert len(recorded) == 1
+        assert recorded[0]["run_id"] == "r-NEW", (
+            f"_on_builder_completion must plumb payload['run_id'] to "
+            f"mark_done; got run_id={recorded[0]['run_id']!r}"
+        )
+
+    def test_on_builder_completion_plumbs_payload_run_id_to_mark_stopped(self):
+        """Same plumbing check on the failure path: payload run_id
+        must reach ``registry.mark_stopped``."""
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+
+        recorded: list[dict] = []
+
+        async def fake_stopped(*, task_id, reason, run_id):
+            recorded.append({"task_id": task_id, "reason": reason, "run_id": run_id})
+            return True
+
+        registry.mark_stopped = fake_stopped  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+        ch._build_retry_keyboard = lambda _t, **_k: None  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-1",
+                "task_id": "t-1",
+                "run_id": "r-OLD",
+                "status": "timeout",
+                "error_message": "took too long",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert len(recorded) == 1
+        assert recorded[0]["run_id"] == "r-OLD"
+
     def test_on_builder_completion_does_not_duplicate_summary_in_placeholder(self):
         """Phase 4I post-review polish: success-path completion sends
         the full summary in the document attachment caption.

@@ -27,6 +27,7 @@ def _reset_dedup_cache():
 def _make_runtime(
     *,
     builder_thread_id: str | None = "task-builder-1",
+    builder_run_id: str | None = "run-builder-1",
     parent_thread_id: str | None = "thread-companion-1",
     user_id: str = "alice",
     trace_id: str = "trace-1",
@@ -68,7 +69,10 @@ def _make_runtime(
         ei_thread_id = (
             builder_thread_id if builder_thread_id_in_execution_info else None
         )
-        execution_info = SimpleNamespace(thread_id=ei_thread_id)
+        execution_info = SimpleNamespace(
+            thread_id=ei_thread_id,
+            run_id=builder_run_id,
+        )
 
     runtime = SimpleNamespace(
         context=context,
@@ -143,7 +147,12 @@ def _phantom_artifact() -> dict:
 
 
 def test_build_completion_payload_from_artifact_success_shape():
-    runtime = _make_runtime(builder_thread_id="t-build", parent_thread_id="t-parent", user_id="alice")
+    runtime = _make_runtime(
+        builder_thread_id="t-build",
+        builder_run_id="r-1",
+        parent_thread_id="t-parent",
+        user_id="alice",
+    )
     state = _make_state(task_brief="Build a brief about X", task_type="document")
 
     with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/foo.md"):
@@ -155,6 +164,10 @@ def test_build_completion_payload_from_artifact_success_shape():
     assert payload["thread_id"] == "t-parent"
     # ``task_id`` = builder thread (also key in async_tasks dict).
     assert payload["task_id"] == "t-build"
+    # ``run_id`` = LangGraph run id of the terminating run. Phase 4I
+    # post-review (codex P1): plumbed through so the gateway's
+    # ``_on_builder_completion`` can validate run_id matching.
+    assert payload["run_id"] == "r-1"
     assert payload["agent_name"] == "sophia_builder"
     assert payload["status"] == "success"  # _map_status normalizes "completed" -> "success"
     assert payload["task_type"] == "document"
@@ -168,6 +181,74 @@ def test_build_completion_payload_from_artifact_success_shape():
     assert payload["user_id"] == "alice"
     assert payload["source"] == "builder_artifact_middleware"
     assert payload["trace_id"] == "trace-1"
+
+
+def test_build_completion_payload_run_id_is_none_when_runtime_missing_it():
+    """Pre-4I in-flight payloads: if runtime.execution_info doesn't
+    expose ``run_id`` (e.g. older test stubs / langgraph runtimes),
+    the payload carries ``run_id=None``. Downstream registry treats
+    None as "skip the check" so older deployments don't break.
+    """
+    runtime = _make_runtime(builder_thread_id="t-build", builder_run_id=None)
+    state = _make_state()
+    with patch.object(builder_events, "_signed_artifact_url", return_value=None):
+        payload = builder_events.build_completion_payload_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+    assert payload["run_id"] is None
+
+
+def test_resolve_runtime_run_id_reads_execution_info():
+    """``_resolve_runtime_run_id`` returns ``runtime.execution_info.run_id``
+    when present."""
+    runtime = _make_runtime(builder_run_id="r-42")
+    assert builder_events._resolve_runtime_run_id(runtime) == "r-42"
+
+
+def test_resolve_runtime_run_id_falls_back_to_context():
+    """If execution_info doesn't carry run_id, the context dict is
+    consulted as a fallback (legacy test stubs)."""
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="t", run_id=None),
+        context={"run_id": "r-from-context"},
+    )
+    assert builder_events._resolve_runtime_run_id(runtime) == "r-from-context"
+
+
+def test_resolve_runtime_run_id_returns_none_when_unavailable():
+    """Missing on both execution_info and context → None (callers
+    skip the run_id check)."""
+    runtime = SimpleNamespace(
+        execution_info=SimpleNamespace(thread_id="t", run_id=None),
+        context={},
+    )
+    assert builder_events._resolve_runtime_run_id(runtime) is None
+
+
+def test_builder_completion_event_pydantic_accepts_run_id():
+    """Wire-contract lock: the gateway's pydantic model MUST keep
+    ``run_id`` (not silently drop it). Without this, a webhook
+    arriving with ``run_id`` populated would have it stripped at
+    parse time and the registry's run-id guard would be effectively
+    disabled on the direct terminal-arrival path — exactly the gap
+    codex P1 flagged.
+    """
+    from app.gateway.routers.builder_events import BuilderCompletionEvent
+
+    parsed = BuilderCompletionEvent(
+        thread_id="t-parent",
+        task_id="t-build",
+        run_id="r-NEW",
+        status="success",
+    )
+    # The field round-trips through ``model_dump`` (what the router
+    # uses to forward the payload).
+    dumped = parsed.model_dump()
+    assert dumped["run_id"] == "r-NEW"
+    # Back-compat: run_id is optional. Pre-4I in-flight payloads
+    # without the field still parse.
+    legacy = BuilderCompletionEvent(thread_id="t-p", task_id="t-b", status="success")
+    assert legacy.run_id is None
 
 
 def test_phantom_success_coerces_to_error():
