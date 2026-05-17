@@ -452,7 +452,6 @@ def wait_for_pending_events(
             logger.warning(
                 "Mem0 poll for pending events failed for user %s", user_id, exc_info=True
             )
-            break
         if pending:
             time.sleep(poll_interval)
 

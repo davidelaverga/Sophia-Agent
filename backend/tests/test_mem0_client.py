@@ -783,6 +783,35 @@ class TestWaitForPendingEvents:
             assert mock_client.get_events.call_args_list[0].kwargs.get("cursor") is None
             assert mock_client.get_events.call_args_list[1].kwargs.get("cursor") == "cursor_2"
 
+    def test_get_events_transient_exception_retries_and_resolves(self):
+        """Transient get_events failures do not abort polling before timeout."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_events"])
+        mock_client.get_events.side_effect = [
+            Exception("temporary"),
+            {
+                "count": 1,
+                "results": [
+                    {
+                        "id": "evt_1",
+                        "status": "SUCCEEDED",
+                        "memory": {"id": "mem_1", "memory": "resolved"},
+                    }
+                ],
+            },
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0
+            )
+
+        assert len(result) == 1
+        assert result[0]["id"] == "mem_1"
+        assert mock_client.get_events.call_count == 2
+
     def test_per_id_get_event_polling(self):
         """When SDK exposes get_event(), poll each pending ID individually."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
@@ -804,6 +833,30 @@ class TestWaitForPendingEvents:
             assert len(result) == 1
             assert result[0]["id"] == "mem_1"
             mock_client.get_event.assert_called_once_with(event_id="evt_1")
+
+    def test_get_event_transient_exception_retries_and_resolves(self):
+        """Transient per-event lookup failures do not abort polling."""
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_event"])
+        mock_client.get_event.side_effect = [
+            Exception("temporary"),
+            {
+                "id": "evt_1",
+                "status": "SUCCEEDED",
+                "memory": {"id": "mem_1", "memory": "resolved"},
+            },
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0
+            )
+
+        assert len(result) == 1
+        assert result[0]["id"] == "mem_1"
+        assert mock_client.get_event.call_count == 2
 
     def test_get_event_ignores_non_terminal_events(self):
         """Per-ID polling skips PENDING events and keeps them in pending."""
