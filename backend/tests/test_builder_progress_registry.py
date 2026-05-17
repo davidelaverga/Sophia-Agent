@@ -197,8 +197,10 @@ async def test_mark_done_returns_false_for_unknown_task() -> None:
     finalized = await r.mark_done(task_id="t-missing", summary="ran fast")
     assert finalized is False
     # The pending terminal is now recorded for replay.
-    assert "t-missing" in r._pending_terminals
-    assert r._pending_terminals["t-missing"].summary == "ran fast"
+    # Phase 4I-followup (codex P1): keyed by (task_id, run_id_or_empty);
+    # no run_id passed → empty-string fallback key.
+    assert ("t-missing", "") in r._pending_terminals
+    assert r._pending_terminals[("t-missing", "")].summary == "ran fast"
 
 
 # ---- Codex P1 post-Phase-4H: run_id matching ------------------------------
@@ -362,7 +364,9 @@ async def test_register_task_replays_pending_terminal() -> None:
 
     # Terminal arrives FIRST (fast-build race).
     await r.mark_done(task_id="t-fast", summary="Built quickly.")
-    assert "t-fast" in r._pending_terminals
+    # Codex P1 post-Phase-4I: keyed by (task_id, run_id_or_empty);
+    # no run_id passed → empty-string slot.
+    assert ("t-fast", "") in r._pending_terminals
     assert captured == []  # no edit yet — no anchor to edit
 
     # Now placeholder lands and registers.
@@ -375,7 +379,10 @@ async def test_register_task_replays_pending_terminal() -> None:
     )
 
     # Pending terminal is consumed (removed from cache) and replay is scheduled.
-    assert "t-fast" not in r._pending_terminals
+    # register_task tried (t-fast, "r-fast") first, missed, fell back
+    # to (t-fast, "") and popped it.
+    assert ("t-fast", "") not in r._pending_terminals
+    assert ("t-fast", "r-fast") not in r._pending_terminals
 
     # Yield to the event loop so the scheduled replay can run.
     await asyncio.sleep(0.05)
@@ -389,13 +396,16 @@ async def test_register_task_replays_pending_terminal() -> None:
 
 @pytest.mark.anyio
 async def test_mark_done_does_not_overwrite_pending_terminal() -> None:
-    """If ``mark_done`` is called twice before registration (rare —
-    terminal webhook is dedup'd at langgraph but defensive), the
-    FIRST call's summary is preserved; the SECOND is a no-op."""
+    """If ``mark_done`` is called twice before registration with the
+    SAME (task_id, run_id) pair (rare — terminal webhook is dedup'd
+    at langgraph but defensive), the FIRST call's summary is
+    preserved; the SECOND is a no-op. (Different run_ids now coexist
+    under separate composite keys — see codex-P1 race test below.)
+    """
     r = BuilderProgressRegistry()
     await r.mark_done(task_id="t-1", summary="first summary")
     await r.mark_done(task_id="t-1", summary="second summary")
-    assert r._pending_terminals["t-1"].summary == "first summary"
+    assert r._pending_terminals[("t-1", "")].summary == "first summary"
 
 
 def test_pending_terminals_evict_on_ttl() -> None:
@@ -407,11 +417,11 @@ def test_pending_terminals_evict_on_ttl() -> None:
     r = BuilderProgressRegistry()
     # Manually insert an "old" pending entry (bypass the public API
     # so we can backdate the timestamp).
-    r._pending_terminals["t-old"] = registry_mod._PendingTerminal(
+    r._pending_terminals[("t-old", "")] = registry_mod._PendingTerminal(
         timestamp=time_module.time() - 1000.0,  # >> 300s TTL
         summary="stale",
     )
-    r._pending_terminals["t-fresh"] = registry_mod._PendingTerminal(
+    r._pending_terminals[("t-fresh", "")] = registry_mod._PendingTerminal(
         timestamp=time_module.time(),
         summary="fresh",
     )
@@ -419,8 +429,8 @@ def test_pending_terminals_evict_on_ttl() -> None:
     # without coroutine context.
     with r._lock:
         r._trim_pending_terminals_locked()
-    assert "t-old" not in r._pending_terminals
-    assert "t-fresh" in r._pending_terminals
+    assert ("t-old", "") not in r._pending_terminals
+    assert ("t-fresh", "") in r._pending_terminals
 
 
 @pytest.mark.anyio
@@ -532,7 +542,8 @@ async def test_mark_stopped_records_pending_when_no_entry() -> None:
     r = BuilderProgressRegistry()
     finalized = await r.mark_stopped(task_id="t-fast-fail", reason="timed out")
     assert finalized is False
-    pending = r._pending_terminals["t-fast-fail"]
+    # Codex P1 post-Phase-4I: keyed by (task_id, run_id_or_empty).
+    pending = r._pending_terminals[("t-fast-fail", "")]
     assert pending.kind == "stopped"
     assert pending.reason == "timed out"
 
@@ -588,8 +599,9 @@ async def test_pending_replay_drops_when_run_id_mismatches() -> None:
 
     # Old run's terminal lands BEFORE its own registration (early race).
     await r.mark_done(task_id="t-1", summary="old run done", run_id="r-OLD")
-    assert "t-1" in r._pending_terminals
-    assert r._pending_terminals["t-1"].run_id == "r-OLD"
+    # Codex P1 post-Phase-4I: keyed by (task_id, run_id_or_empty).
+    assert ("t-1", "r-OLD") in r._pending_terminals
+    assert r._pending_terminals[("t-1", "r-OLD")].run_id == "r-OLD"
 
     # Now a NEW run for the same task_id registers (e.g. the user
     # already fired update_async_task in between).
@@ -598,13 +610,130 @@ async def test_pending_replay_drops_when_run_id_mismatches() -> None:
     )
     await asyncio.sleep(0.05)
 
-    # Pending was consumed by register_task but replay was DROPPED
-    # because the run_id didn't match — so no edit fires and the
-    # new placeholder stays active.
+    # Register_task swept the stale (t-1, r-OLD) pending entry and
+    # didn't find a (t-1, r-NEW) one. No replay fires. The new
+    # placeholder stays active for its own terminal to arrive.
     assert captured == [], (
         "stale-run pending replay must NOT push an edit to the new placeholder"
     )
     assert r.has_task("t-1") is True
+    # And the old pending was cleaned up (codex P1 stale-sweep).
+    assert ("t-1", "r-OLD") not in r._pending_terminals
+
+
+@pytest.mark.anyio
+async def test_pending_replay_picks_newer_run_when_both_present() -> None:
+    """Codex P1 (post-Phase-4I review) primary lock: in the
+    ``update_async_task`` flow the SAME task_id can produce
+    early-arrival terminals from TWO different run_ids before
+    registration. The old key-by-task_id behaviour silently
+    dropped the second one (``if task_key not in pending`` skip),
+    and then registration popped the stale entry and rejected
+    it on run_id mismatch — placeholder stuck forever.
+
+    With composite ``(task_id, run_id)`` keys, both terminals
+    coexist. Registration picks the one matching the entry's
+    run_id and replays it; the stale entry is cleaned up.
+    """
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+
+    # 1. Old run's terminal lands first.
+    await r.mark_done(task_id="t-1", summary="old summary", run_id="r-OLD")
+    # 2. update_async_task interrupts the old run; new run starts and
+    #    ALSO terminates early.
+    await r.mark_done(task_id="t-1", summary="NEW summary", run_id="r-NEW")
+    # Both pending entries coexist.
+    assert ("t-1", "r-OLD") in r._pending_terminals
+    assert ("t-1", "r-NEW") in r._pending_terminals
+
+    # 3. Placeholder for the NEW run lands.
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+    await asyncio.sleep(0.05)
+
+    # Replay fired for r-NEW (correct), and the stale r-OLD pending
+    # was cleaned up by the stale-sweep.
+    assert captured, "expected replay to push an edit for r-NEW"
+    final = captured[-1]
+    assert "[ Done ]" in final
+    assert "NEW summary" in final
+    assert "old summary" not in final  # OLD entry was discarded
+    assert r.has_task("t-1") is False  # mark_done unregisters
+    # And both pending entries are gone (matched one consumed, stale swept).
+    assert ("t-1", "r-OLD") not in r._pending_terminals
+    assert ("t-1", "r-NEW") not in r._pending_terminals
+
+
+@pytest.mark.anyio
+async def test_pending_replay_picks_newer_when_arrival_order_inverted() -> None:
+    """The race-direction symmetry: the NEW run's terminal arrives
+    BEFORE the OLD run's terminal (still both before registration).
+    The composite key still finds the NEW entry on lookup; the
+    OLD one is swept as stale. Without the composite key, this
+    would have worked correctly (the old code kept the first one,
+    which was r-NEW), but it's worth locking — the composite key
+    handles both orderings the same way.
+    """
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+
+    # Inverted order: NEW arrives first, OLD arrives second.
+    await r.mark_done(task_id="t-1", summary="NEW summary", run_id="r-NEW")
+    await r.mark_done(task_id="t-1", summary="old summary", run_id="r-OLD")
+
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+    await asyncio.sleep(0.05)
+
+    assert captured
+    assert "NEW summary" in captured[-1]
+    assert "old summary" not in captured[-1]
+
+
+@pytest.mark.anyio
+async def test_pending_replay_falls_back_to_empty_runid_legacy_pending() -> None:
+    """Back-compat: pre-4I-payload-plumb terminals that arrived
+    without run_id stored under ``(task_id, "")``. Registration
+    for a run WITH run_id first looks up ``(task_id, run_id)``,
+    misses, then falls back to ``(task_id, "")`` and replays. The
+    pending's empty run_id passes the replay's match check (it's
+    falsy so the guard short-circuits to "match").
+    """
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+
+    # Legacy mark_done without run_id (pre-4I payload).
+    await r.mark_done(task_id="t-1", summary="legacy summary")
+    assert ("t-1", "") in r._pending_terminals
+
+    # Registration for a current run with run_id.
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+    await asyncio.sleep(0.05)
+
+    # Replay fires (fallback to empty-run_id pending).
+    assert captured
+    assert "legacy summary" in captured[-1]
+    assert "[ Done ]" in captured[-1]
 
 
 def test_pending_terminals_evict_on_cap() -> None:
@@ -617,9 +746,10 @@ def test_pending_terminals_evict_on_cap() -> None:
     r = BuilderProgressRegistry()
     # Fill past the cap with FRESH timestamps so the TTL pass
     # doesn't drop them — we want to exercise the cap pass only.
+    # Codex P1 post-Phase-4I: keyed by (task_id, run_id_or_empty).
     now = time_module.time()
     for i in range(registry_mod._PENDING_TERMINAL_CAP + 50):
-        r._pending_terminals[f"t-{i:04d}"] = registry_mod._PendingTerminal(
+        r._pending_terminals[(f"t-{i:04d}", "")] = registry_mod._PendingTerminal(
             timestamp=now, summary=str(i)
         )
     with r._lock:
@@ -627,8 +757,8 @@ def test_pending_terminals_evict_on_cap() -> None:
     assert len(r._pending_terminals) <= registry_mod._PENDING_TERMINAL_CAP
     # Oldest entries evicted; newest preserved.
     last_idx = registry_mod._PENDING_TERMINAL_CAP + 49
-    assert f"t-{last_idx:04d}" in r._pending_terminals
-    assert "t-0000" not in r._pending_terminals
+    assert (f"t-{last_idx:04d}", "") in r._pending_terminals
+    assert ("t-0000", "") not in r._pending_terminals
 
 
 @pytest.mark.anyio

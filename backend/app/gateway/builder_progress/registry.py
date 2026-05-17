@@ -130,10 +130,23 @@ class BuilderProgressRegistry:
         self._entries: dict[str, BuilderProgressEntry] = {}
         self._callbacks: dict[str, EditCallback] = {}
         # Codex P2 (post-Phase-4H review): terminal events that
-        # arrive before ``register_task`` are recorded here keyed by
-        # task_id. Replayed on registration. Bounded + TTL'd to
-        # prevent leaks when a placeholder never lands.
-        self._pending_terminals: dict[str, _PendingTerminal] = {}
+        # arrive before ``register_task`` are recorded here for
+        # replay on registration. Bounded + TTL'd to prevent leaks
+        # when a placeholder never lands.
+        #
+        # Codex P1 (post-Phase-4I review): keyed by
+        # ``(task_id, run_id_or_empty)`` rather than just ``task_id``.
+        # The ``update_async_task`` flow can produce TWO early
+        # terminals for the same task_id from different run_ids
+        # before registration; keying by task_id alone would silently
+        # drop the second one (the "if task_key not in pending"
+        # short-circuit), and registration would then pop the stale
+        # one and reject it on run_id mismatch — leaving the
+        # placeholder stuck. Composite key lets both coexist;
+        # registration picks the one matching the entry's run_id.
+        # Legacy/back-compat terminals without a run_id store under
+        # ``(task_id, "")``.
+        self._pending_terminals: dict[tuple[str, str], _PendingTerminal] = {}
         # Codex P2 (post-Phase-4I review): strong-ref set for
         # ``_schedule_pending_replay``'s fire-and-forget tasks.
         # asyncio only weakly references tasks created via
@@ -205,14 +218,33 @@ class BuilderProgressRegistry:
         stuck on "Working on it…" indefinitely.
         """
         task_key = str(task_id)
+        run_id_str = str(run_id)
         with self._lock:
             self._entries[task_key] = BuilderProgressEntry(
                 chat_id=chat_id,
                 message_id=message_id,
                 channel_name=channel_name,
-                run_id=str(run_id),
+                run_id=run_id_str,
             )
-            pending = self._pending_terminals.pop(task_key, None)
+            # Codex P1 (post-Phase-4I review): pending terminals are
+            # now keyed by ``(task_id, run_id_or_empty)``. Look up the
+            # matching one for THIS run first; fall back to a legacy
+            # entry stored under ``(task_id, "")`` for pre-4I
+            # terminals that didn't carry run_id. Clean up any other
+            # pending entries for the SAME task_id (different run_ids
+            # — from previous interrupted runs) since they can't
+            # match this entry and would just leak until the TTL
+            # eviction fires.
+            pending = self._pending_terminals.pop((task_key, run_id_str), None)
+            if pending is None:
+                pending = self._pending_terminals.pop((task_key, ""), None)
+            # Sweep stale same-task pending entries (from interrupted
+            # previous runs whose terminals couldn't be matched).
+            stale_keys = [
+                k for k in self._pending_terminals if k[0] == task_key
+            ]
+            for k in stale_keys:
+                self._pending_terminals.pop(k, None)
             self._trim_locked()
             self._trim_pending_terminals_locked()
         logger.info(
@@ -501,14 +533,24 @@ class BuilderProgressRegistry:
             entry = self._entries.get(task_key)
             callback = self._callbacks.get(entry.channel_name) if entry else None
         if entry is None:
+            # Codex P1 (post-Phase-4I review): key the pending entry
+            # by ``(task_id, run_id_or_empty)`` so multiple early
+            # terminals from different run_ids (the
+            # ``update_async_task`` race) coexist. The "if key not
+            # in pending" short-circuit now only dedupes terminals
+            # for the SAME (task_id, run_id) pair — which the
+            # langgraph side already dedups via
+            # ``_emitted_task_ids``, so this is belt-and-braces.
+            pending_run_id = str(run_id) if run_id else ""
+            pending_key: tuple[str, str] = (task_key, pending_run_id)
             with self._lock:
-                if task_key not in self._pending_terminals:
-                    self._pending_terminals[task_key] = _PendingTerminal(
+                if pending_key not in self._pending_terminals:
+                    self._pending_terminals[pending_key] = _PendingTerminal(
                         timestamp=time.time(),
                         kind=kind,
                         summary=summary,
                         reason=reason,
-                        run_id=str(run_id) if run_id else "",
+                        run_id=pending_run_id,
                     )
                     self._trim_pending_terminals_locked()
             logger.info(
