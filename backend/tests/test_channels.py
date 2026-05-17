@@ -1994,385 +1994,89 @@ class TestChannelService:
         assert service.manager._channel_sessions["telegram"]["assistant_id"] == "mobile_agent"
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
 
-    def test_telegram_inherits_service_langgraph_url(self):
-        """Codex P2 regression: ``channels.langgraph_url`` must be threaded
-        into the TelegramChannel constructor so the BuilderProgressSubscriber
-        subscribes against the same LangGraph endpoint the manager uses to
-        dispatch. Otherwise the subscriber falls back to ``LANGGRAPH_URL``
-        env / ``http://localhost:2024`` and may hit a different service.
+    def test_register_progress_entry_calls_registry(self):
+        """Phase 4H (webhook relay): when a builder_progress placeholder is
+        sent, the channel registers ``(task_id, chat_id, message_id, "telegram")``
+        with the gateway-side ``BuilderProgressRegistry`` so the
+        ``/internal/builder-progress`` endpoint can later find the entry.
+        Replaces the deleted ``_spawn_progress_subscriber`` flow.
         """
-        from app.channels.service import ChannelService
         from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
 
-        service = ChannelService(
-            channels_config={
-                "langgraph_url": "http://internal-langgraph:2024",
-                "telegram": {"enabled": False, "bot_token": "x"},
-            }
-        )
-        # Force a real TelegramChannel instantiation through _start_channel
-        # without actually starting the bot (which needs network/token).
-        # We patch ``start`` to a no-op coroutine so the channel just lands
-        # in the service registry and we can inspect its _langgraph_url.
-        async def go():
-            original_start = TelegramChannel.start
-
-            async def _noop_start(self):  # type: ignore[no-untyped-def]
-                self._running = True
-
-            try:
-                TelegramChannel.start = _noop_start  # type: ignore[assignment]
-                # Override enabled=True for this one test
-                service._config["telegram"]["enabled"] = True
-                await service._start_channel("telegram", service._config["telegram"])
-            finally:
-                TelegramChannel.start = original_start  # type: ignore[assignment]
-
-            channel = service._channels.get("telegram")
-            assert channel is not None
-            assert channel._langgraph_url == "http://internal-langgraph:2024"
-
-        _run(go())
-
-    def test_spawn_progress_subscriber_routes_through_tg_loop(self):
-        """Codex P1 (post-Phase-4F): ``send`` is invoked by the bus
-        subscriber on ``_main_loop``, but PTB bot calls are loop-affine
-        to the polling thread's ``_tg_loop`` (learning #14 in the v3
-        migration plan). The subscriber's ``bot.edit_message_text``
-        calls must run on ``_tg_loop`` or they raise "bound to a
-        different event loop" and the placeholder never updates.
-
-        This test verifies that when ``_spawn_progress_subscriber`` is
-        called from a loop different from ``_tg_loop``, it hops via
-        ``asyncio.run_coroutine_threadsafe`` instead of using
-        ``asyncio.create_task`` on the wrong loop.
-        """
-        import concurrent.futures
-        import threading
-
-        import app.channels.telegram_progress_subscriber as subscriber_module
-        from app.channels.telegram import TelegramChannel
-
+        reset_for_tests()
         ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
-
-        # Build a real, running asyncio loop on a background thread to
-        # stand in for ``_tg_loop``. The subscriber's coroutine is never
-        # awaited to completion — we cancel immediately after spawn.
-        tg_loop = asyncio.new_event_loop()
-        tg_thread_ready = threading.Event()
-
-        def _run_tg_loop():
-            asyncio.set_event_loop(tg_loop)
-            tg_thread_ready.set()
-            tg_loop.run_forever()
-
-        tg_thread = threading.Thread(target=_run_tg_loop, daemon=True)
-        tg_thread.start()
-        tg_thread_ready.wait(timeout=2.0)
-        ch._tg_loop = tg_loop
-
-        # Stub subscriber that records which loop it runs on.
-        seen_loop: dict[str, object] = {}
-
-        class _RecordingSubscriber:
-            def __init__(self, **_kwargs):  # type: ignore[no-untyped-def]
-                self._task_id = _kwargs.get("task_id")
-
-            async def run(self) -> None:
-                try:
-                    seen_loop["loop"] = asyncio.get_running_loop()
-                except RuntimeError:
-                    seen_loop["loop"] = None
-
-        original = subscriber_module.BuilderProgressSubscriber
-        subscriber_module.BuilderProgressSubscriber = _RecordingSubscriber  # type: ignore[assignment]
-        try:
-            async def go():
-                # Sanity: the calling loop is NOT _tg_loop.
-                caller_loop = asyncio.get_running_loop()
-                assert caller_loop is not tg_loop
-
-                ch._spawn_progress_subscriber(
-                    bot=MagicMock(),
-                    chat_id=1,
-                    message_id=2,
-                    meta={"task_id": "t-cross-loop", "run_id": "r"},
-                )
-
-                # The subscriber should be tracked as a
-                # ``concurrent.futures.Future`` (cross-loop hop), NOT a
-                # plain ``asyncio.Task`` bound to the caller's loop.
-                handles = list(ch._progress_subscriber_tasks)
-                assert len(handles) == 1
-                handle = handles[0]
-                assert isinstance(handle, concurrent.futures.Future), (
-                    f"cross-loop spawn must use run_coroutine_threadsafe "
-                    f"(returns concurrent.futures.Future), got: {type(handle).__name__}"
-                )
-
-                # Wait briefly for the subscriber to enter run() so it
-                # records the loop it's actually on.
-                deadline = asyncio.get_event_loop().time() + 1.0
-                while "loop" not in seen_loop and asyncio.get_event_loop().time() < deadline:
-                    await asyncio.sleep(0.02)
-                assert seen_loop.get("loop") is tg_loop, (
-                    f"subscriber.run() must execute on _tg_loop; "
-                    f"got: {seen_loop.get('loop')!r}"
-                )
-
-            _run(go())
-        finally:
-            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
-            tg_loop.call_soon_threadsafe(tg_loop.stop)
-            tg_thread.join(timeout=2.0)
-            tg_loop.close()
-
-    def test_spawn_progress_subscriber_passes_configured_langgraph_url(self):
-        """Codex P2 regression at the spawn site: the URL TelegramChannel
-        captures from config MUST flow through to BuilderProgressSubscriber's
-        constructor. Asserts the kwarg shape directly rather than the
-        end-to-end network behaviour.
-
-        Phase 4F (codex P1 post-review): the spawn now routes through
-        ``_tg_loop``. This test pretends the test's own loop IS
-        ``_tg_loop`` so the spawn takes the "same loop" branch and
-        creates a plain asyncio.Task that's easy to cancel cleanly.
-        """
-        import app.channels.telegram_progress_subscriber as subscriber_module
-        from app.channels.telegram import TelegramChannel
-
-        ch = TelegramChannel(
-            bus=MessageBus(),
-            config={"bot_token": "x", "langgraph_url": "http://configured:2024"},
+        ch._register_progress_entry(
+            chat_id=42,
+            message_id=99,
+            meta={"task_id": "t-A", "run_id": "r-1"},
         )
-        captured: dict[str, object] = {}
+        registry = get_progress_registry()
+        assert registry.has_task("t-A")
 
-        class _FakeSubscriber:
-            def __init__(self, **kwargs: object) -> None:
-                captured.update(kwargs)
-                self._task_id = kwargs.get("task_id")
-
-            async def run(self) -> None:
-                # Park forever — the test cancels immediately after spawn.
-                await asyncio.sleep(60)
-
-        original = subscriber_module.BuilderProgressSubscriber
-        subscriber_module.BuilderProgressSubscriber = _FakeSubscriber  # type: ignore[assignment]
-        try:
-            async def go():
-                # Pretend the test loop IS _tg_loop so the spawn path
-                # takes the "same loop" branch (asyncio.create_task).
-                ch._tg_loop = asyncio.get_running_loop()
-                ch._spawn_progress_subscriber(
-                    bot=MagicMock(),
-                    chat_id=123,
-                    message_id=456,
-                    meta={"task_id": "t-1", "run_id": "r-1"},
-                )
-                # Drain the fire-and-forget task tracker.
-                for task in list(ch._progress_subscriber_tasks):
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-
-            _run(go())
-        finally:
-            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
-
-        assert captured.get("langgraph_url") == "http://configured:2024"
-        assert captured.get("task_id") == "t-1"
-        assert captured.get("run_id") == "r-1"
-
-    def test_spawn_progress_subscriber_raises_when_tg_loop_unavailable(self):
-        """Codex P2 (post-Phase-4G review): when ``_tg_loop`` is None or
-        not running, ``_spawn_progress_subscriber`` MUST raise
-        ``ProgressSubscriberSpawnError`` instead of silently logging
-        and returning. The previous silent-skip let ``send()`` complete
-        successfully, the bus's strict-publish returned True, the
-        manager marked dedup, AND no subscriber attached — progress
-        froze for the whole run with no retry path.
-
-        Raising propagates the failure through the bus listener (which
-        re-raises after the codex fifth-pass fix) into
-        ``publish_outbound_strict``, which flips ``delivered=False`` so
-        the manager skips the dedup mark and the next turn retries.
-        """
-        import app.channels.telegram_progress_subscriber as subscriber_module
-        from app.channels.telegram import ProgressSubscriberSpawnError, TelegramChannel
-
-        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
-        ch._tg_loop = None  # explicit — already the default
-
-        construction_attempted = {"yes": False}
-
-        class _FakeSubscriber:
-            def __init__(self, **_kw):  # type: ignore[no-untyped-def]
-                construction_attempted["yes"] = True
-
-            async def run(self) -> None:  # pragma: no cover
-                return None
-
-        original = subscriber_module.BuilderProgressSubscriber
-        subscriber_module.BuilderProgressSubscriber = _FakeSubscriber  # type: ignore[assignment]
-        try:
-            with pytest.raises(ProgressSubscriberSpawnError, match="_tg_loop unavailable"):
-                ch._spawn_progress_subscriber(
-                    bot=MagicMock(),
-                    chat_id=1,
-                    message_id=2,
-                    meta={"task_id": "t-noloop", "run_id": "r"},
-                )
-        finally:
-            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
-
-        # Construction IS attempted before the loop check — the failure
-        # happens at the scheduling step. No subscriber tracked.
-        assert construction_attempted["yes"] is True
-        assert ch._progress_subscriber_tasks == set()
-
-    def test_spawn_progress_subscriber_raises_on_missing_meta(self):
-        """Codex P2: empty/absent task_id or run_id is a programming
-        error (well-formed metadata always includes both), but it MUST
-        still propagate as a spawn failure rather than silently
-        skipping. Same retry-path reasoning as above."""
+    def test_register_progress_entry_raises_on_missing_meta(self):
+        """Empty/absent task_id or run_id is a programming error but
+        MUST still propagate (as ``ProgressSubscriberSpawnError``) so
+        the manager's strict-publish skips the dedup mark and the next
+        turn retries."""
         from app.channels.telegram import ProgressSubscriberSpawnError, TelegramChannel
 
         ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
 
         with pytest.raises(ProgressSubscriberSpawnError, match="missing task_id or run_id"):
-            ch._spawn_progress_subscriber(
-                bot=MagicMock(),
+            ch._register_progress_entry(
                 chat_id=1,
                 message_id=2,
-                meta={"task_id": "", "run_id": "r"},  # empty task_id
+                meta={"task_id": "", "run_id": "r"},
             )
 
         with pytest.raises(ProgressSubscriberSpawnError, match="missing task_id or run_id"):
-            ch._spawn_progress_subscriber(
-                bot=MagicMock(),
+            ch._register_progress_entry(
                 chat_id=1,
                 message_id=2,
-                meta={"task_id": "t", "run_id": ""},  # empty run_id
+                meta={"task_id": "t", "run_id": ""},
             )
 
-    def test_spawn_progress_subscriber_raises_on_construction_failure(self):
-        """Codex P2: if ``BuilderProgressSubscriber.__init__`` raises
-        (import error, bad kwargs, etc.) the spawn must NOT silently
-        return — it must propagate as ``ProgressSubscriberSpawnError``
-        so the strict-publish path can retry next turn."""
-        import app.channels.telegram_progress_subscriber as subscriber_module
+    def test_send_propagates_register_failure_after_successful_telegram_send(self):
+        """End-to-end regression: when bot.send_message succeeds but the
+        registry registration step raises (e.g. malformed meta), the
+        exception MUST propagate out of ``send()`` so the bus's
+        ``_on_outbound`` re-raises and ``publish_outbound_strict``
+        returns False. AND the send must NOT be retried (the message
+        already landed)."""
         from app.channels.telegram import ProgressSubscriberSpawnError, TelegramChannel
 
         ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
-
-        class _CrashyConstructor:
-            def __init__(self, **_kw):  # type: ignore[no-untyped-def]
-                raise RuntimeError("simulated import / init bug")
-
-        original = subscriber_module.BuilderProgressSubscriber
-        subscriber_module.BuilderProgressSubscriber = _CrashyConstructor  # type: ignore[assignment]
-        try:
-            with pytest.raises(ProgressSubscriberSpawnError, match="subscriber construction failed"):
-                ch._spawn_progress_subscriber(
-                    bot=MagicMock(),
-                    chat_id=1,
-                    message_id=2,
-                    meta={"task_id": "t-crashy", "run_id": "r"},
-                )
-        finally:
-            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
-
-    def test_send_propagates_spawn_failure_after_successful_telegram_send(self):
-        """End-to-end regression: when ``send()`` succeeds at the
-        Telegram API layer but the subsequent ``_spawn_progress_subscriber``
-        fails (e.g. _tg_loop unavailable), the exception MUST propagate
-        out of ``send()`` so the bus's ``_on_outbound`` re-raises and
-        ``publish_outbound_strict`` returns False. AND the send must
-        NOT be retried (the message already landed in Telegram —
-        retrying would double-send)."""
-        import app.channels.telegram_progress_subscriber as subscriber_module
-        from app.channels.telegram import ProgressSubscriberSpawnError, TelegramChannel
-
-        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
-        ch._tg_loop = None  # spawn will fail
 
         send_call_count = {"n": 0}
-        sent_id = 12345
 
         async def _capture_send(**_kw):
             send_call_count["n"] += 1
-            return SimpleNamespace(message_id=sent_id)
+            return SimpleNamespace(message_id=12345)
 
         bot_mock = MagicMock()
         bot_mock.send_message = _capture_send
-        # Make the application non-None so send proceeds past the early-out.
         ch._application = SimpleNamespace(bot=bot_mock)
 
-        # Stub the subscriber constructor; the _tg_loop check fires
-        # AFTER construction so we want construction to succeed.
-        original = subscriber_module.BuilderProgressSubscriber
-        subscriber_module.BuilderProgressSubscriber = lambda **_kw: SimpleNamespace(  # type: ignore[assignment]
-            run=lambda: None
-        )
-        try:
-            msg = OutboundMessage(
-                channel_name="telegram",
-                chat_id="1",
-                thread_id="th",
-                text="Working on it...",
-                metadata={"builder_progress": {"task_id": "t-1", "run_id": "r-1"}},
-            )
-            async def go():
-                with pytest.raises(ProgressSubscriberSpawnError, match="_tg_loop unavailable"):
-                    await ch.send(msg)
-            _run(go())
-        finally:
-            subscriber_module.BuilderProgressSubscriber = original  # type: ignore[assignment]
-
-        # Crucially: bot.send_message was called exactly ONCE. The
-        # spawn failure must not trigger a retry of the send.
-        assert send_call_count["n"] == 1, (
-            f"send was retried {send_call_count['n']} times — spawn failures "
-            f"must NOT trigger send retries (message already landed)"
-        )
-
-    def test_telegram_per_channel_langgraph_url_overrides_service_default(self):
-        """If a channel sets its own ``langgraph_url`` in config, that wins
-        over the service-level default. Useful for dev/staging where the
-        manager and channel may target different services."""
-        from app.channels.service import ChannelService
-        from app.channels.telegram import TelegramChannel
-
-        service = ChannelService(
-            channels_config={
-                "langgraph_url": "http://service-default:2024",
-                "telegram": {
-                    "enabled": False,
-                    "bot_token": "x",
-                    "langgraph_url": "http://channel-override:2024",
-                },
-            }
+        msg = OutboundMessage(
+            channel_name="telegram",
+            chat_id="1",
+            thread_id="th",
+            text="Working on it...",
+            # Empty task_id triggers ProgressSubscriberSpawnError in _register_progress_entry.
+            metadata={"builder_progress": {"task_id": "", "run_id": "r-1"}},
         )
 
         async def go():
-            original_start = TelegramChannel.start
-
-            async def _noop_start(self):  # type: ignore[no-untyped-def]
-                self._running = True
-
-            try:
-                TelegramChannel.start = _noop_start  # type: ignore[assignment]
-                service._config["telegram"]["enabled"] = True
-                await service._start_channel("telegram", service._config["telegram"])
-            finally:
-                TelegramChannel.start = original_start  # type: ignore[assignment]
-
-            channel = service._channels["telegram"]
-            assert channel._langgraph_url == "http://channel-override:2024"
-
+            with pytest.raises(ProgressSubscriberSpawnError, match="missing task_id or run_id"):
+                await ch.send(msg)
         _run(go())
+
+        assert send_call_count["n"] == 1, (
+            f"send was retried {send_call_count['n']} times — registration "
+            f"failures must NOT trigger send retries (message already landed)"
+        )
 
 
 # ---------------------------------------------------------------------------

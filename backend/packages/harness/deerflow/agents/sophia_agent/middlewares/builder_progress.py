@@ -1,54 +1,46 @@
-"""BuilderProgressMiddleware — emit phase events into the LangGraph stream.
+"""BuilderProgressMiddleware — POST phase events to the gateway via webhook.
 
-Phase 4G of the v3 streaming migration. Restores the live-progress UX
-that PR #120 had ("drafting", "researching", "writing file", etc.
-inside the Telegram placeholder). Two parts to that UX:
+Phase 4H of the v3 streaming migration. Replaces the
+``get_stream_writer`` approach (Phase 4G Stage 2, which depended on
+``runs.join_stream`` HTTP delivery that doesn't work cross-process
+against ``langgraph_runtime_inmem``) with a direct HTTP POST from
+this middleware to the gateway's ``/internal/builder-progress``
+endpoint.
 
-1. **Subscriber side** — ``BuilderProgressSubscriber`` opens
-   ``client.runs.join_stream(thread_id, run_id, stream_mode=[...])``,
-   iterates ``StreamPart`` chunks, and feeds them to ``ProgressRenderer``
-   which produces ``[ Researching ]`` / ``[ Drafting ]`` headers and
-   emoji-prefixed activity lines for ``edit_message_text``.
+The endpoint dispatches each event through a per-task
+``ProgressRenderer`` (gateway-side ``BuilderProgressRegistry``) and
+the channel's edit callback updates the Telegram placeholder via
+``bot.edit_message_text``. See:
 
-2. **Emitter side** — THIS middleware. Calls
-   ``langgraph.config.get_stream_writer()`` at builder lifecycle hooks
-   and pushes ``{"name": "phase", "phase": "<event>"}`` payloads into
-   the stream. The subscriber catches them as ``custom``-mode events
-   and the renderer's ``_on_custom`` handler updates the phase header.
+- ``backend/app/gateway/builder_progress/registry.py`` — the registry.
+- ``backend/app/gateway/routers/builder_events.py::receive_builder_progress``
+  — the webhook endpoint.
+- ``backend/app/channels/telegram.py::_register_progress_entry`` and
+  ``_edit_progress_placeholder`` — the channel wiring.
 
-The native langgraph runtime ALSO emits ``messages-tuple`` (per-token
-deltas) and ``updates`` (state deltas including tool_calls) — both are
-subscribed to by the consumer. But ``langgraph_runtime_inmem`` (the
-``langgraph dev`` runtime production runs) may not durably replay
-those modes for late-joining HTTP subscribers. This middleware's
-``custom`` events are emitted DURING the run while the subscriber is
-already connected, so no replay-buffer reliance.
+Why webhook instead of ``get_stream_writer``: the production
+LangGraph service runs ``langgraph dev`` (in-mem runtime). Events
+written via ``get_stream_writer`` go into that run's stream queue,
+but cross-process HTTP ``runs.join_stream`` consumers don't receive
+them reliably. We confirmed this in production smoke tests
+2026-05-16/17 with chunks=0 for the full 120 s subscriber lifetime.
 
-The existing ``deerflow.sophia.builder_progress.ProgressEmitter``
-(added 2026-05-04 in PR-#120 commit ``36c32ac3``) classifies phase
-events with throttling + trace-file persistence. We reuse its event-
-type taxonomy (``ProgressEventType.STARTED`` /
-``DRAFTING`` / ``COMPLETED`` / ``ERROR``) but route output to
-``get_stream_writer`` instead of (or in addition to) the JSONL trace.
-
-Position in chain: between ``BuilderResearchPolicyMiddleware`` and
-``TodoMiddleware``. After research-policy because we want to emit
-``started`` after the brief has been built (so the user sees the
-placeholder transition once the actual work begins), before the artifact
-verifier so we can emit ``finalizing`` as soon as the model emits
-``emit_builder_artifact``.
-
-Defensive: ``get_stream_writer()`` returns None when called outside an
-active langgraph run (e.g. in unit tests). The middleware logs at
-debug and skips emission in that case — never crashes.
+The webhook bypasses the SDK stream entirely — each phase event is
+one HTTP POST that lands on the gateway in real time, while the
+subscriber is connected. No replay buffer, no runtime contracts to
+satisfy beyond "HTTP works between containers" (which we already
+rely on for the terminal completion webhook).
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import time
 from typing import Any, NotRequired, override
 
+import httpx
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
@@ -91,6 +83,34 @@ _FINALIZING_TOOL_SUBSTRINGS = (
 )
 
 
+# Priority for same-turn arbitration (finalizing > drafting > researching).
+_PHASE_PRIORITY: dict[str, int] = {
+    _PHASE_FINALIZING: 3,
+    _PHASE_DRAFTING: 2,
+    _PHASE_RESEARCHING: 1,
+}
+
+
+# Gateway webhook configuration. Mirrors the existing builder-events
+# completion webhook (``deerflow.sophia.builder_events._gateway_url``).
+# Operators set ``SOPHIA_GATEWAY_URL`` on the LangGraph service to
+# the Gateway's reachable URL (Render-internal or public).
+_DEFAULT_GATEWAY_URL = "http://localhost:8001"
+_WEBHOOK_PATH = "/internal/builder-progress"
+_WEBHOOK_TIMEOUT_SECONDS = 2.0
+
+
+def _gateway_url() -> str:
+    return os.environ.get("SOPHIA_GATEWAY_URL", _DEFAULT_GATEWAY_URL).rstrip("/")
+
+
+# Strong refs for fire-and-forget POST tasks. Without this set the
+# tasks can be GC'd before they complete (v3-migration learning #4).
+# Bounded — entries removed via add_done_callback(discard) on
+# completion.
+_POST_TASKS: set[asyncio.Task] = set()
+
+
 def _classify_tool(tool_name: str) -> str | None:
     """Return the phase a tool call should transition to, or None."""
     if not isinstance(tool_name, str) or not tool_name:
@@ -105,21 +125,8 @@ def _classify_tool(tool_name: str) -> str | None:
     return None
 
 
-# Priority order for the same-turn phase-arbitration in
-# ``after_model``: when an AI message has multiple tool_calls in one
-# batch (e.g. a final search alongside ``emit_builder_artifact``), the
-# strongest signal wins. ``finalizing`` > ``drafting`` > ``researching``.
-# Out-of-band phases (``starting`` / ``done``) come from lifecycle
-# hooks, not tool_call inspection, and so are not part of this table.
-_PHASE_PRIORITY: dict[str, int] = {
-    _PHASE_FINALIZING: 3,
-    _PHASE_DRAFTING: 2,
-    _PHASE_RESEARCHING: 1,
-}
-
-
 def _pick_strongest_phase(tool_calls: list) -> str | None:
-    """Return the highest-priority phase among the given tool_calls, or None."""
+    """Return the highest-priority phase among the given tool_calls."""
     best_phase: str | None = None
     best_priority = 0
     for call in tool_calls:
@@ -134,83 +141,175 @@ def _pick_strongest_phase(tool_calls: list) -> str | None:
     return best_phase
 
 
-def _get_stream_writer() -> Any | None:
-    """Return a callable that pushes payloads into the current run's stream.
+def _resolve_task_id_and_run_id(runtime: Runtime) -> tuple[str | None, str | None]:
+    """Extract ``(task_id, run_id)`` from runtime.execution_info.
 
-    Wrapped in a try/except so unit tests (no langgraph context) and
-    callers running outside an active run see ``None`` and skip
-    emission cleanly. LangGraph's ``get_stream_writer`` raises
-    ``RuntimeError`` when called outside a run context.
+    Per langgraph >= 1.0, ``runtime.execution_info`` is populated on
+    every task with the running graph's identity. ``task_id`` is the
+    builder's own thread_id; ``run_id`` is the LangGraph run id. Both
+    are required to register/dispatch with the gateway registry.
     """
-    try:
-        from langgraph.config import get_stream_writer
-    except ImportError:
-        logger.debug("BuilderProgress: langgraph.config.get_stream_writer not importable")
-        return None
-    try:
-        return get_stream_writer()
-    except Exception:
-        # No active run context — happens in tests or before the
-        # graph node is actually executing. Not an error.
-        return None
+    info = getattr(runtime, "execution_info", None)
+    if info is None:
+        return None, None
+    task_id = getattr(info, "thread_id", None)
+    run_id = getattr(info, "run_id", None)
+    if not isinstance(task_id, str) or not task_id:
+        task_id = None
+    if not isinstance(run_id, str) or not run_id:
+        run_id = None
+    return task_id, run_id
 
 
-def _emit_phase(phase: str) -> None:
-    """Push a ``{"name": "phase", "phase": phase}`` event into the run's stream.
+async def _post_progress_event(
+    *,
+    task_id: str,
+    run_id: str,
+    event_name: str,
+    data: Any,
+) -> None:
+    """Fire one progress event at the gateway.
 
-    Safe to call from anywhere — silently no-ops if the stream writer
-    is unavailable. The subscriber's renderer handles unknown phases
-    by falling back to a capitalised version of the string in the
-    header.
+    Fire-and-forget — failures are logged and swallowed so a slow or
+    failing gateway never blocks or crashes the builder. The artifact-
+    delivery path remains independent and is the durability backstop.
     """
-    writer = _get_stream_writer()
-    if writer is None:
-        return
+    url = f"{_gateway_url()}{_WEBHOOK_PATH}"
+    payload = {
+        "task_id": task_id,
+        "run_id": run_id,
+        "event_name": event_name,
+        "data": data,
+    }
     try:
-        writer({"name": "phase", "phase": phase})
+        async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+            response = await client.post(url, json=payload)
+            if response.status_code >= 400:
+                logger.warning(
+                    "BuilderProgress: webhook rejected status=%s task_id=%s event=%s body=%s",
+                    response.status_code,
+                    task_id,
+                    event_name,
+                    response.text[:200],
+                )
     except Exception:
-        # Never let a streaming-side issue crash the builder.
-        logger.warning(
-            "BuilderProgress: stream writer raised on phase=%s",
-            phase,
+        logger.debug(
+            "BuilderProgress: webhook delivery failed task_id=%s event=%s",
+            task_id,
+            event_name,
             exc_info=True,
         )
 
 
+def _schedule_post(
+    *,
+    task_id: str,
+    run_id: str,
+    event_name: str,
+    data: Any,
+) -> None:
+    """Schedule a webhook POST without awaiting it.
+
+    Builder-side fire-and-forget: the middleware hooks return as soon
+    as the POST is scheduled so the langgraph graph doesn't wait on
+    the gateway. Strong-ref tracking via ``_POST_TASKS`` (with
+    discard-on-done) prevents GC of in-flight tasks (v3-migration
+    learning #4).
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No active loop — middleware was invoked from a sync context
+        # we don't expect. Log at debug and skip (the artifact path
+        # is still the durability backstop).
+        logger.debug(
+            "BuilderProgress: no running loop; skipping webhook task_id=%s",
+            task_id,
+        )
+        return
+    task = loop.create_task(
+        _post_progress_event(
+            task_id=task_id,
+            run_id=run_id,
+            event_name=event_name,
+            data=data,
+        )
+    )
+    _POST_TASKS.add(task)
+    task.add_done_callback(_POST_TASKS.discard)
+
+
+def _emit_phase(task_id: str, run_id: str, phase: str) -> None:
+    """Send a ``{name: "phase", phase: <phase>}`` custom event."""
+    _schedule_post(
+        task_id=task_id,
+        run_id=run_id,
+        event_name="custom",
+        data={"name": "phase", "phase": phase},
+    )
+
+
+def _emit_updates(task_id: str, run_id: str, tool_calls: list) -> None:
+    """Send an ``updates`` event carrying the latest tool_calls.
+
+    The renderer's ``_on_updates`` extracts tool_calls from the
+    ``{node_name: {messages: [{tool_calls: [...]}]}}`` envelope so we
+    rebuild that shape from a list of tool_call dicts. The agent-node
+    name is irrelevant to the renderer — it iterates all nodes — so
+    we use a stable placeholder.
+    """
+    # Tool-call dicts are JSON-serializable as-is (name/args structure).
+    # If callers pass non-dict tool_calls (SimpleNamespace etc), they
+    # won't serialize cleanly. We dict-coerce defensively.
+    serializable: list[dict] = []
+    for call in tool_calls:
+        if isinstance(call, dict):
+            serializable.append({"name": call.get("name"), "args": call.get("args") or {}})
+        else:
+            name = getattr(call, "name", None)
+            args = getattr(call, "args", None) or {}
+            if name:
+                serializable.append({"name": name, "args": args if isinstance(args, dict) else {}})
+    if not serializable:
+        return
+    _schedule_post(
+        task_id=task_id,
+        run_id=run_id,
+        event_name="updates",
+        data={"agent": {"messages": [{"tool_calls": serializable}]}},
+    )
+
+
 class BuilderProgressState(AgentState):
-    # Track the last-emitted phase to avoid spamming the stream with
-    # redundant transitions on every tool-call batch. Reducer is
-    # last-write-wins (default) which matches the "one phase at a time"
-    # semantic.
     builder_progress_last_phase: NotRequired[str]
 
 
 class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
-    """Emit ``custom``-mode phase events for the builder's progress UX.
+    """POST ``custom``/``updates`` progress events to the gateway.
 
-    Hooks:
+    Hooks (async variants — langgraph runs async):
 
-    - ``before_agent`` — emits ``starting`` so the placeholder
-      transitions off the initial "Working on it…" body.
-    - ``after_model`` — inspects tool_calls on the latest AI message;
-      maps tool names → phase strings via ``_classify_tool``; emits
-      iff the phase changed. Search/fetch tools → ``researching``,
-      write/edit tools → ``drafting``, ``emit_builder_artifact`` →
-      ``finalizing``.
-    - ``after_agent`` — emits ``done`` so the placeholder finalizes
-      with a ``[ Done ]`` header. The artifact-delivery webhook
-      (``_on_builder_completion``) still fires independently for the
-      document attachment.
+    - ``abefore_agent`` — emits ``starting`` phase.
+    - ``aafter_model`` — inspects the latest AI message's tool_calls;
+      classifies via lowercase-substring match (same-turn arbitration
+      via ``_PHASE_PRIORITY``); emits the strongest phase + the raw
+      tool_calls (so the renderer's ``updates`` handler can build
+      activity lines like "🔍 Searching: best EVs").
+    - ``aafter_agent`` — emits ``done``.
 
-    Single source of truth for phase classification is the lowercase-
-    substring match in ``_classify_tool``. Adding a new tool to one
-    of the substring tuples is the minimal change to extend coverage.
+    State field ``builder_progress_last_phase`` tracks the last-emitted
+    phase to skip redundant transitions on multi-tool-call batches
+    sharing the same phase.
+
+    Defensive: missing task_id/run_id (execution_info not populated)
+    short-circuits to a debug log. Webhook failures are logged at
+    debug and swallowed.
     """
 
     state_schema = BuilderProgressState
 
     @override
-    def before_agent(
+    async def abefore_agent(
         self, state: BuilderProgressState, runtime: Runtime
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
@@ -218,39 +317,62 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         if last_phase == _PHASE_STARTING:
             log_middleware("BuilderProgress", "already started, skipping", _t0)
             return None
-        _emit_phase(_PHASE_STARTING)
-        log_middleware("BuilderProgress", f"emit phase={_PHASE_STARTING}", _t0)
+        task_id, run_id = _resolve_task_id_and_run_id(runtime)
+        if task_id is None or run_id is None:
+            log_middleware("BuilderProgress", "no task_id/run_id in runtime", _t0)
+            return {"builder_progress_last_phase": _PHASE_STARTING}
+        _emit_phase(task_id, run_id, _PHASE_STARTING)
+        log_middleware(
+            "BuilderProgress",
+            f"abefore_agent emit phase={_PHASE_STARTING} task_id={task_id}",
+            _t0,
+        )
         return {"builder_progress_last_phase": _PHASE_STARTING}
 
     @override
-    def after_model(
+    async def aafter_model(
         self, state: BuilderProgressState, runtime: Runtime
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
         messages = state.get("messages", []) or []
-        new_phase: str | None = None
+        tool_calls: list = []
         for msg in reversed(messages):
             if getattr(msg, "type", None) != "ai":
                 continue
-            tool_calls = getattr(msg, "tool_calls", []) or []
-            # Same-turn arbitration: ``emit_builder_artifact`` (finalizing)
-            # alongside a sibling search call is "finalizing wins". See
-            # ``_PHASE_PRIORITY`` table for the ordering rationale.
-            new_phase = _pick_strongest_phase(tool_calls)
-            break  # only inspect the latest AI message
+            raw = getattr(msg, "tool_calls", []) or []
+            tool_calls = list(raw)
+            break
+        if not tool_calls:
+            log_middleware("BuilderProgress", "no tool_calls in latest AI msg", _t0)
+            return None
+        new_phase = _pick_strongest_phase(tool_calls)
+        task_id, run_id = _resolve_task_id_and_run_id(runtime)
+        if task_id is None or run_id is None:
+            log_middleware("BuilderProgress", "no task_id/run_id; skip POST", _t0)
+            return None
+        # Always emit the tool_calls (activity lines like 🔍 Searching).
+        _emit_updates(task_id, run_id, tool_calls)
         if new_phase is None:
-            log_middleware("BuilderProgress", "no phase change", _t0)
+            log_middleware("BuilderProgress", "tool_calls emitted, no phase change", _t0)
             return None
         last_phase = state.get("builder_progress_last_phase")
         if new_phase == last_phase:
-            log_middleware("BuilderProgress", f"phase unchanged ({new_phase})", _t0)
+            log_middleware(
+                "BuilderProgress",
+                f"phase unchanged ({new_phase}); tool_calls emitted only",
+                _t0,
+            )
             return None
-        _emit_phase(new_phase)
-        log_middleware("BuilderProgress", f"emit phase={new_phase}", _t0)
+        _emit_phase(task_id, run_id, new_phase)
+        log_middleware(
+            "BuilderProgress",
+            f"aafter_model emit phase={new_phase} task_id={task_id}",
+            _t0,
+        )
         return {"builder_progress_last_phase": new_phase}
 
     @override
-    def after_agent(
+    async def aafter_agent(
         self, state: BuilderProgressState, runtime: Runtime
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
@@ -258,8 +380,16 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         if last_phase == _PHASE_DONE:
             log_middleware("BuilderProgress", "already done, skipping", _t0)
             return None
-        _emit_phase(_PHASE_DONE)
-        log_middleware("BuilderProgress", f"emit phase={_PHASE_DONE}", _t0)
+        task_id, run_id = _resolve_task_id_and_run_id(runtime)
+        if task_id is None or run_id is None:
+            log_middleware("BuilderProgress", "no task_id/run_id; skip POST", _t0)
+            return {"builder_progress_last_phase": _PHASE_DONE}
+        _emit_phase(task_id, run_id, _PHASE_DONE)
+        log_middleware(
+            "BuilderProgress",
+            f"aafter_agent emit phase={_PHASE_DONE} task_id={task_id}",
+            _t0,
+        )
         return {"builder_progress_last_phase": _PHASE_DONE}
 
 

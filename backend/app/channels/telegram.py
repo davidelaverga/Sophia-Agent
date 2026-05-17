@@ -80,30 +80,13 @@ class TelegramChannel(Channel):
         # cannot drop a running task; entries are removed on completion via
         # `task.add_done_callback(self._background_tasks.discard)`.
         self._background_tasks: set[asyncio.Task] = set()
-        # Phase 4D of the v3 streaming migration: per-task ``BuilderProgressSubscriber``
-        # asyncio tasks that subscribe to a builder run's v3 stream and
-        # edit the placeholder message in this chat. Same strong-ref +
-        # discard-on-done pattern as ``_background_tasks``.
-        #
-        # Phase 4F (codex P1 post-review): the value type is now
-        # ``asyncio.Task | concurrent.futures.Future`` because
-        # ``_spawn_progress_subscriber`` schedules the run on ``_tg_loop``
-        # — when the caller is on a different loop, that hop returns a
-        # ``concurrent.futures.Future`` (from ``run_coroutine_threadsafe``)
-        # rather than an ``asyncio.Task``. Both expose ``add_done_callback``
-        # with a single-argument callable signature compatible with
-        # ``set.discard``, so the strong-ref + discard pattern still works.
-        self._progress_subscriber_tasks: set[Any] = set()
-        # Phase 4F (codex P2): configured LangGraph URL — must match the
-        # one ``ChannelManager`` uses, so the progress subscriber
-        # subscribes against the same langgraph service the build was
-        # dispatched on. ``ChannelService._start_channel`` injects this
-        # into the per-channel config dict from
-        # ``channels.langgraph_url``; a per-channel override is also
-        # honored. Falls back to the env var the subscriber reads
-        # internally if neither is set.
-        cfg_url = config.get("langgraph_url")
-        self._langgraph_url: str | None = cfg_url.strip() if isinstance(cfg_url, str) and cfg_url.strip() else None
+        # Phase 4H: progress placeholders are now driven by webhook
+        # relay (the gateway-side ``BuilderProgressRegistry``) — no
+        # per-task subscriber tasks to track here. The
+        # ``_progress_subscriber_tasks`` strong-ref set and the
+        # ``_langgraph_url`` field that the deleted subscriber relied
+        # on are gone with it. Channels register an edit callback
+        # with the registry on ``start()``.
         # Dual-bot architecture, Phase 1: surface whether a sibling worker bot
         # token is configured. Phase 1 is config-only — no second client is
         # built, no behavior changes. Phase 3 of the spec wires this token to
@@ -132,6 +115,17 @@ class TelegramChannel(Channel):
         self._main_loop = asyncio.get_event_loop()
         self._running = True
         self.bus.subscribe_outbound(self._on_outbound)
+
+        # Phase 4H (webhook relay): register the edit callback that
+        # the per-process ``BuilderProgressRegistry`` invokes when the
+        # langgraph-side ``BuilderProgressMiddleware`` POSTs a phase
+        # event. Hops to ``_tg_loop`` to keep PTB bot calls loop-affine
+        # (learning #14 in the v3 migration plan).
+        from app.gateway.builder_progress import get_progress_registry
+
+        get_progress_registry().register_channel_callback(
+            "telegram", self._edit_progress_placeholder
+        )
         # Builder completion cards (sync `switch_to_builder` and async
         # deepagents path) ride a parallel pub/sub channel — see PR plan.
         self.bus.subscribe_builder_completion(self._on_builder_completion)
@@ -260,38 +254,41 @@ class TelegramChannel(Channel):
         if not progress_meta:
             self._last_bot_message[msg.chat_id] = sent.message_id
         if progress_meta:
-            # May raise ProgressSubscriberSpawnError; propagate so the
-            # manager's strict-publish path sees the failure.
-            self._spawn_progress_subscriber(
-                bot=bot,
+            # Phase 4H (webhook relay): register the placeholder with
+            # the per-process ``BuilderProgressRegistry``. The langgraph-
+            # side ``BuilderProgressMiddleware`` POSTs phase events to
+            # ``/internal/builder-progress``; the registry dispatches
+            # them through the renderer and invokes our edit callback
+            # (``_edit_progress_placeholder`` below). Replaces the
+            # deleted ``BuilderProgressSubscriber``+ ``runs.join_stream``
+            # path which didn't work cross-process against
+            # ``langgraph dev``'s in-mem runtime.
+            self._register_progress_entry(
                 chat_id=chat_id,
                 message_id=sent.message_id,
                 meta=progress_meta,
             )
 
-    def _spawn_progress_subscriber(
+    def _register_progress_entry(
         self,
         *,
-        bot: Any,
         chat_id: int,
         message_id: int,
         meta: dict[str, Any],
     ) -> None:
-        """Spawn a v3 progress subscriber for one builder task.
+        """Register a placeholder with the gateway-side progress registry.
 
-        Runs on the EI bot's ``_tg_loop`` so bot calls are loop-affine.
-        The subscriber holds itself alive via the asyncio task created
-        below; we don't track it in a registry because the run is bounded
-        by ``BUILDER_PROGRESS_TOTAL_TIMEOUT_S`` (30 min default) and
-        Telegram doesn't need a cancel surface — the user just gets a
-        final-state edit when the run ends.
+        Phase 4H (webhook relay): replaces ``_spawn_progress_subscriber``
+        which depended on ``runs.join_stream`` HTTP delivery that
+        doesn't work cross-process against the in-mem runtime. Now the
+        langgraph-side ``BuilderProgressMiddleware`` POSTs phase events
+        directly to ``/internal/builder-progress``; this method merely
+        binds ``task_id`` → ``(chat_id, message_id)`` in the registry
+        so the endpoint knows which placeholder to edit.
 
-        Phase 4G codex P2 post-review: raises ``ProgressSubscriberSpawnError``
-        on any failure path so the caller (``send``) propagates the
-        exception to the bus listener. The bus's strict-publish then
-        flips ``delivered=False`` and the manager skips the dedup mark,
-        triggering a retry on the next companion turn instead of leaving
-        a placeholder with no subscriber AND blocking future emissions.
+        Raises ``ProgressSubscriberSpawnError`` on missing metadata so
+        the manager's strict-publish path skips the dedup mark and the
+        next companion turn retries.
         """
         task_id = str(meta.get("task_id") or "")
         run_id = str(meta.get("run_id") or "")
@@ -300,87 +297,60 @@ class TelegramChannel(Channel):
                 f"progress placeholder missing task_id or run_id (meta={meta!r})"
             )
         try:
-            from app.channels.telegram_progress_subscriber import BuilderProgressSubscriber
+            from app.gateway.builder_progress import get_progress_registry
 
-            subscriber = BuilderProgressSubscriber(
-                bot=bot,
+            get_progress_registry().register_task(
+                task_id=task_id,
                 chat_id=chat_id,
                 message_id=message_id,
-                # The builder's own thread_id == task_id (per
-                # start_builder_task's async_tasks row shape — learning #18
-                # in the v3 migration plan).
-                thread_id=task_id,
-                run_id=run_id,
-                task_id=task_id,
-                # Codex P2 (post-Phase-4F review): use the configured
-                # ``channels.langgraph_url`` (matching ChannelManager's
-                # dispatch URL) instead of the subscriber's internal
-                # ``LANGGRAPH_URL`` env fallback.
-                langgraph_url=self._langgraph_url,
+                channel_name="telegram",
             )
-        except Exception as exc:
-            logger.warning(
-                "[Telegram] failed to construct progress subscriber task_id=%s",
-                task_id,
-                exc_info=True,
-            )
-            raise ProgressSubscriberSpawnError(
-                f"subscriber construction failed task_id={task_id}: {exc}"
-            ) from exc
-        # Phase 4F (codex P1 post-review): spawn on ``_tg_loop`` so the
-        # subscriber's ``bot.edit_message_text`` calls run on the same
-        # loop the PTB Application/Bot was initialised on (learning #14
-        # in the v3 migration plan: "PTB bot I/O is loop-affine to the
-        # polling thread's ``_tg_loop``"). ``send`` can be invoked on
-        # ``_main_loop`` via the bus subscriber path; using
-        # ``asyncio.create_task`` there binds the task to the wrong loop
-        # and every ``edit_message_text`` raises "bound to a different
-        # event loop" — the placeholder never updates.
-        tg_loop = self._tg_loop
-        if tg_loop is None or not tg_loop.is_running():
-            raise ProgressSubscriberSpawnError(
-                f"_tg_loop unavailable (running={tg_loop.is_running() if tg_loop is not None else False}); "
-                f"cannot schedule subscriber task_id={task_id}"
-            )
-
-        try:
-            current_loop: asyncio.AbstractEventLoop | None
-            try:
-                current_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                current_loop = None
-
-            if current_loop is tg_loop:
-                # Already on the bot's loop — normal create_task is fine
-                # and gives us an asyncio.Task handle.
-                handle: Any = asyncio.create_task(subscriber.run())
-            else:
-                # Different loop — hop via run_coroutine_threadsafe.
-                # Returns concurrent.futures.Future, which also supports
-                # add_done_callback for the strong-ref discard pattern.
-                handle = asyncio.run_coroutine_threadsafe(subscriber.run(), tg_loop)
-
-            self._progress_subscriber_tasks.add(handle)
-            handle.add_done_callback(self._progress_subscriber_tasks.discard)
             logger.info(
-                "[Telegram] progress subscriber spawned chat_id=%s message_id=%s task_id=%s loop_hop=%s",
+                "[Telegram] progress placeholder registered chat_id=%s message_id=%s task_id=%s run_id=%s",
                 chat_id,
                 message_id,
                 task_id,
-                "yes" if current_loop is not tg_loop else "no",
+                run_id,
             )
         except Exception as exc:
-            # Includes RuntimeError ("no running loop") and any
-            # scheduling-side issue from create_task /
-            # run_coroutine_threadsafe.
             logger.warning(
-                "[Telegram] failed to schedule progress subscriber task_id=%s",
+                "[Telegram] progress registry registration failed task_id=%s",
                 task_id,
                 exc_info=True,
             )
             raise ProgressSubscriberSpawnError(
-                f"subscriber scheduling failed task_id={task_id}: {exc}"
+                f"progress registry registration failed task_id={task_id}: {exc}"
             ) from exc
+
+    async def _edit_progress_placeholder(
+        self, chat_id: int, message_id: int, body: str
+    ) -> None:
+        """Edit-callback invoked by ``BuilderProgressRegistry``.
+
+        Hops to ``_tg_loop`` because PTB bot calls are loop-affine to
+        the polling thread (learning #14 in the v3 migration plan).
+        ``_run_bot_call_on_telegram_loop`` is the shared helper used
+        by attachment downloads too — it short-circuits cleanly when
+        we're already on the right loop.
+        """
+        if not self._application:
+            return
+        bot = self._application.bot
+        try:
+            await self._run_bot_call_on_telegram_loop(
+                bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=message_id,
+                    text=body,
+                )
+            )
+        except Exception:
+            logger.warning(
+                "[Telegram] progress placeholder edit failed chat_id=%s message_id=%s",
+                chat_id,
+                message_id,
+                exc_info=True,
+            )
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:
@@ -1092,6 +1062,25 @@ class TelegramChannel(Channel):
         artifact_url = payload.get("artifact_url")
         artifact_filename = payload.get("artifact_filename")
         task_id = payload.get("task_id") or "unknown"
+
+        # Phase 4H: finalize and unregister the progress placeholder.
+        # Edits to ``[ Done ]`` with the builder summary if a placeholder
+        # is still registered for this task_id, then drops the entry so
+        # subsequent webhooks for the same task_id are no-ops. The
+        # artifact document is sent below as a separate message.
+        try:
+            from app.gateway.builder_progress import get_progress_registry
+
+            summary = payload.get("summary") or ""
+            await get_progress_registry().mark_done(
+                task_id=str(task_id), summary=summary
+            )
+        except Exception:
+            logger.warning(
+                "[Telegram] progress registry mark_done failed task_id=%s",
+                task_id,
+                exc_info=True,
+            )
 
         bot = self._application.bot
 

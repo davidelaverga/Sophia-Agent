@@ -46,15 +46,12 @@ class ChannelService:
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
         )
-        # Phase 4F (codex P2): channels that subscribe to LangGraph
-        # streams (currently TelegramChannel for the builder progress
-        # subscriber) need the same URL the manager dispatches against.
-        # Stored here so ``_start_channel`` can inject it into each
-        # per-channel config dict before instantiation — channels that
-        # don't care silently ignore the extra key, and per-channel
-        # overrides remain possible (channel-local ``langgraph_url``
-        # wins over the service-level default).
-        self._langgraph_url = langgraph_url
+        # Phase 4H: the langgraph_url plumb to channels (added in
+        # Phase 4F for the deleted BuilderProgressSubscriber) is no
+        # longer needed — the gateway-side BuilderProgressRegistry +
+        # ``/internal/builder-progress`` webhook relay replaces the
+        # per-channel SDK stream subscription. The manager still uses
+        # ``langgraph_url`` for its own dispatch.
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
@@ -136,18 +133,8 @@ class ChannelService:
             logger.exception("Failed to import channel class for %s", name)
             return False
 
-        # Phase 4F (codex P2): inject the service-level ``langgraph_url``
-        # into the per-channel config when the channel did NOT specify
-        # its own. TelegramChannel reads ``config.get("langgraph_url")``
-        # to point its BuilderProgressSubscriber at the same LangGraph
-        # service the manager dispatches against. Channels that don't
-        # use this key (Slack, Feishu) ignore it harmlessly.
-        channel_config = dict(config)
-        if not channel_config.get("langgraph_url"):
-            channel_config["langgraph_url"] = self._langgraph_url
-
         try:
-            channel = channel_cls(bus=self.bus, config=channel_config)
+            channel = channel_cls(bus=self.bus, config=config)
             await channel.start()
             self._channels[name] = channel
             # Auto-register the channel's inbound-file reader with the

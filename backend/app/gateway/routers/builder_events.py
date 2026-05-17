@@ -70,6 +70,34 @@ class BuilderCompletionEvent(BaseModel):
     )
 
 
+class BuilderProgressEvent(BaseModel):
+    """Wire contract for the LangGraph-side ``BuilderProgressMiddleware`` webhook.
+
+    Phase 4H (webhook relay): replaces the ``runs.join_stream`` HTTP
+    subscriber path that doesn't work cross-process against
+    ``langgraph dev``'s in-mem runtime. The middleware POSTs one
+    payload per phase transition (or per AI message with tool_calls);
+    the endpoint dispatches it through the per-task ``ProgressRenderer``
+    and calls the channel's edit callback to update the placeholder.
+
+    ``event_name`` matches the renderer's ``apply`` API:
+    - ``"custom"`` with ``data={"name": "phase", "phase": "<phase>"}``
+      for lifecycle transitions (starting / researching / drafting /
+      finalizing / done).
+    - ``"updates"`` with ``data={"agent": {"messages": [{"tool_calls": [...]}]}}``
+      for tool-call activity lines (🔍 / 🔗 / 📝 / 📦).
+    - ``"messages"`` / ``"messages-tuple"`` reserved for future per-
+      token streaming if we move to a runtime that supports it.
+    """
+
+    task_id: str = Field(..., description="Builder thread_id / subagent task id.")
+    run_id: str = Field(..., description="LangGraph run id (for diagnostics).")
+    event_name: str = Field(..., description="messages | updates | custom")
+    data: Any | None = Field(
+        default=None, description="Mode-specific payload — see class docstring."
+    )
+
+
 # ---- Routers ---------------------------------------------------------------
 
 
@@ -126,6 +154,50 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
             )
 
     return {"delivered_subscribers": delivered}
+
+
+@internal_router.post(
+    "/builder-progress",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Receive a progress event from the builder middleware",
+)
+async def receive_builder_progress(event: BuilderProgressEvent) -> dict[str, Any]:
+    """Internal webhook for builder phase / tool-call events.
+
+    The langgraph-side ``BuilderProgressMiddleware`` POSTs one of
+    these per lifecycle hook (``before_agent``, ``after_model`` with
+    relevant tool_calls, ``after_agent``). The gateway-side registry
+    dispatches the event through the per-task ``ProgressRenderer``
+    and edits the Telegram placeholder via the channel's edit
+    callback. See ``app/gateway/builder_progress/registry.py`` for
+    the full flow.
+
+    Phase 4H (webhook relay) replaces the ``runs.join_stream`` HTTP
+    consumer that doesn't work cross-process against the
+    ``langgraph_runtime_inmem`` backend.
+
+    Best-effort: any registry failure is logged and swallowed so the
+    builder never blocks waiting on the gateway. The 202 response
+    means "accepted for relay" — NOT "successfully edited".
+    """
+    from app.gateway.builder_progress import get_progress_registry
+
+    registry = get_progress_registry()
+    try:
+        applied = await registry.apply_event(
+            task_id=event.task_id,
+            event_name=event.event_name,
+            data=event.data,
+        )
+    except Exception:
+        logger.warning(
+            "Builder-progress relay failed task_id=%s event=%s",
+            event.task_id,
+            event.event_name,
+            exc_info=True,
+        )
+        applied = False
+    return {"applied": applied}
 
 
 def _format_sse_event(payload: dict[str, Any]) -> bytes:
