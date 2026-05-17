@@ -377,7 +377,7 @@ def _build_session_metadata(
     messages = thread_state.get("messages", [])
     if session_start_unix is None:
         session_start_unix = _earliest_message_timestamp(messages, session_id=session_id)
-    if session_start_unix is None and session_id is None:
+    if session_start_unix is None and (session_id is None or not _messages_have_session_tags(messages)):
         session_start_unix = _earliest_message_timestamp(messages)
 
     return {
@@ -426,6 +426,10 @@ def _earliest_message_timestamp(messages: list[Any], session_id: str | None = No
         if ts is not None:
             timestamps.append(ts)
     return min(timestamps) if timestamps else None
+
+
+def _messages_have_session_tags(messages: list[Any]) -> bool:
+    return any(_message_session_id(msg) is not None for msg in messages)
 
 
 def _message_session_id(msg: Any) -> str | None:

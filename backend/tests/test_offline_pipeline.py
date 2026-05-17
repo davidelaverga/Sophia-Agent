@@ -449,6 +449,38 @@ class TestBuildSessionMetadata:
 
         assert meta["session_start_unix"] == 200
 
+    def test_session_start_unix_falls_back_to_untagged_message_timestamps(self):
+        """If SessionStore is stale and messages are untagged, use conversation time."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "hello", "timestamp": 1715900500},
+                {"role": "assistant", "content": "hi", "timestamp": 1715900100},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 1715900100
+
+    def test_session_start_unix_does_not_use_other_tagged_sessions(self):
+        """If the thread is tagged for another session, avoid anchoring to it."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "old", "session_id": "old-session", "timestamp": 1},
+                {"role": "assistant", "content": "old reply", "session_id": "old-session", "timestamp": 2},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] is None
+
 
 class TestBuildSessionSummary:
     def test_builds_transcript_from_messages(self):
