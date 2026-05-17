@@ -2423,6 +2423,59 @@ class TestChannelService:
         )
         assert not any(c.startswith("done:") for c in calls)
 
+    def test_edit_progress_placeholder_re_raises_bot_failure(self):
+        """Codex P1 (Phase 4J post-review): a transient
+        ``bot.edit_message_text`` failure (Telegram 5xx / network
+        blip) MUST propagate out of ``_edit_progress_placeholder``
+        so the registry's outer try/except catches it and skips
+        ``last_pushed_body = body``. Previously the channel
+        swallowed the exception, the registry interpreted the edit
+        as successful, cached the body, and on terminal paths
+        unregistered the task — placeholder permanently stuck.
+
+        End-to-end lock: passes a fake bot whose edit raises;
+        ``_edit_progress_placeholder`` MUST raise.
+        """
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        class _FailingBot:
+            async def edit_message_text(self, **_kw):
+                raise RuntimeError("simulated Telegram 5xx")
+
+        ch._application = SimpleNamespace(bot=_FailingBot())
+        # No _tg_loop → _run_bot_call_on_telegram_loop short-circuits to
+        # ``return await coro`` (same loop), which awaits the failing
+        # edit and raises.
+        ch._tg_loop = None
+
+        async def go():
+            with pytest.raises(RuntimeError, match="simulated Telegram 5xx"):
+                await ch._edit_progress_placeholder(
+                    chat_id=42, message_id=99, body="some body"
+                )
+
+        _run(go())
+
+    def test_edit_progress_placeholder_raises_when_no_application(self):
+        """Codex P1: the no-application case (channel shutting down /
+        never started) MUST raise so the registry treats it as a
+        failed edit and preserves ``last_pushed_body`` for retry.
+        Previously returned silently → registry assumed success."""
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        ch._application = None  # explicit — channel not started
+
+        async def go():
+            with pytest.raises(RuntimeError, match="no application"):
+                await ch._edit_progress_placeholder(
+                    chat_id=1, message_id=2, body="body"
+                )
+
+        _run(go())
+
     def test_telegram_unregisters_progress_callback_on_stop(self):
         """Codex P2 (Phase 4J): ``TelegramChannel.start()`` registers
         an edit callback with the global ``BuilderProgressRegistry``;

@@ -376,8 +376,28 @@ class TelegramChannel(Channel):
         by attachment downloads too — it short-circuits cleanly when
         we're already on the right loop.
         """
+        # Codex P1 (Phase 4J post-review): the channel callback MUST
+        # propagate failures to the registry so its
+        # ``cache-after-success`` contract (commit 0a7b94f3) works.
+        # Previously the channel caught and swallowed bot errors here,
+        # so the registry interpreted every edit as successful — and
+        # the body got cached even when ``bot.edit_message_text``
+        # 5xx'd. On terminal paths the registry would ALSO unregister
+        # the task, locking the placeholder out of further updates
+        # entirely.
+        #
+        # Now: the no-application case raises explicitly (the channel
+        # is shutting down / never started — the edit can't fire and
+        # the registry should treat this as failed so the next attempt
+        # can retry once the channel restarts). The bot.edit failure
+        # path logs + re-raises. The registry's outer try/except
+        # catches and treats as failed delivery, preserving
+        # last_pushed_body and keeping the placeholder retry-able.
         if not self._application:
-            return
+            raise RuntimeError(
+                "[Telegram] _edit_progress_placeholder called with no application "
+                "(channel not started or stopped)"
+            )
         bot = self._application.bot
         try:
             await self._run_bot_call_on_telegram_loop(
@@ -389,11 +409,12 @@ class TelegramChannel(Channel):
             )
         except Exception:
             logger.warning(
-                "[Telegram] progress placeholder edit failed chat_id=%s message_id=%s",
+                "[Telegram] progress placeholder edit failed chat_id=%s message_id=%s — re-raising for registry retry",
                 chat_id,
                 message_id,
                 exc_info=True,
             )
+            raise
 
     async def send_file(self, msg: OutboundMessage, attachment: ResolvedAttachment) -> bool:
         if not self._application:
