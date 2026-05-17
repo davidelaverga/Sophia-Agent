@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
@@ -420,6 +420,10 @@ def _is_memory_record(item: dict) -> bool:
     """Return True if ``item`` is a resolved Mem0 memory dict, not an event wrapper."""
     if not isinstance(item, dict):
         return False
+    if item.get("status") or item.get("event_status"):
+        return False
+    if isinstance(item.get("memory"), dict):
+        return False
     # Event wrappers carry event_id and lack memory/content.
     # Memory records have either memory, content, or metadata with category.
     if item.get("event_id") and not item.get("memory") and not item.get("content"):
@@ -427,6 +431,32 @@ def _is_memory_record(item: dict) -> bool:
     if not item.get("memory") and not item.get("content") and not item.get("metadata"):
         return False
     return True
+
+
+def _pending_memory_item_from_add_result(
+    item: dict,
+    *,
+    content: str,
+    metadata: dict,
+    session_id: str,
+) -> MemoryItem | None:
+    if not isinstance(item, dict):
+        return None
+    event_id = item.get("event_id") or item.get("id")
+    if not event_id:
+        return None
+
+    pending_metadata = dict(metadata)
+    pending_metadata["mem0_event_id"] = str(event_id)
+    pending_metadata["mem0_sync_state"] = "pending"
+
+    return MemoryItem(
+        id=str(event_id),
+        content=content,
+        category=pending_metadata.get("category"),
+        session_id=session_id,
+        metadata=pending_metadata,
+    )
 
 
 def _get_all_paginated(
@@ -651,7 +681,7 @@ async def list_memories(
     response_model=MemoryItem,
     summary="Create a memory",
 )
-async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
+async def create_memory(user_id: str, body: MemoryCreateRequest, response: Response) -> MemoryItem:
     _validate_user(user_id)
     try:
         from deerflow.sophia.mem0_client import add_memories
@@ -684,8 +714,29 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
                 )
             return _to_memory_item(first)
 
-        # add_memories returned an event wrapper (not a resolved memory) —
-        # treat as a failure to persist.
+        pending_item = _pending_memory_item_from_add_result(
+            first,
+            content=body.text,
+            metadata=memory_metadata,
+            session_id="manual-create",
+        )
+        if pending_item is not None:
+            response.status_code = 202
+            upsert_review_metadata(
+                user_id,
+                content=body.text,
+                metadata=pending_item.metadata,
+                session_id="manual-create",
+                sync_state="pending",
+            )
+            logger.info(
+                "Mem0 create_memory queued async add for user %s event_id=%s",
+                user_id,
+                pending_item.id,
+            )
+            return pending_item
+
+        # add_memories returned neither a resolved memory nor a queued event.
         logger.warning(
             "Mem0 create_memory returned non-memory for user %s: %s",
             user_id,

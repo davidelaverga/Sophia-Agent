@@ -436,6 +436,53 @@ class TestCreateMemory:
         assert resp.status_code == 503
         assert resp.json()["detail"] == "Memory service unavailable"
 
+    def test_create_memory_pending_event_returns_202(self, client, mock_review_store):
+        """Async Mem0 add event wrappers are accepted, not treated as failures."""
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"event_id": "evt_1", "memory": None}
+        ]):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Queued memory", "category": "lesson", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["id"] == "evt_1"
+        assert data["content"] == "Queued memory"
+        assert data["category"] == "lesson"
+        assert data["metadata"]["mem0_event_id"] == "evt_1"
+        assert data["metadata"]["mem0_sync_state"] == "pending"
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            content="Queued memory",
+            metadata={
+                "status": "approved",
+                "category": "lesson",
+                "mem0_event_id": "evt_1",
+                "mem0_sync_state": "pending",
+            },
+            session_id="manual-create",
+            sync_state="pending",
+        )
+
+    def test_create_memory_raw_event_with_nested_memory_returns_pending(self, client, mock_review_store):
+        """Raw add results can include nested memory payloads but still be event wrappers."""
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"id": "evt_1", "memory": {"id": "mem_1", "memory": "Queued memory"}}
+        ]):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Queued memory", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["id"] == "evt_1"
+        assert data["content"] == "Queued memory"
+        assert data["metadata"]["mem0_sync_state"] == "pending"
+        mock_review_store["upsert"].assert_called_once()
+
     def test_create_memory_invalid_user_returns_400(self, client):
         resp = client.post(
             "/api/sophia/user;hack/memories",
