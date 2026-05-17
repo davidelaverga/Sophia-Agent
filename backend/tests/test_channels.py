@@ -183,6 +183,29 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_publish_outbound_strict_returns_false_when_no_listeners(self):
+        """Codex P2 (Phase 4J): an empty listener list means the
+        message wasn't actually consumed. Strict-publish callers
+        (the builder-progress placeholder path in
+        ``ChannelManager._maybe_open_progress_placeholders``) use
+        the returned bool to decide whether to mark dedup. Returning
+        True here would silently drop the placeholder AND block all
+        future retries — a placeholder published during a channel
+        restart / boot ordering gap would be permanently lost.
+        """
+        bus = MessageBus()
+
+        async def go():
+            out = OutboundMessage(channel_name="t", chat_id="c", thread_id="th", text="x")
+            delivered = await bus.publish_outbound_strict(out)
+            assert delivered is False, (
+                "publish_outbound_strict must return False when no listeners "
+                "are registered — otherwise the manager dedup-marks a "
+                "placeholder that no channel actually consumed"
+            )
+
+        _run(go())
+
     def test_review_notification_callback(self):
         bus = MessageBus()
         received: list[dict] = []
@@ -2399,6 +2422,44 @@ class TestChannelService:
             f"error status must route to mark_stopped; calls={calls}"
         )
         assert not any(c.startswith("done:") for c in calls)
+
+    def test_telegram_unregisters_progress_callback_on_stop(self):
+        """Codex P2 (Phase 4J): ``TelegramChannel.start()`` registers
+        an edit callback with the global ``BuilderProgressRegistry``;
+        ``stop()`` MUST symmetrically unregister it. Otherwise a
+        restart leaves a stale callback bound to the stopped channel
+        instance, and webhook events arriving in the gap route
+        through a dead callback (registry says applied=True but
+        bot.edit_message_text never fires).
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        # Skip the real bot init in start(): instead manually run
+        # the channel-callback registration (the start() path most
+        # relevant to this test) and then call stop().
+        registry = get_progress_registry()
+        registry.register_channel_callback("telegram", ch._edit_progress_placeholder)
+        assert "telegram" in registry._callbacks
+
+        async def go():
+            # The bot startup machinery early-exits on no bot_token in
+            # the real start() — we already manually registered the
+            # callback above, so just call stop() directly. The
+            # stop() path checks ``_running`` and other state
+            # defensively.
+            await ch.stop()
+
+        _run(go())
+
+        assert "telegram" not in registry._callbacks, (
+            "stop() must unregister the channel's progress callback so "
+            "a restart doesn't leave a dead bound callback in the registry"
+        )
 
     def test_send_propagates_register_failure_after_successful_telegram_send(self):
         """End-to-end regression: when bot.send_message succeeds but the

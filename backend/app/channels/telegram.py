@@ -180,6 +180,26 @@ class TelegramChannel(Channel):
         self.bus.unsubscribe_outbound(self._on_outbound)
         self.bus.unsubscribe_builder_completion(self._on_builder_completion)
         self.bus.unsubscribe_review_notification(self._on_review_notification)
+        # Phase 4J (codex P2 post-Phase-4I): symmetric unregister of
+        # the builder-progress edit callback. start() registers
+        # ``self._edit_progress_placeholder`` with the global
+        # ``BuilderProgressRegistry``; without this unregister, a
+        # restart leaves a stale callback bound to a stopped instance
+        # — webhook events arriving in the gap would route through
+        # the dead callback (registry returns applied=True but
+        # bot.edit_message_text never fires). ``unregister`` uses
+        # ``.pop(key, None)`` so it's a safe no-op when start()
+        # didn't successfully register (e.g. early-exit on missing
+        # bot_token).
+        try:
+            from app.gateway.builder_progress import get_progress_registry
+
+            get_progress_registry().unregister_channel_callback("telegram")
+        except Exception:
+            logger.warning(
+                "[Telegram] failed to unregister progress callback on stop",
+                exc_info=True,
+            )
         if self._tg_loop and self._tg_loop.is_running():
             self._tg_loop.call_soon_threadsafe(self._tg_loop.stop)
         if self._thread:
