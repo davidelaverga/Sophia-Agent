@@ -419,13 +419,21 @@ def _lookup_session_start_unix(user_id: str | None, session_id: str | None) -> i
 
 def _earliest_message_timestamp(messages: list[Any], session_id: str | None = None) -> int | None:
     timestamps: list[int] = []
+    untagged_timestamps: list[int] = []
     for msg in messages:
-        if session_id is not None and _message_session_id(msg) != session_id:
-            continue
+        msg_session_id = _message_session_id(msg)
         ts = _message_timestamp_unix(msg)
-        if ts is not None:
+        if ts is None:
+            continue
+        if session_id is None:
             timestamps.append(ts)
-    return min(timestamps) if timestamps else None
+        elif msg_session_id == session_id:
+            timestamps.append(ts)
+        elif msg_session_id is None:
+            untagged_timestamps.append(ts)
+    if timestamps:
+        return min(timestamps)
+    return min(untagged_timestamps) if untagged_timestamps else None
 
 
 def _messages_have_session_tags(messages: list[Any]) -> bool:

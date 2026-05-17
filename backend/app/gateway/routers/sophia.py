@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -445,13 +446,16 @@ def _pending_memory_item_from_add_result(
     event_id = item.get("event_id") or item.get("id")
     if not event_id:
         return None
+    local_memory_id = _local_memory_id_for_content(content)
+    if not local_memory_id:
+        return None
 
     pending_metadata = dict(metadata)
     pending_metadata["mem0_event_id"] = str(event_id)
     pending_metadata["mem0_sync_state"] = "pending"
 
     return MemoryItem(
-        id=str(event_id),
+        id=local_memory_id,
         content=content,
         category=pending_metadata.get("category"),
         session_id=session_id,
@@ -534,6 +538,13 @@ def _local_content_hash_from_memory_id(memory_id: str) -> str | None:
     if isinstance(memory_id, str) and memory_id.startswith("local:"):
         return memory_id.split(":", 1)[1] or None
     return None
+
+
+def _local_memory_id_for_content(content: str) -> str | None:
+    normalized = (content or "").strip()
+    if not normalized:
+        return None
+    return f"local:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
 
 
 def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> int:
@@ -725,6 +736,7 @@ async def create_memory(user_id: str, body: MemoryCreateRequest, response: Respo
             upsert_review_metadata(
                 user_id,
                 content=body.text,
+                content_hash=_local_content_hash_from_memory_id(pending_item.id),
                 metadata=pending_item.metadata,
                 session_id="manual-create",
                 sync_state="pending",
@@ -732,7 +744,7 @@ async def create_memory(user_id: str, body: MemoryCreateRequest, response: Respo
             logger.info(
                 "Mem0 create_memory queued async add for user %s event_id=%s",
                 user_id,
-                pending_item.id,
+                pending_item.metadata.get("mem0_event_id") if pending_item.metadata else None,
             )
             return pending_item
 
