@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -448,7 +449,8 @@ class TestCreateMemory:
 
         assert resp.status_code == 202
         data = resp.json()
-        assert data["id"] == "evt_1"
+        expected_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+        assert data["id"] == expected_id
         assert data["content"] == "Queued memory"
         assert data["category"] == "lesson"
         assert data["metadata"]["mem0_event_id"] == "evt_1"
@@ -456,6 +458,7 @@ class TestCreateMemory:
         mock_review_store["upsert"].assert_called_once_with(
             "test_user",
             content="Queued memory",
+            content_hash=expected_id.split(":", 1)[1],
             metadata={
                 "status": "approved",
                 "category": "lesson",
@@ -478,7 +481,8 @@ class TestCreateMemory:
 
         assert resp.status_code == 202
         data = resp.json()
-        assert data["id"] == "evt_1"
+        expected_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+        assert data["id"] == expected_id
         assert data["content"] == "Queued memory"
         assert data["metadata"]["mem0_sync_state"] == "pending"
         mock_review_store["upsert"].assert_called_once()
@@ -546,6 +550,24 @@ class TestUpdateMemory:
             )
         assert resp.status_code == 422
 
+    def test_update_local_pending_memory_uses_content_hash_not_mem0(self, client, mock_mem0, mock_review_store):
+        local_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+
+        resp = client.put(
+            f"/api/sophia/test_user/memories/{local_id}",
+            json={"text": "Updated queued memory", "metadata": {"status": "approved"}},
+        )
+
+        assert resp.status_code == 200
+        mock_mem0.update.assert_not_called()
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            content="Updated queued memory",
+            content_hash=local_id.split(":", 1)[1],
+            metadata={"status": "approved"},
+            sync_state="manual",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Memory Delete
@@ -563,6 +585,18 @@ class TestDeleteMemory:
         mock_mem0.delete.side_effect = Exception("Not found")
         resp = client.delete("/api/sophia/test_user/memories/m1")
         assert resp.status_code == 503
+
+    def test_delete_local_pending_memory_uses_content_hash_not_mem0(self, client, mock_mem0, mock_review_store):
+        local_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+
+        resp = client.delete(f"/api/sophia/test_user/memories/{local_id}")
+
+        assert resp.status_code == 204
+        mock_mem0.delete.assert_not_called()
+        mock_review_store["remove"].assert_called_once_with(
+            "test_user",
+            content_hash=local_id.split(":", 1)[1],
+        )
 
 
 class TestBulkReview:
@@ -588,6 +622,24 @@ class TestBulkReview:
             sync_state="manual",
         )
         mock_review_store["remove"].assert_called_once_with("test_user", memory_id="m2")
+
+    def test_bulk_review_local_pending_memory_uses_content_hash_not_mem0(self, client, mock_mem0, mock_review_store):
+        local_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+
+        resp = client.post(
+            "/api/sophia/test_user/memories/bulk-review",
+            json={"items": [{"id": local_id, "action": "approve"}]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "ok"
+        mock_mem0.update.assert_not_called()
+        mock_review_store["upsert"].assert_any_call(
+            "test_user",
+            content_hash=local_id.split(":", 1)[1],
+            metadata={"status": "approved"},
+            sync_state="manual",
+        )
 
     def test_delete_invalidates_cache(self, client, mock_mem0):
         mock_mem0.delete.return_value = None

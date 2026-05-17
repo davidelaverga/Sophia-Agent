@@ -449,6 +449,40 @@ class TestBuildSessionMetadata:
 
         assert meta["session_start_unix"] == 200
 
+    def test_session_start_unix_uses_untagged_messages_when_current_session_is_untagged(self):
+        """Older tagged messages must not hide untagged current-session messages."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "old", "session_id": "old-session", "timestamp": 1},
+                {"role": "user", "content": "current one", "timestamp": 200},
+                {"role": "assistant", "content": "current two", "timestamp": 250},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 200
+
+    def test_session_start_unix_prefers_exact_session_tags_over_untagged_messages(self):
+        """When current-session tags exist, they win over untagged timestamps."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "untagged prior", "timestamp": 100},
+                {"role": "user", "content": "current one", "session_id": "current-session", "timestamp": 300},
+                {"role": "assistant", "content": "current two", "session_id": "current-session", "timestamp": 350},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 300
+
     def test_session_start_unix_falls_back_to_untagged_message_timestamps(self):
         """If SessionStore is stale and messages are untagged, use conversation time."""
         from deerflow.sophia.offline_pipeline import _build_session_metadata
