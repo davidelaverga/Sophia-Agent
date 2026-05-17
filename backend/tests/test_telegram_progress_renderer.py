@@ -160,6 +160,69 @@ class TestTerminalRendering:
         assert result.terminal is True
         assert "[ Done ]" in r.render()
 
+    def test_mark_done_clears_activity_history(self) -> None:
+        """On natural completion the placeholder must render as a clean
+        ``[ Done ]`` (plus optional summary) — the live tool-call activity
+        lines (🔍 Searching, 🔗 Reading, 📝 Drafting) are progress signal
+        for the in-flight build only. Once the build is complete the
+        accumulated history just clutters the chat; the artifact arrives
+        as a separate message via ``_on_builder_completion``. Lock the
+        cleared-history contract so a future "preserve history" change
+        would fail loudly.
+        """
+        r = ProgressRenderer()
+        # Build up a typical activity history through the run.
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_search", "args": {"query": "best EVs"}},
+            ])]},
+        })
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_fetch", "args": {"url": "https://ev-database.org/cars/2026"}},
+            ])]},
+        })
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/report.md"}},
+            ])]},
+        })
+        # Sanity: history is populated pre-mark_done.
+        pre_body = r.render()
+        assert "🔍 Searching" in pre_body
+        assert "🔗 Reading" in pre_body
+        assert "📝 Drafting" in pre_body
+
+        result = r.mark_done(summary="Build complete.")
+        assert result.terminal is True
+
+        body = r.render()
+        assert "[ Done ]" in body
+        assert "Build complete." in body
+        # Activity history MUST be cleared.
+        assert "🔍 Searching" not in body
+        assert "🔗 Reading" not in body
+        assert "📝 Drafting" not in body
+        assert r.state.activity_lines == []
+
+    def test_mark_done_without_summary_clears_activity_history(self) -> None:
+        """Even with no summary, mark_done clears history — the final
+        body is just ``[ Done ]`` on its own."""
+        r = ProgressRenderer()
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_search", "args": {"query": "x"}},
+            ])]},
+        })
+        assert r.state.activity_lines  # populated before mark_done
+
+        r.mark_done()  # no summary
+
+        body = r.render()
+        assert "[ Done ]" in body
+        assert "🔍 Searching" not in body
+        assert r.state.activity_lines == []
+
     def test_mark_stalled_renders_still_working_and_is_not_terminal(self) -> None:
         """Phase 4F: per-event / total timeout MUST NOT pretend the
         build is done. The build may still be running — the streaming

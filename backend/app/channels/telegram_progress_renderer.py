@@ -261,10 +261,20 @@ class ProgressRenderer:
         can rely on — the SDK iterator just stops. The subscriber's
         loop calls this method when the iteration ends, with the
         builder's summary (or empty) as the final body line.
+
+        Clears the accumulated activity history so the final placeholder
+        renders as a clean ``[ Done ]`` (plus optional summary). The
+        intermediate tool-call lines (🔍 Searching, 📝 Drafting, …) are
+        live-progress signal — once the build is complete they only
+        clutter the chat and the deliverable is what matters. The
+        artifact-delivery path (`_on_builder_completion`) sends the
+        actual file as a separate message; the placeholder's job is
+        done.
         """
         before = self._snapshot()
         self.state.current_phase = "done"
         self.state.terminal = True
+        self.state.activity_lines = []
         if summary:
             self.state.summary_text = _shorten(summary, 600)
         return RenderResult(state_changed=self._snapshot() != before, terminal=True)
