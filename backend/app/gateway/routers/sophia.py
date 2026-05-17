@@ -426,27 +426,27 @@ def _is_memory_record(item: dict) -> bool:
     return True
 
 
-def _get_all_paginated(client, filters: dict) -> list[dict]:
+def _get_all_paginated(client, filters: dict, page_size: int = 100) -> list[dict]:
     """Fetch all pages from Mem0 v3 get_all and return a flat list of memories."""
     all_results: list[dict] = []
-    cursor: str | None = None
+    page = 1
     page_count = 0
     while True:
-        kwargs: dict = {"filters": filters}
-        if cursor is not None:
-            kwargs["cursor"] = cursor
-        result = client.get_all(**kwargs)
+        result = client.get_all(filters=filters, page=page, page_size=page_size)
         page_count += 1
         if isinstance(result, dict):
             results = result.get("results", [])
-            all_results.extend(results if isinstance(results, list) else [results])
-            cursor = result.get("next")
+            if isinstance(results, list):
+                all_results.extend(results)
+            elif results:
+                all_results.append(results)
+            if not result.get("next"):
+                break
+            page += 1
         elif isinstance(result, list):
             all_results.extend(result)
             break
         else:
-            break
-        if not cursor:
             break
     logger.debug("get_all paginated | pages=%d | total=%d", page_count, len(all_results))
     return all_results

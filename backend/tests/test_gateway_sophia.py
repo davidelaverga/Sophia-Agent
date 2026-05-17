@@ -169,6 +169,30 @@ class TestListMemories:
         assert resp.json()["count"] == 0
         assert resp.json()["memories"] == []
 
+    def test_get_all_pagination_uses_page_params_not_next_url(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": "m1", "memory": "First"}], "next": "https://api.mem0.ai/v3/memories/?page=2"},
+            {"results": [{"id": "m2", "memory": "Second"}], "next": None},
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"})
+
+        assert result == [{"id": "m1", "memory": "First"}, {"id": "m2", "memory": "Second"}]
+        assert mock_client.get_all.call_args_list[0].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 1,
+            "page_size": 100,
+        }
+        assert mock_client.get_all.call_args_list[1].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 2,
+            "page_size": 100,
+        }
+        assert all("cursor" not in call.kwargs for call in mock_client.get_all.call_args_list)
+
     def test_with_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Needs review", "metadata": None},
@@ -183,7 +207,7 @@ class TestListMemories:
         data = resp.json()
         assert data["count"] == 1
         assert data["memories"][0]["id"] == "m1"
-        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user"})
+        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user"}, page=1, page_size=100)
         assert mock_mem0.get.call_count == 2
 
     def test_status_filter_uses_local_review_metadata_overlay(self, client, mock_mem0, mock_review_store):
@@ -553,7 +577,11 @@ class TestJournal:
         mock_mem0.get_all.return_value = []
         resp = client.get("/api/sophia/test_user/journal?type=relationship")
         assert resp.status_code == 200
-        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user", "categories": "relationship"})
+        mock_mem0.get_all.assert_called_once_with(
+            filters={"user_id": "test_user", "categories": "relationship"},
+            page=1,
+            page_size=100,
+        )
 
     def test_with_search_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
