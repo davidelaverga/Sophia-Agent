@@ -162,7 +162,110 @@ class TestAafterModel:
         updates_post = next(p for p in captured_posts if p["event_name"] == "updates")
         tcs = updates_post["data"]["agent"]["messages"][0]["tool_calls"]
         assert tcs[0]["name"] == "builder_web_search"
+        # Codex P1 (post-Phase-4I review): args are trimmed to a
+        # renderer-safe projection. query → kept; nothing else.
+        assert tcs[0]["args"] == {"query": "FST"}
         assert update == {"builder_progress_last_phase": "researching"}
+
+    @pytest.mark.anyio
+    async def test_aafter_model_trims_write_file_content_field(
+        self, captured_posts: list[dict]
+    ) -> None:
+        """Codex P1 lock: ``write_file.content`` (a potentially huge
+        document body) MUST be stripped from the webhook payload.
+        The renderer only reads ``path`` / ``file_path`` for the
+        📝 Drafting activity line; shipping the full content would
+        balloon every progress webhook to hundreds of KB on a
+        long-form build.
+        """
+        mw = BuilderProgressMiddleware()
+        huge_content = "x" * 100_000  # 100 KB document body
+        state = {
+            "messages": [
+                _ai_message(tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "path": "/mnt/user-data/outputs/report.md",
+                            "content": huge_content,
+                            "mode": "w",
+                        },
+                    },
+                ])
+            ],
+        }
+        await mw.aafter_model(state, _runtime())
+
+        updates_post = next(p for p in captured_posts if p["event_name"] == "updates")
+        sent_args = updates_post["data"]["agent"]["messages"][0]["tool_calls"][0]["args"]
+        # ``path`` is kept (renderer reads it for the activity line).
+        assert sent_args.get("path") == "/mnt/user-data/outputs/report.md"
+        # ``content`` is DROPPED — not in the allow-list.
+        assert "content" not in sent_args
+        # ``mode`` (irrelevant to the renderer) is also dropped.
+        assert "mode" not in sent_args
+        # Payload size sanity: the trimmed args must be tiny vs the
+        # 100 KB content. Be generous in the bound; we just want to
+        # prove huge fields don't leak.
+        import json
+        wire_size = len(json.dumps(updates_post["data"]))
+        assert wire_size < 1000, (
+            f"trimmed updates payload size {wire_size}B is too large — "
+            f"content field was probably not stripped"
+        )
+
+    @pytest.mark.anyio
+    async def test_aafter_model_clips_overlong_arg_values(
+        self, captured_posts: list[dict]
+    ) -> None:
+        """Even allow-listed fields are clipped at the per-arg max
+        (240 chars). A pathological bash command or search query
+        shouldn't burn unbounded bandwidth on the wire."""
+        mw = BuilderProgressMiddleware()
+        state = {
+            "messages": [
+                _ai_message(tool_calls=[
+                    {"name": "bash", "args": {"command": "echo " + "z" * 5000}},
+                ])
+            ],
+        }
+        await mw.aafter_model(state, _runtime())
+
+        updates_post = next(p for p in captured_posts if p["event_name"] == "updates")
+        sent_cmd = updates_post["data"]["agent"]["messages"][0]["tool_calls"][0]["args"]["command"]
+        assert len(sent_cmd) <= 240
+        assert sent_cmd.endswith("…")  # clip marker
+
+    @pytest.mark.anyio
+    async def test_aafter_model_drops_unknown_tool_args(
+        self, captured_posts: list[dict]
+    ) -> None:
+        """Tool not in the allow-list → args becomes {} (renderer
+        doesn't read args for unknown tools anyway; this prevents
+        a malformed tool name from leaking arbitrary fields like
+        secrets accidentally placed in args)."""
+        mw = BuilderProgressMiddleware()
+        state = {
+            "messages": [
+                _ai_message(tool_calls=[
+                    {"name": "some_unknown_tool", "args": {"secret": "hunter2"}},
+                ])
+            ],
+        }
+        await mw.aafter_model(state, _runtime())
+
+        # Unknown tool: no phase classification → no custom event,
+        # but updates IS emitted so the renderer can show a generic
+        # 🔧 activity line. The args are scrubbed.
+        updates_posts = [p for p in captured_posts if p["event_name"] == "updates"]
+        assert len(updates_posts) == 1
+        sent_args = updates_posts[0]["data"]["agent"]["messages"][0]["tool_calls"][0]["args"]
+        assert sent_args == {}, (
+            f"unknown-tool args must be scrubbed; got {sent_args}"
+        )
+        assert "secret" not in sent_args
+        # No phase event for an unclassified tool.
+        assert not any(p["event_name"] == "custom" for p in captured_posts)
 
     @pytest.mark.anyio
     async def test_finalizing_wins_in_same_batch(

@@ -134,6 +134,17 @@ class BuilderProgressRegistry:
         # task_id. Replayed on registration. Bounded + TTL'd to
         # prevent leaks when a placeholder never lands.
         self._pending_terminals: dict[str, _PendingTerminal] = {}
+        # Codex P2 (post-Phase-4I review): strong-ref set for
+        # ``_schedule_pending_replay``'s fire-and-forget tasks.
+        # asyncio only weakly references tasks created via
+        # ``loop.create_task``; without a strong-ref hold, the GC
+        # can collect an in-flight replay task before mark_done /
+        # mark_stopped completes, leaving the placeholder stuck.
+        # Same pattern as ``_POST_TASKS`` in the middleware and
+        # ``_progress_subscriber_tasks`` in the original Phase 4D
+        # subscriber. ``add_done_callback(discard)`` keeps the set
+        # bounded.
+        self._replay_tasks: set[asyncio.Task] = set()
         # Protect registration / lookup against concurrent access
         # from the HTTP endpoint coroutine + channel send coroutine.
         # All operations are short (dict ops + a callback await
@@ -282,7 +293,14 @@ class BuilderProgressRegistry:
                 summary=pending.summary,
                 run_id=entry.run_id,
             )
-        loop.create_task(coro)
+        # Codex P2 (post-Phase-4I review): keep a strong reference to
+        # the scheduled task. asyncio.create_task only weakly
+        # references the task; without this set, the GC can collect
+        # the replay coroutine mid-flight and the placeholder stays
+        # stuck. ``add_done_callback(discard)`` reaps on completion.
+        task = loop.create_task(coro)
+        self._replay_tasks.add(task)
+        task.add_done_callback(self._replay_tasks.discard)
         logger.info(
             "[BuilderProgress] pending terminal replay scheduled task_id=%s "
             "kind=%s age_s=%.1f",

@@ -249,6 +249,79 @@ def _emit_phase(task_id: str, run_id: str, phase: str) -> None:
     )
 
 
+# Codex P1 (post-Phase-4I review): per-tool argument allow-list. The
+# renderer's ``_format_tool_detail`` (in
+# ``app/channels/telegram_progress_renderer.py``) only reads a small
+# subset of fields from each tool's args:
+#
+#   - search/tavily_search/web_search → args["query"]
+#   - web_fetch/jina_fetch/builder_web_fetch → args["url"]
+#   - write_file/str_replace → args["path"] or args["file_path"]
+#   - bash → args["command"]
+#
+# Forwarding the full args dict — which for ``write_file`` includes the
+# ENTIRE document body in ``args["content"]`` — would balloon every
+# progress webhook to hundreds of kilobytes for a long-form build,
+# risking proxy/body-limit drops AND wasting bandwidth between the
+# langgraph service and the gateway. We strip down to a known-safe
+# minimal projection per tool here, in the langgraph process, BEFORE
+# the POST goes out.
+_ARG_ALLOWLIST_BY_TOOL: dict[str, tuple[str, ...]] = {
+    # Research / web tools — renderer reads query / url.
+    "builder_web_search": ("query",),
+    "web_search": ("query",),
+    "tavily_search": ("query",),
+    "builder_web_fetch": ("url",),
+    "web_fetch": ("url",),
+    "jina_fetch": ("url",),
+    # Draft tools — renderer reads path / file_path.
+    "write_file": ("path", "file_path"),
+    "str_replace": ("path", "file_path"),
+    "edit_file": ("path", "file_path"),
+    # Bash — renderer reads command (and only the first 60 chars).
+    "bash": ("command",),
+    # Finalize tools — renderer doesn't read any args at all.
+    "emit_builder_artifact": (),
+    "emit_artifact": (),
+    "render_markdown_to_pdf": (),
+}
+
+# Hard upper bound on per-arg string length we'll ship to the gateway.
+# The renderer truncates at 60-80 chars anyway; carrying anything
+# longer is dead weight on the wire. Larger than the rendered max so
+# we don't accidentally clip mid-word; small enough that even a worst
+# case ~10-tool batch stays well under any sane proxy body limit.
+_MAX_ARG_VALUE_CHARS = 240
+
+
+def _trim_tool_args(name: str, args: dict) -> dict:
+    """Return a renderer-safe projection of ``args``.
+
+    Looks up the tool's allow-list in ``_ARG_ALLOWLIST_BY_TOOL`` and
+    keeps only those keys. Falls back to an empty dict for unknown
+    tools (the renderer renders them with a generic 🔧 prefix and
+    only the tool name — no args read). String values are clipped
+    to ``_MAX_ARG_VALUE_CHARS``.
+    """
+    allow = _ARG_ALLOWLIST_BY_TOOL.get(name.lower() if isinstance(name, str) else "")
+    if allow is None:
+        # Unknown tool — renderer doesn't read args for these.
+        return {}
+    if not allow:
+        return {}
+    out: dict = {}
+    for key in allow:
+        if not isinstance(args, dict):
+            continue
+        if key not in args:
+            continue
+        value = args[key]
+        if isinstance(value, str) and len(value) > _MAX_ARG_VALUE_CHARS:
+            value = value[: _MAX_ARG_VALUE_CHARS - 1] + "…"
+        out[key] = value
+    return out
+
+
 def _emit_updates(task_id: str, run_id: str, tool_calls: list) -> None:
     """Send an ``updates`` event carrying the latest tool_calls.
 
@@ -257,6 +330,12 @@ def _emit_updates(task_id: str, run_id: str, tool_calls: list) -> None:
     rebuild that shape from a list of tool_call dicts. The agent-node
     name is irrelevant to the renderer — it iterates all nodes — so
     we use a stable placeholder.
+
+    Codex P1 (post-Phase-4I review): each call's ``args`` is trimmed
+    to a renderer-safe projection via ``_trim_tool_args`` before
+    serialization. This prevents huge fields like ``write_file.content``
+    (entire markdown deliverables) from being shipped to the gateway
+    on every model turn.
     """
     # Tool-call dicts are JSON-serializable as-is (name/args structure).
     # If callers pass non-dict tool_calls (SimpleNamespace etc), they
@@ -264,12 +343,15 @@ def _emit_updates(task_id: str, run_id: str, tool_calls: list) -> None:
     serializable: list[dict] = []
     for call in tool_calls:
         if isinstance(call, dict):
-            serializable.append({"name": call.get("name"), "args": call.get("args") or {}})
+            name = call.get("name")
+            raw_args = call.get("args") or {}
         else:
             name = getattr(call, "name", None)
-            args = getattr(call, "args", None) or {}
-            if name:
-                serializable.append({"name": name, "args": args if isinstance(args, dict) else {}})
+            raw_args = getattr(call, "args", None) or {}
+        if not name:
+            continue
+        trimmed_args = _trim_tool_args(str(name), raw_args if isinstance(raw_args, dict) else {})
+        serializable.append({"name": name, "args": trimmed_args})
     if not serializable:
         return
     _schedule_post(

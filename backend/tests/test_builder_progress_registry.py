@@ -288,6 +288,65 @@ async def test_apply_event_with_no_run_id_param_still_works() -> None:
 
 
 @pytest.mark.anyio
+async def test_pending_replay_holds_strong_reference_to_task() -> None:
+    """Codex P2 (post-Phase-4I review): the replay task spawned by
+    ``_schedule_pending_replay`` MUST be held in
+    ``self._replay_tasks`` so the asyncio runtime doesn't GC it
+    mid-flight. ``asyncio.create_task`` returns a weakly-referenced
+    handle; without a strong ref, a fast-finish placeholder could
+    leave the user stuck on "Working on it…" because the replay
+    coroutine was collected before it completed.
+    """
+    r = BuilderProgressRegistry()
+
+    # Capture the registry's _replay_tasks set immediately after
+    # schedule but BEFORE awaiting any sleep. The task should be
+    # in the set as soon as create_task returns.
+    seen_in_set: dict[str, bool] = {"value": False}
+    callback_fired: dict[str, bool] = {"value": False}
+
+    async def cb(_c, _m, _b):
+        # Re-read the set from inside the callback. The replay
+        # task should still be referenced (we're inside it).
+        if r._replay_tasks:
+            seen_in_set["value"] = True
+        callback_fired["value"] = True
+
+    r.register_channel_callback("telegram", cb)
+    # Terminal arrives early, recorded as pending.
+    await r.mark_done(task_id="t-strong-ref", summary="ok", run_id="r-1")
+    # Now register — this should schedule a replay task and
+    # immediately add it to _replay_tasks.
+    r.register_task(
+        task_id="t-strong-ref",
+        chat_id=1,
+        message_id=2,
+        channel_name="telegram",
+        run_id="r-1",
+    )
+    # Replay task is scheduled but not yet run. The set MUST be
+    # non-empty at this point (the strong ref is held).
+    assert len(r._replay_tasks) == 1, (
+        f"replay task must be strong-ref'd in _replay_tasks set; "
+        f"got len={len(r._replay_tasks)}"
+    )
+    # Let the loop run the task.
+    await asyncio.sleep(0.1)
+    # Callback fired (proves the task ran to completion).
+    assert callback_fired["value"] is True
+    assert seen_in_set["value"] is True, (
+        "strong ref must still be held while the callback runs"
+    )
+    # Discard-on-done callback eventually clears the set.
+    # Yield once more to let the done-callback run.
+    await asyncio.sleep(0.01)
+    assert len(r._replay_tasks) == 0, (
+        f"replay task should be discarded after completion; "
+        f"_replay_tasks still has {len(r._replay_tasks)} entries"
+    )
+
+
+@pytest.mark.anyio
 async def test_register_task_replays_pending_terminal() -> None:
     """Codex P2: if ``mark_done`` arrives before ``register_task``
     (fast-build race), the terminal is recorded and replayed when
