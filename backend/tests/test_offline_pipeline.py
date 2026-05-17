@@ -413,6 +413,42 @@ class TestBuildSessionMetadata:
         meta = _build_session_metadata(state)
         assert meta["session_start_unix"] == 1715900100
 
+    def test_session_start_unix_prefers_current_session_record(self):
+        """Current session record must win over older messages in the thread."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        record = MagicMock()
+        record.created_at = "1970-01-02T00:00:00+00:00"
+        state = {
+            "messages": [
+                {"role": "user", "content": "old session", "session_id": "old-session", "timestamp": 1},
+                {"role": "user", "content": "current session", "timestamp": 2},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=record) as mock_get:
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 86400
+        mock_get.assert_called_once_with("user1", "current-session")
+
+    def test_session_start_unix_uses_only_current_session_messages_when_scoped(self):
+        """Fallback to message timestamps only within the finalized session."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "old session", "session_id": "old-session", "timestamp": 1},
+                {"role": "user", "content": "current one", "session_id": "current-session", "timestamp": 200},
+                {"role": "assistant", "content": "current two", "session_id": "current-session", "timestamp": 250},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 200
+
 
 class TestBuildSessionSummary:
     def test_builds_transcript_from_messages(self):

@@ -130,7 +130,7 @@ def run_offline_pipeline(
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])
-    session_metadata = _build_session_metadata(thread_state)
+    session_metadata = _build_session_metadata(thread_state, user_id=user_id, session_id=session_id)
     artifacts = _extract_artifacts(thread_state)
 
     logger.info(
@@ -359,30 +359,26 @@ def _write_offline_recap(
     return "ok"
 
 
-def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
+def _build_session_metadata(
+    thread_state: dict[str, Any],
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     """Extract session-level metadata from thread_state.
 
-    Pulls ``platform``, ``context_mode``, ``ritual``, and
-    ``session_start_unix`` from either the top-level state dict or a
-    nested ``configurable`` dict.
+    Pulls ``platform``, ``context_mode``, ``ritual``, and the current
+    session's ``session_start_unix`` from either the persisted session
+    record, session-scoped messages, or top-level thread state.
     """
     configurable = thread_state.get("configurable", {})
 
-    # Upgrade A: derive session_start_unix from earliest message timestamp
-    # or fallback to now. Scan all messages because the first entry may
-    # be a system/summary message that lacks a timestamp.
-    session_start_unix: int | None = None
+    session_start_unix = _lookup_session_start_unix(user_id, session_id)
     messages = thread_state.get("messages", [])
-    for msg in messages:
-        ts: int | float | None = None
-        if isinstance(msg, dict):
-            ts = msg.get("timestamp")
-        else:
-            ts = getattr(msg, "timestamp", None)
-        if isinstance(ts, (int, float)):
-            ts_int = int(ts)
-            if session_start_unix is None or ts_int < session_start_unix:
-                session_start_unix = ts_int
+    if session_start_unix is None:
+        session_start_unix = _earliest_message_timestamp(messages, session_id=session_id)
+    if session_start_unix is None and session_id is None:
+        session_start_unix = _earliest_message_timestamp(messages)
 
     return {
         "platform": (
@@ -399,6 +395,91 @@ def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
         ),
         "session_start_unix": session_start_unix,
     }
+
+
+def _lookup_session_start_unix(user_id: str | None, session_id: str | None) -> int | None:
+    if not user_id or not session_id:
+        return None
+    try:
+        from deerflow.sophia.session_store import SessionStore
+
+        record = SessionStore().get(user_id, session_id)
+    except Exception:
+        logger.warning(
+            "session.finalization metadata_session_lookup_failed user=%s session=%s",
+            user_id,
+            session_id,
+            exc_info=True,
+        )
+        return None
+    if record is None:
+        return None
+    return _coerce_timestamp_unix(getattr(record, "created_at", None))
+
+
+def _earliest_message_timestamp(messages: list[Any], session_id: str | None = None) -> int | None:
+    timestamps: list[int] = []
+    for msg in messages:
+        if session_id is not None and _message_session_id(msg) != session_id:
+            continue
+        ts = _message_timestamp_unix(msg)
+        if ts is not None:
+            timestamps.append(ts)
+    return min(timestamps) if timestamps else None
+
+
+def _message_session_id(msg: Any) -> str | None:
+    for container in _message_metadata_containers(msg):
+        raw = container.get("session_id") or container.get("run_id")
+        if raw:
+            return str(raw)
+    return None
+
+
+def _message_timestamp_unix(msg: Any) -> int | None:
+    for container in _message_metadata_containers(msg):
+        for key in ("timestamp", "created_at", "created"):
+            if key not in container:
+                continue
+            ts = _coerce_timestamp_unix(container.get(key))
+            if ts is not None:
+                return ts
+    return _coerce_timestamp_unix(getattr(msg, "timestamp", None))
+
+
+def _message_metadata_containers(msg: Any) -> list[dict]:
+    containers: list[dict] = []
+    if isinstance(msg, dict):
+        containers.append(msg)
+        for key in ("metadata", "additional_kwargs", "response_metadata", "data"):
+            value = msg.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+    else:
+        for attr in ("metadata", "additional_kwargs", "response_metadata"):
+            value = getattr(msg, attr, None)
+            if isinstance(value, dict):
+                containers.append(value)
+    return containers
+
+
+def _coerce_timestamp_unix(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        pass
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return int(parsed.timestamp())
+    except ValueError:
+        return None
 
 
 def _extract_artifacts(thread_state: dict[str, Any]) -> list[dict]:
