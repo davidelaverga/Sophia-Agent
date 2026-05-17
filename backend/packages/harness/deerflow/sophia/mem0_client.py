@@ -43,6 +43,10 @@ _warm_up_completed: bool = False
 _warm_up_lock = threading.Lock()
 
 
+class Mem0EventFailedError(RuntimeError):
+    """Raised when a Mem0 async add event reaches FAILED status."""
+
+
 # ---------------------------------------------------------------------------
 # Feature flags (read once at import, environment-driven)
 # ---------------------------------------------------------------------------
@@ -354,7 +358,17 @@ def add_memories(
         if isinstance(item, dict) and (item.get("event_id") or item.get("id"))
     ]
     if event_ids:
-        resolved = wait_for_pending_events(user_id, event_ids)
+        try:
+            resolved = wait_for_pending_events(user_id, event_ids)
+        except Mem0EventFailedError:
+            logger.warning(
+                "session.finalization mem0_add_failed user_id=%s session_id=%s event_ids=%s",
+                user_id,
+                session_id,
+                event_ids,
+                exc_info=True,
+            )
+            return []
         if resolved:
             logger.info(
                 "session.finalization mem0_add_resolved user_id=%s session_id=%s "
@@ -421,7 +435,9 @@ def wait_for_pending_events(
                     events, _ = _normalize_paginated_result(event_result)
                     for evt in events:
                         status = evt.get("status", evt.get("event_status", "")).upper()
-                        if status not in ("SUCCEEDED", "FAILED", "COMPLETED"):
+                        if status == "FAILED":
+                            raise Mem0EventFailedError(f"Mem0 add event failed: {evt_id}")
+                        if status not in ("SUCCEEDED", "COMPLETED"):
                             continue
                         resolved.extend(_extract_memories_from_event(evt))
                         pending.discard(evt_id)
@@ -442,12 +458,16 @@ def wait_for_pending_events(
                         if evt_id not in pending:
                             continue
                         status = evt.get("status", evt.get("event_status", "")).upper()
-                        if status not in ("SUCCEEDED", "FAILED", "COMPLETED"):
+                        if status == "FAILED":
+                            raise Mem0EventFailedError(f"Mem0 add event failed: {evt_id}")
+                        if status not in ("SUCCEEDED", "COMPLETED"):
                             continue
                         resolved.extend(_extract_memories_from_event(evt))
                         pending.discard(evt_id)
                     if not cursor or not pending:
                         break
+        except Mem0EventFailedError:
+            raise
         except Exception:
             logger.warning(
                 "Mem0 poll for pending events failed for user %s", user_id, exc_info=True

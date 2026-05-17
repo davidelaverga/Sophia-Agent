@@ -558,6 +558,27 @@ class TestAddMemories:
                 assert len(result) == 1
                 assert result[0]["id"] == "evt_1"
 
+    def test_add_returns_empty_when_pending_event_fails(self):
+        """FAILED async add events are write failures, not pending results."""
+        from deerflow.sophia.mem0_client import Mem0EventFailedError, add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": None}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                side_effect=Mem0EventFailedError("failed"),
+            ):
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+
+        assert result == []
+
     def test_add_without_event_apis_does_not_return_historical_get_all_memories(self):
         """If event APIs are missing, keep raw add result instead of old memories."""
         from deerflow.sophia.mem0_client import add_memories
@@ -654,9 +675,9 @@ class TestWaitForPendingEvents:
             # evt_1 never reached SUCCEEDED — should time out with nothing
             assert result == []
 
-    def test_resolves_failed_events_with_memory(self):
-        """Events with FAILED status are terminal and resolved if memory is present."""
-        from deerflow.sophia.mem0_client import wait_for_pending_events
+    def test_failed_events_raise_write_error(self):
+        """FAILED events are terminal write errors, not resolved memories."""
+        from deerflow.sophia.mem0_client import Mem0EventFailedError, wait_for_pending_events
 
         mock_client = MagicMock(spec=["get_events"])
         mock_client.get_events.return_value = {
@@ -672,11 +693,10 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
-                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
-            )
-            assert len(result) == 1
-            assert result[0]["id"] == "mem_1"
+            with pytest.raises(Mem0EventFailedError):
+                wait_for_pending_events(
+                    "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+                )
 
     def test_extracts_memory_from_results_path(self):
         """Mem0 v3 may carry memory outputs in event.results."""
