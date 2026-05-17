@@ -214,6 +214,138 @@ async def test_failed_callback_does_not_update_last_pushed_body() -> None:
 
 
 @pytest.mark.anyio
+async def test_apply_event_serializes_concurrent_calls_per_task() -> None:
+    """Codex P1 (Phase 4J post-review): concurrent ``apply_event``
+    calls for the SAME task_id must NOT interleave at the
+    ``renderer.apply`` mutation or the ``last_pushed_body`` write.
+    Without per-entry serialization, two POSTs for the same task
+    could race — an older event could apply AFTER a newer one and
+    overwrite the renderer state with stale content (visible as a
+    phase regression like ``[ Finalizing ]`` → ``[ Drafting ]``).
+
+    Locks the contract by:
+    1. Building a slow channel callback (sleeps to widen the race
+       window).
+    2. Spawning two concurrent ``apply_event`` coroutines for the
+       same task_id with DIFFERENT phase events.
+    3. Asserting the second coroutine WAITS for the first
+       (serialized): its callback start-time is AFTER the first
+       callback's end-time.
+    """
+    import time
+
+    r = BuilderProgressRegistry()
+    call_log: list[tuple[str, float]] = []  # (label, monotonic_time)
+
+    async def slow_cb(_c: int, _m: int, body: str) -> None:
+        call_log.append(("enter", time.monotonic()))
+        # Sleep long enough that a non-serialized concurrent caller
+        # would be inside its own renderer.apply before this exits.
+        await asyncio.sleep(0.05)
+        call_log.append((f"exit:{body[:30]}", time.monotonic()))
+
+    r.register_channel_callback("telegram", slow_cb)
+    r.register_task(
+        task_id="t-race", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    # Spawn two concurrent apply_events for the SAME task_id.
+    coro1 = r.apply_event(
+        task_id="t-race",
+        event_name="custom",
+        data={"name": "phase", "phase": "researching"},
+    )
+    coro2 = r.apply_event(
+        task_id="t-race",
+        event_name="custom",
+        data={"name": "phase", "phase": "drafting"},
+    )
+    results = await asyncio.gather(coro1, coro2)
+
+    # Both edits should have landed (both events change renderer state).
+    assert results == [True, True], (
+        f"expected both apply_event calls to succeed; got {results}"
+    )
+
+    # Serialization contract: every "enter" entry must be followed
+    # by its "exit" entry BEFORE the next "enter". Equivalently:
+    # the log alternates enter/exit and never sees two enters in
+    # a row (which would indicate concurrent callbacks).
+    enters = [i for i, e in enumerate(call_log) if e[0] == "enter"]
+    exits = [i for i, e in enumerate(call_log) if e[0].startswith("exit")]
+    # Each enter must be followed immediately by an exit.
+    for enter_idx in enters:
+        assert enter_idx + 1 < len(call_log), (
+            f"unmatched enter at {enter_idx}: log={call_log}"
+        )
+        next_event = call_log[enter_idx + 1]
+        assert next_event[0].startswith("exit"), (
+            f"concurrent callbacks detected — enter at {enter_idx} "
+            f"followed by another enter at {enter_idx + 1}. log={call_log}"
+        )
+    # Final renderer state reflects the LAST applied event (drafting,
+    # since the asyncio scheduler runs coro1 first by FIFO order then
+    # coro2 picks up after the lock release).
+    entry = r._entries["t-race"]
+    assert "[ Drafting ]" in entry.last_pushed_body
+    # Both enters happened — no race-induced short-circuit.
+    assert len(enters) == 2
+    assert len(exits) == 2
+
+
+@pytest.mark.anyio
+async def test_apply_event_cross_task_remains_concurrent() -> None:
+    """Sanity: the per-entry lock must NOT serialize ACROSS task_ids.
+    Two different task_ids should be able to apply concurrently.
+    """
+    import time
+
+    r = BuilderProgressRegistry()
+
+    enter_times: dict[str, float] = {}
+    exit_times: dict[str, float] = {}
+
+    async def slow_cb(_c: int, _m: int, body: str) -> None:
+        # Tag by what task this is (chat_id encodes it).
+        tag = body[:20]
+        enter_times[tag] = time.monotonic()
+        await asyncio.sleep(0.05)
+        exit_times[tag] = time.monotonic()
+
+    r.register_channel_callback("telegram", slow_cb)
+    r.register_task(
+        task_id="t-A", chat_id=1, message_id=2, channel_name="telegram", run_id="r-A"
+    )
+    r.register_task(
+        task_id="t-B", chat_id=3, message_id=4, channel_name="telegram", run_id="r-B"
+    )
+
+    results = await asyncio.gather(
+        r.apply_event(
+            task_id="t-A",
+            event_name="custom",
+            data={"name": "phase", "phase": "researching"},
+        ),
+        r.apply_event(
+            task_id="t-B",
+            event_name="custom",
+            data={"name": "phase", "phase": "drafting"},
+        ),
+    )
+    assert results == [True, True]
+    # Both callbacks should have been INSIDE the sleep at the same
+    # time — verify by checking that the second enter happened
+    # BEFORE the first exit (overlap proves concurrency).
+    assert len(enter_times) == 2 and len(exit_times) == 2
+    latest_enter = max(enter_times.values())
+    earliest_exit = min(exit_times.values())
+    assert latest_enter < earliest_exit, (
+        f"cross-task callbacks did not overlap: "
+        f"enters={enter_times} exits={exit_times}"
+    )
+
+
+@pytest.mark.anyio
 async def test_successful_callback_updates_last_pushed_body() -> None:
     """Sanity counterpart: on success the cache DOES update, so a
     subsequent event producing identical body is correctly

@@ -84,6 +84,19 @@ class BuilderProgressEntry:
     placeholder (phase regressions, premature "done"). ``apply_event``
     validates the incoming run_id against this field and drops
     mismatches.
+
+    Codex P1 (Phase 4J post-review): ``update_lock`` serializes
+    per-task renderer mutation + body cache update + edit callback
+    await. The middleware emits webhook POSTs fire-and-forget; the
+    endpoint spawns a coroutine per POST. Without serialization,
+    two events for the same task_id can interleave at the
+    ``renderer.apply`` mutation and the ``last_pushed_body`` write,
+    causing visible phase regressions (a newer ``[ Finalizing ]``
+    overwritten by an older ``[ Drafting ]``) or dropped retries.
+    The lock is per-entry so cross-task events still process
+    concurrently. It's an asyncio.Lock not a threading.Lock — the
+    gateway endpoint runs on a single FastAPI loop so loop-affinity
+    is fine.
     """
 
     chat_id: int
@@ -93,6 +106,11 @@ class BuilderProgressEntry:
     renderer: ProgressRenderer = field(default_factory=ProgressRenderer)
     # Last-pushed body so we can avoid no-op edits.
     last_pushed_body: str = ""
+    # Lazily initialised on first use so the dataclass constructor
+    # doesn't require an asyncio loop to be running (the registry
+    # is constructed at import time in some test paths). See
+    # ``BuilderProgressRegistry._ensure_entry_lock``.
+    update_lock: asyncio.Lock | None = None
 
 
 @dataclass
@@ -354,6 +372,26 @@ class BuilderProgressRegistry:
         with self._lock:
             return str(task_id) in self._entries
 
+    def _ensure_entry_lock(self, entry: BuilderProgressEntry) -> asyncio.Lock:
+        """Lazily construct the per-entry asyncio.Lock under threading.Lock.
+
+        Codex P1 (Phase 4J post-review): we don't initialise the
+        Lock at ``register_task`` time because some callers
+        (notably the singleton-init path triggered at module import
+        in test fixtures) may not have an asyncio loop running yet.
+        First touch from an async context (always ``apply_event`` or
+        ``_finalize_terminal``) creates it.
+
+        The compare-and-set must happen under ``self._lock`` to
+        prevent two concurrent first-touch callers from each
+        creating a fresh Lock and proceeding unsynchronized — the
+        whole point is to serialize on a SINGLE lock object.
+        """
+        with self._lock:
+            if entry.update_lock is None:
+                entry.update_lock = asyncio.Lock()
+            return entry.update_lock
+
     # -- event dispatch -----------------------------------------------------
 
     async def apply_event(
@@ -395,6 +433,45 @@ class BuilderProgressRegistry:
                 event_name,
             )
             return False
+        # Codex P1 (Phase 4J post-review): serialize per-task
+        # renderer mutation + body cache update + callback await.
+        # The middleware fires webhook POSTs as fire-and-forget
+        # asyncio tasks; the gateway endpoint spawns a coroutine per
+        # POST. Without this lock, two events for the same task_id
+        # can interleave at ``renderer.apply`` and the
+        # ``last_pushed_body`` write — older state can overwrite
+        # newer state (phase regression: ``[ Finalizing ]`` →
+        # ``[ Drafting ]``), and a retry attempt can race with the
+        # original. The lock is per-entry; cross-task events still
+        # proceed concurrently.
+        lock = self._ensure_entry_lock(entry)
+        async with lock:
+            return await self._apply_event_locked(
+                entry=entry,
+                callback=callback,
+                task_id=task_id,
+                event_name=event_name,
+                data=data,
+                run_id=run_id,
+            )
+
+    async def _apply_event_locked(
+        self,
+        *,
+        entry: BuilderProgressEntry,
+        callback: EditCallback | None,
+        task_id: str,
+        event_name: str,
+        data: Any,
+        run_id: str | None,
+    ) -> bool:
+        """Critical section of ``apply_event`` held under ``entry.update_lock``.
+
+        Extracted so the lock-acquisition site is a clean three-line
+        ``async with`` block and the body-mutation logic is testable
+        without lock-dance noise. All decision branches that previously
+        lived inline in ``apply_event`` are preserved verbatim here.
+        """
         # Codex P1 (post-Phase-4H review): drop events from an
         # obsoleted run. ``update_async_task`` keeps the same task_id
         # but starts a new run; in-flight POSTs from the interrupted
@@ -571,6 +648,37 @@ class BuilderProgressRegistry:
                 run_id,
             )
             return False
+        # Codex P1 (Phase 4J post-review): same per-task lock as
+        # ``apply_event``. Serializes renderer mutation + body cache
+        # update + callback await so a concurrent ``apply_event``
+        # for the same task_id can't interleave with the terminal
+        # finalize. Without this, the renderer state could be
+        # mid-mutation when terminal fires, producing an
+        # inconsistent rendered body and a partial edit.
+        lock = self._ensure_entry_lock(entry)
+        async with lock:
+            return await self._finalize_terminal_locked(
+                entry=entry,
+                callback=callback,
+                task_id=task_id,
+                kind=kind,
+                summary=summary,
+                reason=reason,
+                run_id=run_id,
+            )
+
+    async def _finalize_terminal_locked(
+        self,
+        *,
+        entry: BuilderProgressEntry,
+        callback: EditCallback | None,
+        task_id: str,
+        kind: str,
+        summary: str,
+        reason: str,
+        run_id: str | None,
+    ) -> bool:
+        """Critical section of ``_finalize_terminal`` under ``entry.update_lock``."""
         # Codex P1: drop terminal events from an obsoleted run.
         if run_id is not None and str(run_id) != entry.run_id:
             logger.info(
