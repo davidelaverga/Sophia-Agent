@@ -2109,10 +2109,128 @@ class TestChannelService:
         _run(go())
         ch._tg_loop.close()
 
-        assert any(c.startswith("done:t-1:Built FST.md") for c in calls), (
+        # Codex-driven UX polish 2026-05-17: success path passes
+        # empty summary so the placeholder body doesn't duplicate
+        # the document caption text. The `done:t-1:` prefix is
+        # enough to confirm routing without coupling to summary text.
+        assert any(c.startswith("done:t-1:") for c in calls), (
             f"success status must route to mark_done; calls={calls}"
         )
         assert not any(c.startswith("stopped:") for c in calls)
+
+    def test_send_routes_bot_call_through_tg_loop(self):
+        """Phase 4I post-review polish: ``send()`` must route
+        ``bot.send_message`` through ``_run_bot_call_on_telegram_loop``
+        so the httpx connection pool opens on ``_tg_loop`` from the
+        first send. Without this, the placeholder's first
+        ``edit_message_text`` (from the gateway-side registry edit
+        callback) tries to reuse the connection on the wrong loop
+        and fails with ``RuntimeError: <Event> is bound to a
+        different event loop`` (production smoke test 2026-05-17
+        log line at 17:54:54).
+        """
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        # Make application non-None so send() proceeds past the
+        # early-out.
+        bot_mock = MagicMock()
+
+        sent_obj = SimpleNamespace(message_id=42)
+
+        async def fake_send_message(**_kw):
+            return sent_obj
+
+        bot_mock.send_message = fake_send_message
+        ch._application = SimpleNamespace(bot=bot_mock)
+
+        # Capture which coroutines pass through the loop-hop helper.
+        hop_calls: list[object] = []
+
+        async def fake_hop(coro):
+            hop_calls.append(coro)
+            return await coro
+
+        ch._run_bot_call_on_telegram_loop = fake_hop  # type: ignore[assignment]
+
+        msg = OutboundMessage(
+            channel_name="telegram",
+            chat_id="1",
+            thread_id="th",
+            text="Hello",
+        )
+
+        async def go():
+            await ch.send(msg)
+
+        _run(go())
+
+        # Exactly one bot call passed through the hop helper.
+        assert len(hop_calls) == 1, (
+            f"send() must route bot.send_message through "
+            f"_run_bot_call_on_telegram_loop; got {len(hop_calls)} hops"
+        )
+
+    def test_on_builder_completion_does_not_duplicate_summary_in_placeholder(self):
+        """Phase 4I post-review polish: success-path completion sends
+        the full summary in the document attachment caption.
+        ``mark_done`` must NOT also write the summary into the
+        placeholder body — that would duplicate the same text in
+        two consecutive Telegram messages.
+
+        Asserts that ``registry.mark_done`` is invoked with
+        ``summary=""`` (the placeholder retains only its ``[ Done ]``
+        header + activity-line history).
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+        registry.register_task(
+            task_id="t-dedup",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-1",
+        )
+
+        recorded: list[dict] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            recorded.append({"task_id": task_id, "summary": summary, "run_id": run_id})
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-dedup",
+                "task_id": "t-dedup",
+                "status": "success",
+                "summary": "Built the technical breakdown with eight sections...",
+                "run_id": "r-1",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert len(recorded) == 1
+        assert recorded[0]["summary"] == "", (
+            f"placeholder finalize must pass empty summary to avoid "
+            f"duplicating the document caption text; got: {recorded[0]['summary']!r}"
+        )
 
     def test_on_builder_completion_branches_to_mark_stopped_on_error(self):
         """Codex P2: error / timeout / cancelled statuses route through

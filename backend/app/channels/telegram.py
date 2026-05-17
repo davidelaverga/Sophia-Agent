@@ -226,7 +226,24 @@ class TelegramChannel(Channel):
         sent = None
         for attempt in range(_max_retries):
             try:
-                sent = await bot.send_message(**kwargs)
+                # Phase 4I post-review: route the bot call through
+                # ``_tg_loop`` so the underlying httpx connection pool
+                # is opened on the same loop the subsequent edits run
+                # on. Without this hop, ``send()`` runs on the bus
+                # subscriber's loop (``_main_loop``) and creates a
+                # connection bound there; the first
+                # ``edit_message_text`` from the gateway-side progress
+                # registry runs on ``_tg_loop`` and tries to reuse
+                # the same connection → ``RuntimeError: <Event> is
+                # bound to a different event loop``. Subsequent edits
+                # succeed because the failed connection is dropped
+                # and a fresh one opens on ``_tg_loop``, but the
+                # first edit is lost. Routing the send through
+                # ``_tg_loop`` puts both calls on the same loop from
+                # the start.
+                sent = await self._run_bot_call_on_telegram_loop(
+                    bot.send_message(**kwargs)
+                )
                 break
             except Exception as exc:
                 last_exc = exc
@@ -377,12 +394,18 @@ class TelegramChannel(Channel):
         reply_to = self._last_bot_message.get(msg.chat_id)
 
         try:
+            # Phase 4I post-review: same loop-affinity fix as ``send()``
+            # — file uploads come through the bus subscriber on
+            # ``_main_loop``; the bot's connection pool is owned by
+            # ``_tg_loop``. Hop both photo and document paths.
             if attachment.is_image and attachment.size <= 10 * 1024 * 1024:
                 with open(attachment.actual_path, "rb") as f:
                     kwargs: dict[str, Any] = {"chat_id": chat_id, "photo": f}
                     if reply_to:
                         kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_photo(**kwargs)
+                    sent = await self._run_bot_call_on_telegram_loop(
+                        bot.send_photo(**kwargs)
+                    )
             else:
                 from telegram import InputFile
 
@@ -391,7 +414,9 @@ class TelegramChannel(Channel):
                     kwargs = {"chat_id": chat_id, "document": input_file}
                     if reply_to:
                         kwargs["reply_to_message_id"] = reply_to
-                    sent = await bot.send_document(**kwargs)
+                    sent = await self._run_bot_call_on_telegram_loop(
+                        bot.send_document(**kwargs)
+                    )
 
             self._last_bot_message[msg.chat_id] = sent.message_id
             logger.info("[Telegram] file sent: %s to chat=%s", attachment.filename, msg.chat_id)
@@ -1079,14 +1104,28 @@ class TelegramChannel(Channel):
             from app.gateway.builder_progress import get_progress_registry
 
             registry = get_progress_registry()
-            summary = payload.get("summary") or ""
             error_message = payload.get("error_message") or ""
             run_id = payload.get("run_id")  # may be None for legacy payloads
+            # Phase 4I post-review polish: ``payload["summary"]`` is
+            # NOT forwarded to the placeholder finalizer — the
+            # document attachment caption already carries the full
+            # summary, and rendering it inside ``[ Done ]`` too
+            # duplicates the text. See the success branch below.
 
             if status == "success":
+                # Phase 4I post-review UX polish: do NOT pass the
+                # summary to the placeholder finalizer. The document
+                # attachment sent right below carries the full
+                # summary in its caption; rendering it inside the
+                # ``[ Done ]`` placeholder body too would duplicate
+                # the text verbatim (visible in the 2026-05-17
+                # smoke-test screenshot). The placeholder finalizes
+                # as just ``[ Done ]`` + the activity-line history
+                # so the user sees what happened without redundant
+                # summary text.
                 await registry.mark_done(
                     task_id=str(task_id),
-                    summary=summary,
+                    summary="",
                     run_id=str(run_id) if run_id else None,
                 )
             elif status in {"error", "failed", "timeout", "timed_out", "cancelled", "canceled"}:
