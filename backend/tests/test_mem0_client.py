@@ -533,6 +533,28 @@ class TestAddMemories:
                 assert len(result) == 1
                 assert result[0]["id"] == "evt_1"
 
+    def test_add_without_event_apis_does_not_return_historical_get_all_memories(self):
+        """If event APIs are missing, keep raw add result instead of old memories."""
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock(spec=["add", "get_all"])
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": None}]
+        mock_client.get_all.return_value = {
+            "count": 1,
+            "results": [{"id": "old_mem", "memory": "historical"}],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result = add_memories(
+                user_id="user1",
+                messages=[{"role": "user", "content": "hello"}],
+                session_id="sess_123",
+            )
+
+        assert result == [{"event_id": "evt_1", "memory": None}]
+        mock_client.get_all.assert_not_called()
+
 
 class TestWaitForPendingEvents:
     def test_resolves_via_get_events_when_succeeded(self):
@@ -705,9 +727,8 @@ class TestWaitForPendingEvents:
             assert len(result) == 1
             assert result[0]["id"] == "mem_1"
 
-    def test_fallback_to_get_all_when_no_get_events(self):
-        """Fallback path: get_all returns memories; we cannot map memory ids
-        back to event ids, so we return all available memories."""
+    def test_no_event_api_returns_empty_without_get_all(self):
+        """get_all cannot map event ids to new memories, so never use it here."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
         mock_client = MagicMock(spec=["get_all"])
@@ -721,8 +742,8 @@ class TestWaitForPendingEvents:
             result = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
-            assert len(result) == 1
-            assert result[0]["id"] == "mem_1"
+            assert result == []
+            mock_client.get_all.assert_not_called()
 
     def test_paginated_get_events_follows_next_cursor(self):
         """Walk every page until pending IDs are found or pages exhausted."""

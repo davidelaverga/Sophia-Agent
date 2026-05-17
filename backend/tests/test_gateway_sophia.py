@@ -193,6 +193,43 @@ class TestListMemories:
         }
         assert all("cursor" not in call.kwargs for call in mock_client.get_all.call_args_list)
 
+    def test_get_all_pagination_stops_at_max_pages(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": "m1", "memory": "First"}], "next": "page-2"},
+            {"results": [{"id": "m2", "memory": "Second"}], "next": "page-3"},
+            {"results": [{"id": "m3", "memory": "Third"}], "next": None},
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"}, max_pages=2)
+
+        assert result == [{"id": "m1", "memory": "First"}, {"id": "m2", "memory": "Second"}]
+        assert mock_client.get_all.call_count == 2
+        assert mock_client.get_all.call_args_list[0].kwargs["page"] == 1
+        assert mock_client.get_all.call_args_list[1].kwargs["page"] == 2
+
+    def test_get_all_pagination_stops_at_max_results(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": "m1"}, {"id": "m2"}], "next": "page-2"},
+            {"results": [{"id": "m3"}, {"id": "m4"}], "next": "page-3"},
+        ]
+
+        result = _get_all_paginated(
+            mock_client,
+            {"user_id": "test_user"},
+            page_size=2,
+            max_pages=5,
+            max_results=3,
+        )
+
+        assert result == [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}]
+        assert mock_client.get_all.call_count == 2
+
     def test_with_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Needs review", "metadata": None},
@@ -209,6 +246,41 @@ class TestListMemories:
         assert data["memories"][0]["id"] == "m1"
         mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user"}, page=1, page_size=100)
         assert mock_mem0.get.call_count == 2
+
+    def test_status_filter_can_find_pending_memory_on_second_page(self, client, mock_mem0):
+        mock_mem0.get_all.side_effect = [
+            {
+                "results": [
+                    {"id": "m1", "memory": "Approved", "metadata": {"status": "approved"}, "categories": ["fact"]},
+                ],
+                "next": "page-2",
+            },
+            {
+                "results": [
+                    {"id": "m2", "memory": "Needs review", "metadata": {"status": "pending_review"}, "categories": ["lesson"]},
+                ],
+                "next": None,
+            },
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "m2"
+        assert mock_mem0.get_all.call_count == 2
+        assert mock_mem0.get_all.call_args_list[0].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 1,
+            "page_size": 100,
+        }
+        assert mock_mem0.get_all.call_args_list[1].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 2,
+            "page_size": 100,
+        }
+        mock_mem0.get.assert_not_called()
 
     def test_status_filter_uses_local_review_metadata_overlay(self, client, mock_mem0, mock_review_store):
         mock_mem0.get_all.return_value = [

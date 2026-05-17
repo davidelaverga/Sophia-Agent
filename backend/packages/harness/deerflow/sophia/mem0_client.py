@@ -400,10 +400,17 @@ def wait_for_pending_events(
 
     # v3 async event IDs are different from memory IDs.
     # Prefer per-ID get_event() when the SDK supports it — avoids
-    # pagination issues with busy projects.  Fall back to paginated
-    # get_events() or get_all() otherwise.
+    # pagination issues with busy projects. Fall back to paginated
+    # get_events() only; get_all() cannot safely map event IDs to new
+    # memory rows and would return unrelated historical memories.
     has_get_event = hasattr(client, "get_event")
     has_get_events = hasattr(client, "get_events")
+    if not has_get_event and not has_get_events:
+        logger.warning(
+            "Mem0 event APIs unavailable for user %s; cannot resolve pending add events",
+            user_id,
+        )
+        return []
 
     while pending and time.monotonic() < deadline:
         try:
@@ -441,15 +448,6 @@ def wait_for_pending_events(
                         pending.discard(evt_id)
                     if not cursor or not pending:
                         break
-            else:
-                # Fallback: get_all returns memories keyed by memory id.
-                # Since memory ids != event ids we cannot map them;
-                # return all available memories and clear pending.
-                result = client.get_all(filters={"user_id": user_id})
-                all_memories = _normalize_get_all_result(result)
-                if all_memories:
-                    resolved.extend(all_memories)
-                    pending.clear()
         except Exception:
             logger.warning(
                 "Mem0 poll for pending events failed for user %s", user_id, exc_info=True
