@@ -162,6 +162,124 @@ async def test_apply_event_swallows_callback_exception() -> None:
 
 
 @pytest.mark.anyio
+async def test_failed_callback_does_not_update_last_pushed_body() -> None:
+    """Codex P2 (Phase 4J post-review) primary lock: a transient edit
+    failure (Telegram 5xx / network blip) must NOT update
+    ``entry.last_pushed_body``. The previous "cache before callback"
+    pattern marked the body as delivered regardless of success.
+
+    Why it matters: ``last_pushed_body`` is the body-equality guard
+    used by ``apply_event`` (and ``_finalize_terminal``) to skip
+    redundant edits. If a failed edit marks the body as delivered,
+    a later event producing the SAME body (e.g. a tool-call batch
+    that doesn't visibly change the rendered output but DOES change
+    renderer state — passing the ``state_changed`` guard) would
+    short-circuit at the body-equality check and never retry. The
+    placeholder would stay on whatever was last actually pushed.
+
+    With "cache after success", failed edits leave
+    ``last_pushed_body`` at its prior value so the next attempt
+    with the same body can retry.
+    """
+    r = BuilderProgressRegistry()
+
+    async def bad_cb(*_: object) -> None:
+        raise RuntimeError("simulated transient Telegram 5xx")
+
+    r.register_channel_callback("telegram", bad_cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    # Pre-condition: cache is empty (channel just registered).
+    entry = r._entries["t-1"]
+    assert entry.last_pushed_body == ""
+
+    # Apply an event that changes renderer state. Callback raises.
+    applied = await r.apply_event(
+        task_id="t-1",
+        event_name="custom",
+        data={"name": "phase", "phase": "researching"},
+    )
+    assert applied is False  # callback raised → return False
+
+    # CRITICAL: last_pushed_body is STILL empty. The failed edit
+    # didn't update the cache, so a subsequent event producing
+    # the same body would retry.
+    assert entry.last_pushed_body == "", (
+        "failed callback must NOT update last_pushed_body — otherwise "
+        "the body-equality guard would lock the placeholder out of "
+        "retries for any subsequent event producing the same body"
+    )
+
+
+@pytest.mark.anyio
+async def test_successful_callback_updates_last_pushed_body() -> None:
+    """Sanity counterpart: on success the cache DOES update, so a
+    subsequent event producing identical body is correctly
+    short-circuited (no redundant Telegram API call)."""
+    r = BuilderProgressRegistry()
+    attempts: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        attempts.append(body)
+
+    r.register_channel_callback("telegram", cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    applied = await r.apply_event(
+        task_id="t-1",
+        event_name="custom",
+        data={"name": "phase", "phase": "researching"},
+    )
+    assert applied is True
+
+    entry = r._entries["t-1"]
+    # Cache updated to the successfully-pushed body.
+    assert entry.last_pushed_body
+    assert "[ Researching ]" in entry.last_pushed_body
+    assert entry.last_pushed_body == attempts[-1]
+
+
+@pytest.mark.anyio
+async def test_successful_callback_caches_body_to_prevent_duplicate_edits() -> None:
+    """Sanity counterpart to the failure-retry test: when the callback
+    SUCCEEDS, the body IS cached, and a subsequent same-body event
+    is correctly short-circuited (no redundant edit attempt)."""
+    r = BuilderProgressRegistry()
+    attempts: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        attempts.append(body)
+
+    r.register_channel_callback("telegram", cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    first = await r.apply_event(
+        task_id="t-1",
+        event_name="custom",
+        data={"name": "phase", "phase": "researching"},
+    )
+    assert first is True
+    assert len(attempts) == 1
+
+    second = await r.apply_event(
+        task_id="t-1",
+        event_name="custom",
+        data={"name": "phase", "phase": "researching"},
+    )
+    # Renderer state didn't actually change, so state_changed=False
+    # is the FIRST short-circuit. But even if it did, the body-equality
+    # guard would catch it. Either way: no second callback attempt.
+    assert second is False
+    assert len(attempts) == 1
+
+
+@pytest.mark.anyio
 async def test_mark_done_finalizes_and_unregisters() -> None:
     """``mark_done`` pushes the final ``[ Done ]`` body and removes
     the entry so subsequent events for the same task_id are no-ops."""

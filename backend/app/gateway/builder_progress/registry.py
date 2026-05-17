@@ -423,10 +423,19 @@ class BuilderProgressRegistry:
                 task_id,
             )
             return False
-        # Cache the body BEFORE we invoke the callback so a slow /
-        # failing callback can't cause us to retry the same edit on
-        # back-to-back events.
-        entry.last_pushed_body = body
+        # Codex P2 (Phase 4J post-review): cache ``last_pushed_body``
+        # AFTER the callback succeeds, not before. The body-equality
+        # guard above (``body == entry.last_pushed_body``) already
+        # prevents spam on back-to-back identical events. The original
+        # "cache before" approach traded retry-ability for one extra
+        # spam guard — wrong tradeoff: a transient Telegram edit
+        # failure (5xx / network blip) would mark the body as
+        # delivered, and the next event carrying the SAME body would
+        # be dropped at the equality check → placeholder stuck on
+        # whatever was last actually pushed, possibly for the rest
+        # of the run. With "cache after success", a failed edit
+        # leaves ``last_pushed_body`` at its previous value so the
+        # next same-body event retries.
         try:
             await callback(entry.chat_id, entry.message_id, body)
         except Exception:
@@ -437,6 +446,7 @@ class BuilderProgressRegistry:
                 exc_info=True,
             )
             return False
+        entry.last_pushed_body = body
         return True
 
     async def mark_done(
@@ -585,9 +595,16 @@ class BuilderProgressRegistry:
             return False
         body = entry.renderer.render()
         if callback is not None and body and body != entry.last_pushed_body:
-            entry.last_pushed_body = body
+            # Codex P2 (Phase 4J post-review): cache AFTER the
+            # callback succeeds — see ``apply_event`` for the
+            # rationale. A failed terminal edit shouldn't mark the
+            # body as delivered; on this path the next code path
+            # is ``unregister_task`` which clears the entry anyway,
+            # but keeping the pattern symmetric prevents drift if
+            # the unregister is ever lifted or moved.
             try:
                 await callback(entry.chat_id, entry.message_id, body)
+                entry.last_pushed_body = body
             except Exception:
                 logger.warning(
                     "[BuilderProgress] mark_%s edit raised channel=%s task_id=%s",
