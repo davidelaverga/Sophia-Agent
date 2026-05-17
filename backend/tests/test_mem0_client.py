@@ -253,8 +253,8 @@ class TestAddMemories:
 
         mock_client = MagicMock()
         mock_client.add.return_value = [
-            {"id": "evt_1", "memory": {"id": "mem_1", "content": "extracted fact"}},
-            {"id": "evt_2", "memory": {"id": "mem_2", "content": "extracted feeling"}},
+            {"event_id": "evt_1", "memory": {"id": "mem_1", "content": "extracted fact"}},
+            {"event_id": "evt_2", "memory": {"id": "mem_2", "content": "extracted feeling"}},
         ]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
@@ -296,11 +296,30 @@ class TestAddMemories:
                 assert len(result) == 2
                 mock_wait.assert_called_once_with("user1", ["evt_v3_1", "evt_v3_2"])
 
+    def test_add_does_not_poll_plain_memory_ids_from_sync_add(self):
+        """Synchronous add() responses return memory IDs under id, not event IDs."""
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"id": "mem_1", "memory": "resolved memory"}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch("deerflow.sophia.mem0_client.wait_for_pending_events") as mock_wait:
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                )
+
+        assert result == [{"id": "mem_1", "memory": "resolved memory"}]
+        mock_wait.assert_not_called()
+
     def test_add_passes_run_id_as_session_id(self):
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": "hello"}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": "hello"}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -349,7 +368,7 @@ class TestAddMemories:
         mock_client.search.return_value = [
             {"id": "m1", "memory": "old fact", "metadata": {}}
         ]
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "new_m1", "content": "new fact"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "new_m1", "content": "new fact"}}]
 
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
@@ -377,7 +396,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "mem_1", "content": "hello"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "mem_1", "content": "hello"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -406,7 +425,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "mem_1", "content": "hello"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "mem_1", "content": "hello"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -430,7 +449,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = {"results": [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]}
+        mock_client.add.return_value = {"results": [{"event_id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]}
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -450,7 +469,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -471,7 +490,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -496,7 +515,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -518,7 +537,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -540,7 +559,7 @@ class TestAddMemories:
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
-        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        mock_client.add.return_value = [{"event_id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
@@ -556,7 +575,7 @@ class TestAddMemories:
                 mock_wait.assert_called_once_with("user1", ["evt_1"])
                 # Falls back to raw normalized result (event id, not memory id)
                 assert len(result) == 1
-                assert result[0]["id"] == "evt_1"
+                assert result[0]["event_id"] == "evt_1"
 
     def test_add_returns_empty_when_pending_event_fails(self):
         """FAILED async add events are write failures, not pending results."""
