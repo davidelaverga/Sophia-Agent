@@ -35,6 +35,9 @@ router = APIRouter(
 _background_tasks: set = set()
 _session_store = SessionStore()
 _LEGACY_SESSION_USER_ID = "dev-user"
+_MEM0_GET_ALL_PAGE_SIZE = 100
+_MEM0_GET_ALL_MAX_PAGES = 5
+_MEM0_GET_ALL_MAX_RESULTS = _MEM0_GET_ALL_PAGE_SIZE * _MEM0_GET_ALL_MAX_PAGES
 
 
 # ---------------------------------------------------------------------------
@@ -426,29 +429,45 @@ def _is_memory_record(item: dict) -> bool:
     return True
 
 
-def _get_all_paginated(client, filters: dict, page_size: int = 100) -> list[dict]:
-    """Fetch all pages from Mem0 v3 get_all and return a flat list of memories."""
+def _get_all_paginated(
+    client,
+    filters: dict,
+    page_size: int = _MEM0_GET_ALL_PAGE_SIZE,
+    max_pages: int = _MEM0_GET_ALL_MAX_PAGES,
+    max_results: int = _MEM0_GET_ALL_MAX_RESULTS,
+) -> list[dict]:
+    """Fetch bounded pages from Mem0 v3 get_all and return a flat list."""
     all_results: list[dict] = []
+    page_size = max(1, min(page_size, _MEM0_GET_ALL_PAGE_SIZE))
+    max_pages = max(1, max_pages)
+    max_results = max(1, max_results)
     page = 1
     page_count = 0
-    while True:
+    while page_count < max_pages and len(all_results) < max_results:
         result = client.get_all(filters=filters, page=page, page_size=page_size)
         page_count += 1
         if isinstance(result, dict):
             results = result.get("results", [])
+            remaining = max_results - len(all_results)
             if isinstance(results, list):
-                all_results.extend(results)
+                all_results.extend(results[:remaining])
             elif results:
                 all_results.append(results)
-            if not result.get("next"):
+            if not result.get("next") or len(all_results) >= max_results:
                 break
             page += 1
         elif isinstance(result, list):
-            all_results.extend(result)
+            all_results.extend(result[: max_results - len(all_results)])
             break
         else:
             break
-    logger.debug("get_all paginated | pages=%d | total=%d", page_count, len(all_results))
+    logger.debug(
+        "get_all paginated | pages=%d | total=%d | max_pages=%d | max_results=%d",
+        page_count,
+        len(all_results),
+        max_pages,
+        max_results,
+    )
     return all_results
 
 
