@@ -307,9 +307,9 @@ def add_memories(
 
     # Compute expiration from importance if not already set
     if "expiration_date" not in resolved_metadata:
-        importance = resolved_metadata.get("importance_score") or resolved_metadata.get(
-            "importance"
-        )
+        importance = resolved_metadata.get("importance_score")
+        if importance is None:
+            importance = resolved_metadata.get("importance")
         expiration = _expiration_for_importance(importance)
         if expiration:
             resolved_metadata["expiration_date"] = expiration

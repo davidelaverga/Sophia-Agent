@@ -28,7 +28,6 @@ from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderComm
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
-from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_prefetch import Mem0RetrievalMiddleware
 from deerflow.agents.sophia_agent.middlewares.memory_injection import MemoryInjectionMiddleware
 from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
@@ -260,16 +259,16 @@ def make_sophia_agent(config: RunnableConfig):
         PlatformContextMiddleware(),
         # 6. Derive prior completed turns before first-turn-only middleware runs.
         TurnCountMiddleware(),
-        # 7. Mem0 retrieval — prefetch memories early so the search can
-        # overlap with the expensive calibration middlewares below.
-        # Upgrade E: split from Mem0MemoryMiddleware into retrieval + injection.
-        Mem0RetrievalMiddleware(user_id),
-        # 8-9. User context
+        # 7-8. User context
         UserIdentityMiddleware(user_id),
         SessionStateMiddleware(user_id),
-        # 10-12. Calibration (order matters: tone -> context -> ritual -> skill)
+        # 9-12. Calibration (order matters: tone -> context -> ritual -> skill)
         ToneGuidanceMiddleware(SKILLS_PATH / "tone_guidance.md"),
         ContextAdaptationMiddleware(SKILLS_PATH / "context", context_mode),
+        # 12b. Mem0 retrieval — context must be selected before retrieval so
+        # voice fast-cache keys use the current context_mode on switch turns.
+        # Upgrade E: split from Mem0MemoryMiddleware into retrieval + injection.
+        Mem0RetrievalMiddleware(user_id),
         RitualMiddleware(SKILLS_PATH / "rituals", ritual),
         # 13. Skill routing (reads tone band + ritual from state)
         SkillRouterMiddleware(SKILLS_PATH / "skills"),
