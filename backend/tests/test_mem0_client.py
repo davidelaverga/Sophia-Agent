@@ -467,6 +467,31 @@ class TestAddMemories:
                 call_kwargs = mock_client.add.call_args.kwargs
                 assert "expiration_date" in call_kwargs["metadata"]
 
+    def test_zero_importance_score_gets_expiration_date(self):
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"id": "evt_1", "memory": {"id": "m1", "content": "fact"}}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=[{"id": "m1"}],
+            ):
+                add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "hello"}],
+                    session_id="sess_123",
+                    metadata={
+                        "importance_score": 0.0,
+                        "importance": "structural",
+                        "review_status": "pending_review",
+                    },
+                )
+                call_kwargs = mock_client.add.call_args.kwargs
+                assert "expiration_date" in call_kwargs["metadata"]
+
     def test_timestamp_passed_when_provided(self):
         from deerflow.sophia.mem0_client import add_memories
 
