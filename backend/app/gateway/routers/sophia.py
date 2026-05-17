@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
@@ -35,6 +36,7 @@ router = APIRouter(
 _background_tasks: set = set()
 _session_store = SessionStore()
 _LEGACY_SESSION_USER_ID = "dev-user"
+_MEM0_GET_ALL_PAGE_SIZE = 100
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +415,107 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
     ]
 
 
+def _is_memory_record(item: dict) -> bool:
+    """Return True if ``item`` is a resolved Mem0 memory dict, not an event wrapper."""
+    if not isinstance(item, dict):
+        return False
+    if item.get("status") or item.get("event_status"):
+        return False
+    if isinstance(item.get("memory"), dict):
+        return False
+    # Event wrappers carry event_id and lack memory/content.
+    # Memory records have either memory, content, or metadata with category.
+    if item.get("event_id") and not item.get("memory") and not item.get("content"):
+        return False
+    if item.get("id"):
+        return True
+    if not item.get("memory") and not item.get("content") and not item.get("metadata"):
+        return False
+    return True
+
+
+def _pending_memory_item_from_add_result(
+    item: dict,
+    *,
+    content: str,
+    metadata: dict,
+    session_id: str,
+) -> MemoryItem | None:
+    if not isinstance(item, dict):
+        return None
+    event_id = item.get("event_id") or item.get("id")
+    if not event_id:
+        return None
+    local_memory_id = _local_memory_id_for_content(content)
+    if not local_memory_id:
+        return None
+
+    pending_metadata = dict(metadata)
+    pending_metadata["mem0_event_id"] = str(event_id)
+    pending_metadata["mem0_sync_state"] = "pending"
+
+    return MemoryItem(
+        id=local_memory_id,
+        content=content,
+        category=pending_metadata.get("category"),
+        session_id=session_id,
+        metadata=pending_metadata,
+    )
+
+
+def _get_all_paginated(
+    client,
+    filters: dict,
+    page_size: int = _MEM0_GET_ALL_PAGE_SIZE,
+    max_pages: int | None = None,
+    max_results: int | None = None,
+) -> list[dict]:
+    """Fetch pages from Mem0 v3 get_all and return a flat list."""
+    all_results: list[dict] = []
+    page_size = max(1, min(page_size, _MEM0_GET_ALL_PAGE_SIZE))
+    if max_pages is not None:
+        max_pages = max(1, max_pages)
+    if max_results is not None:
+        max_results = max(1, max_results)
+    page = 1
+    page_count = 0
+    while True:
+        if max_pages is not None and page_count >= max_pages:
+            break
+        if max_results is not None and len(all_results) >= max_results:
+            break
+        result = client.get_all(filters=filters, page=page, page_size=page_size)
+        page_count += 1
+        if isinstance(result, dict):
+            results = result.get("results", [])
+            if isinstance(results, list):
+                if max_results is None:
+                    all_results.extend(results)
+                else:
+                    all_results.extend(results[: max_results - len(all_results)])
+            elif results:
+                all_results.append(results)
+            if not result.get("next"):
+                break
+            page += 1
+        elif isinstance(result, list):
+            if max_results is None:
+                all_results.extend(result)
+            else:
+                all_results.extend(result[: max_results - len(all_results)])
+            break
+        else:
+            break
+    logger.debug(
+        "get_all paginated | pages=%d | total=%d | max_pages=%s | max_results=%s",
+        page_count,
+        len(all_results),
+        max_pages,
+        max_results,
+    )
+    return all_results
+
+
 def _get_session_recap_path(user_id: str, session_id: str) -> Path:
     return safe_user_path(USERS_DIR, user_id, "recaps", f"{session_id}.json")
 
@@ -446,6 +549,13 @@ def _local_content_hash_from_memory_id(memory_id: str) -> str | None:
     if isinstance(memory_id, str) and memory_id.startswith("local:"):
         return memory_id.split(":", 1)[1] or None
     return None
+
+
+def _local_memory_id_for_content(content: str) -> str | None:
+    normalized = (content or "").strip()
+    if not normalized:
+        return None
+    return f"local:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
 
 
 def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> int:
@@ -568,8 +678,7 @@ async def list_memories(
             user_id,
             status or "<none>",
         )
-        result = client.get_all(filters={"user_id": user_id})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id})
         memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
@@ -594,39 +703,28 @@ async def list_memories(
     response_model=MemoryItem,
     summary="Create a memory",
 )
-async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
+async def create_memory(user_id: str, body: MemoryCreateRequest, response: Response) -> MemoryItem:
     _validate_user(user_id)
-    client = _get_mem0_client()
     try:
+        from deerflow.sophia.mem0_client import add_memories
+
         memory_metadata = dict(body.metadata or {})
         if body.category and "category" not in memory_metadata:
             memory_metadata["category"] = body.category
 
-        add_kwargs = {
-            "messages": [{"role": "user", "content": body.text}],
-            "user_id": user_id,
-        }
-        if memory_metadata:
-            add_kwargs["metadata"] = memory_metadata
+        created = add_memories(
+            user_id=user_id,
+            messages=[{"role": "user", "content": body.text}],
+            session_id="manual-create",
+            metadata=memory_metadata or None,
+        )
 
-        try:
-            result = client.add(**add_kwargs)
-        except TypeError:
-            add_kwargs.pop("metadata", None)
-            result = client.add(**add_kwargs)
+        if not created:
+            logger.warning("Mem0 add returned empty for user %s — memory not persisted", user_id)
+            raise HTTPException(status_code=503, detail="Memory service unavailable")
 
-        from deerflow.sophia.mem0_client import invalidate_user_cache
-        invalidate_user_cache(user_id)
-
-        if isinstance(result, dict):
-            created = result.get("results", [result])
-        elif isinstance(result, list):
-            created = result
-        else:
-            created = [result] if result else []
-
-        first = created[0] if created else None
-        if isinstance(first, dict) and first.get("id"):
+        first = created[0]
+        if isinstance(first, dict) and _is_memory_record(first) and first.get("id"):
             if memory_metadata:
                 upsert_review_metadata(
                     user_id,
@@ -638,22 +736,36 @@ async def create_memory(user_id: str, body: MemoryCreateRequest) -> MemoryItem:
                 )
             return _to_memory_item(first)
 
-        if memory_metadata:
+        pending_item = _pending_memory_item_from_add_result(
+            first,
+            content=body.text,
+            metadata=memory_metadata,
+            session_id="manual-create",
+        )
+        if pending_item is not None:
+            response.status_code = 202
             upsert_review_metadata(
                 user_id,
-                memory_id=first.get("id") if isinstance(first, dict) else None,
                 content=body.text,
-                metadata=memory_metadata,
+                content_hash=_local_content_hash_from_memory_id(pending_item.id),
+                metadata=pending_item.metadata,
                 session_id="manual-create",
-                sync_state="manual",
+                sync_state="pending",
             )
+            logger.info(
+                "Mem0 create_memory queued async add for user %s event_id=%s",
+                user_id,
+                pending_item.metadata.get("mem0_event_id") if pending_item.metadata else None,
+            )
+            return pending_item
 
-        return MemoryItem(
-            id=str(first.get("id", "")) if isinstance(first, dict) else "",
-            content=body.text,
-            category=body.category or memory_metadata.get("category"),
-            metadata=memory_metadata or None,
+        # add_memories returned neither a resolved memory nor a queued event.
+        logger.warning(
+            "Mem0 create_memory returned non-memory for user %s: %s",
+            user_id,
+            first,
         )
+        raise HTTPException(status_code=503, detail="Memory service unavailable")
     except Exception as e:
         logger.warning("Failed to create memory for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")
@@ -848,8 +960,7 @@ async def journal(
                 filters: dict = {"user_id": user_id}
                 if selected_category:
                     filters["categories"] = selected_category
-                result = client.get_all(filters=filters)
-                memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+                memories_raw = _get_all_paginated(client, filters)
                 memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
                 memories_raw = [
                     memory
@@ -866,8 +977,7 @@ async def journal(
             filters = {"user_id": user_id}
             if selected_category:
                 filters["categories"] = selected_category
-            result = client.get_all(filters=filters)
-            memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+            memories_raw = _get_all_paginated(client, filters)
             memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
 
         memories_raw = _sort_memories_desc(memories_raw)
@@ -977,8 +1087,7 @@ async def visual_decisions(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        result = client.get_all(filters={"user_id": user_id, "categories": "decision"})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id, "categories": "decision"})
         items = [_to_memory_item(m) for m in memories_raw]
         return CategoryMemoryResponse(memories=items, count=len(items))
     except Exception as e:
@@ -995,8 +1104,7 @@ async def visual_commitments(user_id: str) -> CategoryMemoryResponse:
     _validate_user(user_id)
     client = _get_mem0_client()
     try:
-        result = client.get_all(filters={"user_id": user_id, "categories": "commitment"})
-        memories_raw = result if isinstance(result, list) else result.get("results", result.get("memories", []))
+        memories_raw = _get_all_paginated(client, {"user_id": user_id, "categories": "commitment"})
         items = [_to_memory_item(m) for m in memories_raw]
         return CategoryMemoryResponse(memories=items, count=len(items))
     except Exception as e:

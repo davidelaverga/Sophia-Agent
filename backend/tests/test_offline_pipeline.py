@@ -55,7 +55,6 @@ def _fake_msg(msg_type: str, content: str) -> MagicMock:
 _PATCHES = {
     "trace": "deerflow.sophia.offline_pipeline.write_session_trace",
     "extraction": "deerflow.sophia.offline_pipeline.extract_session_memories",
-    "reconcile": "deerflow.sophia.offline_pipeline.reconcile_review_metadata_with_mem0",
     "smart_opener": "deerflow.sophia.offline_pipeline.generate_smart_opener",
     "handoff": "deerflow.sophia.offline_pipeline.generate_handoff",
     "identity": "deerflow.sophia.offline_pipeline.maybe_update_identity",
@@ -78,7 +77,6 @@ def mock_steps():
     mocks["extraction"].return_value = [
         {"content": "User had a tough day", "category": "feeling", "importance": "potential"},
     ]
-    mocks["reconcile"].return_value = 0
     mocks["smart_opener"].return_value = "How are you feeling today?"
     mocks["identity"].return_value = False
     mocks["recap"].return_value = "ok"
@@ -129,7 +127,6 @@ class TestHappyPath:
 
         mock_steps["trace"].assert_called_once()
         mock_steps["extraction"].assert_called_once()
-        mock_steps["reconcile"].assert_called_once_with("user_abc")
         mock_steps["smart_opener"].assert_called_once()
         mock_steps["handoff"].assert_called_once()
         mock_steps["identity"].assert_called_once()
@@ -164,20 +161,6 @@ class TestHappyPath:
         )
 
         mock_steps["identity"].assert_called_once_with("user_abc", memories)
-
-    def test_reconcile_runs_after_extraction(self, mock_steps):
-        from deerflow.sophia.offline_pipeline import run_offline_pipeline
-
-        run_offline_pipeline(
-            user_id="user_abc",
-            session_id="sess_reconcile",
-            thread_id="thread_reconcile",
-            thread_state=_make_thread_state(),
-        )
-
-        assert mock_steps["extraction"].call_count == 1
-        assert mock_steps["reconcile"].call_count == 1
-
 
 # ==================================================================
 # Idempotency
@@ -400,6 +383,137 @@ class TestBuildSessionMetadata:
         assert meta["platform"] == "text"
         assert meta["context_mode"] == "life"
         assert meta["ritual"] is None
+
+    def test_session_start_unix_from_earliest_timestamped_message(self):
+        """When first message lacks timestamp, scan all for earliest valid one."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "system", "content": "system prompt"},
+                {"role": "user", "content": "hello", "timestamp": 1715900000},
+                {"role": "assistant", "content": "hi", "timestamp": 1715900100},
+            ],
+            "platform": "voice",
+        }
+        meta = _build_session_metadata(state)
+        assert meta["session_start_unix"] == 1715900000
+
+    def test_session_start_unix_picks_earliest_across_all_messages(self):
+        """Multiple messages with timestamps — pick the earliest."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "hello", "timestamp": 1715900500},
+                {"role": "assistant", "content": "hi", "timestamp": 1715900100},
+                {"role": "user", "content": "bye", "timestamp": 1715900200},
+            ],
+        }
+        meta = _build_session_metadata(state)
+        assert meta["session_start_unix"] == 1715900100
+
+    def test_session_start_unix_prefers_current_session_record(self):
+        """Current session record must win over older messages in the thread."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        record = MagicMock()
+        record.created_at = "1970-01-02T00:00:00+00:00"
+        state = {
+            "messages": [
+                {"role": "user", "content": "old session", "session_id": "old-session", "timestamp": 1},
+                {"role": "user", "content": "current session", "timestamp": 2},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=record) as mock_get:
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 86400
+        mock_get.assert_called_once_with("user1", "current-session")
+
+    def test_session_start_unix_uses_only_current_session_messages_when_scoped(self):
+        """Fallback to message timestamps only within the finalized session."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "old session", "session_id": "old-session", "timestamp": 1},
+                {"role": "user", "content": "current one", "session_id": "current-session", "timestamp": 200},
+                {"role": "assistant", "content": "current two", "session_id": "current-session", "timestamp": 250},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 200
+
+    def test_session_start_unix_uses_untagged_messages_when_current_session_is_untagged(self):
+        """Older tagged messages must not hide untagged current-session messages."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "old", "session_id": "old-session", "timestamp": 1},
+                {"role": "user", "content": "current one", "timestamp": 200},
+                {"role": "assistant", "content": "current two", "timestamp": 250},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 200
+
+    def test_session_start_unix_prefers_exact_session_tags_over_untagged_messages(self):
+        """When current-session tags exist, they win over untagged timestamps."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "untagged prior", "timestamp": 100},
+                {"role": "user", "content": "current one", "session_id": "current-session", "timestamp": 300},
+                {"role": "assistant", "content": "current two", "session_id": "current-session", "timestamp": 350},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 300
+
+    def test_session_start_unix_falls_back_to_untagged_message_timestamps(self):
+        """If SessionStore is stale and messages are untagged, use conversation time."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "hello", "timestamp": 1715900500},
+                {"role": "assistant", "content": "hi", "timestamp": 1715900100},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] == 1715900100
+
+    def test_session_start_unix_does_not_use_other_tagged_sessions(self):
+        """If the thread is tagged for another session, avoid anchoring to it."""
+        from deerflow.sophia.offline_pipeline import _build_session_metadata
+
+        state = {
+            "messages": [
+                {"role": "user", "content": "old", "session_id": "old-session", "timestamp": 1},
+                {"role": "assistant", "content": "old reply", "session_id": "old-session", "timestamp": 2},
+            ],
+        }
+
+        with patch("deerflow.sophia.session_store.SessionStore.get", return_value=None):
+            meta = _build_session_metadata(state, user_id="user1", session_id="current-session")
+
+        assert meta["session_start_unix"] is None
 
 
 class TestBuildSessionSummary:

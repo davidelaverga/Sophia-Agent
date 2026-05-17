@@ -189,7 +189,7 @@ class TestExtractSessionMemories:
         assert call_kwargs["session_id"] == "sess_005"
 
         meta = call_kwargs["metadata"]
-        assert meta["status"] == "pending_review"
+        assert meta["review_status"] == "pending_review"
         assert meta["platform"] == "voice"
         assert meta["context_mode"] == "work"
         assert meta["importance"] == "potential"  # 0.6 -> potential
@@ -351,7 +351,7 @@ class TestExtractSessionMemories:
         meta = mock_add_memories.call_args[1]["metadata"]
         assert meta["platform"] == "text"  # default
         assert meta["context_mode"] == "life"  # default
-        assert meta["status"] == "pending_review"
+        assert meta["review_status"] == "pending_review"
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")

@@ -166,6 +166,12 @@ def extract_session_memories(
     platform = metadata.get("platform", "text")
     context_mode = metadata.get("context_mode", "life")
 
+    # Upgrade A: anchor memories to session start time if available
+    session_start_unix = metadata.get("session_start_unix")
+    if session_start_unix is None:
+        # Fallback: use current time
+        session_start_unix = int(datetime.now(UTC).timestamp())
+
     for entry in extracted:
         if not isinstance(entry, dict) or not entry.get("content"):
             continue
@@ -184,6 +190,7 @@ def extract_session_memories(
             "importance_score": importance_score,
             "confidence": entry.get("confidence", 0.5),
             "status": "pending_review",
+            "review_status": "pending_review",
             "platform": platform,
             "context_mode": context_mode,
         }
@@ -205,11 +212,13 @@ def extract_session_memories(
         if entry_meta.get("tags"):
             mem0_metadata["tags"] = entry_meta["tags"]
 
+        # Upgrade A: pass timestamp so Mem0 v3 temporal reasoning anchors correctly
         result = add_memories(
             user_id=user_id,
             messages=[{"role": "user", "content": entry["content"]}],
             session_id=session_id,
             metadata=mem0_metadata,
+            timestamp=session_start_unix,
         )
 
         written_memories.append({

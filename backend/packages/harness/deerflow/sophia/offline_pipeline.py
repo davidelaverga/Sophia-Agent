@@ -31,7 +31,6 @@ from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
 from deerflow.sophia.extraction import extract_session_memories
 from deerflow.sophia.handoffs import generate_handoff
 from deerflow.sophia.identity import maybe_update_identity
-from deerflow.sophia.mem0_client import reconcile_review_metadata_with_mem0
 from deerflow.sophia.smart_opener import generate_smart_opener
 from deerflow.sophia.trace_logger import write_session_trace
 
@@ -131,7 +130,7 @@ def run_offline_pipeline(
 
     # --- Extract data from thread_state ---
     messages = thread_state.get("messages", [])
-    session_metadata = _build_session_metadata(thread_state)
+    session_metadata = _build_session_metadata(thread_state, user_id=user_id, session_id=session_id)
     artifacts = _extract_artifacts(thread_state)
 
     logger.info(
@@ -166,7 +165,6 @@ def run_offline_pipeline(
         extracted_memories = extract_session_memories(
             user_id, session_id, serialized_messages, session_metadata,
         )
-        reconcile_review_metadata_with_mem0(user_id)
         steps["extraction"] = "ok"
         logger.info(
             "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
@@ -361,13 +359,26 @@ def _write_offline_recap(
     return "ok"
 
 
-def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
+def _build_session_metadata(
+    thread_state: dict[str, Any],
+    *,
+    user_id: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, Any]:
     """Extract session-level metadata from thread_state.
 
-    Pulls ``platform``, ``context_mode``, and ``ritual`` from either
-    the top-level state dict or a nested ``configurable`` dict.
+    Pulls ``platform``, ``context_mode``, ``ritual``, and the current
+    session's ``session_start_unix`` from either the persisted session
+    record, session-scoped messages, or top-level thread state.
     """
     configurable = thread_state.get("configurable", {})
+
+    session_start_unix = _lookup_session_start_unix(user_id, session_id)
+    messages = thread_state.get("messages", [])
+    if session_start_unix is None:
+        session_start_unix = _earliest_message_timestamp(messages, session_id=session_id)
+    if session_start_unix is None and (session_id is None or not _messages_have_session_tags(messages)):
+        session_start_unix = _earliest_message_timestamp(messages)
 
     return {
         "platform": (
@@ -382,7 +393,105 @@ def _build_session_metadata(thread_state: dict[str, Any]) -> dict[str, Any]:
             thread_state.get("active_ritual")
             or configurable.get("ritual")
         ),
+        "session_start_unix": session_start_unix,
     }
+
+
+def _lookup_session_start_unix(user_id: str | None, session_id: str | None) -> int | None:
+    if not user_id or not session_id:
+        return None
+    try:
+        from deerflow.sophia.session_store import SessionStore
+
+        record = SessionStore().get(user_id, session_id)
+    except Exception:
+        logger.warning(
+            "session.finalization metadata_session_lookup_failed user=%s session=%s",
+            user_id,
+            session_id,
+            exc_info=True,
+        )
+        return None
+    if record is None:
+        return None
+    return _coerce_timestamp_unix(getattr(record, "created_at", None))
+
+
+def _earliest_message_timestamp(messages: list[Any], session_id: str | None = None) -> int | None:
+    timestamps: list[int] = []
+    untagged_timestamps: list[int] = []
+    for msg in messages:
+        msg_session_id = _message_session_id(msg)
+        ts = _message_timestamp_unix(msg)
+        if ts is None:
+            continue
+        if session_id is None:
+            timestamps.append(ts)
+        elif msg_session_id == session_id:
+            timestamps.append(ts)
+        elif msg_session_id is None:
+            untagged_timestamps.append(ts)
+    if timestamps:
+        return min(timestamps)
+    return min(untagged_timestamps) if untagged_timestamps else None
+
+
+def _messages_have_session_tags(messages: list[Any]) -> bool:
+    return any(_message_session_id(msg) is not None for msg in messages)
+
+
+def _message_session_id(msg: Any) -> str | None:
+    for container in _message_metadata_containers(msg):
+        raw = container.get("session_id") or container.get("run_id")
+        if raw:
+            return str(raw)
+    return None
+
+
+def _message_timestamp_unix(msg: Any) -> int | None:
+    for container in _message_metadata_containers(msg):
+        for key in ("timestamp", "created_at", "created"):
+            if key not in container:
+                continue
+            ts = _coerce_timestamp_unix(container.get(key))
+            if ts is not None:
+                return ts
+    return _coerce_timestamp_unix(getattr(msg, "timestamp", None))
+
+
+def _message_metadata_containers(msg: Any) -> list[dict]:
+    containers: list[dict] = []
+    if isinstance(msg, dict):
+        containers.append(msg)
+        for key in ("metadata", "additional_kwargs", "response_metadata", "data"):
+            value = msg.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+    else:
+        for attr in ("metadata", "additional_kwargs", "response_metadata"):
+            value = getattr(msg, attr, None)
+            if isinstance(value, dict):
+                containers.append(value)
+    return containers
+
+
+def _coerce_timestamp_unix(value: Any) -> int | None:
+    if isinstance(value, (int, float)):
+        return int(value)
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return int(float(value))
+    except ValueError:
+        pass
+    try:
+        normalized = value.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return int(parsed.timestamp())
+    except ValueError:
+        return None
 
 
 def _extract_artifacts(thread_state: dict[str, Any]) -> list[dict]:

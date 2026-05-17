@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -169,6 +170,81 @@ class TestListMemories:
         assert resp.json()["count"] == 0
         assert resp.json()["memories"] == []
 
+    def test_get_all_pagination_uses_page_params_not_next_url(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": "m1", "memory": "First"}], "next": "https://api.mem0.ai/v3/memories/?page=2"},
+            {"results": [{"id": "m2", "memory": "Second"}], "next": None},
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"})
+
+        assert result == [{"id": "m1", "memory": "First"}, {"id": "m2", "memory": "Second"}]
+        assert mock_client.get_all.call_args_list[0].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 1,
+            "page_size": 100,
+        }
+        assert mock_client.get_all.call_args_list[1].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 2,
+            "page_size": 100,
+        }
+        assert all("cursor" not in call.kwargs for call in mock_client.get_all.call_args_list)
+
+    def test_get_all_pagination_stops_at_max_pages(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": "m1", "memory": "First"}], "next": "page-2"},
+            {"results": [{"id": "m2", "memory": "Second"}], "next": "page-3"},
+            {"results": [{"id": "m3", "memory": "Third"}], "next": None},
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"}, max_pages=2)
+
+        assert result == [{"id": "m1", "memory": "First"}, {"id": "m2", "memory": "Second"}]
+        assert mock_client.get_all.call_count == 2
+        assert mock_client.get_all.call_args_list[0].kwargs["page"] == 1
+        assert mock_client.get_all.call_args_list[1].kwargs["page"] == 2
+
+    def test_get_all_pagination_stops_at_max_results(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": "m1"}, {"id": "m2"}], "next": "page-2"},
+            {"results": [{"id": "m3"}, {"id": "m4"}], "next": "page-3"},
+        ]
+
+        result = _get_all_paginated(
+            mock_client,
+            {"user_id": "test_user"},
+            page_size=2,
+            max_pages=5,
+            max_results=3,
+        )
+
+        assert result == [{"id": "m1"}, {"id": "m2"}, {"id": "m3"}]
+        assert mock_client.get_all.call_count == 2
+
+    def test_get_all_pagination_defaults_do_not_cap_at_five_pages(self):
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": f"m{page}"}], "next": f"page-{page + 1}" if page < 6 else None}
+            for page in range(1, 7)
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"})
+
+        assert [item["id"] for item in result] == ["m1", "m2", "m3", "m4", "m5", "m6"]
+        assert mock_client.get_all.call_count == 6
+
     def test_with_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Needs review", "metadata": None},
@@ -183,8 +259,43 @@ class TestListMemories:
         data = resp.json()
         assert data["count"] == 1
         assert data["memories"][0]["id"] == "m1"
-        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user"})
+        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user"}, page=1, page_size=100)
         assert mock_mem0.get.call_count == 2
+
+    def test_status_filter_can_find_pending_memory_on_second_page(self, client, mock_mem0):
+        mock_mem0.get_all.side_effect = [
+            {
+                "results": [
+                    {"id": "m1", "memory": "Approved", "metadata": {"status": "approved"}, "categories": ["fact"]},
+                ],
+                "next": "page-2",
+            },
+            {
+                "results": [
+                    {"id": "m2", "memory": "Needs review", "metadata": {"status": "pending_review"}, "categories": ["lesson"]},
+                ],
+                "next": None,
+            },
+        ]
+
+        resp = client.get("/api/sophia/test_user/memories/recent?status=pending_review")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "m2"
+        assert mock_mem0.get_all.call_count == 2
+        assert mock_mem0.get_all.call_args_list[0].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 1,
+            "page_size": 100,
+        }
+        assert mock_mem0.get_all.call_args_list[1].kwargs == {
+            "filters": {"user_id": "test_user"},
+            "page": 2,
+            "page_size": 100,
+        }
+        mock_mem0.get.assert_not_called()
 
     def test_status_filter_uses_local_review_metadata_overlay(self, client, mock_mem0, mock_review_store):
         mock_mem0.get_all.return_value = [
@@ -303,9 +414,10 @@ class TestListMemories:
 # ---------------------------------------------------------------------------
 
 class TestCreateMemory:
-    def test_create_memory_returns_item(self, client, mock_mem0, mock_review_store):
-        mock_mem0.add.return_value = [{"id": "m1", "memory": "Likes pizza", "categories": ["food"]}]
-        with patch("deerflow.sophia.mem0_client.invalidate_user_cache") as mock_invalidate:
+    def test_create_memory_returns_item(self, client, mock_review_store):
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"id": "m1", "memory": "Likes pizza", "categories": ["food"]}
+        ]) as mock_add:
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Likes pizza", "category": "food", "metadata": {"status": "approved"}},
@@ -314,8 +426,12 @@ class TestCreateMemory:
         data = resp.json()
         assert data["id"] == "m1"
         assert data["content"] == "Likes pizza"
-        mock_mem0.add.assert_called_once()
-        mock_invalidate.assert_called_once_with("test_user")
+        mock_add.assert_called_once()
+        call_kwargs = mock_add.call_args[1]
+        assert call_kwargs["user_id"] == "test_user"
+        assert call_kwargs["session_id"] == "manual-create"
+        assert call_kwargs["messages"] == [{"role": "user", "content": "Likes pizza"}]
+        assert call_kwargs["metadata"] == {"status": "approved", "category": "food"}
         mock_review_store["upsert"].assert_called_once_with(
             "test_user",
             memory_id="m1",
@@ -325,15 +441,87 @@ class TestCreateMemory:
             sync_state="manual",
         )
 
-    def test_create_memory_falls_back_without_metadata(self, client, mock_mem0):
-        mock_mem0.add.side_effect = [TypeError("metadata unsupported"), [{"id": "m2", "memory": "Keeps going"}]]
-        with patch("deerflow.sophia.mem0_client.invalidate_user_cache"):
+    def test_create_memory_empty_result_returns_503(self, client):
+        """When add_memories returns empty (Mem0 unavailable), return 503."""
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[]):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Keeps going", "metadata": {"status": "approved"}},
             )
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Memory service unavailable"
+
+    def test_create_memory_accepts_id_only_resolved_memory(self, client, mock_review_store):
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"id": "mem_1"}
+        ]):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Resolved memory", "metadata": {"status": "approved"}},
+            )
+
         assert resp.status_code == 200
-        assert mock_mem0.add.call_count == 2
+        data = resp.json()
+        assert data["id"] == "mem_1"
+        assert data["content"] == ""
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            memory_id="mem_1",
+            content="Resolved memory",
+            metadata={"status": "approved"},
+            session_id="manual-create",
+            sync_state="manual",
+        )
+
+    def test_create_memory_pending_event_returns_202(self, client, mock_review_store):
+        """Async Mem0 add event wrappers are accepted, not treated as failures."""
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"event_id": "evt_1", "memory": None}
+        ]):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Queued memory", "category": "lesson", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 202
+        data = resp.json()
+        expected_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+        assert data["id"] == expected_id
+        assert data["content"] == "Queued memory"
+        assert data["category"] == "lesson"
+        assert data["metadata"]["mem0_event_id"] == "evt_1"
+        assert data["metadata"]["mem0_sync_state"] == "pending"
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            content="Queued memory",
+            content_hash=expected_id.split(":", 1)[1],
+            metadata={
+                "status": "approved",
+                "category": "lesson",
+                "mem0_event_id": "evt_1",
+                "mem0_sync_state": "pending",
+            },
+            session_id="manual-create",
+            sync_state="pending",
+        )
+
+    def test_create_memory_raw_event_with_nested_memory_returns_pending(self, client, mock_review_store):
+        """Raw add results can include nested memory payloads but still be event wrappers."""
+        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
+            {"id": "evt_1", "memory": {"id": "mem_1", "memory": "Queued memory"}}
+        ]):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Queued memory", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 202
+        data = resp.json()
+        expected_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+        assert data["id"] == expected_id
+        assert data["content"] == "Queued memory"
+        assert data["metadata"]["mem0_sync_state"] == "pending"
+        mock_review_store["upsert"].assert_called_once()
 
     def test_create_memory_invalid_user_returns_400(self, client):
         resp = client.post(
@@ -398,6 +586,24 @@ class TestUpdateMemory:
             )
         assert resp.status_code == 422
 
+    def test_update_local_pending_memory_uses_content_hash_not_mem0(self, client, mock_mem0, mock_review_store):
+        local_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+
+        resp = client.put(
+            f"/api/sophia/test_user/memories/{local_id}",
+            json={"text": "Updated queued memory", "metadata": {"status": "approved"}},
+        )
+
+        assert resp.status_code == 200
+        mock_mem0.update.assert_not_called()
+        mock_review_store["upsert"].assert_called_once_with(
+            "test_user",
+            content="Updated queued memory",
+            content_hash=local_id.split(":", 1)[1],
+            metadata={"status": "approved"},
+            sync_state="manual",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Memory Delete
@@ -415,6 +621,18 @@ class TestDeleteMemory:
         mock_mem0.delete.side_effect = Exception("Not found")
         resp = client.delete("/api/sophia/test_user/memories/m1")
         assert resp.status_code == 503
+
+    def test_delete_local_pending_memory_uses_content_hash_not_mem0(self, client, mock_mem0, mock_review_store):
+        local_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+
+        resp = client.delete(f"/api/sophia/test_user/memories/{local_id}")
+
+        assert resp.status_code == 204
+        mock_mem0.delete.assert_not_called()
+        mock_review_store["remove"].assert_called_once_with(
+            "test_user",
+            content_hash=local_id.split(":", 1)[1],
+        )
 
 
 class TestBulkReview:
@@ -440,6 +658,24 @@ class TestBulkReview:
             sync_state="manual",
         )
         mock_review_store["remove"].assert_called_once_with("test_user", memory_id="m2")
+
+    def test_bulk_review_local_pending_memory_uses_content_hash_not_mem0(self, client, mock_mem0, mock_review_store):
+        local_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+
+        resp = client.post(
+            "/api/sophia/test_user/memories/bulk-review",
+            json={"items": [{"id": local_id, "action": "approve"}]},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "ok"
+        mock_mem0.update.assert_not_called()
+        mock_review_store["upsert"].assert_any_call(
+            "test_user",
+            content_hash=local_id.split(":", 1)[1],
+            metadata={"status": "approved"},
+            sync_state="manual",
+        )
 
     def test_delete_invalidates_cache(self, client, mock_mem0):
         mock_mem0.delete.return_value = None
@@ -548,7 +784,11 @@ class TestJournal:
         mock_mem0.get_all.return_value = []
         resp = client.get("/api/sophia/test_user/journal?type=relationship")
         assert resp.status_code == 200
-        mock_mem0.get_all.assert_called_once_with(filters={"user_id": "test_user", "categories": "relationship"})
+        mock_mem0.get_all.assert_called_once_with(
+            filters={"user_id": "test_user", "categories": "relationship"},
+            page=1,
+            page_size=100,
+        )
 
     def test_with_search_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
