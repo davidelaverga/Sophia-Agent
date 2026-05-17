@@ -304,6 +304,12 @@ class TelegramChannel(Channel):
                 chat_id=chat_id,
                 message_id=message_id,
                 channel_name="telegram",
+                # Codex P1 (post-Phase-4H review): registry stores
+                # run_id so it can validate incoming webhook posts.
+                # Events whose run_id doesn't match the registered
+                # run_id are from an interrupted previous run and
+                # get dropped.
+                run_id=run_id,
             )
             logger.info(
                 "[Telegram] progress placeholder registered chat_id=%s message_id=%s task_id=%s run_id=%s",

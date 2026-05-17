@@ -188,6 +188,10 @@ async def receive_builder_progress(event: BuilderProgressEvent) -> dict[str, Any
             task_id=event.task_id,
             event_name=event.event_name,
             data=event.data,
+            # Codex P1 (post-Phase-4H review): pass run_id so the
+            # registry can drop in-flight POSTs from an obsoleted run
+            # (interrupted via ``update_async_task``).
+            run_id=event.run_id,
         )
     except Exception:
         logger.warning(
