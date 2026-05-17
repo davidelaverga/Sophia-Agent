@@ -97,10 +97,24 @@ class BuilderProgressEntry:
 
 @dataclass
 class _PendingTerminal:
-    """Terminal event captured before ``register_task`` happened."""
+    """Terminal event captured before ``register_task`` happened.
+
+    Phase 4I (codex post-Phase-4H follow-up): carries ``kind`` and
+    ``run_id`` so the replay path can:
+
+    - Route to ``mark_done`` (success) or ``mark_stopped`` (failure)
+      based on the original terminal's status (codex P2).
+    - Validate the pending's run_id against the just-registered
+      entry's run_id and drop the replay if they disagree (codex P1
+      for the replay path — stale-run terminal queued early shouldn't
+      land on a fresh-run placeholder via ``update_async_task``).
+    """
 
     timestamp: float
-    summary: str
+    kind: str = "done"  # "done" | "stopped"
+    summary: str = ""    # used when kind == "done"
+    reason: str = ""     # used when kind == "stopped"
+    run_id: str = ""
 
 
 class BuilderProgressRegistry:
@@ -204,14 +218,25 @@ class BuilderProgressRegistry:
     def _schedule_pending_replay(
         self, task_id: str, pending: _PendingTerminal
     ) -> None:
-        """Fire ``mark_done`` for a task whose terminal arrived early.
+        """Fire the appropriate terminal for a task whose webhook arrived early.
 
         Called from ``register_task`` (sync) after we find a pending
-        terminal. Schedules the async ``mark_done`` on the current
-        loop so the placeholder transforms to ``[ Done ]`` without
-        the registering caller having to await. If no loop is
-        running (sync caller), we log and skip — the artifact path
-        is still the durability backstop.
+        terminal. Schedules the async finalizer on the current loop
+        so the placeholder transforms without the registering caller
+        having to await. If no loop is running (sync caller), we
+        log and skip — the artifact path is still the durability
+        backstop.
+
+        Phase 4I (codex P1 + P2):
+
+        - Routes to ``mark_done`` or ``mark_stopped`` based on
+          ``pending.kind`` so failure terminals don't render as Done.
+        - Validates ``pending.run_id`` against the just-registered
+          entry's run_id. Mismatch means the pending was for a
+          previous run (interrupted before its terminal could fire
+          and the new run was started via ``update_async_task``);
+          we drop the replay so the new run's placeholder isn't
+          closed prematurely.
         """
         try:
             loop = asyncio.get_running_loop()
@@ -221,11 +246,48 @@ class BuilderProgressRegistry:
                 task_id,
             )
             return
-        coro = self.mark_done(task_id=task_id, summary=pending.summary)
+        # Codex P1: validate that the pending's run_id matches the
+        # just-registered entry's run_id. Look up the entry under the
+        # lock since register_task has already inserted it.
+        with self._lock:
+            entry = self._entries.get(task_id)
+        if entry is None:
+            # Race: entry was unregistered between register_task and
+            # this scheduling step. Drop the replay — there's nothing
+            # to finalize.
+            logger.warning(
+                "[BuilderProgress] pending terminal replay aborted — entry gone task_id=%s",
+                task_id,
+            )
+            return
+        if pending.run_id and pending.run_id != entry.run_id:
+            logger.info(
+                "[BuilderProgress] pending terminal replay dropped — run_id mismatch "
+                "task_id=%s pending_run_id=%s entry_run_id=%s kind=%s",
+                task_id,
+                pending.run_id,
+                entry.run_id,
+                pending.kind,
+            )
+            return
+        if pending.kind == "stopped":
+            coro = self.mark_stopped(
+                task_id=task_id,
+                reason=pending.reason,
+                run_id=entry.run_id,
+            )
+        else:
+            coro = self.mark_done(
+                task_id=task_id,
+                summary=pending.summary,
+                run_id=entry.run_id,
+            )
         loop.create_task(coro)
         logger.info(
-            "[BuilderProgress] pending terminal replay scheduled task_id=%s age_s=%.1f",
+            "[BuilderProgress] pending terminal replay scheduled task_id=%s "
+            "kind=%s age_s=%.1f",
             task_id,
+            pending.kind,
             time.time() - pending.timestamp,
         )
 
@@ -327,13 +389,27 @@ class BuilderProgressRegistry:
             return False
         return True
 
-    async def mark_done(self, *, task_id: str, summary: str = "") -> bool:
+    async def mark_done(
+        self,
+        *,
+        task_id: str,
+        summary: str = "",
+        run_id: str | None = None,
+    ) -> bool:
         """Finalize the placeholder as ``[ Done ]`` and unregister.
 
         Called from ``_on_builder_completion`` when the artifact
-        delivery webhook fires. The placeholder body transforms to
-        the done header + optional summary; the entry is then
-        dropped so future webhooks for the same task_id are no-ops.
+        delivery webhook fires AND ``status == "success"``. The
+        placeholder body transforms to the done header + optional
+        summary; the entry is then dropped so future webhooks for
+        the same task_id are no-ops.
+
+        Codex P1 (post-Phase-4H review): ``run_id`` is checked
+        against the registered entry's run_id. A delayed terminal
+        from a previous run (interrupted via ``update_async_task``)
+        must NOT close the new run's placeholder. When ``run_id``
+        is omitted (callers that don't yet plumb it), the check is
+        skipped — non-breaking.
 
         Codex P2 (post-Phase-4H review): if the entry isn't
         registered yet (fast-build race — terminal webhook arrived
@@ -341,33 +417,112 @@ class BuilderProgressRegistry:
         placeholder), record the terminal in ``_pending_terminals``
         so ``register_task`` can replay it on registration. Without
         this, a fast-build placeholder would land AFTER the terminal
-        and stay stuck on "Working on it…" forever (no later
-        terminal would arrive for that task_id).
+        and stay stuck on "Working on it…" forever.
+        """
+        return await self._finalize_terminal(
+            task_id=task_id,
+            kind="done",
+            summary=summary,
+            reason="",
+            run_id=run_id,
+        )
+
+    async def mark_stopped(
+        self,
+        *,
+        task_id: str,
+        reason: str = "",
+        run_id: str | None = None,
+    ) -> bool:
+        """Finalize the placeholder as ``[ Stopped — (reason) ]`` and unregister.
+
+        Phase 4I (codex P2 post-Phase-4H): symmetric counterpart to
+        ``mark_done`` for non-success terminal outcomes
+        (``error`` / ``failed`` / ``timeout`` / ``timed_out`` /
+        ``cancelled`` / ``canceled``). The placeholder transforms to
+        a "[ Stopped ]" header instead of falsely claiming "[ Done ]"
+        when the channel is about to render a retry card right
+        below it.
+
+        Same run_id-match guard and pending-record-on-miss semantics
+        as ``mark_done``.
+        """
+        return await self._finalize_terminal(
+            task_id=task_id,
+            kind="stopped",
+            summary="",
+            reason=reason,
+            run_id=run_id,
+        )
+
+    async def _finalize_terminal(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+        summary: str,
+        reason: str,
+        run_id: str | None,
+    ) -> bool:
+        """Shared implementation for ``mark_done`` / ``mark_stopped``.
+
+        Returns True iff the renderer was advanced AND an edit was
+        pushed (and the entry was unregistered). Returns False on
+        any short-circuit:
+
+        - Entry not found → records the terminal as pending for
+          later replay (and logs).
+        - run_id mismatch on existing entry → drops silently.
+        - Renderer produced no body change → unregisters but
+          doesn't push.
+        - Callback raised → swallows the exception, unregisters
+          anyway (the artifact-delivery path is independent).
         """
         task_key = str(task_id)
         with self._lock:
             entry = self._entries.get(task_key)
             callback = self._callbacks.get(entry.channel_name) if entry else None
         if entry is None:
-            # Record so register_task can replay (codex P2). If a
-            # pending terminal already exists for this task_id, leave
-            # the existing one — the LATER mark_done call would
-            # carry the same payload anyway (terminal webhook is
-            # dedup'd at the langgraph side).
             with self._lock:
                 if task_key not in self._pending_terminals:
                     self._pending_terminals[task_key] = _PendingTerminal(
-                        timestamp=time.time(), summary=summary
+                        timestamp=time.time(),
+                        kind=kind,
+                        summary=summary,
+                        reason=reason,
+                        run_id=str(run_id) if run_id else "",
                     )
                     self._trim_pending_terminals_locked()
             logger.info(
-                "[BuilderProgress] mark_done recorded as pending — no entry yet "
-                "task_id=%s summary_len=%d",
+                "[BuilderProgress] mark_%s recorded as pending — no entry yet "
+                "task_id=%s run_id=%s",
+                kind,
                 task_id,
-                len(summary),
+                run_id,
             )
             return False
-        entry.renderer.mark_done(summary=summary)
+        # Codex P1: drop terminal events from an obsoleted run.
+        if run_id is not None and str(run_id) != entry.run_id:
+            logger.info(
+                "[BuilderProgress] mark_%s dropped — run_id mismatch task_id=%s "
+                "expected_run_id=%s incoming_run_id=%s",
+                kind,
+                task_id,
+                entry.run_id,
+                run_id,
+            )
+            return False
+        if kind == "done":
+            entry.renderer.mark_done(summary=summary)
+        elif kind == "stopped":
+            entry.renderer.mark_stopped(reason=reason)
+        else:
+            logger.warning(
+                "[BuilderProgress] _finalize_terminal called with unknown kind=%r task_id=%s",
+                kind,
+                task_id,
+            )
+            return False
         body = entry.renderer.render()
         if callback is not None and body and body != entry.last_pushed_body:
             entry.last_pushed_body = body
@@ -375,7 +530,8 @@ class BuilderProgressRegistry:
                 await callback(entry.chat_id, entry.message_id, body)
             except Exception:
                 logger.warning(
-                    "[BuilderProgress] mark_done edit raised channel=%s task_id=%s",
+                    "[BuilderProgress] mark_%s edit raised channel=%s task_id=%s",
+                    kind,
                     entry.channel_name,
                     task_id,
                     exc_info=True,

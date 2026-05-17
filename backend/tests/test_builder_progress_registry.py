@@ -364,6 +364,190 @@ def test_pending_terminals_evict_on_ttl() -> None:
     assert "t-fresh" in r._pending_terminals
 
 
+@pytest.mark.anyio
+async def test_mark_done_drops_when_run_id_mismatches() -> None:
+    """Codex P1 (post-Phase-4H follow-up): a stale-run terminal MUST NOT
+    close the new run's placeholder. ``mark_done`` validates ``run_id``
+    against the registered entry's run_id and drops on mismatch.
+    """
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+    # Register the NEW run.
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+
+    # Stale terminal from the OLD run arrives.
+    finalized = await r.mark_done(task_id="t-1", summary="old summary", run_id="r-OLD")
+    assert finalized is False
+    assert captured == []
+    # Entry is still registered (the new run's placeholder is intact).
+    assert r.has_task("t-1") is True
+
+
+@pytest.mark.anyio
+async def test_mark_done_accepts_matching_run_id() -> None:
+    """Sanity: matching run_id finalizes normally."""
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    finalized = await r.mark_done(task_id="t-1", summary="all good", run_id="r-1")
+    assert finalized is True
+    assert any("[ Done ]" in body for body in captured)
+    assert any("all good" in body for body in captured)
+    assert r.has_task("t-1") is False
+
+
+# ---- Phase 4I: mark_stopped (codex P2 post-Phase-4H) ---------------------
+
+
+@pytest.mark.anyio
+async def test_mark_stopped_finalizes_with_stopped_header() -> None:
+    """Codex P2: failure terminals get [ Stopped — (reason) ] instead
+    of the misleading [ Done ]."""
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    finalized = await r.mark_stopped(task_id="t-1", reason="timed out")
+    assert finalized is True
+    assert captured, "edit callback should have been invoked"
+    final_body = captured[-1]
+    assert "[ Stopped ]" in final_body
+    assert "timed out" in final_body
+    assert "[ Done ]" not in final_body, (
+        "stopped finalize must not produce a Done header"
+    )
+    assert r.has_task("t-1") is False
+
+
+@pytest.mark.anyio
+async def test_mark_stopped_drops_when_run_id_mismatches() -> None:
+    """Codex P1+P2 combination: a stale failure-terminal from the
+    interrupted run MUST NOT close the new run's placeholder either.
+    """
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+
+    finalized = await r.mark_stopped(
+        task_id="t-1", reason="old run errored", run_id="r-OLD"
+    )
+    assert finalized is False
+    assert captured == []
+    assert r.has_task("t-1") is True
+
+
+@pytest.mark.anyio
+async def test_mark_stopped_records_pending_when_no_entry() -> None:
+    """Codex P2 + early-arrival race: a failure terminal arriving
+    before registration is queued so the eventual placeholder can be
+    finalized correctly (not as Done)."""
+    r = BuilderProgressRegistry()
+    finalized = await r.mark_stopped(task_id="t-fast-fail", reason="timed out")
+    assert finalized is False
+    pending = r._pending_terminals["t-fast-fail"]
+    assert pending.kind == "stopped"
+    assert pending.reason == "timed out"
+
+
+@pytest.mark.anyio
+async def test_pending_replay_routes_to_stopped_when_kind_is_stopped() -> None:
+    """Codex P2 replay: when the pending was a failure-kind terminal,
+    register_task's replay path routes through mark_stopped (not
+    mark_done) so the placeholder shows [ Stopped ]."""
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+
+    # Fast-failed: terminal arrives first.
+    await r.mark_stopped(task_id="t-fast-fail", reason="build failed", run_id="r-1")
+    # Placeholder lands.
+    r.register_task(
+        task_id="t-fast-fail",
+        chat_id=1,
+        message_id=2,
+        channel_name="telegram",
+        run_id="r-1",
+    )
+    # Yield to the loop so the scheduled replay runs.
+    await asyncio.sleep(0.05)
+
+    assert captured, "replay should have invoked the edit callback"
+    final = captured[-1]
+    assert "[ Stopped ]" in final
+    assert "build failed" in final
+    assert "[ Done ]" not in final
+
+
+@pytest.mark.anyio
+async def test_pending_replay_drops_when_run_id_mismatches() -> None:
+    """Codex P1 replay path: a pending terminal recorded for an OLD run
+    must NOT fire onto a NEW run's freshly-registered placeholder
+    (update_async_task flow with a race-y old-run terminal queued
+    early). The replay validates pending.run_id against entry.run_id
+    and drops on mismatch.
+    """
+    r = BuilderProgressRegistry()
+    captured: list[str] = []
+
+    async def cb(_c: int, _m: int, body: str) -> None:
+        captured.append(body)
+
+    r.register_channel_callback("telegram", cb)
+
+    # Old run's terminal lands BEFORE its own registration (early race).
+    await r.mark_done(task_id="t-1", summary="old run done", run_id="r-OLD")
+    assert "t-1" in r._pending_terminals
+    assert r._pending_terminals["t-1"].run_id == "r-OLD"
+
+    # Now a NEW run for the same task_id registers (e.g. the user
+    # already fired update_async_task in between).
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+    await asyncio.sleep(0.05)
+
+    # Pending was consumed by register_task but replay was DROPPED
+    # because the run_id didn't match — so no edit fires and the
+    # new placeholder stays active.
+    assert captured == [], (
+        "stale-run pending replay must NOT push an edit to the new placeholder"
+    )
+    assert r.has_task("t-1") is True
+
+
 def test_pending_terminals_evict_on_cap() -> None:
     """When the pending-cache exceeds its cap, the OLDEST entries are
     dropped (FIFO via dict insertion order)."""

@@ -2038,6 +2038,144 @@ class TestChannelService:
                 meta={"task_id": "t", "run_id": ""},
             )
 
+    def test_on_builder_completion_branches_to_mark_done_on_success(self):
+        """Codex P2 (post-Phase-4H follow-up): success status routes
+        through ``mark_done`` so the placeholder finalizes as
+        ``[ Done ]`` before the artifact document is sent."""
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+
+        captured: list[str] = []
+
+        async def cb(_c, _m, body):
+            captured.append(body)
+
+        registry.register_channel_callback("telegram", cb)
+        registry.register_task(
+            task_id="t-1",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-1",
+        )
+
+        # Capture which registry method is invoked. Patch both so we
+        # detect cross-method leakage.
+        calls: list[str] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            calls.append(f"done:{task_id}:{summary}")
+            return True
+
+        async def fake_stopped(*, task_id, reason, run_id):
+            calls.append(f"stopped:{task_id}:{reason}")
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+        registry.mark_stopped = fake_stopped  # type: ignore[method-assign]
+
+        # Stub out the parts of _on_builder_completion that aren't
+        # under test (artifact download, bot send, etc.) by setting
+        # only what the early branches need.
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        # _find_chat_topic_for_thread is the gate — make it return a
+        # (chat_id, topic_id) match so the handler proceeds.
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        # Stop the bot dispatch from actually running.
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-1",
+                "task_id": "t-1",
+                "status": "success",
+                "summary": "Built FST.md",
+                "run_id": "r-1",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                # Downstream artifact / bot machinery isn't mocked
+                # exhaustively; we only care that the finalize call
+                # happened before any error.
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert any(c.startswith("done:t-1:Built FST.md") for c in calls), (
+            f"success status must route to mark_done; calls={calls}"
+        )
+        assert not any(c.startswith("stopped:") for c in calls)
+
+    def test_on_builder_completion_branches_to_mark_stopped_on_error(self):
+        """Codex P2: error / timeout / cancelled statuses route through
+        ``mark_stopped`` so the placeholder finalizes honestly
+        instead of misleading the user with ``[ Done ]`` directly
+        above the retry card."""
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+        registry.register_task(
+            task_id="t-2",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-2",
+        )
+
+        calls: list[str] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            calls.append(f"done:{task_id}")
+            return True
+
+        async def fake_stopped(*, task_id, reason, run_id):
+            calls.append(f"stopped:{task_id}:{reason}")
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+        registry.mark_stopped = fake_stopped  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+        # The retry-keyboard helper is referenced on the error branch
+        # below — stub it to a sentinel so we don't trip downstream.
+        ch._build_retry_keyboard = lambda _t, **_k: None  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-2",
+                "task_id": "t-2",
+                "status": "error",
+                "error_message": "build crashed",
+                "run_id": "r-2",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert any(c.startswith("stopped:t-2:build crashed") for c in calls), (
+            f"error status must route to mark_stopped; calls={calls}"
+        )
+        assert not any(c.startswith("done:") for c in calls)
+
     def test_send_propagates_register_failure_after_successful_telegram_send(self):
         """End-to-end regression: when bot.send_message succeeds but the
         registry registration step raises (e.g. malformed meta), the

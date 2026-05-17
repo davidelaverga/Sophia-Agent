@@ -1069,22 +1069,62 @@ class TelegramChannel(Channel):
         artifact_filename = payload.get("artifact_filename")
         task_id = payload.get("task_id") or "unknown"
 
-        # Phase 4H: finalize and unregister the progress placeholder.
-        # Edits to ``[ Done ]`` with the builder summary if a placeholder
-        # is still registered for this task_id, then drops the entry so
-        # subsequent webhooks for the same task_id are no-ops. The
-        # artifact document is sent below as a separate message.
+        # Phase 4H + 4I: finalize and unregister the progress placeholder.
+        # Phase 4I (codex P2 post-Phase-4H): branch on ``status`` so
+        # error / timeout / cancelled outcomes get a [ Stopped ]
+        # header instead of the misleading [ Done ]. The retry card
+        # the channel renders just below would otherwise contradict
+        # the placeholder's claim of success.
         try:
             from app.gateway.builder_progress import get_progress_registry
 
+            registry = get_progress_registry()
             summary = payload.get("summary") or ""
-            await get_progress_registry().mark_done(
-                task_id=str(task_id), summary=summary
-            )
+            error_message = payload.get("error_message") or ""
+            run_id = payload.get("run_id")  # may be None for legacy payloads
+
+            if status == "success":
+                await registry.mark_done(
+                    task_id=str(task_id),
+                    summary=summary,
+                    run_id=str(run_id) if run_id else None,
+                )
+            elif status in {"error", "failed", "timeout", "timed_out", "cancelled", "canceled"}:
+                # Map raw status → short reason string for the
+                # [ Stopped — (reason) ] placeholder body. Prefer
+                # the model's own error_message when present (it's
+                # typically more user-actionable); fall back to a
+                # status-keyed default.
+                reason = error_message.strip() if isinstance(error_message, str) else ""
+                if not reason:
+                    reason = {
+                        "error": "build failed",
+                        "failed": "build failed",
+                        "timeout": "timed out",
+                        "timed_out": "timed out",
+                        "cancelled": "cancelled",
+                        "canceled": "cancelled",
+                    }.get(status, str(status))
+                await registry.mark_stopped(
+                    task_id=str(task_id),
+                    reason=reason,
+                    run_id=str(run_id) if run_id else None,
+                )
+            else:
+                # Unknown / unexpected terminal status. Skip
+                # placeholder finalization rather than guessing —
+                # the artifact / retry branches below still run
+                # normally.
+                logger.warning(
+                    "[Telegram] builder completion unknown status=%r task_id=%s — skipping placeholder finalize",
+                    status,
+                    task_id,
+                )
         except Exception:
             logger.warning(
-                "[Telegram] progress registry mark_done failed task_id=%s",
+                "[Telegram] progress registry finalize failed task_id=%s status=%s",
                 task_id,
+                status,
                 exc_info=True,
             )
 
