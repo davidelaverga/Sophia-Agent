@@ -533,6 +533,59 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
 
     @staticmethod
+    def _upload_fallback_and_fire(
+        state: BuilderArtifactState,
+        runtime: Runtime,
+        fallback: dict[str, Any],
+        status: str,
+    ) -> None:
+        """Mirror the ceiling-fallback file to Supabase BEFORE firing the
+        completion webhook.
+
+        Phase 4L (2026-05-19): the two ceiling-fallback call sites used
+        to fire ``fire_completion_webhook_from_artifact`` directly,
+        without uploading the promoted file. If ``SOPHIA_SUPABASE_MIRROR_ALL``
+        wasn't enabled (or the per-write mirror missed the file), the
+        downstream signed-URL mint returned 404 and Telegram delivery
+        fell back to plaintext. Mirrors the upload step from the normal
+        happy path at ``after_model`` (the lines that resolve
+        ``upload_thread_id`` and call ``_upload_builder_outputs_to_supabase``).
+
+        Safe to call when ``fallback["artifact_path"]`` is None:
+        ``maybe_mirror_file`` is a no-op for missing paths, and
+        ``_upload_builder_outputs_to_supabase`` short-circuits when
+        ``outputs_host_path`` or ``thread_id`` is unset. The upload
+        helper also documents "Any failure is logged and swallowed so
+        builder flow never regresses" — so if the upload raises, the
+        webhook still fires (the placeholder is finalized; delivery
+        may still degrade to plaintext, which is the pre-Phase-4L
+        behavior — i.e. no regression).
+        """
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+        )
+        delegation = state.get("delegation_context")
+        parent_thread_id = (
+            delegation.get("parent_thread_id") if isinstance(delegation, dict) else None
+        )
+        builder_thread_id = (
+            runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
+        )
+        upload_thread_id = parent_thread_id or builder_thread_id
+        _upload_builder_outputs_to_supabase(
+            thread_id=upload_thread_id,
+            outputs_host_path=outputs_host_path,
+            artifact_args=fallback,
+        )
+        fire_completion_webhook_from_artifact(
+            state=state,
+            runtime=runtime,
+            artifact=fallback,
+            status=status,
+        )
+
+    @staticmethod
     def _has_generator_script(state: BuilderArtifactState) -> bool:
         """Return True if a builder-produced ``_generate_*.py`` script exists.
 
@@ -971,12 +1024,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 steps_completed=non_artifact_turns,
                                 reason=f"consecutive_empty_emit_rejections={consecutive_rejections}",
                             )
-                            # Fire the gateway webhook so Telegram still
-                            # receives the (degraded) artifact card.
-                            fire_completion_webhook_from_artifact(
+                            # Phase 4L: upload the promoted file to
+                            # Supabase BEFORE firing the webhook so the
+                            # signed-URL mint + Telegram bytes-download
+                            # both succeed. Without this the ceiling
+                            # fallback delivered plaintext instead of
+                            # the actual file (2026-05-19 production
+                            # smoke test).
+                            self._upload_fallback_and_fire(
                                 state=state,
                                 runtime=runtime,
-                                artifact=fallback,
+                                fallback=fallback,
                                 status="completed",
                             )
                             return {
@@ -1121,13 +1179,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         steps_completed=non_artifact_turns,
                         reason="hard_ceiling",
                     )
-                    # Fire the gateway webhook so Telegram receives the
-                    # ceiling-fallback artifact (or an error card via the
-                    # phantom-success guard if no real file landed).
-                    fire_completion_webhook_from_artifact(
+                    # Phase 4L: upload-before-webhook (see
+                    # ``_upload_fallback_and_fire`` docstring). Same
+                    # contract as the consecutive-rejection short-circuit
+                    # above — ensures the ceiling-fallback file actually
+                    # lands in Supabase before the channel adapter
+                    # tries to download bytes for the user.
+                    self._upload_fallback_and_fire(
                         state=state,
                         runtime=runtime,
-                        artifact=fallback,
+                        fallback=fallback,
                         status="completed",
                     )
                     return {

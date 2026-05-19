@@ -149,3 +149,130 @@ def test_ceiling_fallback_mtime_filter_excludes_stale_md(tmp_path: Path) -> None
     )
     # Stale file filtered out → apology fallback.
     assert fallback["artifact_path"] is None
+
+
+# ---- Phase 4L: upload-before-webhook on the two ceiling-fallback sites
+#
+# Both ceiling-fallback call sites (consecutive-rejection short-circuit and
+# hard-ceiling termination) used to fire the completion webhook WITHOUT
+# uploading the promoted file to Supabase first. Result: signed-URL mint
+# 404'd downstream, Telegram delivery degraded to plaintext. The new
+# helper `_upload_fallback_and_fire` ensures upload happens before the
+# webhook on both paths. These tests lock the contract.
+
+
+def test_upload_fallback_and_fire_calls_upload_before_webhook(monkeypatch) -> None:
+    """Primary unit lock for the new helper.
+
+    Mocks both ``_upload_builder_outputs_to_supabase`` and
+    ``fire_completion_webhook_from_artifact`` and asserts the upload is
+    called FIRST, then the webhook. Records the call order so a future
+    refactor that accidentally inverts the order fails loudly.
+    """
+    from types import SimpleNamespace
+
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba_module
+
+    call_order: list[str] = []
+
+    def _stub_upload(*, thread_id, outputs_host_path, artifact_args):
+        call_order.append("upload")
+        # Sanity: helper should pass the parent thread_id from
+        # delegation_context (not the builder thread).
+        assert thread_id == "parent-thread-xyz"
+
+    def _stub_fire(*, state, runtime, artifact, status):
+        call_order.append("fire")
+        assert status == "completed"
+        assert artifact["artifact_path"] == "/mnt/user-data/outputs/recovered.md"
+
+    monkeypatch.setattr(
+        ba_module, "_upload_builder_outputs_to_supabase", _stub_upload
+    )
+    monkeypatch.setattr(
+        ba_module, "fire_completion_webhook_from_artifact", _stub_fire
+    )
+
+    state: dict = {
+        "thread_data": {"outputs_path": "/mnt/user-data/outputs"},
+        "delegation_context": {"parent_thread_id": "parent-thread-xyz"},
+    }
+    runtime = SimpleNamespace(context={"thread_id": "builder-thread-abc"})
+    fallback = {
+        "artifact_path": "/mnt/user-data/outputs/recovered.md",
+        "artifact_type": "document",
+        "confidence": 0.4,
+    }
+
+    BuilderArtifactMiddleware._upload_fallback_and_fire(
+        state=state, runtime=runtime, fallback=fallback, status="completed"
+    )
+
+    assert call_order == ["upload", "fire"], (
+        f"upload must run BEFORE webhook fire; got order={call_order}"
+    )
+
+
+def test_upload_fallback_and_fire_falls_back_to_builder_thread_when_parent_missing(
+    monkeypatch,
+) -> None:
+    """When ``delegation_context.parent_thread_id`` is absent (e.g. a
+    Builder-as-Main run that never had a companion parent), the helper
+    must fall back to ``runtime.context["thread_id"]``. This mirrors
+    the resolution logic in the normal happy path."""
+    from types import SimpleNamespace
+
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba_module
+
+    captured: dict = {}
+
+    def _stub_upload(*, thread_id, outputs_host_path, artifact_args):
+        captured["thread_id"] = thread_id
+
+    monkeypatch.setattr(
+        ba_module, "_upload_builder_outputs_to_supabase", _stub_upload
+    )
+    monkeypatch.setattr(
+        ba_module, "fire_completion_webhook_from_artifact", lambda **kw: None
+    )
+
+    state: dict = {
+        "thread_data": {"outputs_path": "/mnt/user-data/outputs"},
+        # No delegation_context.
+    }
+    runtime = SimpleNamespace(context={"thread_id": "builder-only-thread"})
+    fallback = {"artifact_path": "/mnt/user-data/outputs/x.md", "artifact_type": "document"}
+
+    BuilderArtifactMiddleware._upload_fallback_and_fire(
+        state=state, runtime=runtime, fallback=fallback, status="completed"
+    )
+    assert captured["thread_id"] == "builder-only-thread"
+
+
+def test_upload_fallback_and_fire_safe_when_artifact_path_is_none(monkeypatch) -> None:
+    """``_upload_builder_outputs_to_supabase`` is documented as safe to
+    call with ``artifact_args["artifact_path"]=None``; this test locks
+    that the new helper doesn't add defensive logic that would break
+    that contract (e.g., raising on missing path)."""
+    from types import SimpleNamespace
+
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba_module
+
+    monkeypatch.setattr(
+        ba_module, "_upload_builder_outputs_to_supabase", lambda **kw: None
+    )
+    monkeypatch.setattr(
+        ba_module, "fire_completion_webhook_from_artifact", lambda **kw: None
+    )
+
+    state: dict = {
+        "thread_data": {"outputs_path": "/mnt/user-data/outputs"},
+        "delegation_context": {"parent_thread_id": "p-1"},
+    }
+    runtime = SimpleNamespace(context={"thread_id": "b-1"})
+    fallback = {"artifact_path": None, "artifact_type": "unknown", "confidence": 0.2}
+
+    # Must not raise.
+    BuilderArtifactMiddleware._upload_fallback_and_fire(
+        state=state, runtime=runtime, fallback=fallback, status="completed"
+    )
