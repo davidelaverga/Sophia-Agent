@@ -66,6 +66,23 @@ _TRIM_TARGET = 768  # keep ~75% on overflow
 _PENDING_TERMINAL_TTL_SECONDS = 300.0
 _PENDING_TERMINAL_CAP = 256
 
+# Codex P2 (post-Phase-4K+1 review): when the terminal edit callback
+# fails (transient Telegram 5xx, channel restarting mid-edit, etc.)
+# the placeholder must NOT be unregistered as "done" — builder
+# completion webhooks are LRU-deduped server-side (see
+# ``_emitted_task_ids`` in ``deerflow/sophia/builder_events.py``), so
+# no second terminal webhook will ever fire. Without an explicit
+# retry, the placeholder stays stuck on its last non-terminal body
+# forever.
+#
+# Retry policy: bounded attempts with exponential-ish backoff. After
+# the last attempt, we give up + unregister + log warning so the
+# entry doesn't leak. Three attempts at 2/5/15 seconds (~22s total
+# wall clock) is enough to ride out a typical Telegram 5xx blip
+# without keeping the entry alive indefinitely.
+_TERMINAL_RETRY_BACKOFFS_SECONDS: tuple[float, ...] = (2.0, 5.0, 15.0)
+_MAX_TERMINAL_RETRIES = len(_TERMINAL_RETRY_BACKOFFS_SECONDS)
+
 
 # Type alias for the per-channel edit callback. Channels register one
 # of these for their channel_name; the registry invokes it on every
@@ -111,6 +128,13 @@ class BuilderProgressEntry:
     # is constructed at import time in some test paths). See
     # ``BuilderProgressRegistry._ensure_entry_lock``.
     update_lock: asyncio.Lock | None = None
+    # Codex P2 (post-Phase-4K+1 review): bounded retry counter for
+    # the terminal edit. Incremented on each callback failure inside
+    # ``_finalize_terminal_locked``; once it hits
+    # ``_MAX_TERMINAL_RETRIES`` we give up and unregister. Counter
+    # is per-entry so a replacement run (``update_async_task``) gets
+    # a fresh budget.
+    terminal_retry_attempts: int = 0
 
 
 @dataclass
@@ -176,6 +200,12 @@ class BuilderProgressRegistry:
         # subscriber. ``add_done_callback(discard)`` keeps the set
         # bounded.
         self._replay_tasks: set[asyncio.Task] = set()
+        # Codex P2 (post-Phase-4K+1 review): strong-ref set for
+        # ``_schedule_terminal_retry``'s fire-and-forget retry tasks.
+        # Separate from ``_replay_tasks`` so failure modes (replay
+        # tasks leaking would be a different bug from retries
+        # leaking) are diagnosable independently in logs / tests.
+        self._terminal_retry_tasks: set[asyncio.Task] = set()
         # Protect registration / lookup against concurrent access
         # from the HTTP endpoint coroutine + channel send coroutine.
         # All operations are short (dict ops + a callback await
@@ -743,25 +773,70 @@ class BuilderProgressRegistry:
             )
             return False
         body = entry.renderer.render()
+        callback_succeeded = True
         if callback is not None and body and body != entry.last_pushed_body:
             # Codex P2 (Phase 4J post-review): cache AFTER the
             # callback succeeds — see ``apply_event`` for the
             # rationale. A failed terminal edit shouldn't mark the
-            # body as delivered; on this path the next code path
-            # is ``unregister_task`` which clears the entry anyway,
-            # but keeping the pattern symmetric prevents drift if
-            # the unregister is ever lifted or moved.
+            # body as delivered.
             try:
                 await callback(entry.chat_id, entry.message_id, body)
                 entry.last_pushed_body = body
             except Exception:
+                callback_succeeded = False
                 logger.warning(
-                    "[BuilderProgress] mark_%s edit raised channel=%s task_id=%s",
+                    "[BuilderProgress] mark_%s edit raised channel=%s task_id=%s "
+                    "attempt=%d/%d",
                     kind,
                     entry.channel_name,
                     task_id,
+                    entry.terminal_retry_attempts + 1,
+                    _MAX_TERMINAL_RETRIES,
                     exc_info=True,
                 )
+
+        if not callback_succeeded:
+            # Codex P2 (post-Phase-4K+1 review): terminal edit failed.
+            # Builder completion webhooks are LRU-deduped server-side
+            # (one terminal per task_id, ever), so there's no second
+            # webhook to retry from. Without an explicit retry the
+            # placeholder is permanently stuck on its previous
+            # non-terminal body. Schedule a backoff retry; if all
+            # retries fail we eventually unregister + log.
+            entry.terminal_retry_attempts += 1
+            if entry.terminal_retry_attempts < _MAX_TERMINAL_RETRIES:
+                self._schedule_terminal_retry(
+                    task_id=task_id,
+                    kind=kind,
+                    summary=summary,
+                    reason=reason,
+                    run_id=run_id,
+                    expected_entry=entry,
+                    attempt=entry.terminal_retry_attempts,
+                )
+                # IMPORTANT: do NOT unregister here. The retry needs
+                # the entry to still be in ``_entries`` so its
+                # identity-guarded ``mark_done`` / ``mark_stopped``
+                # can re-fetch it. Cleanup happens either on a later
+                # successful retry or on retry-budget exhaustion
+                # (below).
+                return False
+            # Retries exhausted — give up so the entry doesn't leak.
+            # The user will see the last-pushed (non-terminal) body
+            # but the artifact-delivery path is independent and
+            # still ran via ``_on_builder_completion``.
+            logger.warning(
+                "[BuilderProgress] mark_%s retries exhausted (%d/%d) — "
+                "giving up; placeholder may be stuck task_id=%s channel=%s",
+                kind,
+                entry.terminal_retry_attempts,
+                _MAX_TERMINAL_RETRIES,
+                task_id,
+                entry.channel_name,
+            )
+            self.unregister_task(task_id, expected_entry=entry)
+            return False
+
         # Codex P2 (post-Phase-4K review): identity-guarded unregister.
         # During the slow callback await above, ``register_task`` may
         # have been called by ``update_async_task`` for a replacement
@@ -772,6 +847,93 @@ class BuilderProgressRegistry:
         # points at our snapshot ``entry`` before popping.
         self.unregister_task(task_id, expected_entry=entry)
         return True
+
+    def _schedule_terminal_retry(
+        self,
+        *,
+        task_id: str,
+        kind: str,
+        summary: str,
+        reason: str,
+        run_id: str | None,
+        expected_entry: BuilderProgressEntry,
+        attempt: int,
+    ) -> None:
+        """Schedule a delayed re-attempt of ``mark_done``/``mark_stopped``.
+
+        ``attempt`` is the 1-indexed retry number that just FAILED — so
+        ``attempt=1`` means we just had our first failure and are
+        scheduling retry #1. We index the backoff table with
+        ``attempt - 1`` (clamped at the end of the table) and the
+        retry function itself goes through the public ``mark_*`` API
+        so it inherits run_id matching, identity-guarded unregister,
+        and lock acquisition.
+
+        Identity guard inside the retry: before we re-enter mark_*,
+        we re-check that ``_entries[task_id] is expected_entry``. If
+        the entry was replaced by ``update_async_task`` or removed by
+        a concurrent unregister, the retry is a no-op (the new
+        entry's terminal will arrive on its own; the removed entry
+        is already done).
+        """
+        backoff_idx = min(attempt - 1, len(_TERMINAL_RETRY_BACKOFFS_SECONDS) - 1)
+        backoff = _TERMINAL_RETRY_BACKOFFS_SECONDS[backoff_idx]
+
+        async def _retry() -> None:
+            try:
+                await asyncio.sleep(backoff)
+            except asyncio.CancelledError:
+                return
+            with self._lock:
+                current = self._entries.get(str(task_id))
+            if current is not expected_entry:
+                logger.info(
+                    "[BuilderProgress] terminal retry skipped — entry "
+                    "replaced or removed task_id=%s",
+                    task_id,
+                )
+                return
+            logger.info(
+                "[BuilderProgress] terminal retry firing task_id=%s "
+                "kind=%s attempt=%d backoff_s=%.1f",
+                task_id,
+                kind,
+                attempt,
+                backoff,
+            )
+            try:
+                if kind == "done":
+                    await self.mark_done(
+                        task_id=task_id, summary=summary, run_id=run_id
+                    )
+                else:
+                    await self.mark_stopped(
+                        task_id=task_id, reason=reason, run_id=run_id
+                    )
+            except Exception:
+                logger.warning(
+                    "[BuilderProgress] terminal retry mark_%s raised task_id=%s",
+                    kind,
+                    task_id,
+                    exc_info=True,
+                )
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No active loop — caller is in a sync context we don't
+            # expect (terminal handlers always run under FastAPI's
+            # async loop). Log and bail; the placeholder may stay
+            # stuck but the artifact path is independent.
+            logger.warning(
+                "[BuilderProgress] terminal retry not scheduled — no "
+                "running loop task_id=%s",
+                task_id,
+            )
+            return
+        task = loop.create_task(_retry())
+        self._terminal_retry_tasks.add(task)
+        task.add_done_callback(self._terminal_retry_tasks.discard)
 
     # -- internals ----------------------------------------------------------
 

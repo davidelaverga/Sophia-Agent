@@ -1199,3 +1199,219 @@ async def test_mark_done_for_old_run_does_not_detach_replacement_placeholder() -
             "replacement entry must still be the active one"
         )
         assert r._entries["t-1"].run_id == "r-NEW"
+
+
+# ---- Phase 4K+2: terminal-edit retry (codex P2 post-Phase-4K+1 review)
+#
+# Builder completion webhooks are LRU-deduped server-side: each task_id
+# gets ONE terminal webhook delivered to the gateway, ever. If the
+# gateway-side terminal callback raises (transient Telegram 5xx,
+# channel restarting, etc.) we must NOT unregister-as-done and lose
+# the opportunity to retry — the placeholder would stay stuck on its
+# last non-terminal body forever. The fix schedules bounded retries
+# with backoff; only after all retries fail do we unregister + log.
+
+
+@pytest.mark.anyio
+async def test_mark_done_does_not_unregister_on_callback_failure() -> None:
+    """Codex P2 primary unit lock. A single callback failure must
+    leave the entry registered so the scheduled retry has something
+    to act on. ``last_pushed_body`` must NOT be updated (cache-after-
+    success), and the public return value is False."""
+    from unittest.mock import patch
+
+    r = BuilderProgressRegistry()
+    invocations = 0
+
+    async def failing_cb(_c: int, _m: int, _body: str) -> None:
+        nonlocal invocations
+        invocations += 1
+        raise RuntimeError("simulated Telegram 5xx")
+
+    r.register_channel_callback("telegram", failing_cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    # Stub _schedule_terminal_retry so we observe the retry decision
+    # without actually waiting through the backoff in the test.
+    with patch.object(r, "_schedule_terminal_retry") as scheduled:
+        finalized = await r.mark_done(task_id="t-1", summary="hello", run_id="r-1")
+
+    assert finalized is False, "failed terminal must return False"
+    assert invocations == 1, "callback should have been attempted exactly once"
+    # Entry stays registered for the retry to find.
+    assert r.has_task("t-1") is True
+    # last_pushed_body unchanged (cache-after-success).
+    with r._lock:
+        assert r._entries["t-1"].last_pushed_body == ""
+    # Retry was scheduled with attempt=1.
+    assert scheduled.call_count == 1
+    kwargs = scheduled.call_args.kwargs
+    assert kwargs["task_id"] == "t-1"
+    assert kwargs["kind"] == "done"
+    assert kwargs["attempt"] == 1
+
+
+@pytest.mark.anyio
+async def test_mark_done_unregisters_after_exhausting_retries() -> None:
+    """After ``_MAX_TERMINAL_RETRIES`` consecutive failures, give up
+    and unregister so the entry doesn't leak. Log a warning so the
+    failure is diagnosable."""
+    from unittest.mock import patch
+
+    from app.gateway.builder_progress import registry as registry_mod
+
+    r = BuilderProgressRegistry()
+
+    async def failing_cb(_c: int, _m: int, _body: str) -> None:
+        raise RuntimeError("simulated outage")
+
+    r.register_channel_callback("telegram", failing_cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    # Pre-set retry count one short of the cap; the next failure
+    # increments it to _MAX_TERMINAL_RETRIES and trips the give-up
+    # branch.
+    with r._lock:
+        r._entries["t-1"].terminal_retry_attempts = registry_mod._MAX_TERMINAL_RETRIES - 1
+
+    with patch.object(r, "_schedule_terminal_retry") as scheduled:
+        finalized = await r.mark_done(task_id="t-1", summary="x", run_id="r-1")
+
+    assert finalized is False
+    # NO further retry scheduled — we exhausted the budget.
+    assert scheduled.call_count == 0
+    # Entry cleaned up.
+    assert r.has_task("t-1") is False
+
+
+@pytest.mark.anyio
+async def test_terminal_retry_skips_when_entry_was_replaced() -> None:
+    """If ``update_async_task`` registers a replacement entry between
+    the scheduled retry and the actual retry firing, the retry MUST
+    no-op rather than attempting to finalize the new entry on behalf
+    of the old run."""
+    r = BuilderProgressRegistry()
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-OLD"
+    )
+    with r._lock:
+        entry_old = r._entries["t-1"]
+
+    # Replacement run lands before the retry would have fired.
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+    with r._lock:
+        entry_new = r._entries["t-1"]
+
+    # Schedule the retry against the OLD entry but with a very short
+    # backoff so the test doesn't sleep forever.
+    from app.gateway.builder_progress import registry as registry_mod
+
+    # Patch the backoff table to 0s so the retry fires immediately.
+    monkeypatched = (0.0,) + registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS[1:]
+    original = registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS
+    registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS = monkeypatched
+    try:
+        r._schedule_terminal_retry(
+            task_id="t-1",
+            kind="done",
+            summary="ignored",
+            reason="",
+            run_id="r-OLD",
+            expected_entry=entry_old,
+            attempt=1,
+        )
+        # Give the retry task a chance to run + bail.
+        await asyncio.sleep(0.05)
+    finally:
+        registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS = original
+
+    # Replacement entry still active, never touched by old-run retry.
+    assert r.has_task("t-1") is True
+    with r._lock:
+        assert r._entries["t-1"] is entry_new
+        # Replacement's renderer NOT in a terminal state.
+        assert r._entries["t-1"].renderer.state.terminal is False
+
+
+@pytest.mark.anyio
+async def test_terminal_retry_succeeds_and_unregisters() -> None:
+    """End-to-end: first callback fails, retry succeeds → placeholder
+    finalized → entry unregistered. The full retry round-trip."""
+    r = BuilderProgressRegistry()
+    invocations: list[str] = []
+    fail_once = {"left": 1}
+
+    async def flaky_cb(_c: int, _m: int, body: str) -> None:
+        if fail_once["left"] > 0:
+            fail_once["left"] -= 1
+            invocations.append(f"fail:{body[:10]}")
+            raise RuntimeError("transient")
+        invocations.append(f"ok:{body[:10]}")
+
+    r.register_channel_callback("telegram", flaky_cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+
+    # Shorten the backoff for the test.
+    from app.gateway.builder_progress import registry as registry_mod
+
+    original = registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS
+    registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS = (0.01, 0.01, 0.01)
+    try:
+        # First attempt — fails, schedules retry.
+        finalized = await r.mark_done(task_id="t-1", summary="all done", run_id="r-1")
+        assert finalized is False
+        assert r.has_task("t-1") is True  # entry kept for retry
+
+        # Wait for the retry to fire + succeed.
+        await asyncio.sleep(0.15)
+    finally:
+        registry_mod._TERMINAL_RETRY_BACKOFFS_SECONDS = original
+
+    # First callback fail, second callback OK → entry unregistered.
+    assert len(invocations) == 2
+    assert invocations[0].startswith("fail:")
+    assert invocations[1].startswith("ok:")
+    assert r.has_task("t-1") is False, (
+        "successful retry should have unregistered the entry"
+    )
+
+
+@pytest.mark.anyio
+async def test_schedule_terminal_retry_logs_and_skips_when_no_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If somehow the retry scheduler runs in a context with no
+    running loop (defensive coding), it must log + bail — not crash.
+    The placeholder may stay stuck but the artifact path is
+    independent.
+    """
+    r = BuilderProgressRegistry()
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+    with r._lock:
+        entry = r._entries["t-1"]
+
+    def _raise(*_a, **_kw):
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", _raise)
+
+    # Must not raise.
+    r._schedule_terminal_retry(
+        task_id="t-1",
+        kind="done",
+        summary="x",
+        reason="",
+        run_id="r-1",
+        expected_entry=entry,
+        attempt=1,
+    )
