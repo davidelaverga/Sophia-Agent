@@ -197,7 +197,12 @@ async def test_last_endpoint_returns_event_after_publish(app: FastAPI, client: h
 
 @pytest.mark.anyio
 async def test_internal_post_forwards_to_channel_bus(app: FastAPI, client: httpx.AsyncClient, monkeypatch):
-    """The internal POST also fans the event out to channel adapters via the global bus."""
+    """The internal POST also fans the event out to channel adapters via the global bus.
+
+    Phase 4K: the channel fan-out is now scheduled as a background task
+    (`_fan_out_to_channels`) instead of being awaited inline, so the
+    test must drain pending tasks before asserting the bus stub fired.
+    """
     captured: list[dict] = []
 
     async def _stub_publish(payload):
@@ -220,8 +225,64 @@ async def test_internal_post_forwards_to_channel_bus(app: FastAPI, client: httpx
         )
 
     assert response.status_code == 202
+    # Drain the fire-and-forget fan-out task scheduled by the handler.
+    await routes.drain_background_tasks(timeout=5.0)
     assert len(captured) == 1
     assert captured[0]["thread_id"] == "thread-3"
+
+
+@pytest.mark.anyio
+async def test_internal_post_returns_fast_when_subscriber_is_slow(
+    app: FastAPI, client: httpx.AsyncClient, monkeypatch
+):
+    """Regression lock for Phase 4K fire-and-forget restoration.
+
+    Before this fix, the gateway-side ``receive_builder_event`` awaited
+    ``publish_builder_completion`` inline. With a real Telegram artifact
+    upload that takes 5-15 seconds, every terminal webhook tripped the
+    langgraph-side ``_WEBHOOK_TIMEOUT_SECONDS`` (production: 2.0s →
+    now 10.0s) and the daemon thread logged ``httpx.ReadTimeout``.
+
+    This test patches the channel-bus subscriber to sleep 3 seconds.
+    With fire-and-forget, the handler must return in well under a
+    second (the SSE worker.publish is the only inline step and is an
+    in-memory enqueue). If anyone re-introduces a synchronous await
+    of the fan-out path, this test fails loudly.
+
+    Mirrors the regression test from PR #125 commit ``4ea5c657`` which
+    didn't land on PR #128 because the branch was started fresh off
+    ``main``.
+    """
+    import time
+
+    async def _slow_publish(payload):
+        await asyncio.sleep(3.0)
+
+    monkeypatch.setattr(
+        "app.channels.message_bus.publish_builder_completion",
+        _slow_publish,
+    )
+
+    async with client:
+        start = time.perf_counter()
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "thread-slow",
+                "task_id": "task-slow",
+                "status": "success",
+                "agent_name": "sophia_builder",
+            },
+        )
+        elapsed = time.perf_counter() - start
+
+    assert response.status_code == 202
+    # Generous bound — the actual time is ~ms; 500ms catches any
+    # accidental synchronous-await regression while leaving CI
+    # variance headroom.
+    assert elapsed < 0.5, f"Handler took {elapsed:.3f}s; expected fire-and-forget under 500ms"
+    # Cleanup: drain the background task so it doesn't leak across tests.
+    await routes.drain_background_tasks(timeout=5.0)
 
 
 @pytest.mark.anyio

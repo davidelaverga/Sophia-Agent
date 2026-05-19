@@ -41,7 +41,17 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
-_WEBHOOK_TIMEOUT_SECONDS = 2.0
+# Gateway returns 202 in milliseconds (heavy work runs as background
+# tasks on the gateway-side; see
+# ``app/gateway/routers/builder_events.py::receive_builder_event``).
+# A generous timeout keeps the daemon thread patient through normal
+# network blips without producing false-failure logs on every artifact
+# run. The previous 2.0 s cap fired predictably on healthy runs
+# because the gateway synchronously awaited the channel fan-out
+# (artifact upload to Telegram is 5-15 s); Phase 4K restored the
+# fire-and-forget pattern from PR #125 commit ``4ea5c657`` and
+# bumped this cap in lockstep.
+_WEBHOOK_TIMEOUT_SECONDS = 10.0
 
 
 # Process-local LRU cache of task_ids that have already had their completion

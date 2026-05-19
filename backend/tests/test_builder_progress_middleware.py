@@ -383,3 +383,75 @@ class TestScheduling:
             event_name="custom",
             data={"name": "phase", "phase": "starting"},
         )
+
+
+class TestKillSwitch:
+    """Phase 4K — ``SOPHIA_BUILDER_PROGRESS_ENABLED`` env-var kill switch.
+
+    Operator-flippable on Render's langgraph service. When set to a
+    falsy value, all three middleware hooks short-circuit before
+    emitting any webhook or returning any state delta. This is the
+    diagnostic A/B test for Phase 4H webhook spam affecting builder
+    behavior on long-form runs.
+    """
+
+    @pytest.mark.anyio
+    async def test_abefore_agent_short_circuits_when_disabled(
+        self, captured_posts: list[dict], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SOPHIA_BUILDER_PROGRESS_ENABLED", "false")
+        mw = BuilderProgressMiddleware()
+        update = await mw.abefore_agent({}, _runtime("task-A", "run-A"))
+        assert update is None
+        assert captured_posts == []
+
+    @pytest.mark.anyio
+    async def test_aafter_model_short_circuits_when_disabled(
+        self, captured_posts: list[dict], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SOPHIA_BUILDER_PROGRESS_ENABLED", "0")
+        mw = BuilderProgressMiddleware()
+        state = {
+            "messages": [
+                _ai_message(tool_calls=[{"name": "builder_web_search", "args": {"query": "x"}}])
+            ],
+        }
+        update = await mw.aafter_model(state, _runtime())
+        assert update is None
+        assert captured_posts == []
+
+    @pytest.mark.anyio
+    async def test_aafter_agent_short_circuits_when_disabled(
+        self, captured_posts: list[dict], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("SOPHIA_BUILDER_PROGRESS_ENABLED", "no")
+        mw = BuilderProgressMiddleware()
+        update = await mw.aafter_agent({"builder_progress_last_phase": "drafting"}, _runtime())
+        assert update is None
+        assert captured_posts == []
+
+    @pytest.mark.anyio
+    async def test_default_true_when_env_var_unset(
+        self, captured_posts: list[dict], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Back-compat: flag absent → middleware runs as before."""
+        monkeypatch.delenv("SOPHIA_BUILDER_PROGRESS_ENABLED", raising=False)
+        mw = BuilderProgressMiddleware()
+        update = await mw.abefore_agent({}, _runtime("task-A", "run-A"))
+        assert update == {"builder_progress_last_phase": "starting"}
+        assert len(captured_posts) == 1
+        assert captured_posts[0]["event_name"] == "custom"
+        assert captured_posts[0]["data"]["phase"] == "starting"
+
+    @pytest.mark.anyio
+    async def test_truthy_values_still_enable(
+        self, captured_posts: list[dict], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Common truthy strings keep the middleware active."""
+        for truthy in ("true", "1", "yes", "TRUE", "True"):
+            monkeypatch.setenv("SOPHIA_BUILDER_PROGRESS_ENABLED", truthy)
+            captured_posts.clear()
+            mw = BuilderProgressMiddleware()
+            update = await mw.abefore_agent({}, _runtime("task-T", "run-T"))
+            assert update == {"builder_progress_last_phase": "starting"}, f"failed for value={truthy!r}"
+            assert len(captured_posts) == 1, f"failed for value={truthy!r}"

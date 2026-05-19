@@ -100,6 +100,32 @@ _WEBHOOK_PATH = "/internal/builder-progress"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
 
 
+# Phase 4K (post-2026-05-18 production smoke): kill-switch env var that
+# disables the entire middleware. Operator-flippable on Render's
+# langgraph service (declared in ``render.yaml`` with ``sync: false``)
+# so we can A/B test whether the webhook spam from this middleware is
+# affecting builder model behavior on long-form runs.
+#
+# Default ``true`` for back-compat. Flip to ``false`` to short-circuit
+# all three hooks at the top — the langgraph stream is unaffected
+# (no events emitted), and the artifact-delivery webhook
+# (``deerflow.sophia.builder_events``) still fires independently, so
+# placeholders finalize via ``_on_builder_completion`` (which still
+# clears the activity history per ``f04767b6``).
+_ENABLED_ENV_VAR = "SOPHIA_BUILDER_PROGRESS_ENABLED"
+
+
+def _enabled() -> bool:
+    """Read the kill-switch env var; default True if unset.
+
+    Truthy values: anything not in {"0", "false", "no", ""} (case-
+    insensitive). The strict shape prevents typos like ``FLASE`` from
+    silently disabling the middleware.
+    """
+    raw = os.environ.get(_ENABLED_ENV_VAR, "true").strip().lower()
+    return raw not in {"0", "false", "no", ""}
+
+
 def _gateway_url() -> str:
     return os.environ.get("SOPHIA_GATEWAY_URL", _DEFAULT_GATEWAY_URL).rstrip("/")
 
@@ -395,6 +421,14 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         self, state: BuilderProgressState, runtime: Runtime
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
+        # Phase 4K kill-switch — flag-off short-circuits ALL hooks.
+        # The artifact-delivery path is independent and still fires
+        # via deerflow.sophia.builder_events, so the build still
+        # completes end-to-end; we just don't stream phase / activity
+        # events to the gateway during the run.
+        if not _enabled():
+            log_middleware("BuilderProgress", "disabled via SOPHIA_BUILDER_PROGRESS_ENABLED=false", _t0)
+            return None
         last_phase = state.get("builder_progress_last_phase")
         if last_phase == _PHASE_STARTING:
             log_middleware("BuilderProgress", "already started, skipping", _t0)
@@ -416,6 +450,10 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         self, state: BuilderProgressState, runtime: Runtime
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
+        # Phase 4K kill-switch — see ``abefore_agent``. Returns None so
+        # langgraph applies no state delta from this hook.
+        if not _enabled():
+            return None
         messages = state.get("messages", []) or []
         tool_calls: list = []
         for msg in reversed(messages):
@@ -458,6 +496,9 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         self, state: BuilderProgressState, runtime: Runtime
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
+        # Phase 4K kill-switch — see ``abefore_agent``.
+        if not _enabled():
+            return None
         last_phase = state.get("builder_progress_last_phase")
         if last_phase == _PHASE_DONE:
             log_middleware("BuilderProgress", "already done, skipping", _t0)

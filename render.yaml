@@ -21,6 +21,15 @@ services:
         sync: false
       - key: LANGCHAIN_TRACING_V2
         value: "false"
+      # Phase 4K kill-switch for BuilderProgressMiddleware. Flip to
+      # ``false`` in the Render dashboard to disable the webhook spam
+      # during the builder run (live phase / activity-line UX). The
+      # artifact-delivery webhook is independent and still fires, so
+      # placeholders still finalize correctly via _on_builder_completion.
+      # Default ``true`` for back-compat. sync: false → operator-set
+      # in Render Dashboard.
+      - key: SOPHIA_BUILDER_PROGRESS_ENABLED
+        sync: false
 
   # ─────────────────────────────────────────────────────────────────
   # 2. Gateway API (REST + SSE proxy)

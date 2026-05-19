@@ -38,6 +38,71 @@ from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 logger = logging.getLogger(__name__)
 
 
+# Strong references to in-flight background tasks scheduled by
+# ``receive_builder_event``. ``asyncio.create_task`` without an external
+# reference is technically GC-collectable while still running; this set
+# pins them until done (v3-migration learning #4). Bounded by the rate
+# at which the builder fires completion webhooks (~1 per task,
+# infrequent). Each task self-discards via ``add_done_callback``.
+#
+# Phase 4K (cherry-picked from abandoned PR #125 commit ``4ea5c657``):
+# PR #128 branched off ``main`` BEFORE the fire-and-forget fix landed
+# on the PR #125 branch, so the synchronous-await pattern that triggers
+# ``httpx.ReadTimeout`` on every artifact-bearing run came back. The
+# LangGraph-side daemon thread that POSTs here gives up after
+# ``_WEBHOOK_TIMEOUT_SECONDS`` (10s in builder_events.py). Heavy
+# downstream work — bot artifact delivery via the channel bus,
+# companion wakeup — runs as background tasks so this handler
+# responds in ~milliseconds.
+_BACKGROUND_TASKS: set[asyncio.Task[Any]] = set()
+
+
+async def _fan_out_to_channels(payload: dict[str, Any]) -> None:
+    """Best-effort artifact delivery via the channel MessageBus.
+
+    Heavy: the EI bot's ``_on_builder_completion`` awaits ``mark_done``
+    (under the per-task ``asyncio.Lock`` added by codex P1 ``b9eeb7c3``),
+    then downloads the artifact from Supabase + uploads to Telegram
+    (5-15s for real documents). Runs as a background task so the
+    webhook handler returns fast.
+    """
+    try:
+        from app.channels.message_bus import publish_builder_completion
+
+        await publish_builder_completion(payload)
+    except Exception:
+        logger.warning(
+            "Channel fan-out failed for builder event task_id=%s",
+            payload.get("task_id"),
+            exc_info=True,
+        )
+
+
+async def drain_background_tasks(*, timeout: float = 30.0) -> None:
+    """Wait for all in-flight webhook background tasks to finish.
+
+    Test utility. Production callers don't need this — the runtime keeps
+    tasks alive on the event loop until they complete on their own. The
+    fire-and-forget pattern means the webhook handler can't be observed
+    via the response, so tests need an explicit drain point.
+    """
+    if not _BACKGROUND_TASKS:
+        return
+    pending = list(_BACKGROUND_TASKS)
+    if not pending:
+        return
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*pending, return_exceptions=True),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        logger.warning(
+            "drain_background_tasks: timed out waiting for %d task(s)",
+            len(pending),
+        )
+
+
 # ---- Request model ---------------------------------------------------------
 
 
@@ -123,28 +188,38 @@ public_router = APIRouter(prefix="/api/threads", tags=["builder-events"])
     summary="Receive a builder-completion event from the LangGraph process",
 )
 async def receive_builder_event(event: BuilderCompletionEvent, request: Request) -> dict[str, Any]:
-    """Internal webhook target.
+    """Internal webhook target — return fast, deliver async.
 
-    Accepts the event, hands it to the worker for SSE fan-out, and also
-    publishes it onto the channel ``MessageBus`` so Telegram/Slack/Feishu
-    adapters can deliver a card to the originating chat.
+    The langgraph-side daemon thread that posts here gives up after a
+    short HTTP timeout (see ``_WEBHOOK_TIMEOUT_SECONDS`` in
+    ``deerflow.sophia.builder_events``). Heavy downstream work — channel
+    fan-out (artifact delivery via the bus → ``_on_builder_completion``)
+    and companion wakeup — runs as background tasks so this handler
+    responds in ~milliseconds and the daemon thread never times out.
+    Each task swallows its own errors; failures land on the gateway
+    logs but never echo back to the builder process (which already
+    moved on).
+
+    The synchronous step kept inline is ``worker.publish(payload)`` —
+    the legacy SSE pub/sub for the webapp completion card. It only
+    enqueues to in-memory subscribers, so it returns in microseconds.
+
+    Phase 4K (cherry-picked from abandoned PR #125 commit ``4ea5c657``):
+    fix-and-forget restored. PR #128 inherited the pre-4ea5c657
+    synchronous-await state from main; this commit restores the
+    pattern that PR #125 had landed on May 14.
     """
     payload = event.model_dump()
     worker = get_builder_events_worker(request.app)
     delivered = await worker.publish(payload)
 
-    # Fan out to channel adapters too. Best-effort: never let a channel
-    # failure surface to the LangGraph process (which already moved on).
-    try:
-        from app.channels.message_bus import publish_builder_completion
-
-        await publish_builder_completion(payload)
-    except Exception:
-        logger.warning(
-            "Channel fan-out failed for builder event task_id=%s",
-            payload.get("task_id"),
-            exc_info=True,
-        )
+    # Channel fan-out → background. The bus subscriber chain
+    # (``_on_builder_completion``) takes 5-15s for real artifact
+    # uploads; awaiting it inline would block the langgraph daemon
+    # thread past its webhook timeout.
+    bg = asyncio.create_task(_fan_out_to_channels(payload))
+    _BACKGROUND_TASKS.add(bg)
+    bg.add_done_callback(_BACKGROUND_TASKS.discard)
 
     # Trigger a synthetic companion turn so Sophia proactively surfaces
     # the artifact in chat without the user having to send another
