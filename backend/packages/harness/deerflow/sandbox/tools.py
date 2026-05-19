@@ -856,12 +856,17 @@ def write_file_tool(
     content: str,
     append: bool = False,
 ) -> str:
-    """Write text content to a file.
+    """Write text content to a file. Use ``append=True`` to extend a long document across multiple calls instead of rewriting it.
 
     Args:
         description: Explain why you are writing to this file in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the file to write to. ALWAYS PROVIDE THIS PARAMETER SECOND.
         content: The content to write to the file. ALWAYS PROVIDE THIS PARAMETER THIRD.
+        append: If True, append ``content`` to the existing file. Use to
+            incrementally build a long document across multiple write_file
+            calls — first call opens with append=False (or omit), subsequent
+            calls extend with append=True. Avoids regenerating the whole
+            document each turn. Defaults to False.
     """
     try:
         sandbox = ensure_sandbox_initialized(runtime)
