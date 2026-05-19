@@ -136,12 +136,19 @@ class TestMessageBus:
         that need delivery confirmation. The strict variant returns
         a bool so callers like ``ChannelManager._maybe_open_progress_placeholders``
         can decide whether to mark dedup or retry next turn.
+
+        Phase 4M (codex P1 post-Phase-4K-rollback review): listeners
+        must return ``True`` explicitly to signal "I handled this".
+        Listeners that return None/falsy are treated as no-ops (e.g.,
+        ``Channel._on_outbound`` no-ops when channel_name doesn't
+        match). See ``test_publish_outbound_strict_returns_false_when_no_listener_handles``.
         """
         bus = MessageBus()
         received: list[OutboundMessage] = []
 
         async def good(msg):
             received.append(msg)
+            return True  # Phase 4M: explicit-True contract.
 
         async def go():
             bus.subscribe_outbound(good)
@@ -203,6 +210,100 @@ class TestMessageBus:
                 "are registered — otherwise the manager dedup-marks a "
                 "placeholder that no channel actually consumed"
             )
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_false_when_no_listener_handles(self):
+        """Codex P1 (Phase 4M, post-Phase-4K-rollback review).
+
+        Simulates the restart/lifecycle race: the Telegram channel
+        unregistered its listener (channel restart), but OTHER channel
+        listeners (Feishu/Slack) are still subscribed. The strict
+        publish iterates all listeners; none raise (they just no-op
+        because their channel_name doesn't match the message), but
+        NO channel actually consumed the message.
+
+        Pre-fix: ``publish_outbound_strict`` returned True (all_ok was
+        initialised True and never flipped because no exception was
+        raised). The manager dedup-marked ``(task_id, run_id)``,
+        permanently suppressing retries for that run — placeholder
+        stuck on "Working on it…" forever.
+
+        Post-fix: strict-mode requires at least one listener to return
+        ``True``. Channel mismatch returns ``None`` (no-op), so the
+        bus signals undelivered → manager retries on the next
+        companion turn.
+        """
+        bus = MessageBus()
+        observed_calls = 0
+
+        async def feishu_listener(msg):
+            """Listener registered for a different channel. Returns
+            None (no-op) instead of True because msg isn't for them."""
+            nonlocal observed_calls
+            observed_calls += 1
+            # No explicit return → implicit None → "not handled".
+
+        async def slack_listener(msg):
+            """Another non-target listener that returns False explicitly.
+            False is also falsy and must be treated as not-handled."""
+            nonlocal observed_calls
+            observed_calls += 1
+            return False
+
+        async def go():
+            bus.subscribe_outbound(feishu_listener)
+            bus.subscribe_outbound(slack_listener)
+            # Message targeted at Telegram (whose listener is absent).
+            out = OutboundMessage(
+                channel_name="telegram", chat_id="c", thread_id="th", text="x"
+            )
+            delivered = await bus.publish_outbound_strict(out)
+
+            # Both listeners ran (the bus doesn't filter by channel
+            # name — that's the listener's responsibility) but neither
+            # signalled handled, so strict-mode must report undelivered.
+            assert observed_calls == 2
+            assert delivered is False, (
+                "publish_outbound_strict must return False when no "
+                "listener returns True — otherwise a restart race that "
+                "leaves only non-target listeners subscribed would "
+                "silently mark the placeholder delivered and block retries"
+            )
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_true_when_target_listener_handles(self):
+        """Companion to the mismatch test: when the target channel's
+        listener IS subscribed and returns True, strict mode returns
+        True even if OTHER non-matching listeners are also present
+        and return None. Mimics the production happy path with
+        Telegram + Feishu both registered.
+        """
+        bus = MessageBus()
+        feishu_calls = 0
+        telegram_calls = 0
+
+        async def feishu_listener(msg):
+            nonlocal feishu_calls
+            feishu_calls += 1
+            # Channel mismatch — returns None.
+
+        async def telegram_listener(msg):
+            nonlocal telegram_calls
+            telegram_calls += 1
+            return True  # Matching channel, send succeeded.
+
+        async def go():
+            bus.subscribe_outbound(feishu_listener)
+            bus.subscribe_outbound(telegram_listener)
+            out = OutboundMessage(
+                channel_name="telegram", chat_id="c", thread_id="th", text="x"
+            )
+            delivered = await bus.publish_outbound_strict(out)
+            assert telegram_calls == 1
+            assert feishu_calls == 1  # both ran, but only one handled
+            assert delivered is True
 
         _run(go())
 

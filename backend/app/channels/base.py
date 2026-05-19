@@ -84,7 +84,7 @@ class Channel(ABC):
             metadata=metadata or {},
         )
 
-    async def _on_outbound(self, msg: OutboundMessage) -> None:
+    async def _on_outbound(self, msg: OutboundMessage) -> bool | None:
         """Outbound callback registered with the bus.
 
         Only forwards messages targeted at this channel. Sends the text
@@ -103,6 +103,14 @@ class Channel(ABC):
         path. File-upload failures remain non-fatal (advisory) — they
         are independent attachments and a failed upload should not
         flip delivery to False for the text payload.
+
+        Phase 4M (codex P1 post-Phase-4K rollback review): explicit
+        ``True`` return on the matching-channel-and-sent path so
+        ``publish_outbound_strict`` can confirm THIS listener actually
+        handled the message. The channel-mismatch branch returns
+        ``None`` implicitly (no-op) so other channels' listeners can
+        still be subscribed without falsely signalling handled. See
+        the ``OutboundCallback`` contract in ``message_bus.py``.
         """
         if msg.channel_name == self.name:
             try:
@@ -118,3 +126,6 @@ class Channel(ABC):
                         logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
                 except Exception:
                     logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+
+            return True
+        return None

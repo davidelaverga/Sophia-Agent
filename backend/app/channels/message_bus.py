@@ -111,7 +111,16 @@ class OutboundMessage:
 # MessageBus
 # ---------------------------------------------------------------------------
 
-OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
+# Phase 4M (codex P1 post-Phase-4K rollback review): outbound callbacks
+# may now return ``True`` to signal "I handled this message" (used by
+# ``publish_outbound_strict`` to confirm at least one listener actually
+# consumed the message before reporting delivery success). Returning
+# ``None`` / ``False`` means "no-op for me" (e.g.,
+# ``Channel._on_outbound`` no-ops when ``msg.channel_name != self.name``).
+# Raising means "delivery error" — ``publish_outbound_strict`` treats
+# both not-handled AND raised as undelivered. Back-compat: existing
+# ``publish_outbound`` (non-strict) ignores the return value entirely.
+OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, bool | None]]
 BuilderCompletionCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 ReviewNotificationCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
@@ -197,33 +206,42 @@ class MessageBus:
                 logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
 
     async def publish_outbound_strict(self, msg: OutboundMessage) -> bool:
-        """Dispatch like ``publish_outbound`` but report listener failures.
+        """Dispatch like ``publish_outbound`` but confirm a listener handled it.
 
-        Returns ``True`` only when at least one listener was registered
-        AND ALL registered listeners completed without raising. Returns
-        ``False`` if no listeners are registered OR at least one
-        listener raised — the bus still iterates the rest (so
-        unaffected channels still receive the message) but the boolean
-        tells the caller "delivery wasn't confirmed; don't mark this
-        as accepted".
+        Returns ``True`` only when:
 
-        Phase 4J (codex P2 post-Phase-4I review): the empty-listener
-        case explicitly returns ``False``. The original implementation
-        initialised ``all_ok = True`` and skipped the loop on empty
-        listeners — a placeholder published during a window where no
-        channel was subscribed (channel restart / lifecycle race /
-        boot ordering) was silently accepted by the manager's strict
-        path, dedup marked, and future retries blocked. The empty
-        case satisfies neither "delivered to a channel" nor "at least
-        one listener accepted" — return False so the manager retries
-        on the next companion turn.
+        - At least one listener returned ``True`` (signalling "I handled
+          this message" — for ``Channel._on_outbound`` that means the
+          listener's ``channel_name`` matched ``msg.channel_name`` AND
+          the send succeeded), AND
+        - No listener raised an exception during iteration.
+
+        Returns ``False`` when:
+
+        - No listeners are registered, OR
+        - All listeners returned a falsy value (none handled — e.g., the
+          target channel's listener was unregistered during a restart
+          race while other channels' listeners remain subscribed), OR
+        - At least one listener raised (the bus still iterates the rest
+          so unaffected channels still receive the message, but the
+          boolean tells the caller "delivery wasn't confirmed").
+
+        Phase 4M (codex P1 post-Phase-4K rollback review): added the
+        "at-least-one-handled" check. Without it, a publish during a
+        window where the target listener was missing but OTHER channel
+        listeners remained subscribed reported ``True`` (no listener
+        raised — they just no-op'd via ``msg.channel_name != self.name``)
+        and the manager dedup-marked the ``(task_id, run_id)``,
+        permanently blocking retries for that run even though no
+        channel actually consumed the placeholder. Requiring an
+        explicit ``True`` return closes this race.
+
+        Phase 4J (codex P2 post-Phase-4I review): the zero-listener case
+        is also ``False`` — same rationale, just a different cause
+        (channel never registered vs. wrong channel registered).
 
         Use this for delivery-sensitive paths like the builder progress
-        placeholder. Phase 4F codex P1 (post-review, fourth pass):
-        ``_maybe_open_progress_placeholders`` previously trusted
-        ``publish_outbound`` to surface Telegram send errors — but the
-        bus swallows listener exceptions, so a transient send failure
-        looked successful and the dedup key was marked.
+        placeholder.
         """
         logger.info(
             "[Bus] outbound dispatching (strict): channel=%s, chat_id=%s, listeners=%d, text_len=%d",
@@ -241,17 +259,41 @@ class MessageBus:
                 msg.chat_id,
             )
             return False
-        all_ok = True
+
+        any_handled = False
+        any_failed = False
         for callback in self._outbound_listeners:
             try:
-                await callback(msg)
+                result = await callback(msg)
             except Exception:
-                all_ok = False
+                any_failed = True
                 logger.exception(
                     "Error in outbound callback (strict) for channel=%s",
                     msg.channel_name,
                 )
-        return all_ok
+                continue
+            # Phase 4M: explicit-True contract. Listeners that no-op
+            # (channel-name mismatch) return None and DO NOT count as
+            # a handler. Only an explicit ``True`` means "I did the
+            # work this message asked for".
+            if result is True:
+                any_handled = True
+
+        if any_failed:
+            return False
+        if not any_handled:
+            logger.warning(
+                "[Bus] publish_outbound_strict: no listener handled the "
+                "message channel=%s chat_id=%s listeners=%d — likely the "
+                "target-channel listener is missing (restart race / "
+                "wrong channel registered). Treating as undelivered "
+                "so the caller can retry.",
+                msg.channel_name,
+                msg.chat_id,
+                len(self._outbound_listeners),
+            )
+            return False
+        return True
 
     # -- builder completion ------------------------------------------------
 

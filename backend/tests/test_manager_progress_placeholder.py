@@ -47,8 +47,16 @@ def _result_with_task(*, task_id: str, run_id: str | None = "run-xyz") -> dict[s
 
 
 async def _subscribe_capture(bus: MessageBus, sink: list[OutboundMessage]) -> None:
-    async def _capture(msg: OutboundMessage) -> None:
+    async def _capture(msg: OutboundMessage) -> bool:
+        # Phase 4M (post-Phase-4K-rollback codex P1): listeners must
+        # return True to signal "I handled this message" so
+        # publish_outbound_strict can confirm a real channel consumed
+        # the placeholder. Returning None would treat this capturing
+        # stub as a no-op (channel-mismatch case) and the manager's
+        # strict path would report undelivered, skipping the dedup
+        # mark these tests rely on.
         sink.append(msg)
+        return True
 
     bus.subscribe_outbound(_capture)
 
@@ -150,7 +158,12 @@ async def test_listener_failure_does_not_mark_dedup(
     delivered_msgs: list[OutboundMessage] = []
 
     async def _good_listener(msg):
+        # Phase 4M: listeners must return True to signal "I handled
+        # this message" so publish_outbound_strict can confirm a
+        # real channel consumed the placeholder (not just a no-op
+        # from a mismatched-channel listener).
         delivered_msgs.append(msg)
+        return True
 
     manager.bus.subscribe_outbound(_good_listener)
     await manager._maybe_open_progress_placeholders(_inbound(), result, thread_id="th")
