@@ -359,10 +359,51 @@ class BuilderProgressRegistry:
             time.time() - pending.timestamp,
         )
 
-    def unregister_task(self, task_id: str) -> None:
-        """Drop a task's entry. Called from ``_on_builder_completion``."""
+    def unregister_task(
+        self,
+        task_id: str,
+        *,
+        expected_entry: BuilderProgressEntry | None = None,
+    ) -> None:
+        """Drop a task's entry. Called from ``_on_builder_completion``.
+
+        Codex P2 (post-Phase-4K review): ``expected_entry`` is an
+        identity guard against the ``update_async_task`` replacement
+        race. When ``register_task`` is called with the same
+        ``task_id`` but a new ``run_id`` (the replacement-run flow),
+        ``_entries[task_id]`` is overwritten with a fresh
+        ``BuilderProgressEntry`` instance. If an in-flight terminal
+        handler from the OLD run is currently awaiting the slow
+        Telegram edit, releasing the lock and calling
+        ``unregister_task(task_id)`` unconditionally would pop the
+        NEW entry — detaching the active run's placeholder.
+
+        The run_id check at the top of ``_finalize_terminal_locked``
+        doesn't catch this because it operates on the snapshot
+        ``entry`` captured BEFORE the await; that snapshot's
+        ``run_id`` legitimately matches the OLD run's terminal
+        payload, so the check passes.
+
+        Identity guard: only pop if the dict slot still points at the
+        same entry object the caller acquired. ``is`` comparison is
+        unambiguous — even if a future code path reused the same
+        run_id string, a freshly-constructed entry would be a
+        different object.
+        """
+        task_key = str(task_id)
         with self._lock:
-            popped = self._entries.pop(str(task_id), None)
+            current = self._entries.get(task_key)
+            if expected_entry is not None and current is not expected_entry:
+                # Replacement run is now registered under this task_id.
+                # Leave it alone — the new entry's terminal handler
+                # will unregister itself when its time comes.
+                logger.info(
+                    "[BuilderProgress] unregister skipped — entry was "
+                    "replaced (likely update_async_task race) task_id=%s",
+                    task_id,
+                )
+                return
+            popped = self._entries.pop(task_key, None)
         if popped is not None:
             logger.info(
                 "[BuilderProgress] task unregistered task_id=%s", task_id
@@ -721,7 +762,15 @@ class BuilderProgressRegistry:
                     task_id,
                     exc_info=True,
                 )
-        self.unregister_task(task_id)
+        # Codex P2 (post-Phase-4K review): identity-guarded unregister.
+        # During the slow callback await above, ``register_task`` may
+        # have been called by ``update_async_task`` for a replacement
+        # run on the same task_id — overwriting ``_entries[task_key]``
+        # with a fresh entry. Without ``expected_entry``, the
+        # unconditional pop here would detach the new run's
+        # placeholder. The guard checks that the dict slot still
+        # points at our snapshot ``entry`` before popping.
+        self.unregister_task(task_id, expected_entry=entry)
         return True
 
     # -- internals ----------------------------------------------------------

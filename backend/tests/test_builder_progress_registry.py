@@ -1033,3 +1033,169 @@ async def test_apply_event_with_updates_emits_activity_lines() -> None:
         ]}]}},
     )
     assert any("🔍 Searching: Zep memory" in body for body in captured)
+
+
+# ---- Phase 4K+1: unregister identity guard (codex P2 post-Phase-4K review)
+#
+# When ``update_async_task`` starts a replacement run, ``register_task``
+# overwrites ``_entries[task_id]`` with a fresh entry that has the new
+# run_id. If a terminal handler from the OLD run is mid-await (slow
+# Telegram edit) when this happens, releasing the lock and calling
+# ``unregister_task(task_id)`` unconditionally would pop the NEW entry,
+# detaching the active run's placeholder. The fix adds an
+# ``expected_entry`` identity guard so the unregister only pops when
+# the dict slot still references the snapshot the caller captured.
+
+
+def test_unregister_task_with_matching_expected_entry_pops() -> None:
+    """Identity guard is back-compat: when the dict slot still
+    references the same entry the caller acquired, the pop proceeds
+    as before. Locks the happy-path semantics."""
+    r = BuilderProgressRegistry()
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+    with r._lock:
+        entry = r._entries["t-1"]
+    r.unregister_task("t-1", expected_entry=entry)
+    assert r.has_task("t-1") is False
+
+
+def test_unregister_task_with_mismatched_expected_entry_does_not_pop() -> None:
+    """Codex P2 (post-Phase-4K) primary lock. Simulate the
+    ``update_async_task`` replacement race: snapshot entry_A,
+    overwrite the slot with entry_B (different run_id), then call
+    ``unregister_task`` with ``expected_entry=entry_A``. The pop must
+    be SKIPPED so entry_B (the active replacement) stays registered.
+    """
+    r = BuilderProgressRegistry()
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-OLD"
+    )
+    with r._lock:
+        entry_old = r._entries["t-1"]
+
+    # Replacement run registers under the same task_id with a new run_id.
+    # This is exactly what start_builder_task does on update_async_task.
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+    with r._lock:
+        entry_new = r._entries["t-1"]
+    assert entry_new is not entry_old, (
+        "register_task on existing task_id must replace the entry object"
+    )
+    assert entry_new.run_id == "r-NEW"
+
+    # Old run's terminal handler (snapshot=entry_old) tries to unregister.
+    # The identity guard must reject the pop — entry_new remains active.
+    r.unregister_task("t-1", expected_entry=entry_old)
+
+    assert r.has_task("t-1") is True, (
+        "identity guard must have prevented the pop of the replacement entry"
+    )
+    with r._lock:
+        assert r._entries["t-1"] is entry_new, (
+            "replacement entry must still be present after guarded unregister"
+        )
+
+
+def test_unregister_task_without_expected_entry_is_unconditional() -> None:
+    """Back-compat: callers that don't pass ``expected_entry`` (e.g.,
+    legacy code paths, tests, external integrations) still get the
+    original unconditional-pop semantic."""
+    r = BuilderProgressRegistry()
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+    r.unregister_task("t-1")  # no expected_entry argument
+    assert r.has_task("t-1") is False
+
+
+def test_unregister_task_with_expected_entry_on_missing_slot_is_safe() -> None:
+    """If the dict slot was already popped (e.g., trim eviction)
+    between snapshot and unregister, the guard simply no-ops without
+    raising."""
+    r = BuilderProgressRegistry()
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-1"
+    )
+    with r._lock:
+        snapshot = r._entries["t-1"]
+        # Simulate the slot being cleared out by some other path.
+        r._entries.pop("t-1", None)
+    # Must not raise; must not re-insert anything.
+    r.unregister_task("t-1", expected_entry=snapshot)
+    assert r.has_task("t-1") is False
+
+
+@pytest.mark.anyio
+async def test_mark_done_for_old_run_does_not_detach_replacement_placeholder() -> None:
+    """Codex P2 (post-Phase-4K) end-to-end lock for the replacement race.
+
+    Sequence:
+    1. Run-A is registered with ``run_id="r-OLD"``.
+    2. Run-A's terminal payload is dispatched via ``mark_done`` with a
+       SLOW edit callback (so the per-entry lock is held mid-await).
+    3. WHILE the callback is awaiting, ``register_task`` for the
+       replacement Run-B (``run_id="r-NEW"``) overwrites
+       ``_entries[task_id]``.
+    4. Run-A's callback completes and ``_finalize_terminal_locked``
+       calls ``unregister_task``.
+
+    Expected: identity guard rejects the pop. Run-B's placeholder
+    remains in the registry, ready to receive its own progress events
+    and terminal.
+
+    Without the identity guard this test fails: the legitimate-for-A
+    run_id check passes (entry_A.run_id == "r-OLD"), the callback
+    runs, and the final ``unregister_task`` pops entry_B — leaving
+    Run-B with no placeholder anchor.
+    """
+    r = BuilderProgressRegistry()
+    callback_started = asyncio.Event()
+    callback_release = asyncio.Event()
+    captured_bodies: list[str] = []
+
+    async def slow_cb(_chat: int, _msg: int, body: str) -> None:
+        captured_bodies.append(body)
+        callback_started.set()
+        await callback_release.wait()
+
+    r.register_channel_callback("telegram", slow_cb)
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-OLD"
+    )
+
+    # Kick off the terminal for the OLD run; it'll block inside the
+    # callback under the per-entry lock.
+    mark_task = asyncio.create_task(
+        r.mark_done(task_id="t-1", summary="old done", run_id="r-OLD")
+    )
+
+    # Wait until the callback is actually executing (lock held).
+    await asyncio.wait_for(callback_started.wait(), timeout=2.0)
+
+    # Simulate update_async_task: register the replacement run.
+    # This overwrites _entries["t-1"] with a fresh entry.
+    r.register_task(
+        task_id="t-1", chat_id=1, message_id=2, channel_name="telegram", run_id="r-NEW"
+    )
+    with r._lock:
+        entry_new = r._entries["t-1"]
+    assert entry_new.run_id == "r-NEW"
+
+    # Release the callback so mark_done finishes and reaches unregister.
+    callback_release.set()
+    finalized = await asyncio.wait_for(mark_task, timeout=2.0)
+    assert finalized is True
+
+    # CRITICAL: the replacement entry must still be registered.
+    assert r.has_task("t-1") is True, (
+        "identity-guarded unregister must NOT have detached the replacement"
+    )
+    with r._lock:
+        assert r._entries["t-1"] is entry_new, (
+            "replacement entry must still be the active one"
+        )
+        assert r._entries["t-1"].run_id == "r-NEW"
