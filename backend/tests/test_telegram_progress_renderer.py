@@ -105,6 +105,57 @@ class TestEventDispatch:
         # Body is just the initial header + blank
         assert r.state.activity_lines == []
 
+    def test_bash_tool_calls_are_hidden_from_activity_stream(self) -> None:
+        """Phase 4N regression lock: ``bash`` joins the hidden set.
+
+        Before this change, every bash call surfaced as ``⚙️ Running: …``
+        in the placeholder — verification commands (``wc -l``, ``ls``,
+        ``cat``), small inline-Python operations, and (less often)
+        legitimate generator-script execution. User feedback after the
+        Phase 4M deploy: the ``Running`` lines clutter the placeholder
+        and don't add signal the user cares about; the deliverable is
+        the produced file, not the shell command that produced it.
+
+        Acceptance: a bash tool_call MUST produce zero activity lines
+        and zero ``⚙️`` glyphs in the rendered body. ``state_changed``
+        will correctly be ``False`` (same pattern as the other
+        hidden tools) so the registry's per-task edit dispatch
+        short-circuits on a bash-only batch.
+        """
+        r = ProgressRenderer()
+        result = r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "bash", "args": {"command": "wc -l /mnt/user-data/outputs/report.md"}},
+            ])]},
+        })
+        body = r.render()
+        assert "⚙️" not in body, "bash gear glyph must not appear in rendered placeholder"
+        assert "Running" not in body, "bash 'Running' verb must not appear in rendered placeholder"
+        assert r.state.activity_lines == [], "bash must not add an activity line"
+        # Existing hidden-tool semantics: no activity line added → no
+        # state mutation → no edit fired downstream.
+        assert result.state_changed is False
+
+    def test_bash_hidden_does_not_filter_other_tools_in_same_batch(self) -> None:
+        """Sanity companion: a batch that contains BOTH a hidden bash
+        call AND a visible tool (e.g. builder_web_search) still renders
+        the visible tool. The filter is per-tool, not a blanket
+        'any bash in the batch hides everything' rule.
+        """
+        r = ProgressRenderer()
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "bash", "args": {"command": "ls /mnt/user-data/outputs"}},
+                {"name": "builder_web_search", "args": {"query": "claude subagents"}},
+            ])]},
+        })
+        body = r.render()
+        # Search still rendered.
+        assert "🔍 Searching: claude subagents" in body
+        # Bash still hidden.
+        assert "⚙️" not in body
+        assert "Running" not in body
+
     def test_custom_phase_event(self) -> None:
         r = ProgressRenderer()
         r.apply("custom", {"name": "phase", "phase": "finalizing"})
@@ -159,6 +210,77 @@ class TestTerminalRendering:
         result = r.mark_done()
         assert result.terminal is True
         assert "[ Done ]" in r.render()
+
+    def test_mark_done_clears_activity_history(self) -> None:
+        """Phase 4N: when the build reaches ``[ Done ]``, the accumulated
+        live-progress activity lines (🔍 Searching, 🔗 Reading, 📝
+        Drafting) are CLEARED so the final placeholder renders as a
+        clean header (+ optional summary). The intermediate activity is
+        live-streaming signal only — once the build is complete the
+        deliverable is what matters, and it arrives as a separate
+        Telegram message via ``_on_builder_completion``.
+
+        Previously shipped at ``f04767b6``, rolled back at ``b9eeb7c3``
+        as part of Phase 4K's diagnostic backout. Re-introduced in
+        isolation now that the underlying builder regression
+        (Phase 4M's bash-heredoc loop) is fixed and the rollback's
+        precaution is no longer needed.
+        """
+        r = ProgressRenderer()
+        # Build a typical drafting history.
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_search", "args": {"query": "claude subagents"}},
+            ])]},
+        })
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_fetch", "args": {"url": "https://example.com/page"}},
+            ])]},
+        })
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "write_file", "args": {"path": "/mnt/user-data/outputs/report.md"}},
+            ])]},
+        })
+        # Sanity: pre-mark_done the history IS populated.
+        pre_body = r.render()
+        assert "🔍 Searching" in pre_body
+        assert "🔗 Reading" in pre_body
+        assert "📝 Drafting" in pre_body
+
+        result = r.mark_done(summary="Build complete.")
+        assert result.terminal is True
+
+        body = r.render()
+        assert "[ Done ]" in body
+        assert "Build complete." in body
+        # Activity lines MUST be cleared.
+        assert "🔍 Searching" not in body
+        assert "🔗 Reading" not in body
+        assert "📝 Drafting" not in body
+        assert r.state.activity_lines == []
+
+    def test_mark_done_without_summary_clears_activity_history(self) -> None:
+        """Even with no summary, ``mark_done`` clears history — the
+        final body is just ``[ Done ]`` on its own. Locks the
+        no-summary case separately so a future change can't
+        accidentally bind the clear behaviour to summary-present.
+        """
+        r = ProgressRenderer()
+        r.apply("updates", {
+            "agent": {"messages": [_Aimsg([
+                {"name": "builder_web_search", "args": {"query": "x"}},
+            ])]},
+        })
+        assert r.state.activity_lines  # populated before mark_done
+
+        r.mark_done()  # no summary
+
+        body = r.render()
+        assert "[ Done ]" in body
+        assert "🔍 Searching" not in body
+        assert r.state.activity_lines == []
 
     def test_mark_stalled_renders_still_working_and_is_not_terminal(self) -> None:
         """Phase 4F: per-event / total timeout MUST NOT pretend the

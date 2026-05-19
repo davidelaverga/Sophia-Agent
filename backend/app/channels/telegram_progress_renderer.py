@@ -43,7 +43,26 @@ _TOOL_LABELS: dict[str, tuple[str, str]] = {
 
 # Tool names that are too noisy to render as activity lines (low-signal
 # internals like file-tree listing, tiny edits inside a write loop).
-_HIDDEN_TOOLS: frozenset[str] = frozenset({"ls", "read_file", "str_replace", "todo_read", "todo_write"})
+#
+# Phase 4N (2026-05-19): ``bash`` added to the hidden set. User
+# feedback after the Phase 4M deploy: the ``⚙️ Running: …`` lines
+# (verification commands like ``wc -l`` / ``ls``, intermediate
+# Python operations) clutter the placeholder during drafting.
+# Trade-off accepted by the user: binary-deliverable workflows that
+# bash-run a generator script (chart-visualization, ppt-generation
+# skills) will show a blank stream during the ~30-60s the script
+# runs. The deliverable still arrives via the independent
+# ``_on_builder_completion`` path. If the trade-off becomes
+# noticeable, swap this blanket entry for a command-pattern
+# heuristic (hide only heredocs / ``python -c`` / ``echo > …``).
+_HIDDEN_TOOLS: frozenset[str] = frozenset({
+    "ls",
+    "read_file",
+    "str_replace",
+    "todo_read",
+    "todo_write",
+    "bash",
+})
 
 _PHASE_LABELS: dict[str, str] = {
     "starting": "Working",
@@ -261,10 +280,28 @@ class ProgressRenderer:
         can rely on — the SDK iterator just stops. The subscriber's
         loop calls this method when the iteration ends, with the
         builder's summary (or empty) as the final body line.
+
+        Phase 4N (2026-05-19): clears accumulated activity history so
+        the final placeholder renders as a clean ``[ Done ]`` (+
+        optional summary). The intermediate tool-call lines are
+        live-progress signal only — once the build is complete the
+        deliverable is what matters, and the artifact arrives as a
+        separate Telegram message via ``_on_builder_completion``.
+        Previously shipped at ``f04767b6``, rolled back at
+        ``b9eeb7c3`` as part of Phase 4K's full backout. Re-introduced
+        in isolation now that the underlying builder regression
+        (Phase 4M's bash-heredoc loop) is fixed.
+
+        Scoped to ``mark_done`` only — ``mark_stalled`` (per-event
+        timeout) and ``mark_stopped`` (error / cancel) preserve
+        history because in those degraded states the history is the
+        user's last honest signal about what the build was doing
+        when the stream stopped.
         """
         before = self._snapshot()
         self.state.current_phase = "done"
         self.state.terminal = True
+        self.state.activity_lines = []
         if summary:
             self.state.summary_text = _shorten(summary, 600)
         return RenderResult(state_changed=self._snapshot() != before, terminal=True)
