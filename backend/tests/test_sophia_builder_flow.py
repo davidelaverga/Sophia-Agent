@@ -376,6 +376,58 @@ def test_artifact_instructions_lists_ack_example_per_lifecycle_tool():
         assert ack_marker in text, f"ack '{ack_marker}' missing from artifact_instructions.md"
 
 
+def test_update_async_task_wrapped_with_terminal_guard(monkeypatch):
+    """Phase 2B chain-membership invariant: the native deepagents
+    ``update_async_task`` must be filtered from the middleware's tool list
+    and replaced by the Phase 2B terminal-thread-guard wrapper.
+
+    A future refactor that drops the wrapper would silently regress to the
+    behaviour that caused the 2026-05-20 19:53–19:57 production dangling-tool
+    loop — this test pins the wrap in place.
+    """
+    companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    captured: dict = {}
+    _stub_companion_for_chain_inspection(monkeypatch, companion_module, captured)
+
+    companion_module.make_sophia_agent({"configurable": {"user_id": "user_123"}})
+
+    async_middleware = _find_async_middleware(captured["middleware"])
+    update_tools = [
+        t for t in getattr(async_middleware, "tools", [])
+        if getattr(t, "name", None) == "update_async_task"
+    ]
+    # Exactly one update_async_task tool — the wrapper, not the native.
+    assert len(update_tools) == 1, (
+        f"Expected exactly one update_async_task tool; found {len(update_tools)}"
+    )
+    wrapper = update_tools[0]
+    # The wrapper's func / coroutine must come from the Phase 2B module,
+    # not from deepagents.middleware.async_subagents.
+    func_module = (getattr(wrapper.func, "__module__", None)
+                   or getattr(wrapper.coroutine, "__module__", None) or "")
+    assert "update_async_task_wrapper" in func_module, (
+        f"update_async_task tool is not the Phase 2B wrapper "
+        f"(func module={func_module!r}). Wrapper must shadow the native dispatch."
+    )
+
+
+def test_async_builder_system_prompt_names_terminal_redirect_rule():
+    """The system-prompt preamble must explicitly tell the model that
+    update_async_task is for ACTIVE builds only, and that terminal builds
+    require start_builder_task with a brief that references the prior
+    artifact."""
+    module = importlib.import_module("deerflow.agents.sophia_agent.agent")
+    prompt = module._ASYNC_BUILDER_SYSTEM_PROMPT
+    # Active-only language for update_async_task.
+    assert "RUNNING" in prompt or "running" in prompt.lower()
+    # Terminal-status language.
+    assert "TERMINAL" in prompt or "terminal" in prompt.lower()
+    # The directive: terminal modify cues → start_builder_task with
+    # prior-artifact-referencing brief.
+    assert "start_builder_task" in prompt
+    assert "prior artifact" in prompt.lower() or "previous version" in prompt.lower()
+
+
 def test_lifecycle_tool_observer_middleware_registered_in_companion_chain(monkeypatch):
     """The observer middleware emits one structured log per lifecycle-tool
     call. Chain-membership test so a future refactor cannot silently drop

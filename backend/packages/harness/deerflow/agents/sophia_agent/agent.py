@@ -76,11 +76,19 @@ _ASYNC_BUILDER_SYSTEM_PROMPT = (
     "provided.)\n"
     "  Ack like: \"Starting the build now — I'll have it back to you shortly.\"\n"
     "\n"
-    "- `update_async_task(task_id, message)` — user course-corrects mid-build. "
-    'Cues: "actually make it shorter / longer", "also include X", "add a '
-    'section", "please add", "can you also", "wait, change", "make it 2 slides '
-    'not 5".\n'
+    "- `update_async_task(task_id, message)` — user course-corrects mid-build "
+    "AND the build is still RUNNING (status not terminal). Cues: \"actually "
+    "make it shorter / longer\", \"also include X\", \"add a section\", "
+    "\"please add\", \"can you also\", \"wait, change\", \"make it 2 slides "
+    "not 5\".\n"
     "  Ack like: \"Got it, updating the build to include X.\"\n"
+    "  NEVER call update_async_task on a TERMINAL build (status in {success, "
+    "completed, error, failed, cancelled, timeout, timed_out}). The wrapper "
+    "rejects this and redirects to start_builder_task. For post-build "
+    "modifications, call start_builder_task with a brief that references the "
+    "prior artifact inline (e.g. \"Building on the prior <artifact>, add a "
+    "section on X...\"). Ack like \"Got it — kicking off a fresh build that "
+    "adds X to the previous version.\"\n"
     "\n"
     "- `check_async_task(task_id)` — user asks about progress. Cues: \"how's "
     'it going?", "any update?", "status?", "is it done?", "where are we?".\n'
@@ -133,11 +141,21 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
     PR-B contract: ``start_async_task`` is filtered from the model-visible
     tool set. The model launches builds via the ``start_builder_task``
     wrapper (regular agent tool, see ``make_start_builder_task_tool``) which
-    enriches the description before calling the LangGraph SDK. The four
-    lifecycle tools (``check_async_task``, ``update_async_task``,
-    ``cancel_async_task``, ``list_async_tasks``) remain native — they do
-    not need enrichment and the wrapper does not own them.
+    enriches the description before calling the LangGraph SDK.
+
+    Phase 2B contract: ``update_async_task`` is wrapped to add a
+    terminal-thread guard. When the model calls it against a builder thread
+    that has already reached terminal status (success / completed / error /
+    etc.), the wrapper returns a directive ToolMessage redirecting to
+    ``start_builder_task`` rather than letting deepagents create a new run
+    on a just-finished thread (which would loop on dangling tool calls).
+    The remaining three lifecycle tools (``check_async_task``,
+    ``cancel_async_task``, ``list_async_tasks``) remain native.
     """
+    from deerflow.sophia.tools.update_async_task_wrapper import (
+        make_update_async_task_wrapper,
+    )
+
     sophia_builder_spec: AsyncSubAgent = {
         "name": "sophia_builder",
         "description": (
@@ -153,8 +171,19 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
         system_prompt=_ASYNC_BUILDER_SYSTEM_PROMPT,
     )
     # Filter ``start_async_task`` so the model only sees the enriched
-    # ``start_builder_task`` wrapper. The lifecycle four stay native.
-    middleware.tools = [t for t in middleware.tools if t.name != "start_async_task"]
+    # ``start_builder_task`` wrapper. Capture the native
+    # ``update_async_task`` so the Phase 2B wrapper can delegate on the
+    # non-terminal path, then filter and replace it.
+    native_update = next(
+        (t for t in middleware.tools if t.name == "update_async_task"), None
+    )
+    middleware.tools = [
+        t
+        for t in middleware.tools
+        if t.name not in ("start_async_task", "update_async_task")
+    ]
+    if native_update is not None:
+        middleware.tools.append(make_update_async_task_wrapper(native_update))
     return middleware
 
 
