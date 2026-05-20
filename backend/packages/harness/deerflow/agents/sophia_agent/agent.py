@@ -28,6 +28,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_command import BuilderComm
 from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
 from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
 from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+from deerflow.agents.sophia_agent.middlewares.lifecycle_tool_observer import LifecycleToolObserverMiddleware
 from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
 from deerflow.agents.sophia_agent.middlewares.message_coercion import MessageCoercionMiddleware
 from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
@@ -62,24 +63,55 @@ logger = logging.getLogger(__name__)
 # chain, so the default companion behaviour is unaffected.
 _ASYNC_BUILDER_SYSTEM_PROMPT = (
     "You can delegate long builds to the Sophia builder as a background task.\n"
-    "- To start a build, call `start_builder_task` with `task_type` "
-    '("document" / "research" / "presentation" / "frontend" / '
-    '"visual_report") and a complete, self-contained `description`. The '
-    "tool returns a task_id immediately; keep talking to the user while the "
-    "build runs. (Do NOT call the lower-level `start_async_task` tool "
-    "directly — `start_builder_task` enriches the description with relevant "
-    "memories, your current emotional read, ritual context, and explicit "
-    "URLs the user provided.)\n"
-    '- When the user asks "how\'s it going?" or enough time has passed, call '
-    "`check_async_task` with the task_id.\n"
-    '- If the user course-corrects ("actually, make it 2 slides not 5"), '
-    "call `update_async_task` with the task_id and the new instruction. This "
-    "preserves the existing thread so the builder keeps its progress.\n"
-    "- If the user asks you to stop, call `cancel_async_task`.\n"
-    '- Use `list_async_tasks` when the user references "that document we '
-    'started" and you need to recall recent task_ids.\n'
-    "Do not poll on a timer. Only check when the user asks or when you know "
-    "enough time has passed that a check is worth offering.\n"
+    "\n"
+    "Tool decision rules — pick the tool that matches the user's intent, then "
+    "call emit_artifact ONCE with a short ack and end the turn:\n"
+    "\n"
+    "- `start_builder_task` — FIRST build, no active task yet. Call with "
+    '`task_type` ("document" / "research" / "presentation" / "frontend" / '
+    '"visual_report") and a complete, self-contained `description`. (Do NOT '
+    "call the lower-level `start_async_task` tool directly — "
+    "`start_builder_task` enriches the description with relevant memories, "
+    "your current emotional read, ritual context, and explicit URLs the user "
+    "provided.)\n"
+    "  Ack like: \"Starting the build now — I'll have it back to you shortly.\"\n"
+    "\n"
+    "- `update_async_task(task_id, message)` — user course-corrects mid-build. "
+    'Cues: "actually make it shorter / longer", "also include X", "add a '
+    'section", "please add", "can you also", "wait, change", "make it 2 slides '
+    'not 5".\n'
+    "  Ack like: \"Got it, updating the build to include X.\"\n"
+    "\n"
+    "- `check_async_task(task_id)` — user asks about progress. Cues: \"how's "
+    'it going?", "any update?", "status?", "is it done?", "where are we?".\n'
+    "  Ack like: \"Let me check on it — still running.\"\n"
+    "\n"
+    "- `cancel_async_task(task_id)` — user explicitly wants to stop. Cues: "
+    '"stop", "cancel", "nevermind", "don\'t bother", "abort", "kill it". Do '
+    "NOT cancel on weak signals — confirm if unsure.\n"
+    "  Ack like: \"Got it, cancelling the build now.\"\n"
+    "\n"
+    "- `list_async_tasks(status_filter?)` — user references multiple tasks or "
+    '"that build we started". Cues: "all my builds", "what\'s running?", "the '
+    'doc from earlier", "the one about X".\n'
+    "  Ack like: \"Pulling up your in-flight builds.\"\n"
+    "\n"
+    "Cross-cutting rules (load-bearing):\n"
+    "1. Task statuses from earlier turns are ALWAYS stale. Never quote a "
+    "status from a previous tool result — always call `check_async_task` or "
+    "`list_async_tasks` first if asked about status.\n"
+    "2. Always use the FULL task_id verbatim — never truncate or abbreviate.\n"
+    "3. Do NOT poll on a timer. Call `check_async_task` only when the user "
+    "asks or when you know enough time has passed that a check is worth "
+    "offering.\n"
+    "4. After ANY lifecycle tool returns, call `emit_artifact` ONCE on the "
+    "same turn with the ack in `next_step` / `takeaway`, then end. Never "
+    "chain a second lifecycle call on the same turn.\n"
+    "5. If `update_async_task` returns an error (validation / network / SDK "
+    "failure), acknowledge plainly in your emit_artifact (\"Couldn't push "
+    "that change through right now — let me know if you want me to start "
+    "over with a tighter brief\") and STOP. Do NOT call `start_builder_task` "
+    "as a workaround.\n"
 )
 
 
@@ -277,6 +309,12 @@ def make_sophia_agent(config: RunnableConfig):
         # block is in the assembled system message but doesn't interfere
         # with skill routing or memory retrieval.
         BuildAwarenessMiddleware(),
+        # 13c. Lifecycle-tool observability — emits one structured log line per
+        # tool_call for any of the five lifecycle tools so we can measure
+        # tool-selection health post-deploy. Positioned after BuildAwareness
+        # (so the active-build block has shaped this turn) and before
+        # ArtifactMiddleware. Purely observational; never mutates state.
+        LifecycleToolObserverMiddleware(),
         # 14. Artifact system
         ArtifactMiddleware(SKILLS_PATH / "artifact_instructions.md"),
         # 15. Deterministic Builder command routing for explicit document requests
