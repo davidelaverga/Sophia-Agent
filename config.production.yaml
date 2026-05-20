@@ -72,36 +72,9 @@ channels:
     # env var by app.gateway.telegram_link_store — no need to pass it here.
     # allowed_users: []  # empty = allow any Telegram user
 
-  # Builder-as-Main Work bot — Stage 1 of the Phase-3 Telegram diagnostic.
-  # @Sophia_Work_bot DMs bypass the companion graph and dispatch directly to
-  # sophia_builder via runs.wait. The 3-step resolver in TelegramWorkChannel
-  # (forward fast-path → reverse lookup by Telegram user_id → auto-bind)
-  # automatically recognises any user already bound through @Sophia_EI_bot's
-  # deep-link flow — no separate webapp onboarding required for Stage 1C.
-  #
-  # Required env vars on Render (gateway service):
-  #   TELEGRAM_WORKER_BOT_TOKEN     — from BotFather, the @Sophia_Work_bot token.
-  #                                    MUST be set on the gateway service.
-  #
-  # Note on bot_username: hardcoded below rather than env-var-resolved. The
-  # langgraph service ALSO loads this file (per Dockerfile.langgraph) and the
-  # config resolver raises ValueError on any missing $VAR. Hardcoding the
-  # username (which is public, not a secret) keeps the langgraph deploy safe
-  # while still being trivially editable here. Mirrors the EI bot pattern,
-  # which doesn't put bot_username in YAML at all (it's read separately by
-  # app.gateway.telegram_link_store from $TELEGRAM_BOT_USERNAME). If you
-  # rename @Sophia_Work_bot in BotFather, edit this line.
-  telegram_work:
-    enabled: true
-    bot_token: $TELEGRAM_WORKER_BOT_TOKEN
-    bot_username: Sophia_Work_bot
-    pilot_user_id: ""             # empty = any EI-bound user welcome.
-                                  # Set to a single canonical Sophia user_id
-                                  # during Stage 1B smoke testing if you want
-                                  # to gate the channel to one tester.
-    allowed_users: []             # empty = no extra Telegram-user-id allowlist.
-                                  # Subject to enabled + pilot_user_id gates.
-    run_timeout_seconds: 900      # 15 min — matches Builder hard turn-budget
-                                  # ceiling. runs.wait raises asyncio.TimeoutError
-                                  # past this and the placeholder is edited with
-                                  # the timeout message.
+  # NOTE: the legacy ``telegram_work`` Builder-as-Main DM channel
+  # (@Sophia_Work_bot direct DMs to the builder graph) was deleted in
+  # Phase 4C of the v3 streaming migration. Builds now route through
+  # the companion only. @Sophia_Work_bot can be deactivated in
+  # BotFather and TELEGRAM_WORKER_BOT_TOKEN can be removed from
+  # Render's gateway service after this deploy.

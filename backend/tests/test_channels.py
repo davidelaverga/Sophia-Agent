@@ -128,6 +128,185 @@ class TestMessageBus:
 
         _run(go())
 
+    def test_publish_outbound_strict_returns_true_when_all_listeners_succeed(self):
+        """``publish_outbound_strict`` reports delivery status to the caller.
+
+        Phase 4F codex P1 post-review (fourth pass): the swallow-flavored
+        ``publish_outbound`` hides Telegram send failures from callers
+        that need delivery confirmation. The strict variant returns
+        a bool so callers like ``ChannelManager._maybe_open_progress_placeholders``
+        can decide whether to mark dedup or retry next turn.
+
+        Phase 4M (codex P1 post-Phase-4K-rollback review): listeners
+        must return ``True`` explicitly to signal "I handled this".
+        Listeners that return None/falsy are treated as no-ops (e.g.,
+        ``Channel._on_outbound`` no-ops when channel_name doesn't
+        match). See ``test_publish_outbound_strict_returns_false_when_no_listener_handles``.
+        """
+        bus = MessageBus()
+        received: list[OutboundMessage] = []
+
+        async def good(msg):
+            received.append(msg)
+            return True  # Phase 4M: explicit-True contract.
+
+        async def go():
+            bus.subscribe_outbound(good)
+            bus.subscribe_outbound(good)
+            out = OutboundMessage(channel_name="test", chat_id="c", thread_id="t", text="ok")
+            delivered = await bus.publish_outbound_strict(out)
+            assert delivered is True
+            assert len(received) == 2
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_false_when_any_listener_raises(self):
+        """Even if other listeners succeed, a single raise flips delivered=False.
+
+        Conservative semantics: the manager skips marking dedup on
+        False so a follow-up turn retries. The bus still iterates the
+        rest of the listeners — unrelated channels still get the
+        message — so the False signal is "delivery is uncertain for
+        SOMEONE", not "delivery failed everywhere".
+        """
+        bus = MessageBus()
+        delivered_to: list[str] = []
+
+        async def failing(_msg):
+            raise RuntimeError("simulated network error")
+
+        async def succeeding(msg):
+            delivered_to.append(msg.channel_name)
+
+        async def go():
+            bus.subscribe_outbound(failing)
+            bus.subscribe_outbound(succeeding)
+            out = OutboundMessage(channel_name="t", chat_id="c", thread_id="th", text="x")
+            delivered = await bus.publish_outbound_strict(out)
+            assert delivered is False
+            # The good listener still ran — we don't short-circuit on
+            # a failing listener.
+            assert delivered_to == ["t"]
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_false_when_no_listeners(self):
+        """Codex P2 (Phase 4J): an empty listener list means the
+        message wasn't actually consumed. Strict-publish callers
+        (the builder-progress placeholder path in
+        ``ChannelManager._maybe_open_progress_placeholders``) use
+        the returned bool to decide whether to mark dedup. Returning
+        True here would silently drop the placeholder AND block all
+        future retries — a placeholder published during a channel
+        restart / boot ordering gap would be permanently lost.
+        """
+        bus = MessageBus()
+
+        async def go():
+            out = OutboundMessage(channel_name="t", chat_id="c", thread_id="th", text="x")
+            delivered = await bus.publish_outbound_strict(out)
+            assert delivered is False, (
+                "publish_outbound_strict must return False when no listeners "
+                "are registered — otherwise the manager dedup-marks a "
+                "placeholder that no channel actually consumed"
+            )
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_false_when_no_listener_handles(self):
+        """Codex P1 (Phase 4M, post-Phase-4K-rollback review).
+
+        Simulates the restart/lifecycle race: the Telegram channel
+        unregistered its listener (channel restart), but OTHER channel
+        listeners (Feishu/Slack) are still subscribed. The strict
+        publish iterates all listeners; none raise (they just no-op
+        because their channel_name doesn't match the message), but
+        NO channel actually consumed the message.
+
+        Pre-fix: ``publish_outbound_strict`` returned True (all_ok was
+        initialised True and never flipped because no exception was
+        raised). The manager dedup-marked ``(task_id, run_id)``,
+        permanently suppressing retries for that run — placeholder
+        stuck on "Working on it…" forever.
+
+        Post-fix: strict-mode requires at least one listener to return
+        ``True``. Channel mismatch returns ``None`` (no-op), so the
+        bus signals undelivered → manager retries on the next
+        companion turn.
+        """
+        bus = MessageBus()
+        observed_calls = 0
+
+        async def feishu_listener(msg):
+            """Listener registered for a different channel. Returns
+            None (no-op) instead of True because msg isn't for them."""
+            nonlocal observed_calls
+            observed_calls += 1
+            # No explicit return → implicit None → "not handled".
+
+        async def slack_listener(msg):
+            """Another non-target listener that returns False explicitly.
+            False is also falsy and must be treated as not-handled."""
+            nonlocal observed_calls
+            observed_calls += 1
+            return False
+
+        async def go():
+            bus.subscribe_outbound(feishu_listener)
+            bus.subscribe_outbound(slack_listener)
+            # Message targeted at Telegram (whose listener is absent).
+            out = OutboundMessage(
+                channel_name="telegram", chat_id="c", thread_id="th", text="x"
+            )
+            delivered = await bus.publish_outbound_strict(out)
+
+            # Both listeners ran (the bus doesn't filter by channel
+            # name — that's the listener's responsibility) but neither
+            # signalled handled, so strict-mode must report undelivered.
+            assert observed_calls == 2
+            assert delivered is False, (
+                "publish_outbound_strict must return False when no "
+                "listener returns True — otherwise a restart race that "
+                "leaves only non-target listeners subscribed would "
+                "silently mark the placeholder delivered and block retries"
+            )
+
+        _run(go())
+
+    def test_publish_outbound_strict_returns_true_when_target_listener_handles(self):
+        """Companion to the mismatch test: when the target channel's
+        listener IS subscribed and returns True, strict mode returns
+        True even if OTHER non-matching listeners are also present
+        and return None. Mimics the production happy path with
+        Telegram + Feishu both registered.
+        """
+        bus = MessageBus()
+        feishu_calls = 0
+        telegram_calls = 0
+
+        async def feishu_listener(msg):
+            nonlocal feishu_calls
+            feishu_calls += 1
+            # Channel mismatch — returns None.
+
+        async def telegram_listener(msg):
+            nonlocal telegram_calls
+            telegram_calls += 1
+            return True  # Matching channel, send succeeded.
+
+        async def go():
+            bus.subscribe_outbound(feishu_listener)
+            bus.subscribe_outbound(telegram_listener)
+            out = OutboundMessage(
+                channel_name="telegram", chat_id="c", thread_id="th", text="x"
+            )
+            delivered = await bus.publish_outbound_strict(out)
+            assert telegram_calls == 1
+            assert feishu_calls == 1  # both ran, but only one handled
+            assert delivered is True
+
+        _run(go())
+
     def test_review_notification_callback(self):
         bus = MessageBus()
         received: list[dict] = []
@@ -325,6 +504,58 @@ class TestChannelBase:
             msg = OutboundMessage(channel_name="other", chat_id="c1", thread_id="t1", text="hi")
             await bus.publish_outbound(msg)
             assert len(ch.sent_messages) == 0
+
+        _run(go())
+
+    def test_on_outbound_propagates_send_failure(self):
+        """Phase 4F codex P1 post-review (fifth pass): when ``send``
+        raises, ``Channel._on_outbound`` MUST re-raise after logging so
+        the bus's ``publish_outbound_strict`` sees the failure and
+        flips ``delivered=False``. The previous swallow-and-return
+        suppressed the exception inside the channel base class, which
+        defeated the strict variant entirely — a Telegram send error
+        looked like successful delivery to the manager's placeholder
+        path and the dedup got marked for a placeholder that never
+        actually reached the user.
+
+        The bus's own iteration-level catch (in ``publish_outbound``)
+        still keeps other channels' listeners running when one fails
+        — that's the right place for cross-cutting safety.
+        """
+        class _FailingChannel(Channel):
+            def __init__(self, bus_):
+                super().__init__(name="failing", bus=bus_, config={})
+
+            async def start(self):
+                self._running = True
+                self.bus.subscribe_outbound(self._on_outbound)
+
+            async def stop(self):
+                self._running = False
+                self.bus.unsubscribe_outbound(self._on_outbound)
+
+            async def send(self, msg):
+                raise RuntimeError("simulated send failure")
+
+        bus = MessageBus()
+        ch = _FailingChannel(bus)
+
+        async def go():
+            await ch.start()
+            msg = OutboundMessage(
+                channel_name="failing", chat_id="c1", thread_id="t1", text="hi"
+            )
+            # publish_outbound STILL catches at its layer (preserving
+            # non-strict semantics). The bus shouldn't re-raise here.
+            await bus.publish_outbound(msg)
+
+            # publish_outbound_strict MUST see the propagated exception
+            # and return False.
+            delivered = await bus.publish_outbound_strict(msg)
+            assert delivered is False, (
+                "channel send raising MUST flip delivered=False through "
+                "the strict variant — see codex P1 post-review fifth pass"
+            )
 
         _run(go())
 
@@ -1886,6 +2117,543 @@ class TestChannelService:
         assert service.manager._default_session["context"]["thinking_enabled"] is False
         assert service.manager._channel_sessions["telegram"]["assistant_id"] == "mobile_agent"
         assert service.manager._channel_sessions["telegram"]["users"]["vip"]["assistant_id"] == "vip_agent"
+
+    def test_register_progress_entry_calls_registry(self):
+        """Phase 4H (webhook relay): when a builder_progress placeholder is
+        sent, the channel registers ``(task_id, chat_id, message_id, "telegram")``
+        with the gateway-side ``BuilderProgressRegistry`` so the
+        ``/internal/builder-progress`` endpoint can later find the entry.
+        Replaces the deleted ``_spawn_progress_subscriber`` flow.
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        ch._register_progress_entry(
+            chat_id=42,
+            message_id=99,
+            meta={"task_id": "t-A", "run_id": "r-1"},
+        )
+        registry = get_progress_registry()
+        assert registry.has_task("t-A")
+
+    def test_register_progress_entry_raises_on_missing_meta(self):
+        """Empty/absent task_id or run_id is a programming error but
+        MUST still propagate (as ``ProgressSubscriberSpawnError``) so
+        the manager's strict-publish skips the dedup mark and the next
+        turn retries."""
+        from app.channels.telegram import ProgressSubscriberSpawnError, TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        with pytest.raises(ProgressSubscriberSpawnError, match="missing task_id or run_id"):
+            ch._register_progress_entry(
+                chat_id=1,
+                message_id=2,
+                meta={"task_id": "", "run_id": "r"},
+            )
+
+        with pytest.raises(ProgressSubscriberSpawnError, match="missing task_id or run_id"):
+            ch._register_progress_entry(
+                chat_id=1,
+                message_id=2,
+                meta={"task_id": "t", "run_id": ""},
+            )
+
+    def test_on_builder_completion_branches_to_mark_done_on_success(self):
+        """Codex P2 (post-Phase-4H follow-up): success status routes
+        through ``mark_done`` so the placeholder finalizes as
+        ``[ Done ]`` before the artifact document is sent."""
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+
+        captured: list[str] = []
+
+        async def cb(_c, _m, body):
+            captured.append(body)
+
+        registry.register_channel_callback("telegram", cb)
+        registry.register_task(
+            task_id="t-1",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-1",
+        )
+
+        # Capture which registry method is invoked. Patch both so we
+        # detect cross-method leakage.
+        calls: list[str] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            calls.append(f"done:{task_id}:{summary}")
+            return True
+
+        async def fake_stopped(*, task_id, reason, run_id):
+            calls.append(f"stopped:{task_id}:{reason}")
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+        registry.mark_stopped = fake_stopped  # type: ignore[method-assign]
+
+        # Stub out the parts of _on_builder_completion that aren't
+        # under test (artifact download, bot send, etc.) by setting
+        # only what the early branches need.
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        # _find_chat_topic_for_thread is the gate — make it return a
+        # (chat_id, topic_id) match so the handler proceeds.
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        # Stop the bot dispatch from actually running.
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-1",
+                "task_id": "t-1",
+                "status": "success",
+                "summary": "Built FST.md",
+                "run_id": "r-1",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                # Downstream artifact / bot machinery isn't mocked
+                # exhaustively; we only care that the finalize call
+                # happened before any error.
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        # Codex-driven UX polish 2026-05-17: success path passes
+        # empty summary so the placeholder body doesn't duplicate
+        # the document caption text. The `done:t-1:` prefix is
+        # enough to confirm routing without coupling to summary text.
+        assert any(c.startswith("done:t-1:") for c in calls), (
+            f"success status must route to mark_done; calls={calls}"
+        )
+        assert not any(c.startswith("stopped:") for c in calls)
+
+    def test_send_routes_bot_call_through_tg_loop(self):
+        """Phase 4I post-review polish: ``send()`` must route
+        ``bot.send_message`` through ``_run_bot_call_on_telegram_loop``
+        so the httpx connection pool opens on ``_tg_loop`` from the
+        first send. Without this, the placeholder's first
+        ``edit_message_text`` (from the gateway-side registry edit
+        callback) tries to reuse the connection on the wrong loop
+        and fails with ``RuntimeError: <Event> is bound to a
+        different event loop`` (production smoke test 2026-05-17
+        log line at 17:54:54).
+        """
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        # Make application non-None so send() proceeds past the
+        # early-out.
+        bot_mock = MagicMock()
+
+        sent_obj = SimpleNamespace(message_id=42)
+
+        async def fake_send_message(**_kw):
+            return sent_obj
+
+        bot_mock.send_message = fake_send_message
+        ch._application = SimpleNamespace(bot=bot_mock)
+
+        # Capture which coroutines pass through the loop-hop helper.
+        hop_calls: list[object] = []
+
+        async def fake_hop(coro):
+            hop_calls.append(coro)
+            return await coro
+
+        ch._run_bot_call_on_telegram_loop = fake_hop  # type: ignore[assignment]
+
+        msg = OutboundMessage(
+            channel_name="telegram",
+            chat_id="1",
+            thread_id="th",
+            text="Hello",
+        )
+
+        async def go():
+            await ch.send(msg)
+
+        _run(go())
+
+        # Exactly one bot call passed through the hop helper.
+        assert len(hop_calls) == 1, (
+            f"send() must route bot.send_message through "
+            f"_run_bot_call_on_telegram_loop; got {len(hop_calls)} hops"
+        )
+
+    def test_on_builder_completion_plumbs_payload_run_id_to_mark_done(self):
+        """Codex P1 (post-Phase-4I review) end-to-end lock:
+        ``_on_builder_completion`` must read ``payload["run_id"]``
+        and pass it to ``registry.mark_done`` / ``mark_stopped`` so
+        the registry can drop stale terminals from interrupted runs.
+
+        Locks both halves of the plumbing:
+        1. The pydantic model accepts ``run_id`` (otherwise it's
+           dropped by Pydantic's default ``extra="ignore"``).
+        2. ``_on_builder_completion`` forwards ``payload["run_id"]``
+           to the registry's mark_done call (not ``None``).
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+        registry.register_task(
+            task_id="t-1",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-NEW",
+        )
+
+        recorded: list[dict] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            recorded.append({"task_id": task_id, "summary": summary, "run_id": run_id})
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-1",
+                "task_id": "t-1",
+                "run_id": "r-NEW",  # carried through from payload
+                "status": "success",
+                "summary": "All done.",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert len(recorded) == 1
+        assert recorded[0]["run_id"] == "r-NEW", (
+            f"_on_builder_completion must plumb payload['run_id'] to "
+            f"mark_done; got run_id={recorded[0]['run_id']!r}"
+        )
+
+    def test_on_builder_completion_plumbs_payload_run_id_to_mark_stopped(self):
+        """Same plumbing check on the failure path: payload run_id
+        must reach ``registry.mark_stopped``."""
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+
+        recorded: list[dict] = []
+
+        async def fake_stopped(*, task_id, reason, run_id):
+            recorded.append({"task_id": task_id, "reason": reason, "run_id": run_id})
+            return True
+
+        registry.mark_stopped = fake_stopped  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+        ch._build_retry_keyboard = lambda _t, **_k: None  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-1",
+                "task_id": "t-1",
+                "run_id": "r-OLD",
+                "status": "timeout",
+                "error_message": "took too long",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert len(recorded) == 1
+        assert recorded[0]["run_id"] == "r-OLD"
+
+    def test_on_builder_completion_does_not_duplicate_summary_in_placeholder(self):
+        """Phase 4I post-review polish: success-path completion sends
+        the full summary in the document attachment caption.
+        ``mark_done`` must NOT also write the summary into the
+        placeholder body — that would duplicate the same text in
+        two consecutive Telegram messages.
+
+        Asserts that ``registry.mark_done`` is invoked with
+        ``summary=""`` (the placeholder retains only its ``[ Done ]``
+        header + activity-line history).
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+        registry.register_task(
+            task_id="t-dedup",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-1",
+        )
+
+        recorded: list[dict] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            recorded.append({"task_id": task_id, "summary": summary, "run_id": run_id})
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-dedup",
+                "task_id": "t-dedup",
+                "status": "success",
+                "summary": "Built the technical breakdown with eight sections...",
+                "run_id": "r-1",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert len(recorded) == 1
+        assert recorded[0]["summary"] == "", (
+            f"placeholder finalize must pass empty summary to avoid "
+            f"duplicating the document caption text; got: {recorded[0]['summary']!r}"
+        )
+
+    def test_on_builder_completion_branches_to_mark_stopped_on_error(self):
+        """Codex P2: error / timeout / cancelled statuses route through
+        ``mark_stopped`` so the placeholder finalizes honestly
+        instead of misleading the user with ``[ Done ]`` directly
+        above the retry card."""
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        registry = get_progress_registry()
+        registry.register_task(
+            task_id="t-2",
+            chat_id=99,
+            message_id=42,
+            channel_name="telegram",
+            run_id="r-2",
+        )
+
+        calls: list[str] = []
+
+        async def fake_done(*, task_id, summary, run_id):
+            calls.append(f"done:{task_id}")
+            return True
+
+        async def fake_stopped(*, task_id, reason, run_id):
+            calls.append(f"stopped:{task_id}:{reason}")
+            return True
+
+        registry.mark_done = fake_done  # type: ignore[method-assign]
+        registry.mark_stopped = fake_stopped  # type: ignore[method-assign]
+
+        ch._tg_loop = asyncio.new_event_loop()
+        ch._application = SimpleNamespace(bot=MagicMock())
+        ch._find_chat_topic_for_thread = lambda _tid: ("99", None)  # type: ignore[assignment]
+        ch._build_completion_caption = lambda _p: "Caption"  # type: ignore[assignment]
+        # The retry-keyboard helper is referenced on the error branch
+        # below — stub it to a sentinel so we don't trip downstream.
+        ch._build_retry_keyboard = lambda _t, **_k: None  # type: ignore[assignment]
+
+        async def go():
+            payload = {
+                "thread_id": "tt-2",
+                "task_id": "t-2",
+                "status": "error",
+                "error_message": "build crashed",
+                "run_id": "r-2",
+            }
+            try:
+                await ch._on_builder_completion(payload)
+            except Exception:
+                pass
+
+        _run(go())
+        ch._tg_loop.close()
+
+        assert any(c.startswith("stopped:t-2:build crashed") for c in calls), (
+            f"error status must route to mark_stopped; calls={calls}"
+        )
+        assert not any(c.startswith("done:") for c in calls)
+
+    def test_edit_progress_placeholder_re_raises_bot_failure(self):
+        """Codex P1 (Phase 4J post-review): a transient
+        ``bot.edit_message_text`` failure (Telegram 5xx / network
+        blip) MUST propagate out of ``_edit_progress_placeholder``
+        so the registry's outer try/except catches it and skips
+        ``last_pushed_body = body``. Previously the channel
+        swallowed the exception, the registry interpreted the edit
+        as successful, cached the body, and on terminal paths
+        unregistered the task — placeholder permanently stuck.
+
+        End-to-end lock: passes a fake bot whose edit raises;
+        ``_edit_progress_placeholder`` MUST raise.
+        """
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        class _FailingBot:
+            async def edit_message_text(self, **_kw):
+                raise RuntimeError("simulated Telegram 5xx")
+
+        ch._application = SimpleNamespace(bot=_FailingBot())
+        # No _tg_loop → _run_bot_call_on_telegram_loop short-circuits to
+        # ``return await coro`` (same loop), which awaits the failing
+        # edit and raises.
+        ch._tg_loop = None
+
+        async def go():
+            with pytest.raises(RuntimeError, match="simulated Telegram 5xx"):
+                await ch._edit_progress_placeholder(
+                    chat_id=42, message_id=99, body="some body"
+                )
+
+        _run(go())
+
+    def test_edit_progress_placeholder_raises_when_no_application(self):
+        """Codex P1: the no-application case (channel shutting down /
+        never started) MUST raise so the registry treats it as a
+        failed edit and preserves ``last_pushed_body`` for retry.
+        Previously returned silently → registry assumed success."""
+        from app.channels.telegram import TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+        ch._application = None  # explicit — channel not started
+
+        async def go():
+            with pytest.raises(RuntimeError, match="no application"):
+                await ch._edit_progress_placeholder(
+                    chat_id=1, message_id=2, body="body"
+                )
+
+        _run(go())
+
+    def test_telegram_unregisters_progress_callback_on_stop(self):
+        """Codex P2 (Phase 4J): ``TelegramChannel.start()`` registers
+        an edit callback with the global ``BuilderProgressRegistry``;
+        ``stop()`` MUST symmetrically unregister it. Otherwise a
+        restart leaves a stale callback bound to the stopped channel
+        instance, and webhook events arriving in the gap route
+        through a dead callback (registry says applied=True but
+        bot.edit_message_text never fires).
+        """
+        from app.channels.telegram import TelegramChannel
+        from app.gateway.builder_progress import get_progress_registry
+        from app.gateway.builder_progress.registry import reset_for_tests
+
+        reset_for_tests()
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        # Skip the real bot init in start(): instead manually run
+        # the channel-callback registration (the start() path most
+        # relevant to this test) and then call stop().
+        registry = get_progress_registry()
+        registry.register_channel_callback("telegram", ch._edit_progress_placeholder)
+        assert "telegram" in registry._callbacks
+
+        async def go():
+            # The bot startup machinery early-exits on no bot_token in
+            # the real start() — we already manually registered the
+            # callback above, so just call stop() directly. The
+            # stop() path checks ``_running`` and other state
+            # defensively.
+            await ch.stop()
+
+        _run(go())
+
+        assert "telegram" not in registry._callbacks, (
+            "stop() must unregister the channel's progress callback so "
+            "a restart doesn't leave a dead bound callback in the registry"
+        )
+
+    def test_send_propagates_register_failure_after_successful_telegram_send(self):
+        """End-to-end regression: when bot.send_message succeeds but the
+        registry registration step raises (e.g. malformed meta), the
+        exception MUST propagate out of ``send()`` so the bus's
+        ``_on_outbound`` re-raises and ``publish_outbound_strict``
+        returns False. AND the send must NOT be retried (the message
+        already landed)."""
+        from app.channels.telegram import ProgressSubscriberSpawnError, TelegramChannel
+
+        ch = TelegramChannel(bus=MessageBus(), config={"bot_token": "x"})
+
+        send_call_count = {"n": 0}
+
+        async def _capture_send(**_kw):
+            send_call_count["n"] += 1
+            return SimpleNamespace(message_id=12345)
+
+        bot_mock = MagicMock()
+        bot_mock.send_message = _capture_send
+        ch._application = SimpleNamespace(bot=bot_mock)
+
+        msg = OutboundMessage(
+            channel_name="telegram",
+            chat_id="1",
+            thread_id="th",
+            text="Working on it...",
+            # Empty task_id triggers ProgressSubscriberSpawnError in _register_progress_entry.
+            metadata={"builder_progress": {"task_id": "", "run_id": "r-1"}},
+        )
+
+        async def go():
+            with pytest.raises(ProgressSubscriberSpawnError, match="missing task_id or run_id"):
+                await ch.send(msg)
+        _run(go())
+
+        assert send_call_count["n"] == 1, (
+            f"send was retried {send_call_count['n']} times — registration "
+            f"failures must NOT trigger send retries (message already landed)"
+        )
 
 
 # ---------------------------------------------------------------------------

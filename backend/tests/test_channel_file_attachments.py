@@ -362,7 +362,16 @@ class TestBaseChannelOnOutbound:
         assert ch.sent_files[0][1].filename == "ok.txt"
 
     def test_send_raises_skips_file_uploads(self, tmp_path):
-        """When send() raises, file uploads are skipped entirely."""
+        """When send() raises, file uploads are skipped entirely.
+
+        Phase 4F codex P1 (post-review, fifth pass): ``_on_outbound``
+        now RE-RAISES after logging so the bus's
+        ``publish_outbound_strict`` can surface delivery failures. The
+        contract preserved by this test: the exception propagates AND
+        no file uploads are attempted on the failed text send.
+        """
+        import pytest
+
         bus = MessageBus()
         ch = _DummyChannel(bus)
 
@@ -382,9 +391,14 @@ class TestBaseChannelOnOutbound:
             attachments=[att],
         )
 
-        _run(ch._on_outbound(msg))
+        # send() now propagates the exception — the bus catches it at
+        # its iteration layer (so other channels still run); the
+        # strict variant flips delivered=False.
+        with pytest.raises(RuntimeError, match="network error"):
+            _run(ch._on_outbound(msg))
 
-        # send() raised, so send_file should never be called
+        # And critically: file uploads were NOT attempted on the
+        # failed text send.
         assert len(ch.sent_files) == 0
 
     def test_default_send_file_returns_false(self):

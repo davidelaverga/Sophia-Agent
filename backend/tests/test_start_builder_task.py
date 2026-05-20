@@ -126,6 +126,39 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert config_payload["configurable"]["thread_id"] == "asgi-1"
 
 
+def test_dispatch_sets_stream_resumable_true(monkeypatch):
+    """Phase 4F regression: ``stream_resumable=True`` MUST be set on
+    ``client.runs.create`` so the gateway-side ``BuilderProgressSubscriber``
+    (HTTP ``runs.join_stream``) can replay events to a late joiner.
+
+    Default for ``langgraph_sdk.RunsClient.create`` is
+    ``stream_resumable=False``. With that default the run produces events
+    internally but the server does not buffer them for HTTP subscribers,
+    so the subscriber sees ``chunks=0`` and the placeholder times out on
+    silence. Production failure 2026-05-16; see plan §Phase 4F.
+    """
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client(thread_id="asgi-2", run_id="run-2")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    runtime = _make_runtime({"user_id": "bob"})
+    asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Markdown deep dive on Zep memory.",
+            task_type="research",
+            runtime=runtime,
+        )
+    )
+
+    run_kwargs = captured["run_kwargs"]
+    assert run_kwargs.get("stream_resumable") is True, (
+        "start_builder_task MUST call runs.create(stream_resumable=True). "
+        "Without it, runs.join_stream returns 200 OK but never yields chunks, "
+        "and the BuilderProgressSubscriber places a misleading '[ Done ]' edit "
+        "after the per-event timeout fires."
+    )
+
+
 # ---------- duplicate protection --------------------------------------------
 
 

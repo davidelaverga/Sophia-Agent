@@ -390,10 +390,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if outputs_host_path_local:
                 outputs_root_local = Path(outputs_host_path_local)
                 if outputs_root_local.is_dir():
+                    # Promotion priority is left-to-right; the mtime sort
+                    # below then picks the most-recently-written file
+                    # within the set, so a fresh ``.pdf`` will still win
+                    # over an older ``.md``. The text extensions were
+                    # added in PR #126 Phase 4F after a production
+                    # markdown-deep-dive failed because ``.md`` wasn't in
+                    # the list — the model emitted ``artifact_path=None``
+                    # under force-emit, the short-circuit kicked in, the
+                    # ceiling fallback scanned outputs/ but found nothing
+                    # promotable, and the run coerced to error instead of
+                    # delivering the markdown the builder had written.
                     _PROMOTE_EXTS = (
+                        # Binary deliverables — high signal, listed first.
                         ".pdf", ".pptx", ".docx", ".xlsx",
                         ".png", ".jpg", ".jpeg", ".svg",
                         ".html", ".zip",
+                        # Text deliverables — markdown deep dives, JSON/CSV
+                        # data reports, YAML specs.
+                        ".md", ".txt", ".csv", ".json", ".yaml", ".yml",
                     )
                     candidates = [
                         p for p in outputs_root_local.rglob("*")
@@ -516,6 +531,59 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "user_next_action": "Tell me what to try differently and I'll run it again.",
             "confidence": 0.2,
         }
+
+    @staticmethod
+    def _upload_fallback_and_fire(
+        state: BuilderArtifactState,
+        runtime: Runtime,
+        fallback: dict[str, Any],
+        status: str,
+    ) -> None:
+        """Mirror the ceiling-fallback file to Supabase BEFORE firing the
+        completion webhook.
+
+        Phase 4L (2026-05-19): the two ceiling-fallback call sites used
+        to fire ``fire_completion_webhook_from_artifact`` directly,
+        without uploading the promoted file. If ``SOPHIA_SUPABASE_MIRROR_ALL``
+        wasn't enabled (or the per-write mirror missed the file), the
+        downstream signed-URL mint returned 404 and Telegram delivery
+        fell back to plaintext. Mirrors the upload step from the normal
+        happy path at ``after_model`` (the lines that resolve
+        ``upload_thread_id`` and call ``_upload_builder_outputs_to_supabase``).
+
+        Safe to call when ``fallback["artifact_path"]`` is None:
+        ``maybe_mirror_file`` is a no-op for missing paths, and
+        ``_upload_builder_outputs_to_supabase`` short-circuits when
+        ``outputs_host_path`` or ``thread_id`` is unset. The upload
+        helper also documents "Any failure is logged and swallowed so
+        builder flow never regresses" — so if the upload raises, the
+        webhook still fires (the placeholder is finalized; delivery
+        may still degrade to plaintext, which is the pre-Phase-4L
+        behavior — i.e. no regression).
+        """
+        thread_data = state.get("thread_data") or {}
+        outputs_host_path = (
+            thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
+        )
+        delegation = state.get("delegation_context")
+        parent_thread_id = (
+            delegation.get("parent_thread_id") if isinstance(delegation, dict) else None
+        )
+        builder_thread_id = (
+            runtime.context.get("thread_id") if getattr(runtime, "context", None) else None
+        )
+        upload_thread_id = parent_thread_id or builder_thread_id
+        _upload_builder_outputs_to_supabase(
+            thread_id=upload_thread_id,
+            outputs_host_path=outputs_host_path,
+            artifact_args=fallback,
+        )
+        fire_completion_webhook_from_artifact(
+            state=state,
+            runtime=runtime,
+            artifact=fallback,
+            status=status,
+        )
 
     @staticmethod
     def _has_generator_script(state: BuilderArtifactState) -> bool:
@@ -956,12 +1024,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                                 steps_completed=non_artifact_turns,
                                 reason=f"consecutive_empty_emit_rejections={consecutive_rejections}",
                             )
-                            # Fire the gateway webhook so Telegram still
-                            # receives the (degraded) artifact card.
-                            fire_completion_webhook_from_artifact(
+                            # Phase 4L: upload the promoted file to
+                            # Supabase BEFORE firing the webhook so the
+                            # signed-URL mint + Telegram bytes-download
+                            # both succeed. Without this the ceiling
+                            # fallback delivered plaintext instead of
+                            # the actual file (2026-05-19 production
+                            # smoke test).
+                            self._upload_fallback_and_fire(
                                 state=state,
                                 runtime=runtime,
-                                artifact=fallback,
+                                fallback=fallback,
                                 status="completed",
                             )
                             return {
@@ -1106,13 +1179,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         steps_completed=non_artifact_turns,
                         reason="hard_ceiling",
                     )
-                    # Fire the gateway webhook so Telegram receives the
-                    # ceiling-fallback artifact (or an error card via the
-                    # phantom-success guard if no real file landed).
-                    fire_completion_webhook_from_artifact(
+                    # Phase 4L: upload-before-webhook (see
+                    # ``_upload_fallback_and_fire`` docstring). Same
+                    # contract as the consecutive-rejection short-circuit
+                    # above — ensures the ceiling-fallback file actually
+                    # lands in Supabase before the channel adapter
+                    # tries to download bytes for the user.
+                    self._upload_fallback_and_fire(
                         state=state,
                         runtime=runtime,
-                        artifact=fallback,
+                        fallback=fallback,
                         status="completed",
                     )
                     return {

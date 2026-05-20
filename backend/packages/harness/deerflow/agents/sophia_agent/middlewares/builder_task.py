@@ -5,27 +5,22 @@ for the builder agent. Reads ``delegation_context`` from the runtime
 config and injects a ``<builder_briefing>`` block into
 ``system_prompt_blocks``.
 
-Two invocation paths:
+Invocation path:
 
-- **Companion-subagent path** (existing): ``start_builder_task.py`` builds
-  ``delegation_context`` from the companion's session state and seeds it
-  on the builder's input. This middleware reads it as-is.
-- **Builder-as-Main path** (Stage 1 of Phase-3 Telegram diagnostic): the
-  ``TelegramWorkChannel`` invokes Builder directly via ``runs.wait`` with
-  no ``delegation_context``. ``abefore_agent`` detects the missing dict,
-  runs a single Haiku classifier call (``_classify_brief``) to produce
-  ``{task_type, demo_mode, normalized_brief}``, and synthesises a
-  ``delegation_context`` matching the companion-side shape so the rest of
-  the chain (``BuilderResearchPolicyMiddleware``, etc.) reads identical
-  fields downstream.
+- **Companion-subagent path** (only path post v3 migration):
+  ``start_builder_task.py`` builds ``delegation_context`` from the
+  companion's session state and seeds it on the builder's input. This
+  middleware reads it as-is and renders the briefing block.
 
-Spec: ``docs/specs/sophia_builder_as_main_work_bot_spec.md`` §6.
+The legacy Builder-as-Main DM path (``TelegramWorkChannel`` + the
+Haiku-classifier synthesis branch) was deleted in Phase 4C of the v3
+migration. The builder is always-a-subagent now; ``delegation_context``
+is always supplied by the caller.
 """
 
 from __future__ import annotations
 
 import html
-import json
 import logging
 import os
 import time
@@ -36,50 +31,9 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
-from deerflow.agents.sophia_agent.utils import extract_last_human_text, log_middleware
+from deerflow.agents.sophia_agent.utils import log_middleware
 
 logger = logging.getLogger(__name__)
-
-
-# Synthetic-delegation branch (Builder-as-Main / Work bot DM path).
-_SYNTHETIC_DELEGATION_SOURCE = "work_bot_dm"
-_BRIEF_CLASSIFICATION_MODEL = "claude-haiku-4-5-20251001"
-_BRIEF_CLASSIFICATION_MAX_TOKENS = 512
-_BRIEF_CLASSIFICATION_PROMPT_PATH = (
-    Path(__file__).resolve().parent.parent / "prompts" / "builder_brief_classification.md"
-)
-_NORMALIZED_BRIEF_MAX_CHARS = 500
-_VALID_BRIEF_TASK_TYPES = (
-    "research", "code", "writing", "data_analysis", "visual", "other",
-)
-
-# Tool schema for the Anthropic structured-output classifier call. Lifted to
-# module level so ``_invoke_classifier`` stays focused on the SDK call shape
-# (keeps both functions under sentrux's complexity threshold).
-_CLASSIFY_BRIEF_TOOL_SCHEMA: dict[str, Any] = {
-    "name": "classify_brief",
-    "description": "Return classification fields for the brief.",
-    "input_schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["task_type", "demo_mode", "normalized_brief"],
-        "properties": {
-            "task_type": {
-                "type": "string",
-                "enum": list(_VALID_BRIEF_TASK_TYPES),
-                "description": "Top-level Builder task category.",
-            },
-            "demo_mode": {
-                "type": "boolean",
-                "description": "True when the user is testing/exploring rather than requesting real work.",
-            },
-            "normalized_brief": {
-                "type": "string",
-                "description": "1-3 sentence cleaned-up restatement of the user's request, ≤500 chars.",
-            },
-        },
-    },
-}
 
 
 # PR #94: max number of files to enumerate in the CRITICAL endgame block.
@@ -228,260 +182,14 @@ class BuilderTaskState(AgentState):
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     """Inject builder briefing derived from companion delegation context.
 
-    On the Builder-as-Main path (no companion in front), the async hook
-    ``abefore_agent`` synthesises a ``delegation_context`` via a single
-    Haiku classification call before delegating to the sync rendering
-    logic in ``before_agent``. See module docstring for the two paths.
+    Reads ``delegation_context`` from state and appends a
+    ``<builder_briefing>`` block to ``system_prompt_blocks``. When no
+    ``delegation_context`` is present the middleware no-ops — the legacy
+    Builder-as-Main synthesis branch was deleted in Phase 4C of the v3
+    migration. Builder is always-a-subagent now.
     """
 
     state_schema = BuilderTaskState
-
-    @override
-    async def abefore_agent(
-        self, state: BuilderTaskState, runtime: Runtime
-    ) -> dict | None:
-        """Async hook — synthesise delegation_context if missing, then render.
-
-        - When ``delegation_context`` is already populated (companion path),
-          this short-circuits to the sync rendering path with no Haiku call.
-        - When missing (Builder-as-Main / Work bot DM path), runs the
-          classifier, persists ``delegation_context`` into state, then
-          calls the sync render so the ``<builder_briefing>`` block is
-          appended to ``system_prompt_blocks`` in this same turn.
-        """
-        delegation = state.get("delegation_context")
-        synthesized: dict[str, Any] | None = None
-
-        if not delegation:
-            last_human = self._extract_last_human_text(state)
-            if not last_human:
-                logger.warning(
-                    "builder_task.no_human_message thread_id=%s",
-                    self._resolve_thread_id(runtime),
-                )
-                # Let the sync path early-return on empty delegation. The
-                # builder's first turn will likely ask a clarifying
-                # question; better than crashing.
-                return self.before_agent(state, runtime)
-
-            classification = await self._classify_brief(last_human)
-            synthesized = {
-                "task_brief": classification["normalized_brief"],
-                "task_type": classification["task_type"],
-                "demo_mode": classification["demo_mode"],
-                "normalized_brief": classification["normalized_brief"],
-                "source": _SYNTHETIC_DELEGATION_SOURCE,
-                "parent_thread_id": None,  # D3 — Builder-as-Main mode marker
-                "companion_artifact": None,
-                "active_ritual": None,
-                "ritual_phase": None,
-                "memories_for_builder": None,
-                "relevant_memories": [],
-                "allow_web_research": False,  # Policy MW will reconsider per task_type
-            }
-            # Mutate state so the sync render below sees it. Returning a
-            # dict from this hook merges into state before the next hook
-            # runs, but we also want this turn's render to use the
-            # synthesised context.
-            state["delegation_context"] = synthesized
-
-            logger.info(
-                "builder_task.synthetic_delegation thread_id=%s task_type=%s demo_mode=%s brief_len=%d",
-                self._resolve_thread_id(runtime),
-                synthesized["task_type"],
-                synthesized["demo_mode"],
-                len(synthesized["normalized_brief"]),
-            )
-
-        # Delegate to the sync rendering path so the briefing block is
-        # appended in the same turn as the synthesis.
-        rendered = self.before_agent(state, runtime)
-
-        if synthesized is None:
-            return rendered
-
-        # Merge the synthesised delegation_context into the returned dict
-        # so the state update lands atomically. ``before_agent`` returns
-        # ``{"system_prompt_blocks": [...]}`` or None; combine both.
-        result: dict[str, Any] = {"delegation_context": synthesized}
-        if isinstance(rendered, dict):
-            result.update(rendered)
-        return result
-
-    async def _classify_brief(self, user_brief: str) -> dict[str, Any]:
-        """Single Haiku call → ``{task_type, demo_mode, normalized_brief}``.
-
-        Uses Anthropic's tool-call structured output (same reason
-        ``emit_artifact`` does) so we get guaranteed-valid JSON instead of
-        parsing free-form text. Falls back to a conservative default on
-        any failure so the run never crashes here.
-
-        Cost: ~$0.0001 per call (Haiku, ~1k input + ~200 output tokens).
-        Latency: ~200-400ms p95.
-        """
-        fallback = self._classify_fallback(user_brief)
-
-        api_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
-        if not api_key:
-            logger.warning("builder_task.classify_no_api_key — using fallback")
-            return fallback
-
-        prompt = self._render_classification_prompt(user_brief)
-        if prompt is None:
-            return fallback
-
-        payload = await self._invoke_classifier(api_key, prompt)
-        if payload is None:
-            return fallback
-
-        return self._validate_classification(payload, user_brief)
-
-    @staticmethod
-    def _classify_fallback(user_brief: str) -> dict[str, Any]:
-        return {
-            "task_type": "other",
-            "demo_mode": False,
-            "normalized_brief": user_brief.strip()[:_NORMALIZED_BRIEF_MAX_CHARS],
-        }
-
-    @staticmethod
-    def _render_classification_prompt(user_brief: str) -> str | None:
-        """Load and substitute the classifier prompt template.
-
-        Returns None when the template is unreadable (logs a warning so
-        the operator can fix the deployment); caller treats None as
-        "use fallback".
-        """
-        try:
-            template = _BRIEF_CLASSIFICATION_PROMPT_PATH.read_text(encoding="utf-8")
-        except OSError:
-            logger.warning(
-                "builder_task.classify_template_missing path=%s — using fallback",
-                _BRIEF_CLASSIFICATION_PROMPT_PATH,
-                exc_info=True,
-            )
-            return None
-        return template.replace("{user_brief}", user_brief.strip())
-
-    async def _invoke_classifier(self, api_key: str, prompt: str) -> dict | None:
-        """Call Haiku with the classify_brief tool; return the input payload or None.
-
-        Wraps the SDK call + response parsing so ``_classify_brief`` stays
-        a clean orchestration sequence (under sentrux's complexity threshold).
-        Returns None on import error, transport error, or when the response
-        contains no usable tool_use block.
-        """
-        try:
-            from anthropic import AsyncAnthropic
-        except ImportError:
-            logger.warning("builder_task.classify_anthropic_missing — using fallback")
-            return None
-
-        try:
-            client = AsyncAnthropic(api_key=api_key)
-            response = await client.messages.create(
-                model=_BRIEF_CLASSIFICATION_MODEL,
-                max_tokens=_BRIEF_CLASSIFICATION_MAX_TOKENS,
-                messages=[{"role": "user", "content": prompt}],
-                tools=[_CLASSIFY_BRIEF_TOOL_SCHEMA],
-                tool_choice={"type": "tool", "name": "classify_brief"},
-            )
-        except Exception as exc:
-            logger.warning(
-                "builder_task.classify_call_failed error=%s — using fallback",
-                type(exc).__name__,
-                exc_info=True,
-            )
-            return None
-
-        payload = self._extract_classify_payload(response)
-        if payload is None:
-            logger.warning("builder_task.classify_no_tool_use_block — using fallback")
-        return payload
-
-    @staticmethod
-    def _extract_classify_payload(response: Any) -> dict | None:
-        """Pull the classify_brief tool_use payload dict out of a response.
-
-        Handles the common SDK shapes: input as dict (default) or input as
-        JSON string (some Anthropic SDK paths). Returns None when no
-        usable block is found.
-        """
-        for block in getattr(response, "content", []) or []:
-            if getattr(block, "type", None) != "tool_use":
-                continue
-            if getattr(block, "name", None) != "classify_brief":
-                continue
-            payload = getattr(block, "input", None)
-            if isinstance(payload, str):
-                try:
-                    payload = json.loads(payload)
-                except json.JSONDecodeError:
-                    return None
-            if isinstance(payload, dict):
-                return payload
-        return None
-
-    @staticmethod
-    def _validate_classification(payload: dict[str, Any], user_brief: str) -> dict[str, Any]:
-        """Normalise classifier output to the canonical shape, with safe defaults."""
-        task_type = payload.get("task_type")
-        if task_type not in _VALID_BRIEF_TASK_TYPES:
-            task_type = "other"
-
-        demo_mode = bool(payload.get("demo_mode", False))
-
-        normalized_brief = payload.get("normalized_brief")
-        if not isinstance(normalized_brief, str) or not normalized_brief.strip():
-            normalized_brief = user_brief.strip()
-        normalized_brief = normalized_brief.strip()[:_NORMALIZED_BRIEF_MAX_CHARS]
-
-        return {
-            "task_type": task_type,
-            "demo_mode": demo_mode,
-            "normalized_brief": normalized_brief,
-        }
-
-    @staticmethod
-    def _extract_last_human_text(state: BuilderTaskState) -> str | None:
-        """Return the trimmed text of the last human message, or None.
-
-        Thin delegate to ``deerflow.agents.sophia_agent.utils.extract_last_human_text``;
-        the shared helper is also used by ``BuilderMem0RetrievalMiddleware``
-        and keeps both call sites under sentrux's complexity threshold.
-        """
-        return extract_last_human_text(state.get("messages"))
-
-    @staticmethod
-    def _resolve_thread_id(runtime: Runtime) -> str | None:
-        """Best-effort thread_id extraction for log lines.
-
-        Walks two candidate sources (runtime.context, then
-        runtime.config.configurable) via a list-of-callables pattern so
-        the function stays linear instead of nested-try/except.
-        """
-        if runtime is None:
-            return None
-        for source in BuilderTaskMiddleware._thread_id_sources(runtime):
-            try:
-                value = source()
-            except Exception:
-                continue
-            if value:
-                return str(value)
-        return None
-
-    @staticmethod
-    def _thread_id_sources(runtime: Runtime) -> list:
-        """Ordered list of zero-arg callables yielding thread_id candidates."""
-        return [
-            lambda: (getattr(runtime, "context", None) or {}).get("thread_id"),
-            lambda: (
-                ((getattr(runtime, "config", None) or {}).get("configurable", {}) or {}).get(
-                    "thread_id"
-                )
-            ),
-        ]
 
     @override
     def before_agent(self, state: BuilderTaskState, runtime: Runtime) -> dict | None:
@@ -696,11 +404,24 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "fragile path PR #93/#94 spent recovery machinery on.\n"
             "Plan your work to fit within this budget:\n"
             "- Turn 1: call write_todos with a short plan (3–5 steps) so the UI can track progress.\n"
-            "- For text deliverables (markdown, html, plain text, code): write the complete file in a single "
-            "write_file_tool call. Do NOT split the same file across multiple write_file_tool calls and do NOT "
-            "call write_file_tool repeatedly to the same path — overwriting a long document costs 90+ seconds "
-            "per turn and burns the wall-clock budget. If output risks exceeding the write budget, ship a "
-            "tighter draft instead of fragmenting.\n"
+            "- For text deliverables (markdown, html, plain text, code): use write_file_tool to author the file. "
+            "PREFERRED path is ONE write_file_tool(path, content) call with the complete document. "
+            "For LONG documents that won't fit in a single model output (>~5000 words): use write_file_tool "
+            "MULTIPLE times to the SAME path — the FIRST call writes the opening chunk (omit append or pass "
+            "append=False), then SUBSEQUENT calls extend the file with append=True. Each chunk costs ~one turn; "
+            "building a 12k-word document in 2-3 chunked write_file_tool(append=True) calls is the correct "
+            "pattern. Use str_replace_tool for targeted edits to existing content.\n"
+            "NEVER use bash_tool to author text file content. The following bash patterns are FORBIDDEN as "
+            "substitutes for write_file_tool:\n"
+            "    * cat > file.md << 'EOF' ... EOF  (heredoc redirect)\n"
+            "    * python -c \"with open('/path', 'w') as f: f.write('...')\"\n"
+            "    * python - << 'PYEOF' ... PYEOF\n"
+            "    * echo '...' > file.md  /  printf '...' > file.md\n"
+            "bash_tool is for EXECUTION (running generator scripts that produce binaries, ls/cat for "
+            "verification, pip-free shell commands), NOT for authoring text. If you find yourself reaching "
+            "for bash to write file content, STOP and use write_file_tool(append=True) instead. The "
+            "bash-heredoc path leads to truncation, encoding bugs, and a turn-budget-burning loop where "
+            "each turn regenerates the entire document.\n"
             "- For binary deliverables (pdf, pptx, docx, xlsx, png, charts): the DELIVERABLE IS THE BINARY. "
             "**Use skills and tools that wrap pre-tested generators — do NOT write your own matplotlib / "
             "reportlab / python-pptx code.** Past attempts failed repeatedly on font/encoding/image-embedding "

@@ -602,6 +602,62 @@ class ChannelManager:
         # the dispatch loop (NOT on the channel's polling thread) to download
         # the bytes off the critical path.
         self._inbound_file_readers: dict[str, InboundFileReader] = {}
+        # Phase 4D of the v3 streaming migration: per-process dedup of
+        # builder runs we've already emitted a progress placeholder for.
+        # Bounded to ~1k (see ``_trim_progress_set``).
+        #
+        # Phase 4F (codex P2 post-review): backed by ``dict[..., None]``
+        # (NOT ``set``) because dict iteration order is insertion-ordered
+        # in CPython 3.7+ and guaranteed by the Python language spec.
+        # The previous ``set`` implementation evicted arbitrary entries
+        # under the trim path — including just-added in-flight ids —
+        # which let the same active build re-emit duplicate "Working
+        # on it…" placeholders on the next companion turn. With a dict
+        # we evict the OLDEST entries (FIFO).
+        #
+        # Phase 4F (codex P1 post-review, second pass): the key is
+        # ``(task_id, run_id)``, NOT ``task_id`` alone. ``update_async_task``
+        # interrupts the active run and creates a new run on the SAME
+        # task_id (see deepagents ``async_subagents.py::update_async_task``
+        # — writes the same task_id back to ``async_tasks`` with the new
+        # ``run_id``). Deduping on task_id alone would silently skip the
+        # replacement run's placeholder; the original subscriber stays
+        # attached to the interrupted run (which produces no further
+        # events) while the new run has no subscriber at all — Telegram
+        # progress freezes mid-task even though work continues.
+        self._progress_task_ids: dict[tuple[str, str], None] = {}
+
+    # Phase 4F (codex P1+P2 post-review): manager-local terminal-status
+    # set for the placeholder gate. **Intentionally diverges** from
+    # ``_TERMINAL_TASK_STATUSES`` in ``deerflow.sophia.tools.start_builder_task``
+    # — the two sets answer different questions:
+    #
+    # - ``start_builder_task``: "is this build truly finished, so a
+    #   duplicate launch is safe?" Default-active: ``interrupted``
+    #   counts as still-active so a duplicate launch is BLOCKED.
+    # - this manager set: "is this row inert enough that we should
+    #   NOT subscribe to its run?" ``interrupted`` runs produce no
+    #   further events (the run is suspended awaiting resume, or was
+    #   already replaced by a new run with a fresh run_id). Subscribing
+    #   would just yield ``[ Still working ]`` after the per-event
+    #   timeout. Treat as terminal here.
+    #
+    # When a user resumes an interrupted task via ``update_async_task``,
+    # the new run_id flows through this gate normally — the (task_id,
+    # new_run_id) tuple is fresh in the dedup dict, so a placeholder
+    # fires for the replacement run. That's the codex P1 fix above.
+    _TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({
+        "success",
+        "completed",
+        "error",
+        "failed",
+        "cancelled",
+        "timeout",
+        "timed_out",
+        # Codex P2 post-review: see comment above for why this diverges
+        # from the start_builder_task set.
+        "interrupted",
+    })
 
     def register_inbound_file_reader(self, channel_name: str, reader: InboundFileReader) -> None:
         """Register a per-channel async function that downloads bytes for
@@ -978,6 +1034,196 @@ class ChannelManager:
         )
         logger.info("[Manager] publishing outbound message to bus: channel=%s, chat_id=%s", msg.channel_name, msg.chat_id)
         await self.bus.publish_outbound(outbound)
+
+        # Phase 4D of the v3 streaming migration: when companion's
+        # ``start_builder_task`` tool ran this turn, publish a
+        # placeholder outbound carrying a ``builder_progress`` marker.
+        # ``telegram.py:send`` recognises the marker, captures the
+        # ``message_id`` after sending, and spawns a
+        # ``BuilderProgressSubscriber`` that subscribes to the builder
+        # run's v3 stream and edits the placeholder live.
+        try:
+            await self._maybe_open_progress_placeholders(msg, result, thread_id)
+        except Exception:
+            logger.warning(
+                "[Manager] progress-placeholder emit failed channel=%s chat_id=%s",
+                msg.channel_name,
+                msg.chat_id,
+                exc_info=True,
+            )
+
+    async def _maybe_open_progress_placeholders(
+        self,
+        msg: InboundMessage,
+        result: Any,
+        thread_id: str,
+    ) -> None:
+        """Publish "Working on it…" placeholders for new builder tasks.
+
+        Only fires on Telegram-class channels (per spec — the streaming
+        UX is Telegram-only in this phase). Pulls newly-launched builder
+        tasks off ``result["async_tasks"]`` (written by
+        ``start_builder_task``) and emits one placeholder per task with
+        a metadata marker the channel uses to wire up the subscriber.
+
+        The gating / placeholder-construction / delivery-confirmation
+        logic is split into helpers (``_progress_candidate_run_id``,
+        ``_build_progress_placeholder``, ``_publish_placeholder_strict``)
+        to keep this function's cyclomatic complexity below the sentrux
+        threshold (CC ≥ 16) — the codex-review cycle on PR #126 added
+        enough branches here to trip it.
+        """
+        if not msg.channel_name or not msg.channel_name.startswith("telegram"):
+            return
+        if not isinstance(result, dict):
+            return
+        async_tasks = result.get("async_tasks")
+        if not isinstance(async_tasks, dict) or not async_tasks:
+            return
+
+        for task_id, task_record in async_tasks.items():
+            run_id = self._progress_candidate_run_id(task_id, task_record)
+            if run_id is None:
+                continue
+            task_id_str = str(task_id)
+            placeholder = self._build_progress_placeholder(msg, thread_id, task_id_str, run_id)
+            if not await self._publish_placeholder_strict(placeholder, task_id_str, run_id):
+                continue
+            # Mark AFTER confirmed delivery so a transient send failure
+            # doesn't permanently block retries for this (task_id, run_id).
+            # Insertion order is preserved by dict (Phase 4F codex P2);
+            # the trim path relies on it for FIFO eviction.
+            self._progress_task_ids[(task_id_str, run_id)] = None
+            self._trim_progress_set()
+
+    def _progress_candidate_run_id(
+        self, task_id: Any, task_record: Any
+    ) -> str | None:
+        """Return the ``run_id`` we should emit a placeholder for, else None.
+
+        Gating chain (any False → skip):
+
+        - record is a dict
+        - ``agent_name == "sophia_builder"`` (codex earlier: skip non-builder)
+        - ``status`` is not in the manager's ``_TERMINAL_TASK_STATUSES``
+          (codex P1+P2 earlier: skip historical / interrupted rows)
+        - ``run_id`` is a non-empty string
+        - ``(task_id, run_id)`` is not already in the dedup dict
+          (codex P1 post-review second pass: dedup includes run_id
+          so ``update_async_task`` flow still emits for the new run)
+        """
+        if not isinstance(task_record, dict):
+            return None
+        if task_record.get("agent_name") != "sophia_builder":
+            return None
+        raw_status = task_record.get("status")
+        if (
+            isinstance(raw_status, str)
+            and raw_status.strip().lower() in self._TERMINAL_TASK_STATUSES
+        ):
+            return None
+        run_id = task_record.get("run_id")
+        if not isinstance(run_id, str) or not run_id:
+            return None
+        if (str(task_id), run_id) in self._progress_task_ids:
+            return None
+        return run_id
+
+    def _build_progress_placeholder(
+        self,
+        msg: InboundMessage,
+        thread_id: str,
+        task_id: str,
+        run_id: str,
+    ) -> OutboundMessage:
+        """Construct the "Working on it…" placeholder for a builder task."""
+        return OutboundMessage(
+            channel_name=msg.channel_name,
+            chat_id=msg.chat_id,
+            thread_id=thread_id,
+            text="Working on it — I'll show progress here. ☕",
+            thread_ts=msg.thread_ts,
+            metadata={
+                "builder_progress": {
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "user_id": msg.user_id,
+                }
+            },
+        )
+
+    async def _publish_placeholder_strict(
+        self,
+        placeholder: OutboundMessage,
+        task_id: str,
+        run_id: str,
+    ) -> bool:
+        """Publish via ``publish_outbound_strict`` + log.
+
+        Returns ``True`` only when delivery is confirmed (caller should
+        mark the dedup). Returns ``False`` on bus-level raise OR on
+        any listener exception (caller should NOT mark — the next
+        companion turn will retry). Phase 4F codex P1 post-review
+        (fourth pass): the bus's swallow-flavored ``publish_outbound``
+        hid Telegram send failures from this caller, so the dedup
+        could be marked for a placeholder that never reached Telegram
+        — permanently blocking retries.
+        """
+        logger.info(
+            "[Manager] publishing builder progress placeholder channel=%s chat_id=%s task_id=%s run_id=%s",
+            placeholder.channel_name,
+            placeholder.chat_id,
+            task_id,
+            run_id,
+        )
+        try:
+            delivered = await self.bus.publish_outbound_strict(placeholder)
+        except Exception:
+            logger.warning(
+                "[Manager] placeholder publish raised task_id=%s — will retry on a future turn",
+                task_id,
+                exc_info=True,
+            )
+            return False
+        if not delivered:
+            logger.warning(
+                "[Manager] placeholder delivery failed (listener raised) task_id=%s run_id=%s "
+                "— will retry on a future turn",
+                task_id,
+                run_id,
+            )
+            return False
+        return True
+
+    def _trim_progress_set(self) -> None:
+        """Evict the OLDEST 25% of dedup entries when the cap is hit.
+
+        Phase 4F (codex P2 post-review): backed by a dict so iteration
+        order == insertion order (guaranteed by the Python language spec
+        since 3.7). Without this, the previous ``set`` implementation
+        evicted hash-table-order entries — including just-added in-flight
+        task_ids — and a still-active build would re-emit duplicate
+        "Working on it…" placeholders on the next companion turn.
+
+        FIFO eviction is correct because the oldest entries are the
+        longest-completed builds: their async_tasks rows have already
+        terminated and re-emitting for them is forbidden by the
+        terminal-status gate added in the same review cycle. Even if a
+        future legitimate re-dispatch of an evicted task_id occurs, the
+        worst case is one extra placeholder — not the stuck-forever
+        duplicate the bug otherwise produces for an active run.
+        """
+        if len(self._progress_task_ids) <= 1024:
+            return
+        # Iterate keys in insertion order (oldest first) and drop the
+        # first 256. ``itertools.islice`` over a dict yields its keys in
+        # the same order ``iter(d)`` does, so this is the cheap O(256)
+        # path even when the dict holds 1024+ entries.
+        from itertools import islice
+
+        stale = list(islice(self._progress_task_ids, 256))
+        for tid in stale:
+            self._progress_task_ids.pop(tid, None)
 
     async def _handle_streaming_chat(
         self,

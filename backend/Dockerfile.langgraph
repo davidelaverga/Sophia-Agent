@@ -21,6 +21,25 @@ COPY skills ./skills
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync"
 
+# Phase 4L: pre-install readabilipy's Node.js dependency (jsdom) at
+# image build time. readabilipy's ``simple_json_from_html_string``
+# lazy-triggers ``npm install`` via ``utils.py::run_npm_install`` on
+# the first web_fetch call. But the upstream wheel ships a partial
+# ``node_modules/jsdom/`` tree, which causes the lazy install to fail
+# with ``ENOTEMPTY: directory not empty, rmdir '.../jsdom/lib/generated/idl'``
+# and leaves ``jsdom/lib/api.js`` missing. Every subsequent web_fetch
+# then falls back to pure-Python extraction (much lower content
+# quality), which causes long-form research builds to loop on bad
+# extractions until they hit the 30-turn force-emit ceiling.
+#
+# Wiping the partial node_modules and running a clean ``npm install``
+# at build time guarantees the runtime ``have_node()`` check in
+# ``readabilipy/simple_json.py`` finds a complete jsdom tree and
+# skips the broken lazy install entirely.
+RUN cd /app/backend/.venv/lib/python3.12/site-packages/readabilipy/javascript \
+    && rm -rf node_modules \
+    && npm install --no-audit --no-fund
+
 ENV PYTHONPATH=.
 
 CMD ["sh", "-c", "cd backend && uv run langgraph dev --host 0.0.0.0 --port ${PORT:-2024} --no-browser --allow-blocking --no-reload"]

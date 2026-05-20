@@ -111,7 +111,16 @@ class OutboundMessage:
 # MessageBus
 # ---------------------------------------------------------------------------
 
-OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, None]]
+# Phase 4M (codex P1 post-Phase-4K rollback review): outbound callbacks
+# may now return ``True`` to signal "I handled this message" (used by
+# ``publish_outbound_strict`` to confirm at least one listener actually
+# consumed the message before reporting delivery success). Returning
+# ``None`` / ``False`` means "no-op for me" (e.g.,
+# ``Channel._on_outbound`` no-ops when ``msg.channel_name != self.name``).
+# Raising means "delivery error" — ``publish_outbound_strict`` treats
+# both not-handled AND raised as undelivered. Back-compat: existing
+# ``publish_outbound`` (non-strict) ignores the return value entirely.
+OutboundCallback = Callable[[OutboundMessage], Coroutine[Any, Any, bool | None]]
 BuilderCompletionCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 ReviewNotificationCallback = Callable[[dict[str, Any]], Coroutine[Any, Any, None]]
 
@@ -176,7 +185,13 @@ class MessageBus:
         self._outbound_listeners = [cb for cb in self._outbound_listeners if cb is not callback]
 
     async def publish_outbound(self, msg: OutboundMessage) -> None:
-        """Dispatch an outbound message to all registered listeners."""
+        """Dispatch an outbound message to all registered listeners.
+
+        Listener exceptions are CAUGHT AND LOGGED, not raised (this is
+        v3-migration learning #3: a Telegram send failure is invisible
+        to callers that rely on the bus return). Callers that need
+        delivery confirmation should use ``publish_outbound_strict``.
+        """
         logger.info(
             "[Bus] outbound dispatching: channel=%s, chat_id=%s, listeners=%d, text_len=%d",
             msg.channel_name,
@@ -189,6 +204,96 @@ class MessageBus:
                 await callback(msg)
             except Exception:
                 logger.exception("Error in outbound callback for channel=%s", msg.channel_name)
+
+    async def publish_outbound_strict(self, msg: OutboundMessage) -> bool:
+        """Dispatch like ``publish_outbound`` but confirm a listener handled it.
+
+        Returns ``True`` only when:
+
+        - At least one listener returned ``True`` (signalling "I handled
+          this message" — for ``Channel._on_outbound`` that means the
+          listener's ``channel_name`` matched ``msg.channel_name`` AND
+          the send succeeded), AND
+        - No listener raised an exception during iteration.
+
+        Returns ``False`` when:
+
+        - No listeners are registered, OR
+        - All listeners returned a falsy value (none handled — e.g., the
+          target channel's listener was unregistered during a restart
+          race while other channels' listeners remain subscribed), OR
+        - At least one listener raised (the bus still iterates the rest
+          so unaffected channels still receive the message, but the
+          boolean tells the caller "delivery wasn't confirmed").
+
+        Phase 4M (codex P1 post-Phase-4K rollback review): added the
+        "at-least-one-handled" check. Without it, a publish during a
+        window where the target listener was missing but OTHER channel
+        listeners remained subscribed reported ``True`` (no listener
+        raised — they just no-op'd via ``msg.channel_name != self.name``)
+        and the manager dedup-marked the ``(task_id, run_id)``,
+        permanently blocking retries for that run even though no
+        channel actually consumed the placeholder. Requiring an
+        explicit ``True`` return closes this race.
+
+        Phase 4J (codex P2 post-Phase-4I review): the zero-listener case
+        is also ``False`` — same rationale, just a different cause
+        (channel never registered vs. wrong channel registered).
+
+        Use this for delivery-sensitive paths like the builder progress
+        placeholder.
+        """
+        logger.info(
+            "[Bus] outbound dispatching (strict): channel=%s, chat_id=%s, listeners=%d, text_len=%d",
+            msg.channel_name,
+            msg.chat_id,
+            len(self._outbound_listeners),
+            len(msg.text),
+        )
+        if not self._outbound_listeners:
+            # Codex P2 (Phase 4J): zero listeners = undelivered.
+            logger.warning(
+                "[Bus] publish_outbound_strict with zero listeners — "
+                "treating as undelivered (channel=%s chat_id=%s)",
+                msg.channel_name,
+                msg.chat_id,
+            )
+            return False
+
+        any_handled = False
+        any_failed = False
+        for callback in self._outbound_listeners:
+            try:
+                result = await callback(msg)
+            except Exception:
+                any_failed = True
+                logger.exception(
+                    "Error in outbound callback (strict) for channel=%s",
+                    msg.channel_name,
+                )
+                continue
+            # Phase 4M: explicit-True contract. Listeners that no-op
+            # (channel-name mismatch) return None and DO NOT count as
+            # a handler. Only an explicit ``True`` means "I did the
+            # work this message asked for".
+            if result is True:
+                any_handled = True
+
+        if any_failed:
+            return False
+        if not any_handled:
+            logger.warning(
+                "[Bus] publish_outbound_strict: no listener handled the "
+                "message channel=%s chat_id=%s listeners=%d — likely the "
+                "target-channel listener is missing (restart race / "
+                "wrong channel registered). Treating as undelivered "
+                "so the caller can retry.",
+                msg.channel_name,
+                msg.chat_id,
+                len(self._outbound_listeners),
+            )
+            return False
+        return True
 
     # -- builder completion ------------------------------------------------
 

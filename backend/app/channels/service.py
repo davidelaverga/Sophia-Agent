@@ -11,18 +11,15 @@ from app.channels.store import ChannelStore
 
 logger = logging.getLogger(__name__)
 
-# Channel name → import path for lazy loading
+# Channel name → import path for lazy loading.
+# The legacy ``telegram_work`` Builder-as-Main DM channel was deleted in
+# Phase 4C of the v3 streaming migration. Builds now route through the
+# companion (``@Sophia_EI_bot``) only; the @Sophia_Work_bot bot can be
+# deactivated in BotFather.
 _CHANNEL_REGISTRY: dict[str, str] = {
     "feishu": "app.channels.feishu:FeishuChannel",
     "slack": "app.channels.slack:SlackChannel",
     "telegram": "app.channels.telegram:TelegramChannel",
-    # Builder-as-Main DM surface for @Sophia_Work_bot. See
-    # docs/specs/sophia_builder_as_main_work_bot_spec.md and
-    # app/channels/telegram_work.py for the channel contract.
-    # Distinct prefix ("telegram_work" vs "telegram") keeps the Work bot's
-    # ChannelStore threads isolated from EI threads — see the prefix
-    # discipline note in app/channels/store.py.
-    "telegram_work": "app.channels.telegram_work:TelegramWorkChannel",
 }
 
 
@@ -49,6 +46,12 @@ class ChannelService:
             default_session=default_session if isinstance(default_session, dict) else None,
             channel_sessions=channel_sessions,
         )
+        # Phase 4H: the langgraph_url plumb to channels (added in
+        # Phase 4F for the deleted BuilderProgressSubscriber) is no
+        # longer needed — the gateway-side BuilderProgressRegistry +
+        # ``/internal/builder-progress`` webhook relay replaces the
+        # per-channel SDK stream subscription. The manager still uses
+        # ``langgraph_url`` for its own dispatch.
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False

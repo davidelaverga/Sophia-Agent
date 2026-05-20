@@ -162,10 +162,10 @@ from deerflow.config import get_app_config
 - `SubagentExecutor` keeps timeout terminal-state guarantees while recording `last_ai_message_summary` and `late_ai_message_summary` for post-timeout diagnostics
 - Companion chain now wires `SummarizationMiddleware` from `summarization` config trigger settings
 - Builder chain includes `SandboxMiddleware` + `TodoMiddleware` in addition to builder-specific task/artifact middlewares
-- **Builder middleware chain order** (post-Stage-1 spec): `build_subagent_runtime_middlewares` → `FileInjectionMiddleware(soul, AGENTS)` → `UserIdentityMiddleware` → **`BuilderMem0RetrievalMiddleware`** (NEW, Stage 1) → `BuilderTaskMiddleware` → `BuilderResearchPolicyMiddleware` → `TodoMiddleware` → `BuilderArtifactMiddleware` → `PromptAssemblyMiddleware` → `DanglingToolCallMiddleware`. The mem0 retrieval middleware sits AFTER UserIdentity (so user_id is resolved) and BEFORE BuilderTask (which reads memory snippets if present and synthesises `delegation_context` on the Builder-as-Main path)
-- **Builder-as-Main DM (Stage 1, Phase 3)**: `TelegramWorkChannel` ([app/channels/telegram_work.py](app/channels/telegram_work.py), registered as `telegram_work` in [service.py](app/channels/service.py)) bypasses the companion graph entirely — DMs to `@Sophia_Work_bot` dispatch directly to `sophia_builder` via `runs.wait`. `BuilderTaskMiddleware.abefore_agent` detects the missing `delegation_context` and runs a single Haiku 4.5 classifier call (`_classify_brief` against [agents/sophia_agent/prompts/builder_brief_classification.md](packages/harness/deerflow/agents/sophia_agent/prompts/builder_brief_classification.md)) to synthesise one with `parent_thread_id: None` (the **D3 marker** for Builder-as-Main mode). Identity binding is shared with the EI bot via `app.gateway.telegram_link_store.resolve_user_id("telegram", chat_id)` — bindings are per Telegram identity, not per bot. Channel-store keys use the prefix `telegram_work:` to stay isolated from EI's `telegram:` keys (see prefix-discipline note in [store.py](app/channels/store.py)). Feature-flagged via `channels.telegram_work.enabled` (default false); Stage 1B uses `pilot_user_id` to gate to a single Sophia user. Spec: `~/Desktop/Sophia V3 specs/sophia_builder_as_main_work_bot_spec.md`
-- **Builder recursion guard (D7/C2)**: [`builder_agent.py`](packages/harness/deerflow/agents/sophia_agent/builder_agent.py) raises `RuntimeError` at agent-build time if `task` or `start_async_task` is in the Builder's tool list. Builder must NEVER spawn AsyncSubAgents — that would create unbounded Builder→Builder recursion. Stage 3 may relax this for specific specialist subagents; the relaxation must be threaded through the registry layer, not added back to the tool list silently. Regression: `tests/test_builder_no_subagent_recursion.py`
-- Regression target for this lifecycle: `PYTHONPATH=. uv run pytest tests/test_sophia_builder_flow.py tests/test_builder_synthetic_delegation.py tests/test_builder_mem0_retrieval.py tests/test_telegram_work_channel.py tests/test_builder_no_subagent_recursion.py -v`
+- **Builder middleware chain order** (post-Phase-4): `build_subagent_runtime_middlewares` → `FileInjectionMiddleware(soul, AGENTS)` → `UserIdentityMiddleware` → `BuilderMem0RetrievalMiddleware` → `BuilderTaskMiddleware` → `BuilderResearchPolicyMiddleware` → **`BuilderProgressMiddleware`** (Phase 4G, fires HTTP POSTs to `/internal/builder-progress` on each lifecycle hook) → `TodoMiddleware` → `BuilderArtifactMiddleware` → `PromptAssemblyMiddleware` → `DanglingToolCallMiddleware`. See [packages/harness/deerflow/agents/sophia_agent/builder_middlewares.py](packages/harness/deerflow/agents/sophia_agent/builder_middlewares.py) for the canonical wiring.
+- **Builder recursion guard (D7/C2)**: [`builder_agent.py`](packages/harness/deerflow/agents/sophia_agent/builder_agent.py) raises `RuntimeError` at agent-build time if `task` or `start_async_task` is in the Builder's tool list. Builder must NEVER spawn AsyncSubAgents — that would create unbounded Builder→Builder recursion. Regression: `tests/test_builder_no_subagent_recursion.py`
+- **Builder authoring tools (Phase 4M)**: `write_file_tool` documents `append: bool` — for long documents that won't fit a single model output, first call writes the opening chunk (`append=False` or omit), subsequent calls extend with `append=True`. `bash_tool` is for EXECUTION only — heredocs / `python -c "with open(...)"` / `echo > file` / `printf > file` for file authoring are explicitly prohibited by the builder system prompt every turn. Regression: [tests/test_builder_task_authoring_guidance.py](tests/test_builder_task_authoring_guidance.py)
+- Regression target for the builder lifecycle: `PYTHONPATH=. uv run pytest tests/test_sophia_builder_flow.py tests/test_builder_mem0_retrieval.py tests/test_builder_no_subagent_recursion.py tests/test_builder_task_authoring_guidance.py tests/test_builder_artifact_ceiling_fallback.py -v`
 
 **ThreadState** (`packages/harness/deerflow/agents/thread_state.py`):
 - Extends `AgentState` with: `sandbox`, `thread_data`, `title`, `artifacts`, `todos`, `uploaded_files`, `viewed_images`
@@ -327,9 +327,47 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 - `manager.py` - Core dispatcher: creates threads via `client.threads.create()`, routes commands, keeps Slack/Telegram on `client.runs.wait()`, and uses `client.runs.stream(["messages-tuple", "values"])` for Feishu incremental outbound updates
 - `base.py` - Abstract `Channel` base class (start/stop/send lifecycle)
 - `service.py` - Manages lifecycle of all configured channels from `config.yaml`
-- `slack.py` / `feishu.py` / `telegram.py` / `telegram_work.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place; `telegram_work.py` is the Builder-as-Main DM channel — bypasses bus + ChannelManager and dispatches directly to `sophia_builder` via `runs.wait`)
+- `slack.py` / `feishu.py` / `telegram.py` - Platform-specific implementations (`feishu.py` tracks the running card `message_id` in memory and patches the same card in place)
 - Telegram attachment downloads triggered by `ChannelManager` must be dispatched back onto `telegram.py`'s `_tg_loop` (using `asyncio.run_coroutine_threadsafe`) because PTB bot I/O is loop-affine to the polling thread loop.
 - Telegram builder completion delivery uploads artifact bytes directly (instead of passing signed URLs to Telegram), and truncates outgoing text to Telegram API limits (`send_document` caption 1024 chars, `send_message` text 4096 chars).
+
+### Builder progress streaming (webhook relay — Phase 4H+)
+
+The live `[ Researching ]` → `[ Drafting ]` → `[ Finalizing ]` → `[ Done ]` placeholder UX is delivered via an HTTP webhook relay (NOT SDK streaming). The full architecture and rationale are documented in [CLAUDE.md (root)](../CLAUDE.md) under "Builder progress streaming". Key gateway-side primitives:
+
+- **`app/gateway/builder_progress/registry.py::BuilderProgressRegistry`** — per-process singleton, channel-agnostic. Maps `task_id` → `(chat_id, message_id, channel_name, run_id, ProgressRenderer)`. Per-entry `asyncio.Lock` serializes renderer mutation + callback await so concurrent webhooks for the same task_id can't interleave at the renderer-state boundary. Identity-guarded unregister (`expected_entry=entry`) protects against the `update_async_task` replacement-run race. Bounded terminal-edit retry (3 attempts, 2/5/15s backoff) protects against transient Telegram 5xx — completion webhooks are LRU-deduped server-side so a single failed edit without retry would permanently strand the placeholder.
+- **`app/channels/telegram_progress_renderer.py::ProgressRenderer`** — event → plain-text body. `_TOOL_LABELS` maps tool name → `(emoji, verb)`; `_HIDDEN_TOOLS = {"ls", "read_file", "str_replace", "todo_read", "todo_write", "bash"}` suppresses noisy tools from the activity stream (bash hidden because verification/inline-Python ops clutter the placeholder — trade-off accepted: binary-deliverable generator scripts also show no live signal during the ~30-60s run; the artifact still arrives via the terminal webhook). `mark_done` clears accumulated `activity_lines` so the final body is `[ Done ]` + optional summary. `mark_stalled` (per-event timeout) and `mark_stopped` (error / cancel) PRESERVE activity history — in those degraded states the history is the user's last honest signal.
+- **`app/gateway/routers/builder_events.py`** — three internal POST endpoints + two webapp SSE GET endpoints:
+  - `POST /internal/builder-events` — terminal completion from langgraph (fire-and-forget channel fan-out via `asyncio.create_task` so the daemon-thread timeout doesn't trip).
+  - `POST /internal/builder-progress` — live progress events from `BuilderProgressMiddleware`.
+  - `GET /api/threads/{thread_id}/builder-events` — webapp SSE for terminal events.
+  - `GET /api/threads/{thread_id}/builder-events/last` — late-mount recovery (returns the most recent terminal event if still in the TTL window).
+- **`packages/harness/deerflow/agents/sophia_agent/middlewares/builder_progress.py::BuilderProgressMiddleware`** — async lifecycle hooks (`abefore_agent` / `aafter_model` / `aafter_agent`) emit fire-and-forget HTTP POSTs to `/internal/builder-progress`. Tool-name classification uses lowercase substring match (e.g., `search`/`fetch`/`browse`/`scrape` → `researching`). `_trim_tool_args` strips heavy fields like `write_file.content` from the payload (preserves only `query`/`url`/`path`/`command` per tool — the renderer only reads those). Strong-ref `_POST_TASKS` set with discard-on-done prevents GC of in-flight POSTs (v3-migration learning #4).
+
+**Webapp integration path (not yet built)**:
+
+The registry is channel-agnostic. To wire the webapp into the same streaming primitives:
+
+1. **Build an SSE bridge** at `GET /api/threads/{thread_id}/builder-progress` (mirror the terminal-events SSE). On webhook arrival, the registry's edit callback for the webapp channel publishes per-thread to an SSE worker; clients connected to the endpoint receive each body.
+2. **Register the webapp callback** at gateway startup: `registry.register_channel_callback("webapp", _emit_sse_event)` where `_emit_sse_event(chat_id, message_id, body) -> bool` returns `True` after publishing (Phase 4M codex P1 explicit-True contract; `None`/`False` = no-op).
+3. **Register placeholder slots** when the webapp shows a placeholder: `registry.register_task(task_id=..., chat_id=..., message_id=..., channel_name="webapp", run_id=...)`. `chat_id` and `message_id` can be webapp-internal handles (any stable identifier for the placeholder DOM node / store entry).
+4. **Terminal finalization is free** — the existing `_on_builder_completion` on the message bus calls `registry.mark_done(task_id, run_id)` / `mark_stopped(task_id, reason, run_id)` for ALL registered channels. The webapp's callback receives the final `[ Done ]` body alongside Telegram.
+
+The langgraph-side middleware doesn't change — events fire for every task regardless of who's subscribed.
+
+Event sequence the webapp will see:
+
+```
+custom   {"name": "phase", "phase": "starting"}    → header [ Working ]
+updates  {"agent": {"messages": [{"tool_calls": [{"name": "builder_web_search", "args": {"query": "..."}}]}]}}
+                                                   → activity line "🔍 Searching: ..."
+custom   {"name": "phase", "phase": "researching"} → header [ Researching ]
+... (drafting / finalizing transitions as the builder progresses)
+custom   {"name": "phase", "phase": "done"}        → header [ Done ], activity cleared
+(terminal webhook delivers artifact via _on_builder_completion)
+```
+
+The webapp can either reuse `ProgressRenderer.apply` directly (delivers plain-text bracket-header bodies that work in any UI) OR consume the structured events and render a richer UI matching the same `_TOOL_LABELS` / `_HIDDEN_TOOLS` conventions for visual consistency with Telegram.
 
 **Message Flow**:
 1. External platform -> Channel impl -> `MessageBus.publish_inbound()`
@@ -344,7 +382,7 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 **Configuration** (`config.yaml` -> `channels`):
 - `langgraph_url` - LangGraph Server URL (default: `http://localhost:2024`)
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
-- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token), `telegram_work` (bot_token + bot_username + enabled + pilot_user_id; see Builder-as-Main section above)
+- Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
 
 ### Render production deployment
 
@@ -352,36 +390,34 @@ Bridges external messaging platforms (Feishu, Slack, Telegram) to the DeerFlow a
 
 **Critical: the config resolver hard-fails on any missing `$VAR`.** [`AppConfig.resolve_env_variables`](packages/harness/deerflow/config/app_config.py) at line 188-190 raises `ValueError` when an env var referenced via `$NAME` syntax isn't set in the process environment. There is no tolerant `${NAME:-default}` syntax. **Both services load this file at startup** — adding a `$VAR` to `config.production.yaml` requires the env var to be set on **both** the gateway service and the langgraph service in Render's dashboard (or the missing one crashes at boot).
 
-**Hardcode-vs-env-var rule:** if the value is a secret (token, key, signed URL), use `$VAR` and ensure both services have it. If the value is public (bot username, channel name, `recursion_limit`), hardcode it in YAML. We learned this the hard way with `bot_username: $TELEGRAM_WORKER_BOT_USERNAME` — adding the var only to gateway crashed langgraph; hardcoding `bot_username: Sophia_Work_bot` fixed it.
+**Hardcode-vs-env-var rule:** if the value is a secret (token, key, signed URL), use `$VAR` and ensure both services have it. If the value is public (bot username, channel name, `recursion_limit`), hardcode it in YAML.
 
 **Required Render env vars** (declared in `render.yaml` with `sync: false` = "operator-set in dashboard, Render won't auto-populate"):
 
 | Service | Required env vars |
 |---|---|
-| `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` |
-| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, plus any token referenced by `config.production.yaml` (currently `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WORKER_BOT_TOKEN`) |
+| `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME` |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `SOPHIA_GATEWAY_URL` (target for `BuilderProgressMiddleware` HTTP POSTs — defaults to `http://localhost:8001`), plus any token referenced by `config.production.yaml` (currently `TELEGRAM_BOT_TOKEN`) |
 | `sophia-voice` | (see render.yaml for the voice service envVars list) |
 
 **Deployment verification recipe** (run in the Render shell after a deploy):
 ```bash
-cat /app/config.yaml | head -60   # confirm telegram_work block is present
+cat /app/config.yaml | head -60   # confirm the file is the one baked from config.production.yaml
 ls -la /app/config.yaml           # timestamp matches deploy time = baked at build
 echo "---"
-env | grep -E "TELEGRAM|ANTHROPIC|MEM0" | sed 's/=.*$/=<set>/'   # verify env vars set
+env | grep -E "TELEGRAM|ANTHROPIC|MEM0|SOPHIA_GATEWAY_URL" | sed 's/=.*$/=<set>/'   # verify env vars set
 ```
 
-**Startup log fingerprints** (gateway service):
-- `Channel telegram_work is disabled, skipping` → `enabled: false` in config
-- `[TelegramWork] bot_token is empty` → `$TELEGRAM_WORKER_BOT_TOKEN` env var unset
-- `[TelegramWork] channel started (bot_username=Sophia_Work_bot ...)` → success
-- (no `telegram_work` log line at all) → `channels.telegram_work` block missing from config.production.yaml
+**Startup log fingerprints** (gateway service): the channels listed in `config.production.yaml::channels` log `Channel <name> started` (or `disabled, skipping` if `enabled: false`). Builder progress signals look like `[BuilderProgress] task registered task_id=... run_id=... message_id=...` (channel callback registered the placeholder) and `[BuilderProgress] task unregistered task_id=...` (on terminal).
 
-**The `runs.wait` 400 trap** — channel adapters that call `client.runs.wait(...)` against the langgraph HTTP service MUST set `thread_id` / `user_id` / `channel` in `context` ONLY, NEVER also in `config["configurable"]`. langgraph-api 0.7+ rejects both-channels payloads with HTTP 400 in <1ms (pre-run validation):
+**The `runs.wait` 400 trap** — channel adapters that call `client.runs.wait(...)` / `runs.create(...)` against the langgraph HTTP service MUST set `thread_id` / `user_id` / `channel` in `context` ONLY, NEVER also in `config["configurable"]`. langgraph-api 0.7+ rejects both-channels payloads with HTTP 400 in <1ms (pre-run validation):
 ```
 "Cannot specify both configurable and context. Prefer setting context alone."
 (langgraph_api/models/run.py:225-228)
 ```
-Mirror the [manager.py:633-645](app/channels/manager.py) pattern. langgraph-api copies `context` → `configurable` server-side (run.py:233), so factories like `make_sophia_builder(config)` still read `cfg["configurable"]["user_id"]` correctly. `start_builder_task.py` is allowed to set `configurable` because it dispatches via SDK ASGI in-process transport (`get_client(url=None)`), which has different validation. Regression-guard test in [tests/test_telegram_work_channel.py::TestDispatchPayloadShape](tests/test_telegram_work_channel.py).
+See [manager.py](app/channels/manager.py) for the working pattern. langgraph-api copies `context` → `configurable` server-side (run.py:233), so factories like `make_sophia_builder(config)` still read `cfg["configurable"]["user_id"]` correctly. `start_builder_task.py` is allowed to set `configurable` because it dispatches via SDK ASGI in-process transport (`get_client(url=None)`), which has different validation. Regression-guard test in [tests/test_channels.py::TestDispatchPayloadShape](tests/test_channels.py).
+
+**`readabilipy` / `jsdom` build-time install (Phase 4L)** — `Dockerfile.langgraph` pre-installs the readabilipy Node.js dependency (`jsdom`) at image build time via `cd .../readabilipy/javascript && rm -rf node_modules && npm install`. Without this, the wheel-shipped partial `node_modules/jsdom/` tree causes a runtime `ENOTEMPTY` npm error on every `web_fetch` → Readability.js falls back to pure-Python extraction → content quality collapses → long-form research builds loop until force-emit ceiling. The pre-install is langgraph-only — `Dockerfile.gateway` doesn't need it.
 
 ### Sentrux scoring (CI gate at `.github/workflows/sentrux-gate.yml`)
 

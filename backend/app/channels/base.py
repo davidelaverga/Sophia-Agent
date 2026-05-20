@@ -84,20 +84,40 @@ class Channel(ABC):
             metadata=metadata or {},
         )
 
-    async def _on_outbound(self, msg: OutboundMessage) -> None:
+    async def _on_outbound(self, msg: OutboundMessage) -> bool | None:
         """Outbound callback registered with the bus.
 
-        Only forwards messages targeted at this channel.
-        Sends the text message first, then uploads any file attachments.
-        File uploads are skipped entirely when the text send fails to avoid
-        partial deliveries (files without accompanying text).
+        Only forwards messages targeted at this channel. Sends the text
+        message first, then uploads any file attachments. File uploads
+        are skipped entirely when the text send fails to avoid partial
+        deliveries (files without accompanying text).
+
+        Phase 4F (codex P1 post-review, fifth pass): the text-send
+        exception is logged AND RE-RAISED. The bus's
+        ``publish_outbound`` already has its own iteration-level catch
+        (so a single channel's failure doesn't crash other channels'
+        listeners), and ``publish_outbound_strict`` needs the
+        propagated exception to flip ``all_ok=False`` for delivery-
+        sensitive callers. Catching here too was redundant defensive
+        coding that hid send failures from the manager's placeholder
+        path. File-upload failures remain non-fatal (advisory) — they
+        are independent attachments and a failed upload should not
+        flip delivery to False for the text payload.
+
+        Phase 4M (codex P1 post-Phase-4K rollback review): explicit
+        ``True`` return on the matching-channel-and-sent path so
+        ``publish_outbound_strict`` can confirm THIS listener actually
+        handled the message. The channel-mismatch branch returns
+        ``None`` implicitly (no-op) so other channels' listeners can
+        still be subscribed without falsely signalling handled. See
+        the ``OutboundCallback`` contract in ``message_bus.py``.
         """
         if msg.channel_name == self.name:
             try:
                 await self.send(msg)
             except Exception:
                 logger.exception("Failed to send outbound message on channel %s", self.name)
-                return  # Do not attempt file uploads when the text message failed
+                raise
 
             for attachment in msg.attachments:
                 try:
@@ -106,3 +126,6 @@ class Channel(ABC):
                         logger.warning("[%s] file upload skipped for %s", self.name, attachment.filename)
                 except Exception:
                     logger.exception("[%s] failed to upload file %s", self.name, attachment.filename)
+
+            return True
+        return None
