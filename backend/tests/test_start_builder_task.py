@@ -246,12 +246,19 @@ def test_duplicate_launch_text_enumerates_all_four_lifecycle_tools(monkeypatch):
         assert tool_name in response, f"{tool_name} missing from rejection text"
     # Each lifecycle alternative must include the FULL task_id verbatim so the
     # model can copy-paste the call shape without hallucinating an id.
-    assert response.count("abc-uuid-123") >= 4
+    # Note: list_async_tasks() takes no task_id, so we expect >= 3 (update,
+    # check, cancel).
+    assert response.count("abc-uuid-123") >= 3
     # At least one ack example per alternative branch.
     assert "Got it, updating" in response
     assert "Let me check" in response
     assert "cancelling the build" in response
     assert "Pulling up your in-flight builds" in response
+    # Regression guard: the recall path must NOT hard-code
+    # ``status_filter="running"`` — pending and interrupted are also active
+    # in our terminal-blacklist model, so a "running"-only filter would
+    # report no in-flight builds even when a build is still active.
+    assert 'status_filter="running"' not in response
 
 
 def test_duplicate_launch_text_does_not_truncate_task_id(monkeypatch):

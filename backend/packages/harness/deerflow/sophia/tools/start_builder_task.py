@@ -628,8 +628,9 @@ async def _start_builder_task_impl(
             f"→ ack like \"Let me check on it now.\"\n"
             f"- User wants to stop the build: cancel_async_task(task_id=\"{existing_task_id}\") "
             f"→ ack like \"Got it, cancelling the build now.\"\n"
-            f"- User referenced multiple tasks: list_async_tasks(status_filter=\"running\") "
-            f"→ ack like \"Pulling up your in-flight builds.\"\n"
+            f"- User referenced multiple tasks: list_async_tasks() "
+            f"(no status_filter — pending and interrupted are also active; let the "
+            f"caller see all builds) → ack like \"Pulling up your in-flight builds.\"\n"
             f"Use the FULL task_id verbatim — never truncate. Do not respond in plain text "
             f"without calling one of these. Never chain two lifecycle tools on the same turn."
         )

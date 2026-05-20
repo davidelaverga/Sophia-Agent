@@ -112,3 +112,16 @@ def test_terminal_block_teaches_list_async_tasks_for_recall():
     block = _render_terminal_block(_terminal_task("success"))
     assert "list_async_tasks" in block
     assert "check_async_task" in block
+
+
+def test_active_block_recall_path_does_not_hardcode_running_filter():
+    """Regression guard for the P2 review: ``list_async_tasks(status_filter="running")``
+    would miss pending and interrupted tasks (both non-terminal in our
+    terminal-blacklist model). The recall path must list ALL tasks so the
+    model sees the full active set, not just running ones."""
+    block = _render_active_block(_active_task())
+    assert 'status_filter="running"' not in block
+    # And the block should explicitly call out why (so the next prose edit
+    # doesn't quietly re-introduce the narrower filter).
+    lower = block.lower()
+    assert "pending" in lower or "interrupted" in lower or "no status_filter" in lower
