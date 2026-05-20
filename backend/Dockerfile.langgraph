@@ -42,4 +42,19 @@ RUN cd /app/backend/.venv/lib/python3.12/site-packages/readabilipy/javascript \
 
 ENV PYTHONPATH=.
 
-CMD ["sh", "-c", "cd backend && uv run langgraph dev --host 0.0.0.0 --port ${PORT:-2024} --no-browser --allow-blocking --no-reload"]
+# Phase 2A: --n-jobs-per-worker 10 unblocks concurrent runs across companion +
+# builder threads. Without this flag, `langgraph dev` defaults to 1 (see
+# `langgraph_api/cli.py:262-263`) AND explicitly overrides any external
+# `N_JOBS_PER_WORKER` env var (`langgraph_api/cli.py:286`), so setting that
+# env var on Render has no effect — the flag is the ONLY way to change it.
+#
+# Default 1 was the production-failure root cause confirmed in Render logs at
+# 2026-05-20 19:43–19:54 UTC: a 10-min builder run held the only worker and
+# the companion's mid-build update sat in queue for 7m 47s, tripping the
+# gateway's runs.wait 5-min httpx ReadTimeout → user saw "An internal error
+# occurred."
+#
+# N=10 matches the langgraph_api.config default. Cross-thread parallelism
+# (builder thread + companion thread on the same shared worker pool) is what
+# we gain; within-thread runs still serialize via LangGraph checkpoint locks.
+CMD ["sh", "-c", "cd backend && uv run langgraph dev --host 0.0.0.0 --port ${PORT:-2024} --no-browser --allow-blocking --no-reload --n-jobs-per-worker 10"]
