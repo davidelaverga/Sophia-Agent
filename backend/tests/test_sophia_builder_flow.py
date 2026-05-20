@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from langgraph.types import Command
 
 
@@ -316,9 +317,6 @@ def test_async_subagent_middleware_after_builder_command(monkeypatch):
 
 
 # ---------- lifecycle-tool discipline (companion system prompt) -------------
-
-
-import pytest  # noqa: E402  — grouped at top to avoid breaking earlier sections
 
 
 _LIFECYCLE_TOOLS_WITH_ACK = [
