@@ -114,6 +114,32 @@ def test_terminal_block_teaches_list_async_tasks_for_recall():
     assert "check_async_task" in block
 
 
+def test_terminal_block_recall_defers_check_to_next_turn_no_chaining():
+    """Regression guard for the P2 review: the recall path previously said
+    'call list_async_tasks first to recall task_ids, then check_async_task
+    on the specific id' AND in the same paragraph said 'never chain a
+    second lifecycle call'. Those two rules contradicted each other and
+    could push the model into invalid 2-tool turns.
+
+    The fix defers the check_async_task call to the NEXT turn so the
+    single-lifecycle-tool-per-turn invariant holds. This test pins that
+    fix in place."""
+    block = _render_terminal_block(_terminal_task("success"))
+    # Both tools must still be mentioned (the model needs to know the
+    # 2-turn pattern exists).
+    assert "list_async_tasks" in block
+    assert "check_async_task" in block
+    # The deferral must be explicit.
+    assert "NEXT turn" in block or "next turn" in block
+    # Anti-pattern guard: the prose must NOT instruct the model to call
+    # check_async_task immediately after list_async_tasks on the same turn.
+    lower = block.lower()
+    assert "then check_async_task" not in lower
+    assert "list_async_tasks first" not in lower
+    # And the one-per-turn invariant must still be present.
+    assert "never chain" in lower or "one lifecycle tool per turn" in lower
+
+
 def test_active_block_recall_path_does_not_hardcode_running_filter():
     """Regression guard for the P2 review: ``list_async_tasks(status_filter="running")``
     would miss pending and interrupted tasks (both non-terminal in our
