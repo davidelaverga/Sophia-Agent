@@ -26,6 +26,71 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-20 · [v3-streaming-webhook-relay] · PR #128
+**Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `~/.claude/plans/users-davidelaverga-desktop-sophia-v3-s-synchronous-dolphin.md` (Phase 4A–4N)
+
+### What Changed
+- **deepagents 0.5 → 0.6, langgraph 1.1 → 1.2, langchain 1.2 → 1.3** version bumps (Phase 4B).
+- **Deleted the workshop bot + Builder-as-Main DM** (`telegram_workshop*.py`, `telegram_work.py`, custom SDK-stream consumer, workshop sinks, `_install_fetch_last_ai_patch`, `_BACKGROUND_TASKS` ghosts). Net –4,500 lines of speculative code.
+- **Webhook relay** for Telegram builder progress streaming (Phase 4H). `BuilderProgressMiddleware` (langgraph side) fires fire-and-forget HTTP POSTs to `/internal/builder-progress` on every lifecycle hook. Gateway-side `BuilderProgressRegistry` dispatches each event through a per-task `ProgressRenderer` and invokes channel callbacks (Telegram registered on `start()`, unregistered on `stop()`). Live placeholder updates: `[ Researching ]` → `[ Drafting ]` → `[ Finalizing ]` → `[ Done ]` with emoji-prefixed activity lines (🔍 Searching, 🔗 Reading, 📝 Drafting, 📦 Wrapping up).
+- **Critical builder-prompt fix (Phase 4M)**: documented `write_file_tool(append=True)` in the tool docstring + removed the prompt rule "do NOT call write_file_tool repeatedly to the same path" + explicitly prohibited bash for text authoring (heredocs / `python -c "with open(...)"` / `echo > file` / `printf > file`). This closed a degenerate `bash`-heredoc rewrite loop where the model regenerated the entire long-form deliverable every turn until force-emit. Prompts/tools are static surface — no model retraining needed; takes effect on next Anthropic API call.
+- **`readabilipy` / `jsdom` build-time install (Phase 4L)** in `Dockerfile.langgraph`. Wipes the partial wheel-shipped `node_modules/jsdom/` and runs `npm install`. Without this, every `web_fetch` hits ENOTEMPTY → falls back to pure-Python extraction → research content degrades → builds loop.
+- **Ceiling-fallback Supabase upload (Phase 4L)**: both ceiling-fallback paths now call `_upload_fallback_and_fire` (upload → mint signed URL → fire completion webhook). Pre-fix, the promoted file was never uploaded and Telegram delivery fell back to plaintext.
+- **Codex review rounds** (P1+P2 ×many): run_id matching across all three terminal arrival paths; per-task asyncio.Lock serialization (renderer mutation + callback await); identity-guarded `unregister_task` (replacement-run race); bounded terminal-edit retry (2/5/15s backoff); fire-and-forget terminal handler (`receive_builder_event` schedules `_fan_out_to_channels` via `asyncio.create_task`); composite-key pending terminals `(task_id, run_id)`; cache-after-success (`entry.last_pushed_body` only updates on successful callback); trim `_emit_updates` payload to renderer-relevant fields only; `Channel._on_outbound` re-raises on send failure; `publish_outbound_strict` requires explicit `True` return from at least one listener (explicit-handled contract).
+- **Renderer polish (Phase 4N)**: `mark_done` clears `activity_lines` so the final placeholder is a clean `[ Done ]` + summary. `bash` added to `_HIDDEN_TOOLS` (verification commands + inline-Python noise — trade-off accepted that binary-deliverable generator scripts show no live signal during their run).
+
+### What We Learned
+
+#### Streaming primitives are the foundation — channel-agnostic by design
+
+The `BuilderProgressRegistry` doesn't know about Telegram. Channels register `(task_id, chat_id, message_id, channel_name, run_id)` after their placeholder send captures the message_id, and an edit callback at startup. The renderer produces plain-text bodies usable by any UI. Webapp integration is a small adapter: build an SSE bridge at `/api/threads/{thread_id}/builder-progress`, register a `_emit_sse_event` callback that publishes to an SSE worker per thread, and the existing `_on_builder_completion` already handles terminal finalization for all registered channels. The langgraph-side middleware doesn't change. See backend/CLAUDE.md "Builder progress streaming" for the canonical integration recipe.
+
+#### `langgraph_runtime_inmem` does NOT replay events to cross-process HTTP subscribers
+
+Production smoke tests (May 16 + May 17) confirmed `chunks=0` for the full 120 s subscriber lifetime on `runs.join_stream`, even with `stream_resumable=True` and `stream_mode=["messages-tuple", "updates", "custom"]`. Migrating to `langgraph up` (paid LangSmith Deployment, Docker-Compose) would unblock SDK streaming but doesn't fit Render's single-container model. **The webhook relay sidesteps the entire runtime-streaming question** — each event is one HTTP POST delivered in real time while the subscriber is connected. No replay buffer dependency.
+
+#### Read the langgraph traceback before guessing
+
+The 2026-05-19 long-form regression looked like "the new streaming work broke the builder." But the langgraph LLM-call durations told the truth: turn 11 = 2s (small bash), turn 12 = 109s, turn 14 = 114s. A 110-second LLM generation is the model emitting ~10K tokens of bash heredoc rewriting the whole document. The streaming work was correct; the prompt rule "do NOT call write_file_tool repeatedly" had no documented alternative for long-form content, so the model invented bash heredocs. Fix landed in static prompt + tool docstring surface (Phase 4M).
+
+#### Tool description is part of the model's catalog — undocumented params are invisible
+
+`write_file_tool` had `append: bool = False` in its Python signature, but the docstring (which Anthropic's tool_use parses into the model's tool catalog) didn't mention it. The model literally couldn't discover the escape hatch. Documenting it was a one-line change with zero behavior code. **Lesson:** when a tool has a parameter, the docstring MUST document it — the signature alone is invisible to the model.
+
+#### Fire-and-forget terminal handler — learning #7 re-discovered
+
+When PR #128 branched off `main` for the clean v3 migration, we inherited the pre-`4ea5c657` synchronous-await version of `receive_builder_event`. Result: every terminal webhook tripped the 2-second langgraph-side `httpx.ReadTimeout`. The fix (cherry-picked from the abandoned PR #125 branch) schedules `publish_builder_completion` via `asyncio.create_task` with `_BACKGROUND_TASKS` strong-ref + `add_done_callback(discard)`. The langgraph-side timeout was simultaneously bumped to 10s.
+
+#### Explicit-True listener contract closes a multi-channel race
+
+`publish_outbound_strict` previously returned True whenever no callback raised. But `Channel._on_outbound` no-ops silently on channel-name mismatch. With non-target listeners subscribed during a target-channel restart, strict reported "delivered" → manager dedup-marked → retries permanently blocked. Fix: callbacks now return `True` to signal "handled". `Channel._on_outbound` returns `True` after matching-channel-and-sent, `None` otherwise. Strict requires at least one `True` AND no raises.
+
+#### Identity-guarded unregister against `update_async_task` replacement runs
+
+When the user calls `update_async_task`, the registry sees `register_task(task_id, ..., run_id=B)` overwriting `_entries[task_id]` with a fresh entry. If run A's terminal handler is mid-await on the slow Telegram edit, releasing the lock and unconditionally popping `_entries[task_id]` would detach run B's placeholder. The run_id check at the top of `_finalize_terminal_locked` doesn't catch this — it compares the snapshot entry's run_id against the incoming terminal's run_id, both of which match A correctly. Fix: `unregister_task(task_id, expected_entry=entry)` — the pop only fires if the dict slot still references the snapshot.
+
+#### Sentrux CI gate cares about categorical regressions, not small `quality_signal` deltas
+
+We shipped 28+ commits across Phase 4 with `quality_signal` deltas all within tolerance. The gate fails only on cycles count, god-files count, complex-functions count, or coupling threshold breaches. Cyclomatic complexity threshold in v0.5.7 is CC ≥ 16; god-files is fan-out > 15. Refactor by extracting helpers / sibling modules when those trip.
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md`: deleted the `Builder-as-Main DM (Stage 1, Phase 3)` section (code is gone). Added a `Builder progress streaming (webhook relay)` section with the full flow + the webapp-integration recipe. Updated the Render env-vars list (removed `TELEGRAM_WORKER_BOT_TOKEN`, added `SOPHIA_GATEWAY_URL` on langgraph). Updated the `runs.wait` 400-trap test reference to `tests/test_channels.py::TestDispatchPayloadShape`.
+- `backend/CLAUDE.md`: removed `telegram_work` from channel implementations / config / startup-log fingerprints. Added a `Builder progress streaming (webhook relay)` section with the four primitives (registry, renderer, router endpoints, middleware) + a "Webapp integration path (not yet built)" subsection with the four steps. Added `readabilipy` / `jsdom` build-time install rationale. Updated builder-chain order to include `BuilderProgressMiddleware`. Added Phase 4M authoring-tools rules (`write_file_tool(append=True)`, bash-not-for-authoring).
+
+### Skills Created / Modified
+- None directly. The Phase 4M prompt fix lives in `BuilderTaskMiddleware._build_briefing` (a Python file, not a skill).
+
+### GEPA Log Entry
+- N/A. Phase 4M edited Python prompt-assembly code (`builder_task.py::_build_briefing`), not a skill file in `skills/public/sophia/`. Behavior change is deterministic given the same builder state — tone delta doesn't apply (the builder doesn't speak; the relevant signal is "does the model pick `write_file(append=True)` over `bash + heredoc` under long-form pressure?"). Trace pair: 2026-05-19 langgraph log at task_id `019e423f-9d26-71e3-8fce-4cd8cc5de0a1` (looping, pre-fix) vs 2026-05-19 night log post-deploy (succeeds, single-shot write + extends with append=True or completes in one call).
+
+### Active follow-ups (open after this PR)
+- **Webapp builder-progress SSE bridge**: build `GET /api/threads/{thread_id}/builder-progress` mirroring the existing terminal-events SSE; register webapp channel callback at gateway startup; webapp-side `register_task` on placeholder display. Foundation is in place — see backend/CLAUDE.md "Webapp integration path".
+- **Refresh `uv.lock`** for langgraph-side patch drift: `langgraph-api 0.8.1→0.8.7`, `langgraph-sdk 0.3.9→0.3.14`, `deepagents 0.6.1→0.6.2`, `langgraph-runtime-inmem 0.28.0→0.28.1`. Major versions are correct; only patch drift. Best done in its own PR for clean revertibility.
+- **`write_todos` rendering polish**: shows as generic `🔧 write todos` because the tool name isn't in `_TOOL_LABELS`. Adding `"write_todos": ("📋", "Planning")` would render nicer. Low priority — user said current rendering is "ok".
+- **Restore bash visibility for legitimate generator-script execution** (chart-visualization, ppt-generation): if the blank-stream trade-off becomes noticeable on binary-deliverable workflows, swap the blanket `_HIDDEN_TOOLS` entry for a command-pattern heuristic (hide only heredocs / `python -c` / `echo > …`).
+
+---
+
 ## 2026-05-07 · [phase-2-telegram-memory-handoff] · PRs #[pending]
 **Author:** Claude Code (with Davide) · **Track:** backend + frontend · **Spec:** `~/Desktop/sophia_async_migration_telegram_diagnostic_spec.md` (Phase 2) + plan at `~/.claude/plans/users-davidelaverga-desktop-sophia-asyn-peppy-riddle.md`
 
