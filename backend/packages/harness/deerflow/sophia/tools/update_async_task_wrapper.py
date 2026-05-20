@@ -17,12 +17,17 @@ producing no useful output for the user.
 This wrapper:
 
 - Pre-screens the target ``task_id`` against
-  ``async_tasks[task_id]["status"]``.
-- If the task is in
-  ``deerflow.sophia.tools.start_builder_task._TERMINAL_TASK_STATUSES``,
-  returns a directive ToolMessage that names ``start_builder_task`` as
-  the correct path for "build a v2 that incorporates the change" and
-  carries the prior artifact's identity inline.
+  ``async_tasks[task_id]["status"]`` (the cached status maintained by
+  ``BuildAwarenessMiddleware``).
+- If the cache says terminal — redirect with the directive ToolMessage,
+  no SDK dispatch.
+- If the cache says non-terminal — perform a **live** SDK re-check
+  against the run before delegating. The cache can be up to
+  ``BuildAwarenessMiddleware._REFRESH_TTL_SECONDS`` (~10s) stale, plus
+  the model's own 2-3s decision latency on top, so a run that finished
+  during the window can still appear running here. The live check
+  closes this race. SDK failures fall back to the cache and delegate
+  (fail-open — we never block on SDK transport issues).
 - Otherwise delegates to the deepagents-native ``update_async_task``
   implementation (the wrapper holds a reference to it).
 
@@ -44,6 +49,42 @@ from langchain_core.tools.base import ToolException
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 
 logger = logging.getLogger(__name__)
+
+
+async def _fetch_live_status(tracked: dict[str, Any]) -> str | None:
+    """Fetch live run status from the LangGraph SDK to defeat cache staleness.
+
+    Returns the live status string on success, or ``None`` on any failure
+    (SDK transport error, missing identifiers, non-dict response). Caller
+    treats ``None`` as "no live signal — fall back to cached status",
+    NEVER as "terminal". This is fail-open by design: an unreachable SDK
+    must not block a legitimate update_async_task dispatch.
+
+    Mirrors ``BuildAwarenessMiddleware._refresh_task_status`` — same
+    in-process ASGI client (``url=None``), same exception-swallow
+    semantics, same dict-shape tolerance.
+    """
+    thread_id = tracked.get("thread_id") or tracked.get("task_id")
+    run_id = tracked.get("run_id")
+    if not thread_id or not run_id:
+        return None
+    try:
+        from langgraph_sdk import get_client  # local import: avoids hard dep at module load
+
+        client = get_client(url=None)  # ASGI in-process
+        run = await client.runs.get(thread_id=thread_id, run_id=run_id)
+    except Exception:  # noqa: BLE001 — never let SDK errors raise out of the wrapper
+        logger.debug(
+            "update_async_task_wrapper: live status check failed for task_id=%s",
+            tracked.get("task_id"),
+            exc_info=True,
+        )
+        return None
+    if isinstance(run, dict):
+        status = run.get("status")
+        if isinstance(status, str):
+            return status
+    return None
 
 
 def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
@@ -145,6 +186,25 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
                 tracked.get("status"),
             )
             return _terminal_redirect_message(task_id, tracked)
+        # Cache says non-terminal — but the cache is maintained by
+        # BuildAwarenessMiddleware with a ~10s TTL, plus the model's
+        # 2-3s decision latency before this wrapper runs. A run that
+        # finished during that window will still look running in cache.
+        # Re-check live via SDK before delegating. On SDK failure we
+        # fail-open and use the cached status (we never want to block a
+        # legitimate update because of SDK transport issues).
+        if tracked is not None:
+            live_status = await _fetch_live_status(tracked)
+            if live_status in _TERMINAL_TASK_STATUSES:
+                tracked_now = {**tracked, "status": live_status}
+                logger.info(
+                    "[Builder] update_async_task redirected (live-check caught "
+                    "stale cache): task_id=%s cached_status=%s live_status=%s",
+                    task_id,
+                    tracked.get("status"),
+                    live_status,
+                )
+                return _terminal_redirect_message(task_id, tracked_now)
         if native_coroutine is None:
             raise ToolException(
                 "Native update_async_task coroutine is unavailable."
