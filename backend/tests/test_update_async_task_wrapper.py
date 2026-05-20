@@ -20,14 +20,13 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from deerflow.sophia.tools.update_async_task_wrapper import (
     make_update_async_task_wrapper,
 )
-
 
 # ---- helpers ---------------------------------------------------------------
 

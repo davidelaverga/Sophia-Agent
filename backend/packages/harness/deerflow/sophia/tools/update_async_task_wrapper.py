@@ -114,6 +114,74 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
     )
 
 
+def _resolve_tracked(state: dict | None, task_id: str) -> dict | None:
+    """Look up the tracked task entry from ``state["async_tasks"]``.
+
+    Returns the entry dict on success, ``None`` if the state shape is
+    unexpected or the task is not tracked. Tolerates both the exact
+    ``task_id`` and a stripped variant (matches the deepagents-native
+    ``_resolve_tracked_task`` lookup semantics).
+    """
+    if not isinstance(state, dict):
+        return None
+    tasks = state.get("async_tasks") or {}
+    if not isinstance(tasks, dict):
+        return None
+    key = task_id.strip() if isinstance(task_id, str) else task_id
+    tracked = tasks.get(task_id) or tasks.get(key)
+    return tracked if isinstance(tracked, dict) else None
+
+
+def _cache_redirect_if_terminal(task_id: str, state: dict | None) -> str | None:
+    """If the cached status is terminal, log + return the redirect string.
+    Otherwise return ``None`` so the caller delegates to the native dispatch.
+    Used by both sync and async paths.
+    """
+    tracked = _resolve_tracked(state, task_id)
+    if tracked is None or tracked.get("status") not in _TERMINAL_TASK_STATUSES:
+        return None
+    logger.info(
+        "[Builder] update_async_task redirected: task_id=%s "
+        "status=%s (terminal — directing model to start_builder_task)",
+        task_id,
+        tracked.get("status"),
+    )
+    return _terminal_redirect_message(task_id, tracked)
+
+
+async def _cache_or_live_redirect_if_terminal(
+    task_id: str, state: dict | None
+) -> str | None:
+    """Async path: check cache first; if non-terminal, re-check live SDK to
+    defeat cache staleness (BuildAwarenessMiddleware TTL ~10s + model
+    decision latency ~3s). On live-terminal, log + return redirect. On
+    SDK failure or live-running, return ``None`` so the caller delegates.
+    """
+    # Cache-terminal branch (no live check needed).
+    cache_redirect = _cache_redirect_if_terminal(task_id, state)
+    if cache_redirect is not None:
+        return cache_redirect
+
+    # Cache says non-terminal (or unknown). For the known-but-non-terminal
+    # case, re-check live SDK to close the stale-cache window.
+    tracked = _resolve_tracked(state, task_id)
+    if tracked is None:
+        return None  # Unknown task — let native return its own error.
+    live_status = await _fetch_live_status(tracked)
+    if live_status not in _TERMINAL_TASK_STATUSES:
+        return None  # Still running or SDK failed — delegate.
+
+    tracked_now = {**tracked, "status": live_status}
+    logger.info(
+        "[Builder] update_async_task redirected (live-check caught "
+        "stale cache): task_id=%s cached_status=%s live_status=%s",
+        task_id,
+        tracked.get("status"),
+        live_status,
+    )
+    return _terminal_redirect_message(task_id, tracked_now)
+
+
 def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredTool:
     """Build a terminal-thread-guarded wrapper around the deepagents-native
     ``update_async_task`` tool.
@@ -138,32 +206,19 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
     native_func = native_tool.func
     native_coroutine = native_tool.coroutine
 
-    def _is_terminal(state: dict | None, task_id: str) -> tuple[bool, dict | None]:
-        if not isinstance(state, dict):
-            return False, None
-        tasks = state.get("async_tasks") or {}
-        if not isinstance(tasks, dict):
-            return False, None
-        tracked = tasks.get(task_id) or tasks.get(task_id.strip() if isinstance(task_id, str) else task_id)
-        if not isinstance(tracked, dict):
-            return False, None
-        return tracked.get("status") in _TERMINAL_TASK_STATUSES, tracked
-
     def update_async_task(
         task_id: str,
         message: str,
         runtime,
     ):
+        # Sync path: cache-only check. The live SDK call is async-only;
+        # production langgraph always uses the async coroutine below. Sync
+        # is exercised by tests only. Mirrors BuildAwareness's sync/async
+        # asymmetry (sync `before_agent` is cache-only; async refreshes).
         state = runtime.state if runtime is not None else {}
-        is_terminal, tracked = _is_terminal(state, task_id)
-        if is_terminal and tracked is not None:
-            logger.info(
-                "[Builder] update_async_task redirected: task_id=%s "
-                "status=%s (terminal — directing model to start_builder_task)",
-                task_id,
-                tracked.get("status"),
-            )
-            return _terminal_redirect_message(task_id, tracked)
+        redirect = _cache_redirect_if_terminal(task_id, state)
+        if redirect is not None:
+            return redirect
         if native_func is None:
             raise ToolException(
                 "Native update_async_task sync func is unavailable; call this "
@@ -177,34 +232,9 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
         runtime,
     ):
         state = runtime.state if runtime is not None else {}
-        is_terminal, tracked = _is_terminal(state, task_id)
-        if is_terminal and tracked is not None:
-            logger.info(
-                "[Builder] update_async_task redirected: task_id=%s "
-                "status=%s (terminal — directing model to start_builder_task)",
-                task_id,
-                tracked.get("status"),
-            )
-            return _terminal_redirect_message(task_id, tracked)
-        # Cache says non-terminal — but the cache is maintained by
-        # BuildAwarenessMiddleware with a ~10s TTL, plus the model's
-        # 2-3s decision latency before this wrapper runs. A run that
-        # finished during that window will still look running in cache.
-        # Re-check live via SDK before delegating. On SDK failure we
-        # fail-open and use the cached status (we never want to block a
-        # legitimate update because of SDK transport issues).
-        if tracked is not None:
-            live_status = await _fetch_live_status(tracked)
-            if live_status in _TERMINAL_TASK_STATUSES:
-                tracked_now = {**tracked, "status": live_status}
-                logger.info(
-                    "[Builder] update_async_task redirected (live-check caught "
-                    "stale cache): task_id=%s cached_status=%s live_status=%s",
-                    task_id,
-                    tracked.get("status"),
-                    live_status,
-                )
-                return _terminal_redirect_message(task_id, tracked_now)
+        redirect = await _cache_or_live_redirect_if_terminal(task_id, state)
+        if redirect is not None:
+            return redirect
         if native_coroutine is None:
             raise ToolException(
                 "Native update_async_task coroutine is unavailable."
