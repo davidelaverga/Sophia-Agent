@@ -20,7 +20,7 @@ from typing import Any, NotRequired, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelRequest, hook_config
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
@@ -813,6 +813,72 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             force_reason,
         )
         return self._forced_write_tool_choice()
+
+    @staticmethod
+    def _is_post_interrupt_update(messages: list) -> bool:
+        """Detect whether the latest HumanMessage in ``messages`` arrived
+        AFTER the builder had already started working — the signal that
+        ``update_async_task`` interrupted an in-flight run and appended a
+        new user message via deepagents' ``multitask_strategy="interrupt"``.
+
+        Heuristic: the latest message is a ``HumanMessage`` AND somewhere
+        earlier in the conversation there is an ``AIMessage`` carrying
+        ``tool_calls``. That AIMessage proves the builder did work (made
+        tool calls) before the new user instruction landed.
+
+        This is a one-shot trigger: as soon as the model responds, the
+        latest message becomes an AIMessage and the heuristic stops
+        matching for that turn-cycle. The caller resets the counter once,
+        then the normal counter-increment logic runs unchanged.
+        """
+        if not messages:
+            return False
+        latest = messages[-1]
+        if not isinstance(latest, HumanMessage):
+            return False
+        # Look backward for any AIMessage with tool_calls (builder did
+        # real work before this new instruction).
+        for msg in reversed(messages[:-1]):
+            if isinstance(msg, AIMessage):
+                tool_calls = getattr(msg, "tool_calls", None) or []
+                if tool_calls:
+                    return True
+        return False
+
+    def _maybe_reset_turn_budget(
+        self, state: BuilderArtifactState
+    ) -> dict[str, Any] | None:
+        """Phase 2E.1: when an interrupted builder run resumes with a new
+        user instruction, reset ``builder_non_artifact_turns`` to 0 so the
+        post-update work gets a fresh turn budget. Without this, the
+        pre-interrupt research turns count against the post-update writing
+        budget and the builder hits the hard ceiling without producing a
+        deliverable (production failure 2026-05-21 21:18-21:46 UTC).
+        """
+        messages = state.get("messages") or []
+        if not self._is_post_interrupt_update(messages):
+            return None
+        current = int(state.get("builder_non_artifact_turns", 0) or 0)
+        if current <= 0:
+            return None  # Nothing to reset — fresh run.
+        logger.info(
+            "[BuilderArtifact] post-interrupt update detected — resetting "
+            "builder_non_artifact_turns: %d → 0 (fresh budget for the update)",
+            current,
+        )
+        return {"builder_non_artifact_turns": 0}
+
+    @override
+    def before_model(
+        self, state: BuilderArtifactState, runtime: Runtime | None = None
+    ) -> dict | None:
+        return self._maybe_reset_turn_budget(state)
+
+    @override
+    async def abefore_model(
+        self, state: BuilderArtifactState, runtime: Runtime | None = None
+    ) -> dict | None:
+        return self._maybe_reset_turn_budget(state)
 
     @override
     def wrap_model_call(
