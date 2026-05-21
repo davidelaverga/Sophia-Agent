@@ -101,6 +101,127 @@ def _redirect_text(response):
     return ""
 
 
+# ---- E.2: post-interrupt message augmentation -----------------------------
+
+
+@pytest.mark.parametrize("non_terminal_status", ["running", "pending", "interrupted"])
+def test_wrapper_augments_user_message_with_file_target_directive(non_terminal_status):
+    """Phase 2E.2: when the wrapper delegates to native update_async_task on
+    a non-terminal target, the user's ``message`` arg is augmented with a
+    directive telling the builder to continue editing files under
+    ``/mnt/user-data/outputs/`` and NOT to invent scratch files like
+    ``test.md`` / ``test2.md``. Production failure 2026-05-21 21:18 UTC:
+    without this hint the builder looped on phantom-target write_file calls
+    for 28 minutes."""
+    native, _, async_calls = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": non_terminal_status,
+            }
+        }
+    )
+
+    asyncio.run(
+        wrapped.coroutine(task_id="task-1", message="add a section on auto TTS", runtime=runtime)
+    )
+
+    # Native was called.
+    assert len(async_calls) == 1
+    delegated_message = async_calls[0]["message"]
+    # The user's verbatim text is preserved.
+    assert "add a section on auto TTS" in delegated_message
+    # Directive is appended.
+    assert "/mnt/user-data/outputs/" in delegated_message
+    assert "test.md" in delegated_message
+    assert "test2.md" in delegated_message
+    # The directive carries the stable sentinel so retries / double-dispatch
+    # don't pile up duplicate directives.
+    assert "[Sophia/post-interrupt build directive]" in delegated_message
+
+
+def test_wrapper_augmentation_includes_prior_artifact_path_when_present():
+    """If the tracked entry already carries an ``artifact_path`` (the prior
+    builder run produced a deliverable before the interrupt), the directive
+    NAMES that path so the model continues editing the exact file rather
+    than re-deriving it."""
+    native, _, async_calls = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "running",
+                "artifact_path": "/mnt/user-data/outputs/recursive_llms_research.md",
+            }
+        }
+    )
+
+    asyncio.run(wrapped.coroutine(task_id="task-1", message="add TTS section", runtime=runtime))
+    msg = async_calls[0]["message"]
+    assert "/mnt/user-data/outputs/recursive_llms_research.md" in msg
+    assert "CONTINUE editing" in msg
+
+
+def test_wrapper_augmentation_is_idempotent():
+    """If the message already carries the directive sentinel (e.g. a retry,
+    or a model that copied the prior directive into a new turn), the
+    wrapper does NOT add a second copy."""
+    native, _, async_calls = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "running",
+            }
+        }
+    )
+
+    pre_augmented = (
+        "please also include reinforcement learning\n\n"
+        "[Sophia/post-interrupt build directive]\nold directive content here"
+    )
+    asyncio.run(wrapped.coroutine(task_id="task-1", message=pre_augmented, runtime=runtime))
+    msg = async_calls[0]["message"]
+    # The marker appears exactly once.
+    assert msg.count("[Sophia/post-interrupt build directive]") == 1
+    # Original message preserved.
+    assert "please also include reinforcement learning" in msg
+
+
+def test_wrapper_augmentation_skipped_when_terminal_redirect_fires(monkeypatch):
+    """The augmentation is irrelevant on the terminal-target path — the
+    wrapper returns the redirect string immediately and never delegates to
+    native. This test asserts no augmentation work happens (the native
+    coroutine is not called)."""
+    native, _, async_calls = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "success",  # terminal
+                "task_type": "research",
+            }
+        }
+    )
+
+    response = asyncio.run(
+        wrapped.coroutine(task_id="task-1", message="add X", runtime=runtime)
+    )
+    assert isinstance(response, str)
+    assert async_calls == []
+    # The redirect prose doesn't mention the augmentation marker (different code path).
+    assert "[Sophia/post-interrupt build directive]" not in response
+
+
 # ---- ToolRuntime injection contract (regression: prod TypeError 2026-05-21) -
 
 
@@ -657,7 +778,10 @@ def test_wrapper_delegates_when_target_not_terminal_sync(non_terminal_status):
     assert response == "native-sync(task-1)"
     assert len(sync_calls) == 1
     assert sync_calls[0]["task_id"] == "task-1"
-    assert sync_calls[0]["message"] == "add X"
+    # Phase 2E.2: the wrapper augments the message with a file-target
+    # directive before delegating. The user's verbatim text is preserved
+    # at the start; the directive is appended after a marker.
+    assert "add X" in sync_calls[0]["message"]
 
 
 @pytest.mark.parametrize(

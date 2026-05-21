@@ -156,6 +156,63 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
     )
 
 
+# Sentinel substring used to detect whether a message has already been
+# augmented by ``_augment_update_message``. Must be stable across calls
+# because we want idempotency: the model may retry or compose multi-turn
+# updates and we don't want the directive duplicated.
+_FILE_TARGET_HINT_MARKER = "[Sophia/post-interrupt build directive]"
+
+
+def _augment_update_message(
+    message: str, tracked: dict[str, Any] | None
+) -> str:
+    """Augment the user's update message with a file-target directive for the
+    builder. The directive lands in the builder's next HumanMessage after the
+    interrupt and steers the model away from creating scratch files
+    (``test.md``, ``test2.md``, etc.) — the production failure mode observed
+    on 2026-05-21 21:18 UTC.
+
+    If the wrapper can see a prior ``artifact_path`` on the tracked entry,
+    the directive names the specific file the builder should continue
+    editing. Otherwise it gives generic ``/mnt/user-data/outputs/`` guidance.
+
+    Idempotent: if the marker is already present in ``message``, the
+    function returns ``message`` unchanged so a retry / double-dispatch
+    doesn't pile up directives.
+    """
+    if not isinstance(message, str):
+        return message
+    if _FILE_TARGET_HINT_MARKER in message:
+        return message
+
+    prior_path: str | None = None
+    if isinstance(tracked, dict):
+        candidate = tracked.get("artifact_path")
+        if isinstance(candidate, str) and candidate:
+            prior_path = candidate
+
+    if prior_path:
+        directive = (
+            f"\n\n{_FILE_TARGET_HINT_MARKER}\n"
+            f"You are continuing a previously-interrupted build. The prior run "
+            f"produced an artifact at `{prior_path}`. CONTINUE editing that "
+            f"exact file (or write the updated version under "
+            f"`/mnt/user-data/outputs/`) — do NOT create scratch files like "
+            f"`test.md` / `test2.md`. The final artifact path MUST be under "
+            f"`/mnt/user-data/outputs/` so the platform can deliver it."
+        )
+    else:
+        directive = (
+            f"\n\n{_FILE_TARGET_HINT_MARKER}\n"
+            f"You are continuing a previously-interrupted build. Find the "
+            f"file(s) you were targeting under `/mnt/user-data/outputs/` "
+            f"and CONTINUE editing them — do NOT create scratch files like "
+            f"`test.md` / `test2.md`. The final artifact path MUST be under "
+            f"`/mnt/user-data/outputs/` so the platform can deliver it."
+        )
+    return message + directive
+
+
 def _resolve_tracked(state: dict | None, task_id: str) -> dict | None:
     """Look up the tracked task entry from ``state["async_tasks"]``.
 
@@ -278,7 +335,10 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
                 "Native update_async_task sync func is unavailable; call this "
                 "tool from the async path or upgrade deepagents."
             )
-        return native_func(task_id=task_id, message=message, runtime=runtime)
+        # Phase 2E.2: augment the user's message with a file-target directive
+        # so the post-interrupt builder doesn't create scratch files.
+        augmented = _augment_update_message(message, _resolve_tracked(state, task_id))
+        return native_func(task_id=task_id, message=augmented, runtime=runtime)
 
     async def aupdate_async_task(
         task_id: str,
@@ -332,8 +392,14 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             raise ToolException(
                 "Native update_async_task coroutine is unavailable."
             )
+        # Phase 2E.2: augment the user's message with a file-target directive
+        # so the post-interrupt builder continues writing to the correct
+        # /mnt/user-data/outputs/ path instead of inventing scratch filenames.
+        # Production failure 2026-05-21 21:18 UTC: without this hint the
+        # builder loops on write_file(test.md), write_file(test2.md), etc.
+        augmented = _augment_update_message(message, _resolve_tracked(state, task_id))
         return await native_coroutine(
-            task_id=task_id, message=message, runtime=runtime
+            task_id=task_id, message=augmented, runtime=runtime
         )
 
     return StructuredTool.from_function(
