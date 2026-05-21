@@ -38,15 +38,25 @@ its place. The wrapped name is identical (``update_async_task``) so the
 model's tool-selection from PR #129 remains valid.
 """
 
-from __future__ import annotations
-
 import logging
 from typing import Any
 
+from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool
 from langchain_core.tools.base import ToolException
 
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
+
+# NOTE: this module deliberately does NOT use `from __future__ import
+# annotations`. LangChain's tool-runtime injection introspects parameter
+# annotations to identify ToolRuntime-typed args (the marker for "inject
+# this from the execution context, not from the model's tool_call"). With
+# `from __future__ import annotations`, every annotation becomes a forward-
+# reference STRING and the introspection comparison `annotation is
+# ToolRuntime` fails — LangChain then calls the wrapper with only the
+# args_schema fields and Python raises `TypeError: ... missing 1 required
+# positional argument: 'runtime'`. This was the production failure at
+# 2026-05-21 19:28 UTC. Keep annotations evaluated at runtime here.
 
 logger = logging.getLogger(__name__)
 
@@ -209,7 +219,7 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
     def update_async_task(
         task_id: str,
         message: str,
-        runtime,
+        runtime: ToolRuntime,
     ):
         # Sync path: cache-only check. The live SDK call is async-only;
         # production langgraph always uses the async coroutine below. Sync
@@ -229,7 +239,7 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
     async def aupdate_async_task(
         task_id: str,
         message: str,
-        runtime,
+        runtime: ToolRuntime,
     ):
         state = runtime.state if runtime is not None else {}
         redirect = await _cache_or_live_redirect_if_terminal(task_id, state)

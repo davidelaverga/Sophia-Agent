@@ -19,10 +19,12 @@ The wrapper:
 from __future__ import annotations
 
 import asyncio
+import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from langchain.tools import ToolRuntime
 
 from deerflow.sophia.tools.update_async_task_wrapper import (
     make_update_async_task_wrapper,
@@ -31,9 +33,27 @@ from deerflow.sophia.tools.update_async_task_wrapper import (
 # ---- helpers ---------------------------------------------------------------
 
 
-def _make_native_tool(name: str = "update_async_task", description: str = "native desc"):
+def _make_native_tool(
+    name: str = "update_async_task",
+    description: str = "native desc",
+    args_schema=None,
+):
     """Build a fake StructuredTool-shaped object whose ``func`` / ``coroutine``
-    record their call args so tests can assert delegation occurred."""
+    record their call args so tests can assert delegation occurred.
+
+    ``args_schema`` defaults to the real deepagents ``UpdateAsyncTaskSchema``
+    so the StructuredTool produced by the wrapper has production-shaped
+    model-facing args (``task_id``, ``message``).
+    """
+    if args_schema is None:
+        # Lazy import so the module doesn't blow up if deepagents changes
+        # location at some point — falls back to None if not importable.
+        try:
+            from deepagents.middleware.async_subagents import UpdateAsyncTaskSchema
+            args_schema = UpdateAsyncTaskSchema
+        except ImportError:
+            args_schema = None
+
     sync_calls: list[dict] = []
     async_calls: list[dict] = []
 
@@ -50,7 +70,7 @@ def _make_native_tool(name: str = "update_async_task", description: str = "nativ
         description=description,
         func=native_func,
         coroutine=native_coroutine,
-        args_schema=None,
+        args_schema=args_schema,
     )
     return native, sync_calls, async_calls
 
@@ -60,6 +80,70 @@ def _runtime(async_tasks: dict | None) -> SimpleNamespace:
         state={"async_tasks": async_tasks or {}},
         tool_call_id="tc-test",
     )
+
+
+# ---- ToolRuntime injection contract (regression: prod TypeError 2026-05-21) -
+
+
+def test_wrapper_runtime_param_is_recognized_as_directly_injected():
+    """Regression guard for 2026-05-21 19:28 UTC production TypeError:
+    `aupdate_async_task() missing 1 required positional argument: 'runtime'`.
+
+    LangGraph's ToolNode constructs a ToolRuntime per tool_call and injects
+    it into any parameter whose annotation IS the ToolRuntime class. That
+    detection lives in ``StructuredTool._injected_args_keys`` which iterates
+    the function signature and calls ``_is_directly_injected_arg_type`` —
+    that helper checks ``isinstance(annotation, type) and issubclass(...,
+    _DirectlyInjectedToolArg)``. If the wrapper module uses
+    ``from __future__ import annotations``, every annotation becomes a
+    string forward-ref and the isinstance check returns False, so ToolNode
+    NEVER injects the runtime and the function is called with only the
+    args_schema fields → TypeError on the missing positional.
+
+    This test asserts the wrapper's coroutine ``runtime`` parameter is
+    correctly identified as directly-injected. It's the production-truth
+    check — same detection ToolNode uses at dispatch time."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    assert "runtime" in wrapped._injected_args_keys, (
+        "ToolNode will not inject ToolRuntime for this wrapper — fix the "
+        "`runtime: ToolRuntime` annotation (and ensure the module does NOT "
+        "use `from __future__ import annotations`, which stringifies the "
+        "annotation and breaks isinstance-based detection)."
+    )
+
+
+def test_wrapper_runtime_annotation_resolves_to_toolruntime_class():
+    """Belt-and-suspenders: the annotation on the wrapper's runtime
+    parameter must resolve to the actual ToolRuntime class at runtime
+    (not a forward-ref string). A future regression introducing
+    `from __future__ import annotations` to the wrapper module would
+    break LangGraph's ToolNode injection silently — this test trips
+    such a change."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    for fn_name in ("coroutine", "func"):
+        fn = getattr(wrapped, fn_name)
+        sig = inspect.signature(fn)
+        runtime_param = sig.parameters["runtime"]
+        annot = runtime_param.annotation
+        assert annot is ToolRuntime, (
+            f"{fn_name}.runtime annotation must be the ToolRuntime class, "
+            f"got {annot!r}. (If you see a string here, the wrapper module "
+            f"has `from __future__ import annotations` — remove it.)"
+        )
+
+
+def test_wrapper_model_facing_args_exclude_runtime():
+    """The StructuredTool's model-facing arg list (driven by args_schema)
+    must NOT include runtime — that arg comes from the execution context,
+    not from the model's tool_call."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    model_args = set(wrapped.args.keys())
+    assert "runtime" not in model_args
+    assert "task_id" in model_args
+    assert "message" in model_args
 
 
 # ---- terminal-target rejection --------------------------------------------
