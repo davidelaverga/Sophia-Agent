@@ -130,10 +130,41 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
     The interpolated task_id is normalized to the canonical form so any
     follow-up tool calls (e.g. the model copying it into a description)
     use the canonical id, not the whitespace-padded raw form.
+
+    Phase 2E.3: if the tracked entry carries an ``artifact_path`` (the
+    prior builder run delivered a real artifact), the redirect prose
+    NAMES that path and instructs the new build to READ + EDIT the
+    existing file rather than re-running full research from scratch.
+    This makes small edits to delivered artifacts ~3-5x faster.
     """
     status = tracked.get("status", "unknown")
     task_type = tracked.get("task_type") or "build"
     canonical_id = _canonical_task_id(task_id, tracked)
+    prior_path = tracked.get("artifact_path") if isinstance(tracked.get("artifact_path"), str) else None
+
+    if prior_path:
+        v2_strategy = (
+            f"The prior artifact lives at `{prior_path}`. Your NEXT tool call "
+            f"MUST be start_builder_task(description=..., "
+            f"task_type=\"{task_type}\") with a brief that instructs the "
+            f"builder to:\n"
+            f"  1. READ the existing artifact at `{prior_path}` first.\n"
+            f"  2. APPLY the requested change in-place (or write the updated "
+            f"version to a NEW filename under `/mnt/user-data/outputs/` to "
+            f"preserve the original — the user already has the prior copy).\n"
+            f"  3. Do NOT re-research from scratch — build on what's already "
+            f"there. Only fetch new sources for the specific addition the user "
+            f"asked for.\n"
+            f"This is materially faster than a full rebuild for small edits."
+        )
+    else:
+        v2_strategy = (
+            f"Your NEXT tool call MUST be start_builder_task(description=..., "
+            f"task_type=\"{task_type}\") with a complete brief that references "
+            f"the prior artifact's contents inline (e.g. \"Building on the "
+            f"prior <artifact name>, add a section on <X>...\")."
+        )
+
     return (
         f"The builder task (task_id={canonical_id}) has already reached terminal "
         f"status (status={status}). update_async_task CANNOT modify a finished "
@@ -144,13 +175,10 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
         f"The previous {task_type} artifact has already been delivered to the "
         f"user (Telegram / web). The user has it.\n"
         f"\n"
-        f"If the user wants the change incorporated, your NEXT tool call MUST "
-        f"be start_builder_task(description=..., task_type=\"{task_type}\") "
-        f"with a complete brief that references the prior artifact's contents "
-        f"inline (e.g. \"Building on the prior recursive_llms_research.md "
-        f"artifact, add a section on <X>...\"). emit_artifact ONCE on the same "
-        f"turn with takeaway like \"Got it — kicking off a fresh build that "
-        f"adds X to the previous version.\"\n"
+        f"{v2_strategy}\n"
+        f"\n"
+        f"emit_artifact ONCE on the same turn with takeaway like \"Got it — "
+        f"kicking off a fresh build that adds X to the previous version.\"\n"
         f"\n"
         f"Do NOT call update_async_task again on this task_id — it is terminal."
     )

@@ -101,6 +101,87 @@ def _redirect_text(response):
     return ""
 
 
+# ---- E.3: terminal-redirect uses prior artifact_path ----------------------
+
+
+def test_terminal_redirect_includes_prior_artifact_path_when_present():
+    """Phase 2E.3: when the terminal builder produced a real artifact, the
+    redirect prose names the prior path and instructs the new build to
+    READ + EDIT the existing file rather than re-research from scratch.
+    Saves ~3-5x runtime for small edits to delivered artifacts."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "success",
+                "task_type": "research",
+                "artifact_path": "/mnt/user-data/outputs/recursive_llms_research.md",
+            }
+        }
+    )
+
+    response = wrapped.func(task_id="task-1", message="add TTS section", runtime=runtime)
+    assert isinstance(response, str)
+    # The prior artifact path is named explicitly.
+    assert "/mnt/user-data/outputs/recursive_llms_research.md" in response
+    # Read + edit pattern is described.
+    lower = response.lower()
+    assert "read" in lower
+    assert "do not re-research" in lower or "build on what's already there" in lower
+    # Still names start_builder_task as the tool to call next.
+    assert "start_builder_task" in response
+
+
+def test_terminal_redirect_falls_back_when_no_prior_artifact_path():
+    """If the tracked entry has no ``artifact_path`` (e.g. builder ended in
+    error before emitting one), the redirect uses the generic "v2 brief"
+    prose without naming a path. This is the existing Phase 2B behaviour."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "error",
+                "task_type": "research",
+                # No artifact_path.
+            }
+        }
+    )
+
+    response = wrapped.func(task_id="task-1", message="retry", runtime=runtime)
+    assert isinstance(response, str)
+    assert "start_builder_task" in response
+    # No specific path is named (none to name).
+    assert "/mnt/user-data/outputs/" not in response
+
+
+def test_terminal_redirect_artifact_path_handles_non_string_safely():
+    """Defensive: if artifact_path is None or a non-string (corrupt state),
+    the redirect falls through to the generic prose without crashing."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    for bad_path in (None, 123, {"nope": True}, ""):
+        runtime = _runtime(
+            {
+                "task-1": {
+                    "task_id": "task-1",
+                    "agent_name": "sophia_builder",
+                    "status": "success",
+                    "task_type": "document",
+                    "artifact_path": bad_path,
+                }
+            }
+        )
+        response = wrapped.func(task_id="task-1", message="add Y", runtime=runtime)
+        assert isinstance(response, str)
+        assert "start_builder_task" in response
+
+
 # ---- E.2: post-interrupt message augmentation -----------------------------
 
 
