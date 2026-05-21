@@ -393,6 +393,99 @@ def test_live_terminal_redirect_unblocks_start_builder_task_duplicate_guard(monk
     )
 
 
+@pytest.mark.parametrize(
+    "padded_input",
+    ["task-1 ", " task-1", "  task-1  ", "\ttask-1\n"],
+)
+def test_live_terminal_redirect_writes_state_under_canonical_task_id(monkeypatch, padded_input):
+    """Regression for codex P2 review 2026-05-21:
+    when the model passes ``task_id`` with surrounding whitespace,
+    ``_resolve_tracked`` correctly finds the canonical entry via
+    ``task_id.strip()`` — but if the live-redirect state update is keyed
+    by the RAW input, the reducer merges a phantom whitespace-keyed
+    entry alongside the still-non-terminal canonical entry, and
+    ``_has_active_builder_task`` then sees the canonical entry as still
+    active → rejects the follow-up ``start_builder_task`` → recovery
+    path is broken in exactly the whitespace-tolerance case the wrapper
+    is meant to handle.
+
+    Fix asserts: the Command's ``async_tasks`` update writes back under
+    the CANONICAL key (``"task-1"``), and a follow-up
+    ``_has_active_builder_task`` on the merged state returns None.
+    """
+    native, _, async_calls = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    _stub_sdk_client(monkeypatch, run_status="success")
+    pre_state_async_tasks = {
+        # Canonical key — what BuildAwarenessMiddleware / start_builder_task wrote.
+        "task-1": {
+            "task_id": "task-1",
+            "agent_name": "sophia_builder",
+            "status": "running",
+            "thread_id": "task-1",
+            "run_id": "r-1",
+            "task_type": "research",
+        }
+    }
+    runtime = _runtime(pre_state_async_tasks)
+
+    response = asyncio.run(
+        wrapped.coroutine(task_id=padded_input, message="add X", runtime=runtime)
+    )
+
+    assert isinstance(response, Command)
+    updated_tasks = response.update["async_tasks"]
+    # Must write back under the canonical key, NOT the raw padded input.
+    assert "task-1" in updated_tasks, (
+        f"state update must use canonical task_id 'task-1', "
+        f"got keys: {list(updated_tasks.keys())!r}"
+    )
+    assert padded_input not in updated_tasks, (
+        f"state update wrote under whitespace key {padded_input!r}; this "
+        f"creates a phantom entry and leaves the canonical entry non-terminal"
+    )
+    assert updated_tasks["task-1"]["status"] == "success"
+
+    # End-to-end: simulate langgraph merging the Command update, then
+    # confirm start_builder_task's duplicate guard would NOT reject.
+    merged = {**pre_state_async_tasks, **updated_tasks}
+    assert _has_active_builder_task({"async_tasks": merged}) is None, (
+        "after canonical-key merge, _has_active_builder_task must return None"
+    )
+    # Native dispatch did not run.
+    assert async_calls == []
+
+
+def test_live_terminal_redirect_message_uses_canonical_task_id_in_prose(monkeypatch):
+    """The interpolated task_id in the redirect prose is normalized to
+    the canonical form. Otherwise the model may copy the
+    whitespace-padded id into a follow-up start_builder_task description,
+    which is at best ugly and at worst a future bug."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    _stub_sdk_client(monkeypatch, run_status="success")
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "running",
+                "thread_id": "task-1",
+                "run_id": "r-1",
+                "task_type": "research",
+            }
+        }
+    )
+    response = asyncio.run(
+        wrapped.coroutine(task_id="  task-1  ", message="add X", runtime=runtime)
+    )
+    text = _redirect_text(response)
+    assert "task_id=task-1)" in text, (
+        f"redirect prose must show canonical 'task-1', got prose: {text[:200]}"
+    )
+    assert "  task-1  " not in text
+
+
 def test_live_terminal_redirect_degrades_to_string_when_tool_call_id_missing(monkeypatch, caplog):
     """When runtime has no tool_call_id (rare — synthetic / test contexts
     only), the wrapper logs a warning and falls back to a plain-string

@@ -99,13 +99,43 @@ async def _fetch_live_status(tracked: dict[str, Any]) -> str | None:
     return None
 
 
+def _canonical_task_id(task_id: str, tracked: dict[str, Any]) -> str:
+    """Return the canonical task_id for state writes and prose.
+
+    The model may pass a task_id with leading/trailing whitespace. The
+    ``async_tasks`` dict is keyed by the **canonical** (stripped) id —
+    every code path that writes to ``async_tasks`` in deepagents-native
+    and ``start_builder_task`` uses ``tracked["task_id"]`` as the key
+    (see ``deepagents/middleware/async_subagents.py:547,586,637,669``).
+    If we wrote back under the raw key, the original canonical entry
+    would stay non-terminal and ``_has_active_builder_task`` would still
+    see an active build → reject the follow-up ``start_builder_task``
+    (codex P2 review 2026-05-21, whitespace-tolerance class).
+
+    Prefers ``tracked["task_id"]`` (entries always carry their own id by
+    convention); falls back to the stripped input as a defensive default.
+    """
+    canonical = tracked.get("task_id")
+    if isinstance(canonical, str) and canonical:
+        return canonical
+    if isinstance(task_id, str):
+        return task_id.strip()
+    return task_id  # exotic shape — leave it alone
+
+
 def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
     """Build the directive ToolMessage returned to the model when the target
-    builder has already reached terminal status."""
+    builder has already reached terminal status.
+
+    The interpolated task_id is normalized to the canonical form so any
+    follow-up tool calls (e.g. the model copying it into a description)
+    use the canonical id, not the whitespace-padded raw form.
+    """
     status = tracked.get("status", "unknown")
     task_type = tracked.get("task_type") or "build"
+    canonical_id = _canonical_task_id(task_id, tracked)
     return (
-        f"The builder task (task_id={task_id}) has already reached terminal "
+        f"The builder task (task_id={canonical_id}) has already reached terminal "
         f"status (status={status}). update_async_task CANNOT modify a finished "
         f"build — its dispatch would create a new run on a thread whose "
         f"message history is already complete, looping the builder on dangling "
@@ -189,15 +219,21 @@ async def _live_terminal_redirect(
         return None  # Still running or SDK failed — delegate.
 
     tracked_now = {**tracked, "status": live_status}
+    canonical_id = _canonical_task_id(task_id, tracked_now)
     logger.info(
         "[Builder] update_async_task redirected (live-check caught "
-        "stale cache): task_id=%s cached_status=%s live_status=%s",
+        "stale cache): raw_task_id=%r canonical_task_id=%s cached_status=%s "
+        "live_status=%s",
         task_id,
+        canonical_id,
         tracked.get("status"),
         live_status,
     )
     redirect = _terminal_redirect_message(task_id, tracked_now)
-    return redirect, {task_id: tracked_now}
+    # Key the state update by the CANONICAL id so the reducer merges into
+    # the existing entry rather than creating a phantom whitespace-keyed
+    # duplicate (codex P2 review 2026-05-21).
+    return redirect, {canonical_id: tracked_now}
 
 
 def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredTool:
