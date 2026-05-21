@@ -25,7 +25,10 @@ from unittest.mock import MagicMock
 
 import pytest
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 
+from deerflow.sophia.tools.start_builder_task import _has_active_builder_task
 from deerflow.sophia.tools.update_async_task_wrapper import (
     make_update_async_task_wrapper,
 )
@@ -75,11 +78,27 @@ def _make_native_tool(
     return native, sync_calls, async_calls
 
 
-def _runtime(async_tasks: dict | None) -> SimpleNamespace:
+def _runtime(async_tasks: dict | None, tool_call_id: str = "tc-test") -> SimpleNamespace:
     return SimpleNamespace(
         state={"async_tasks": async_tasks or {}},
-        tool_call_id="tc-test",
+        tool_call_id=tool_call_id,
     )
+
+
+def _redirect_text(response):
+    """Extract the redirect prose from either a plain-string return (cache-
+    terminal branch) or a Command return (live-terminal branch). Returns
+    "" for non-redirect responses so substring assertions degrade gracefully."""
+    if isinstance(response, str):
+        return response
+    if isinstance(response, Command):
+        for msg in response.update.get("messages", []):
+            if isinstance(msg, ToolMessage):
+                return msg.content
+            content = getattr(msg, "content", None)
+            if isinstance(content, str):
+                return content
+    return ""
 
 
 # ---- ToolRuntime injection contract (regression: prod TypeError 2026-05-21) -
@@ -253,9 +272,10 @@ def _stub_sdk_client(monkeypatch, *, run_status: str | None, raise_on_get: bool 
 
 def test_async_live_check_redirects_when_cache_stale_but_live_terminal(monkeypatch):
     """The cache says 'running' but the live SDK says 'success' — the
-    wrapper MUST redirect and NOT delegate. This is the dangling-tool-loop
-    race the P1 review flagged.
-    """
+    wrapper MUST return a Command that carries BOTH the redirect prose
+    AND a state update flipping the cached status to terminal. Returning
+    a plain string would let the model's follow-up start_builder_task
+    read the stale cache and reject the relaunch (codex P1 review)."""
     native, _sync_calls, async_calls = _make_native_tool()
     wrapped = make_update_async_task_wrapper(native)
     calls = _stub_sdk_client(monkeypatch, run_status="success")
@@ -278,9 +298,20 @@ def test_async_live_check_redirects_when_cache_stale_but_live_terminal(monkeypat
 
     # Live SDK was queried exactly once.
     assert calls == [("task-1", "r-1")]
-    # Wrapper redirected.
-    assert isinstance(response, str)
-    assert "start_builder_task" in response
+    # Wrapper redirected via Command, not plain string.
+    assert isinstance(response, Command), (
+        "live-terminal redirect must return Command so async_tasks state "
+        "update is persisted before the model calls start_builder_task"
+    )
+    # ToolMessage carries the redirect prose.
+    text = _redirect_text(response)
+    assert "start_builder_task" in text
+    assert "task-1" in text
+    # async_tasks update carries the FRESH terminal status.
+    updated_tasks = response.update.get("async_tasks")
+    assert isinstance(updated_tasks, dict)
+    assert "task-1" in updated_tasks
+    assert updated_tasks["task-1"]["status"] == "success"
     # Native dispatch must NOT have run.
     assert async_calls == []
 
@@ -309,9 +340,88 @@ def test_async_live_check_redirects_for_all_terminal_statuses(monkeypatch, live_
     response = asyncio.run(
         wrapped.coroutine(task_id="task-1", message="add X", runtime=runtime)
     )
+    assert isinstance(response, Command)
+    assert response.update["async_tasks"]["task-1"]["status"] == live_terminal_status
+    assert "start_builder_task" in _redirect_text(response)
+    assert async_calls == []
+
+
+def test_live_terminal_redirect_unblocks_start_builder_task_duplicate_guard(monkeypatch):
+    """End-to-end P1 regression: after the wrapper returns Command with
+    the async_tasks state update, simulate langgraph applying that update
+    to state, then call start_builder_task._has_active_builder_task on
+    the updated state. It MUST return None — confirming that the model's
+    follow-up start_builder_task on the SAME turn will NOT be rejected
+    as a duplicate.
+
+    The 2026-05-21 codex P1 review flagged exactly this failure mode:
+    without persisting the live terminal status, _has_active_builder_task
+    sees the stale non-terminal cache and rejects the relaunch.
+    """
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    _stub_sdk_client(monkeypatch, run_status="success")
+    pre_state_async_tasks = {
+        "task-1": {
+            "task_id": "task-1",
+            "agent_name": "sophia_builder",
+            "status": "running",  # stale cache
+            "thread_id": "task-1",
+            "run_id": "r-1",
+            "task_type": "research",
+        }
+    }
+    runtime = _runtime(pre_state_async_tasks)
+
+    # Sanity: before the wrapper runs, start_builder_task would reject.
+    assert _has_active_builder_task(runtime.state) == "task-1"
+
+    response = asyncio.run(
+        wrapped.coroutine(task_id="task-1", message="add X", runtime=runtime)
+    )
+    assert isinstance(response, Command)
+
+    # Simulate langgraph applying the Command's async_tasks update
+    # (the reducer merges {task_id: tracked_now} into existing async_tasks).
+    updated_state = {
+        "async_tasks": {**pre_state_async_tasks, **response.update["async_tasks"]},
+    }
+    # start_builder_task now sees the fresh terminal status → no active task → not a duplicate.
+    assert _has_active_builder_task(updated_state) is None, (
+        "start_builder_task would reject the relaunch as a duplicate; "
+        "the live-terminal redirect Command failed to update async_tasks state."
+    )
+
+
+def test_live_terminal_redirect_degrades_to_string_when_tool_call_id_missing(monkeypatch, caplog):
+    """When runtime has no tool_call_id (rare — synthetic / test contexts
+    only), the wrapper logs a warning and falls back to a plain-string
+    return. The redirect prose still reaches the model; only the state
+    update is lost. Production always sets tool_call_id."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    _stub_sdk_client(monkeypatch, run_status="success")
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "running",
+                "thread_id": "task-1",
+                "run_id": "r-1",
+                "task_type": "research",
+            }
+        },
+        tool_call_id="",  # ← empty: triggers degraded fallback
+    )
+
+    caplog.set_level("WARNING", logger="deerflow.sophia.tools.update_async_task_wrapper")
+    response = asyncio.run(
+        wrapped.coroutine(task_id="task-1", message="add X", runtime=runtime)
+    )
     assert isinstance(response, str)
     assert "start_builder_task" in response
-    assert async_calls == []
+    assert any("could not persist state update" in r.message for r in caplog.records)
 
 
 def test_async_live_check_delegates_when_live_still_running(monkeypatch):

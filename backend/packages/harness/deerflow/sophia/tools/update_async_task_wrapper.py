@@ -42,8 +42,10 @@ import logging
 from typing import Any
 
 from langchain.tools import ToolRuntime
+from langchain_core.messages import ToolMessage
 from langchain_core.tools import StructuredTool
 from langchain_core.tools.base import ToolException
+from langgraph.types import Command
 
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 
@@ -159,24 +161,29 @@ def _cache_redirect_if_terminal(task_id: str, state: dict | None) -> str | None:
     return _terminal_redirect_message(task_id, tracked)
 
 
-async def _cache_or_live_redirect_if_terminal(
+async def _live_terminal_redirect(
     task_id: str, state: dict | None
-) -> str | None:
-    """Async path: check cache first; if non-terminal, re-check live SDK to
-    defeat cache staleness (BuildAwarenessMiddleware TTL ~10s + model
-    decision latency ~3s). On live-terminal, log + return redirect. On
-    SDK failure or live-running, return ``None`` so the caller delegates.
-    """
-    # Cache-terminal branch (no live check needed).
-    cache_redirect = _cache_redirect_if_terminal(task_id, state)
-    if cache_redirect is not None:
-        return cache_redirect
+) -> tuple[str, dict[str, dict]] | None:
+    """Async-only second-pass check used when the cache says non-terminal.
+    Re-checks live SDK status to defeat cache staleness
+    (BuildAwarenessMiddleware TTL ~10s + model decision latency ~3s).
 
-    # Cache says non-terminal (or unknown). For the known-but-non-terminal
-    # case, re-check live SDK to close the stale-cache window.
+    Returns:
+        - ``(redirect_msg, async_tasks_update)`` tuple when the live status
+          is terminal but the cached status was not. The caller MUST persist
+          the state update — otherwise the model's follow-up
+          ``start_builder_task`` call will read the stale non-terminal cache
+          via ``_has_active_builder_task`` and reject the relaunch as a
+          duplicate (codex P1 review, 2026-05-21).
+        - ``None`` when there is nothing to redirect: no tracked task,
+          cache already terminal (handled by the cache-only helper), live
+          status is non-terminal, or the SDK call failed (fail-open).
+    """
     tracked = _resolve_tracked(state, task_id)
     if tracked is None:
         return None  # Unknown task — let native return its own error.
+    if tracked.get("status") in _TERMINAL_TASK_STATUSES:
+        return None  # Already handled by the cache-only path.
     live_status = await _fetch_live_status(tracked)
     if live_status not in _TERMINAL_TASK_STATUSES:
         return None  # Still running or SDK failed — delegate.
@@ -189,7 +196,8 @@ async def _cache_or_live_redirect_if_terminal(
         tracked.get("status"),
         live_status,
     )
-    return _terminal_redirect_message(task_id, tracked_now)
+    redirect = _terminal_redirect_message(task_id, tracked_now)
+    return redirect, {task_id: tracked_now}
 
 
 def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredTool:
@@ -242,9 +250,48 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
         runtime: ToolRuntime,
     ):
         state = runtime.state if runtime is not None else {}
-        redirect = await _cache_or_live_redirect_if_terminal(task_id, state)
-        if redirect is not None:
-            return redirect
+
+        # Cache-only first: if the cached status is already terminal,
+        # ``start_builder_task._has_active_builder_task`` will return None
+        # on the follow-up call (because terminal statuses are filtered),
+        # so the model can relaunch without us touching state here. Plain
+        # string return is sufficient.
+        cache_redirect = _cache_redirect_if_terminal(task_id, state)
+        if cache_redirect is not None:
+            return cache_redirect
+
+        # Live SDK re-check: the cache may be ~10s stale plus model
+        # decision latency. If live status is terminal but cached is not,
+        # we MUST persist the fresh status into ``async_tasks`` —
+        # otherwise the model's follow-up ``start_builder_task`` reads
+        # the stale cache via ``_has_active_builder_task`` and rejects
+        # the relaunch as a duplicate (codex P1 review 2026-05-21).
+        live_result = await _live_terminal_redirect(task_id, state)
+        if live_result is not None:
+            redirect_msg, async_tasks_update = live_result
+            tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
+            if tool_call_id:
+                return Command(
+                    update={
+                        "messages": [
+                            ToolMessage(redirect_msg, tool_call_id=tool_call_id)
+                        ],
+                        "async_tasks": async_tasks_update,
+                    }
+                )
+            # Degraded fallback when tool_call_id is unavailable (rare —
+            # only in synthetic / test contexts). The redirect text still
+            # reaches the model via the tool's normal return path, but the
+            # state update is lost; the follow-up start_builder_task may
+            # then reject the relaunch as a duplicate. Production always
+            # provides tool_call_id (set by the LangGraph tool executor).
+            logger.warning(
+                "[Builder] live-terminal redirect could not persist state "
+                "update (no tool_call_id on runtime); start_builder_task "
+                "may reject the relaunch on stale cache."
+            )
+            return redirect_msg
+
         if native_coroutine is None:
             raise ToolException(
                 "Native update_async_task coroutine is unavailable."
