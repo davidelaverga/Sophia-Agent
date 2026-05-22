@@ -309,6 +309,24 @@ def _extract_str(d: dict[str, Any] | None, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+# Codex P1 review 2026-05-22: gate write_file_tool prescription by
+# task_type so binary deliverables (.pptx / .pdf) don't get told to
+# use write_file_tool — they need a generator script run via bash.
+_BINARY_OUTPUT_TASK_TYPES = frozenset({"presentation", "visual_report"})
+
+
+def _resolve_effective_task_type(
+    tracked: dict[str, Any] | None,
+    delegation_context: dict[str, Any] | None,
+) -> str | None:
+    """Same lookup priority as ``_resolve_target_path``: tracked entry
+    first, then delegation_context. Returned for use by directive
+    branching below."""
+    return _extract_str(tracked, "task_type") or _extract_str(
+        delegation_context, "task_type"
+    )
+
+
 def _resolve_target_path(
     tracked: dict[str, Any] | None,
     delegation_context: dict[str, Any] | None,
@@ -324,10 +342,55 @@ def _resolve_target_path(
     prior_path = _extract_str(tracked, "artifact_path")
     if prior_path:
         return prior_path
-    task_type = _extract_str(tracked, "task_type") or _extract_str(delegation_context, "task_type")
+    task_type = _resolve_effective_task_type(tracked, delegation_context)
     description = _extract_str(delegation_context, "task")
     suggested = _suggest_artifact_filename(task_type, description)
     return f"/mnt/user-data/outputs/{suggested}"
+
+
+def _file_target_directive_block(target_path: str, task_type: str | None) -> str:
+    """Build the "Concrete file target" + HARD rules block, branched by
+    task_type. Binary deliverables (.pptx via presentation, .pdf via
+    visual_report) cannot be authored by ``write_file_tool`` directly
+    (it writes text bytes only) — the model must produce a generator
+    script and invoke it via ``bash_tool``. Text deliverables get the
+    canonical write_file_tool guidance.
+
+    Codex P1 review 2026-05-22: the prior universal "MUST use
+    write_file_tool" rule was incompatible with binary task_types.
+    """
+    if task_type in _BINARY_OUTPUT_TASK_TYPES:
+        return (
+            f"Concrete file target: `{target_path}`. The deliverable for "
+            f"`{task_type}` is a BINARY file — author a generator script "
+            f"(e.g. Python with python-pptx, reportlab, weasyprint, or the "
+            f"chart-visualization / ppt-generation skill scripts) and run "
+            f"it via `bash_tool`. The script may live anywhere; only the "
+            f"final binary path matters.\n"
+            f"\n"
+            f"HARD rules:\n"
+            f"  - The final deliverable path MUST be under "
+            f"`/mnt/user-data/outputs/`.\n"
+            f"  - DO NOT call `write_file_tool` to author the binary "
+            f"content directly — that tool writes text bytes only. Use it "
+            f"for the generator SCRIPT, not the binary output.\n"
+            f"  - After the binary file is on disk under "
+            f"`/mnt/user-data/outputs/`, call `emit_builder_artifact` with "
+            f"`{target_path}` (or your chosen final path) and STOP."
+        )
+    return (
+        f"Concrete file target: `{target_path}`. Write the final document to "
+        f"that exact path (or, for very long documents, open with "
+        f"`write_file_tool(path, content, append=False)` and extend via "
+        f"`append=True` chunks — same path each time).\n"
+        f"\n"
+        f"HARD rules:\n"
+        f"  - All `write_file_tool` paths MUST start with "
+        f"`/mnt/user-data/outputs/`.\n"
+        f"  - DO NOT create `test.md`, `test2.md`, or any scratch filename.\n"
+        f"  - After the file is complete, call `emit_builder_artifact` with "
+        f"`{target_path}` (or your chosen final path) and STOP."
+    )
 
 
 def _augment_update_message(
@@ -356,6 +419,8 @@ def _augment_update_message(
         return message
 
     target_path = _resolve_target_path(tracked, delegation_context)
+    task_type = _resolve_effective_task_type(tracked, delegation_context)
+    target_block = _file_target_directive_block(target_path, task_type)
 
     directive = (
         f"{_FILE_TARGET_HINT_MARKER}\n"
@@ -364,16 +429,7 @@ def _augment_update_message(
         f"above — TRUST it and DO NOT re-run web_search / web_fetch on the "
         f"same topic.\n"
         f"\n"
-        f"Concrete file target: `{target_path}`. Write the final document to "
-        f"that exact path (or, for very long documents, open with "
-        f"`write_file_tool(path, content, append=False)` and extend via "
-        f"`append=True` chunks — same path each time).\n"
-        f"\n"
-        f"HARD rules:\n"
-        f"  - All `write_file_tool` paths MUST start with `/mnt/user-data/outputs/`.\n"
-        f"  - DO NOT create `test.md`, `test2.md`, or any scratch filename.\n"
-        f"  - After the file is complete, call `emit_builder_artifact` with "
-        f"`{target_path}` (or your chosen final path) and STOP.\n"
+        f"{target_block}\n"
         f"\n"
         f"User's update message:\n"
         f"{message}"

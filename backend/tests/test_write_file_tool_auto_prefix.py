@@ -10,14 +10,26 @@ rejected by ``validate_local_tool_path`` because they don't start with
 retrying with similar bad paths. Eventually hit the 30-turn hard
 ceiling and was coerced to phantom-success → error.
 
-This module tests the ``_auto_prefix_bare_filename`` helper in
-isolation. Integration with the rest of write_file_tool is covered by
-the existing test_sandbox_tools.py mirror tests.
+This module tests:
+1. ``_auto_prefix_bare_filename`` — pure path helper (path-only logic).
+2. ``_is_builder_runtime_context`` — runtime-shape gate that restricts
+   the auto-prefix to the sophia_builder graph (codex P2 review
+   2026-05-22).
+
+Integration with the rest of write_file_tool is covered by the existing
+test_sandbox_tools.py mirror tests.
 """
 
 from __future__ import annotations
 
-from deerflow.sandbox.tools import _OUTPUTS_VIRTUAL_PREFIX, _auto_prefix_bare_filename
+from types import SimpleNamespace
+
+from deerflow.sandbox.tools import (
+    _BUILDER_GRAPH_ID,
+    _OUTPUTS_VIRTUAL_PREFIX,
+    _auto_prefix_bare_filename,
+    _is_builder_runtime_context,
+)
 
 # ---- auto-prefix fires on bare filenames ---------------------------------
 
@@ -112,3 +124,57 @@ def test_outputs_prefix_matches_virtual_path_convention():
     _has_output_file scans for."""
     assert _OUTPUTS_VIRTUAL_PREFIX == "/mnt/user-data/outputs/"
     assert _OUTPUTS_VIRTUAL_PREFIX.endswith("/")
+
+
+# ---- builder-context gate (codex P2 review 2026-05-22) -------------------
+
+
+def _runtime_with_graph(graph_id: str | None) -> SimpleNamespace:
+    """Mirror how langgraph populates runtime.config["configurable"]."""
+    configurable: dict = {}
+    if graph_id is not None:
+        configurable["graph_id"] = graph_id
+    return SimpleNamespace(config={"configurable": configurable})
+
+
+def test_is_builder_context_true_for_sophia_builder():
+    runtime = _runtime_with_graph(_BUILDER_GRAPH_ID)
+    assert _is_builder_runtime_context(runtime) is True
+
+
+def test_is_builder_context_false_for_companion():
+    runtime = _runtime_with_graph("sophia_companion")
+    assert _is_builder_runtime_context(runtime) is False
+
+
+def test_is_builder_context_false_for_lead_agent():
+    runtime = _runtime_with_graph("lead_agent")
+    assert _is_builder_runtime_context(runtime) is False
+
+
+def test_is_builder_context_false_when_graph_id_missing():
+    runtime = _runtime_with_graph(None)
+    assert _is_builder_runtime_context(runtime) is False
+
+
+def test_is_builder_context_false_when_runtime_is_none():
+    """Safer default: unknown runtime shape → no auto-prefix."""
+    assert _is_builder_runtime_context(None) is False
+
+
+def test_is_builder_context_false_for_malformed_config():
+    """Defensive: any shape mismatch on config / configurable → False."""
+    for bad in (
+        SimpleNamespace(config=None),
+        SimpleNamespace(config="not-a-dict"),
+        SimpleNamespace(config={"configurable": "not-a-dict"}),
+        SimpleNamespace(config={}),
+        SimpleNamespace(config={"configurable": None}),
+    ):
+        assert _is_builder_runtime_context(bad) is False
+
+
+def test_builder_graph_id_constant_is_sophia_builder():
+    """Pin the constant so a future rename of the builder graph is caught
+    by this test rather than silently disabling the auto-prefix."""
+    assert _BUILDER_GRAPH_ID == "sophia_builder"

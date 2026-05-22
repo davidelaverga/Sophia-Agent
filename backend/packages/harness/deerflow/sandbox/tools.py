@@ -858,6 +858,32 @@ def read_file_tool(
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
 
+_BUILDER_GRAPH_ID = "sophia_builder"
+
+
+def _is_builder_runtime_context(runtime) -> bool:
+    """Phase 2F.2 gate (codex P2 review 2026-05-22): the auto-prefix
+    rewrite must only fire when write_file_tool is invoked from the
+    sophia_builder graph. Other callers (companion, lead_agent, ad-hoc
+    test harnesses) still expect strict path validation so they don't
+    silently land scratch files in the outputs dir and break a
+    follow-up read_file_tool / str_replace_tool call.
+
+    Reads ``runtime.config["configurable"]["graph_id"]`` — the canonical
+    location langgraph populates for every run. Returns False on any
+    shape mismatch so the default is the safer "no rewrite" path.
+    """
+    if runtime is None:
+        return False
+    config = getattr(runtime, "config", None) or {}
+    if not isinstance(config, dict):
+        return False
+    configurable = config.get("configurable") or {}
+    if not isinstance(configurable, dict):
+        return False
+    return configurable.get("graph_id") == _BUILDER_GRAPH_ID
+
+
 def _auto_prefix_bare_filename(path: str) -> tuple[str, bool]:
     """Phase 2F.2: elevate true bare filenames to the virtual outputs dir.
 
@@ -873,6 +899,10 @@ def _auto_prefix_bare_filename(path: str) -> tuple[str, bool]:
     deliverable and rewrite the path to ``/mnt/user-data/outputs/<name>``.
     Returns ``(possibly_rewritten_path, was_auto_prefixed)`` so the caller
     can log the decision.
+
+    NOTE: this helper is path-pure (no runtime). The CALLER is responsible
+    for deciding whether to invoke it (gating to builder contexts via
+    ``_is_builder_runtime_context`` per codex P2 review).
 
     Restrictions (intentional):
     - Paths starting with ``/`` are left alone (model gave explicit absolute).
@@ -913,13 +943,20 @@ def write_file_tool(
         requested_path = path
         # Phase 2F.2: elevate bare filenames before validation so the
         # post-interrupt builder doesn't loop on Permission denied retries.
-        path, auto_prefixed = _auto_prefix_bare_filename(path)
-        if auto_prefixed:
-            logger.info(
-                "[write_file_tool] auto-prefixed bare path: %r → %r",
-                requested_path,
-                path,
-            )
+        # Codex P2 review 2026-05-22: only auto-prefix in sophia_builder
+        # contexts. Non-builder callers (companion, lead_agent, etc.)
+        # still get strict path validation so they can't silently land
+        # scratch files in /mnt/user-data/outputs/ that follow-up
+        # read_file_tool / str_replace_tool wouldn't find.
+        if _is_builder_runtime_context(runtime):
+            path, auto_prefixed = _auto_prefix_bare_filename(path)
+            if auto_prefixed:
+                logger.info(
+                    "[write_file_tool] auto-prefixed bare path "
+                    "(builder context): %r → %r",
+                    requested_path,
+                    path,
+                )
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
