@@ -1,3 +1,4 @@
+import logging
 import re
 from pathlib import Path
 
@@ -14,6 +15,15 @@ from deerflow.sandbox.exceptions import (
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sophia.storage import supabase_mirror
+
+logger = logging.getLogger(__name__)
+
+# Phase 2F.2: when ``write_file_tool`` receives a true bare filename (no
+# ``/`` separator anywhere), auto-prefix to this virtual outputs dir so the
+# write lands on disk where ``BuilderArtifactMiddleware._has_output_file``
+# can find it. Without this elevation the builder loops on
+# ``Permission denied`` errors trying to write to ``test.md`` etc.
+_OUTPUTS_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/outputs/"
 
 _ABSOLUTE_PATH_PATTERN = re.compile(r"(?<![:\w])/(?:[^\s\"'`;&|<>()]+)")
 _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
@@ -848,6 +858,35 @@ def read_file_tool(
         return f"Error: Unexpected error reading file: {_sanitize_error(e, runtime)}"
 
 
+def _auto_prefix_bare_filename(path: str) -> tuple[str, bool]:
+    """Phase 2F.2: elevate true bare filenames to the virtual outputs dir.
+
+    The deepagents post-interrupt builder occasionally calls
+    ``write_file_tool(path="test.md")`` or ``write_file_tool(path="report.md")``
+    — bare filenames with no directory component. Today those raise
+    ``PermissionError`` in ``validate_local_tool_path`` because they don't
+    start with ``/mnt/user-data/``. The model then loops on retries with
+    different bare names, eventually hitting the hard ceiling.
+
+    When the input ``path`` is a non-empty string containing NO ``/``
+    separator anywhere, we treat it as the model's intent to write a
+    deliverable and rewrite the path to ``/mnt/user-data/outputs/<name>``.
+    Returns ``(possibly_rewritten_path, was_auto_prefixed)`` so the caller
+    can log the decision.
+
+    Restrictions (intentional):
+    - Paths starting with ``/`` are left alone (model gave explicit absolute).
+    - Paths containing any ``/`` are left alone (model has a directory intent
+      we shouldn't override).
+    - Empty strings and non-string inputs are returned unchanged.
+    """
+    if not isinstance(path, str) or not path:
+        return path, False
+    if "/" in path or "\\" in path:
+        return path, False
+    return _OUTPUTS_VIRTUAL_PREFIX + path, True
+
+
 @tool("write_file", parse_docstring=True)
 def write_file_tool(
     runtime: ToolRuntime[ContextT, ThreadState],
@@ -872,6 +911,15 @@ def write_file_tool(
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
         requested_path = path
+        # Phase 2F.2: elevate bare filenames before validation so the
+        # post-interrupt builder doesn't loop on Permission denied retries.
+        path, auto_prefixed = _auto_prefix_bare_filename(path)
+        if auto_prefixed:
+            logger.info(
+                "[write_file_tool] auto-prefixed bare path: %r → %r",
+                requested_path,
+                path,
+            )
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)
