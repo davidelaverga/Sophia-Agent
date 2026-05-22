@@ -240,6 +240,37 @@ def _suggest_artifact_filename(
     return f"{slug}.{ext}"
 
 
+def _extract_str(d: dict[str, Any] | None, key: str) -> str | None:
+    """Return ``d[key]`` only if it's a non-empty string; else None.
+    Used to thread tolerantly through possibly-malformed state dicts
+    without verbose isinstance ladders at every callsite."""
+    if not isinstance(d, dict):
+        return None
+    value = d.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _resolve_target_path(
+    tracked: dict[str, Any] | None,
+    delegation_context: dict[str, Any] | None,
+) -> str:
+    """Resolve the concrete file path to inject into the augmented message.
+
+    Priority:
+      1. ``tracked["artifact_path"]`` — the prior run delivered something
+         on disk; continue editing exactly that.
+      2. Derived ``/mnt/user-data/outputs/<slug>.<ext>`` from the
+         delegation_context's original task brief + task_type.
+    """
+    prior_path = _extract_str(tracked, "artifact_path")
+    if prior_path:
+        return prior_path
+    task_type = _extract_str(tracked, "task_type") or _extract_str(delegation_context, "task_type")
+    description = _extract_str(delegation_context, "task")
+    suggested = _suggest_artifact_filename(task_type, description)
+    return f"/mnt/user-data/outputs/{suggested}"
+
+
 def _augment_update_message(
     message: str,
     tracked: dict[str, Any] | None,
@@ -262,33 +293,10 @@ def _augment_update_message(
     function returns ``message`` unchanged so a retry / double-dispatch
     doesn't pile up directives.
     """
-    if not isinstance(message, str):
-        return message
-    if _FILE_TARGET_HINT_MARKER in message:
+    if not isinstance(message, str) or _FILE_TARGET_HINT_MARKER in message:
         return message
 
-    prior_path: str | None = None
-    task_type: str | None = None
-    description: str | None = None
-    if isinstance(tracked, dict):
-        candidate = tracked.get("artifact_path")
-        if isinstance(candidate, str) and candidate:
-            prior_path = candidate
-        tt = tracked.get("task_type")
-        if isinstance(tt, str) and tt:
-            task_type = tt
-    if isinstance(delegation_context, dict):
-        if description is None:
-            t = delegation_context.get("task")
-            if isinstance(t, str) and t:
-                description = t
-        if task_type is None:
-            tt = delegation_context.get("task_type")
-            if isinstance(tt, str) and tt:
-                task_type = tt
-
-    suggested_filename = _suggest_artifact_filename(task_type, description)
-    target_path = prior_path or f"/mnt/user-data/outputs/{suggested_filename}"
+    target_path = _resolve_target_path(tracked, delegation_context)
 
     directive = (
         f"{_FILE_TARGET_HINT_MARKER}\n"
