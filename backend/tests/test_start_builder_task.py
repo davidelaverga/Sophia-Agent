@@ -124,6 +124,13 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # builder fails with "Thread ID is required" on its first turn.
     config_payload = captured["run_kwargs"]["config"]
     assert config_payload["configurable"]["thread_id"] == "asgi-1"
+    # Codex P1 review 2026-05-22: configurable must also include
+    # ``graph_id`` so tools running inside the builder run (notably
+    # write_file_tool's auto-prefix gate) can identify the builder
+    # context deterministically. langgraph_api propagates this
+    # server-side for logging but does NOT guarantee it appears in
+    # runtime.config["configurable"] at tool-execution time.
+    assert config_payload["configurable"]["graph_id"] == "sophia_builder"
 
 
 def test_dispatch_sets_stream_resumable_true(monkeypatch):

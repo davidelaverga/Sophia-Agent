@@ -178,3 +178,67 @@ def test_builder_graph_id_constant_is_sophia_builder():
     """Pin the constant so a future rename of the builder graph is caught
     by this test rather than silently disabling the auto-prefix."""
     assert _BUILDER_GRAPH_ID == "sophia_builder"
+
+
+# ---- Codex P1 review 2026-05-22: state-based fallback for builder gate ----
+
+
+def test_is_builder_context_true_via_state_delegation_context_only():
+    """The deepagents-native update_async_task dispatch does NOT
+    necessarily propagate ``graph_id`` in the new run's configurable.
+    But it DOES preserve ``state["delegation_context"]`` because it
+    runs on the same builder thread. The gate must accept this as a
+    fallback signal so the auto-prefix still fires on
+    post-interrupt builder runs."""
+    runtime = SimpleNamespace(
+        config={"configurable": {"thread_id": "t1", "user_id": "u"}},
+        # NO graph_id in configurable (the failure mode codex P1 flagged).
+        state={"delegation_context": {"task_type": "research", "task": "build X"}},
+    )
+    assert _is_builder_runtime_context(runtime) is True
+
+
+def test_is_builder_context_true_with_both_tiers():
+    """Belt and braces — primary signal AND fallback both fire."""
+    runtime = SimpleNamespace(
+        config={"configurable": {"graph_id": _BUILDER_GRAPH_ID}},
+        state={"delegation_context": {"task_type": "research"}},
+    )
+    assert _is_builder_runtime_context(runtime) is True
+
+
+def test_is_builder_context_false_with_empty_delegation_context():
+    """An empty dict for delegation_context is NOT a signal — only a
+    populated dict identifies the builder thread."""
+    runtime = SimpleNamespace(
+        config={"configurable": {"thread_id": "t1"}},
+        state={"delegation_context": {}},
+    )
+    assert _is_builder_runtime_context(runtime) is False
+
+
+def test_is_builder_context_false_when_state_lacks_delegation_context():
+    """Companion / lead_agent state shape: no delegation_context key.
+    Without the primary graph_id signal either, the gate returns False."""
+    runtime = SimpleNamespace(
+        config={"configurable": {"thread_id": "t1", "user_id": "u"}},
+        state={"messages": [], "user_id": "u"},
+    )
+    assert _is_builder_runtime_context(runtime) is False
+
+
+def test_is_builder_context_false_when_state_is_not_a_dict():
+    """Defensive: malformed state shape doesn't crash the gate."""
+    runtime = SimpleNamespace(
+        config={"configurable": {"thread_id": "t1"}},
+        state="not-a-dict",
+    )
+    assert _is_builder_runtime_context(runtime) is False
+
+
+def test_is_builder_context_false_when_delegation_context_is_not_a_dict():
+    runtime = SimpleNamespace(
+        config={"configurable": {"thread_id": "t1"}},
+        state={"delegation_context": "not-a-dict"},
+    )
+    assert _is_builder_runtime_context(runtime) is False

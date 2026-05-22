@@ -175,7 +175,11 @@ def _failed_v2_strategy(task_type: str, status: str) -> str:
     )
 
 
-def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
+def _terminal_redirect_message(
+    task_id: str,
+    tracked: dict[str, Any],
+    delegation_context: dict[str, Any] | None = None,
+) -> str:
     """Build the directive ToolMessage returned to the model when the target
     builder has already reached terminal status.
 
@@ -193,9 +197,20 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
     delivered. The successful vs failed branches give different
     guidance so the model doesn't claim a non-existent artifact was
     delivered to the user.
+
+    Codex P1 review 2026-05-22: ``task_type`` is now resolved via
+    ``_safe_task_type`` so the redirect always names a value in
+    ``_CANONICAL_TASK_TYPES`` (document / research / presentation /
+    frontend / visual_report). The prior ``or "build"`` default
+    produced an invalid value that would fail
+    ``start_builder_task``'s ``StartBuilderTaskInput`` validation —
+    especially common after a mid-build update_async_task interrupt
+    that rewrites ``async_tasks[task_id]`` without preserving
+    ``task_type``. ``delegation_context`` is now threaded through
+    callers so the lookup can fall back to it.
     """
     status = tracked.get("status", "unknown")
-    task_type = tracked.get("task_type") or "build"
+    task_type = _safe_task_type(tracked, delegation_context)
     canonical_id = _canonical_task_id(task_id, tracked)
     prior_path = (
         tracked.get("artifact_path")
@@ -313,6 +328,47 @@ def _extract_str(d: dict[str, Any] | None, key: str) -> str | None:
 # task_type so binary deliverables (.pptx / .pdf) don't get told to
 # use write_file_tool — they need a generator script run via bash.
 _BINARY_OUTPUT_TASK_TYPES = frozenset({"presentation", "visual_report"})
+
+# Canonical task_type values accepted by ``start_builder_task``'s
+# ``StartBuilderTaskInput`` schema. The terminal-redirect prose must
+# only suggest values from this set so the model's follow-up
+# ``start_builder_task(task_type=...)`` call passes validation.
+# Codex P1 review 2026-05-22: the prior ``or "build"`` default
+# produced an invalid value that would fail validation.
+_CANONICAL_TASK_TYPES = frozenset({
+    "document",
+    "research",
+    "presentation",
+    "frontend",
+    "visual_report",
+})
+_DEFAULT_TASK_TYPE = "document"  # safest generic; markdown output
+
+
+def _safe_task_type(
+    tracked: dict[str, Any] | None,
+    delegation_context: dict[str, Any] | None,
+) -> str:
+    """Resolve a task_type that is guaranteed to be in
+    ``_CANONICAL_TASK_TYPES``. Tries tracked first, then
+    delegation_context, and only returns a value that's canonical at
+    each step. If neither has a valid value, falls back to
+    ``"document"`` (the safest generic).
+
+    Critical: the prior ``tracked.get("task_type") or "build"`` default
+    produced ``"build"``, which is NOT in the canonical set —
+    ``start_builder_task`` would reject the follow-up relaunch with a
+    validation error.
+
+    Importantly, if ``tracked["task_type"]`` is a non-canonical value
+    (state corruption, schema drift), we ALSO fall through to
+    delegation_context rather than getting stuck on the garbage value.
+    """
+    for source in (tracked, delegation_context):
+        candidate = _extract_str(source, "task_type")
+        if candidate in _CANONICAL_TASK_TYPES:
+            return candidate
+    return _DEFAULT_TASK_TYPE
 
 
 def _resolve_effective_task_type(
@@ -455,6 +511,17 @@ def _resolve_tracked(state: dict | None, task_id: str) -> dict | None:
     return tracked if isinstance(tracked, dict) else None
 
 
+def _state_delegation_context(state: dict | None) -> dict[str, Any] | None:
+    """Extract ``delegation_context`` from ``state`` if it's a dict.
+    Threaded into ``_terminal_redirect_message`` callers so the
+    task_type fallback (codex P1 review 2026-05-22) can pick the
+    correct value when the tracked entry has dropped it."""
+    if not isinstance(state, dict):
+        return None
+    dc = state.get("delegation_context")
+    return dc if isinstance(dc, dict) else None
+
+
 def _cache_redirect_if_terminal(task_id: str, state: dict | None) -> str | None:
     """If the cached status is terminal, log + return the redirect string.
     Otherwise return ``None`` so the caller delegates to the native dispatch.
@@ -469,7 +536,9 @@ def _cache_redirect_if_terminal(task_id: str, state: dict | None) -> str | None:
         task_id,
         tracked.get("status"),
     )
-    return _terminal_redirect_message(task_id, tracked)
+    return _terminal_redirect_message(
+        task_id, tracked, _state_delegation_context(state)
+    )
 
 
 async def _live_terminal_redirect(
@@ -510,7 +579,9 @@ async def _live_terminal_redirect(
         tracked.get("status"),
         live_status,
     )
-    redirect = _terminal_redirect_message(task_id, tracked_now)
+    redirect = _terminal_redirect_message(
+        task_id, tracked_now, _state_delegation_context(state)
+    )
     # Key the state update by the CANONICAL id so the reducer merges into
     # the existing entry rather than creating a phantom whitespace-keyed
     # duplicate (codex P2 review 2026-05-21).

@@ -182,6 +182,118 @@ def test_terminal_redirect_artifact_path_handles_non_string_safely():
         assert "start_builder_task" in response
 
 
+# ---- Codex P1: terminal-redirect must emit a VALID task_type --------------
+
+
+def test_terminal_redirect_falls_back_to_canonical_task_type_when_tracked_missing():
+    """Codex P1 review 2026-05-22: after a mid-build update_async_task
+    interrupt, deepagents-native rewrites async_tasks[task_id] without
+    necessarily preserving ``task_type``. The redirect previously
+    defaulted to ``"build"`` which is NOT in StartBuilderTaskInput's
+    accepted set {document, research, presentation, frontend,
+    visual_report}. The follow-up start_builder_task call would then
+    fail validation.
+
+    Fix: ``_safe_task_type`` falls back to delegation_context, then to
+    "document" (canonical). The redirect prose must NEVER emit
+    ``task_type="build"`` or any other non-canonical value.
+    """
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = SimpleNamespace(
+        state={
+            "async_tasks": {
+                "t1": {
+                    "task_id": "t1",
+                    "agent_name": "sophia_builder",
+                    "status": "success",
+                    # NO task_type — the failure mode the reviewer flagged.
+                },
+            },
+            # delegation_context preserves task_type even when tracked drops it.
+            "delegation_context": {"task_type": "research", "task": "brief"},
+        },
+        tool_call_id="tc-x",
+    )
+    response = wrapped.func(task_id="t1", message="add X", runtime=runtime)
+    # Recovered from delegation_context.
+    assert 'task_type="research"' in response
+    # Forbidden values must not appear.
+    assert 'task_type="build"' not in response
+
+
+def test_terminal_redirect_defaults_to_document_when_nothing_available():
+    """When neither tracked nor delegation_context has a valid task_type,
+    fall back to ``"document"`` (the safest canonical default) rather
+    than ``"build"`` (which is invalid)."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = SimpleNamespace(
+        state={
+            "async_tasks": {
+                "t1": {
+                    "task_id": "t1",
+                    "agent_name": "sophia_builder",
+                    "status": "error",
+                    # No task_type anywhere.
+                },
+            },
+            # No delegation_context either.
+        },
+        tool_call_id="tc-x",
+    )
+    response = wrapped.func(task_id="t1", message="retry", runtime=runtime)
+    assert 'task_type="document"' in response
+    assert 'task_type="build"' not in response
+
+
+def test_terminal_redirect_rejects_invalid_task_type_from_tracked():
+    """Defensive: if `tracked["task_type"]` somehow contains a value
+    outside the canonical set (state corruption, schema drift), fall
+    back to delegation_context / document — don't emit the bad value."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = SimpleNamespace(
+        state={
+            "async_tasks": {
+                "t1": {
+                    "task_id": "t1",
+                    "agent_name": "sophia_builder",
+                    "status": "success",
+                    "task_type": "garbage_invalid_value",
+                },
+            },
+            "delegation_context": {"task_type": "presentation"},
+        },
+        tool_call_id="tc-x",
+    )
+    response = wrapped.func(task_id="t1", message="add X", runtime=runtime)
+    assert 'task_type="presentation"' in response
+    assert "garbage_invalid_value" not in response
+
+
+@pytest.mark.parametrize(
+    "canonical", ["document", "research", "presentation", "frontend", "visual_report"]
+)
+def test_terminal_redirect_passes_through_canonical_task_types(canonical):
+    """When tracked has a canonical task_type, that exact value is used.
+    Parametrized over all 5 valid values to lock the canonical set."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "t1": {
+                "task_id": "t1",
+                "agent_name": "sophia_builder",
+                "status": "success",
+                "task_type": canonical,
+            }
+        }
+    )
+    response = wrapped.func(task_id="t1", message="add X", runtime=runtime)
+    assert f'task_type="{canonical}"' in response
+
+
 # ---- Codex P2: successful-vs-failed terminal redirect prose ---------------
 
 

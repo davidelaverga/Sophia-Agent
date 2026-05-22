@@ -526,6 +526,15 @@ async def _dispatch_via_asgi(
             # ``runtime.config["configurable"]``. State carries the
             # canonical value (see ``delegation_with_parent`` above).
             "parent_thread_id": parent_thread_id,
+            # Codex P1 review 2026-05-22: explicitly populate
+            # ``graph_id`` so tools running inside the builder run can
+            # gate behaviour by it (see
+            # ``deerflow.sandbox.tools._is_builder_runtime_context``).
+            # langgraph_api propagates this server-side for logging
+            # but does NOT guarantee it lands in
+            # ``runtime.config["configurable"]`` at tool-execution
+            # time — explicit is safe.
+            "graph_id": _ASYNC_BUILDER_AGENT_NAME,
         }
     }
     if parent_model:

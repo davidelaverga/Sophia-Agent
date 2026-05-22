@@ -869,19 +869,42 @@ def _is_builder_runtime_context(runtime) -> bool:
     silently land scratch files in the outputs dir and break a
     follow-up read_file_tool / str_replace_tool call.
 
-    Reads ``runtime.config["configurable"]["graph_id"]`` — the canonical
-    location langgraph populates for every run. Returns False on any
-    shape mismatch so the default is the safer "no rewrite" path.
+    Codex P1 review 2026-05-22: two-tier detection.
+
+    Tier 1 (primary): ``runtime.config["configurable"]["graph_id"]``
+    equals ``"sophia_builder"``. ``start_builder_task`` explicitly
+    populates this on dispatch. This is the most direct signal.
+
+    Tier 2 (fallback): ``runtime.state["delegation_context"]`` is a
+    non-empty dict. ``delegation_context`` is seeded ONLY by
+    ``start_builder_task`` and is unique to the builder thread's
+    state. This tier rescues us from cases where the configurable
+    isn't fully propagated — notably the deepagents-native
+    ``update_async_task`` dispatch path which creates a new run on
+    the same builder thread but doesn't always carry forward the
+    full ``configurable`` dict.
+
+    Returns False on any shape mismatch so the default is the safer
+    "no rewrite" path (non-builder strict-validation behaviour).
     """
     if runtime is None:
         return False
+    # Tier 1 — graph_id signal from configurable.
     config = getattr(runtime, "config", None) or {}
-    if not isinstance(config, dict):
-        return False
-    configurable = config.get("configurable") or {}
-    if not isinstance(configurable, dict):
-        return False
-    return configurable.get("graph_id") == _BUILDER_GRAPH_ID
+    if isinstance(config, dict):
+        configurable = config.get("configurable") or {}
+        if isinstance(configurable, dict):
+            if configurable.get("graph_id") == _BUILDER_GRAPH_ID:
+                return True
+    # Tier 2 — state-based fallback. ``delegation_context`` is the
+    # canonical builder-only state marker (seeded by start_builder_task,
+    # consumed by BuilderTaskMiddleware).
+    state = getattr(runtime, "state", None)
+    if isinstance(state, dict):
+        delegation_context = state.get("delegation_context")
+        if isinstance(delegation_context, dict) and delegation_context:
+            return True
+    return False
 
 
 def _auto_prefix_bare_filename(path: str) -> tuple[str, bool]:
