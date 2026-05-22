@@ -1672,6 +1672,27 @@ class TestEmitArtifactTool:
                 voice_emotion_secondary="calm", voice_speed="invalid_speed",
             )
 
+    def test_null_like_reflection_string_is_normalized(self):
+        from deerflow.sophia.tools.emit_artifact_contract import validate_emit_artifact_args
+
+        artifact = validate_emit_artifact_args({
+            "session_goal": "test",
+            "active_goal": "test",
+            "next_step": "test",
+            "takeaway": "test",
+            "reflection": "null",
+            "tone_estimate": 2.0,
+            "tone_target": 2.5,
+            "active_tone_band": "engagement",
+            "skill_loaded": "active_listening",
+            "ritual_phase": "freeform.test",
+            "voice_emotion_primary": "calm",
+            "voice_emotion_secondary": "calm",
+            "voice_speed": "normal",
+        })
+
+        assert artifact["reflection"] is None
+
 
 # --- retrieve_memories tool ---
 
@@ -1690,6 +1711,8 @@ class TestRetrieveMemoriesTool:
                 user_id="user_A",
                 query="test query",
                 categories=[],
+                context_mode=None,
+                limit=15,
             )
             assert "test memory" in result
 
@@ -1703,11 +1726,11 @@ class TestRetrieveMemoriesTool:
 
         with patch("deerflow.sophia.mem0_client.search_memories", return_value=[]) as mock_search:
             tool_a.invoke({"query": "q"})
-            mock_search.assert_called_with(user_id="user_A", query="q", categories=[])
+            mock_search.assert_called_with(user_id="user_A", query="q", categories=[], context_mode=None, limit=15)
 
             mock_search.reset_mock()
             tool_b.invoke({"query": "q"})
-            mock_search.assert_called_with(user_id="user_B", query="q", categories=[])
+            mock_search.assert_called_with(user_id="user_B", query="q", categories=[], context_mode=None, limit=15)
 
     def test_no_results_returns_message(self):
         from unittest.mock import patch

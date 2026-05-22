@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { haptic } from "../../hooks/useHaptics"
 import { buildThreadArtifactHref, formatBuilderArtifactFileSize, getBuilderArtifactFiles } from "../../lib/builder-artifacts"
 import { cn } from "../../lib/utils"
+import { isRealReflection } from "../../session/artifacts"
 import { usePresenceStore } from "../../stores/presence-store"
 import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../types/builder-artifact"
 import type { RitualArtifacts } from "../../types/session"
@@ -109,7 +110,7 @@ export function PresenceArtifactPanel({
   }, [onDismiss])
 
   const handleReflectionTap = useCallback(() => {
-    if (!artifacts?.reflection_candidate || reflectionTapped) return
+    if (!artifacts?.reflection_candidate || !isRealReflection(artifacts.reflection_candidate.prompt) || reflectionTapped) return
     haptic("medium")
     setReflectionTapped(true)
     onReflectionTap?.({
@@ -125,7 +126,7 @@ export function PresenceArtifactPanel({
   const memory_candidates = artifacts?.memory_candidates
   const builderFiles = getBuilderArtifactFiles(builderArtifact)
   const hasBuilder = !!builderArtifact
-  const hasReflection = !!reflection_candidate?.prompt
+  const hasReflection = isRealReflection(reflection_candidate?.prompt)
   const hasMemories = memory_candidates && memory_candidates.length > 0
   const hasTakeaway = !!takeaway?.trim()
   const hasContent = hasBuilder || hasBuilderLibrary || hasTakeaway || hasReflection || hasMemories

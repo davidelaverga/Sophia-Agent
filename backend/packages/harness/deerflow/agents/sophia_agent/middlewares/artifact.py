@@ -8,6 +8,7 @@ After-model: captures emit_artifact tool call output and stores in state.
 import json
 import logging
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -18,6 +19,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.tools.emit_artifact_contract import validate_emit_artifact_args
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ _VOICE_ARTIFACT_INSTRUCTIONS = """<artifact_contract>
 Every turn has two outputs:
 - Spoken reply in normal assistant text.
 - Exactly one emit_artifact tool call after the spoken reply. Never print JSON in the reply.
+- Tool calls must use the structured tool/function channel only. Never verbalize pseudo-tool syntax, JSON-ish calls, or raw expressions such as emit_artifact(...), try{emit_artifact{...}}, or start_builder_task{...} in the spoken reply.
 
 emit_artifact is REQUIRED on every turn with these 13 fields:
 - session_goal: stable session-level aim unless the topic genuinely shifts.
@@ -178,7 +181,7 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
                     log_middleware("Artifact", "mixed tool calls with emit_artifact; loop continues", _t0)
                     return None
 
-                artifact_data = artifact_calls[-1].get("args", {})
+                artifact_data = self._normalize_artifact_args(artifact_calls[-1].get("args", {}))
                 builder_result = state.get("builder_result") or self._extract_builder_result_from_messages(messages)
                 # Close the emit_artifact tool_call(s) with synthetic ToolMessages.
                 # Without this, each turn leaves a dangling tool_call in the thread
@@ -214,6 +217,16 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
         log_middleware("Artifact", "no artifact in response", _t0)
         return None
+
+    @staticmethod
+    def _normalize_artifact_args(args: object) -> dict:
+        if not isinstance(args, Mapping):
+            return {}
+        try:
+            return validate_emit_artifact_args(args)
+        except Exception:
+            logger.warning("ArtifactMiddleware could not normalize emit_artifact args", exc_info=True)
+            return dict(args)
 
     # ------------------------------------------------------------------
     # Builder synthesis

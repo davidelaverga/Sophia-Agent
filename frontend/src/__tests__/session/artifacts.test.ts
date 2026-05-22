@@ -58,4 +58,21 @@ describe('session artifacts helpers', () => {
     });
     expect(getLiveArtifactStatus(result.merged).reflection).toBe('ready');
   });
+
+  it('treats null-like reflection strings as absent', () => {
+    const result = mergeRitualArtifacts(
+      { takeaway: '' },
+      {
+        takeaway: 'You stayed with the hard part instead of rushing past it.',
+        reflection: 'null',
+      },
+      {
+        filterFallbackReflection: true,
+        filterFallbackTakeaway: true,
+      }
+    );
+
+    expect(result.merged.reflection_candidate).toBeUndefined();
+    expect(getLiveArtifactStatus(result.merged).reflection).toBe('capturing');
+  });
 });

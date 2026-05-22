@@ -15,6 +15,8 @@ import type { PresetType, ContextMode } from '../types/session';
 
 import { normalizeBuilderArtifactPayload } from './builder-artifacts';
 
+const NULL_LIKE_ARTIFACT_STRINGS = new Set(['', 'null', 'none', 'undefined', 'n/a']);
+
 
 // =============================================================================
 // ADAPTER FUNCTION
@@ -134,20 +136,25 @@ function normalizeContextMode(value?: string): ContextMode {
 /**
  * Normalizes reflection candidate from various backend formats
  */
-function normalizeReflectionCandidate(
-  raw?: { prompt?: string; tag?: string } | null
-): RecapArtifactsV1['reflectionCandidate'] {
-  if (!raw?.prompt) {
+function normalizeReflectionCandidate(raw?: unknown): RecapArtifactsV1['reflectionCandidate'] {
+  const candidate = typeof raw === 'string' ? { prompt: raw } : raw;
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+    return undefined;
+  }
+  const record = candidate as { prompt?: unknown; tag?: unknown };
+  const prompt = typeof record.prompt === 'string' ? record.prompt.trim() : '';
+  if (!prompt || NULL_LIKE_ARTIFACT_STRINGS.has(prompt.toLowerCase())) {
     return undefined;
   }
   
   const validTags = ['tilt', 'focus', 'confidence', 'communication', 'boundaries', 'growth'];
-  const tag = raw.tag && validTags.includes(raw.tag.toLowerCase()) 
-    ? raw.tag.toLowerCase() as RecapArtifactsV1['reflectionCandidate']['tag']
+  const rawTag = typeof record.tag === 'string' ? record.tag : undefined;
+  const tag = rawTag && validTags.includes(rawTag.toLowerCase())
+    ? rawTag.toLowerCase() as RecapArtifactsV1['reflectionCandidate']['tag']
     : undefined;
   
   return {
-    prompt: raw.prompt,
+    prompt,
     tag,
   };
 }
