@@ -182,6 +182,129 @@ def test_terminal_redirect_artifact_path_handles_non_string_safely():
         assert "start_builder_task" in response
 
 
+# ---- Codex P2: successful-vs-failed terminal redirect prose ---------------
+
+
+@pytest.mark.parametrize(
+    "failed_status",
+    ["error", "failed", "cancelled", "timeout", "timed_out"],
+)
+def test_terminal_redirect_failed_does_not_claim_artifact_delivered(failed_status):
+    """Codex P2 review 2026-05-22: when the prior terminal build ENDED
+    IN FAILURE (error / failed / cancelled / timeout / timed_out), the
+    redirect prose must NOT claim "the artifact has been delivered to
+    the user" — no artifact exists. Telling the model otherwise would
+    guide it to reference a non-existent file in the new v2 brief."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": failed_status,
+                "task_type": "research",
+            }
+        }
+    )
+    response = wrapped.func(task_id="task-1", message="retry with X", runtime=runtime)
+    assert isinstance(response, str)
+    lower = response.lower()
+    # MUST NOT claim delivery.
+    assert "has already been delivered" not in lower
+    assert "the user has it" not in lower
+    assert "the user has the prior" not in lower
+    # MUST say NO artifact was delivered.
+    assert "no artifact was delivered" in lower or "no deliverable was produced" in lower
+    # MUST reference the failure status.
+    assert failed_status in response
+
+
+@pytest.mark.parametrize(
+    "failed_status",
+    ["error", "failed", "cancelled", "timeout", "timed_out"],
+)
+def test_terminal_redirect_failed_steers_to_fresh_start(failed_status):
+    """Failed-terminal redirect must instruct the model to start FRESH,
+    not "build on the prior artifact" / "read the existing file"."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": failed_status,
+                "task_type": "document",
+            }
+        }
+    )
+    response = wrapped.func(task_id="task-1", message="retry", runtime=runtime)
+    assert isinstance(response, str)
+    lower = response.lower()
+    # Anti-pattern guards: must NOT suggest reading/editing the prior file.
+    assert "read the existing artifact" not in lower
+    assert "build on what's already there" not in lower
+    # Must instruct fresh start.
+    assert "fresh" in lower or "clean slate" in lower or "complete brief" in lower
+    # Still uses start_builder_task as the launch tool.
+    assert "start_builder_task" in response
+
+
+def test_terminal_redirect_failed_ignores_stray_artifact_path():
+    """Defensive: if tracked.artifact_path is somehow populated on a
+    failed run (e.g. partial state from a half-completed prior dispatch),
+    the redirect must STILL not claim delivery. We treat 'failed' as
+    authoritative regardless of stray path fields."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": "error",
+                "task_type": "research",
+                # Stray path field that should NOT be used because the
+                # build failed before it could be delivered.
+                "artifact_path": "/mnt/user-data/outputs/half-written.md",
+            }
+        }
+    )
+    response = wrapped.func(task_id="task-1", message="retry", runtime=runtime)
+    lower = response.lower()
+    assert "has already been delivered" not in lower
+    # Failed-branch fresh-start language present.
+    assert "no deliverable was produced" in lower or "no artifact was delivered" in lower
+
+
+@pytest.mark.parametrize("successful_status", ["success", "completed"])
+def test_terminal_redirect_successful_keeps_artifact_delivered_claim(successful_status):
+    """The success branch must still claim delivery so the model knows
+    the user already has the prior version and the v2 brief can
+    reference it."""
+    native, _, _ = _make_native_tool()
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "status": successful_status,
+                "task_type": "research",
+                "artifact_path": "/mnt/user-data/outputs/recursive_llms.md",
+            }
+        }
+    )
+    response = wrapped.func(task_id="task-1", message="add X", runtime=runtime)
+    assert isinstance(response, str)
+    lower = response.lower()
+    # Success branch: claim delivery + steer to read-edit.
+    assert "delivered to" in lower
+    assert "the user has it" in lower or "user has it" in lower
+    assert "/mnt/user-data/outputs/recursive_llms.md" in response
+
+
 # ---- F.1: slug-derived filename + resume-not-restart directive ------------
 
 

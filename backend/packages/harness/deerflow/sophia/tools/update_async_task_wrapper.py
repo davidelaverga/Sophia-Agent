@@ -124,27 +124,20 @@ def _canonical_task_id(task_id: str, tracked: dict[str, Any]) -> str:
     return task_id  # exotic shape — leave it alone
 
 
-def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
-    """Build the directive ToolMessage returned to the model when the target
-    builder has already reached terminal status.
+# Successful terminal statuses (artifact was delivered to the user).
+# The complement — error / failed / cancelled / timeout / timed_out — is
+# also terminal but means NO deliverable exists. Codex P2 review
+# 2026-05-22: the redirect prose must branch on this distinction
+# because telling the model "build on the prior artifact" when no prior
+# artifact exists guides it to reference a non-existent file.
+_SUCCESSFUL_TERMINAL_STATUSES = frozenset({"success", "completed"})
 
-    The interpolated task_id is normalized to the canonical form so any
-    follow-up tool calls (e.g. the model copying it into a description)
-    use the canonical id, not the whitespace-padded raw form.
 
-    Phase 2E.3: if the tracked entry carries an ``artifact_path`` (the
-    prior builder run delivered a real artifact), the redirect prose
-    NAMES that path and instructs the new build to READ + EDIT the
-    existing file rather than re-running full research from scratch.
-    This makes small edits to delivered artifacts ~3-5x faster.
-    """
-    status = tracked.get("status", "unknown")
-    task_type = tracked.get("task_type") or "build"
-    canonical_id = _canonical_task_id(task_id, tracked)
-    prior_path = tracked.get("artifact_path") if isinstance(tracked.get("artifact_path"), str) else None
-
+def _success_v2_strategy(task_type: str, prior_path: str | None) -> str:
+    """v2-build strategy for SUCCESSFUL terminal builds — the user got
+    the prior artifact and now wants edits / additions."""
     if prior_path:
-        v2_strategy = (
+        return (
             f"The prior artifact lives at `{prior_path}`. Your NEXT tool call "
             f"MUST be start_builder_task(description=..., "
             f"task_type=\"{task_type}\") with a brief that instructs the "
@@ -158,12 +151,79 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
             f"asked for.\n"
             f"This is materially faster than a full rebuild for small edits."
         )
+    return (
+        f"Your NEXT tool call MUST be start_builder_task(description=..., "
+        f"task_type=\"{task_type}\") with a complete brief that references "
+        f"the prior artifact's contents inline (e.g. \"Building on the "
+        f"prior <artifact name>, add a section on <X>...\")."
+    )
+
+
+def _failed_v2_strategy(task_type: str, status: str) -> str:
+    """Fresh-start strategy for FAILED terminal builds (error / failed /
+    cancelled / timeout / timed_out) — no prior artifact exists, so the
+    model must NOT reference one."""
+    return (
+        f"The previous attempt ended in `{status}` — NO deliverable was "
+        f"produced. Do NOT instruct the new build to read / edit any prior "
+        f"artifact; there isn't one.\n"
+        f"\n"
+        f"Your NEXT tool call MUST be start_builder_task(description=..., "
+        f"task_type=\"{task_type}\") with a COMPLETE brief that re-states the "
+        f"user's original requirements PLUS the addition / change they just "
+        f"asked for. The new build starts from a clean slate."
+    )
+
+
+def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
+    """Build the directive ToolMessage returned to the model when the target
+    builder has already reached terminal status.
+
+    The interpolated task_id is normalized to the canonical form so any
+    follow-up tool calls (e.g. the model copying it into a description)
+    use the canonical id, not the whitespace-padded raw form.
+
+    Phase 2E.3: if the tracked entry carries an ``artifact_path`` (the
+    prior builder run delivered a real artifact), the redirect prose
+    NAMES that path and instructs the new build to READ + EDIT the
+    existing file rather than re-running full research from scratch.
+
+    Codex P2 review 2026-05-22: terminal includes `error` / `failed` /
+    `cancelled` / `timeout` / `timed_out` where NO artifact was
+    delivered. The successful vs failed branches give different
+    guidance so the model doesn't claim a non-existent artifact was
+    delivered to the user.
+    """
+    status = tracked.get("status", "unknown")
+    task_type = tracked.get("task_type") or "build"
+    canonical_id = _canonical_task_id(task_id, tracked)
+    prior_path = (
+        tracked.get("artifact_path")
+        if isinstance(tracked.get("artifact_path"), str)
+        else None
+    )
+
+    is_successful = status in _SUCCESSFUL_TERMINAL_STATUSES
+    if is_successful:
+        delivery_line = (
+            f"The previous {task_type} artifact has already been delivered to "
+            f"the user (Telegram / web). The user has it."
+        )
+        v2_strategy = _success_v2_strategy(task_type, prior_path)
+        ack_example = (
+            "Got it — kicking off a fresh build that adds X to the previous "
+            "version."
+        )
     else:
-        v2_strategy = (
-            f"Your NEXT tool call MUST be start_builder_task(description=..., "
-            f"task_type=\"{task_type}\") with a complete brief that references "
-            f"the prior artifact's contents inline (e.g. \"Building on the "
-            f"prior <artifact name>, add a section on <X>...\")."
+        delivery_line = (
+            f"The previous attempt is in `{status}` state — NO artifact was "
+            f"delivered to the user. Do NOT tell the user they have the prior "
+            f"version; they don't."
+        )
+        v2_strategy = _failed_v2_strategy(task_type, status)
+        ack_example = (
+            "Got it — the previous build didn't complete. Starting a fresh "
+            "one with your request included."
         )
 
     return (
@@ -173,13 +233,12 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
         f"message history is already complete, looping the builder on dangling "
         f"tool calls.\n"
         f"\n"
-        f"The previous {task_type} artifact has already been delivered to the "
-        f"user (Telegram / web). The user has it.\n"
+        f"{delivery_line}\n"
         f"\n"
         f"{v2_strategy}\n"
         f"\n"
-        f"emit_artifact ONCE on the same turn with takeaway like \"Got it — "
-        f"kicking off a fresh build that adds X to the previous version.\"\n"
+        f"emit_artifact ONCE on the same turn with takeaway like "
+        f"\"{ack_example}\"\n"
         f"\n"
         f"Do NOT call update_async_task again on this task_id — it is terminal."
     )
