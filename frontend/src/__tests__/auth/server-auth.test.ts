@@ -60,6 +60,7 @@ import {
   getUserScopedAuthToken,
   hasUserToken,
 } from '../../app/lib/auth/server-auth'
+import { verifyLegacyBackendToken } from '../../server/legacy-backend-auth'
 
 describe('server-auth helpers', () => {
   beforeEach(() => {
@@ -153,8 +154,19 @@ describe('server-auth helpers', () => {
     authBypassEnabledMock = true
     process.env.BACKEND_API_KEY = ''
 
-    await expect(getUserScopedAuthToken()).resolves.toBe('dev-bypass-token')
-    await expect(getServerAuthToken()).resolves.toBe('dev-bypass-token')
+    const userScopedToken = await getUserScopedAuthToken()
+    const serverToken = await getServerAuthToken()
+
+    expect(verifyLegacyBackendToken(userScopedToken)).toMatchObject({
+      id: 'dev-user',
+      username: 'dev-user',
+      is_active: true,
+    })
+    expect(verifyLegacyBackendToken(serverToken)).toMatchObject({
+      id: 'dev-user',
+      username: 'dev-user',
+      is_active: true,
+    })
   })
 
   it('prefers the cookie token for general server auth', async () => {

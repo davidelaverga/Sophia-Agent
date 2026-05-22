@@ -60,6 +60,8 @@ def _mock_dispatch_unavailable():
 @pytest.fixture(autouse=True)
 def _stream_env(monkeypatch):
     """Set required Stream env vars for all tests."""
+    monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "legacy_cascade")
+    monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "false")
     monkeypatch.setenv("STREAM_API_KEY", "test-api-key")
     monkeypatch.setenv("STREAM_API_SECRET", "test-api-secret")
 
@@ -83,6 +85,8 @@ class TestVoiceConnect:
         assert resp.status_code == 200
         data = resp.json()
         assert data["api_key"] == "test-api-key"
+        assert data["runtime"] == "legacy_cascade"
+        assert data["voice_runtime"] == "legacy_cascade"
         assert data["call_type"] == "default"
         assert data["call_id"].startswith("sophia-user_123-")
         assert len(data["token"]) > 0
@@ -300,6 +304,95 @@ class TestVoiceConnect:
         assert data["session_id"] is None
         assert data["stream_url"] is None
 
+    def test_gemini_runtime_requires_production_promotion_flag(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
+
+        with patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+        ) as dispatch:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 409
+        assert "SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED" in resp.json()["detail"]
+        dispatch.assert_not_awaited()
+
+    def test_gemini_runtime_rejects_automatic_preconnect(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+        ) as proxy_runtime:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice", "preconnect": True},
+            )
+
+        assert resp.status_code == 409
+        assert "automatic preconnect" in resp.json()["detail"]
+        proxy_runtime.assert_not_awaited()
+
+    def test_gemini_runtime_returns_browser_bootstrap_when_promoted(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+
+        runtime_payload = {
+            "runtime": "gemini_live",
+            "voice_runtime": "gemini_live",
+            "production_route": True,
+            "session_id": "gemini-prod-session-1",
+            "stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-1/events",
+            "event_stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-1/events",
+            "provider_event_relay_url": "/production/realtime/gemini/browser-sessions/gemini-prod-session-1/provider-events",
+            "disconnect_url": "/production/realtime/gemini/browser-sessions/gemini-prod-session-1",
+            "browser_audio": "gemini_live_websocket_production_candidate",
+            "transport": "gemini_browser_websocket_ephemeral_token_with_backend_relay",
+            "websocket_url": "wss://gemini.example/live",
+            "websocket_auth": "ephemeral_access_token",
+            "ephemeral_token": {"value": "auth_tokens/test"},
+            "setup": {"model": "models/gemini-live"},
+            "public_event_boundary": "SophiaEventNormalizer",
+        }
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            return_value=runtime_payload,
+        ) as proxy_runtime, patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+        ) as dispatch:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice", "context_mode": "work", "ritual": "debrief", "thread_id": "thread-1"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime"] == "gemini_live"
+        assert data["voice_runtime"] == "gemini_live"
+        assert data["production_route"] is True
+        assert data["session_id"] == "gemini-prod-session-1"
+        assert data["thread_id"] == "thread-1"
+        assert data["stream_url"] == "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1"
+        assert data["event_stream_url"] == "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1"
+        assert data["provider_event_relay_url"] == "/api/sophia/voice/gemini/relay"
+        assert data["disconnect_url"] == "/api/sophia/voice/gemini/disconnect"
+        dispatch.assert_not_awaited()
+        proxy_runtime.assert_awaited_once()
+        assert proxy_runtime.await_args.kwargs["json_body"] == {
+            "user_id": "user_123",
+            "session_id": ANY,
+            "platform": "voice",
+            "context_mode": "work",
+            "ritual": "debrief",
+        }
+
 
 class TestVoiceEvents:
     def test_events_proxy_streams_sse_payload(self):
@@ -335,6 +428,124 @@ class TestVoiceEvents:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
         assert "sophia.transcript" in resp.text
+
+
+class TestOpenAIBrowserDogfoodGateway:
+    def test_sideband_proxies_webrtc_readiness_with_sideband_timeout(self):
+        readiness = {
+            "ready": True,
+            "reason": "connection_state_connected",
+            "elapsed_ms": 42,
+            "connection_state": "connected",
+            "ice_connection_state": "connected",
+            "data_channel_ready_state": "open",
+        }
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+            return_value={"attached": True, "call_id": "rtc_frontend_1"},
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/openai/sideband",
+                json={
+                    "session_id": "browser-openai-1",
+                    "call_id": "rtc_frontend_1",
+                    "location": "https://api.openai.com/v1/realtime/calls/rtc_frontend_1",
+                    "webrtc_readiness": readiness,
+                },
+            )
+
+        assert resp.status_code == 202
+        assert resp.json()["stream_url"] == (
+            "/api/sophia/user_123/voice/dogfood/openai/events?session_id=browser-openai-1"
+        )
+        proxy.assert_awaited_once_with(
+            "POST",
+            "/dogfood/realtime/openai/browser-sessions/browser-openai-1/sideband",
+            json_body={
+                "call_id": "rtc_frontend_1",
+                "location": "https://api.openai.com/v1/realtime/calls/rtc_frontend_1",
+                "webrtc_readiness": readiness,
+            },
+            timeout=ANY,
+        )
+
+
+class TestGeminiBrowserDogfoodGateway:
+    def test_browser_session_proxies_to_voice_service_and_rewrites_stream_url(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+            return_value={
+                "session_id": "browser-gemini-1",
+                "ephemeral_token": {"value": "auth_tokens/test"},
+            },
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/gemini/browser-session",
+                json={"session_id": "browser-gemini-1"},
+            )
+
+        assert resp.status_code == 201
+        assert resp.json()["stream_url"] == (
+            "/api/sophia/user_123/voice/dogfood/gemini/events?session_id=browser-gemini-1"
+        )
+        proxy.assert_awaited_once_with(
+            "POST",
+            "/dogfood/realtime/gemini/browser-sessions",
+            json_body={
+                "user_id": "user_123",
+                "session_id": "browser-gemini-1",
+            },
+        )
+
+    def test_relay_proxies_to_voice_service_session_scoped_endpoint(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_dogfood_json",
+            new_callable=AsyncMock,
+            return_value={
+                "accepted": True,
+                "session_id": "browser-gemini-1",
+                "client_actions": [
+                    {
+                        "type": "gemini_tool_response",
+                        "payload": {
+                            "toolResponse": {
+                                "functionResponses": [
+                                    {
+                                        "id": "artifact-call-1",
+                                        "name": "emit_artifact",
+                                        "response": {
+                                            "ok": True,
+                                            "backend_tool_result": "Artifact recorded.",
+                                        },
+                                    }
+                                ]
+                            }
+                        },
+                    }
+                ],
+            },
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/dogfood/gemini/relay",
+                json={
+                    "session_id": "browser-gemini-1",
+                    "event": {"serverContent": {"outputTranscription": {"text": "Hi."}}},
+                },
+            )
+
+        assert resp.status_code == 202
+        assert resp.json()["client_actions"][0]["type"] == "gemini_tool_response"
+        assert resp.json()["stream_url"] == (
+            "/api/sophia/user_123/voice/dogfood/gemini/events?session_id=browser-gemini-1"
+        )
+        proxy.assert_awaited_once_with(
+            "POST",
+            "/dogfood/realtime/gemini/browser-sessions/browser-gemini-1/provider-events",
+            json_body={"event": {"serverContent": {"outputTranscription": {"text": "Hi."}}}},
+        )
 
 
 @pytest.mark.anyio
