@@ -39,6 +39,7 @@ model's tool-selection from PR #129 remains valid.
 """
 
 import logging
+import re
 from typing import Any
 
 from langchain.tools import ToolRuntime
@@ -191,18 +192,71 @@ def _terminal_redirect_message(task_id: str, tracked: dict[str, Any]) -> str:
 _FILE_TARGET_HINT_MARKER = "[Sophia/post-interrupt build directive]"
 
 
-def _augment_update_message(
-    message: str, tracked: dict[str, Any] | None
-) -> str:
-    """Augment the user's update message with a file-target directive for the
-    builder. The directive lands in the builder's next HumanMessage after the
-    interrupt and steers the model away from creating scratch files
-    (``test.md``, ``test2.md``, etc.) — the production failure mode observed
-    on 2026-05-21 21:18 UTC.
+# Mapping from start_builder_task's task_type to a canonical artifact
+# extension. Used by ``_suggest_artifact_filename`` to give the builder a
+# concrete file target on post-interrupt resume.
+_TASK_TYPE_EXTENSIONS = {
+    "document": "md",
+    "research": "md",
+    "presentation": "pptx",
+    "frontend": "html",
+    "visual_report": "pdf",
+}
 
-    If the wrapper can see a prior ``artifact_path`` on the tracked entry,
-    the directive names the specific file the builder should continue
-    editing. Otherwise it gives generic ``/mnt/user-data/outputs/`` guidance.
+_FALLBACK_TASK_SLUG = "build"
+_MAX_SLUG_SOURCE_CHARS = 60
+
+
+def _slugify_for_filename(text: str, max_len: int = 40) -> str:
+    """Produce a deterministic, filesystem-safe slug from free-form text.
+
+    Lowercase, ASCII alphanumerics + hyphens only, max length capped. Used
+    to derive a stable suggested filename across retries: same input →
+    same slug → same filename. The builder model uses this as a concrete
+    anchor instead of inventing scratch names like ``test.md``.
+    """
+    if not isinstance(text, str):
+        return _FALLBACK_TASK_SLUG
+    # Take the first chunk so the slug remains short even for verbose briefs.
+    head = text.strip()[:_MAX_SLUG_SOURCE_CHARS]
+    # Lowercase + non-alphanumeric → hyphen.
+    cleaned = re.sub(r"[^a-zA-Z0-9]+", "-", head).strip("-").lower()
+    if not cleaned:
+        return _FALLBACK_TASK_SLUG
+    return cleaned[:max_len].rstrip("-") or _FALLBACK_TASK_SLUG
+
+
+def _suggest_artifact_filename(
+    task_type: str | None, description: str | None
+) -> str:
+    """Build a concrete filename to suggest to the builder after an interrupt.
+
+    Format: ``{slug-of-description}.{ext-from-task_type}``. Deterministic so
+    the model can converge on the same target across retries. Falls back to
+    ``build.md`` when both inputs are missing.
+    """
+    ext = _TASK_TYPE_EXTENSIONS.get(task_type or "", "md")
+    slug = _slugify_for_filename(description or _FALLBACK_TASK_SLUG)
+    return f"{slug}.{ext}"
+
+
+def _augment_update_message(
+    message: str,
+    tracked: dict[str, Any] | None,
+    delegation_context: dict[str, Any] | None,
+) -> str:
+    """PREFIX the user's update message with a "resume not restart" directive
+    that gives the builder a concrete file target and steers it away from
+    creating scratch files (``test.md``, ``test2.md``, etc.) and from
+    re-running research it already completed pre-interrupt.
+
+    Phase 2F.1 (2026-05-22): the original Phase 2E.2 directive was appended
+    AFTER the user's message. Empirically the model anchored on the user's
+    text (at the top of the new HumanMessage) and the directive at the
+    bottom was overridden by the original system prompt's "research then
+    write" workflow — see plan file Phase 2F root-cause analysis. This
+    version prefixes the directive AND names a deterministic target
+    filename derived from the original task brief.
 
     Idempotent: if the marker is already present in ``message``, the
     function returns ``message`` unchanged so a retry / double-dispatch
@@ -214,31 +268,50 @@ def _augment_update_message(
         return message
 
     prior_path: str | None = None
+    task_type: str | None = None
+    description: str | None = None
     if isinstance(tracked, dict):
         candidate = tracked.get("artifact_path")
         if isinstance(candidate, str) and candidate:
             prior_path = candidate
+        tt = tracked.get("task_type")
+        if isinstance(tt, str) and tt:
+            task_type = tt
+    if isinstance(delegation_context, dict):
+        if description is None:
+            t = delegation_context.get("task")
+            if isinstance(t, str) and t:
+                description = t
+        if task_type is None:
+            tt = delegation_context.get("task_type")
+            if isinstance(tt, str) and tt:
+                task_type = tt
 
-    if prior_path:
-        directive = (
-            f"\n\n{_FILE_TARGET_HINT_MARKER}\n"
-            f"You are continuing a previously-interrupted build. The prior run "
-            f"produced an artifact at `{prior_path}`. CONTINUE editing that "
-            f"exact file (or write the updated version under "
-            f"`/mnt/user-data/outputs/`) — do NOT create scratch files like "
-            f"`test.md` / `test2.md`. The final artifact path MUST be under "
-            f"`/mnt/user-data/outputs/` so the platform can deliver it."
-        )
-    else:
-        directive = (
-            f"\n\n{_FILE_TARGET_HINT_MARKER}\n"
-            f"You are continuing a previously-interrupted build. Find the "
-            f"file(s) you were targeting under `/mnt/user-data/outputs/` "
-            f"and CONTINUE editing them — do NOT create scratch files like "
-            f"`test.md` / `test2.md`. The final artifact path MUST be under "
-            f"`/mnt/user-data/outputs/` so the platform can deliver it."
-        )
-    return message + directive
+    suggested_filename = _suggest_artifact_filename(task_type, description)
+    target_path = prior_path or f"/mnt/user-data/outputs/{suggested_filename}"
+
+    directive = (
+        f"{_FILE_TARGET_HINT_MARKER}\n"
+        f"You are RESUMING (not restarting) a build that was interrupted by "
+        f"this update message. Your prior research is in the message history "
+        f"above — TRUST it and DO NOT re-run web_search / web_fetch on the "
+        f"same topic.\n"
+        f"\n"
+        f"Concrete file target: `{target_path}`. Write the final document to "
+        f"that exact path (or, for very long documents, open with "
+        f"`write_file_tool(path, content, append=False)` and extend via "
+        f"`append=True` chunks — same path each time).\n"
+        f"\n"
+        f"HARD rules:\n"
+        f"  - All `write_file_tool` paths MUST start with `/mnt/user-data/outputs/`.\n"
+        f"  - DO NOT create `test.md`, `test2.md`, or any scratch filename.\n"
+        f"  - After the file is complete, call `emit_builder_artifact` with "
+        f"`{target_path}` (or your chosen final path) and STOP.\n"
+        f"\n"
+        f"User's update message:\n"
+        f"{message}"
+    )
+    return directive
 
 
 def _resolve_tracked(state: dict | None, task_id: str) -> dict | None:
@@ -365,7 +438,11 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             )
         # Phase 2E.2: augment the user's message with a file-target directive
         # so the post-interrupt builder doesn't create scratch files.
-        augmented = _augment_update_message(message, _resolve_tracked(state, task_id))
+        augmented = _augment_update_message(
+            message,
+            _resolve_tracked(state, task_id),
+            state.get("delegation_context") if isinstance(state, dict) else None,
+        )
         return native_func(task_id=task_id, message=augmented, runtime=runtime)
 
     async def aupdate_async_task(
@@ -425,7 +502,11 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
         # /mnt/user-data/outputs/ path instead of inventing scratch filenames.
         # Production failure 2026-05-21 21:18 UTC: without this hint the
         # builder loops on write_file(test.md), write_file(test2.md), etc.
-        augmented = _augment_update_message(message, _resolve_tracked(state, task_id))
+        augmented = _augment_update_message(
+            message,
+            _resolve_tracked(state, task_id),
+            state.get("delegation_context") if isinstance(state, dict) else None,
+        )
         return await native_coroutine(
             task_id=task_id, message=augmented, runtime=runtime
         )

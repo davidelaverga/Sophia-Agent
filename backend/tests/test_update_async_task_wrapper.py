@@ -182,6 +182,142 @@ def test_terminal_redirect_artifact_path_handles_non_string_safely():
         assert "start_builder_task" in response
 
 
+# ---- F.1: slug-derived filename + resume-not-restart directive ------------
+
+
+def test_augment_prefix_carries_slug_derived_filename_from_delegation_context():
+    """Phase 2F.1: when delegation_context['task'] is present, derive a
+    deterministic slugged filename and include it in the directive so the
+    builder has a concrete file target to write to.
+
+    Without this, the post-interrupt builder invents random filenames
+    (``test.md``, ``test2.md``, etc.) and loops on PermissionError."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    delegation = {
+        "task": "Build a comprehensive markdown document on recursive LLMs research",
+        "task_type": "research",
+    }
+    augmented = _augment_update_message(
+        message="add a section on Karpathy autoresearch",
+        tracked={"task_id": "t1", "task_type": "research"},
+        delegation_context=delegation,
+    )
+    # Concrete file target named explicitly.
+    assert "/mnt/user-data/outputs/" in augmented
+    assert ".md" in augmented
+    # Slug derived from description.
+    assert "build-a-comprehensive-markdown-document" in augmented
+    # Directive is PREFIXED, not appended — the user message follows.
+    user_idx = augmented.find("add a section on Karpathy autoresearch")
+    marker_idx = augmented.find("[Sophia/post-interrupt build directive]")
+    assert marker_idx >= 0
+    assert user_idx > marker_idx, (
+        "Phase 2F.1: directive must precede the user message so the model "
+        "anchors on the directive at the top of the new HumanMessage"
+    )
+
+
+def test_augment_prefix_includes_resume_not_restart_language():
+    """The directive must explicitly tell the model it is RESUMING, not
+    re-running from scratch. Without this language the model re-runs
+    research it already did pre-interrupt (Phase 2F root cause)."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add X",
+        tracked={"task_id": "t1", "task_type": "research"},
+        delegation_context={"task": "research recursive LLMs"},
+    )
+    assert "RESUMING" in augmented
+    assert "not restarting" in augmented.lower() or "do not re-run" in augmented.lower()
+
+
+def test_augment_extension_matches_task_type():
+    """Filename extension must match the task_type's canonical artifact
+    extension so the suggested target lines up with downstream
+    artifact-validation expectations."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    cases = [
+        ("research", ".md"),
+        ("document", ".md"),
+        ("presentation", ".pptx"),
+        ("frontend", ".html"),
+        ("visual_report", ".pdf"),
+    ]
+    for task_type, expected_ext in cases:
+        augmented = _augment_update_message(
+            message="add X",
+            tracked={"task_id": "t1", "task_type": task_type},
+            delegation_context={"task": "the original brief", "task_type": task_type},
+        )
+        assert f"the-original-brief{expected_ext}" in augmented, (
+            f"task_type={task_type} should produce {expected_ext} extension"
+        )
+
+
+def test_augment_prefer_prior_artifact_path_over_suggested_filename():
+    """If the prior builder already produced an artifact_path, use that
+    exact path instead of a derived suggestion. The model should continue
+    editing the existing file, not write to a new derived name."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add X",
+        tracked={
+            "task_id": "t1",
+            "task_type": "research",
+            "artifact_path": "/mnt/user-data/outputs/already-written.md",
+        },
+        delegation_context={"task": "the original brief"},
+    )
+    # Existing artifact wins.
+    assert "/mnt/user-data/outputs/already-written.md" in augmented
+
+
+def test_augment_falls_back_to_build_slug_when_description_missing():
+    """If delegation_context is missing or has no 'task', fall back to a
+    safe default slug (``build.{ext}``) rather than crashing."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    for missing_dc in (None, {}, {"unrelated": "noise"}):
+        augmented = _augment_update_message(
+            message="add X",
+            tracked={"task_id": "t1", "task_type": "research"},
+            delegation_context=missing_dc,
+        )
+        # Either build.md (no description) or some safe fallback under outputs.
+        assert "/mnt/user-data/outputs/" in augmented
+        assert ".md" in augmented
+
+
+def test_augment_slugify_deterministic():
+    """Same input → same slug across calls. This guarantees retry
+    stability: the model converges on the same filename each turn."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _slugify_for_filename
+
+    text = "Build a comprehensive markdown document on recursive LLMs research"
+    assert _slugify_for_filename(text) == _slugify_for_filename(text)
+
+
+def test_augment_slugify_handles_unicode_and_punctuation():
+    """Defensive: weird characters in the description shouldn't crash or
+    produce invalid filenames."""
+    from deerflow.sophia.tools.update_async_task_wrapper import _slugify_for_filename
+
+    cases = [
+        ("Hello, World!", "hello-world"),
+        ("Café résumé", "caf-r-sum"),  # ASCII-only output
+        ("   leading and trailing   ", "leading-and-trailing"),
+        ("@@@", "build"),  # nothing alphanumeric → fallback
+        ("", "build"),
+    ]
+    for input_text, expected in cases:
+        result = _slugify_for_filename(input_text)
+        assert result == expected, f"{input_text!r} → {result!r}, expected {expected!r}"
+
+
 # ---- E.2: post-interrupt message augmentation -----------------------------
 
 
@@ -245,7 +381,9 @@ def test_wrapper_augmentation_includes_prior_artifact_path_when_present():
     asyncio.run(wrapped.coroutine(task_id="task-1", message="add TTS section", runtime=runtime))
     msg = async_calls[0]["message"]
     assert "/mnt/user-data/outputs/recursive_llms_research.md" in msg
-    assert "CONTINUE editing" in msg
+    # Phase 2F.1: directive language asserts "RESUMING (not restarting)"
+    # which is the canonical anti-re-research framing.
+    assert "RESUMING" in msg or "resume" in msg.lower()
 
 
 def test_wrapper_augmentation_is_idempotent():
