@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sophia.local/schemas/sophia-realtime-dogfood-run.schema.json",
+  "title": "Sophia Realtime Dogfood Run Record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "recorded_at",
+    "provider",
+    "runtime_mode",
+    "transport_type",
+    "model",
+    "branch",
+    "tester",
+    "scenario_ids_executed",
+    "event_health",
+    "scorecard",
+    "overall_score",
+    "recommendation"
+  ],
+  "properties": {
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "provider": {
+      "type": "string",
+      "enum": ["legacy_cascade", "openai_realtime", "gemini_live"]
+    },
+    "runtime_mode": {
+      "type": "string"
+    },
+    "transport_type": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "branch": {
+      "type": "string"
+    },
+    "tester": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string"
+    },
+    "user_id": {
+      "type": "string"
+    },
+    "device": {
+      "type": "string"
+    },
+    "network": {
+      "type": "string"
+    },
+    "notes": {
+      "type": "string"
+    },
+    "scenario_ids_executed": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^S(0[1-9]|1[0-5])$"
+      },
+      "uniqueItems": true
+    },
+    "scenario_results": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/scenario_result"
+      },
+      "default": []
+    },
+    "latency_notes": {
+      "type": "string"
+    },
+    "observed_failures": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/failure"
+      },
+      "default": []
+    },
+    "transcript_quality_notes": {
+      "type": "string"
+    },
+    "audio_quality_notes": {
+      "type": "string"
+    },
+    "sophia_voice_register_notes": {
+      "type": "string"
+    },
+    "event_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sophia_event_count",
+        "agent_started_observed",
+        "agent_ended_observed",
+        "final_transcript_observed",
+        "artifact_observed",
+        "provider_event_leaks"
+      ],
+      "properties": {
+        "sophia_event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event_counts_by_type": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "agent_started_observed": {
+          "type": "boolean"
+        },
+        "agent_ended_observed": {
+          "type": "boolean"
+        },
+        "final_transcript_observed": {
+          "type": "boolean"
+        },
+        "artifact_observed": {
+          "type": "boolean"
+        },
+        "builder_task_observed": {
+          "type": ["boolean", "null"]
+        },
+        "interruption_markers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_error_markers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provider_event_leaks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "missing_required_events": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": []
+        },
+        "summary": {
+          "type": "object"
+        }
+      }
+    },
+    "sideband_or_relay_health": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "openai_sideband_attached": {
+          "type": ["boolean", "null"]
+        },
+        "openai_call_id": {
+          "type": ["string", "null"]
+        },
+        "gemini_setup_complete_observed": {
+          "type": ["boolean", "null"]
+        },
+        "gemini_relay_receiving": {
+          "type": ["boolean", "null"]
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "scorecard": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "perceived_ttfa_response_speed",
+        "interruption_handling",
+        "transcript_quality",
+        "assistant_audio_naturalness",
+        "fidelity_to_sophia_voice_register",
+        "emotional_attunement",
+        "event_stream_correctness",
+        "session_stability",
+        "operational_ease",
+        "future_tool_integration_friendliness"
+      ],
+      "properties": {
+        "perceived_ttfa_response_speed": { "$ref": "#/$defs/score" },
+        "interruption_handling": { "$ref": "#/$defs/score" },
+        "transcript_quality": { "$ref": "#/$defs/score" },
+        "assistant_audio_naturalness": { "$ref": "#/$defs/score" },
+        "fidelity_to_sophia_voice_register": { "$ref": "#/$defs/score" },
+        "emotional_attunement": { "$ref": "#/$defs/score" },
+        "event_stream_correctness": { "$ref": "#/$defs/score" },
+        "session_stability": { "$ref": "#/$defs/score" },
+        "operational_ease": { "$ref": "#/$defs/score" },
+        "future_tool_integration_friendliness": { "$ref": "#/$defs/score" }
+      }
+    },
+    "overall_score": {
+      "type": "number",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["pass", "promising but needs fixes", "block"]
+    },
+    "next_actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    }
+  },
+  "$defs": {
+    "scenario_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "executed"],
+      "properties": {
+        "scenario_id": {
+          "type": "string",
+          "pattern": "^S(0[1-9]|1[0-5])$"
+        },
+        "executed": {
+          "type": "boolean"
+        },
+        "notes": {
+          "type": "string"
+        }
+      }
+    },
+    "score": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenario_id", "summary", "severity"],
+      "properties": {
+        "scenario_id": {
+          "type": "string",
+          "pattern": "^S(0[1-9]|1[0-5])$"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "logs_or_events": {
+          "type": "string"
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["blocker", "major", "minor"]
+        },
+        "suspected_owner": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
