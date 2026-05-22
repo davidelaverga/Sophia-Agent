@@ -1,0 +1,2372 @@
+import { describe, expect, it, vi } from 'vitest';
+
+import {
+  buildGeminiLiveWebSocketUrl,
+  categorizeGeminiProviderEvent,
+  classifyGeminiProviderEventForRelay,
+  connectGeminiBrowserLiveDogfood,
+  connectGeminiBrowserLiveFromBootstrap,
+  createGeminiOutputAudioPlaybackController,
+  isGeminiServerInterruptedEvent,
+  isGeminiSetupCompleteMessage,
+  isRelayableGeminiProviderEvent,
+  pcm16BytesToFloat32,
+  pcm16Base64FromFloat32,
+  readGeminiOutputAudioChunks,
+  readGeminiConfiguredToolNames,
+  recordGeminiProviderEventTelemetry,
+  createGeminiProviderEventCategoryCounts,
+  createGeminiRelayClassificationCounts,
+  readGeminiToolCallsFromEvent,
+  type GeminiBrowserLiveDogfoodRelayDiagnostic,
+  type GeminiBrowserLiveDogfoodRelayStatus,
+  type GeminiBrowserLiveDogfoodStage,
+  type GeminiBrowserLiveDogfoodInterruptionDiagnostic,
+  type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
+} from '../app/lib/gemini-browser-live-websocket-dogfood';
+
+const emitArtifactArgs = {
+  session_goal: 'Probe Gemini artifacts.',
+  active_goal: 'Confirm backend tool loop.',
+  next_step: 'Read the debug page.',
+  takeaway: 'Tool response returned.',
+  reflection: null,
+  tone_estimate: 2,
+  tone_target: 2.5,
+  active_tone_band: 'engagement',
+  skill_loaded: 'active_listening',
+  ritual_phase: 'freeform.tool_loop',
+  voice_emotion_primary: 'calm',
+  voice_emotion_secondary: 'sympathetic',
+  voice_speed: 'normal',
+};
+const emitArtifactArgsPreview = `${JSON.stringify(emitArtifactArgs).slice(0, 179)}...`;
+
+function deferredResponse() {
+  let resolve!: (value: Response) => void;
+  const promise = new Promise<Response>((innerResolve) => {
+    resolve = innerResolve;
+  });
+  return { promise, resolve };
+}
+
+class FakeWebSocket {
+  readyState = 0;
+  sent: string[] = [];
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  onclose: ((event: CloseEvent) => void) | null = null;
+
+  constructor(
+    readonly url: string,
+    private readonly options: { autoSetupComplete?: boolean; failToolResponseSend?: boolean } = {},
+  ) {
+    queueMicrotask(() => {
+      this.readyState = 1;
+      this.onopen?.({} as Event);
+    });
+  }
+
+  send(data: string) {
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    if (parsed.toolResponse && this.options.failToolResponseSend) {
+      throw new Error('toolResponse send blocked by test socket');
+    }
+    this.sent.push(data);
+    if (parsed.setup && this.options.autoSetupComplete !== false) {
+      queueMicrotask(() => this.emitMessage({ setupComplete: {} }));
+    }
+  }
+
+  close() {
+    this.readyState = 3;
+    this.onclose?.({} as CloseEvent);
+  }
+
+  emitMessage(payload: Record<string, unknown>) {
+    this.onmessage?.({ data: JSON.stringify(payload) } as MessageEvent);
+  }
+
+  emitRawMessage(data: unknown) {
+    this.onmessage?.({ data } as MessageEvent);
+  }
+
+  emitError() {
+    this.onerror?.({} as Event);
+  }
+
+  emitClose() {
+    this.readyState = 3;
+    this.onclose?.({} as CloseEvent);
+  }
+}
+
+class FakeAudioBufferSource {
+  buffer: AudioBuffer | null = null;
+  connect = vi.fn();
+  disconnect = vi.fn();
+  start = vi.fn();
+  stop = vi.fn();
+  onended: (() => void) | null = null;
+}
+
+class FakeAudioContext {
+  sampleRate = 48000;
+  currentTime = 10;
+  destination = {} as AudioDestinationNode;
+  readonly createdSources: FakeAudioBufferSource[] = [];
+  readonly processor = {
+    onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  };
+  readonly source = {
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  };
+  close = vi.fn(async () => undefined);
+  createMediaStreamSource = vi.fn(() => this.source as unknown as MediaStreamAudioSourceNode);
+  createScriptProcessor = vi.fn(() => this.processor as unknown as ScriptProcessorNode);
+  createBuffer = vi.fn((channels: number, length: number, sampleRate: number) => ({
+    copyToChannel: vi.fn(),
+    duration: length / sampleRate,
+  }) as unknown as AudioBuffer);
+  createBufferSource = vi.fn(() => {
+    const source = new FakeAudioBufferSource();
+    this.createdSources.push(source);
+    return source as unknown as AudioBufferSourceNode;
+  });
+}
+
+describe('Gemini browser Live WebSocket dogfood connector', () => {
+  it('builds the constrained Live WebSocket URL with only the ephemeral token', () => {
+    expect(
+      buildGeminiLiveWebSocketUrl(
+        'wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained',
+        'auth_tokens/gemini-browser-test',
+      ),
+    ).toContain('access_token=auth_tokens%2Fgemini-browser-test');
+    expect(isGeminiSetupCompleteMessage({ setupComplete: {} })).toBe(true);
+    expect(isGeminiSetupCompleteMessage({ serverContent: {} })).toBe(false);
+
+    const encoded = pcm16Base64FromFloat32(new Float32Array([0, 1, -1]), 16000);
+    expect(Buffer.from(encoded, 'base64')).toHaveLength(6);
+  });
+
+  it('decodes Gemini output PCM16 little-endian bytes into normalized float samples', () => {
+    const samples = pcm16BytesToFloat32(new Uint8Array([
+      0x00, 0x00,
+      0xff, 0x7f,
+      0x00, 0x80,
+      0x00, 0x40,
+    ]));
+
+    expect(samples).toHaveLength(4);
+    expect(samples[0]).toBe(0);
+    expect(samples[1]).toBeCloseTo(32767 / 32768, 5);
+    expect(samples[2]).toBe(-1);
+    expect(samples[3]).toBeCloseTo(0.5, 5);
+  });
+
+  it('schedules successive Gemini output audio chunks sequentially and clears playback state', () => {
+    const fakeAudioContext = new FakeAudioContext();
+    fakeAudioContext.currentTime = 5;
+    const player = createGeminiOutputAudioPlaybackController(fakeAudioContext as unknown as AudioContext);
+    const chunk = Buffer.from([0x00, 0x00, 0x00, 0x00]).toString('base64');
+
+    expect(player.playBase64Chunk(chunk)).toBe(true);
+    expect(player.playBase64Chunk(chunk)).toBe(true);
+
+    const starts = fakeAudioContext.createdSources.map((source) => source.start.mock.calls[0]?.[0] as number);
+    expect(starts[0]).toBe(5);
+    expect(starts[1]).toBeCloseTo(5 + 2 / 24000, 7);
+    expect(starts[1]).toBeGreaterThan(starts[0] ?? 0);
+    expect(player.snapshot().nextPlaybackTime).toBeCloseTo(5 + 4 / 24000, 7);
+    expect(player.snapshot().activeSourceCount).toBe(2);
+
+    player.stop();
+
+    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.createdSources[1]?.stop).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.createdSources[1]?.disconnect).toHaveBeenCalledTimes(1);
+    expect(player.snapshot()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0 });
+  });
+
+  it('records bounded non-raw diagnostics for scheduled Gemini output audio chunks', () => {
+    const fakeAudioContext = new FakeAudioContext();
+    fakeAudioContext.currentTime = 12;
+    const diagnostics: unknown[] = [];
+    const player = createGeminiOutputAudioPlaybackController(fakeAudioContext as unknown as AudioContext, {
+      maxDiagnostics: 2,
+      onChunkDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const chunk = Buffer.from([0x00, 0x00, 0x00, 0x00]).toString('base64');
+
+    const played = player.playEvent({
+      serverContent: {
+        modelTurn: {
+          parts: [
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: chunk } },
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: chunk } },
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: chunk } },
+          ],
+        },
+      },
+    }, {
+      providerReceiveSequence: 7,
+      providerRelaySequence: 4,
+      providerReceivedAt: '2026-05-20T12:00:00.000Z',
+      relayCorrelationId: 'gemini-event-7',
+      providerPrimaryCategory: 'serverContent',
+      providerCategories: ['serverContent', 'modelTurnAudio'],
+    });
+
+    expect(played).toBe(3);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[0]).toMatchObject({
+      providerReceiveSequence: 7,
+      providerRelaySequence: 4,
+      providerReceivedAt: '2026-05-20T12:00:00.000Z',
+      relayCorrelationId: 'gemini-event-7',
+      chunkIndex: 0,
+      chunksInEvent: 3,
+      byteLength: 4,
+      base64Length: chunk.length,
+      duplicateOrdinal: 1,
+      audioContextCurrentTime: 12,
+      scheduledStartTime: 12,
+      scheduled: true,
+      activeSourceCountBefore: 0,
+      activeSourceCountAfter: 1,
+    });
+    expect(diagnostics[1]).toMatchObject({
+      chunkIndex: 1,
+      duplicateOrdinal: 2,
+      scheduledStartTime: 12 + 2 / 24000,
+      activeSourceCountBefore: 1,
+      activeSourceCountAfter: 2,
+    });
+    expect((diagnostics[0] as { chunkHash?: unknown }).chunkHash).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('reads Gemini audio chunks from camelCase and snake_case modelTurn inlineData parts', () => {
+    expect(readGeminiOutputAudioChunks({
+      serverContent: {
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAAA' } }],
+        },
+      },
+    })).toEqual(['AAAA']);
+    expect(readGeminiOutputAudioChunks({
+      server_content: {
+        model_turn: {
+          parts: [{ inline_data: { mime_type: 'audio/pcm;rate=24000', data: 'AQABAA==' } }],
+        },
+      },
+    })).toEqual(['AQABAA==']);
+  });
+
+  it('categorizes provider events and records compact correlation telemetry', () => {
+    const event = {
+      serverContent: {
+        inputTranscription: { text: 'hello' },
+        outputTranscription: { text: 'hi' },
+        modelTurn: {
+          parts: [
+            { text: 'hi' },
+            { inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAAA' } },
+            { functionCall: { id: 'nested-call-1', name: 'emit_artifact', args: emitArtifactArgs } },
+          ],
+        },
+      },
+    };
+
+    expect(categorizeGeminiProviderEvent(event)).toEqual([
+      'serverContent',
+      'inputTranscription',
+      'outputTranscription',
+      'modelTurnAudio',
+      'modelTurnText',
+      'toolCall',
+    ]);
+    expect(readGeminiToolCallsFromEvent(event)).toEqual([
+      expect.objectContaining({ id: 'nested-call-1', name: 'emit_artifact' }),
+    ]);
+
+    const telemetry = recordGeminiProviderEventTelemetry(
+      createGeminiProviderEventCategoryCounts(),
+      createGeminiRelayClassificationCounts(),
+      event,
+      '2026-05-20T00:00:00.000Z',
+    );
+    expect(telemetry.categoryCounts.serverContent.count).toBe(1);
+    expect(telemetry.categoryCounts.toolCall.count).toBe(1);
+    expect(telemetry.relayClassification).toBe('critical');
+    expect(telemetry.relayClassificationCounts.critical.count).toBe(1);
+    expect(telemetry.toolCallIds).toEqual(['nested-call-1']);
+    expect(telemetry.outputAudioChunkCount).toBe(1);
+    expect(telemetry.hasInputTranscriptionText).toBe(true);
+    expect(telemetry.hasOutputTranscriptionText).toBe(true);
+    expect(telemetry.inputTranscriptionTextPreview).toBe('hello');
+    expect(telemetry.outputTranscriptionTextPreview).toBe('hi');
+  });
+
+  it('recognizes only meaningful Gemini provider events as relayable', () => {
+    expect(isRelayableGeminiProviderEvent({})).toBe(false);
+    expect(isRelayableGeminiProviderEvent('')).toBe(false);
+    expect(isRelayableGeminiProviderEvent({ serverContent: {} })).toBe(false);
+    expect(isRelayableGeminiProviderEvent({ serverContent: { outputTranscription: { text: '' } } })).toBe(false);
+    expect(isRelayableGeminiProviderEvent({ setupComplete: {} })).toBe(true);
+    expect(isRelayableGeminiProviderEvent({ setup_complete: {} })).toBe(true);
+    expect(isRelayableGeminiProviderEvent({ serverContent: { outputTranscription: { text: 'Hi.' } } })).toBe(true);
+    expect(isRelayableGeminiProviderEvent({
+      toolCall: {
+        functionCalls: [{ id: 'artifact-call-1', name: 'emit_artifact', args: emitArtifactArgs }],
+      },
+    })).toBe(true);
+    expect(readGeminiToolCallsFromEvent({
+      toolCall: {
+        functionCalls: [{ id: 'artifact-call-1', name: 'emit_artifact', args: emitArtifactArgs }],
+      },
+    })).toEqual([
+      {
+        id: 'artifact-call-1',
+        name: 'emit_artifact',
+        args: emitArtifactArgs,
+        argsPreview: emitArtifactArgsPreview,
+      },
+    ]);
+    const memoryToolCalls = readGeminiToolCallsFromEvent({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'memory-call-1',
+            name: 'retrieve_memories',
+            args: {
+              query: 'favorite childhood movie secret phrase',
+              user_id: 'model-user-id',
+              categories: ['preference'],
+            },
+          },
+        ],
+      },
+    });
+    expect(memoryToolCalls).toEqual([
+      {
+        id: 'memory-call-1',
+        name: 'retrieve_memories',
+        args: {
+          query_length: 'favorite childhood movie secret phrase'.length,
+          query_fingerprint: expect.stringMatching(/^fnv1a32:[a-f0-9]{8}$/),
+          raw_query_excluded: true,
+          ignored_model_arg_names: ['user_id', 'categories'],
+        },
+        argsPreview: expect.stringContaining('raw_query_excluded'),
+      },
+    ]);
+    expect(JSON.stringify(memoryToolCalls)).not.toContain('favorite childhood movie secret phrase');
+    expect(JSON.stringify(memoryToolCalls)).not.toContain('model-user-id');
+    expect(readGeminiConfiguredToolNames({
+      tools: [
+        {
+          functionDeclarations: [
+            { name: 'emit_artifact' },
+            { name: 'start_builder_task' },
+            { name: 'check_async_task' },
+          ],
+        },
+      ],
+    })).toEqual(['check_async_task', 'emit_artifact', 'start_builder_task']);
+  });
+
+  it('classifies Gemini provider events by backend continuity importance', () => {
+    expect(classifyGeminiProviderEventForRelay({
+      serverContent: {
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAAA' } }],
+        },
+      },
+    })).toMatchObject({
+      classification: 'skip',
+      shouldRelay: false,
+      reason: 'pure_output_audio_is_played_locally',
+    });
+    expect(classifyGeminiProviderEventForRelay({ sessionResumptionUpdate: { resumable: true, newHandle: 'h1' } })).toMatchObject({
+      classification: 'skip',
+      shouldRelay: false,
+      reason: 'session_resumption_update_is_browser_local_until_resume_is_used',
+    });
+    expect(classifyGeminiProviderEventForRelay({ usageMetadata: { totalTokenCount: 42 } })).toMatchObject({
+      classification: 'summary',
+      shouldRelay: false,
+    });
+    expect(classifyGeminiProviderEventForRelay({ serverContent: { inputTranscription: { text: 'hello' } } })).toMatchObject({
+      classification: 'critical',
+      shouldRelay: true,
+    });
+    expect(classifyGeminiProviderEventForRelay({ toolCallCancellation: { ids: ['tool-call-1'] } })).toMatchObject({
+      classification: 'critical',
+      shouldRelay: true,
+    });
+    expect(classifyGeminiProviderEventForRelay({
+      toolCall: {
+        functionCalls: [{ id: 'artifact-call-1', name: 'emit_artifact', args: emitArtifactArgs }],
+      },
+    })).toMatchObject({
+      classification: 'critical',
+      shouldRelay: true,
+      reason: 'tool_call_requires_backend_execution',
+    });
+    expect(classifyGeminiProviderEventForRelay({
+      toolCall: {
+        functionCalls: [{ id: 'builder-call-1', name: 'start_builder_task', args: { description: 'Draft a page.' } }],
+      },
+    })).toMatchObject({
+      classification: 'critical',
+      shouldRelay: true,
+    });
+  });
+
+  it('starts backend dogfood, opens Gemini WSS, waits for setupComplete, relays events, and cleans up', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-1',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              inputAudioTranscription: {},
+              tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const stoppedTrack = vi.fn();
+    const localStream = {
+      getTracks: () => [{ stop: stoppedTrack }],
+    } as unknown as MediaStream;
+    const fakeAudioContext = new FakeAudioContext();
+    const stages: GeminiBrowserLiveDogfoodStage[] = [];
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    const providerEvents: unknown[] = [];
+    const interruptionDiagnostics: GeminiBrowserLiveDogfoodInterruptionDiagnostic[] = [];
+    const outputAudioDetected = vi.fn();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      sessionId: 'browser-gemini-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => localStream),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onStage: (stage) => stages.push(stage),
+      onProviderEvent: (event) => providerEvents.push(event),
+      onRelayStatus: (status) => relayStatuses.push(status),
+      onOutputAudio: outputAudioDetected,
+      onInterruption: (diagnostic) => interruptionDiagnostics.push(diagnostic),
+    });
+
+    expect(connection.sessionId).toBe('browser-gemini-1');
+    expect(connection.streamUrl).toBe('/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1');
+    expect(connection.websocketUrl).toBe('wss://gemini.example/live?access_token=auth_tokens%2Fgemini-browser-test');
+    expect(connection.relayUrl).toBeNull();
+    expect(connection.publicEventBoundary).toBeNull();
+    expect(connection.transport).toBeNull();
+    expect(connection.setupComplete).toBe(true);
+    expect(stages).toEqual([
+      'starting_backend_session',
+      'requesting_microphone',
+      'opening_websocket',
+      'sending_setup',
+      'waiting_setup_complete',
+      'connected',
+      'streaming_audio',
+    ]);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/sophia/voice/dogfood/gemini/browser-session',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(websocket?.sent[0]).toBe(JSON.stringify({
+      setup: {
+        model: 'models/gemini-3.1-flash-live-preview',
+        inputAudioTranscription: {},
+        tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
+      },
+    }));
+    expect(providerEvents).toEqual([{ setupComplete: {} }]);
+
+    connection.sendText('hello');
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({ realtimeInput: { text: 'hello' } }));
+
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array([0, 0.25, -0.25, 0.5, -0.5, 0.75]) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(6) },
+    } as unknown as AudioProcessingEvent);
+
+    const audioMessage = JSON.parse(websocket?.sent.at(-1) ?? '{}') as { realtimeInput?: { audio?: { data?: string; mimeType?: string } } };
+    expect(audioMessage.realtimeInput?.audio?.mimeType).toBe('audio/pcm;rate=16000');
+    expect(typeof audioMessage.realtimeInput?.audio?.data).toBe('string');
+
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+    await vi.waitFor(() => expect(relayStatuses).toEqual(['active', 'active']));
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+    const setupRelayBody = JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)) as Record<string, unknown>;
+    const transcriptRelayBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as Record<string, unknown>;
+    expect(setupRelayBody).toMatchObject({
+      session_id: 'browser-gemini-1',
+      event: { setupComplete: {} },
+      provider_receive_sequence: 1,
+      provider_relay_sequence: 1,
+      provider_primary_category: 'setupComplete',
+      provider_categories: ['setupComplete'],
+    });
+    expect(transcriptRelayBody).toMatchObject({
+      session_id: 'browser-gemini-1',
+      event: { serverContent: { outputTranscription: { text: 'Hi.' } } },
+      provider_receive_sequence: 2,
+      provider_relay_sequence: 2,
+      provider_primary_category: 'serverContent',
+      provider_categories: ['serverContent', 'outputTranscription'],
+    });
+    expect(typeof setupRelayBody.provider_received_at).toBe('string');
+    expect(typeof setupRelayBody.relay_correlation_id).toBe('string');
+
+    websocket?.emitMessage({
+      serverContent: {
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAABAA==' } }],
+        },
+      },
+    });
+    await vi.waitFor(() => expect(outputAudioDetected).toHaveBeenCalledTimes(1));
+    expect(fakeAudioContext.createdSources).toHaveLength(1);
+    expect(fakeAudioContext.createdSources[0]?.start).toHaveBeenCalledWith(10);
+
+    const interruptionEvent = { serverContent: { interrupted: true } };
+    expect(isGeminiServerInterruptedEvent(interruptionEvent)).toBe(true);
+    websocket?.emitMessage(interruptionEvent);
+    await vi.waitFor(() => expect(interruptionDiagnostics).toHaveLength(1));
+
+    expect(interruptionDiagnostics[0]).toEqual(expect.objectContaining({
+      reason: 'server_interrupted',
+      playbackFlushed: true,
+      playbackStateBefore: expect.objectContaining({ activeSourceCount: 1 }),
+      playbackStateAfter: { nextPlaybackTime: 0, activeSourceCount: 0 },
+    }));
+    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
+    expect(connection.flushOutputAudio()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0 });
+
+    await connection.close();
+
+    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
+    expect(stoppedTrack).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.processor.disconnect).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.source.disconnect).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.close).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      '/api/sophia/voice/dogfood/gemini/disconnect',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ session_id: 'browser-gemini-1' }),
+        keepalive: true,
+      }),
+    );
+    expect(relayStatuses.at(-1)).toBe('disconnected');
+  });
+
+  it('does not POST audio-only events before critical tool and transcription relays', async () => {
+    const artifactToolResponse = {
+      toolResponse: {
+        functionResponses: [
+          { id: 'artifact-priority-call', name: 'emit_artifact', response: { ok: true } },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-priority',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }] },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-priority',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [{ type: 'gemini_tool_response', payload: artifactToolResponse }],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    for (let index = 0; index < 25; index += 1) {
+      websocket?.emitMessage({
+        serverContent: {
+          modelTurn: {
+            parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAAA' } }],
+          },
+        },
+      });
+    }
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'The important words.' } } });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        body: expect.any(String),
+      }),
+    );
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'artifact-priority-call', name: 'emit_artifact', args: emitArtifactArgs }],
+      },
+    });
+    await vi.waitFor(() => expect(websocket?.sent).toContain(JSON.stringify(artifactToolResponse)));
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      4,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        body: expect.any(String),
+      }),
+    );
+
+    await connection.close();
+  });
+
+  it('does not drop raw Gemini outputTranscription fragments while preserving relay sequence numbers', async () => {
+    const firstPartialRelay = deferredResponse();
+    const relayTraces: unknown[] = [];
+    const coalescingDiagnostics: unknown[] = [];
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-coalescing',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-coalescing',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockImplementationOnce(() => firstPartialRelay.promise)
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onRelayTrace: (trace) => relayTraces.push(trace),
+      onRelayCoalescingDiagnostic: (diagnostic) => coalescingDiagnostics.push(diagnostic),
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: "You're asking" } } });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'for a' } } });
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'deeper' } } });
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'understanding' } } });
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(coalescingDiagnostics).toHaveLength(0);
+
+    firstPartialRelay.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
+
+    const firstRelayBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as Record<string, unknown>;
+    const secondRelayBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as Record<string, unknown>;
+    const thirdRelayBody = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as Record<string, unknown>;
+    const fourthRelayBody = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body)) as Record<string, unknown>;
+    expect(firstRelayBody).toMatchObject({
+      provider_receive_sequence: 2,
+      provider_relay_sequence: 2,
+      event: { serverContent: { outputTranscription: { text: "You're asking" } } },
+    });
+    expect(secondRelayBody).toMatchObject({
+      provider_receive_sequence: 3,
+      provider_relay_sequence: 3,
+      event: { serverContent: { outputTranscription: { text: 'for a' } } },
+    });
+    expect(thirdRelayBody).toMatchObject({
+      provider_receive_sequence: 4,
+      provider_relay_sequence: 4,
+      event: { serverContent: { outputTranscription: { text: 'deeper' } } },
+    });
+    expect(fourthRelayBody).toMatchObject({
+      provider_receive_sequence: 5,
+      provider_relay_sequence: 5,
+      event: { serverContent: { outputTranscription: { text: 'understanding' } } },
+    });
+    expect(relayTraces.at(-1)).toMatchObject({
+      throughput: {
+        transcriptPartialsCoalesced: 0,
+        transcriptPartialsDropped: 0,
+        transcriptPartialsSent: 4,
+        transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
+      },
+    });
+
+    await connection.close();
+  });
+
+  it('keeps user transcripts, tools, cancellations, and boundaries non-droppable behind a blocked transcript fragment', async () => {
+    const firstPartialRelay = deferredResponse();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-critical-events',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-critical-events',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockImplementationOnce(() => firstPartialRelay.promise)
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Blocked fragment.' } } });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'user words' } } });
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'artifact-critical-call', name: 'emit_artifact', args: emitArtifactArgs }],
+      },
+    });
+    websocket?.emitMessage({ toolCallCancellation: { ids: ['artifact-critical-call'] } });
+    websocket?.emitMessage({ serverContent: { turnComplete: true } });
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    firstPartialRelay.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+
+    const queuedBodies = fetchMock.mock.calls.slice(3, 7).map((call) => JSON.parse(String(call[1]?.body)) as Record<string, unknown>);
+    expect(queuedBodies.map((body) => body.provider_relay_sequence)).toEqual([3, 4, 5, 6]);
+    expect(queuedBodies[0]).toMatchObject({
+      event: { serverContent: { inputTranscription: { text: 'user words' } } },
+    });
+    expect(queuedBodies[1]).toMatchObject({
+      event: {
+        toolCall: {
+          functionCalls: [{ id: 'artifact-critical-call', name: 'emit_artifact', args: emitArtifactArgs }],
+        },
+      },
+    });
+    expect(queuedBodies[2]).toMatchObject({
+      event: { toolCallCancellation: { ids: ['artifact-critical-call'] } },
+    });
+    expect(queuedBodies[3]).toMatchObject({
+      event: { serverContent: { turnComplete: true } },
+    });
+
+    await connection.close();
+  });
+
+  it('never coalesces final assistant transcript boundary events behind pending partials', async () => {
+    const firstPartialRelay = deferredResponse();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-final-boundary',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-final-boundary',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockImplementationOnce(() => firstPartialRelay.promise)
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Partial in flight.' } } });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3));
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Queued partial.' } } });
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Final caption.' }, turnComplete: true } });
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    firstPartialRelay.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
+
+    const queuedPartialBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as Record<string, unknown>;
+    const finalBody = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as Record<string, unknown>;
+    expect(queuedPartialBody).toMatchObject({
+      provider_relay_sequence: 3,
+      event: { serverContent: { outputTranscription: { text: 'Queued partial.' } } },
+    });
+    expect(finalBody).toMatchObject({
+      provider_relay_sequence: 4,
+      event: { serverContent: { outputTranscription: { text: 'Final caption.' }, turnComplete: true } },
+    });
+
+    await connection.close();
+  });
+
+  it('sends audioStreamEnd and gates microphone frames while Gemini mic is manually muted', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-muted',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', tools: [] },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-muted',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const track = { enabled: true, stop: vi.fn() };
+    const localStream = {
+      getTracks: () => [track],
+      getAudioTracks: () => [track],
+    } as unknown as MediaStream;
+    const fakeAudioContext = new FakeAudioContext();
+    const inputAudioDiagnostics: unknown[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => localStream),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onInputAudioActivity: (diagnostic) => inputAudioDiagnostics.push(diagnostic),
+    });
+
+    connection.setMicrophoneMuted(true);
+    expect(track.enabled).toBe(false);
+    expect(websocket?.sent.at(-1)).toBe(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    expect(inputAudioDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: 'manual_mute_on', micState: 'muted' }),
+      expect.objectContaining({ eventType: 'input_audio_stream_paused', micState: 'muted' }),
+      expect.objectContaining({ eventType: 'input_audio_stream_end_sent', audioStreamEndSent: true }),
+    ]));
+    const sentCountAfterMute = websocket?.sent.length ?? 0;
+
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array([0.25, -0.25, 0.5, -0.5]) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4) },
+    } as unknown as AudioProcessingEvent);
+    expect(websocket?.sent).toHaveLength(sentCountAfterMute);
+
+    connection.setMicrophoneMuted(false);
+    expect(track.enabled).toBe(true);
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array([0.25, -0.25, 0.5, -0.5]) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4) },
+    } as unknown as AudioProcessingEvent);
+
+    const audioMessage = JSON.parse(websocket?.sent.at(-1) ?? '{}') as { realtimeInput?: { audio?: { mimeType?: string } } };
+    expect(audioMessage.realtimeInput?.audio?.mimeType).toBe('audio/pcm;rate=16000');
+    expect(inputAudioDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ eventType: 'manual_mute_off', micState: 'unmuted' }),
+      expect.objectContaining({
+        eventType: 'input_audio_frame_sent',
+        micState: 'unmuted',
+        audioFrameSequence: 1,
+        framesRepresented: 1,
+        frameByteLength: expect.any(Number),
+        frameDurationMs: expect.any(Number),
+      }),
+    ]));
+    expect(JSON.stringify(inputAudioDiagnostics)).not.toContain('data');
+
+    await connection.close();
+  });
+
+  it('connects from a production bootstrap using production relay and disconnect aliases', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const stoppedTrack = vi.fn();
+    const localStream = {
+      getTracks: () => [{ stop: stoppedTrack }],
+    } as unknown as MediaStream;
+    const fakeAudioContext = new FakeAudioContext();
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'user-1',
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-prod-1',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/prod-test' },
+        setup: { model: 'models/gemini-live', tools: [] },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-1',
+        provider_event_relay_url: '/api/sophia/voice/gemini/relay',
+        disconnect_url: '/api/sophia/voice/gemini/disconnect',
+        public_event_boundary: 'SophiaEventNormalizer',
+        transport: 'gemini_browser_websocket_ephemeral_token_with_backend_relay',
+      },
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => localStream),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+    });
+
+    expect(connection.sessionId).toBe('gemini-prod-1');
+    expect(connection.streamUrl).toBe('/api/sophia/voice/gemini/events?session_id=gemini-prod-1');
+    expect(connection.relayUrl).toBe('/api/sophia/voice/gemini/relay');
+    expect(connection.publicEventBoundary).toBe('SophiaEventNormalizer');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sophia/voice/gemini/relay',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+
+    await connection.close();
+
+    expect(stoppedTrack).toHaveBeenCalledTimes(1);
+    expect(websocket?.readyState).toBe(3);
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      '/api/sophia/voice/gemini/disconnect',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify({ session_id: 'gemini-prod-1' }),
+        keepalive: true,
+      }),
+    );
+  });
+
+  it('relays Gemini toolCall messages and sends backend toolResponse actions over the existing WebSocket', async () => {
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'artifact-call-1',
+            name: 'emit_artifact',
+            response: {
+              ok: true,
+              backend_tool_result: 'Artifact recorded.',
+              result_summary: 'Artifact recorded.',
+              artifact_recorded: true,
+            },
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-tool-loop',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-tool-loop',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: toolResponsePayload,
+                result_summary: 'Existing Sophia emit_artifact tool executed.',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'artifact-call-1',
+                name: 'emit_artifact',
+                success: true,
+                result_summary: 'Existing Sophia emit_artifact tool executed.',
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    const relayDiagnostics: GeminiBrowserLiveDogfoodRelayDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+      onRelayDiagnostic: (diagnostic) => relayDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'artifact-call-1',
+            name: 'emit_artifact',
+            args: emitArtifactArgs,
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(websocket?.sent).toContain(JSON.stringify(toolResponsePayload)));
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+    expect(toolDiagnostics.map((diagnostic) => diagnostic.phase)).toEqual([
+      'tool_call_received',
+      'backend_accepted_tool_call',
+      'tool_response_sent',
+    ]);
+    expect(toolDiagnostics[0]?.toolCall).toMatchObject({
+      id: 'artifact-call-1',
+      name: 'emit_artifact',
+      argsPreview: emitArtifactArgsPreview,
+    });
+    expect(toolDiagnostics[2]?.resultSummary).toBe('Artifact recorded.');
+    expect(toolDiagnostics[2]?.backendResponse).toMatchObject({ artifact_recorded: true });
+    expect(relayDiagnostics).toEqual([]);
+
+    await connection.close();
+  });
+
+  it('redacts retrieve_memories diagnostics while sending the raw toolResponse back to Gemini', async () => {
+    const rawMemoryText = 'Luis said his favorite childhood movie was The Lord of the Rings.';
+    const rawQuery = 'favorite childhood movie lord rings';
+    const memoryResponse = {
+      ok: true,
+      status: 'success',
+      count: 1,
+      memories: [
+        {
+          text: rawMemoryText,
+          category: 'preference',
+          source: 'long_term_memory',
+        },
+      ],
+      diagnostics: {
+        schema: 'realtime_retrieve_memories_diagnostics_v1',
+        tool: 'retrieve_memories',
+        status: 'success',
+        count: 1,
+        has_results: true,
+        query_length: rawQuery.length,
+        query_fingerprint: 'sha256:query1234567890',
+        query_term_count: 5,
+        raw_query_excluded: true,
+        provider_status: 'available',
+        provider_reason: 'sdk_client',
+        result_categories: ['preference'],
+        result_text_lengths: [rawMemoryText.length],
+        result_fingerprints: [
+          {
+            rank: 1,
+            text_fingerprint: 'sha256:memory123456789',
+            text_length: rawMemoryText.length,
+            query_terms_matched_count: 5,
+            query_term_count: 5,
+            exact_query_terms_present: true,
+            category: 'preference',
+            unsafe_preview: rawMemoryText,
+          },
+        ],
+        result_preview_included: false,
+        raw_memory_text_excluded: true,
+        max_query_terms_matched_count: 5,
+        any_result_exact_query_terms_present: true,
+        unsafe_preview: rawMemoryText,
+      },
+    };
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'memory-call-1',
+            name: 'retrieve_memories',
+            response: memoryResponse,
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-memory-tool-loop',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'retrieve_memories' }] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-memory-tool-loop',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: toolResponsePayload,
+                result_summary: 'retrieve_memories returned success with 1 snippet(s).',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'memory-call-1',
+                name: 'retrieve_memories',
+                success: true,
+                result_summary: 'retrieve_memories returned success with 1 snippet(s).',
+                response: memoryResponse,
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'memory-call-1',
+            name: 'retrieve_memories',
+            args: { query: rawQuery, user_id: 'model-user-id' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(websocket?.sent).toContain(JSON.stringify(toolResponsePayload)));
+
+    const serializedDiagnostics = JSON.stringify(toolDiagnostics);
+    const backendAccepted = toolDiagnostics.find((diagnostic) => diagnostic.phase === 'backend_accepted_tool_call');
+    const responseSent = toolDiagnostics.find((diagnostic) => diagnostic.phase === 'tool_response_sent');
+
+    expect(JSON.stringify(websocket?.sent)).toContain(rawMemoryText);
+    expect(serializedDiagnostics).not.toContain(rawMemoryText);
+    expect(serializedDiagnostics).not.toContain(rawQuery);
+    expect(serializedDiagnostics).not.toContain('model-user-id');
+    expect(backendAccepted?.backendResponse).toMatchObject({
+      status: 'success',
+      count: 1,
+      raw_memory_text_excluded: true,
+      raw_query_excluded: true,
+      diagnostics: {
+        result_fingerprints: [
+          {
+            rank: 1,
+            text_fingerprint: 'sha256:memory123456789',
+            text_length: rawMemoryText.length,
+            query_terms_matched_count: 5,
+            query_term_count: 5,
+            exact_query_terms_present: true,
+            category: 'preference',
+          },
+        ],
+      },
+    });
+    expect(responseSent?.resultSummary).toBe('retrieve_memories returned success with 1 snippet(s).');
+    expect(responseSent?.backendResponse).toMatchObject({
+      has_results: true,
+      diagnostics: {
+        query_fingerprint: 'sha256:query1234567890',
+        result_preview_included: false,
+      },
+    });
+
+    await connection.close();
+  });
+
+  it('suppresses stale toolResponse send-back when Gemini cancels the tool call first', async () => {
+    const toolRelay = deferredResponse();
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'artifact-call-cancelled',
+            name: 'emit_artifact',
+            response: {
+              ok: true,
+              result_summary: 'Artifact recorded after cancellation.',
+            },
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-cancelled-tool-loop',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-cancelled-tool-loop',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockImplementationOnce(() => toolRelay.promise)
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'artifact-call-cancelled', name: 'emit_artifact', args: emitArtifactArgs },
+        ],
+      },
+    });
+    websocket?.emitMessage({ toolCallCancellation: { ids: ['artifact-call-cancelled'] } });
+    toolRelay.resolve(new Response(
+      JSON.stringify({
+        accepted: true,
+        client_actions: [
+          {
+            type: 'gemini_tool_response',
+            payload: toolResponsePayload,
+            result_summary: 'Existing Sophia emit_artifact tool executed.',
+          },
+        ],
+      }),
+      { status: 202, headers: { 'Content-Type': 'application/json' } },
+    ));
+
+    await vi.waitFor(() => expect(toolDiagnostics.map((diagnostic) => diagnostic.phase)).toContain('tool_response_send_suppressed'));
+    expect(websocket?.sent).not.toContain(JSON.stringify(toolResponsePayload));
+    expect(toolDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ phase: 'tool_call_cancelled' }),
+      expect.objectContaining({
+        phase: 'tool_response_send_suppressed',
+        suppressionReason: 'cancelled_before_tool_response_send',
+      }),
+    ]));
+
+    await connection.close();
+  });
+
+  it('propagates builder task id and status from backend diagnostics and toolResponse payloads', async () => {
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'builder-call-1',
+            name: 'start_builder_task',
+            response: {
+              ok: true,
+              task_id: 'builder-thread-1',
+              status: 'running',
+              result_summary: 'Launched builder task. task_id: builder-thread-1.',
+            },
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-builder-tool-loop',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'start_builder_task' }] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-builder-tool-loop',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: toolResponsePayload,
+                result_summary: 'Existing Sophia builder task launched: builder-thread-1.',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'builder-call-1',
+                name: 'start_builder_task',
+                success: true,
+                task_id: 'builder-thread-1',
+                task_status: 'running',
+                result_summary: 'Existing Sophia builder task launched: builder-thread-1.',
+                response: {
+                  ok: true,
+                  task_id: 'builder-thread-1',
+                  status: 'running',
+                  result_summary: 'Launched builder task. task_id: builder-thread-1.',
+                },
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          {
+            id: 'builder-call-1',
+            name: 'start_builder_task',
+            args: { description: 'Make a one-page document.', task_type: 'document' },
+          },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(websocket?.sent).toContain(JSON.stringify(toolResponsePayload)));
+    expect(toolDiagnostics[1]).toMatchObject({
+      phase: 'backend_accepted_tool_call',
+      taskId: 'builder-thread-1',
+      taskStatus: 'running',
+      backendResponse: { task_id: 'builder-thread-1', status: 'running' },
+    });
+    expect(toolDiagnostics[2]).toMatchObject({
+      phase: 'tool_response_sent',
+      taskId: 'builder-thread-1',
+      taskStatus: 'running',
+      resultSummary: 'Launched builder task. task_id: builder-thread-1.',
+    });
+
+    await connection.close();
+  });
+
+  it('sends update, list, and cancel lifecycle toolResponses over the active Gemini WebSocket', async () => {
+    const updateToolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'update-call-1',
+            name: 'update_async_task',
+            response: {
+              ok: true,
+              task_id: 'builder-thread-1',
+              status: 'running',
+              result_summary: 'Updated builder task. task_id: builder-thread-1.',
+            },
+          },
+        ],
+      },
+    };
+    const listToolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'list-call-1',
+            name: 'list_async_tasks',
+            response: {
+              ok: true,
+              tasks: [
+                { task_id: 'builder-thread-1', status: 'running', agent_name: 'sophia_builder' },
+                { task_id: 'builder-thread-2', status: 'success', agent_name: 'sophia_builder' },
+              ],
+              task_count: 2,
+              result_summary: '2 tracked builder task(s).',
+            },
+          },
+        ],
+      },
+    };
+    const cancelToolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'cancel-call-1',
+            name: 'cancel_async_task',
+            response: {
+              ok: true,
+              task_id: 'builder-thread-1',
+              status: 'cancelled',
+              result_summary: 'Cancelled builder task. task_id: builder-thread-1.',
+            },
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-lifecycle-tools',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [
+                { name: 'update_async_task' },
+                { name: 'list_async_tasks' },
+                { name: 'cancel_async_task' },
+              ] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-lifecycle-tools',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: updateToolResponsePayload,
+                result_summary: 'Updated builder task. task_id: builder-thread-1.',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'update-call-1',
+                name: 'update_async_task',
+                success: true,
+                task_id: 'builder-thread-1',
+                task_status: 'running',
+                result_summary: 'Updated builder task. task_id: builder-thread-1.',
+                response: updateToolResponsePayload.toolResponse.functionResponses[0].response,
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: listToolResponsePayload,
+                result_summary: '2 tracked builder task(s).',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'list-call-1',
+                name: 'list_async_tasks',
+                success: true,
+                result_summary: '2 tracked builder task(s).',
+                response: listToolResponsePayload.toolResponse.functionResponses[0].response,
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: cancelToolResponsePayload,
+                result_summary: 'Cancelled builder task. task_id: builder-thread-1.',
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'cancel-call-1',
+                name: 'cancel_async_task',
+                success: true,
+                task_id: 'builder-thread-1',
+                task_status: 'cancelled',
+                result_summary: 'Cancelled builder task. task_id: builder-thread-1.',
+                response: cancelToolResponsePayload.toolResponse.functionResponses[0].response,
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'update-call-1', name: 'update_async_task', args: { task_id: 'builder-thread-1', message: 'Make it warmer.' } },
+        ],
+      },
+    });
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'list-call-1', name: 'list_async_tasks', args: { status_filter: 'all' } },
+        ],
+      },
+    });
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'cancel-call-1', name: 'cancel_async_task', args: { task_id: 'builder-thread-1' } },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(websocket?.sent).toContain(JSON.stringify(cancelToolResponsePayload)));
+    expect(websocket?.sent).toContain(JSON.stringify(updateToolResponsePayload));
+    expect(websocket?.sent).toContain(JSON.stringify(listToolResponsePayload));
+
+    const sentLifecycleResponses = toolDiagnostics.filter((diagnostic) => diagnostic.phase === 'tool_response_sent');
+    expect(sentLifecycleResponses.map((diagnostic) => diagnostic.toolCall.name)).toEqual([
+      'update_async_task',
+      'list_async_tasks',
+      'cancel_async_task',
+    ]);
+    expect(sentLifecycleResponses[0]).toMatchObject({ taskId: 'builder-thread-1', taskStatus: 'running' });
+    expect(sentLifecycleResponses[1]).toMatchObject({
+      trackedTaskIds: ['builder-thread-1', 'builder-thread-2'],
+      backendResponse: { task_count: 2 },
+    });
+    expect(sentLifecycleResponses[2]).toMatchObject({ taskId: 'builder-thread-1', taskStatus: 'cancelled' });
+
+    await connection.close();
+  });
+
+  it('surfaces lifecycle execution rejection as a tool response instead of relay degradation', async () => {
+    const toolResponsePayload = {
+      toolResponse: {
+        functionResponses: [
+          {
+            id: 'check-call-1',
+            name: 'check_async_task',
+            response: {
+              ok: false,
+              rejected: true,
+              error_type: 'unknown_task_id',
+              error_message: "No tracked task exists for task_id '789654321' in this trusted Gemini dogfood session.",
+              task_id: '789654321',
+              status: 'rejected',
+              tracked_task_ids: ['builder-thread-1'],
+              recovery_guidance: 'Do not invent task ids. Call start_builder_task first or list_async_tasks.',
+              result_summary: "Lifecycle tool rejected: no tracked task exists for task_id '789654321'.",
+            },
+          },
+        ],
+      },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-lifecycle-rejected',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              tools: [{ functionDeclarations: [{ name: 'check_async_task' }] }],
+              inputAudioTranscription: {},
+            },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-lifecycle-rejected',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: toolResponsePayload,
+                result_summary: "Lifecycle tool rejected: no tracked task exists for task_id '789654321'.",
+              },
+            ],
+            tool_diagnostics: [
+              {
+                id: 'check-call-1',
+                name: 'check_async_task',
+                success: false,
+                execution_rejected: true,
+                task_id: '789654321',
+                task_status: 'rejected',
+                tracked_task_ids: ['builder-thread-1'],
+                rejection_reason: 'unknown_task_id',
+                recovery_guidance: 'Do not invent task ids. Call start_builder_task first or list_async_tasks.',
+                error_text: "No tracked task exists for task_id '789654321' in this trusted Gemini dogfood session.",
+                result_summary: "Lifecycle tool rejected: no tracked task exists for task_id '789654321'.",
+                response: toolResponsePayload.toolResponse.functionResponses[0].response,
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    const relayDiagnostics: GeminiBrowserLiveDogfoodRelayDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onRelayStatus: (status) => relayStatuses.push(status),
+      onRelayDiagnostic: (diagnostic) => relayDiagnostics.push(diagnostic),
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [
+          { id: 'check-call-1', name: 'check_async_task', args: { task_id: '789654321' } },
+        ],
+      },
+    });
+
+    await vi.waitFor(() => expect(websocket?.sent).toContain(JSON.stringify(toolResponsePayload)));
+    expect(toolDiagnostics.map((diagnostic) => diagnostic.phase)).toEqual([
+      'tool_call_received',
+      'tool_execution_rejected',
+      'tool_response_sent',
+    ]);
+    expect(toolDiagnostics[0]).toMatchObject({ taskId: '789654321' });
+    expect(toolDiagnostics[1]).toMatchObject({
+      success: false,
+      taskId: '789654321',
+      taskStatus: 'rejected',
+      trackedTaskIds: ['builder-thread-1'],
+      rejectionReason: 'unknown_task_id',
+      recoveryGuidance: 'Do not invent task ids. Call start_builder_task first or list_async_tasks.',
+    });
+    expect(toolDiagnostics[2]).toMatchObject({
+      phase: 'tool_response_sent',
+      taskId: '789654321',
+      trackedTaskIds: ['builder-thread-1'],
+      rejectionReason: 'unknown_task_id',
+    });
+    expect(relayStatuses).toContain('active');
+    expect(relayStatuses).not.toContain('degraded');
+    expect(relayDiagnostics).toEqual([]);
+
+    await connection.close();
+  });
+
+  it('surfaces toolResponse send failure without marking the relay or provider transport dead', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-tool-send-fail',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-tool-send-fail',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            accepted: true,
+            client_actions: [
+              {
+                type: 'gemini_tool_response',
+                payload: {
+                  toolResponse: {
+                    functionResponses: [
+                      {
+                        id: 'artifact-call-fail',
+                        name: 'emit_artifact',
+                        response: {
+                          ok: true,
+                          backend_tool_result: 'Artifact recorded.',
+                          result_summary: 'Artifact recorded.',
+                        },
+                      },
+                    ],
+                  },
+                },
+              },
+            ],
+          }),
+          { status: 202, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    const relayDiagnostics: GeminiBrowserLiveDogfoodRelayDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url, { failToolResponseSend: true });
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
+      onRelayStatus: (status) => relayStatuses.push(status),
+      onRelayDiagnostic: (diagnostic) => relayDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{ id: 'artifact-call-fail', name: 'emit_artifact', args: emitArtifactArgs }],
+      },
+    });
+
+    await vi.waitFor(() => expect(toolDiagnostics.map((diagnostic) => diagnostic.phase)).toContain('tool_response_send_failed'));
+    expect(toolDiagnostics.at(-1)).toMatchObject({
+      phase: 'tool_response_send_failed',
+      success: false,
+      errorText: 'toolResponse send blocked by test socket',
+    });
+    expect(relayStatuses).toContain('active');
+    expect(relayStatuses).not.toContain('terminal_error');
+    expect(relayDiagnostics).toEqual([]);
+    expect(websocket?.readyState).toBe(1);
+
+    await connection.close();
+  });
+
+  it('preserves backend detail on session and relay failures', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: 'Gemini browser Live dogfood requires SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED=true.' }), {
+          status: 409,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      );
+
+    await expect(
+      connectGeminiBrowserLiveDogfood({
+        userId: 'user-1',
+        fetchFn: fetchMock as typeof fetch,
+        webSocketFactory: (url) => new FakeWebSocket(url),
+        getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+        audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      }),
+    ).rejects.toThrow(
+      'Gemini browser dogfood session failed: Gemini browser Live dogfood requires SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED=true.',
+    );
+
+    const relayFetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-1',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
+            provider_event_relay_url: '/dogfood/realtime/gemini/browser-sessions/browser-gemini-1/provider-events',
+            public_event_boundary: 'SophiaEventNormalizer',
+            transport: 'gemini_browser_websocket_ephemeral_token_with_backend_relay',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ accepted: true, session_id: 'browser-gemini-1' }), {
+          status: 202,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ detail: 'Gemini browser relay accepts only documented Gemini Live server messages.' }), {
+          status: 422,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const relayErrors: unknown[] = [];
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    const relayDiagnostics: GeminiBrowserLiveDogfoodRelayDiagnostic[] = [];
+    let relayWebSocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: relayFetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        relayWebSocket = new FakeWebSocket(url);
+        return relayWebSocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onRelayError: (error) => relayErrors.push(error),
+      onRelayStatus: (status) => relayStatuses.push(status),
+      onRelayDiagnostic: (diagnostic) => relayDiagnostics.push(diagnostic),
+    });
+
+    expect(connection.relayUrl).toBe('/dogfood/realtime/gemini/browser-sessions/browser-gemini-1/provider-events');
+    expect(connection.publicEventBoundary).toBe('SophiaEventNormalizer');
+    expect(connection.transport).toBe('gemini_browser_websocket_ephemeral_token_with_backend_relay');
+    await vi.waitFor(() => expect(relayStatuses).toEqual(['active']));
+
+    relayWebSocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Hi.' } } });
+    await vi.waitFor(() => {
+      expect(relayStatuses).toContain('degraded');
+      expect(relayErrors).toHaveLength(1);
+      expect(relayDiagnostics).toHaveLength(1);
+    });
+
+    expect(relayErrors[0]).toBeInstanceOf(Error);
+    expect((relayErrors[0] as Error).message).toBe(
+      'Gemini browser dogfood relay failed: Gemini browser relay accepts only documented Gemini Live server messages.',
+    );
+    expect(relayDiagnostics[0]).toMatchObject({
+      targetPath: '/api/sophia/voice/dogfood/gemini/relay',
+      eventType: 'serverContent.outputTranscription',
+      hasHttpResponse: true,
+      statusCode: 422,
+      terminal: false,
+      consecutiveFailures: 1,
+      websocketOpen: true,
+      websocketState: 'open',
+    });
+
+    await connection.close();
+  });
+
+  it('captures browser-level relay fetch failures as degraded while the Gemini socket remains open', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-fetch-fail',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-fetch-fail',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202 }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    const relayDiagnostics: GeminiBrowserLiveDogfoodRelayDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onRelayStatus: (status) => relayStatuses.push(status),
+      onRelayDiagnostic: (diagnostic) => relayDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      serverContent: {
+        inputTranscription: { text: 'I need this relayed.' },
+      },
+    });
+
+    await vi.waitFor(() => expect(relayDiagnostics).toHaveLength(1));
+
+    expect(relayStatuses).toContain('degraded');
+    expect(relayDiagnostics[0]).toMatchObject({
+      targetPath: '/api/sophia/voice/dogfood/gemini/relay',
+      eventType: 'serverContent.inputTranscription',
+      hasHttpResponse: false,
+      statusCode: null,
+      errorText: 'Failed to fetch',
+      fetchErrorName: 'TypeError',
+      terminal: false,
+      websocketOpen: true,
+      websocketState: 'open',
+    });
+
+    const failedRelayInit = fetchMock.mock.calls[2]?.[1] as RequestInit;
+    expect(failedRelayInit.keepalive).toBeUndefined();
+
+    await connection.close();
+  });
+
+  it('escalates persistent relay failures to terminal relay status', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-terminal-relay',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-terminal-relay',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValueOnce(new Response(JSON.stringify({ accepted: true }), { status: 202 }))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    const relayDiagnostics: GeminiBrowserLiveDogfoodRelayDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onRelayStatus: (status) => relayStatuses.push(status),
+      onRelayDiagnostic: (diagnostic) => relayDiagnostics.push(diagnostic),
+    });
+
+    for (let index = 0; index < 3; index += 1) {
+      websocket?.emitMessage({ serverContent: { inputTranscription: { text: `I need this relayed ${index}.` } } });
+    }
+
+    await vi.waitFor(() => expect(relayDiagnostics).toHaveLength(3));
+
+    expect(relayStatuses).toContain('terminal_error');
+    expect(relayDiagnostics.at(-1)).toMatchObject({
+      terminal: true,
+      consecutiveFailures: 3,
+      websocketOpen: true,
+    });
+
+    await connection.close();
+  });
+
+  it('skips empty and semantically empty websocket frames instead of relaying them', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-1',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connectionPromise = connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url, { autoSetupComplete: false });
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => {
+      expect(websocket?.sent[0]).toBe(JSON.stringify({
+        setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+      }));
+    });
+
+    websocket?.emitRawMessage('{}');
+    websocket?.emitRawMessage('');
+    websocket?.emitMessage({ serverContent: {} });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    websocket?.emitMessage({ setupComplete: {} });
+    const connection = await connectionPromise;
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+
+    await connection.close();
+  });
+
+  it('preserves setupComplete when the WebSocket delivers the JSON frame as a Blob', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-blob-setup',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-blob-setup',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const providerEvents: unknown[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connectionPromise = connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url, { autoSetupComplete: false });
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onProviderEvent: (event) => providerEvents.push(event),
+    });
+
+    await vi.waitFor(() => {
+      expect(websocket?.sent[0]).toBe(JSON.stringify({
+        setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+      }));
+    });
+
+    websocket?.emitRawMessage(new Blob([JSON.stringify({ setupComplete: {} })], { type: 'application/json' }));
+    const connection = await connectionPromise;
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+
+    expect(connection.setupComplete).toBe(true);
+    expect(providerEvents).toEqual([{ setupComplete: {} }]);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({
+        method: 'POST',
+        body: expect.any(String),
+      }),
+    );
+
+    await connection.close();
+  });
+
+  it('does not relay websocket lifecycle errors before a real provider message exists', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-1',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connectionPromise = connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url, { autoSetupComplete: false });
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => {
+      expect(websocket?.sent[0]).toBe(JSON.stringify({
+        setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+      }));
+    });
+    websocket?.emitError();
+
+    await expect(connectionPromise).rejects.toThrow('Gemini Live WebSocket failed before setupComplete.');
+    expect(
+      fetchMock.mock.calls.some(([url]) => url === '/api/sophia/voice/dogfood/gemini/relay'),
+    ).toBe(false);
+  });
+
+  it('does not relay websocket lifecycle close events before setupComplete', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-1',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(null, { status: 202 }));
+    let websocket: FakeWebSocket | null = null;
+
+    const connectionPromise = connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url, { autoSetupComplete: false });
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await vi.waitFor(() => {
+      expect(websocket?.sent[0]).toBe(JSON.stringify({
+        setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+      }));
+    });
+    websocket?.emitClose();
+
+    await expect(connectionPromise).rejects.toThrow('Gemini Live WebSocket closed before setupComplete.');
+    expect(
+      fetchMock.mock.calls.some(([url]) => url === '/api/sophia/voice/dogfood/gemini/relay'),
+    ).toBe(false);
+  });
+});

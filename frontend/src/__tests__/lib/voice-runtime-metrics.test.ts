@@ -253,6 +253,290 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.thresholds.firstAudio.status).toBe('good');
     expect(metrics.regressions).toHaveLength(0);
     expect(metrics.timeline.at(-1)?.label).toBe('Turn diagnostic');
+    expect(metrics.sessionTelemetry.runtime).toBe('legacy_cascade');
+    expect(metrics.sessionTelemetry.runtimeLabel).toBe('Legacy Cascade');
+    expect(metrics.sessionTelemetry.legacy?.joinLatencyMs).toBe(300);
+    expect(metrics.sessionTelemetry.gemini).toBeNull();
+  });
+
+  it('summarizes Gemini Live production telemetry without legacy join assumptions', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          streamUrl: '/voice/gemini/stream/gemini-session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.160Z',
+        category: 'voice-session',
+        name: 'gemini-stage-changed',
+        payload: {
+          runtime: 'gemini_live',
+          stage: 'connected',
+          connectionState: 'connected',
+          websocketState: 'connected',
+          microphoneState: 'connected',
+          remoteAudioState: 'expected',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:00.200Z',
+        category: 'voice-session',
+        name: 'gemini-provider-event',
+        payload: {
+          runtime: 'gemini_live',
+          eventType: 'setupComplete',
+          setupComplete: true,
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-04-07T12:00:00.220Z',
+        category: 'voice-session',
+        name: 'gemini-relay-status',
+        payload: { runtime: 'gemini_live', relayStatus: 'active', voiceAgentSessionId: 'gemini-session-dev' },
+      }),
+      buildEvent({
+        seq: 51,
+        at: '2026-04-07T12:00:00.225Z',
+        category: 'voice-session',
+        name: 'gemini-provider-event-correlation',
+        payload: {
+          runtime: 'gemini_live',
+          telemetry: {
+            timestamp: '2026-04-07T12:00:00.225Z',
+            correlationId: 'artifact-call-1',
+            primaryCategory: 'toolCall',
+            categories: ['toolCall'],
+            categoryCounts: {
+              toolCall: { count: 1, lastAt: '2026-04-07T12:00:00.225Z' },
+              outputTranscription: { count: 1, lastAt: '2026-04-07T12:00:00.200Z' },
+            },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 52,
+        at: '2026-04-07T12:00:00.230Z',
+        category: 'voice-session',
+        name: 'gemini-relay-trace',
+        payload: {
+          runtime: 'gemini_live',
+          trace: {
+            timestamp: '2026-04-07T12:00:00.230Z',
+            correlationId: 'artifact-call-1',
+            eventCategory: 'toolCall',
+            attemptCount: 2,
+            successCount: 2,
+            failureCount: 0,
+            success: true,
+            statusCode: 202,
+            responseKind: 'client_actions_and_tool_diagnostics',
+            durationMs: 18,
+          },
+        },
+      }),
+      buildEvent({
+        seq: 6,
+        at: '2026-04-07T12:00:00.250Z',
+        category: 'voice-session',
+        name: 'sophia-ready',
+        payload: { reason: 'gemini-live-setup-complete', runtime: 'gemini_live', voiceAgentSessionId: 'gemini-session-dev' },
+      }),
+      buildEvent({
+        seq: 7,
+        at: '2026-04-07T12:00:00.300Z',
+        category: 'voice-sse',
+        name: 'stream-open',
+        payload: {
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+          streamUrl: '/voice/gemini/stream/gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 8,
+        at: '2026-04-07T12:00:00.320Z',
+        category: 'voice-session',
+        name: 'gemini-relay-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          diagnostic: {
+            timestamp: '2026-04-07T12:00:00.320Z',
+            eventType: 'serverContent',
+            consecutiveFailures: 0,
+            errorText: '',
+          },
+        },
+      }),
+      buildEvent({
+        seq: 9,
+        at: '2026-04-07T12:00:00.340Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_call_received',
+          toolName: 'emit_artifact',
+          diagnostic: {
+            timestamp: '2026-04-07T12:00:00.340Z',
+            phase: 'tool_call_received',
+            toolCall: { name: 'emit_artifact' },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 10,
+        at: '2026-04-07T12:00:00.360Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_response_sent',
+          toolName: 'emit_artifact',
+          diagnostic: {
+            timestamp: '2026-04-07T12:00:00.360Z',
+            phase: 'tool_response_sent',
+            toolCall: { name: 'emit_artifact' },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 100,
+        at: '2026-04-07T12:00:00.370Z',
+        category: 'voice-session',
+        name: 'gemini-tool-call-ledger',
+        payload: {
+          runtime: 'gemini_live',
+          entry: {
+            toolCallId: 'artifact-call-1',
+            toolName: 'emit_artifact',
+            receivedAt: '2026-04-07T12:00:00.340Z',
+            relayStartedAt: '2026-04-07T12:00:00.345Z',
+            relayCompletedAt: '2026-04-07T12:00:00.360Z',
+            toolResponseSentAt: '2026-04-07T12:00:00.370Z',
+            finalState: 'responded',
+          },
+        },
+      }),
+      buildEvent({
+        seq: 101,
+        at: '2026-04-07T12:00:00.380Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          runtime: 'gemini_live',
+          phase: 'tool_call_cancelled',
+          diagnostic: {
+            timestamp: '2026-04-07T12:00:00.380Z',
+            phase: 'tool_call_cancelled',
+            toolCall: { id: 'cancelled-call-1', name: null },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 102,
+        at: '2026-04-07T12:00:00.420Z',
+        category: 'voice-session',
+        name: 'gemini-interruption',
+        payload: {
+          runtime: 'gemini_live',
+          diagnostic: {
+            timestamp: '2026-04-07T12:00:00.420Z',
+            reason: 'server_interrupted',
+            playbackFlushed: true,
+          },
+        },
+      }),
+      buildEvent({
+        seq: 11,
+        at: '2026-04-07T12:00:00.500Z',
+        category: 'voice-session',
+        name: 'gemini-output-audio-started',
+        payload: { runtime: 'gemini_live', voiceAgentSessionId: 'gemini-session-dev' },
+      }),
+      buildEvent({
+        seq: 12,
+        at: '2026-04-07T12:00:00.700Z',
+        category: 'voice-sse',
+        name: 'sophia.user_transcript',
+        payload: { data: { text: 'hello Sophia' } },
+      }),
+      buildEvent({
+        seq: 13,
+        at: '2026-04-07T12:00:00.900Z',
+        category: 'voice-sse',
+        name: 'sophia.transcript',
+        payload: { data: { text: 'I am here.', is_final: true } },
+      }),
+      buildEvent({
+        seq: 14,
+        at: '2026-04-07T12:00:01.000Z',
+        category: 'voice-sse',
+        name: 'sophia.artifact',
+        payload: { data: { takeaway: 'Gemini path.' } },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.sessionTelemetry.runtime).toBe('gemini_live');
+    expect(metrics.sessionTelemetry.runtimeLabel).toBe('Gemini Live');
+    expect(metrics.sessionTelemetry.legacy).toBeNull();
+    expect(metrics.timings.joinLatencyMs).toBeNull();
+    expect(metrics.timings.sessionReadyMs).toBe(250);
+    expect(metrics.timings.sseOpenMs).toBe(200);
+    expect(metrics.sessionTelemetry.gemini?.publicSseState).toBe('connected');
+    expect(metrics.sessionTelemetry.gemini?.websocketState).toBe('connected');
+    expect(metrics.sessionTelemetry.gemini?.relayStatus).toBe('active');
+    expect(metrics.sessionTelemetry.gemini?.setupComplete).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.providerEventCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.providerCategoryCounts.toolCall.count).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.relayDiagnosticCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.relayTraceCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.relayAttemptCount).toBe(2);
+    expect(metrics.sessionTelemetry.gemini?.relaySuccessCount).toBe(2);
+    expect(metrics.sessionTelemetry.gemini?.lastRelayResponseKind).toBe('client_actions_and_tool_diagnostics');
+    expect(metrics.sessionTelemetry.gemini?.lastRelayDurationMs).toBe(18);
+    expect(metrics.sessionTelemetry.gemini?.toolCallCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.toolResponseCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.toolRejectionCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.toolCancellationCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.toolCallLedger).toEqual([
+      expect.objectContaining({ toolCallId: 'artifact-call-1', finalState: 'responded' }),
+    ]);
+    expect(metrics.sessionTelemetry.gemini?.artifactToolCallCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.builderToolCallCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.outputAudioEventCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.interruptionCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.playbackFlushCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
   });
 
   it('includes builder progress and stall diagnostics in telemetry', () => {
@@ -448,6 +732,80 @@ describe('buildVoiceDeveloperMetrics', () => {
         expect.objectContaining({ key: 'microphone', level: 'warn' }),
       ]),
     );
+  });
+
+  it('flags Gemini provider transcripts that never surface as public user transcripts', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-05-20T04:43:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-05-20T04:43:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-05-20T04:43:00.400Z',
+        category: 'voice-sse',
+        name: 'stream-open',
+        payload: { runtime: 'gemini_live', voiceAgentSessionId: 'gemini-session-dev' },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-05-20T04:43:01.000Z',
+        category: 'harness-input',
+        name: 'microphone-audio-detected',
+        payload: { rms: 0.072 },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-05-20T04:43:01.200Z',
+        category: 'voice-session',
+        name: 'gemini-provider-event-correlation',
+        payload: {
+          runtime: 'gemini_live',
+          telemetry: {
+            timestamp: '2026-05-20T04:43:01.200Z',
+            primaryCategory: 'inputTranscription',
+            categories: ['inputTranscription'],
+            categoryCounts: {
+              inputTranscription: { count: 12, lastAt: '2026-05-20T04:43:01.200Z' },
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-05-20T04:43:02.000Z'),
+    });
+
+    expect(metrics.counts.userTranscripts).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.providerCategoryCounts.inputTranscription.count).toBe(12);
+    expect(metrics.health.title).toBe('Provider transcript not surfaced');
+    expect(metrics.bottleneck.kind).toBe('transport');
+    expect(metrics.regressions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ key: 'public-continuity', level: 'warn' }),
+      ]),
+    );
+    expect(metrics.regressions.some((marker) => marker.key === 'microphone')).toBe(false);
   });
 
   it('marks turn segmentation noise and backend stalls as regressions', () => {
