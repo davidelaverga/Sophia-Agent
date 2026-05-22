@@ -14,6 +14,13 @@ services:
     plan: standard
     region: oregon
     healthCheckPath: /ok
+    # NOTE on worker concurrency: do NOT add `N_JOBS_PER_WORKER` here. The
+    # `langgraph dev` CLI explicitly OVERRIDES the env var (see
+    # `langgraph_api/cli.py:262-263, 286` — "Don't overwrite"). Concurrency is
+    # set via the `--n-jobs-per-worker 10` flag in
+    # `backend/Dockerfile.langgraph` CMD instead. Phase 2A (2026-05-20) raised
+    # this from the CLI default of 1 to 10 to unblock concurrent builder +
+    # companion runs.
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false

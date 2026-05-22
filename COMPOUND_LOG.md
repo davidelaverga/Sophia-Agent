@@ -26,6 +26,45 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-22 · [companion-builder-lifecycle-discipline] · PR #129
+**Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `~/.claude/plans/users-davidelaverga-desktop-subagents-a-woolly-haven.md` (PR #129 + Phase 2A–2F)
+
+### What Changed
+Fixes the Sophia companion's "mid-build update gets lost" failure end-to-end. PR opened as a tool-selection prompt fix; production testing surfaced four stacked root causes that all needed addressing:
+
+- **Initial PR (3 commits)** — lifecycle-tool discipline across all 5 deepagents surfaces (start/update/check/cancel/list async_task): per-tool ack matrix in 4 prompt surfaces (`start_builder_task` duplicate-rejection ToolMessage, `BuildAwarenessMiddleware._render_active_block`, `_ASYNC_BUILDER_SYSTEM_PROMPT`, `AGENTS.md`) + new `LifecycleToolObserverMiddleware` for observability. 14 new tests.
+- **Phase 2A** — `backend/Dockerfile.langgraph` adds `--n-jobs-per-worker 10` to `langgraph dev`. Confirmed via `langgraph_api/cli.py:262-263, 286`: the CLI hardcodes default 1 and explicitly overrides any external env var → the flag is the ONLY way to lift the worker pool. Production run on commit `11505719` had `Worker stats max=1` blocking companion update turns for 7m 47s behind the builder; post-fix logs show `max=10`.
+- **Phase 2B** — NEW `update_async_task_wrapper.py` with terminal-thread guard. Wraps the deepagents-native lifecycle tool; if the target task is in `_TERMINAL_TASK_STATUSES`, redirect the model to `start_builder_task` with a v2 brief instead of letting the native dispatch create a new run on an already-completed thread (which caused the 28-min dangling-tool loop observed at 2026-05-20 19:53–19:57 UTC).
+- **Phase 2E.1+2+3** — turn-budget reset on post-interrupt HumanMessage; file-target directive injection into update messages; terminal-redirect names the prior `artifact_path` so small edits to delivered artifacts don't re-run full research.
+- **Phase 2F.1+2+3** — Builder-side resilience after the user retested at 2026-05-22 19:54–20:14 UTC and the builder still spent 20 min in a `write_file_tool(path="test.md")` loop. Fixes:
+  - `write_file_tool` auto-prefixes BARE filenames to `/mnt/user-data/outputs/` (gated to builder contexts via `_is_builder_runtime_context`).
+  - `_augment_update_message` now PREFIXES the directive with a slug-derived concrete filename + "RESUMING (not restarting)" language so the model trusts prior research.
+  - `BuilderArtifactMiddleware` injects a path-correction `HumanMessage` after 3 consecutive `write_file_tool` errors (defensive escape hatch).
+- **Codex review fixes** — 7 P1/P2 review iterations addressing: live-SDK status re-check before delegating (defeat cache staleness), Command-state-update persistence so terminal redirects work end-to-end, canonical task_id whitespace normalization, success-vs-failed terminal status branches, builder-context gate scoped to `sophia_builder` graph only, write_file_tool prescription gated by task_type (binary deliverables use generator script + bash, not write_file_tool), `graph_id` populated in `start_builder_task`'s `run_config["configurable"]`, `task_type` fallback validated against `_CANONICAL_TASK_TYPES = {document, research, presentation, frontend, visual_report}`.
+
+### What We Learned
+- **deepagents canonical async-subagents are text-only.** Both `researcher` and `coder` reference implementations in [langchain-ai/async-deep-agents](https://github.com/langchain-ai/async-deep-agents) produce output as messages, not files. The `multitask_strategy="interrupt"` pattern works cleanly there. Sophia's builder diverges: it MUST write a file under `/mnt/user-data/outputs/` AND call `emit_builder_artifact`. The interrupt+resume flow stresses our path-validation + turn-budget middleware in ways the canonical doesn't have to handle. The Phase 2E/2F surgical fixes recover that without abandoning the canonical pattern (we evaluated cancel+restart explicitly; the user vetoed because it loses partial work).
+- **`langgraph dev` is the production runtime here.** It defaults `N_JOBS_PER_WORKER=1` and refuses external override — the flag is the only knob. The flag must live in the Dockerfile CMD, not Render env. `render.yaml` carries a comment documenting this so the next person doesn't try the env-var route.
+- **`graph_id` is NOT automatically in `runtime.config["configurable"]`.** langgraph_api populates it server-side for logging via `_get_graph_id(run)` but at tool-execution time the configurable dict only contains what the dispatcher explicitly set. We now set it on builder dispatch + use a Tier-2 state-based fallback (`state["delegation_context"]` presence) on update_async_task interrupt paths where the configurable doesn't always carry forward.
+- **A 5-min gateway timeout claim was wrong.** Earlier diagnosis blamed an explicit 300s ReadTimeout in our gateway; logs show the actual timeout is the LangGraph SDK's httpx default. The misdiagnosis didn't affect the fix but is corrected in the plan file's status section.
+
+### CLAUDE.md updates
+- Companion middleware chain section: documented that `update_async_task` is filtered and replaced by the Phase 2B wrapper (same filter pattern as `start_async_task`), and that `BuilderArtifactMiddleware` has new `before_model` / `abefore_model` hooks for post-interrupt turn-budget reset + path-correction injection.
+- Tools-available-to-companion section: added that the wrapper around `update_async_task` enforces terminal-thread guard + canonical task_type fallback.
+- New "Builder file-target conventions" subsection: documents the `_OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"` requirement and the auto-prefix gate.
+
+### Skills Created
+None. Existing skills unchanged.
+
+### GEPA Log Entry
+- `_ASYNC_BUILDER_SYSTEM_PROMPT` (companion-side preamble injected by `AsyncSubAgentMiddleware`):
+  - **Before:** Brief cue-phrase coverage per tool, no per-tool ack examples, no cross-cutting rules; failed empirically to steer the model away from `start_builder_task` on modification cues mid-build.
+  - **After:** Full intent→tool→ack matrix with explicit cues per tool, ack-example sentences, 5 cross-cutting rules (stale-status guard, full-task_id rule, no-polling, one-emit_artifact-per-turn, update-failure handling), task_type-gated guidance for binary deliverables.
+  - **tone_delta:** N/A — task-selection signal, not emotional.
+  - **trace pair available:** yes — Render logs 2026-05-20 19:43–19:54 UTC (pre-fix) vs 2026-05-22 22:30 UTC onwards (post-fix), full PR #129 + Phase 2A–2F deployed.
+
+---
+
 ## 2026-05-20 · [v3-streaming-webhook-relay] · PR #128
 **Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `~/.claude/plans/users-davidelaverga-desktop-sophia-v3-s-synchronous-dolphin.md` (Phase 4A–4N)
 

@@ -98,7 +98,11 @@ def test_active_task_renders_in_flight_block():
     block = result["system_prompt_blocks"][-1]
     assert "<build_status>" in block
     assert "in flight" in block.lower()
-    assert "Don't relaunch" in block
+    # Phase: directive replaces "Don't relaunch" with the explicit
+    # start_builder_task duplicate-rejection rule. The full lifecycle-tool
+    # matrix lives in test_build_awareness_lifecycle_block.py.
+    assert "start_builder_task" in block
+    assert "duplicate" in block.lower()
     assert "do NOT bring this up unprompted" in block
 
 
