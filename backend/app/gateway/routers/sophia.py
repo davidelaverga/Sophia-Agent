@@ -630,17 +630,25 @@ def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None,
     return "Want a quick debrief before you go?"
 
 
-def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, thread_state: dict | None) -> None:
+def _queue_offline_pipeline(
+    user_id: str,
+    session_id: str,
+    thread_id: str,
+    thread_state: dict | None,
+    *,
+    force_reprocess: bool = False,
+) -> None:
     from deerflow.sophia.offline_pipeline import run_offline_pipeline
 
     logger.info(
-        "session.finalization queue_pipeline user_id=%s session_id=%s thread_id=%s has_thread_state=%s message_count=%s artifact_count=%s",
+        "session.finalization queue_pipeline user_id=%s session_id=%s thread_id=%s has_thread_state=%s message_count=%s artifact_count=%s force_reprocess=%s",
         user_id,
         session_id,
         thread_id,
         thread_state is not None,
         len(thread_state.get("messages", [])) if isinstance(thread_state, dict) else 0,
         len(thread_state.get("artifacts", [])) if isinstance(thread_state, dict) and isinstance(thread_state.get("artifacts"), list) else 0,
+        force_reprocess,
     )
 
     task = asyncio.create_task(
@@ -650,6 +658,7 @@ def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, threa
             session_id,
             thread_id,
             thread_state,
+            force_reprocess=force_reprocess,
         )
     )
     _background_tasks.add(task)
@@ -1703,11 +1712,17 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         pass
 
     try:
+        # force_reprocess=True so an explicit "End Session" click always
+        # re-runs the pipeline, even if an earlier inactivity_watcher fire
+        # processed a thinner version of the same session. The two-stage
+        # idempotency in run_offline_pipeline serializes concurrent calls
+        # via `_in_flight_sessions` so this is safe.
         _queue_offline_pipeline(
             user_id,
             body.session_id,
             body.thread_id,
             _build_thread_state_from_end_request(body),
+            force_reprocess=True,
         )
         logger.info(
             "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s",

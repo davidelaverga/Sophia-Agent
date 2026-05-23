@@ -16,6 +16,18 @@ from deerflow.sophia.mem0_client import add_memories
 
 logger = logging.getLogger(__name__)
 
+
+class ExtractionParseError(RuntimeError):
+    """Raised when Claude's extraction response cannot be parsed as a JSON list.
+
+    Caught by ``run_offline_pipeline`` so the session is NOT promoted to the
+    ``_processed_sessions`` idempotency set — letting the next pipeline trigger
+    retry extraction. Empty-but-valid responses (LLM legitimately said no
+    candidates) are NOT raised: those return ``[]`` cleanly and the session is
+    marked processed (no point retrying when the LLM said nothing).
+    """
+
+
 # Path to the extraction prompt template
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 _EXTRACTION_TEMPLATE_PATH = _PROMPTS_DIR / "mem0_extraction.md"
@@ -138,21 +150,45 @@ def extract_session_memories(
         logger.error("Anthropic API call failed for session %s", session_id, exc_info=True)
         return []
 
-    # Parse JSON response
+    # Parse JSON response. Distinguish three outcomes:
+    #   1. Empty after fence-strip (LLM returned a bare fence or whitespace) →
+    #      return [] cleanly so the pipeline marks the session processed.
+    #      Retrying won't help — the LLM said nothing.
+    #   2. JSON parse error on non-empty content → raise ExtractionParseError
+    #      so the pipeline leaves the session unprocessed and retries on the
+    #      next trigger.
+    #   3. Successful parse → return the list (possibly empty if LLM said "[]"
+    #      explicitly, treated same as case 1).
+    cleaned = _strip_markdown_fences(response_text)
+    if not cleaned:
+        logger.info(
+            "[Extraction] empty response — LLM returned no candidates (user_id=%s session_id=%s)",
+            user_id,
+            session_id,
+        )
+        return []
+
     try:
-        cleaned = _strip_markdown_fences(response_text)
         extracted = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError) as exc:
         logger.error(
             "Failed to parse extraction response for session %s: %s",
             session_id,
             response_text[:200] if response_text else "(empty)",
         )
-        return []
+        raise ExtractionParseError(
+            f"Extraction JSON parse failed for session {session_id}"
+        ) from exc
 
     if not isinstance(extracted, list):
-        logger.error("Extraction response is not a list for session %s", session_id)
-        return []
+        logger.error(
+            "Extraction response is not a list for session %s (got %s)",
+            session_id,
+            type(extracted).__name__,
+        )
+        raise ExtractionParseError(
+            f"Extraction response is not a list for session {session_id}"
+        )
 
     logger.info(
         "session.finalization extraction_candidates user_id=%s session_id=%s candidate_count=%s",

@@ -3,6 +3,8 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 # Sample extraction response from Claude Haiku
 _SAMPLE_EXTRACTION = [
     {
@@ -106,9 +108,15 @@ class TestExtractSessionMemories:
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
-    def test_malformed_json_returns_empty(self, mock_anthropic_mod, mock_add_memories):
-        """Malformed JSON response -> graceful fallback, return empty list."""
-        from deerflow.sophia.extraction import extract_session_memories
+    def test_malformed_json_raises_extraction_parse_error(self, mock_anthropic_mod, mock_add_memories):
+        """Malformed JSON response -> raise ExtractionParseError so caller can retry.
+
+        Contract change (H.1): previously this returned `[]` and was indistinguishable
+        from a legitimate empty result, causing the offline pipeline's idempotency
+        guard to lock the session permanently. Now the pipeline catches this and
+        leaves the session unprocessed for a future retry.
+        """
+        from deerflow.sophia.extraction import ExtractionParseError, extract_session_memories
 
         mock_client = MagicMock()
         mock_anthropic_mod.Anthropic.return_value = mock_client
@@ -116,14 +124,14 @@ class TestExtractSessionMemories:
             "This is not valid JSON at all {{{}"
         )
 
-        result = extract_session_memories(
-            user_id="user1",
-            session_id="sess_002",
-            messages=_SAMPLE_MESSAGES,
-            session_metadata=_SESSION_METADATA,
-        )
+        with pytest.raises(ExtractionParseError):
+            extract_session_memories(
+                user_id="user1",
+                session_id="sess_002",
+                messages=_SAMPLE_MESSAGES,
+                session_metadata=_SESSION_METADATA,
+            )
 
-        assert result == []
         mock_add_memories.assert_not_called()
 
     def test_empty_transcript_skips_extraction(self):
@@ -309,9 +317,13 @@ class TestExtractSessionMemories:
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
-    def test_non_list_response_returns_empty(self, mock_anthropic_mod, mock_add_memories):
-        """Response that parses as JSON but is not a list -> return empty."""
-        from deerflow.sophia.extraction import extract_session_memories
+    def test_non_list_response_raises_extraction_parse_error(self, mock_anthropic_mod, mock_add_memories):
+        """Response that parses as JSON but is not a list -> raise ExtractionParseError.
+
+        Contract change (H.1): a JSON object instead of an array is a malformed
+        extraction response — retryable like other parse errors.
+        """
+        from deerflow.sophia.extraction import ExtractionParseError, extract_session_memories
 
         mock_client = MagicMock()
         mock_anthropic_mod.Anthropic.return_value = mock_client
@@ -319,14 +331,40 @@ class TestExtractSessionMemories:
             '{"error": "unexpected format"}'
         )
 
-        result = extract_session_memories(
-            user_id="user1",
-            session_id="sess_011",
-            messages=_SAMPLE_MESSAGES,
-        )
+        with pytest.raises(ExtractionParseError):
+            extract_session_memories(
+                user_id="user1",
+                session_id="sess_011",
+                messages=_SAMPLE_MESSAGES,
+            )
 
-        assert result == []
         mock_add_memories.assert_not_called()
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_bare_markdown_fence_returns_empty_not_raises(self, mock_anthropic_mod, mock_add_memories):
+        """Bare fence (LLM returned no body) -> return [] cleanly, not ExtractionParseError.
+
+        H.1 short-circuit: when ``_strip_markdown_fences("```json")`` produces an empty
+        string, treat it as "LLM legitimately said nothing" rather than a parse error.
+        Retrying wouldn't help — Claude already declined to extract anything.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        for bare_fence in ("```json", "```json\n", "```json\n\n```", "```\n```", "   ```json   "):
+            mock_client = MagicMock()
+            mock_anthropic_mod.Anthropic.return_value = mock_client
+            mock_client.messages.create.return_value = _make_anthropic_response(bare_fence)
+
+            result = extract_session_memories(
+                user_id="user1",
+                session_id="sess_bare_fence",
+                messages=_SAMPLE_MESSAGES,
+                session_metadata=_SESSION_METADATA,
+            )
+
+            assert result == [], f"Bare fence {bare_fence!r} should return [] cleanly"
+            mock_add_memories.assert_not_called()
 
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")

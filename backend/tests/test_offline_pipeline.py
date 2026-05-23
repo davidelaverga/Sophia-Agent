@@ -936,3 +936,179 @@ class TestWriteOfflineRecap:
 
         payload = json.loads((tmp_path / "user-1" / "recaps" / "sess-1.json").read_text())
         assert payload["started_at"] is None
+
+
+# ==================================================================
+# H.2 — Extraction retryability + force_reprocess + in-flight guard
+# ==================================================================
+
+
+class TestExtractionRetryability:
+    """The H.2 contract: extraction parse error leaves session NOT processed.
+
+    Before H.2, ``_processed_sessions.add(session_id)`` ran BEFORE extraction —
+    so a failed-or-empty extraction permanently locked the session against
+    retry, even when a later trigger (e.g. explicit end_session click on the
+    same thread, after many more messages) had genuine data to extract.
+    """
+
+    def test_extraction_parse_error_leaves_session_unprocessed(self, mock_steps):
+        """ExtractionParseError → second call MUST re-run the pipeline."""
+        from deerflow.sophia.extraction import ExtractionParseError
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        # First call: extraction raises ExtractionParseError
+        mock_steps["extraction"].side_effect = ExtractionParseError("malformed JSON")
+        r1 = run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_retry_parse",
+            thread_id="thread_retry_parse",
+            thread_state=_make_thread_state(),
+        )
+        assert r1["status"] == "completed"
+        assert r1["steps"]["extraction"] == "parse_error"
+        assert r1["extraction_retryable"] is True
+
+        # Second call: extraction now succeeds → must NOT be rejected as "already_processed"
+        mock_steps["extraction"].side_effect = None
+        mock_steps["extraction"].return_value = [
+            {"content": "User said something memorable", "category": "fact", "importance": "structural"},
+        ]
+        r2 = run_offline_pipeline(
+            user_id="user_abc",
+            session_id="sess_retry_parse",
+            thread_id="thread_retry_parse",
+            thread_state=_make_thread_state(),
+        )
+        assert r2["status"] == "completed", "Session should be retryable after parse error"
+        assert r2["steps"]["extraction"] == "ok"
+        assert r2["extraction_retryable"] is False
+        assert mock_steps["extraction"].call_count == 2
+
+    def test_extraction_generic_exception_leaves_session_unprocessed(self, mock_steps):
+        """Non-parse extraction exception (e.g. Mem0 unavailable) also leaves session retryable."""
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        mock_steps["extraction"].side_effect = RuntimeError("Mem0 down")
+        r1 = run_offline_pipeline("user_abc", "sess_retry_runtime", "t1", _make_thread_state())
+        assert r1["extraction_retryable"] is True
+
+        mock_steps["extraction"].side_effect = None
+        mock_steps["extraction"].return_value = [
+            {"content": "ok", "category": "fact", "importance": "structural"},
+        ]
+        r2 = run_offline_pipeline("user_abc", "sess_retry_runtime", "t1", _make_thread_state())
+        assert r2["status"] == "completed", "Generic extraction errors should also be retryable"
+        assert r2["extraction_retryable"] is False
+
+    def test_extraction_empty_marks_session_processed(self, mock_steps):
+        """LLM legitimately returns [] → mark session processed (don't keep retrying)."""
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        mock_steps["extraction"].return_value = []   # legitimate "no memories"
+        r1 = run_offline_pipeline("user_abc", "sess_empty", "t_empty", _make_thread_state())
+        assert r1["status"] == "completed"
+        assert r1["steps"]["extraction"] == "ok"
+        assert r1["extraction_retryable"] is False
+
+        r2 = run_offline_pipeline("user_abc", "sess_empty", "t_empty", _make_thread_state())
+        assert r2["status"] == "already_processed", (
+            "Empty-but-valid extraction should mark session processed — "
+            "the LLM said no candidates, no point retrying"
+        )
+
+
+class TestForceReprocess:
+    """The H.3 contract: explicit end_session can override idempotency."""
+
+    def test_force_reprocess_bypasses_already_processed(self, mock_steps):
+        """force_reprocess=True re-runs the pipeline even on a completed session."""
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        # First call completes successfully
+        r1 = run_offline_pipeline("user_abc", "sess_force", "t_force", _make_thread_state())
+        assert r1["status"] == "completed"
+        assert mock_steps["trace"].call_count == 1
+
+        # Without force, second call short-circuits
+        r2 = run_offline_pipeline("user_abc", "sess_force", "t_force", _make_thread_state())
+        assert r2["status"] == "already_processed"
+        assert mock_steps["trace"].call_count == 1   # not incremented
+
+        # With force, second call re-runs every step
+        r3 = run_offline_pipeline(
+            "user_abc", "sess_force", "t_force", _make_thread_state(),
+            force_reprocess=True,
+        )
+        assert r3["status"] == "completed"
+        assert mock_steps["trace"].call_count == 2   # ran again
+
+
+class TestInFlightProtection:
+    """Two-stage idempotency: concurrent calls on the same session_id serialize.
+
+    When run_offline_pipeline is invoked twice for the same session_id while
+    the first call is still in progress (extraction is the longest step in
+    practice), the second call must NOT double-process. It returns the
+    `in_flight` status so the caller can ignore the duplicate.
+    """
+
+    def test_in_flight_protects_concurrent_runs(self, mock_steps):
+        """While extraction is running on session X, a second call returns 'in_flight'."""
+        import threading
+
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        # Use an Event to pause extraction inside the first call so we can
+        # fire a second call mid-flight.
+        first_started = threading.Event()
+        let_first_finish = threading.Event()
+        second_result = {}
+
+        def slow_extraction(*args, **kwargs):
+            first_started.set()
+            let_first_finish.wait(timeout=5.0)
+            return [{"content": "x", "category": "fact", "importance": "structural"}]
+
+        mock_steps["extraction"].side_effect = slow_extraction
+
+        def run_first():
+            run_offline_pipeline("user_abc", "sess_inflight", "t_inflight", _make_thread_state())
+
+        first_thread = threading.Thread(target=run_first)
+        first_thread.start()
+        assert first_started.wait(timeout=5.0), "First call should have entered extraction"
+
+        # Second call while first is still in extraction
+        second_result["r"] = run_offline_pipeline(
+            "user_abc", "sess_inflight", "t_inflight", _make_thread_state(),
+        )
+
+        # Release the first call and let it complete
+        let_first_finish.set()
+        first_thread.join(timeout=5.0)
+
+        assert second_result["r"]["status"] == "in_flight", (
+            "Concurrent call on same session_id should return 'in_flight', "
+            "not 'already_processed' (first hasn't promoted yet)"
+        )
+
+    def test_in_flight_releases_after_completion(self, mock_steps):
+        """After a run completes, _in_flight_sessions should not retain the session_id.
+
+        This is the post-condition that justifies the try/finally pattern in
+        run_offline_pipeline. Without `finally`, an exception during steps
+        would leave the session stuck in in_flight permanently.
+        """
+        from deerflow.sophia.offline_pipeline import (
+            _in_flight_sessions,
+            run_offline_pipeline,
+        )
+
+        run_offline_pipeline("user_abc", "sess_release_ok", "t1", _make_thread_state())
+        assert "sess_release_ok" not in _in_flight_sessions
+
+        # Even on a step failure path (extraction raises), in-flight should release
+        mock_steps["extraction"].side_effect = RuntimeError("boom")
+        run_offline_pipeline("user_abc", "sess_release_err", "t2", _make_thread_state())
+        assert "sess_release_err" not in _in_flight_sessions
