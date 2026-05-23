@@ -474,7 +474,12 @@ class TestCreateMemory:
         )
 
     def test_create_memory_pending_event_returns_202(self, client, mock_review_store):
-        """Async Mem0 add event wrappers are accepted, not treated as failures."""
+        """Async Mem0 add event wrappers are accepted, not treated as failures.
+
+        The local placeholder ID is salted with the Mem0 event_id so two
+        pending creates with identical text get distinct local handles
+        (see test_create_memory_duplicate_content_distinct_local_ids below).
+        """
         with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
             {"event_id": "evt_1", "memory": None}
         ]):
@@ -485,7 +490,7 @@ class TestCreateMemory:
 
         assert resp.status_code == 202
         data = resp.json()
-        expected_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+        expected_id = f"local:{hashlib.sha256(b'Queued memory|evt_1').hexdigest()}"
         assert data["id"] == expected_id
         assert data["content"] == "Queued memory"
         assert data["category"] == "lesson"
@@ -505,6 +510,41 @@ class TestCreateMemory:
             sync_state="pending",
         )
 
+    def test_create_memory_duplicate_content_distinct_local_ids(self, client, mock_review_store):
+        """Two pending creates with identical text get DISTINCT local IDs.
+
+        Before the discriminator fix, the local ID was ``local:sha256(content)``
+        — two queued creates with the same text collapsed onto one ID and
+        overwrote each other's review_metadata / mem0_event_id. With the
+        event_id discriminator, the IDs differ even when content is identical.
+        """
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories",
+            side_effect=[
+                [{"event_id": "evt_first", "memory": None}],
+                [{"event_id": "evt_second", "memory": None}],
+            ],
+        ):
+            resp1 = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Same text twice", "metadata": {"status": "pending_review"}},
+            )
+            resp2 = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Same text twice", "metadata": {"status": "pending_review"}},
+            )
+
+        assert resp1.status_code == 202
+        assert resp2.status_code == 202
+        id1 = resp1.json()["id"]
+        id2 = resp2.json()["id"]
+        assert id1 != id2, (
+            "Duplicate-content pending creates must get distinct local IDs "
+            "(otherwise the second overwrites the first's review_metadata)"
+        )
+        assert resp1.json()["metadata"]["mem0_event_id"] == "evt_first"
+        assert resp2.json()["metadata"]["mem0_event_id"] == "evt_second"
+
     def test_create_memory_raw_event_with_nested_memory_returns_pending(self, client, mock_review_store):
         """Raw add results can include nested memory payloads but still be event wrappers."""
         with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
@@ -517,7 +557,7 @@ class TestCreateMemory:
 
         assert resp.status_code == 202
         data = resp.json()
-        expected_id = f"local:{hashlib.sha256(b'Queued memory').hexdigest()}"
+        expected_id = f"local:{hashlib.sha256(b'Queued memory|evt_1').hexdigest()}"
         assert data["id"] == expected_id
         assert data["content"] == "Queued memory"
         assert data["metadata"]["mem0_sync_state"] == "pending"

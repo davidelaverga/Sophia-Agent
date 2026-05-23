@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -446,7 +447,13 @@ def _pending_memory_item_from_add_result(
     event_id = item.get("event_id") or item.get("id")
     if not event_id:
         return None
-    local_memory_id = _local_memory_id_for_content(content)
+    # Salt the local ID with the Mem0 event_id so two pending creates with
+    # identical text (e.g. duplicate API calls) get distinct local handles
+    # and don't overwrite each other's review_metadata.
+    local_memory_id = _local_memory_id_for_content(
+        content,
+        discriminator=str(event_id),
+    )
     if not local_memory_id:
         return None
 
@@ -551,11 +558,33 @@ def _local_content_hash_from_memory_id(memory_id: str) -> str | None:
     return None
 
 
-def _local_memory_id_for_content(content: str) -> str | None:
+def _local_memory_id_for_content(
+    content: str,
+    *,
+    discriminator: str | None = None,
+) -> str | None:
+    """Build a stable but per-write-unique local placeholder ID.
+
+    Two queued ``add_memories`` calls with identical text would otherwise
+    collide on the same ``local:{sha256(content)}`` ID and overwrite each
+    other's review_metadata + ``mem0_event_id`` linkage. Passing the Mem0
+    ``event_id`` (or any per-write unique value) as ``discriminator`` salts
+    the hash so each pending write gets a distinct local ID. The same call
+    with the same ``(content, discriminator)`` is still deterministic, so
+    the ID acts as a stable handle for follow-up update/discard calls.
+
+    When no discriminator is provided, fall back to a nanosecond-precision
+    timestamp so callers without a known event_id still avoid collisions
+    (the only realistic same-nanosecond collision would be two coroutines
+    racing inside the same event loop tick with identical content — vanishingly
+    rare and still safer than the bare content hash).
+    """
     normalized = (content or "").strip()
     if not normalized:
         return None
-    return f"local:{hashlib.sha256(normalized.encode('utf-8')).hexdigest()}"
+    disc = discriminator if discriminator else f"ts:{time.time_ns()}"
+    composite = f"{normalized}|{disc}".encode("utf-8")
+    return f"local:{hashlib.sha256(composite).hexdigest()}"
 
 
 def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> int:

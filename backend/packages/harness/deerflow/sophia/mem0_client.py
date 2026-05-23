@@ -180,10 +180,18 @@ def search_memories(
 
     _t0 = time.perf_counter()
     try:
+        # Mem0 v3 SDK uses ``top_k`` (documented in MemoryClient.search /
+        # AsyncMemoryClient.search). Older code passed ``limit`` which the
+        # server happened to accept in some environments but the v3 contract
+        # is ``top_k`` — sending ``limit`` risks being silently ignored on
+        # SDK/API combinations that strip unknown keys, falling back to the
+        # default retrieval depth and undermining voice-mode's reduced
+        # window. Keep the internal kwarg name ``limit`` so callers don't
+        # have to know about the wire format.
         search_kwargs: dict[str, Any] = {
             "query": query,
             "filters": {"user_id": user_id},
-            "limit": limit,
+            "top_k": limit,
         }
         if MEM0_REFERENCE_DATE_ENABLED and reference_date is not None:
             search_kwargs["reference_date"] = reference_date.strftime("%Y-%m-%d")
@@ -200,7 +208,7 @@ def search_memories(
         breakdown = ",".join(f"{k}:{v}" for k, v in sorted(category_counts.items()))
 
         logger.info(
-            "[Mem0Search] user_id=%s query=%r filters=%s reference_date=%s limit=%d "
+            "[Mem0Search] user_id=%s query=%r filters=%s reference_date=%s top_k=%d "
             "latency_ms=%.0f results=%d categories=[%s]",
             user_id,
             query[:80],

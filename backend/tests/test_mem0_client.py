@@ -171,7 +171,15 @@ class TestSearchMemories:
             # All results returned — platform handles relevance
             assert len(result) == 3
 
-    def test_limit_passed_to_mem0_search(self):
+    def test_top_k_passed_to_mem0_search(self):
+        """Mem0 v3 SDK uses ``top_k`` for result count, not ``limit``.
+
+        Sending ``limit`` risks being silently ignored on SDK/API combinations
+        that strip unknown keys, falling back to the default retrieval depth
+        and undermining voice-mode's reduced window. Callers still pass
+        ``limit=N`` to ``search_memories`` (internal API name); the wrapper
+        translates it to ``top_k`` on the wire.
+        """
         from deerflow.sophia.mem0_client import search_memories
 
         mock_client = MagicMock()
@@ -180,7 +188,12 @@ class TestSearchMemories:
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
             search_memories("user1", "query", limit=6)
-            assert mock_client.search.call_args.kwargs["limit"] == 6
+            kwargs = mock_client.search.call_args.kwargs
+            assert kwargs["top_k"] == 6, "Mem0 v3 search must receive top_k, not limit"
+            assert "limit" not in kwargs, (
+                "Don't send the legacy 'limit' kwarg — the SDK ignores it and the "
+                "server-side default top_k applies instead"
+            )
 
     def test_reference_date_passed_when_enabled(self):
         from deerflow.sophia.mem0_client import search_memories
