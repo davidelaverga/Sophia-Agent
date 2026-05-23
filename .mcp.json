@@ -8,7 +8,7 @@
       "type": "http",
       "url": "https://mcp.mem0.ai/mcp",
       "headers": {
-        "Authorization": "Bearer ${MEM0_API_KEY}"
+        "Authorization": "Token ${MEM0_API_KEY}"
       }
     }
   }

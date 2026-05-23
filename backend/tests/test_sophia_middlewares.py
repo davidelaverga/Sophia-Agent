@@ -1762,6 +1762,48 @@ class TestMem0MemoryMiddleware:
 
         assert mock_search.call_args.kwargs["limit"] == 4
 
+    def test_reference_date_passed_to_search(self):
+        """The retrieval middleware must pass ``reference_date=now()`` so Mem0
+        v3 temporal reasoning can anchor relative-time queries.
+
+        Without this, queries like "what did I tell you yesterday?" fall back
+        to default behavior and stale memories outrank time-relevant ones.
+        Codex P1 review on PR #130 flagged this as the missing wire.
+        """
+        from datetime import UTC, datetime
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        mw = Mem0MemoryMiddleware("user-1")
+        before = datetime.now(UTC)
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_prefetch.search_memories",
+            return_value=[],
+        ) as mock_search:
+            mw.before_agent(
+                {
+                    "messages": [_make_message("what did we discuss last week?")],
+                    "platform": "text",
+                    "context_mode": "life",
+                },
+                _make_runtime(thread_id="thread-rd", platform="text"),
+            )
+        after = datetime.now(UTC)
+
+        kwargs = mock_search.call_args.kwargs
+        assert "reference_date" in kwargs, (
+            "Mem0 retrieval middleware MUST pass reference_date so v3 temporal "
+            "reasoning can anchor relative-time queries"
+        )
+        ref = kwargs["reference_date"]
+        assert isinstance(ref, datetime)
+        assert ref.tzinfo is not None, "reference_date must be timezone-aware (UTC)"
+        assert before <= ref <= after, (
+            f"reference_date {ref!r} should be roughly 'now' "
+            f"(between {before!r} and {after!r})"
+        )
+
     def test_voice_reuses_recent_similar_results(self):
         from unittest.mock import patch
 

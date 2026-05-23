@@ -17,6 +17,7 @@ import logging
 import re
 import threading
 import time
+from datetime import UTC, datetime
 from typing import NotRequired, override
 
 from langchain.agents import AgentState
@@ -333,10 +334,16 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
 
         _t_search = time.perf_counter()
         try:
+            # Pass ``reference_date`` so Mem0 v3 temporal reasoning can anchor
+            # relative-time queries ("yesterday", "last week", "earlier this
+            # month") to *now* instead of the memory's own timestamp. Without
+            # this, the platform's temporal layer falls back to default behavior
+            # and stale memories outrank time-relevant ones for these queries.
             results = search_memories(
                 user_id=self._user_id,
                 query=query,
                 limit=memory_limit,
+                reference_date=datetime.now(UTC),
             )
         except Exception:
             logger.warning("Mem0 retrieval failed for user %s", self._user_id, exc_info=True)
