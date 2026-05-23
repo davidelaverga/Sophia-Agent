@@ -79,8 +79,8 @@ def main() -> int:
     unresolved_placeholders = _find_unresolved_placeholders(rendered_prompt)
     summary = {
         "output_path": str(OUTPUT_PATH),
-        "assembly_function": "voice.realtime.sophia_prompt.build_gemini_live_realtime_instructions",
-        "assembly_path": "voice.server:start_gemini_browser_dogfood_session -> voice.realtime.gemini_browser_dogfood.GeminiBrowserDogfoodSessionManager.start_browser_session -> voice.realtime.dogfood_session.RealtimeDogfoodSessionManager.start_session -> voice.realtime.dogfood_session._instructions_for_selection -> voice.realtime.sophia_prompt.build_gemini_live_realtime_instructions -> voice.realtime.gemini_live.build_gemini_live_setup_config",
+        "assembly_function": "voice.realtime.sophia_prompt.build_gemini_live_realtime_setup_instructions",
+        "assembly_path": "voice.server:start_gemini_browser_dogfood_session -> voice.realtime.gemini_browser_dogfood.GeminiBrowserDogfoodSessionManager.start_browser_session -> voice.realtime.dogfood_session.RealtimeDogfoodSessionManager.start_session -> voice.realtime.dogfood_session._instructions_for_selection -> voice.realtime.sophia_prompt.build_gemini_live_realtime_setup_instructions -> voice.realtime.gemini_live.build_gemini_live_setup_config",
         "platform": settings.platform,
         "context_mode": settings.context_mode,
         "ritual": settings.ritual,

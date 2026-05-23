@@ -129,6 +129,33 @@ We shipped 28+ commits across Phase 4 with `quality_signal` deltas all within to
 - **Restore bash visibility for legitimate generator-script execution** (chart-visualization, ppt-generation): if the blank-stream trade-off becomes noticeable on binary-deliverable workflows, swap the blanket `_HIDDEN_TOOLS` entry for a command-pattern heuristic (hide only heredocs / `python -c` / `echo > …`).
 
 ---
+## 2026-05-23 · [voice-skill-slow-state-seed] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** Phase 12.6C skill slow-state seed contract
+
+### What Changed
+- Added a dynamic `### Voice Skill State` seed block for realtime voice setup instructions.
+- Conditioned `challenging_growth` and default posture with conservative trust/session/pattern defaults while leaving the model as the live emotional reader.
+- Wired Gemini setup to append the seed after authenticated user context and before the Gemini spoken-turn overlay.
+- Added OpenAI/GPT Realtime code-path readiness so default dogfood instructions and session configs can carry the same seed.
+- Added focused seed rendering/setup tests and updated the runtime docs, common pitfalls, audit trail, prompt render helper, and rendered Gemini prompt debug doc.
+
+### What We Learned
+- Phase 12.6A's baked skill repertoire needed a dynamic setup seed to make the in-bounds promise operational.
+- The current realtime path has bounded identity/handoff/memory setup context, but no reliable full trust analytics; unknown state must stay conservative.
+- Recurring-pattern evidence can be surfaced from already-fetched bounded setup memories without adding per-turn or extra Mem0 calls.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- Realtime voice prompt before behavior: the stable repertoire said a session seed may constrain in-bounds skills, but setup did not always provide the slow-state gate.
+- Realtime voice prompt after behavior: setup includes a dynamic slow-state seed with conservative defaults; the stable repertoire now states the dynamic seed tells Sophia which modes are in bounds.
+- `tone_delta`: not measurable in this implementation phase.
+- Trace pair available: no.
+
 ## 2026-05-23 · [voice-transcript-fidelity-diagnostics] · PR #[pending]
 **Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** Phase 12.6B spoken assistant transcript fidelity audit
 

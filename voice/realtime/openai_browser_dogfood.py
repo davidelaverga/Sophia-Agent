@@ -25,6 +25,7 @@ from voice.realtime.openai_realtime import (
     build_openai_realtime_session_config,
 )
 from voice.realtime.runtime_selection import VoiceRuntimeMode
+from voice.realtime.sophia_prompt import build_sophia_realtime_setup_instructions
 
 OPENAI_REALTIME_API_KEY_ENV = "OPENAI_API_KEY"
 OPENAI_REALTIME_CLIENT_SECRET_URL = "https://api.openai.com/v1/realtime/client_secrets"
@@ -548,7 +549,11 @@ class OpenAIBrowserDogfoodSessionManager:
         instructions: str | None = None,
     ) -> OpenAIBrowserDogfoodSession:
         gate = validate_openai_browser_dogfood_settings(settings)
-        session_instructions = instructions or getattr(settings, "instructions", "Speak as Sophia.")
+        session_instructions = instructions or build_sophia_realtime_setup_instructions(
+            platform=str(getattr(settings, "platform", "voice")),
+            context_mode=str(getattr(settings, "context_mode", "life")),
+            ritual=getattr(settings, "ritual", None),
+        )
         dogfood_session = await self._realtime_sessions.start_session(
             settings,
             user_id=user_id,

@@ -251,9 +251,10 @@ async def test_close_session_is_safe_and_idempotent_without_sideband_attachment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_openai_env(monkeypatch)
+    fake_minter = FakeClientSecretMinter()
     manager = OpenAIBrowserDogfoodSessionManager(
         RealtimeDogfoodSessionManager(),
-        client_secret_minter=FakeClientSecretMinter(),  # type: ignore[arg-type]
+        client_secret_minter=fake_minter,  # type: ignore[arg-type]
     )
 
     browser_session = await manager.start_browser_session(
@@ -261,6 +262,12 @@ async def test_close_session_is_safe_and_idempotent_without_sideband_attachment(
         user_id="user-1",
         session_id="browser-openai-cleanup-1",
     )
+
+    instructions = fake_minter.requests[0]["session_config"]["instructions"]
+    assert "### Voice Skill State" in instructions
+    assert "session_count: unknown" in instructions
+    assert "challenging_growth_allowed: false" in instructions
+    assert "consult_skill" not in instructions
 
     assert await manager.close_session(browser_session.dogfood_session.session_id) is True
     assert await manager.close_session(browser_session.dogfood_session.session_id) is False

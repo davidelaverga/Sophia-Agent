@@ -159,6 +159,16 @@ The key decision is to distinguish spoken behavior from transcript audit fidelit
 
 Gemini browser provider telemetry now carries a `responseId` field when the raw provider message exposes one. This is diagnostic metadata only. Phase 12.6B does not change spoken audio, crisis prompt behavior, emotional skills, artifact schema, Builder behavior, memory behavior, provider routing, or VAD.
 
+## Phase 12.6C Skill Slow-State Seed Contract
+
+Phase 12.6C implements the slow-state seed promised by 12.6A. The implementation report lives at `docs/audits/skill-slow-state-seed-contract-phase-12-6c.md`.
+
+Voice emotional skills remain a baked in-context repertoire, not a fetchable tool path. The new dynamic `### Voice Skill State` block is appended at setup time outside the stable cached prompt prefix. It tells Sophia the conservative slow-state facts the harness can safely provide: session count, established-trust status, recurring-pattern summaries, prior tone band, default posture, `challenging_growth_allowed`, the reason for that gate, in-bounds skills, out-of-bounds skills, and the always-in-bounds crisis override.
+
+Gemini Live appends this seed after authenticated setup context (identity/handoff/bounded memories) and before the Gemini spoken-turn overlay. OpenAI/GPT Realtime dogfood defaults now use the same seed renderer in session instructions when explicit instructions are not supplied, and the OpenAI session-config helper carries seeded instructions unchanged. Provider routing is unchanged.
+
+The harness boundary is intentionally narrow: it gates slow structural appropriateness, especially early-session `trust_building` and `challenging_growth`, while the model still reads the live emotional moment. Unknown state defaults conservatively: trust unknown, recurring patterns unknown, `default_posture=trust_building`, and `challenging_growth_allowed=false`. This phase does not implement trust analytics, trace/session-history counting, crisis classification, ritual tools, memory writeback, artifact schema changes, Builder changes, VAD tuning, or provider promotion.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.

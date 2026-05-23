@@ -13,6 +13,12 @@ from voice.realtime.sophia_prompt import (
     build_gemini_live_spoken_turn_policy_overlay,
     build_sophia_realtime_instructions,
 )
+from voice.realtime.skill_slow_state import (
+    VoiceSkillSlowStateSeed,
+    build_voice_skill_state_seed_block,
+    voice_skill_slow_state_seed_diagnostics,
+    voice_skill_slow_state_seed_from_setup_context,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS_PACKAGE_PATH = REPO_ROOT / "backend" / "packages" / "harness"
@@ -31,6 +37,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class GeminiLiveMemoryContext:
     prompt_block: str | None
+    skill_state_prompt_block: str | None = None
     diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
@@ -53,6 +60,7 @@ def build_gemini_live_realtime_instructions_with_memory_context(
         context_mode=context_mode,
         ritual=ritual,
     )
+    skill_state_prompt_block = memory_context.skill_state_prompt_block or build_voice_skill_state_seed_block()
     blocks = [
         build_sophia_realtime_instructions(
             platform=platform,
@@ -60,6 +68,7 @@ def build_gemini_live_realtime_instructions_with_memory_context(
             ritual=ritual,
         ),
         memory_context.prompt_block,
+        skill_state_prompt_block,
         build_gemini_live_spoken_turn_policy_overlay(),
     ]
     instructions = "\n\n---\n\n".join(block.strip() for block in blocks if block and block.strip())
@@ -91,7 +100,13 @@ def build_gemini_live_memory_context(
         safe_user_id = _validate_user_id(user_id)
     except ValueError:
         diagnostics["status"] = "invalid_user_id"
-        return GeminiLiveMemoryContext(prompt_block=None, diagnostics=diagnostics)
+        seed = VoiceSkillSlowStateSeed()
+        diagnostics["skill_state"] = voice_skill_slow_state_seed_diagnostics(seed)
+        return GeminiLiveMemoryContext(
+            prompt_block=None,
+            skill_state_prompt_block=build_voice_skill_state_seed_block(seed),
+            diagnostics=diagnostics,
+        )
 
     identity_text = _read_user_text_file(safe_user_id, "identity.md")
     handoff_text = _read_user_text_file(safe_user_id, "handoffs", "latest.md")
@@ -103,6 +118,12 @@ def build_gemini_live_memory_context(
         context_mode=context_mode,
         ritual=ritual,
         limit=memory_limit,
+    )
+    skill_state_seed = voice_skill_slow_state_seed_from_setup_context(
+        identity_text=identity_text,
+        handoff_text=handoff_text,
+        memory_snippets=memories,
+        recurring_patterns_known=mem0_status == "ok",
     )
 
     diagnostics.update(
@@ -118,6 +139,7 @@ def build_gemini_live_memory_context(
             "identity_excerpt_chars": len(identity_excerpt or ""),
             "handoff_excerpt_chars": len(handoff_excerpt or ""),
             "memory_chars": sum(len(memory.content) for memory in memories),
+            "skill_state": voice_skill_slow_state_seed_diagnostics(skill_state_seed),
         }
     )
 
@@ -138,7 +160,11 @@ def build_gemini_live_memory_context(
         diagnostics["memory_count"],
         diagnostics["mem0_status"],
     )
-    return GeminiLiveMemoryContext(prompt_block=prompt_block, diagnostics=diagnostics)
+    return GeminiLiveMemoryContext(
+        prompt_block=prompt_block,
+        skill_state_prompt_block=build_voice_skill_state_seed_block(skill_state_seed),
+        diagnostics=diagnostics,
+    )
 
 
 def _render_memory_context_block(

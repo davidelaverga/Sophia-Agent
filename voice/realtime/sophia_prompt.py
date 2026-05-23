@@ -4,6 +4,11 @@ import ast
 from functools import cache, lru_cache
 from pathlib import Path
 
+from voice.realtime.skill_slow_state import (
+    VoiceSkillSlowStateSeed,
+    build_voice_skill_state_seed_block,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_PATH = REPO_ROOT / "skills" / "public" / "sophia"
 SOPHIA_AGENT_MIDDLEWARE_PATH = (
@@ -54,7 +59,7 @@ Memory recall and epistemic honesty:
 </realtime_memory_recall_guidance>"""
 
 _EMOTIONAL_SKILLS_REPERTOIRE = """### §M — Your Skills (your repertoire for different moments)
-You hold all of these at once. You don't load one or announce it. You recognize the moment and respond in the matching way, the way someone skilled already has these moves in them. At the start of each session, the seed may tell you which modes are in bounds right now: session count, established-trust flag, recurring-pattern flags, and prior tone band. Stay within that slow-state boundary. active_listening is your home base. Crisis overrides everything — see §N.
+You hold all of these at once. You don't load one or announce it. You recognize the moment and respond in the matching way, the way someone skilled already has these moves in them. At the start of each session, the dynamic seed tells you which modes are in bounds right now: session count, established-trust flag, recurring-pattern flags, and prior tone band. Stay within that slow-state boundary. active_listening is your home base. Crisis overrides everything — see §N.
 
 Use these mode ids exactly in your internal state: active_listening, vulnerability_holding, crisis_redirect, trust_building, boundary_holding, challenging_growth, identity_fluidity_support, celebrating_breakthrough.
 
@@ -182,6 +187,45 @@ def build_gemini_live_realtime_instructions(
             platform=platform,
             context_mode=context_mode,
             ritual=ritual,
+        ),
+        build_gemini_live_spoken_turn_policy_overlay(),
+    ]
+    return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
+
+
+def build_sophia_realtime_setup_instructions(
+    *,
+    platform: str = "voice",
+    context_mode: str = "life",
+    ritual: str | None = None,
+    skill_state: VoiceSkillSlowStateSeed | None = None,
+) -> str:
+    """Build provider setup instructions with the dynamic skill slow-state seed."""
+    blocks = [
+        build_sophia_realtime_instructions(
+            platform=platform,
+            context_mode=context_mode,
+            ritual=ritual,
+        ),
+        build_voice_skill_state_seed_block(skill_state),
+    ]
+    return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
+
+
+def build_gemini_live_realtime_setup_instructions(
+    *,
+    platform: str = "voice",
+    context_mode: str = "life",
+    ritual: str | None = None,
+    skill_state: VoiceSkillSlowStateSeed | None = None,
+) -> str:
+    """Build Gemini Live setup instructions with dynamic skill slow-state."""
+    blocks = [
+        build_sophia_realtime_setup_instructions(
+            platform=platform,
+            context_mode=context_mode,
+            ritual=ritual,
+            skill_state=skill_state,
         ),
         build_gemini_live_spoken_turn_policy_overlay(),
     ]

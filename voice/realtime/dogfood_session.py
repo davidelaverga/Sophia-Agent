@@ -17,7 +17,10 @@ from voice.realtime.runtime_factory import (
     build_realtime_runtime_bundle,
 )
 from voice.realtime.runtime_selection import VoiceRuntimeMode
-from voice.realtime.sophia_prompt import build_gemini_live_realtime_instructions
+from voice.realtime.sophia_prompt import (
+    build_gemini_live_realtime_setup_instructions,
+    build_sophia_realtime_setup_instructions,
+)
 
 DURABLE_PUBLIC_REPLAY_TYPES = frozenset({"sophia.user_transcript", "sophia.builder_task"})
 
@@ -366,7 +369,13 @@ def _instructions_for_selection(
     if instructions:
         return instructions
     if mode == VoiceRuntimeMode.GEMINI_LIVE:
-        return build_gemini_live_realtime_instructions(
+        return build_gemini_live_realtime_setup_instructions(
+            platform=str(getattr(settings, "platform", "voice")),
+            context_mode=str(getattr(settings, "context_mode", "life")),
+            ritual=getattr(settings, "ritual", None),
+        )
+    if mode == VoiceRuntimeMode.OPENAI_REALTIME:
+        return build_sophia_realtime_setup_instructions(
             platform=str(getattr(settings, "platform", "voice")),
             context_mode=str(getattr(settings, "context_mode", "life")),
             ritual=getattr(settings, "ritual", None),

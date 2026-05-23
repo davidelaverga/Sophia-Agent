@@ -453,6 +453,12 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert "<realtime_memory_recall_guidance>" in system_instruction
     assert "Broad recall and later specific recall are separate opportunities" in system_instruction
     assert "After a user reveals or corrects an answer that was not retrieved" in system_instruction
+    assert "### Voice Skill State" in system_instruction
+    assert "session_count: unknown" in system_instruction
+    assert "challenging_growth_allowed: false" in system_instruction
+    assert system_instruction.index("### Voice Skill State") < system_instruction.index(
+        "<gemini_live_spoken_turn_policy>"
+    )
     assert "<artifact_contract>" in system_instruction
     assert "For a fresh user request to create, build, generate, research, or present something" in system_instruction
     assert "Never invent task IDs" in system_instruction
@@ -534,6 +540,8 @@ async def test_production_browser_session_uses_production_public_payload(
     assert "# Context: Work" in system_instruction
     assert "<realtime_memory_recall_guidance>" in system_instruction
     assert "New facts from this live conversation are not durable memory" in system_instruction
+    assert "### Voice Skill State" in system_instruction
+    assert "challenging_growth_allowed: false" in system_instruction
     assert "<gemini_live_spoken_turn_policy>" in system_instruction
     assert "Do not assume the user is gaming" in system_instruction
     assert "latest complete user utterance" in system_instruction

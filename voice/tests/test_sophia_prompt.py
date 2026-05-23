@@ -14,11 +14,19 @@ from voice.realtime.sophia_prompt import (
     GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
     REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE,
     build_gemini_live_realtime_instructions,
+    build_gemini_live_realtime_setup_instructions,
     build_gemini_live_spoken_turn_policy_overlay,
     build_realtime_memory_recall_guidance,
+    build_sophia_realtime_setup_instructions,
     build_sophia_realtime_instructions,
     gemini_live_realtime_instruction_sources,
     sophia_realtime_instruction_sources,
+)
+from voice.realtime.openai_realtime import build_openai_realtime_session_config
+from voice.realtime.skill_slow_state import (
+    MAX_RECURRING_PATTERN_CHARS,
+    VoiceSkillSlowStateSeed,
+    build_voice_skill_state_seed_block,
 )
 
 
@@ -66,9 +74,110 @@ def test_realtime_prompt_bakes_emotional_skills_without_skill_tool() -> None:
     assert "consult_skill" not in prompt
     assert "### §M — Your Skills (your repertoire for different moments)" in prompt
     assert "You hold all of these at once" in prompt
+    assert "dynamic seed tells you which modes are in bounds" in prompt
     assert "session count, established-trust flag, recurring-pattern flags, and prior tone band" in prompt
     for skill_name in EMOTIONAL_SKILL_NAMES:
         assert skill_name in prompt
+
+
+def test_voice_skill_state_seed_renders_conservative_defaults() -> None:
+    seed = build_voice_skill_state_seed_block()
+
+    assert "### Voice Skill State" in seed
+    assert "session_count: unknown" in seed
+    assert "trust_established: unknown" in seed
+    assert "recurring_patterns: unknown" in seed
+    assert "prior_tone_band: unknown" in seed
+    assert "default_posture: trust_building" in seed
+    assert "challenging_growth_allowed: false" in seed
+    assert "challenging_growth_reason: trust/pattern evidence unavailable" in seed
+    assert "out_of_bounds: challenging_growth" in seed
+    assert "crisis_override: always in bounds" in seed
+    assert "The model still reads the live emotional moment." in seed
+
+
+def test_voice_skill_state_seed_unknown_trust_blocks_challenging_growth() -> None:
+    seed = build_voice_skill_state_seed_block(
+        VoiceSkillSlowStateSeed(
+            session_count=12,
+            trust_established=None,
+            recurring_patterns=("Avoids hard conversations until the deadline is close.",),
+            recurring_patterns_known=True,
+            prior_tone_band="engagement",
+        )
+    )
+
+    assert "session_count: 12" in seed
+    assert "trust_established: unknown" in seed
+    assert "prior_tone_band: engagement" in seed
+    assert "default_posture: trust_building" in seed
+    assert "challenging_growth_allowed: false" in seed
+    assert "challenging_growth_reason: trust is not established" in seed
+    assert "out_of_bounds: challenging_growth" in seed
+
+
+def test_voice_skill_state_seed_early_session_defaults_to_trust_building() -> None:
+    seed = build_voice_skill_state_seed_block(
+        VoiceSkillSlowStateSeed(
+            session_count=1,
+            trust_established=False,
+            recurring_patterns=(),
+            recurring_patterns_known=True,
+        )
+    )
+
+    assert "session_count: 1" in seed
+    assert "trust_established: false" in seed
+    assert "recurring_patterns: none" in seed
+    assert "default_posture: trust_building" in seed
+    assert "challenging_growth_allowed: false" in seed
+
+
+def test_voice_skill_state_seed_allows_challenging_growth_with_trust_and_pattern() -> None:
+    seed = build_voice_skill_state_seed_block(
+        VoiceSkillSlowStateSeed(
+            session_count=8,
+            trust_established=True,
+            recurring_patterns=("Avoids the hard part by switching into planning mode.",),
+            recurring_patterns_known=True,
+            prior_tone_band="anger-antagonism",
+        )
+    )
+
+    assert "session_count: 8" in seed
+    assert "trust_established: true" in seed
+    assert "prior_tone_band: anger_antagonism" in seed
+    assert "default_posture: active_listening" in seed
+    assert "challenging_growth_allowed: true" in seed
+    assert "challenging_growth_reason: trust established and recurring pattern evidence present" in seed
+    assert "in_bounds:" in seed and "challenging_growth" in seed
+    assert "out_of_bounds: none" in seed
+
+
+def test_voice_skill_state_seed_keeps_always_in_bounds_skills() -> None:
+    seed = build_voice_skill_state_seed_block()
+
+    assert "active_listening (always)" in seed
+    assert "crisis_redirect (override)" in seed
+    assert "crisis_override: always in bounds" in seed
+
+
+def test_voice_skill_state_seed_bounds_pattern_summaries_and_invalid_tone() -> None:
+    long_pattern = "x" * (MAX_RECURRING_PATTERN_CHARS + 30)
+    seed = build_voice_skill_state_seed_block(
+        VoiceSkillSlowStateSeed(
+            trust_established=True,
+            recurring_patterns=(long_pattern, "second pattern", "third pattern", "fourth pattern"),
+            recurring_patterns_known=True,
+            prior_tone_band="not-a-band",
+        )
+    )
+
+    pattern_line = next(line for line in seed.splitlines() if line.startswith("- recurring_patterns:"))
+    assert "..." in pattern_line
+    assert "fourth pattern" not in pattern_line
+    assert "prior_tone_band: unknown" in seed
+    assert len(pattern_line.split(": ", 1)[1].split("; ")[0]) <= MAX_RECURRING_PATTERN_CHARS
 
 
 def test_realtime_prompt_contains_crisis_override_and_artifact_exception() -> None:
@@ -155,6 +264,46 @@ def test_gemini_live_setup_contains_overlay_after_artifact_contract() -> None:
     assert rendered.rstrip().endswith("</gemini_live_spoken_turn_policy>")
 
 
+def test_gemini_live_setup_instructions_include_dynamic_skill_seed() -> None:
+    prompt = build_gemini_live_realtime_setup_instructions()
+    setup = build_gemini_live_setup_config(instructions=prompt)
+    rendered = _system_instruction_text(setup)
+
+    assert "### Voice Skill State" in rendered
+    assert "session_count: unknown" in rendered
+    assert "challenging_growth_allowed: false" in rendered
+    assert rendered.index("### Voice Skill State") < rendered.index("<gemini_live_spoken_turn_policy>")
+
+
+def test_openai_realtime_session_config_can_carry_dynamic_skill_seed() -> None:
+    instructions = build_sophia_realtime_setup_instructions(
+        skill_state=VoiceSkillSlowStateSeed(
+            session_count=6,
+            trust_established=True,
+            recurring_patterns=("Retreats into over-planning when the emotional risk rises.",),
+            recurring_patterns_known=True,
+            prior_tone_band="engagement",
+        )
+    )
+    config = build_openai_realtime_session_config(instructions=instructions)
+
+    rendered = str(config["instructions"])
+    assert "### Voice Skill State" in rendered
+    assert "session_count: 6" in rendered
+    assert "trust_established: true" in rendered
+    assert "challenging_growth_allowed: true" in rendered
+    assert "consult_skill" not in rendered
+
+
+def test_stable_realtime_prompt_does_not_include_dynamic_skill_state_values() -> None:
+    prompt = build_sophia_realtime_instructions()
+
+    assert "### Voice Skill State" not in prompt
+    assert "session_count: unknown" not in prompt
+    assert "trust_established: unknown" not in prompt
+    assert "challenging_growth_allowed:" not in prompt
+
+
 def test_gemini_live_instruction_sources_append_overlay_source() -> None:
     sources = gemini_live_realtime_instruction_sources(
         context_mode="work",
@@ -206,6 +355,7 @@ def test_gemini_live_memory_context_uses_trusted_user_files_before_overlay(tmp_p
     )
 
     assert "<gemini_live_user_context>" in prompt
+    assert "### Voice Skill State" in prompt
     assert "Preferred name: Luis" in prompt
     assert "Stored identity excerpt:" in prompt
     assert "Latest session handoff excerpt:" in prompt
@@ -213,11 +363,15 @@ def test_gemini_live_memory_context_uses_trusted_user_files_before_overlay(tmp_p
     assert "Preferred name, identity excerpts, and handoff excerpts are setup context from earlier" in prompt
     assert "stored memories are only the items listed under Relevant stored memories" in prompt
     assert prompt.index("<gemini_live_user_context>") < prompt.index("<gemini_live_spoken_turn_policy>")
+    assert prompt.index("<gemini_live_user_context>") < prompt.index("### Voice Skill State")
+    assert prompt.index("### Voice Skill State") < prompt.index("<gemini_live_spoken_turn_policy>")
     assert context.diagnostics["trusted_user_context"] is True
     assert context.diagnostics["injected"] is True
     assert context.diagnostics["preferred_name_present"] is True
     assert context.diagnostics["mem0_status"] == "not_configured"
     assert context.diagnostics["mem0_provider_reason"] == "missing_api_key"
+    assert context.diagnostics["skill_state"]["schema"] == "voice_skill_state_seed_v1"
+    assert context.diagnostics["skill_state"]["challenging_growth_allowed"] is False
 
 
 def test_gemini_live_memory_context_fetches_bounded_mem0_memories(monkeypatch) -> None:
@@ -262,10 +416,17 @@ def test_gemini_live_memory_context_fetches_bounded_mem0_memories(monkeypatch) -
     assert "preference" in calls[0]["categories"]
     assert "ritual_context" in calls[0]["categories"]
     assert context.prompt_block is not None
+    assert context.skill_state_prompt_block is not None
     assert context.prompt_block.count("- [") == 4
     assert "This fifth memory" not in context.prompt_block
+    assert "### Voice Skill State" in context.skill_state_prompt_block
+    assert "Luis uses technical detail as a processing tool." in context.skill_state_prompt_block
+    assert "This fifth memory" not in context.skill_state_prompt_block
+    assert "challenging_growth_allowed: false" in context.skill_state_prompt_block
     assert context.diagnostics["memory_count"] == 4
     assert context.diagnostics["memory_categories"] == ["decision", "pattern", "preference"]
+    assert context.diagnostics["skill_state"]["recurring_pattern_count"] == 1
+    assert context.diagnostics["skill_state"]["raw_unbounded_memory_text_included"] is False
     assert "Luis prefers" not in str(context.diagnostics)
 
 
@@ -279,6 +440,7 @@ def test_debug_rendered_gemini_prompt_includes_strengthened_overlay() -> None:
 
     for expected in [
         "### §m — your skills (your repertoire for different moments)",
+        "dynamic seed tells you which modes are in bounds",
         "active_listening",
         "vulnerability_holding",
         "crisis_redirect",
@@ -288,6 +450,10 @@ def test_debug_rendered_gemini_prompt_includes_strengthened_overlay() -> None:
         "identity_fluidity_support",
         "celebrating_breakthrough",
         "minimal crisis acknowledgment",
+        "### voice skill state",
+        "session_count: unknown",
+        "challenging_growth_allowed: false",
+        "crisis_override: always in bounds",
         "<realtime_memory_recall_guidance>",
         "broad recall and later specific recall are separate opportunities",
         "current-session context",
