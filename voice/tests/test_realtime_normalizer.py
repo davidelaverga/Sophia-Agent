@@ -211,6 +211,42 @@ def test_user_transcript_public_event_preserves_provider_source_metadata() -> No
     assert payloads[1] == {"type": "sophia.turn", "data": {"phase": "user_ended"}}
 
 
+def test_assistant_transcript_public_event_preserves_source_response_segment_metadata() -> None:
+    payloads = _payloads(
+        [
+            _event(
+                ProviderEventType.ASSISTANT_TEXT_DELTA,
+                {
+                    "text": "Please call emergency services now.",
+                    "is_delta": False,
+                    "transcript_assembly": "auto",
+                    "segment_id": "gemini-segment-0",
+                    "source_sequence": 42,
+                    "provider_received_at": "2026-05-20T12:00:01.000Z",
+                    "relay_correlation_id": "relay-42",
+                },
+                provider="google-gemini-live",
+                response_id="gemini-response-42",
+            )
+        ]
+    )
+
+    assert payloads == [
+        {
+            "type": "sophia.transcript",
+            "data": {
+                "text": "Please call emergency services now.",
+                "is_final": False,
+                "response_id": "gemini-response-42",
+                "segment_id": "gemini-segment-0",
+                "source_sequence": 42,
+                "provider_received_at": "2026-05-20T12:00:01.000Z",
+                "relay_correlation_id": "relay-42",
+            },
+        }
+    ]
+
+
 def test_openai_style_realtime_fixture_normalizes_without_leaking_provider_names() -> None:
     payloads = _payloads(
         [

@@ -270,6 +270,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
 
   it('categorizes provider events and records compact correlation telemetry', () => {
     const event = {
+      responseId: 'provider-response-1',
       serverContent: {
         inputTranscription: { text: 'hello' },
         outputTranscription: { text: 'hi' },
@@ -305,6 +306,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(telemetry.categoryCounts.toolCall.count).toBe(1);
     expect(telemetry.relayClassification).toBe('critical');
     expect(telemetry.relayClassificationCounts.critical.count).toBe(1);
+    expect(telemetry.responseId).toBe('provider-response-1');
     expect(telemetry.toolCallIds).toEqual(['nested-call-1']);
     expect(telemetry.outputAudioChunkCount).toBe(1);
     expect(telemetry.hasInputTranscriptionText).toBe(true);

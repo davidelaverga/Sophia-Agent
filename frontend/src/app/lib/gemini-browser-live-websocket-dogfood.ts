@@ -140,6 +140,7 @@ export type GeminiProviderEventCategoryCounts = Record<GeminiProviderEventCatego
 export interface GeminiBrowserLiveProviderEventTelemetry {
   timestamp: string;
   correlationId: string;
+  responseId: string | null;
   providerReceiveSequence: number | null;
   providerReceivedAt: string | null;
   primaryCategory: GeminiProviderEventCategory | 'unknown';
@@ -1296,6 +1297,7 @@ export function recordGeminiProviderEventTelemetry(
   return {
     timestamp,
     correlationId: receiveMetadata?.relayCorrelationId ?? geminiProviderEventCorrelationId(event, 0),
+    responseId: readGeminiResponseId(event),
     providerReceiveSequence: receiveMetadata?.providerReceiveSequence ?? null,
     providerReceivedAt: receiveMetadata?.providerReceivedAt ?? null,
     primaryCategory: categories[0] ?? 'unknown',
@@ -2539,6 +2541,18 @@ function readTranscriptionTextPreview(event: unknown, ...transcriptionKeys: stri
   return text.length > MAX_TRANSCRIPTION_TELEMETRY_PREVIEW_CHARS
     ? `${text.slice(0, MAX_TRANSCRIPTION_TELEMETRY_PREVIEW_CHARS)}...`
     : text;
+}
+
+function readGeminiResponseId(event: unknown): string | null {
+  if (!isRecord(event)) {
+    return null;
+  }
+  const direct = stringFromAnyKey(event, 'responseId', 'response_id', 'eventId', 'event_id');
+  if (direct) {
+    return direct;
+  }
+  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
+  return stringFromAnyKey(serverContent, 'responseId', 'response_id');
 }
 
 function geminiProviderEventCorrelationId(event: unknown, sequence: number): string {

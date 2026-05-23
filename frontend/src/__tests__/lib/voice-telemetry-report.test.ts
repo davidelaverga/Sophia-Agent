@@ -373,7 +373,7 @@ describe('buildVoiceTelemetryReport', () => {
     expect(relayTrace?.trace?.backendDiagnostics).not.toHaveProperty('function_calls_extracted');
     expect(relayTrace?.trace?.backendDiagnostics).not.toHaveProperty('cancellation_ids_observed');
     expect(relayTrace?.trace?.backendDiagnostics).not.toHaveProperty('tool_execution_recent');
-    expect(report.turnCaptureDiagnostics.version).toBe(1);
+    expect(report.turnCaptureDiagnostics.version).toBe(2);
     expect(report.turnCaptureDiagnostics.sourceEventCount).toBe(4);
     expect(serialized).not.toContain('old archived event text');
     expect(serialized).not.toContain('old private chat store text');
@@ -747,6 +747,129 @@ describe('buildVoiceTelemetryReport', () => {
       cancellationBeforeResponsePrepared: true,
     });
     expect(JSON.stringify(report.turnCaptureDiagnostics)).not.toContain('do-not-export-raw-audio');
+  });
+
+  it('flags assistant audio when provider and public transcript evidence is missing', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      summary: buildSummary(),
+      metrics: buildMetrics(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-provider-event-correlation',
+          payload: {
+            telemetry: {
+              categories: ['serverContent', 'modelTurnAudio'],
+              responseId: 'provider-response-1',
+              providerReceiveSequence: 21,
+              correlationId: 'gemini-event-21',
+              outputAudioChunkCount: 4,
+            },
+          },
+        },
+      ]),
+    });
+
+    const evidence = report.turnCaptureDiagnostics.summary.assistantTranscriptEvidence;
+
+    expect(evidence.assistantAudioChunkCount).toBe(4);
+    expect(evidence.providerOutputTranscriptionFragmentCount).toBe(0);
+    expect(evidence.publicAssistantTranscriptEventCount).toBe(0);
+    expect(evidence.warnings).toEqual(expect.arrayContaining([
+      'assistant_audio_present_without_provider_output_transcription',
+      'assistant_audio_present_without_public_transcript',
+    ]));
+    expect(evidence.windows.at(-1)).toMatchObject({
+      responseId: 'provider-response-1',
+      assistantTranscriptMissingWhileAudioPresent: true,
+      warnings: expect.arrayContaining([
+        'assistant_audio_without_provider_output_transcription',
+        'assistant_audio_without_public_assistant_transcript',
+      ]),
+    });
+  });
+
+  it('compares provider output transcription with public assistant transcript evidence', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      summary: buildSummary(),
+      metrics: buildMetrics(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-provider-event-correlation',
+          payload: {
+            telemetry: {
+              categories: ['serverContent', 'outputTranscription', 'modelTurnAudio'],
+              responseId: 'provider-response-2',
+              providerReceiveSequence: 31,
+              correlationId: 'gemini-event-31',
+              outputAudioChunkCount: 2,
+              outputTranscriptionTextPreview: 'Please contact emergency services now.',
+            },
+          },
+        },
+        {
+          seq: 3,
+          recordedAt: '2026-05-20T12:00:01.300Z',
+          category: 'voice-sse',
+          name: 'sophia.transcript',
+          payload: { data: { text: 'now.', is_final: false } },
+        },
+        {
+          seq: 4,
+          recordedAt: '2026-05-20T12:00:01.500Z',
+          category: 'voice-session',
+          name: 'gemini-interruption',
+          payload: { diagnostic: { playbackFlushed: true } },
+        },
+      ]),
+    });
+
+    const evidence = report.turnCaptureDiagnostics.summary.assistantTranscriptEvidence;
+    const window = evidence.windows.at(-1);
+
+    expect(evidence.latestProviderOutputTranscriptionPreview).toBe('Please contact emergency services now.');
+    expect(evidence.latestPublicAssistantTranscriptPreview).toBe('now.');
+    expect(evidence.publicAssistantTranscriptLatestTextLength).toBe(4);
+    expect(evidence.publicTranscriptFinalSeen).toBe(false);
+    expect(window).toMatchObject({
+      responseId: 'provider-response-2',
+      assistantAudioChunkEvents: 2,
+      providerOutputTranscriptionFragmentCount: 1,
+      publicAssistantTranscriptEventCount: 1,
+      publicAssistantTranscriptLatestTextLength: 4,
+      interrupted: true,
+      playbackFlush: true,
+      assistantTranscriptInterruptedBeforeFinal: true,
+      warnings: expect.arrayContaining([
+        'public_assistant_transcript_shorter_than_provider_output',
+        'assistant_transcript_interrupted_before_final',
+        'assistant_transcript_flushed_before_final',
+        'public_assistant_transcript_missing_source_sequence',
+        'public_assistant_transcript_missing_response_id',
+      ]),
+    });
+    expect(window?.providerToPublicTranscriptRatio).toBeLessThan(0.35);
   });
 
   it('bounds turn capture diagnostics to the most recent compact evidence', () => {

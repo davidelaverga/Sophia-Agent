@@ -129,6 +129,29 @@ We shipped 28+ commits across Phase 4 with `quality_signal` deltas all within to
 - **Restore bash visibility for legitimate generator-script execution** (chart-visualization, ppt-generation): if the blank-stream trade-off becomes noticeable on binary-deliverable workflows, swap the blanket `_HIDDEN_TOOLS` entry for a command-pattern heuristic (hide only heredocs / `python -c` / `echo > …`).
 
 ---
+## 2026-05-23 · [voice-transcript-fidelity-diagnostics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** Phase 12.6B spoken assistant transcript fidelity audit
+
+### What Changed
+- Added `turnCaptureDiagnostics.version = 2` with compact assistant audio/provider transcript/public transcript evidence windows and warnings.
+- Added bounded Gemini provider `responseId` telemetry when the raw provider event exposes one.
+- Added focused frontend telemetry tests and backend normalizer metadata coverage for assistant transcript evidence.
+- Documented that the 12.6A crisis smoke should be interpreted as transcript audit-fidelity failure, not spoken crisis prompt failure, unless future evidence proves otherwise.
+
+### What We Learned
+- The inspected 12.6A report retained only the final current-run slice, after the crisis turn, so it cannot prove what the public crisis transcript path did.
+- The retained slice shows provider output transcription and audio can exist while public captions arrive seconds later, remain partial-only, and lack response/source metadata.
+- High relay latency, interruptions/playback flushes, and export scoping must be separated before diagnosing prompt behavior.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (diagnostics/docs/tests only; no Sophia prompt files, skills, crisis behavior, artifact schema, Builder, memory, VAD, or provider routing changed).
+
 ## 2026-05-23 · [voice-emotional-skills-prompt] · PR #[pending]
 **Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** `sophia_voice_system_prompt_spec_v1.md` + `sophia_voice_skills_and_crisis_spec_v1.md`
 

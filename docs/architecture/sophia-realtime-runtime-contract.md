@@ -149,6 +149,16 @@ Crisis remains in prompt as an override. It stops other skill behavior, avoids e
 
 The harness slow-state contract is documented but not fully implemented here. Future session seeds may constrain the model with session count, established-trust flag, recurring-pattern flags, and prior tone band; the model holds the repertoire, but should stay within those bounds.
 
+## Phase 12.6B Spoken Assistant Transcript Fidelity Evidence
+
+Phase 12.6B is a focused observability phase after the 12.6A smoke showed a mismatch between Sophia's reportedly correct spoken crisis redirect and sparse public assistant captions. The implementation report lives at `docs/audits/spoken-assistant-transcript-fidelity-phase-12-6b.md`.
+
+The key decision is to distinguish spoken behavior from transcript audit fidelity. A broken public `sophia.transcript` trail is not proof that Gemini spoke the wrong response. For safety and crisis smokes, telemetry must show separate evidence for provider audio chunks, provider `outputTranscription`, public assistant transcript snapshots, interruption/playback flush, finalization, response/source metadata, and export scope.
+
+`turnCaptureDiagnostics.version` is now `2` and includes `summary.assistantTranscriptEvidence`. The evidence is compact and bounded: per-window audio chunk counts, provider output-transcription fragment/text lengths, public assistant transcript counts/lengths/final-seen state, latest safe previews, provider-to-public ratio, interruption/flush flags, source/response id gaps, and warnings such as `assistant_audio_present_without_provider_output_transcription`, `assistant_audio_present_without_public_transcript`, `public_assistant_transcript_shorter_than_provider_output`, `assistant_transcript_interrupted_before_final`, and `capture_scope_may_omit_earlier_provider_events`.
+
+Gemini browser provider telemetry now carries a `responseId` field when the raw provider message exposes one. This is diagnostic metadata only. Phase 12.6B does not change spoken audio, crisis prompt behavior, emotional skills, artifact schema, Builder behavior, memory behavior, provider routing, or VAD.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.

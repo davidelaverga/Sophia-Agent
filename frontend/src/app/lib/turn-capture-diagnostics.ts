@@ -53,6 +53,7 @@ export type TurnCaptureDiagnosticEvent = {
   cancellationAfterInterruption?: boolean | null;
   cancellationBeforeResponsePrepared?: boolean | null;
   cancellationBeforeResponseSent?: boolean | null;
+  playbackFlushed?: boolean | null;
 };
 
 export type TurnCaptureTranscriptPreview = {
@@ -81,8 +82,56 @@ export type TurnCaptureToolEvidence = {
   publicArtifactObserved: boolean;
 };
 
+export type TurnCaptureAssistantTranscriptEvidenceWindow = {
+  windowId: string;
+  startedAt: string | null;
+  lastEventAt: string | null;
+  endedAt: string | null;
+  responseId: string | null;
+  segmentId: string | null;
+  providerStartSequence: number | null;
+  providerEndSequence: number | null;
+  assistantAudioChunkEvents: number;
+  providerOutputTranscriptionFragmentCount: number;
+  providerOutputTranscriptionTextLength: number;
+  publicAssistantTranscriptEventCount: number;
+  publicAssistantTranscriptFinalSeen: boolean;
+  publicAssistantTranscriptMaxTextLength: number;
+  publicAssistantTranscriptLatestTextLength: number;
+  providerToPublicTranscriptRatio: number | null;
+  latestProviderOutputTranscriptionPreview: string | null;
+  latestPublicAssistantTranscriptPreview: string | null;
+  interrupted: boolean;
+  playbackFlush: boolean;
+  userInputOverlappedAudio: boolean;
+  publicTranscriptMissingSourceSequence: boolean;
+  publicTranscriptMissingResponseId: boolean;
+  assistantTranscriptMissingWhileAudioPresent: boolean;
+  assistantTranscriptInterruptedBeforeFinal: boolean;
+  warnings: string[];
+};
+
+export type TurnCaptureAssistantTranscriptEvidence = {
+  schema: 'assistant_transcript_evidence_v1';
+  sourceProviderEventCorrelationCount: number;
+  reportedProviderEventCount: number | null;
+  captureMayOmitEarlierProviderEvents: boolean;
+  assistantAudioChunkCount: number;
+  providerOutputTranscriptionFragmentCount: number;
+  providerOutputTranscriptionTextLength: number;
+  publicAssistantTranscriptEventCount: number;
+  publicAssistantTranscriptMaxTextLength: number;
+  publicAssistantTranscriptLatestTextLength: number;
+  publicTranscriptFinalSeen: boolean;
+  providerToPublicTranscriptRatio: number | null;
+  latestProviderOutputTranscriptionPreview: string | null;
+  latestPublicAssistantTranscriptPreview: string | null;
+  windows: TurnCaptureAssistantTranscriptEvidenceWindow[];
+  warnings: string[];
+};
+
 export type TurnCaptureDiagnostics = {
-  version: 1;
+  version: 2;
   eventLimit: number;
   sourceEventCount: number;
   eventCount: number;
@@ -112,6 +161,7 @@ export type TurnCaptureDiagnostics = {
     };
     recentProviderInputTranscripts: TurnCaptureTranscriptPreview[];
     recentPublicUserTranscripts: TurnCaptureTranscriptPreview[];
+    assistantTranscriptEvidence: TurnCaptureAssistantTranscriptEvidence;
     toolEvidence: TurnCaptureToolEvidence[];
     finalUiState: {
       stage: string | null;
@@ -128,8 +178,11 @@ export type TurnCaptureDiagnostics = {
 
 const MAX_TURN_CAPTURE_EVENTS = 220;
 const MAX_RECENT_TRANSCRIPTS = 3;
+const MAX_ASSISTANT_TRANSCRIPT_EVIDENCE_WINDOWS = 8;
 const MAX_TOOL_EVIDENCE = 20;
 const TEXT_PREVIEW_CHARS = 160;
+const MIN_TEXT_LENGTH_FOR_RATIO_WARNING = 24;
+const MIN_PROVIDER_TO_PUBLIC_TRANSCRIPT_RATIO = 0.35;
 const REDACTED = '[redacted]';
 
 export function buildTurnCaptureDiagnostics(
@@ -235,6 +288,7 @@ export function buildTurnCaptureDiagnostics(
       const providerReceiveSequence = numericValue(telemetry?.providerReceiveSequence);
       const providerRelaySequence = numericValue(telemetry?.providerRelaySequence);
       const relayCorrelationId = stringValue(telemetry?.correlationId);
+      const responseId = stringValue(telemetry?.responseId);
       const categories = stringArray(telemetry?.categories);
       const base = {
         captureSeq: numericValue(captureEvent.seq),
@@ -242,6 +296,7 @@ export function buildTurnCaptureDiagnostics(
         providerReceiveSequence,
         providerRelaySequence,
         relayCorrelationId,
+        responseId,
       };
 
       if (categories.includes('inputTranscription')) {
@@ -410,6 +465,7 @@ export function buildTurnCaptureDiagnostics(
         family: 'turn_boundary',
         eventType: 'interrupted',
         source: 'gemini_browser_interruption',
+        playbackFlushed: booleanValue(diagnostic?.playbackFlushed),
         assistantAudioActive,
         userInputActive,
       });
@@ -655,8 +711,9 @@ export function buildTurnCaptureDiagnostics(
 
   const geminiTelemetry = recordValue(recordValue(metrics?.sessionTelemetry)?.gemini);
   const metricCounts = recordValue(metrics?.counts);
+  const assistantTranscriptEvidence = buildAssistantTranscriptEvidence(timeline, sourceEvents, metrics);
   return {
-    version: 1,
+    version: 2,
     eventLimit: MAX_TURN_CAPTURE_EVENTS,
     sourceEventCount: sourceEvents.length,
     eventCount: boundedEvents.length,
@@ -666,6 +723,7 @@ export function buildTurnCaptureDiagnostics(
       counts,
       recentProviderInputTranscripts,
       recentPublicUserTranscripts,
+      assistantTranscriptEvidence,
       toolEvidence: [...latestToolLedger.values()].slice(-MAX_TOOL_EVIDENCE),
       finalUiState: {
         stage: stringValue(metrics?.stage) ?? currentStage,
@@ -703,6 +761,254 @@ function createEmptyCounts(): TurnCaptureDiagnostics['summary']['counts'] {
     sessionStageTransition: 0,
     publicSophiaEvent: 0,
   };
+}
+
+function buildAssistantTranscriptEvidence(
+  timeline: Omit<TurnCaptureDiagnosticEvent, 'timelineSequence'>[],
+  sourceEvents: CaptureEvent[],
+  metrics?: VoiceDeveloperMetrics,
+): TurnCaptureAssistantTranscriptEvidence {
+  const windows: MutableAssistantTranscriptEvidenceWindow[] = [];
+  let current: MutableAssistantTranscriptEvidenceWindow | null = null;
+
+  const startWindow = (event: Omit<TurnCaptureDiagnosticEvent, 'timelineSequence'>) => {
+    if (!current) {
+      current = {
+        windowId: `assistant-window-${windows.length + 1}`,
+        startedAt: event.timestamp,
+        lastEventAt: event.timestamp,
+        endedAt: null,
+        responseId: event.responseId ?? null,
+        segmentId: event.segmentId ?? null,
+        providerStartSequence: event.providerReceiveSequence ?? null,
+        providerEndSequence: event.providerReceiveSequence ?? null,
+        assistantAudioChunkEvents: 0,
+        providerOutputTranscriptionFragmentCount: 0,
+        providerOutputTranscriptionTextLength: 0,
+        publicAssistantTranscriptEventCount: 0,
+        publicAssistantTranscriptFinalSeen: false,
+        publicAssistantTranscriptMaxTextLength: 0,
+        publicAssistantTranscriptLatestTextLength: 0,
+        latestProviderOutputTranscriptionPreview: null,
+        latestPublicAssistantTranscriptPreview: null,
+        interrupted: false,
+        playbackFlush: false,
+        userInputOverlappedAudio: false,
+        publicTranscriptMissingSourceSequence: false,
+        publicTranscriptMissingResponseId: false,
+      };
+      windows.push(current);
+    }
+
+    current.lastEventAt = event.timestamp;
+    current.responseId ??= event.responseId ?? null;
+    current.segmentId ??= event.segmentId ?? null;
+    if (event.providerReceiveSequence != null) {
+      current.providerStartSequence = current.providerStartSequence == null
+        ? event.providerReceiveSequence
+        : Math.min(current.providerStartSequence, event.providerReceiveSequence);
+      current.providerEndSequence = current.providerEndSequence == null
+        ? event.providerReceiveSequence
+        : Math.max(current.providerEndSequence, event.providerReceiveSequence);
+    }
+    if (event.userInputActive && (current.assistantAudioChunkEvents > 0 || event.assistantAudioActive)) {
+      current.userInputOverlappedAudio = true;
+    }
+    return current;
+  };
+
+  const closeWindow = (event: Omit<TurnCaptureDiagnosticEvent, 'timelineSequence'>, interrupted = false) => {
+    if (!current) {
+      return;
+    }
+    current.lastEventAt = event.timestamp;
+    current.endedAt = event.timestamp;
+    current.interrupted = current.interrupted || interrupted;
+    current.playbackFlush = current.playbackFlush || event.playbackFlushed === true;
+    current = null;
+  };
+
+  for (const event of timeline) {
+    if (event.eventType === 'provider_output_transcription') {
+      const window = startWindow(event);
+      window.providerOutputTranscriptionFragmentCount += 1;
+      const preview = event.textPreview ?? '';
+      window.providerOutputTranscriptionTextLength += preview.length;
+      window.latestProviderOutputTranscriptionPreview = event.textPreview ?? window.latestProviderOutputTranscriptionPreview;
+      continue;
+    }
+
+    if (event.eventType === 'assistant_audio_chunk' || event.eventType === 'assistant_audio_chunk_scheduled') {
+      const window = startWindow(event);
+      window.assistantAudioChunkEvents += event.audioChunkCount && event.audioChunkCount > 0 ? event.audioChunkCount : 1;
+      if (event.userInputActive) {
+        window.userInputOverlappedAudio = true;
+      }
+      continue;
+    }
+
+    if (event.eventType === 'public_assistant_transcript') {
+      const window = startWindow(event);
+      const textLength = event.textPreview?.length ?? 0;
+      window.publicAssistantTranscriptEventCount += 1;
+      window.publicAssistantTranscriptLatestTextLength = textLength;
+      window.publicAssistantTranscriptMaxTextLength = Math.max(window.publicAssistantTranscriptMaxTextLength, textLength);
+      window.publicAssistantTranscriptFinalSeen = window.publicAssistantTranscriptFinalSeen || event.isFinal === true;
+      window.latestPublicAssistantTranscriptPreview = event.textPreview ?? window.latestPublicAssistantTranscriptPreview;
+      window.publicTranscriptMissingSourceSequence = window.publicTranscriptMissingSourceSequence || event.providerReceiveSequence == null;
+      window.publicTranscriptMissingResponseId = window.publicTranscriptMissingResponseId || !event.responseId;
+      if (event.userInputActive && (window.assistantAudioChunkEvents > 0 || event.assistantAudioActive)) {
+        window.userInputOverlappedAudio = true;
+      }
+      continue;
+    }
+
+    if (event.eventType === 'agent_started') {
+      startWindow(event);
+      continue;
+    }
+
+    if (event.eventType === 'provider_input_transcription' || event.eventType === 'public_user_transcript') {
+      if (current && (event.assistantAudioActive || current.assistantAudioChunkEvents > 0)) {
+        current.userInputOverlappedAudio = true;
+      }
+      continue;
+    }
+
+    if (event.eventType === 'interrupted') {
+      closeWindow(event, true);
+      continue;
+    }
+
+    if (event.eventType === 'turnComplete' || event.eventType === 'agent_ended') {
+      closeWindow(event, false);
+    }
+  }
+
+  const finalizedWindows = windows.map(finalizeAssistantTranscriptEvidenceWindow);
+  const assistantAudioChunkCount = finalizedWindows.reduce((sum, window) => sum + window.assistantAudioChunkEvents, 0);
+  const providerOutputTranscriptionFragmentCount = finalizedWindows.reduce((sum, window) => sum + window.providerOutputTranscriptionFragmentCount, 0);
+  const providerOutputTranscriptionTextLength = finalizedWindows.reduce((sum, window) => sum + window.providerOutputTranscriptionTextLength, 0);
+  const publicAssistantTranscriptEventCount = finalizedWindows.reduce((sum, window) => sum + window.publicAssistantTranscriptEventCount, 0);
+  const publicAssistantTranscriptMaxTextLength = finalizedWindows.reduce(
+    (max, window) => Math.max(max, window.publicAssistantTranscriptMaxTextLength),
+    0,
+  );
+  const latestPublicWindow = findLast(finalizedWindows, (window) => Boolean(window.latestPublicAssistantTranscriptPreview));
+  const latestProviderWindow = findLast(finalizedWindows, (window) => Boolean(window.latestProviderOutputTranscriptionPreview));
+  const reportedProviderEventCount = numericValue(recordValue(recordValue(metrics?.sessionTelemetry)?.gemini)?.providerEventCount);
+  const sourceProviderEventCorrelationCount = sourceEvents.filter((event) => event.name === 'gemini-provider-event-correlation').length;
+  const warnings = uniqueStrings(finalizedWindows.flatMap((window) => window.warnings));
+  const captureMayOmitEarlierProviderEvents = reportedProviderEventCount != null
+    && sourceProviderEventCorrelationCount > 0
+    && reportedProviderEventCount > sourceProviderEventCorrelationCount;
+  if (captureMayOmitEarlierProviderEvents) {
+    warnings.push('capture_scope_may_omit_earlier_provider_events');
+  }
+  if (assistantAudioChunkCount > 0 && providerOutputTranscriptionFragmentCount === 0) {
+    warnings.push('assistant_audio_present_without_provider_output_transcription');
+  }
+  if (assistantAudioChunkCount > 0 && publicAssistantTranscriptEventCount === 0) {
+    warnings.push('assistant_audio_present_without_public_transcript');
+  }
+
+  return {
+    schema: 'assistant_transcript_evidence_v1',
+    sourceProviderEventCorrelationCount,
+    reportedProviderEventCount,
+    captureMayOmitEarlierProviderEvents,
+    assistantAudioChunkCount,
+    providerOutputTranscriptionFragmentCount,
+    providerOutputTranscriptionTextLength,
+    publicAssistantTranscriptEventCount,
+    publicAssistantTranscriptMaxTextLength,
+    publicAssistantTranscriptLatestTextLength: latestPublicWindow?.publicAssistantTranscriptLatestTextLength ?? 0,
+    publicTranscriptFinalSeen: finalizedWindows.some((window) => window.publicAssistantTranscriptFinalSeen),
+    providerToPublicTranscriptRatio: transcriptRatio(publicAssistantTranscriptMaxTextLength, providerOutputTranscriptionTextLength),
+    latestProviderOutputTranscriptionPreview: latestProviderWindow?.latestProviderOutputTranscriptionPreview ?? null,
+    latestPublicAssistantTranscriptPreview: latestPublicWindow?.latestPublicAssistantTranscriptPreview ?? null,
+    windows: finalizedWindows.slice(-MAX_ASSISTANT_TRANSCRIPT_EVIDENCE_WINDOWS),
+    warnings: uniqueStrings(warnings),
+  };
+}
+
+type MutableAssistantTranscriptEvidenceWindow = Omit<
+  TurnCaptureAssistantTranscriptEvidenceWindow,
+  | 'providerToPublicTranscriptRatio'
+  | 'assistantTranscriptMissingWhileAudioPresent'
+  | 'assistantTranscriptInterruptedBeforeFinal'
+  | 'warnings'
+>;
+
+function finalizeAssistantTranscriptEvidenceWindow(
+  window: MutableAssistantTranscriptEvidenceWindow,
+): TurnCaptureAssistantTranscriptEvidenceWindow {
+  const warnings: string[] = [];
+  const assistantTranscriptMissingWhileAudioPresent = window.assistantAudioChunkEvents > 0
+    && window.publicAssistantTranscriptEventCount === 0;
+  const assistantTranscriptInterruptedBeforeFinal = window.interrupted && !window.publicAssistantTranscriptFinalSeen;
+  const providerToPublicTranscriptRatio = transcriptRatio(
+    window.publicAssistantTranscriptMaxTextLength,
+    window.providerOutputTranscriptionTextLength,
+  );
+
+  if (window.assistantAudioChunkEvents > 0 && window.providerOutputTranscriptionFragmentCount === 0) {
+    warnings.push('assistant_audio_without_provider_output_transcription');
+  }
+  if (assistantTranscriptMissingWhileAudioPresent) {
+    warnings.push('assistant_audio_without_public_assistant_transcript');
+  }
+  if (
+    window.assistantAudioChunkEvents > 0
+    && window.providerOutputTranscriptionTextLength >= MIN_TEXT_LENGTH_FOR_RATIO_WARNING
+    && (providerToPublicTranscriptRatio ?? 0) < MIN_PROVIDER_TO_PUBLIC_TRANSCRIPT_RATIO
+  ) {
+    warnings.push('public_assistant_transcript_shorter_than_provider_output');
+  }
+  if (assistantTranscriptInterruptedBeforeFinal) {
+    warnings.push('assistant_transcript_interrupted_before_final');
+  }
+  if (window.playbackFlush && !window.publicAssistantTranscriptFinalSeen) {
+    warnings.push('assistant_transcript_flushed_before_final');
+  }
+  if (window.userInputOverlappedAudio) {
+    warnings.push('assistant_audio_overlapped_user_input');
+  }
+  if (window.publicTranscriptMissingSourceSequence) {
+    warnings.push('public_assistant_transcript_missing_source_sequence');
+  }
+  if (window.publicTranscriptMissingResponseId) {
+    warnings.push('public_assistant_transcript_missing_response_id');
+  }
+
+  return {
+    ...window,
+    providerToPublicTranscriptRatio,
+    assistantTranscriptMissingWhileAudioPresent,
+    assistantTranscriptInterruptedBeforeFinal,
+    warnings,
+  };
+}
+
+function transcriptRatio(publicLength: number, providerLength: number): number | null {
+  if (providerLength <= 0) {
+    return null;
+  }
+  return Math.round((publicLength / providerLength) * 100) / 100;
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
+function findLast<T>(values: T[], predicate: (value: T) => boolean): T | undefined {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index];
+    if (value !== undefined && predicate(value)) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function boundedEventOffset(totalLength: number): number {
