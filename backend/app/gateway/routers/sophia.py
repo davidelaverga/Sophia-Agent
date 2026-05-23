@@ -583,7 +583,7 @@ def _local_memory_id_for_content(
     if not normalized:
         return None
     disc = discriminator if discriminator else f"ts:{time.time_ns()}"
-    composite = f"{normalized}|{disc}".encode("utf-8")
+    composite = f"{normalized}|{disc}".encode()
     return f"local:{hashlib.sha256(composite).hexdigest()}"
 
 

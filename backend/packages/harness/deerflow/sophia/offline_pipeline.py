@@ -129,39 +129,13 @@ def run_offline_pipeline(
         force_reprocess,
     )
 
-    # --- Two-stage idempotency check ---
-    # 1. If already processed: skip (unless force_reprocess, in which case
-    #    clear the marker and re-run).
-    # 2. If currently in-flight (another concurrent call): skip with
-    #    `in_flight` status so the caller knows.
-    # 3. Otherwise: register in `_in_flight_sessions` and proceed. Promote
-    #    to `_processed_sessions` only at the end if extraction succeeded.
-    with _processed_lock:
-        if session_id in _processed_sessions:
-            if not force_reprocess:
-                logger.info(
-                    "[Pipeline] skipped_already_processed user_id=%s session_id=%s thread_id=%s force_reprocess=%s",
-                    user_id,
-                    session_id,
-                    thread_id,
-                    force_reprocess,
-                )
-                return {"status": "already_processed", "session_id": session_id}
-            _processed_sessions.discard(session_id)
-            logger.info(
-                "[Pipeline] force_reprocess clearing processed marker user_id=%s session_id=%s",
-                user_id,
-                session_id,
-            )
-        if session_id in _in_flight_sessions:
-            logger.info(
-                "[Pipeline] skipped_in_flight user_id=%s session_id=%s thread_id=%s",
-                user_id,
-                session_id,
-                thread_id,
-            )
-            return {"status": "in_flight", "session_id": session_id}
-        _in_flight_sessions.add(session_id)
+    # --- Two-stage idempotency check (see _acquire_pipeline_slot for full
+    # behavior; extracted to keep this function below sentrux CC threshold). ---
+    slot = _acquire_pipeline_slot(
+        user_id, session_id, thread_id, force_reprocess=force_reprocess,
+    )
+    if slot != "proceed":
+        return {"status": slot, "session_id": session_id}
 
     # `extraction_retryable` gates promotion to `_processed_sessions` at the
     # bottom. Set to True on ExtractionParseError or any other extraction
@@ -247,19 +221,7 @@ def run_offline_pipeline(
                 session_id,
                 len(extracted_memories),
             )
-            extracted_ids: list[str] = []
-            for _m in extracted_memories or []:
-                _mem0_res = _m.get("mem0_result") if isinstance(_m, dict) else None
-                if isinstance(_mem0_res, list):
-                    for _r in _mem0_res:
-                        if isinstance(_r, dict):
-                            _mid = _r.get("id") or _r.get("event_id")
-                            if _mid:
-                                extracted_ids.append(_mid)
-                elif isinstance(_mem0_res, dict):
-                    _mid = _mem0_res.get("id") or _mem0_res.get("event_id")
-                    if _mid:
-                        extracted_ids.append(_mid)
+            extracted_ids = _collect_extracted_ids(extracted_memories)
             logger.info(
                 "[Pipeline] extraction_ids user_id=%s session_id=%s mem0_ids_or_events=%s",
                 user_id,
@@ -404,6 +366,88 @@ def reset_processed_sessions() -> None:
     with _processed_lock:
         _processed_sessions.clear()
         _in_flight_sessions.clear()
+
+
+def _collect_extracted_ids(extracted_memories: list[dict]) -> list[str]:
+    """Flatten Mem0 IDs (or event_ids) out of the extraction result.
+
+    Each extracted_memories entry may carry a ``mem0_result`` field that is
+    either a list of dicts (one per resolved memory) or a single dict (the
+    sync-add path). This helper walks both shapes and collects every
+    ``id`` / ``event_id`` it can find, preserving order. Extracted into a
+    standalone function to keep ``run_offline_pipeline`` below the sentrux
+    CC threshold — the loop-over-list-or-dict logic alone added ~6 branches.
+    """
+    ids: list[str] = []
+    for entry in extracted_memories or []:
+        if not isinstance(entry, dict):
+            continue
+        mem0_res = entry.get("mem0_result")
+        if isinstance(mem0_res, list):
+            for record in mem0_res:
+                if not isinstance(record, dict):
+                    continue
+                mid = record.get("id") or record.get("event_id")
+                if mid:
+                    ids.append(mid)
+        elif isinstance(mem0_res, dict):
+            mid = mem0_res.get("id") or mem0_res.get("event_id")
+            if mid:
+                ids.append(mid)
+    return ids
+
+
+def _acquire_pipeline_slot(
+    user_id: str,
+    session_id: str,
+    thread_id: str,
+    *,
+    force_reprocess: bool,
+) -> str:
+    """Atomically check + register the pipeline slot for ``session_id``.
+
+    Returns one of:
+        "proceed"            -- caller should run the pipeline; the session
+                                is now in ``_in_flight_sessions``.
+        "already_processed"  -- session already completed and force=False;
+                                caller should short-circuit with the
+                                ``already_processed`` status.
+        "in_flight"          -- another concurrent call is mid-pipeline;
+                                caller should short-circuit with
+                                ``in_flight`` status.
+
+    The lock is held only for the check + registration; the pipeline runs
+    outside it. The release of ``_in_flight_sessions`` happens in the caller's
+    ``finally`` block. Extracted from ``run_offline_pipeline`` to keep its CC
+    below the sentrux v0.5.7 threshold (16).
+    """
+    with _processed_lock:
+        if session_id in _processed_sessions:
+            if not force_reprocess:
+                logger.info(
+                    "[Pipeline] skipped_already_processed user_id=%s session_id=%s thread_id=%s force_reprocess=%s",
+                    user_id,
+                    session_id,
+                    thread_id,
+                    force_reprocess,
+                )
+                return "already_processed"
+            _processed_sessions.discard(session_id)
+            logger.info(
+                "[Pipeline] force_reprocess clearing processed marker user_id=%s session_id=%s",
+                user_id,
+                session_id,
+            )
+        if session_id in _in_flight_sessions:
+            logger.info(
+                "[Pipeline] skipped_in_flight user_id=%s session_id=%s thread_id=%s",
+                user_id,
+                session_id,
+                thread_id,
+            )
+            return "in_flight"
+        _in_flight_sessions.add(session_id)
+        return "proceed"
 
 
 # ------------------------------------------------------------------
