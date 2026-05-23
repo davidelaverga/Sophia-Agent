@@ -140,8 +140,6 @@ def run_offline_pipeline(
     # `extraction_retryable` gates promotion to `_processed_sessions` at the
     # bottom. Set to True on ExtractionParseError or any other extraction
     # exception so the next pipeline trigger retries.
-    extraction_retryable = False
-
     try:
         # --- Thread state: fetch from LangGraph if not provided ---
         if thread_state is None:
@@ -159,178 +157,12 @@ def run_offline_pipeline(
                 return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
             logger.info("Fetched thread_state from LangGraph for session %s", session_id)
 
-        # --- Extract data from thread_state ---
-        messages = thread_state.get("messages", [])
-        session_metadata = _build_session_metadata(thread_state, user_id=user_id, session_id=session_id)
-        artifacts = _extract_artifacts(thread_state)
-
-        logger.info(
-            "session.finalization pipeline_context user_id=%s session_id=%s message_count=%s artifact_count=%s platform=%s context_mode=%s ritual=%s",
-            user_id,
-            session_id,
-            len(messages),
-            len(artifacts),
-            session_metadata.get("platform"),
-            session_metadata.get("context_mode"),
-            session_metadata.get("ritual"),
+        # Run the 7-step body in a helper to keep this orchestrator below
+        # the sentrux CC threshold. ``_run_pipeline_steps`` owns all the
+        # per-step try/except + extraction parse-error handling.
+        steps, extraction_retryable = _run_pipeline_steps(
+            user_id, session_id, thread_id, thread_state,
         )
-
-        _sstart = session_metadata.get("session_start_unix")
-        logger.info(
-            "[Pipeline] user_id=%s session_id=%s session_start_unix=%s session_start_iso=%s platform=%s context_mode=%s",
-            user_id,
-            session_id,
-            _sstart,
-            (datetime.fromtimestamp(_sstart, UTC).isoformat() if _sstart else "-"),
-            session_metadata.get("platform"),
-            session_metadata.get("context_mode"),
-        )
-
-        steps: dict[str, str] = {}
-
-        # ------------------------------------------------------------------
-        # Step 1: Trace logging
-        # ------------------------------------------------------------------
-        try:
-            write_session_trace(user_id, session_id, messages, session_metadata)
-            steps["trace"] = "ok"
-        except Exception:
-            logger.error("Pipeline step 'trace' failed for session %s", session_id, exc_info=True)
-            steps["trace"] = "error"
-
-        # ------------------------------------------------------------------
-        # Step 2: Memory extraction
-        # ------------------------------------------------------------------
-        # `ExtractionParseError` (raised when Claude's response can't be
-        # parsed as a JSON list) sets `extraction_retryable=True` so we
-        # don't promote to `_processed_sessions` at the bottom — the next
-        # pipeline trigger will retry. An LLM legitimately returning [] is
-        # NOT a parse error: that returns cleanly and we DO promote.
-        # Other exceptions (Anthropic SDK errors, Mem0 unavailable, etc.)
-        # also leave the session retryable.
-        extracted_memories: list[dict] = []
-        try:
-            serialized_messages = _serialize_messages(messages)
-            extracted_memories = extract_session_memories(
-                user_id, session_id, serialized_messages, session_metadata,
-            )
-            steps["extraction"] = "ok"
-            logger.info(
-                "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
-                user_id,
-                session_id,
-                len(extracted_memories),
-            )
-            extracted_ids = _collect_extracted_ids(extracted_memories)
-            logger.info(
-                "[Pipeline] extraction_ids user_id=%s session_id=%s mem0_ids_or_events=%s",
-                user_id,
-                session_id,
-                extracted_ids[:20],
-            )
-        except ExtractionParseError:
-            logger.warning(
-                "[Pipeline] extraction_parse_error user_id=%s session_id=%s — session left NOT processed for retry",
-                user_id,
-                session_id,
-            )
-            steps["extraction"] = "parse_error"
-            extraction_retryable = True
-        except Exception:
-            logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
-            steps["extraction"] = "error"
-            extraction_retryable = True
-
-        # ------------------------------------------------------------------
-        # Step 3: Smart opener generation
-        # ------------------------------------------------------------------
-        smart_opener_text: str = ""
-        try:
-            session_summary = _build_session_summary(messages)
-            recent_memories = _format_memories_for_opener(extracted_memories)
-            smart_opener_text = generate_smart_opener(
-                user_id,
-                session_summary,
-                recent_memories=recent_memories,
-            )
-            steps["smart_opener"] = "ok"
-        except Exception:
-            logger.error("Pipeline step 'smart_opener' failed for session %s", session_id, exc_info=True)
-            steps["smart_opener"] = "error"
-
-        # ------------------------------------------------------------------
-        # Step 4: Notification (placeholder)
-        # ------------------------------------------------------------------
-        try:
-            logger.info("Memory candidates ready for review (user=%s, session=%s)", user_id, session_id)
-            steps["notification"] = "ok"
-        except Exception:
-            logger.error("Pipeline step 'notification' failed for session %s", session_id, exc_info=True)
-            steps["notification"] = "error"
-
-        # ------------------------------------------------------------------
-        # Step 5: Handoff generation
-        # ------------------------------------------------------------------
-        try:
-            generate_handoff(
-                user_id,
-                session_id,
-                messages,
-                artifacts=artifacts,
-                extracted_memories=extracted_memories,
-                smart_opener_text=smart_opener_text or None,
-            )
-            steps["handoff"] = "ok"
-        except Exception:
-            logger.error("Pipeline step 'handoff' failed for session %s", session_id, exc_info=True)
-            steps["handoff"] = "error"
-
-        # ------------------------------------------------------------------
-        # Step 5b: Recap envelope
-        # ------------------------------------------------------------------
-        # Channel-originated sessions (Telegram today, iOS / future channels
-        # tomorrow) never trigger the web flow's POST /sessions/{id}/end, so
-        # without this step they would have no ``users/{user_id}/recaps/{session_id}.json``
-        # and the frontend ``/recap/<session>`` page would 404. The recap we
-        # write here is sparse (status="processing", recap_artifacts=null) —
-        # the frontend's ``hydratePayloadWithRemoteMemories`` then pulls the
-        # Mem0 candidates from ``/api/memory/recent?session_id=...`` and shows
-        # them.  Idempotency guard: never overwrite an existing file, because
-        # the web flow writes a richer envelope with takeaway / reflection
-        # synthesized via a client-side LLM call.
-        try:
-            steps["recap"] = _write_offline_recap(
-                user_id, session_id, thread_id, session_metadata, len(messages),
-            )
-        except Exception:
-            logger.error(
-                "Pipeline step 'recap' failed for session %s", session_id, exc_info=True,
-            )
-            steps["recap"] = "error"
-
-        # ------------------------------------------------------------------
-        # Step 6: Identity update
-        # ------------------------------------------------------------------
-        try:
-            maybe_update_identity(user_id, extracted_memories)
-            steps["identity"] = "ok"
-        except Exception:
-            logger.error("Pipeline step 'identity' failed for session %s", session_id, exc_info=True)
-            steps["identity"] = "error"
-
-        # ------------------------------------------------------------------
-        # Step 7: Visual artifact check (placeholder)
-        # ------------------------------------------------------------------
-        try:
-            sessions_this_week = _count_placeholder_sessions()
-            logger.info(
-                "Visual artifact check: %d sessions this week (user=%s)",
-                sessions_this_week, user_id,
-            )
-            steps["visual_check"] = "ok"
-        except Exception:
-            logger.error("Pipeline step 'visual_check' failed for session %s", session_id, exc_info=True)
-            steps["visual_check"] = "error"
 
         # --- PROMOTE to _processed_sessions ONLY if extraction was not retryable.
         # On parse error / other extraction exception, leave the session
@@ -359,6 +191,171 @@ def run_offline_pipeline(
         # exited (success, abort-on-no-thread-state, or unhandled exception).
         with _processed_lock:
             _in_flight_sessions.discard(session_id)
+
+
+def _run_pipeline_steps(
+    user_id: str,
+    session_id: str,
+    thread_id: str,
+    thread_state: dict[str, Any],
+) -> tuple[dict[str, str], bool]:
+    """Execute the 7 pipeline steps and return ``(steps, extraction_retryable)``.
+
+    Extracted from ``run_offline_pipeline`` so the orchestrator stays below the
+    sentrux CC threshold (16). All step-level try/except blocks live here.
+    Each step is best-effort — a failure in one does not abort the others.
+
+    ``extraction_retryable`` is True iff the memory extraction step raised
+    ``ExtractionParseError`` or any other exception (i.e. the LLM response
+    couldn't be processed, so a future pipeline trigger should retry). An
+    LLM that legitimately returns ``[]`` is NOT a retry case — the empty
+    list propagates and ``extraction_retryable`` stays False.
+    """
+    messages = thread_state.get("messages", [])
+    session_metadata = _build_session_metadata(thread_state, user_id=user_id, session_id=session_id)
+    artifacts = _extract_artifacts(thread_state)
+
+    logger.info(
+        "session.finalization pipeline_context user_id=%s session_id=%s message_count=%s artifact_count=%s platform=%s context_mode=%s ritual=%s",
+        user_id,
+        session_id,
+        len(messages),
+        len(artifacts),
+        session_metadata.get("platform"),
+        session_metadata.get("context_mode"),
+        session_metadata.get("ritual"),
+    )
+
+    _sstart = session_metadata.get("session_start_unix")
+    logger.info(
+        "[Pipeline] user_id=%s session_id=%s session_start_unix=%s session_start_iso=%s platform=%s context_mode=%s",
+        user_id,
+        session_id,
+        _sstart,
+        (datetime.fromtimestamp(_sstart, UTC).isoformat() if _sstart else "-"),
+        session_metadata.get("platform"),
+        session_metadata.get("context_mode"),
+    )
+
+    steps: dict[str, str] = {}
+    extraction_retryable = False
+
+    # Step 1: Trace logging
+    try:
+        write_session_trace(user_id, session_id, messages, session_metadata)
+        steps["trace"] = "ok"
+    except Exception:
+        logger.error("Pipeline step 'trace' failed for session %s", session_id, exc_info=True)
+        steps["trace"] = "error"
+
+    # Step 2: Memory extraction. ExtractionParseError → retryable; other
+    # exceptions → also retryable; empty list (LLM returned no candidates)
+    # → not retryable.
+    extracted_memories: list[dict] = []
+    try:
+        serialized_messages = _serialize_messages(messages)
+        extracted_memories = extract_session_memories(
+            user_id, session_id, serialized_messages, session_metadata,
+        )
+        steps["extraction"] = "ok"
+        logger.info(
+            "session.finalization pipeline_extraction_complete user_id=%s session_id=%s memory_count=%s",
+            user_id,
+            session_id,
+            len(extracted_memories),
+        )
+        extracted_ids = _collect_extracted_ids(extracted_memories)
+        logger.info(
+            "[Pipeline] extraction_ids user_id=%s session_id=%s mem0_ids_or_events=%s",
+            user_id,
+            session_id,
+            extracted_ids[:20],
+        )
+    except ExtractionParseError:
+        logger.warning(
+            "[Pipeline] extraction_parse_error user_id=%s session_id=%s — session left NOT processed for retry",
+            user_id,
+            session_id,
+        )
+        steps["extraction"] = "parse_error"
+        extraction_retryable = True
+    except Exception:
+        logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)
+        steps["extraction"] = "error"
+        extraction_retryable = True
+
+    # Step 3: Smart opener generation
+    smart_opener_text: str = ""
+    try:
+        session_summary = _build_session_summary(messages)
+        recent_memories = _format_memories_for_opener(extracted_memories)
+        smart_opener_text = generate_smart_opener(
+            user_id,
+            session_summary,
+            recent_memories=recent_memories,
+        )
+        steps["smart_opener"] = "ok"
+    except Exception:
+        logger.error("Pipeline step 'smart_opener' failed for session %s", session_id, exc_info=True)
+        steps["smart_opener"] = "error"
+
+    # Step 4: Notification (placeholder)
+    try:
+        logger.info("Memory candidates ready for review (user=%s, session=%s)", user_id, session_id)
+        steps["notification"] = "ok"
+    except Exception:
+        logger.error("Pipeline step 'notification' failed for session %s", session_id, exc_info=True)
+        steps["notification"] = "error"
+
+    # Step 5: Handoff generation
+    try:
+        generate_handoff(
+            user_id,
+            session_id,
+            messages,
+            artifacts=artifacts,
+            extracted_memories=extracted_memories,
+            smart_opener_text=smart_opener_text or None,
+        )
+        steps["handoff"] = "ok"
+    except Exception:
+        logger.error("Pipeline step 'handoff' failed for session %s", session_id, exc_info=True)
+        steps["handoff"] = "error"
+
+    # Step 5b: Recap envelope. Channel-originated sessions never trigger the
+    # web flow's POST /sessions/{id}/end, so without this step they would have
+    # no recap file and the frontend would 404. Skip-if-exists guard keeps the
+    # web flow's richer envelope (synthesized via a client-side LLM call) from
+    # being overwritten.
+    try:
+        steps["recap"] = _write_offline_recap(
+            user_id, session_id, thread_id, session_metadata, len(messages),
+        )
+    except Exception:
+        logger.error("Pipeline step 'recap' failed for session %s", session_id, exc_info=True)
+        steps["recap"] = "error"
+
+    # Step 6: Identity update
+    try:
+        maybe_update_identity(user_id, extracted_memories)
+        steps["identity"] = "ok"
+    except Exception:
+        logger.error("Pipeline step 'identity' failed for session %s", session_id, exc_info=True)
+        steps["identity"] = "error"
+
+    # Step 7: Visual artifact check (placeholder)
+    try:
+        sessions_this_week = _count_placeholder_sessions()
+        logger.info(
+            "Visual artifact check: %d sessions this week (user=%s)",
+            sessions_this_week, user_id,
+        )
+        steps["visual_check"] = "ok"
+    except Exception:
+        logger.error("Pipeline step 'visual_check' failed for session %s", session_id, exc_info=True)
+        steps["visual_check"] = "error"
+
+    return steps, extraction_retryable
 
 
 def reset_processed_sessions() -> None:
