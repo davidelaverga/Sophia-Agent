@@ -144,6 +144,17 @@ def run_offline_pipeline(
         session_metadata.get("ritual"),
     )
 
+    _sstart = session_metadata.get("session_start_unix")
+    logger.info(
+        "[Pipeline] user_id=%s session_id=%s session_start_unix=%s session_start_iso=%s platform=%s context_mode=%s",
+        user_id,
+        session_id,
+        _sstart,
+        (datetime.fromtimestamp(_sstart, UTC).isoformat() if _sstart else "-"),
+        session_metadata.get("platform"),
+        session_metadata.get("context_mode"),
+    )
+
     steps: dict[str, str] = {}
 
     # ------------------------------------------------------------------
@@ -171,6 +182,25 @@ def run_offline_pipeline(
             user_id,
             session_id,
             len(extracted_memories),
+        )
+        extracted_ids: list[str] = []
+        for _m in extracted_memories or []:
+            _mem0_res = _m.get("mem0_result") if isinstance(_m, dict) else None
+            if isinstance(_mem0_res, list):
+                for _r in _mem0_res:
+                    if isinstance(_r, dict):
+                        _mid = _r.get("id") or _r.get("event_id")
+                        if _mid:
+                            extracted_ids.append(_mid)
+            elif isinstance(_mem0_res, dict):
+                _mid = _mem0_res.get("id") or _mem0_res.get("event_id")
+                if _mid:
+                    extracted_ids.append(_mid)
+        logger.info(
+            "[Pipeline] extraction_ids user_id=%s session_id=%s mem0_ids_or_events=%s",
+            user_id,
+            session_id,
+            extracted_ids[:20],
         )
     except Exception:
         logger.error("Pipeline step 'extraction' failed for session %s", session_id, exc_info=True)

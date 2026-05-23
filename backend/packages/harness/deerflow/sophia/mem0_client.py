@@ -193,11 +193,23 @@ def search_memories(
 
         memories = _normalize_search_results(results)
 
+        category_counts: dict[str, int] = {}
+        for mem in memories:
+            cat = (mem.get("category") or "unknown")
+            category_counts[cat] = category_counts.get(cat, 0) + 1
+        breakdown = ",".join(f"{k}:{v}" for k, v in sorted(category_counts.items()))
+
         logger.info(
-            "[Mem0Search] %d results in %.0fms (query='%s')",
-            len(memories),
+            "[Mem0Search] user_id=%s query=%r filters=%s reference_date=%s limit=%d "
+            "latency_ms=%.0f results=%d categories=[%s]",
+            user_id,
+            query[:80],
+            search_kwargs.get("filters", {"user_id": user_id}),
+            search_kwargs.get("reference_date", "-"),
+            limit,
             api_ms,
-            query[:60],
+            len(memories),
+            breakdown,
         )
         for i, mem in enumerate(memories):
             score_str = (
@@ -205,7 +217,7 @@ def search_memories(
                 if mem.get("score") is not None
                 else ""
             )
-            logger.info(
+            logger.debug(
                 "[Mem0Search]   [%d] [%s]%s %s",
                 i,
                 mem.get("category", "?"),
@@ -327,6 +339,25 @@ def add_memories(
         add_kwargs["metadata"] = resolved_metadata
     if timestamp is not None:
         add_kwargs["timestamp"] = timestamp
+
+    def _redact_meta(m: dict) -> dict:
+        out = {}
+        for k, v in (m or {}).items():
+            if isinstance(v, str) and len(v) > 60:
+                out[k] = v[:60] + "..."
+            else:
+                out[k] = v
+        return out
+
+    logger.info(
+        "[Mem0Add] user_id=%s session_id=%s run_id=%s timestamp=%s msg_count=%d metadata=%s",
+        user_id,
+        session_id,
+        add_kwargs.get("run_id"),
+        add_kwargs.get("timestamp", "-"),
+        len(messages) if messages else 0,
+        _redact_meta(resolved_metadata) if resolved_metadata else {},
+    )
 
     try:
         result = client.add(**add_kwargs)

@@ -70,6 +70,22 @@ class MemoryInjectionMiddleware(AgentMiddleware[MemoryInjectionState]):
 
         block = "<memories>\n" + "\n".join(memory_lines) + "\n</memories>"
 
+        inj_categories: dict[str, int] = {}
+        for mem in results[:memory_limit]:
+            cat = (mem.get("category") or "unknown")
+            inj_categories[cat] = inj_categories.get(cat, 0) + 1
+        inj_breakdown = ",".join(f"{k}:{v}" for k, v in sorted(inj_categories.items()))
+
+        logger.info(
+            "[MemoryInjection] user_id=%s platform=%s injected_count=%d ids=%s categories=[%s] first_content=%r",
+            state.get("user_id", "-"),
+            platform or "-",
+            len(memory_lines),
+            memory_ids[:10],
+            inj_breakdown,
+            (memory_lines[0][:80] if memory_lines else ""),
+        )
+
         log_middleware("MemoryInjection", f"{len(memory_lines)} memories injected", _t0)
         return {
             "injected_memories": memory_ids,

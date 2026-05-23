@@ -705,6 +705,13 @@ async def list_memories(
 )
 async def create_memory(user_id: str, body: MemoryCreateRequest, response: Response) -> MemoryItem:
     _validate_user(user_id)
+    logger.info(
+        "[GwCreate] user_id=%s text_len=%d category=%s metadata_keys=%s",
+        user_id,
+        len(body.text or ""),
+        body.category or "-",
+        sorted((body.metadata or {}).keys()),
+    )
     try:
         from deerflow.sophia.mem0_client import add_memories
 

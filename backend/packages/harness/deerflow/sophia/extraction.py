@@ -161,6 +161,22 @@ def extract_session_memories(
         len(extracted),
     )
 
+    candidate_breakdown: dict[str, int] = {}
+    for _e in extracted:
+        if isinstance(_e, dict):
+            _cat = (_e.get("category") or "unknown")
+            candidate_breakdown[_cat] = candidate_breakdown.get(_cat, 0) + 1
+    _breakdown_str = ",".join(f"{k}:{v}" for k, v in sorted(candidate_breakdown.items()))
+
+    logger.info(
+        "[Extraction] user_id=%s session_id=%s candidate_count=%d categories=[%s] first_content=%r",
+        user_id,
+        session_id,
+        len(extracted),
+        _breakdown_str,
+        (extracted[0].get("content", "")[:80] if extracted and isinstance(extracted[0], dict) else ""),
+    )
+
     # Write each extracted memory to Mem0
     written_memories: list[dict] = []
     platform = metadata.get("platform", "text")

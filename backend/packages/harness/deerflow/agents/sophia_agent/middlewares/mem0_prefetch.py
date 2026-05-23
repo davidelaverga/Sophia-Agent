@@ -295,6 +295,17 @@ class Mem0RetrievalMiddleware(AgentMiddleware[Mem0RetrievalState]):
         memory_limit = _VOICE_MEMORY_LIMIT if platform in ("voice", "ios_voice") else _DEFAULT_MEMORY_LIMIT
         query = extract_last_message_text(messages).strip()[:200]
 
+        _tid = str(thread_id or "")
+        logger.info(
+            "[Mem0RetrievalCtx] user_id=%s thread_id=%s platform=%s context_mode=%s turn=%s query=%r",
+            self._user_id,
+            (_tid[:8] + "..." if _tid else "-"),
+            platform or "-",
+            context_mode or "-",
+            turn_count,
+            query[:80],
+        )
+
         if not query:
             return [], 0.0
 
