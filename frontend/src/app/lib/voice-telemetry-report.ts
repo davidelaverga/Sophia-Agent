@@ -1,6 +1,10 @@
 import type { SophiaCaptureBundle, SophiaCaptureSnapshot } from './session-capture';
 import { buildTurnCaptureDiagnostics, type TurnCaptureDiagnostics } from './turn-capture-diagnostics';
-import type { VoiceDeveloperMetrics, VoiceTelemetrySummary } from './voice-runtime-metrics';
+import {
+  buildVoiceArtifactTelemetryCounts,
+  type VoiceDeveloperMetrics,
+  type VoiceTelemetrySummary,
+} from './voice-runtime-metrics';
 
 type CaptureEvent = SophiaCaptureBundle['events'][number];
 
@@ -85,6 +89,7 @@ export function buildVoiceTelemetryReport({
 }): VoiceTelemetryReport {
   const resolvedExportedAt = exportedAt ?? new Date().toISOString();
   const selected = selectCurrentRunEvents(captureBundle.events, captureBundle.snapshot);
+  const reconciledMetrics = reconcileArtifactTelemetryMetrics(metrics, captureBundle.snapshot, selected.events);
 
   return {
     reportType: 'voice-telemetry-report',
@@ -92,12 +97,56 @@ export function buildVoiceTelemetryReport({
     source: 'session-ui',
     exportedAt: resolvedExportedAt,
     summary: sanitizeTelemetryValue(summary) as VoiceTelemetrySummary,
-    metrics: sanitizeTelemetryValue(metrics) as VoiceDeveloperMetrics,
+    metrics: sanitizeTelemetryValue(reconciledMetrics) as VoiceDeveloperMetrics,
     diagnosticsSummary: buildDiagnosticsSummary(captureBundle, selected),
     turnCaptureDiagnostics: sanitizeTelemetryValue(
-      buildTurnCaptureDiagnostics(selected.events, metrics),
+      buildTurnCaptureDiagnostics(selected.events, reconciledMetrics),
     ) as TurnCaptureDiagnostics,
     captureBundle: buildScopedTelemetryCaptureBundle(captureBundle, resolvedExportedAt, selected),
+  };
+}
+
+function reconcileArtifactTelemetryMetrics(
+  metrics: VoiceDeveloperMetrics,
+  snapshot: SophiaCaptureSnapshot,
+  selectedEvents: CaptureEvent[],
+): VoiceDeveloperMetrics {
+  const artifactMetrics = buildVoiceArtifactTelemetryCounts({
+    events: selectedEvents,
+    snapshot,
+  });
+  const counts = {
+    ...metrics.counts,
+    artifacts: artifactMetrics.artifactCount,
+    artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
+    artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactRenderedCount: artifactMetrics.artifactRenderedCount,
+    artifactCountSource: artifactMetrics.artifactCountSource,
+    artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+  };
+
+  if (metrics.sessionTelemetry.runtime !== 'gemini_live') {
+    return {
+      ...metrics,
+      counts,
+    };
+  }
+
+  return {
+    ...metrics,
+    counts,
+    sessionTelemetry: {
+      ...metrics.sessionTelemetry,
+      gemini: {
+        ...metrics.sessionTelemetry.gemini,
+        artifactCount: artifactMetrics.artifactCount,
+        artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
+        artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+        artifactRenderedCount: artifactMetrics.artifactRenderedCount,
+        artifactCountSource: artifactMetrics.artifactCountSource,
+        artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+      },
+    },
   };
 }
 

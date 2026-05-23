@@ -387,6 +387,48 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.captureBundle.snapshot.artifacts.recapArtifacts).toBeNull();
   });
 
+  it('reconciles rendered artifact state into exported artifact counts', () => {
+    const staleMetrics = buildMetrics();
+    staleMetrics.counts.artifacts = 0;
+    if (staleMetrics.sessionTelemetry.runtime === 'gemini_live') {
+      staleMetrics.sessionTelemetry.gemini.artifactCount = 0;
+    }
+
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:05.000Z',
+      summary: buildSummary(),
+      metrics: staleMetrics,
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session', runtime: 'gemini_live' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-call-ledger',
+          payload: { entry: { toolCallId: 'tool-call-1', finalState: 'responded' } },
+        },
+      ]),
+    });
+
+    expect(report.metrics.counts.artifacts).toBe(1);
+    expect(report.metrics.counts.artifactPublicEventCount).toBe(0);
+    expect(report.metrics.counts.artifactRenderedCount).toBe(1);
+    expect(report.metrics.counts.artifactCountSource).toBe('rendered_state');
+    expect(report.metrics.counts.artifactCountMismatch).toBe(true);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
+    expect(report.metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCount).toBe(1);
+    expect(report.turnCaptureDiagnostics.summary.finalUiState.artifactCountSource).toBe('rendered_state');
+  });
+
   it('redacts auth-bearing transport material while keeping transport diagnostics readable', () => {
     const report = buildVoiceTelemetryReport({
       exportedAt: '2026-05-20T12:00:05.000Z',

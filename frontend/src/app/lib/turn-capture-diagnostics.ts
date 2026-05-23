@@ -118,6 +118,10 @@ export type TurnCaptureDiagnostics = {
       micState: string | null;
       remoteAudioState: string | null;
       publicSseState: string | null;
+      artifactCount: number | null;
+      artifactPublicEventCount: number | null;
+      artifactRenderedCount: number | null;
+      artifactCountSource: string | null;
     };
   };
 };
@@ -650,6 +654,7 @@ export function buildTurnCaptureDiagnostics(
   }));
 
   const geminiTelemetry = recordValue(recordValue(metrics?.sessionTelemetry)?.gemini);
+  const metricCounts = recordValue(metrics?.counts);
   return {
     version: 1,
     eventLimit: MAX_TURN_CAPTURE_EVENTS,
@@ -667,6 +672,10 @@ export function buildTurnCaptureDiagnostics(
         micState: stringValue(geminiTelemetry?.microphoneState) ?? micState,
         remoteAudioState: stringValue(geminiTelemetry?.remoteAudioState) ?? remoteAudioState,
         publicSseState: stringValue(geminiTelemetry?.publicSseState) ?? publicSseState,
+        artifactCount: numericValue(metricCounts?.artifacts),
+        artifactPublicEventCount: numericValue(metricCounts?.artifactPublicEventCount),
+        artifactRenderedCount: numericValue(metricCounts?.artifactRenderedCount),
+        artifactCountSource: stringValue(metricCounts?.artifactCountSource),
       },
     },
   };

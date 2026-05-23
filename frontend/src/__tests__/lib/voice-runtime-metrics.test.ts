@@ -31,9 +31,13 @@ function buildEvent({
 function buildSnapshot({
   detectedAudio = true,
   error = null,
+  sessionArtifacts = null,
+  artifactDom = {},
 }: {
   detectedAudio?: boolean;
   error?: string | null;
+  sessionArtifacts?: SophiaCaptureSnapshot['artifacts']['sessionArtifacts'];
+  artifactDom?: Partial<SophiaCaptureSnapshot['artifacts']['dom']>;
 } = {}): SophiaCaptureSnapshot {
   return {
     capturedAt: '2026-04-07T12:00:03.250Z',
@@ -54,15 +58,15 @@ function buildSnapshot({
       },
     },
     artifacts: {
-      sessionArtifacts: null,
+      sessionArtifacts,
       recapArtifacts: null,
       recapCommitStatus: null,
       dom: {
-        railLabel: null,
-        takeawayText: null,
-        reflectionText: null,
-        memoriesText: null,
-        panelVisible: false,
+        railLabel: artifactDom.railLabel ?? null,
+        takeawayText: artifactDom.takeawayText ?? null,
+        reflectionText: artifactDom.reflectionText ?? null,
+        memoriesText: artifactDom.memoriesText ?? null,
+        panelVisible: artifactDom.panelVisible ?? false,
       },
     },
     harness: {
@@ -537,6 +541,117 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.interruptionCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.playbackFlushCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.artifactCountSource).toBe('public_event');
+  });
+
+  it('counts rendered session artifacts when the public artifact event is absent from the active slice', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.800Z',
+        category: 'artifacts-runtime',
+        name: 'ingest-artifacts',
+        payload: {
+          sessionId: 'session-dev',
+          source: 'voice',
+          incoming: {
+            takeaway: 'Rendered artifact reached the UI.',
+            reflection_candidate: { prompt: 'What changed after it landed?' },
+          },
+          merged: {
+            takeaway: 'Rendered artifact reached the UI.',
+            reflection_candidate: { prompt: 'What changed after it landed?' },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot({
+        sessionArtifacts: {
+          takeaway: 'Rendered artifact reached the UI.',
+          reflection_candidate: { prompt: 'What changed after it landed?' },
+        },
+      }),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.counts.artifacts).toBe(1);
+    expect(metrics.counts.artifactPublicEventCount).toBe(0);
+    expect(metrics.counts.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.counts.artifactRenderedCount).toBe(1);
+    expect(metrics.counts.artifactCountSource).toBe('runtime_ingest');
+    expect(metrics.counts.artifactCountMismatch).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactPublicEventCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.artifactRuntimeIngestCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactRenderedCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactCountMismatch).toBe(true);
+  });
+
+  it('does not count emit_artifact tool calls as artifacts without validated artifact evidence', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.400Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          data: {
+            phase: 'tool_call_received',
+            diagnostic: {
+              toolCall: { id: 'artifact-call-1', name: 'emit_artifact' },
+            },
+          },
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.700Z',
+        category: 'voice-session',
+        name: 'gemini-tool-loop-diagnostic',
+        payload: {
+          data: {
+            phase: 'tool_response_sent',
+            diagnostic: {
+              toolCall: { id: 'artifact-call-1', name: 'emit_artifact' },
+            },
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:01.500Z'),
+    });
+
+    expect(metrics.sessionTelemetry.gemini?.artifactToolCallCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.toolResponseCount).toBe(1);
+    expect(metrics.counts.artifacts).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.artifactCount).toBe(0);
+    expect(metrics.counts.artifactCountSource).toBe('none');
   });
 
   it('includes builder progress and stall diagnostics in telemetry', () => {

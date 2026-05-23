@@ -18,6 +18,17 @@ export type VoiceMetricsHealthLevel = "good" | "warn" | "bad" | "neutral"
 
 export type VoiceTransportSource = "sse" | "custom" | "pending"
 
+export type VoiceArtifactCountSource = "public_event" | "runtime_ingest" | "rendered_state" | "none"
+
+export type VoiceArtifactTelemetryCounts = {
+  artifactCount: number
+  artifactPublicEventCount: number
+  artifactRuntimeIngestCount: number
+  artifactRenderedCount: number
+  artifactCountSource: VoiceArtifactCountSource
+  artifactCountMismatch: boolean
+}
+
 export type VoiceMetricsTimelineItem = {
   id: string
   at: string
@@ -242,6 +253,11 @@ export type GeminiSessionTelemetry = {
     toolCallLedger: Array<Record<string, unknown>>
     publicTurnCount: number
     artifactCount: number
+    artifactPublicEventCount: number
+    artifactRuntimeIngestCount: number
+    artifactRenderedCount: number
+    artifactCountSource: VoiceArtifactCountSource
+    artifactCountMismatch: boolean
     publicDiagnosticCount: number
     lastUserTranscriptAt: string | null
     lastAssistantTranscriptAt: string | null
@@ -272,6 +288,11 @@ export type VoiceDeveloperMetrics = {
     userTranscripts: number
     assistantTranscripts: number
     artifacts: number
+    artifactPublicEventCount: number
+    artifactRuntimeIngestCount: number
+    artifactRenderedCount: number
+    artifactCountSource: VoiceArtifactCountSource
+    artifactCountMismatch: boolean
     diagnostics: number
     builderEvents: number
   }
@@ -406,6 +427,17 @@ const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "list_async_tasks",
 ])
 
+const NULL_LIKE_ARTIFACT_STRINGS = new Set(["null", "none", "undefined", "n/a"])
+const FALLBACK_ARTIFACT_TAKEAWAYS = new Set([
+  "session completed",
+  "companion error - fallback response",
+])
+const FALLBACK_ARTIFACT_REFLECTIONS = new Set([
+  "what mattered most in this conversation?",
+  "general reflection prompt",
+  "general reflection",
+])
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -422,6 +454,79 @@ function asString(value: unknown): string | null {
 
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null
+}
+
+function asRealArtifactString(value: unknown): string | null {
+  const text = asString(value)
+  if (!text) return null
+  return NULL_LIKE_ARTIFACT_STRINGS.has(text.toLowerCase()) ? null : text
+}
+
+function hasRealArtifactTakeaway(value: unknown): boolean {
+  const text = asRealArtifactString(value)
+  return Boolean(text && !FALLBACK_ARTIFACT_TAKEAWAYS.has(text.toLowerCase()))
+}
+
+function hasRealArtifactReflection(value: unknown): boolean {
+  const text = asRealArtifactString(value)
+  return Boolean(text && !FALLBACK_ARTIFACT_REFLECTIONS.has(text.toLowerCase()))
+}
+
+function artifactReflectionPrompt(value: unknown): unknown {
+  const direct = asRealArtifactString(value)
+  if (direct) return direct
+  return asRecord(value)?.prompt
+}
+
+function hasArtifactContent(value: unknown): boolean {
+  const record = asRecord(value)
+  if (!record) return false
+
+  if (hasRealArtifactTakeaway(record.takeaway) || hasRealArtifactTakeaway(record.session_takeaway)) {
+    return true
+  }
+
+  if (hasRealArtifactReflection(artifactReflectionPrompt(record.reflection_candidate ?? record.reflection))) {
+    return true
+  }
+
+  return Array.isArray(record.memory_candidates) && record.memory_candidates.length > 0
+}
+
+function hasArtifactsRuntimeIngestContent(event: NormalizedVoiceCaptureEvent): boolean {
+  if (event.category !== "artifacts-runtime") return false
+  if (event.name !== "ingest-artifacts" && event.name !== "apply-memory-candidates") return false
+
+  const payload = event.payloadRecord
+  return hasArtifactContent(payload?.merged) || hasArtifactContent(payload?.incoming)
+}
+
+function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | undefined): boolean {
+  if (!snapshot) return false
+  if (hasArtifactContent(snapshot.artifacts.sessionArtifacts)) return true
+
+  const dom = snapshot.artifacts.dom
+  return Boolean(
+    asRealArtifactString(dom.takeawayText)
+      || asRealArtifactString(dom.reflectionText)
+      || asRealArtifactString(dom.memoriesText),
+  )
+}
+
+function resolveArtifactCountSource({
+  artifactPublicEventCount,
+  artifactRuntimeIngestCount,
+  artifactRenderedCount,
+}: {
+  artifactPublicEventCount: number
+  artifactRuntimeIngestCount: number
+  artifactRenderedCount: number
+}): VoiceArtifactCountSource {
+  const maxCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
+  if (maxCount <= 0) return "none"
+  if (artifactPublicEventCount === maxCount) return "public_event"
+  if (artifactRuntimeIngestCount === maxCount) return "runtime_ingest"
+  return "rendered_state"
 }
 
 function getBuilderDebugDetail(payload: Record<string, unknown> | null | undefined): string | null {
@@ -509,6 +614,40 @@ function normalizeEvent(event: VoiceCaptureEvent): NormalizedVoiceCaptureEvent {
     payloadRecord,
     dataRecord,
   }
+}
+
+function buildArtifactTelemetryCountsFromEvents(
+  activeEvents: NormalizedVoiceCaptureEvent[],
+  snapshot: SophiaCaptureSnapshot | null | undefined,
+): VoiceArtifactTelemetryCounts {
+  const artifactPublicEventCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
+  const artifactRuntimeIngestCount = countWhere(activeEvents, hasArtifactsRuntimeIngestContent)
+  const artifactRenderedCount = hasRenderedArtifactSnapshot(snapshot) ? 1 : 0
+  const artifactCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
+  const artifactCountSource = resolveArtifactCountSource({
+    artifactPublicEventCount,
+    artifactRuntimeIngestCount,
+    artifactRenderedCount,
+  })
+
+  return {
+    artifactCount,
+    artifactPublicEventCount,
+    artifactRuntimeIngestCount,
+    artifactRenderedCount,
+    artifactCountSource,
+    artifactCountMismatch: artifactCount !== artifactPublicEventCount,
+  }
+}
+
+export function buildVoiceArtifactTelemetryCounts({
+  events,
+  snapshot,
+}: {
+  events: VoiceCaptureEvent[]
+  snapshot?: SophiaCaptureSnapshot | null
+}): VoiceArtifactTelemetryCounts {
+  return buildArtifactTelemetryCountsFromEvents(events.map(normalizeEvent), snapshot ?? null)
 }
 
 function eventData(event: NormalizedVoiceCaptureEvent): Record<string, unknown> | null {
@@ -920,6 +1059,11 @@ function buildSessionTelemetry(params: {
         toolCallLedger: hookTelemetry?.toolCallLedger ?? ledgerEntries,
         publicTurnCount: counts.turns,
         artifactCount: counts.artifacts,
+        artifactPublicEventCount: counts.artifactPublicEventCount,
+        artifactRuntimeIngestCount: counts.artifactRuntimeIngestCount,
+        artifactRenderedCount: counts.artifactRenderedCount,
+        artifactCountSource: counts.artifactCountSource,
+        artifactCountMismatch: counts.artifactCountMismatch,
         publicDiagnosticCount: counts.diagnostics,
         lastUserTranscriptAt: lastTurn.lastUserTranscriptAt,
         lastAssistantTranscriptAt: lastTurn.lastAssistantTranscriptAt,
@@ -2351,7 +2495,7 @@ export function buildVoiceDeveloperMetrics({
     activeEvents,
     (event) => event.name === "sophia.transcript" && (eventData(event)?.is_final === true || eventData(event)?.final === true),
   )
-  const artifactCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
+  const artifactMetrics = buildArtifactTelemetryCountsFromEvents(activeEvents, snapshot)
   const diagnosticCount = countWhere(activeEvents, (event) => event.name === "sophia.turn_diagnostic")
   const builderEvents = countWhere(activeEvents, (event) => event.category === "builder" || event.name === "sophia.builder_task")
   const turnCount = Math.max(
@@ -2517,7 +2661,12 @@ export function buildVoiceDeveloperMetrics({
     turns: turnCount,
     userTranscripts: userTranscriptCount,
     assistantTranscripts: assistantTranscriptCount,
-    artifacts: artifactCount,
+    artifacts: artifactMetrics.artifactCount,
+    artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
+    artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactRenderedCount: artifactMetrics.artifactRenderedCount,
+    artifactCountSource: artifactMetrics.artifactCountSource,
+    artifactCountMismatch: artifactMetrics.artifactCountMismatch,
     diagnostics: diagnosticCount,
     builderEvents,
   }
