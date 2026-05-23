@@ -10,6 +10,7 @@ from voice.realtime.gemini_memory_context import (
     build_gemini_live_realtime_instructions_with_memory_context,
 )
 from voice.realtime.sophia_prompt import (
+    EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
     GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
     REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE,
     build_gemini_live_realtime_instructions,
@@ -19,6 +20,18 @@ from voice.realtime.sophia_prompt import (
     gemini_live_realtime_instruction_sources,
     sophia_realtime_instruction_sources,
 )
+
+
+EMOTIONAL_SKILL_NAMES = [
+    "active_listening",
+    "vulnerability_holding",
+    "crisis_redirect",
+    "trust_building",
+    "boundary_holding",
+    "challenging_growth",
+    "identity_fluidity_support",
+    "celebrating_breakthrough",
+]
 
 
 def _system_instruction_text(setup: dict[str, Any]) -> str:
@@ -45,6 +58,38 @@ def test_base_sophia_realtime_prompt_does_not_include_gemini_overlay() -> None:
     assert "<gemini_live_spoken_turn_policy>" not in prompt
     assert "Gemini Live-specific overlay" not in prompt
     assert GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE not in sophia_realtime_instruction_sources()
+
+
+def test_realtime_prompt_bakes_emotional_skills_without_skill_tool() -> None:
+    prompt = build_sophia_realtime_instructions()
+
+    assert "consult_skill" not in prompt
+    assert "### §M — Your Skills (your repertoire for different moments)" in prompt
+    assert "You hold all of these at once" in prompt
+    assert "session count, established-trust flag, recurring-pattern flags, and prior tone band" in prompt
+    for skill_name in EMOTIONAL_SKILL_NAMES:
+        assert skill_name in prompt
+
+
+def test_realtime_prompt_contains_crisis_override_and_artifact_exception() -> None:
+    prompt = build_sophia_realtime_instructions()
+
+    assert "### §N — Crisis (overrides everything)" in prompt
+    assert "every other skill stops immediately" in prompt
+    assert "No exploring, no techniques, no prediction, no build" in prompt
+    assert "call or text 988" in prompt
+    assert "text HOME to 741741" in prompt
+    assert "minimal crisis acknowledgment" in prompt
+    assert "do not emit the full artifact" in prompt.lower()
+
+
+def test_realtime_prompt_reframes_skill_loaded_as_self_observation() -> None:
+    prompt = build_sophia_realtime_instructions()
+
+    assert "skill_loaded: the mode you are in this turn" in prompt
+    assert "not the record of a tool call" in prompt
+    assert "exact injected skill name" not in prompt
+    assert "the one you loaded" not in prompt
 
 
 def test_gemini_live_spoken_turn_policy_contains_required_rules() -> None:
@@ -99,6 +144,9 @@ def test_gemini_live_setup_contains_overlay_after_artifact_contract() -> None:
     rendered = _system_instruction_text(setup)
 
     assert rendered == prompt
+    assert "consult_skill" not in rendered
+    assert "### §M — Your Skills (your repertoire for different moments)" in rendered
+    assert "crisis_redirect" in rendered
     assert "<artifact_contract>" in rendered
     assert "<gemini_live_spoken_turn_policy>" in rendered
     assert rendered.index("<artifact_contract>") < rendered.index(
@@ -114,7 +162,12 @@ def test_gemini_live_instruction_sources_append_overlay_source() -> None:
     )
 
     assert sources[-1] == GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE
+    assert EMOTIONAL_SKILLS_REPERTOIRE_SOURCE in sources
     assert REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE in sources
+    assert sources.index(EMOTIONAL_SKILLS_REPERTOIRE_SOURCE) < sources.index(
+        "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/"
+        "platform_context.py::PLATFORM_PROMPTS"
+    )
     assert sources.index(REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE) < sources.index(
         "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/"
         "artifact.py::_VOICE_ARTIFACT_INSTRUCTIONS"
@@ -225,6 +278,16 @@ def test_debug_rendered_gemini_prompt_includes_strengthened_overlay() -> None:
     ).read_text(encoding="utf-8").lower()
 
     for expected in [
+        "### §m — your skills (your repertoire for different moments)",
+        "active_listening",
+        "vulnerability_holding",
+        "crisis_redirect",
+        "trust_building",
+        "boundary_holding",
+        "challenging_growth",
+        "identity_fluidity_support",
+        "celebrating_breakthrough",
+        "minimal crisis acknowledgment",
         "<realtime_memory_recall_guidance>",
         "broad recall and later specific recall are separate opportunities",
         "current-session context",
@@ -236,3 +299,4 @@ def test_debug_rendered_gemini_prompt_includes_strengthened_overlay() -> None:
         "do not mention artifact bookkeeping aloud",
     ]:
         assert expected in debug_prompt
+    assert "consult_skill" not in debug_prompt

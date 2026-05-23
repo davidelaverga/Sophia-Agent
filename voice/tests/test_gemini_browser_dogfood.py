@@ -23,6 +23,7 @@ from voice.realtime import (
 )
 from voice.realtime.gemini_browser_dogfood import GeminiRelaySourceMetadata
 from voice.realtime.sophia_prompt import (
+    EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
     GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
     gemini_live_realtime_instruction_sources,
 )
@@ -332,6 +333,8 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
 
     tool_declarations = declarations[0]["functionDeclarations"]
     assert [tool["name"] for tool in tool_declarations] == EXPECTED_GEMINI_TOOL_NAMES
+    assert "consult_skill" not in [tool["name"] for tool in tool_declarations]
+    assert "consult_skill" not in json.dumps(declarations)
     assert "sophia_tool_probe" not in json.dumps(declarations)
     emit_artifact_declaration = tool_declarations[0]
     assert set(emit_artifact_declaration["parameters"]["properties"]) == ARTIFACT_FIELD_NAMES
@@ -419,6 +422,7 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert fake_minter.requests[0]["setup"]["outputAudioTranscription"] == {}
     tool_declarations = fake_minter.requests[0]["setup"]["tools"][0]["functionDeclarations"]
     assert [tool["name"] for tool in tool_declarations] == EXPECTED_GEMINI_TOOL_NAMES
+    assert "consult_skill" not in [tool["name"] for tool in tool_declarations]
     emit_artifact_declaration = tool_declarations[0]
     assert set(emit_artifact_declaration["parameters"]["properties"]) == ARTIFACT_FIELD_NAMES
     assert set(emit_artifact_declaration["parameters"]["required"]) == ARTIFACT_FIELD_NAMES
@@ -433,6 +437,18 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert "# Sophia — Soul" in system_instruction
     assert "# Sophia — Voice" in system_instruction
     assert "# Sophia — Techniques" in system_instruction
+    assert "consult_skill" not in system_instruction
+    assert "### §M — Your Skills (your repertoire for different moments)" in system_instruction
+    assert "active_listening" in system_instruction
+    assert "vulnerability_holding" in system_instruction
+    assert "crisis_redirect" in system_instruction
+    assert "trust_building" in system_instruction
+    assert "boundary_holding" in system_instruction
+    assert "challenging_growth" in system_instruction
+    assert "identity_fluidity_support" in system_instruction
+    assert "celebrating_breakthrough" in system_instruction
+    assert "No exploring, no techniques, no prediction, no build" in system_instruction
+    assert "not the record of a tool call" in system_instruction
     assert "Platform: voice. Respond in 1-3 sentences." in system_instruction
     assert "<realtime_memory_recall_guidance>" in system_instruction
     assert "Broad recall and later specific recall are separate opportunities" in system_instruction
@@ -454,6 +470,7 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
         "skills/public/sophia/voice.md",
         "skills/public/sophia/techniques.md",
         "skills/public/sophia/AGENTS.md",
+        EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
         "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/platform_context.py::PLATFORM_PROMPTS",
         "skills/public/sophia/context/life.md",
         "voice/realtime/sophia_prompt.py::build_realtime_memory_recall_guidance",

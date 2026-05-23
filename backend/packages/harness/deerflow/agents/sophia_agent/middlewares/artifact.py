@@ -28,10 +28,12 @@ TONE_DELTA_THRESHOLD = 0.3
 _VOICE_ARTIFACT_INSTRUCTIONS = """<artifact_contract>
 Every turn has two outputs:
 - Spoken reply in normal assistant text.
-- Exactly one emit_artifact tool call after the spoken reply. Never print JSON in the reply.
+- Exactly one emit_artifact tool call after the spoken reply on non-crisis turns. Never print JSON in the reply.
 - Tool calls must use the structured tool/function channel only. Never verbalize pseudo-tool syntax, JSON-ish calls, or raw expressions such as emit_artifact(...), try{emit_artifact{...}}, or start_builder_task{...} in the spoken reply.
 
-emit_artifact is REQUIRED on every turn with these 13 fields:
+On a crisis turn, do not emit the full artifact. Emit only a minimal crisis acknowledgment when that signal is supported by the runtime: a single signal that you recognized crisis and entered crisis_redirect. Nothing else.
+
+emit_artifact is REQUIRED on every non-crisis turn with these 13 fields:
 - session_goal: stable session-level aim unless the topic genuinely shifts.
 - active_goal: what you are doing for the user right now.
 - next_step: likely best next move for the following turn.
@@ -40,7 +42,9 @@ emit_artifact is REQUIRED on every turn with these 13 fields:
 - tone_estimate: honest 0.0-4.0 read of where the user ends this turn.
 - tone_target: min(tone_estimate + 0.5, 4.0).
 - active_tone_band: shutdown | grief_fear | anger_antagonism | engagement | enthusiasm.
-- skill_loaded: exact injected skill name, or active_listening if none is visible.
+- skill_loaded: the mode you are in this turn — active_listening, vulnerability_holding,
+  trust_building, boundary_holding, challenging_growth, identity_fluidity_support,
+  or celebrating_breakthrough. This is you observing which mode you are in, not the record of a tool call.
 - ritual_phase: ritual.step or freeform.topic.
 - voice_emotion_primary: choose the delivery intent, not the user's raw state.
 - voice_emotion_secondary: close fallback emotion.

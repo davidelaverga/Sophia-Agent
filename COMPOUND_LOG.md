@@ -129,6 +129,33 @@ We shipped 28+ commits across Phase 4 with `quality_signal` deltas all within to
 - **Restore bash visibility for legitimate generator-script execution** (chart-visualization, ppt-generation): if the blank-stream trade-off becomes noticeable on binary-deliverable workflows, swap the blanket `_HIDDEN_TOOLS` entry for a command-pattern heuristic (hide only heredocs / `python -c` / `echo > …`).
 
 ---
+## 2026-05-23 · [voice-emotional-skills-prompt] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** `sophia_voice_system_prompt_spec_v1.md` + `sophia_voice_skills_and_crisis_spec_v1.md`
+
+### What Changed
+- Added the eight Sophia emotional skill modes directly to the realtime voice prompt as a cached in-context repertoire.
+- Kept the Gemini voice tool surface to existing tools only: `emit_artifact`, builder lifecycle tools, and `retrieve_memories`; `consult_skill` remains absent.
+- Updated voice artifact prompt wording so `skill_loaded` means the mode Sophia is in this turn, not a tool-call record.
+- Replaced crisis-as-loaded-skill wording with in-prompt crisis override behavior and minimal crisis acknowledgment wording, without changing artifact schema.
+- Added focused prompt/tool-surface tests and updated the rendered Gemini prompt debug doc.
+
+### What We Learned
+- The clean B4 worktree already avoided declaring `consult_skill`, but it also lacked the baked eight-skill repertoire in realtime prompt assembly.
+- The right implementation point is a stable prompt block before dynamic platform/context/ritual/user seed material, plus source-list coverage so Gemini setup parity tests can see it.
+- The current 13-field artifact schema cannot implement a one-field crisis signal yet; this phase keeps that as prompt/docs wording and defers schema/tool support.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None; existing skill files were read as source material but not changed.
+
+### GEPA Log Entry
+- Realtime voice prompt before behavior: Sophia had core identity/voice/techniques but no cached emotional skills repertoire, and artifact wording described `skill_loaded` as injected skill visibility.
+- Realtime voice prompt after behavior: Sophia holds all eight emotional skills in context, crisis is an in-prompt override, and `skill_loaded` is self-observed mode.
+- `tone_delta`: not measurable in this implementation phase.
+- Trace pair available: no.
+
 ## 2026-05-22 · [working-tree-cleanup-before-12-5c-b] · PR #[pending]
 **Author:** GitHub Copilot · **Track:** repo hygiene + docs · **Spec:** Phase 12.5C-Prep cleanup request
 

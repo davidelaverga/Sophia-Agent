@@ -398,6 +398,7 @@ def test_retrieve_memories_contract_can_convert_to_openai_function_schema() -> N
 
     assert declaration["type"] == "function"
     assert declaration["name"] == "retrieve_memories"
+    assert "consult_skill" not in json.dumps(declaration)
     assert "explicit memory" in declaration["description"]
     assert "do you remember my favorite childhood movie" in declaration["description"]
     assert "what did we talk about last time" in declaration["description"]
@@ -410,3 +411,14 @@ def test_retrieve_memories_contract_can_convert_to_openai_function_schema() -> N
     assert parameters["additionalProperties"] is False
     assert "user_id" not in parameters["properties"]
     assert "categories" not in parameters["properties"]
+
+
+def test_openai_realtime_session_config_does_not_add_skill_tool() -> None:
+    memory_declaration = openai_retrieve_memories_function_declaration()
+    config = build_openai_realtime_session_config(
+        instructions="Speak as Sophia.",
+        tools=[memory_declaration],
+    )
+
+    assert [tool["name"] for tool in config["tools"]] == ["retrieve_memories"]
+    assert "consult_skill" not in json.dumps(config)

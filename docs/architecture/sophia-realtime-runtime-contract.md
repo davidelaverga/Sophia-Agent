@@ -61,7 +61,7 @@ Provider assumptions must stay separate. GPT Realtime's default server-side conv
 
 The recommended next implementation slice is narrow: adapt `retrieve_memories` for realtime as a query-only, trusted-user-id, bounded-output function tool. The current tool is still LangChain/text-companion-shaped with `(query, categories)` and up to 15 bullet results. A safe realtime phase should extract a shared core, keep user identity bound from trusted session context, cap voice results around five snippets, expose privacy-minimized diagnostics, and prove explicit-recall behavior without changing prompts, artifact schemas, VAD, builder storage, routing, or runtime defaults.
 
-Deferred until explicit later phases: `consult_skill`, time/schedule tools, `wait_for_user`, web tools, the 13-to-15 artifact migration, builder per-step artifacts, `check_async_task.latest_artifact_summary`, GPT target session config, and any provider promotion. Phase 12.5B-A made no runtime, prompt behavior, routing, VAD, schema, tool, builder-storage, or default-provider changes.
+Deferred until explicit later phases: time/schedule tools, `wait_for_user`, web tools, the 13-to-15 artifact migration, builder per-step artifacts, `check_async_task.latest_artifact_summary`, GPT target session config, and any provider promotion. Phase 12.5B-A made no runtime, prompt behavior, routing, VAD, schema, tool, builder-storage, or default-provider changes. Phase 12.6A later closed the older voice `consult_skill` path by baking the emotional skills into the cached prompt instead of implementing a skill retrieval tool.
 
 ## Phase 12.5B-B Realtime retrieve_memories Tool Contract
 
@@ -136,6 +136,18 @@ Provider-specific boundary:
 - Gemini Live is currently more production-wired, but public `sophia.*` events are not provider-visible context. Gemini setup is effectively immutable after the first setup message; backend tool execution returns a browser-sent `toolResponse`, and current `emit_artifact` responses report artifact status/keys rather than the full orientation content. Prior artifact visibility must be proven through Gemini function-call/toolResponse behavior before relying on it.
 
 Recommended next phase: 12.5C-B Artifact Visibility Proof Harness. Prove GPT and Gemini artifact visibility separately before adding any compact artifact-orientation bridge, reconnect reseed payload, or 15-field artifact schema migration.
+
+## Phase 12.6A Baked Emotional Skills Prompt
+
+Phase 12.6A implements Davide's updated voice skills direction. The implementation report lives at `docs/audits/bake-emotional-skills-into-voice-prompt-phase-12-6a.md`.
+
+Voice mode no longer treats emotional skills as a fetchable tool path. The realtime prompt now carries all eight fixed emotional modes in the stable instructions prefix: `active_listening`, `vulnerability_holding`, `crisis_redirect`, `trust_building`, `boundary_holding`, `challenging_growth`, `identity_fluidity_support`, and `celebrating_breakthrough`. Sophia flows between these modes in context and records `skill_loaded` as the mode she is in this turn, not a tool call that happened.
+
+The Gemini voice tool surface remains narrow and existing-tool-only: `emit_artifact`, builder lifecycle tools, and `retrieve_memories`. `consult_skill` is not declared for Gemini Live, is not part of the prepared OpenAI-compatible declaration path, and should not be added to voice mode unless a later measured scaling problem reopens skill retrieval/RAG.
+
+Crisis remains in prompt as an override. It stops other skill behavior, avoids exploration/problem-solving/build work, gives direct resources, and includes minimal crisis acknowledgment wording for future observability. This phase does not change the 13-field artifact schema and does not implement a crisis classifier, tripwire, live cancellation, memory writeback, Builder behavior, VAD/turn detection, or provider routing.
+
+The harness slow-state contract is documented but not fully implemented here. Future session seeds may constrain the model with session count, established-trust flag, recurring-pattern flags, and prior tone band; the model holds the repertoire, but should stay within those bounds.
 
 ## Why BackendAdapter Is Not Reused
 
