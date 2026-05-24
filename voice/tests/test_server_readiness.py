@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -68,107 +69,24 @@ def test_vision_agents_route_rejects_experimental_runtime_without_silent_fallbac
         validate_vision_agents_session_runtime(settings)
 
 
-def test_resolve_invalid_call_id_exception_prefers_sdk_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
-    class SDKInvalidCallId(Exception):
-        pass
-
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(InvalidCallId=SDKInvalidCallId),
-    )
-
-    resolved = server._resolve_invalid_call_id_exception()
-
-    assert resolved is SDKInvalidCallId
-
-
-def test_resolve_invalid_call_id_exception_falls_back_to_local_exception(
+def test_server_import_succeeds_when_turn_detection_events_module_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(),
-    )
+    original_import_module = importlib.import_module
 
-    resolved = server._resolve_invalid_call_id_exception()
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.turn_detection.events":
+            raise ModuleNotFoundError("missing", name=name)
+        return original_import_module(name, package)
 
-    assert issubclass(resolved, Exception)
-    assert resolved.__name__ == "InvalidCallId"
+    monkeypatch.setattr(importlib, "import_module", import_hook)
 
+    import voice.vision_agents_compat as compat
 
-def test_resolve_vision_agents_exception_prefers_sdk_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
-    class SDKSessionsExceeded(Exception):
-        pass
+    importlib.reload(compat)
+    reloaded_server = importlib.reload(server)
 
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(MaxConcurrentSessionsExceeded=SDKSessionsExceeded),
-    )
-
-    resolved = server._resolve_vision_agents_exception("MaxConcurrentSessionsExceeded")
-
-    assert resolved is SDKSessionsExceeded
-
-
-def test_resolve_vision_agents_exception_falls_back_to_named_exception(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(),
-    )
-
-    resolved = server._resolve_vision_agents_exception("MaxSessionsPerCallExceeded")
-
-    assert issubclass(resolved, Exception)
-    assert resolved.__name__ == "MaxSessionsPerCallExceeded"
-
-
-def test_resolve_stt_event_symbol_prefers_sdk_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
-    class SDKPartialEvent:
-        pass
-
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(STTPartialTranscriptEvent=SDKPartialEvent),
-    )
-
-    resolved = server._resolve_stt_event_symbol("STTPartialTranscriptEvent")
-
-    assert resolved is SDKPartialEvent
-
-
-def test_resolve_stt_event_symbol_falls_back_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(STTTranscriptEvent=object),
-    )
-
-    resolved = server._resolve_stt_event_symbol("STTPartialTranscriptEvent")
-
-    assert resolved.__name__ == "STTPartialTranscriptEvent"
-
-
-@pytest.mark.parametrize("missing_symbol", ["STTTranscriptEvent", "STTErrorEvent"])
-def test_resolve_stt_event_symbol_falls_back_for_other_missing_symbols(
-    monkeypatch: pytest.MonkeyPatch,
-    missing_symbol: str,
-) -> None:
-    monkeypatch.setattr(
-        server.importlib,
-        "import_module",
-        lambda _name: SimpleNamespace(),
-    )
-
-    resolved = server._resolve_stt_event_symbol(missing_symbol)
-
-    assert resolved.__name__ == missing_symbol
+    assert reloaded_server.TurnEndedEvent.__name__ == "TurnEndedEvent"
 
 
 @pytest.mark.anyio

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import importlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -27,7 +26,6 @@ from vision_agents.core.runner.http.dependencies import (
 from vision_agents.core.runner.http.models import StartSessionResponse
 from vision_agents.core.runner.http.options import ServeOptions
 from vision_agents.core.tts.events import TTSSynthesisStartEvent
-from vision_agents.core.turn_detection.events import TurnEndedEvent
 from vision_agents.plugins.deepgram import STT as DeepgramSTT
 from vision_agents.plugins.getstream import Edge as StreamEdge
 from voice.config import get_settings
@@ -57,52 +55,18 @@ from voice.sophia_llm import SophiaLLM
 from voice.sophia_turn import SophiaTurnDetection
 from voice.sophia_tts import SophiaTTS
 from voice.sse_broker import VoiceEventBroker, format_sse_event
+from voice.vision_agents_compat import (
+    InvalidCallId,
+    MaxConcurrentSessionsExceeded,
+    MaxSessionsPerCallExceeded,
+    STTErrorEvent,
+    STTPartialTranscriptEvent,
+    STTTranscriptEvent,
+    TurnEndedEvent,
+)
 
 
 logger = logging.getLogger(__name__)
-
-
-def _resolve_vision_agents_exception(symbol_name: str) -> type[Exception]:
-    exceptions_module = importlib.import_module("vision_agents.core.agents.exceptions")
-    symbol = getattr(exceptions_module, symbol_name, None)
-    if isinstance(symbol, type) and issubclass(symbol, Exception):
-        return symbol
-
-    fallback_name = symbol_name
-
-    class FallbackVisionAgentsException(Exception):
-        """Compatibility fallback for missing vision-agents exception symbols."""
-
-    FallbackVisionAgentsException.__name__ = fallback_name
-    return FallbackVisionAgentsException
-
-
-def _resolve_invalid_call_id_exception() -> type[Exception]:
-    return _resolve_vision_agents_exception("InvalidCallId")
-
-
-def _resolve_stt_event_symbol(symbol_name: str) -> type:
-    stt_events_module = importlib.import_module("vision_agents.core.stt.events")
-    symbol = getattr(stt_events_module, symbol_name, None)
-    if isinstance(symbol, type):
-        return symbol
-
-    fallback_name = symbol_name
-
-    class FallbackSTTEvent:
-        """Compatibility fallback for missing vision-agents STT event symbols."""
-
-    FallbackSTTEvent.__name__ = fallback_name
-    return FallbackSTTEvent
-
-
-
-InvalidCallId = _resolve_invalid_call_id_exception()
-MaxConcurrentSessionsExceeded = _resolve_vision_agents_exception("MaxConcurrentSessionsExceeded")
-MaxSessionsPerCallExceeded = _resolve_vision_agents_exception("MaxSessionsPerCallExceeded")
-STTErrorEvent = _resolve_stt_event_symbol("STTErrorEvent")
-STTPartialTranscriptEvent = _resolve_stt_event_symbol("STTPartialTranscriptEvent")
-STTTranscriptEvent = _resolve_stt_event_symbol("STTTranscriptEvent")
 voice_event_broker = VoiceEventBroker()
 realtime_dogfood_sessions = RealtimeDogfoodSessionManager()
 openai_browser_dogfood_sessions = OpenAIBrowserDogfoodSessionManager(realtime_dogfood_sessions)
