@@ -510,6 +510,47 @@ class TestCreateMemory:
             sync_state="pending",
         )
 
+    def test_create_memory_offloads_add_memories_to_thread(self, client, mock_review_store):
+        """create_memory MUST run the sync add_memories in asyncio.to_thread.
+
+        add_memories can block up to ~30s while polling Mem0 events. Calling it
+        directly from an async FastAPI handler stalls the event loop and degrades
+        responsiveness for concurrent requests on the same worker. Codex P2
+        review on PR #130 flagged this. This test pins the contract by patching
+        asyncio.to_thread and asserting it was called.
+        """
+        from unittest.mock import patch as mock_patch
+
+        captured: dict = {}
+
+        async def _fake_to_thread(func, *args, **kwargs):
+            # Capture which sync function was offloaded so we can assert it
+            # was add_memories, not something else.
+            captured["func"] = func
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return [{"event_id": "evt_offload", "memory": None}]
+
+        with mock_patch(
+            "app.gateway.routers.sophia.asyncio.to_thread",
+            side_effect=_fake_to_thread,
+        ) as spy:
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Offloaded memory", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 202
+        assert spy.call_count == 1, "add_memories MUST be offloaded via asyncio.to_thread"
+        # The first positional arg of to_thread is the sync callable
+        assert captured["func"].__name__ == "add_memories"
+        # Verify the kwargs we expect
+        assert captured["kwargs"]["user_id"] == "test_user"
+        assert captured["kwargs"]["session_id"] == "manual-create"
+        assert captured["kwargs"]["messages"] == [
+            {"role": "user", "content": "Offloaded memory"}
+        ]
+
     def test_create_memory_duplicate_content_distinct_local_ids(self, client, mock_review_store):
         """Two pending creates with identical text get DISTINCT local IDs.
 

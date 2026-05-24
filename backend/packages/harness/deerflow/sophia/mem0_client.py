@@ -160,7 +160,14 @@ def search_memories(
     if context_mode is not None:
         logger.debug("[Mem0Search] context_mode parameter ignored in v3 mode")
 
-    date_key = reference_date.isoformat() if reference_date else ""
+    # Cache key must match the resolution the wire format uses (day-level
+    # YYYY-MM-DD), NOT the full isoformat. Otherwise two calls on the same day
+    # produce identical upstream queries (same Mem0 request) yet different
+    # cache keys — the cache effectively never hits and every turn pays the
+    # full Mem0 round-trip. The retrieval middleware passes
+    # ``datetime.now(UTC)`` each turn, so isoformat would differ by
+    # microseconds even for back-to-back calls.
+    date_key = reference_date.strftime("%Y-%m-%d") if reference_date else ""
     cache_key = f"{user_id}:{query}:{date_key}:{limit}"
 
     with _cache_lock:

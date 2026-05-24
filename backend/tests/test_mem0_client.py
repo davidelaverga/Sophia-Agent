@@ -209,6 +209,65 @@ class TestSearchMemories:
                 mock_client.search.call_args.kwargs["reference_date"] == "2026-05-16"
             )
 
+    def test_cache_key_uses_day_resolution_not_isoformat(self):
+        """Cache key must match the wire format's day resolution (YYYY-MM-DD).
+
+        Codex P1 review on PR #130 flagged that two calls on the same day
+        with different microsecond timestamps were producing different cache
+        keys (isoformat) even though the wire format is day-only — so the
+        cache effectively never hit when the retrieval middleware passes
+        datetime.now(UTC) on every turn. This test pins the fix: same-day
+        calls share one cache entry.
+        """
+        from deerflow.sophia.mem0_client import search_memories
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = [
+            {"id": "m1", "memory": "fact", "metadata": {}}
+        ]
+        # Two calls on 2026-05-16, very different microsecond timestamps.
+        # The wire format both send to Mem0 is "2026-05-16" — they MUST
+        # share a cache entry.
+        ref_morning = datetime(2026, 5, 16, 8, 0, 1, 123456, tzinfo=UTC)
+        ref_evening = datetime(2026, 5, 16, 22, 45, 19, 987654, tzinfo=UTC)
+
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            r1 = search_memories("user1", "query", reference_date=ref_morning)
+            r2 = search_memories("user1", "query", reference_date=ref_evening)
+            assert r1 == r2
+            assert mock_client.search.call_count == 1, (
+                "Same day → must hit cache on second call. "
+                "Without the day-level cache key, the retrieval middleware "
+                "(which passes datetime.now(UTC) every turn) bypasses the cache "
+                "entirely and pays the full Mem0 round-trip on every message."
+            )
+
+    def test_cache_key_differs_across_days(self):
+        """Same query on different days MUST NOT collide in the cache.
+
+        The corollary to test_cache_key_uses_day_resolution_not_isoformat:
+        we cache at day resolution, so a query on May 16 and the same query
+        on May 17 must trigger TWO upstream calls (the reference_date sent
+        on the wire is different — "2026-05-16" vs "2026-05-17").
+        """
+        from deerflow.sophia.mem0_client import search_memories
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = []
+        ref_day1 = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)
+        ref_day2 = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
+
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            search_memories("user1", "query", reference_date=ref_day1)
+            search_memories("user1", "query", reference_date=ref_day2)
+            assert mock_client.search.call_count == 2, (
+                "Different days → must NOT share a cache entry"
+            )
+
     def test_exception_returns_empty(self):
         from deerflow.sophia.mem0_client import search_memories
 

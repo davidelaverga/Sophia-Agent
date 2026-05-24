@@ -757,7 +757,13 @@ async def create_memory(user_id: str, body: MemoryCreateRequest, response: Respo
         if body.category and "category" not in memory_metadata:
             memory_metadata["category"] = body.category
 
-        created = add_memories(
+        # ``add_memories`` is synchronous and can block up to ~30s while it
+        # polls Mem0 events to wait for terminal status (see
+        # ``wait_for_pending_events`` in mem0_client). Run it in a worker
+        # thread so the async route doesn't stall the event loop for any
+        # other concurrent requests on this worker.
+        created = await asyncio.to_thread(
+            add_memories,
             user_id=user_id,
             messages=[{"role": "user", "content": body.text}],
             session_id="manual-create",
