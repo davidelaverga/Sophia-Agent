@@ -1129,13 +1129,13 @@ class TestInFlightProtection:
         from unittest.mock import patch
 
         from deerflow.sophia.offline_pipeline import (
-            _rerun_pending_sessions,
+            _pending_reruns,
             run_offline_pipeline,
         )
 
         # _fetch_thread_state fails on the FIRST call (the in-flight one)
         # and succeeds on the SECOND (the deferred rerun). Inside the failing
-        # call, we seed _rerun_pending_sessions to simulate a concurrent
+        # call, we seed _pending_reruns to simulate a concurrent
         # force_reprocess landing while the first call's fetch was in progress.
         fetch_calls = {"n": 0}
         SESSION_ID = "sess_rerun_through_err"
@@ -1143,7 +1143,9 @@ class TestInFlightProtection:
         def fetch_side_effect(thread_id):
             fetch_calls["n"] += 1
             if fetch_calls["n"] == 1:
-                _rerun_pending_sessions.add(SESSION_ID)
+                # Simulate a concurrent force_reprocess caller that passed no
+                # explicit thread_state (so the rerun will fetch fresh).
+                _pending_reruns[SESSION_ID] = None
                 return None
             return _make_thread_state()
 
@@ -1177,17 +1179,18 @@ class TestInFlightProtection:
         an inactivity-triggered run would be silently dropped — the explicit
         caller's intent was lost and the thinner inactivity result stood.
 
-        Now the second call sets _rerun_pending_sessions and the first
-        call's finally re-invokes the pipeline with force_reprocess=True
-        after releasing the in-flight slot. Net result: extraction runs
-        TWICE — once for the in-flight call, once for the queued rerun.
+        Now the second call writes its thread_state into _pending_reruns and
+        the first call's finally re-invokes the pipeline with that state +
+        force_reprocess=True after releasing the in-flight slot. Net result:
+        extraction runs TWICE — once for the in-flight call, once for the
+        queued rerun.
         """
         import threading as _threading
 
         from deerflow.sophia.offline_pipeline import (
             _in_flight_sessions,
+            _pending_reruns,
             _processed_sessions,
-            _rerun_pending_sessions,
             run_offline_pipeline,
         )
 
@@ -1231,9 +1234,10 @@ class TestInFlightProtection:
             force_reprocess=True,
         )
         assert second_result["status"] == "in_flight"
-        assert "sess_qrerun" in _rerun_pending_sessions, (
-            "force_reprocess during in_flight MUST set _rerun_pending_sessions "
-            "so the first run's finally honors the explicit reprocess request"
+        assert "sess_qrerun" in _pending_reruns, (
+            "force_reprocess during in_flight MUST register an entry in "
+            "_pending_reruns so the first run's finally honors the explicit "
+            "reprocess request"
         )
 
         # Release the first call. Its finally will detect the queued rerun
@@ -1247,9 +1251,92 @@ class TestInFlightProtection:
             f"Expected extraction to run twice (first + queued rerun), "
             f"got {extraction_call_count['n']}"
         )
-        # _rerun_pending_sessions cleared by the rerun consumption
-        assert "sess_qrerun" not in _rerun_pending_sessions
+        # _pending_reruns entry cleared by the rerun consumption
+        assert "sess_qrerun" not in _pending_reruns
         # in_flight released after the rerun completed
         assert "sess_qrerun" not in _in_flight_sessions
         # Final state: session marked processed (rerun succeeded)
         assert "sess_qrerun" in _processed_sessions
+
+    def test_force_reprocess_rerun_uses_second_callers_thread_state(self, mock_steps):
+        """The deferred rerun MUST use the second caller's thread_state, not the first's.
+
+        Codex P1 review on PR #130 R6: previously the rerun reused the first
+        run's resolved thread_state — even though the second (force_reprocess)
+        caller typically has newer messages/artifacts (e.g. /end_session
+        landing on top of an inactivity-triggered run with stale data). This
+        silently dropped the newest data and reprocessed the stale snapshot.
+
+        Fix: ``_pending_reruns`` is a dict mapping session_id -> the second
+        caller's thread_state. The rerun pops that entry and uses it.
+
+        This test pins the contract by tagging each thread_state with an
+        identifying marker and asserting the rerun's _run_pipeline_steps
+        was invoked with the SECOND state, not the first.
+        """
+        import threading as _threading
+        from unittest.mock import patch
+
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        first_started = _threading.Event()
+        let_first_finish = _threading.Event()
+        extraction_call_count = {"n": 0}
+
+        def slow_then_quick_extraction(*args, **kwargs):
+            extraction_call_count["n"] += 1
+            if extraction_call_count["n"] == 1:
+                first_started.set()
+                let_first_finish.wait(timeout=5.0)
+            return [{"content": "x", "category": "fact", "importance": "structural"}]
+
+        mock_steps["extraction"].side_effect = slow_then_quick_extraction
+
+        # Two distinct thread_states tagged with a marker so we can identify
+        # which one each pipeline invocation received.
+        first_state = _make_thread_state()
+        first_state["_marker"] = "stale_inactivity_snapshot"
+        second_state = _make_thread_state()
+        second_state["_marker"] = "fresh_end_session_state"
+
+        # Track which thread_state each _run_pipeline_steps call received.
+        seen_markers: list[str] = []
+        real_run_steps = None
+
+        def capture_steps(user_id, session_id, thread_id, thread_state):
+            seen_markers.append(thread_state.get("_marker", "<no-marker>"))
+            return real_run_steps(user_id, session_id, thread_id, thread_state)
+
+        # Import lazily so we can capture the real function before patching.
+        from deerflow.sophia import offline_pipeline as op_mod
+        real_run_steps = op_mod._run_pipeline_steps
+
+        with patch.object(op_mod, "_run_pipeline_steps", side_effect=capture_steps):
+            def run_first():
+                run_offline_pipeline(
+                    "user_abc", "sess_freshest", "t_freshest", first_state,
+                )
+
+            first_thread = _threading.Thread(target=run_first)
+            first_thread.start()
+            assert first_started.wait(timeout=5.0)
+
+            # Second caller lands while first is mid-extraction, with a
+            # NEWER thread_state.
+            second_result = run_offline_pipeline(
+                "user_abc", "sess_freshest", "t_freshest", second_state,
+                force_reprocess=True,
+            )
+            assert second_result["status"] == "in_flight"
+
+            let_first_finish.set()
+            first_thread.join(timeout=5.0)
+
+        # Exactly two _run_pipeline_steps invocations: the first run + the rerun.
+        assert seen_markers == [
+            "stale_inactivity_snapshot",  # first (in-flight) run
+            "fresh_end_session_state",     # deferred rerun — uses 2nd caller's state
+        ], (
+            f"Deferred rerun MUST use the second caller's thread_state, "
+            f"not reuse the first's. Got marker sequence: {seen_markers!r}"
+        )

@@ -54,13 +54,27 @@ logger = logging.getLogger(__name__)
 # next pipeline trigger (inactivity, explicit end_session, etc.) will retry.
 _processed_sessions: set[str] = set()
 _in_flight_sessions: set[str] = set()
-# `_rerun_pending_sessions`: sessions whose explicit force_reprocess request
-#   arrived while the session was already in flight. The in-flight run's
-#   `finally` block detects this flag, clears it, and immediately re-invokes
-#   the pipeline with force_reprocess=True so the explicit caller's intent
-#   isn't silently dropped (e.g. an end_session click landing on top of an
-#   inactivity-triggered run that's still processing a thinner version).
-_rerun_pending_sessions: set[str] = set()
+# `_pending_reruns`: session_id -> thread_state captured from the in-flight-blocked
+#   force_reprocess caller. The in-flight run's `finally` block pops the entry
+#   (atomically with the _in_flight discard) and re-invokes the pipeline using
+#   THAT state, not the first run's stale snapshot. Critical for the common
+#   race where /end_session lands on top of an inactivity-triggered run: the
+#   end_session caller has newer messages/artifacts in its thread_state, and
+#   the deferred rerun must use those rather than the inactivity snapshot.
+#
+# Three states (use the _NOT_PENDING sentinel to differentiate "pop with
+# no rerun queued" from "pop with rerun-state=None"):
+#   - session_id absent             -> no rerun queued
+#   - session_id present, value=dict -> rerun with that thread_state
+#   - session_id present, value=None -> rerun queued but caller didn't
+#                                       provide a state; the rerun will
+#                                       fetch fresh from LangGraph
+#
+# Last-writer-wins under concurrent force_reprocess calls — we only need one
+# deferred rerun, and the most-recent caller's state is the most representative
+# of the user's intent.
+_pending_reruns: dict[str, dict[str, Any] | None] = {}
+_NOT_PENDING: Any = object()
 _processed_lock = threading.Lock()
 
 _LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:2024")
@@ -138,8 +152,15 @@ def run_offline_pipeline(
 
     # --- Two-stage idempotency check (see _acquire_pipeline_slot for full
     # behavior; extracted to keep this function below sentrux CC threshold). ---
+    # Pass our own thread_state as ``pending_thread_state`` so that if THIS
+    # call is rejected with "in_flight" + force_reprocess, the in-flight run
+    # picks up OUR state for the deferred rerun (not the first run's stale
+    # snapshot). Codex P1 review on PR #130 — critical for the /end_session
+    # race where the explicit caller has newer messages/artifacts.
     slot = _acquire_pipeline_slot(
-        user_id, session_id, thread_id, force_reprocess=force_reprocess,
+        user_id, session_id, thread_id,
+        force_reprocess=force_reprocess,
+        pending_thread_state=thread_state,
     )
     if slot != "proceed":
         return {"status": slot, "session_id": session_id}
@@ -193,35 +214,37 @@ def run_offline_pipeline(
     finally:
         # Always release the in-flight guard, regardless of how this run
         # exited (success, abort-on-no-thread-state, or unhandled exception).
-        # Atomically capture whether a force_reprocess request landed while
-        # this run was in flight — if so, honor it after we release the slot
-        # so the explicit caller's intent isn't silently dropped.
+        # Atomically pop the deferred-rerun entry — if a force_reprocess
+        # caller landed while we were in flight, we use THEIR thread_state
+        # for the rerun, not ours. Codex P1: the explicit caller (typically
+        # /end_session) has the user's newest messages; reusing our first-run
+        # state would silently reprocess stale data.
         with _processed_lock:
             _in_flight_sessions.discard(session_id)
-            rerun_queued = session_id in _rerun_pending_sessions
-            if rerun_queued:
-                _rerun_pending_sessions.discard(session_id)
+            rerun_state = _pending_reruns.pop(session_id, _NOT_PENDING)
 
-    if rerun_queued:
+    if rerun_state is not _NOT_PENDING:
         logger.info(
             "[Pipeline] honoring queued force_reprocess user_id=%s session_id=%s "
-            "— in-flight run completed, now executing the deferred rerun",
+            "has_pending_state=%s — running deferred rerun with second caller's state",
             user_id,
             session_id,
+            rerun_state is not None,
         )
         # Tail-call with force_reprocess=True. The recursive call re-acquires
-        # the slot normally (the session was just removed from _in_flight, and
-        # force_reprocess clears _processed_sessions inside _acquire_pipeline_slot).
-        # rerun_pending is a set, so any further force_reprocess requests during
-        # the rerun collapse to at most one additional deferred rerun — no
-        # unbounded recursion under concurrent traffic.
+        # the slot normally (the session was just removed from _in_flight,
+        # and force_reprocess clears _processed_sessions inside
+        # ``_acquire_pipeline_slot``). ``_pending_reruns`` is a dict keyed by
+        # session_id, so concurrent force_reprocess requests during the rerun
+        # collapse to at most one additional deferred rerun — no unbounded
+        # recursion under concurrent traffic.
         #
-        # Reuse the resolved thread_state so the rerun doesn't need a fresh
-        # LangGraph fetch (we already have the data, and the second caller
-        # that triggered the rerun has already returned its in_flight status —
-        # there's no one waiting for a fresher state).
+        # If ``rerun_state`` is None the second caller didn't pass one; the
+        # rerun's ``_ensure_thread_state`` will fetch fresh from LangGraph
+        # (which gives us the absolute newest state at rerun time — even
+        # better than reusing a snapshot).
         return run_offline_pipeline(
-            user_id, session_id, thread_id, thread_state, force_reprocess=True,
+            user_id, session_id, thread_id, rerun_state, force_reprocess=True,
         )
 
     return result
@@ -393,11 +416,11 @@ def _run_pipeline_steps(
 
 
 def reset_processed_sessions() -> None:
-    """Clear all idempotency sets. For testing only."""
+    """Clear all idempotency tracking state. For testing only."""
     with _processed_lock:
         _processed_sessions.clear()
         _in_flight_sessions.clear()
-        _rerun_pending_sessions.clear()
+        _pending_reruns.clear()
 
 
 def _collect_extracted_ids(extracted_memories: list[dict]) -> list[str]:
@@ -467,6 +490,7 @@ def _acquire_pipeline_slot(
     thread_id: str,
     *,
     force_reprocess: bool,
+    pending_thread_state: dict[str, Any] | None = None,
 ) -> str:
     """Atomically check + register the pipeline slot for ``session_id``.
 
@@ -478,19 +502,20 @@ def _acquire_pipeline_slot(
                                 ``already_processed`` status.
         "in_flight"          -- another concurrent call is mid-pipeline;
                                 caller should short-circuit. If THIS call had
-                                ``force_reprocess=True``, the session_id is
-                                additionally added to ``_rerun_pending_sessions``
-                                so the in-flight run's ``finally`` will
-                                immediately re-invoke the pipeline with
-                                ``force_reprocess=True`` after releasing the
-                                slot. This guarantees an explicit reprocess
-                                request is never silently dropped just because
-                                an inactivity-triggered run was running.
+                                ``force_reprocess=True``, we ALSO write
+                                ``pending_thread_state`` into ``_pending_reruns``
+                                so the in-flight run's ``finally`` will pop it
+                                and re-invoke the pipeline with THAT (newer)
+                                state. Critical for the /end_session race:
+                                the explicit caller's thread_state has the
+                                user's latest messages, the inactivity caller's
+                                does not — the rerun MUST use the newer one,
+                                not reuse the first run's stale snapshot
+                                (Codex P1 review on PR #130).
 
     The lock is held only for the check + registration; the pipeline runs
     outside it. The release of ``_in_flight_sessions`` happens in the caller's
-    ``finally`` block. Extracted from ``run_offline_pipeline`` to keep its CC
-    below the sentrux v0.5.7 threshold (16).
+    ``finally`` block.
     """
     with _processed_lock:
         if session_id in _processed_sessions:
@@ -511,13 +536,18 @@ def _acquire_pipeline_slot(
             )
         if session_id in _in_flight_sessions:
             if force_reprocess:
-                _rerun_pending_sessions.add(session_id)
+                # Last-writer-wins: if multiple force_reprocess requests land
+                # while in-flight, the most recent caller's state replaces
+                # any earlier captured state. The rerun only fires ONCE
+                # regardless of how many requests queued.
+                _pending_reruns[session_id] = pending_thread_state
                 logger.info(
                     "[Pipeline] queued_rerun_after_in_flight user_id=%s session_id=%s thread_id=%s "
-                    "— explicit force_reprocess will run after current in-flight pipeline releases",
+                    "has_pending_state=%s — explicit force_reprocess will run after current in-flight pipeline releases",
                     user_id,
                     session_id,
                     thread_id,
+                    pending_thread_state is not None,
                 )
             else:
                 logger.info(
