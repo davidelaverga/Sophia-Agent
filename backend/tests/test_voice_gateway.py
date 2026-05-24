@@ -533,6 +533,12 @@ class TestGeminiBrowserDogfoodGateway:
                 json={
                     "session_id": "browser-gemini-1",
                     "event": {"serverContent": {"outputTranscription": {"text": "Hi."}}},
+                    "provider_receive_sequence": 42,
+                    "provider_relay_sequence": 7,
+                    "provider_received_at": "2026-05-24T05:27:57.739Z",
+                    "relay_correlation_id": "gemini-42",
+                    "provider_primary_category": "outputTranscription",
+                    "provider_categories": ["serverContent", "outputTranscription"],
                 },
             )
 
@@ -544,7 +550,51 @@ class TestGeminiBrowserDogfoodGateway:
         proxy.assert_awaited_once_with(
             "POST",
             "/dogfood/realtime/gemini/browser-sessions/browser-gemini-1/provider-events",
-            json_body={"event": {"serverContent": {"outputTranscription": {"text": "Hi."}}}},
+            json_body={
+                "event": {"serverContent": {"outputTranscription": {"text": "Hi."}}},
+                "provider_receive_sequence": 42,
+                "provider_relay_sequence": 7,
+                "provider_received_at": "2026-05-24T05:27:57.739Z",
+                "relay_correlation_id": "gemini-42",
+                "provider_primary_category": "outputTranscription",
+                "provider_categories": ["serverContent", "outputTranscription"],
+            },
+        )
+
+    def test_production_relay_preserves_browser_source_metadata(self):
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            return_value={"accepted": True, "session_id": "gemini-prod-1"},
+        ) as proxy:
+            resp = client.post(
+                "/api/sophia/user_123/voice/gemini/relay",
+                json={
+                    "session_id": "gemini-prod-1",
+                    "event": {"serverContent": {"inputTranscription": {"text": "Wait, one more thing."}}},
+                    "provider_receive_sequence": 84,
+                    "provider_relay_sequence": 12,
+                    "provider_received_at": "2026-05-24T05:28:01.000Z",
+                    "relay_correlation_id": "gemini-84",
+                    "provider_primary_category": "inputTranscription",
+                    "provider_categories": ["serverContent", "inputTranscription"],
+                },
+            )
+
+        assert resp.status_code == 202
+        assert resp.json()["stream_url"] == "/api/sophia/voice/gemini/events?session_id=gemini-prod-1"
+        proxy.assert_awaited_once_with(
+            "POST",
+            "/production/realtime/gemini/browser-sessions/gemini-prod-1/provider-events",
+            json_body={
+                "event": {"serverContent": {"inputTranscription": {"text": "Wait, one more thing."}}},
+                "provider_receive_sequence": 84,
+                "provider_relay_sequence": 12,
+                "provider_received_at": "2026-05-24T05:28:01.000Z",
+                "relay_correlation_id": "gemini-84",
+                "provider_primary_category": "inputTranscription",
+                "provider_categories": ["serverContent", "inputTranscription"],
+            },
         )
 
 

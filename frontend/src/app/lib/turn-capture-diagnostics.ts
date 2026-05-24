@@ -6,6 +6,7 @@ type CaptureEvent = SophiaCaptureBundle['events'][number];
 export type TurnCaptureDiagnosticFamily =
   | 'user_input_activity'
   | 'provider_input_transcription'
+  | 'barge_in_transcript_handoff'
   | 'public_user_transcript'
   | 'assistant_output'
   | 'turn_boundary'
@@ -29,6 +30,10 @@ export type TurnCaptureDiagnosticEvent = {
   responseId?: string | null;
   segmentId?: string | null;
   textPreview?: string | null;
+  captured?: boolean | null;
+  promoted?: boolean | null;
+  newTurnDispatched?: boolean | null;
+  blockedReason?: string | null;
   isFinal?: boolean | null;
   audioChunkCount?: number | null;
   frameByteLength?: number | null;
@@ -158,6 +163,9 @@ export type TurnCaptureDiagnostics = {
       manualMute: number;
       providerInputTranscription: number;
       publicUserTranscript: number;
+      bargeInTranscriptCaptured: number;
+      bargeInTranscriptPromoted: number;
+      bargeInNewTurnDispatch: number;
       providerOutputTranscription: number;
       publicAssistantTranscript: number;
       assistantAudioChunkEvents: number;
@@ -649,6 +657,34 @@ export function buildTurnCaptureDiagnostics(
       continue;
     }
 
+    if (captureEvent.name === 'gemini-barge-in-transcript-handoff') {
+      const diagnostic = recordValue(payload?.diagnostic);
+      const captured = booleanValue(diagnostic?.captured) === true;
+      const promoted = booleanValue(diagnostic?.promoted) === true;
+      const newTurnDispatched = booleanValue(diagnostic?.newTurnDispatched) === true;
+      if (captured) counts.bargeInTranscriptCaptured += 1;
+      if (promoted) counts.bargeInTranscriptPromoted += 1;
+      if (newTurnDispatched) counts.bargeInNewTurnDispatch += 1;
+      pushTimeline({
+        captureSeq: numericValue(captureEvent.seq),
+        timestamp: captureEvent.recordedAt,
+        family: 'barge_in_transcript_handoff',
+        eventType: 'barge_in_transcript_handoff',
+        source: 'gemini_browser_transcript_handoff',
+        providerReceiveSequence: numericValue(diagnostic?.providerReceiveSequence),
+        relayCorrelationId: stringValue(diagnostic?.relayCorrelationId),
+        textPreview: previewText(diagnostic?.transcriptPreview),
+        captured,
+        promoted,
+        newTurnDispatched,
+        blockedReason: stringValue(diagnostic?.bargeInNewTurnDispatchBlockedReason)
+          ?? stringValue(diagnostic?.newTurnDispatchBlockedReason),
+        assistantAudioActive,
+        userInputActive,
+      });
+      continue;
+    }
+
     if (captureEvent.name === 'sophia.user_transcript') {
       const data = recordValue(payload?.data);
       const textPreview = previewText(data?.text);
@@ -816,6 +852,9 @@ function createEmptyCounts(): TurnCaptureDiagnostics['summary']['counts'] {
     manualMute: 0,
     providerInputTranscription: 0,
     publicUserTranscript: 0,
+    bargeInTranscriptCaptured: 0,
+    bargeInTranscriptPromoted: 0,
+    bargeInNewTurnDispatch: 0,
     providerOutputTranscription: 0,
     publicAssistantTranscript: 0,
     assistantAudioChunkEvents: 0,

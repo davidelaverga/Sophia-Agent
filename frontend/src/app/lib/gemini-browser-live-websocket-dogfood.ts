@@ -164,6 +164,42 @@ export interface GeminiInputAudioActivityDiagnostic {
   confirmedAssistantUserOverlapMs?: number;
 }
 
+export type GeminiBargeInNewTurnDispatchBlockedReason =
+  | 'none'
+  | 'not_confirmed_barge_in'
+  | 'empty_transcript'
+  | 'duplicate_transcript'
+  | 'already_promoted_for_barge_in'
+  | 'websocket_not_open'
+  | 'websocket_send_failed';
+
+export interface GeminiBargeInTranscriptHandoffDiagnostic {
+  timestamp: string;
+  providerReceiveSequence: number | null;
+  providerReceivedAt: string | null;
+  relayCorrelationId: string | null;
+  text: string | null;
+  transcriptPreview: string | null;
+  transcriptLength: number;
+  captured: boolean;
+  promoted: boolean;
+  ignored: boolean;
+  duplicateSuppressed: boolean;
+  promotionLatencyMs: number | null;
+  newTurnDispatched: boolean;
+  newTurnDispatchBlockedReason: GeminiBargeInNewTurnDispatchBlockedReason;
+  bargeInConfirmationSource: GeminiBargeInConfirmationSource;
+  bargeInConfirmationReason: string | null;
+  bargeInTranscriptCapturedCount: number;
+  bargeInTranscriptPromotedCount: number;
+  bargeInTranscriptPromotionLatencyMs: number | null;
+  bargeInTranscriptIgnoredCount: number;
+  bargeInTranscriptDuplicateSuppressedCount: number;
+  lastBargeInTranscriptPreview: string | null;
+  bargeInNewTurnDispatchCount: number;
+  bargeInNewTurnDispatchBlockedReason: GeminiBargeInNewTurnDispatchBlockedReason;
+}
+
 export type GeminiProviderEventCategory =
   | 'setupComplete'
   | 'serverContent'
@@ -385,6 +421,7 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   onInterruption?: (diagnostic: GeminiBrowserLiveDogfoodInterruptionDiagnostic) => void;
   onStaleOutputSuppression?: (diagnostic: GeminiStaleOutputSuppressionDiagnostic) => void;
   onInputAudioActivity?: (diagnostic: GeminiInputAudioActivityDiagnostic) => void;
+  onBargeInTranscriptHandoff?: (diagnostic: GeminiBargeInTranscriptHandoffDiagnostic) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
 }
 
@@ -652,6 +689,9 @@ export async function connectGeminiBrowserLiveDogfood(
   let staleOutputSuppressionArmedAt: string | null = null;
   let staleOutputSuppressionArmedBy: GeminiBargeInConfirmationSource | null = null;
   let bargeInConfirmationReason: string | null = null;
+  let staleOutputFenceGeneration = 0;
+  let activeBargeInFenceGeneration: number | null = null;
+  let promotedBargeInTranscriptFenceGeneration: number | null = null;
   let rawAssistantUserOverlapStartedAtMs: number | null = null;
   let rawAssistantUserOverlapMs = 0;
   let confirmedAssistantUserOverlapStartedAtMs: number | null = null;
@@ -666,6 +706,15 @@ export async function connectGeminiBrowserLiveDogfood(
   let candidateFramesDidNotConfirmCount = 0;
   let candidateExpiredCount = 0;
   let suppressionBlockedBecauseNoIntentCount = 0;
+  let bargeInTranscriptCapturedCount = 0;
+  let bargeInTranscriptPromotedCount = 0;
+  let bargeInTranscriptPromotionLatencyMs: number | null = null;
+  let bargeInTranscriptIgnoredCount = 0;
+  let bargeInTranscriptDuplicateSuppressedCount = 0;
+  let lastBargeInTranscriptPreview: string | null = null;
+  let bargeInNewTurnDispatchCount = 0;
+  let bargeInNewTurnDispatchBlockedReason: GeminiBargeInNewTurnDispatchBlockedReason = 'none';
+  const promotedBargeInTranscriptFingerprints: string[] = [];
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -877,6 +926,9 @@ export async function connectGeminiBrowserLiveDogfood(
     staleOutputSuppressionArmedAt = timestampIso;
     staleOutputSuppressionArmedBy = armedBy;
     bargeInConfirmationReason = reason;
+    staleOutputFenceGeneration += 1;
+    activeBargeInFenceGeneration = staleOutputFenceGeneration;
+    promotedBargeInTranscriptFenceGeneration = null;
     confirmedAssistantUserOverlapStartedAtMs = overlapStartedAtMs;
     return true;
   };
@@ -913,6 +965,8 @@ export async function connectGeminiBrowserLiveDogfood(
     staleOutputSuppressionArmedAt = null;
     staleOutputSuppressionArmedBy = null;
     bargeInConfirmationReason = null;
+    activeBargeInFenceGeneration = null;
+    promotedBargeInTranscriptFenceGeneration = null;
     closeConfirmedAssistantUserOverlap();
     resetBargeInCandidate();
     confirmedBargeInCandidateFrameCount = 0;
@@ -968,6 +1022,183 @@ export async function connectGeminiBrowserLiveDogfood(
       return { confirmed: false, reason: 'provider_input_transcription_likely_echo' };
     }
     return { confirmed: true, reason: 'provider_input_transcription_after_assistant_output_with_text' };
+  };
+
+  const rememberPromotedBargeInTranscriptFingerprint = (fingerprint: string) => {
+    promotedBargeInTranscriptFingerprints.push(fingerprint);
+    if (promotedBargeInTranscriptFingerprints.length > 20) {
+      promotedBargeInTranscriptFingerprints.splice(0, promotedBargeInTranscriptFingerprints.length - 20);
+    }
+  };
+
+  const emitBargeInTranscriptHandoff = (
+    diagnostic: Omit<GeminiBargeInTranscriptHandoffDiagnostic,
+      | 'bargeInTranscriptCapturedCount'
+      | 'bargeInTranscriptPromotedCount'
+      | 'bargeInTranscriptPromotionLatencyMs'
+      | 'bargeInTranscriptIgnoredCount'
+      | 'bargeInTranscriptDuplicateSuppressedCount'
+      | 'lastBargeInTranscriptPreview'
+      | 'bargeInNewTurnDispatchCount'
+      | 'bargeInNewTurnDispatchBlockedReason'
+    >,
+  ) => {
+    options.onBargeInTranscriptHandoff?.({
+      ...diagnostic,
+      bargeInTranscriptCapturedCount,
+      bargeInTranscriptPromotedCount,
+      bargeInTranscriptPromotionLatencyMs,
+      bargeInTranscriptIgnoredCount,
+      bargeInTranscriptDuplicateSuppressedCount,
+      lastBargeInTranscriptPreview,
+      bargeInNewTurnDispatchCount,
+      bargeInNewTurnDispatchBlockedReason,
+    });
+  };
+
+  const promoteBargeInInputTranscription = (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+    confirmation: { confirmed: boolean; reason: string },
+  ) => {
+    const text = readTranscriptionText(event, 'inputTranscription', 'input_transcription');
+    const timestamp = new Date().toISOString();
+    const transcriptPreview = readTranscriptionTextPreview(event, 'inputTranscription', 'input_transcription');
+    const isConfirmedBargeIn = staleOutputSuppressionActive || confirmation.confirmed;
+    const inPossibleBargeInWindow = isConfirmedBargeIn || assistantOutputStartedAtMs !== null || bargeInCandidateFrameCount > 0;
+    if (!text && !inPossibleBargeInWindow) {
+      return;
+    }
+
+    if (!text) {
+      bargeInTranscriptIgnoredCount += 1;
+      bargeInNewTurnDispatchBlockedReason = 'empty_transcript';
+      emitBargeInTranscriptHandoff({
+        timestamp,
+        providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+        providerReceivedAt: receiveMetadata.providerReceivedAt,
+        relayCorrelationId: receiveMetadata.relayCorrelationId,
+        text: null,
+        transcriptPreview: null,
+        transcriptLength: 0,
+        captured: false,
+        promoted: false,
+        ignored: true,
+        duplicateSuppressed: false,
+        promotionLatencyMs: null,
+        newTurnDispatched: false,
+        newTurnDispatchBlockedReason: 'empty_transcript',
+        bargeInConfirmationSource: currentBargeInConfirmationSource(),
+        bargeInConfirmationReason: currentBargeInConfirmationReason() ?? confirmation.reason,
+      });
+      return;
+    }
+
+    if (!isConfirmedBargeIn) {
+      if (inPossibleBargeInWindow) {
+        bargeInTranscriptIgnoredCount += 1;
+        bargeInNewTurnDispatchBlockedReason = 'not_confirmed_barge_in';
+        emitBargeInTranscriptHandoff({
+          timestamp,
+          providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+          providerReceivedAt: receiveMetadata.providerReceivedAt,
+          relayCorrelationId: receiveMetadata.relayCorrelationId,
+          text,
+          transcriptPreview,
+          transcriptLength: text.length,
+          captured: false,
+          promoted: false,
+          ignored: true,
+          duplicateSuppressed: false,
+          promotionLatencyMs: null,
+          newTurnDispatched: false,
+          newTurnDispatchBlockedReason: 'not_confirmed_barge_in',
+          bargeInConfirmationSource: currentBargeInConfirmationSource(),
+          bargeInConfirmationReason: confirmation.reason,
+        });
+      }
+      return;
+    }
+
+    if (!staleOutputSuppressionActive && confirmation.confirmed) {
+      confirmBargeIn('provider_input_transcription', receiveMetadata.providerReceivedAt, {
+        stopPlayback: false,
+        reason: confirmation.reason,
+      });
+    }
+
+    bargeInTranscriptCapturedCount += 1;
+    lastBargeInTranscriptPreview = transcriptPreview;
+    const fingerprint = normalizeTranscriptionForIntent(text);
+    const duplicateSuppressed = fingerprint.length > 0 && promotedBargeInTranscriptFingerprints.includes(fingerprint);
+    const alreadyPromotedForFence = activeBargeInFenceGeneration !== null
+      && promotedBargeInTranscriptFenceGeneration === activeBargeInFenceGeneration;
+    if (duplicateSuppressed || alreadyPromotedForFence) {
+      bargeInTranscriptDuplicateSuppressedCount += 1;
+      const blockedReason = duplicateSuppressed ? 'duplicate_transcript' : 'already_promoted_for_barge_in';
+      bargeInNewTurnDispatchBlockedReason = blockedReason;
+      emitBargeInTranscriptHandoff({
+        timestamp,
+        providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+        providerReceivedAt: receiveMetadata.providerReceivedAt,
+        relayCorrelationId: receiveMetadata.relayCorrelationId,
+        text,
+        transcriptPreview,
+        transcriptLength: text.length,
+        captured: true,
+        promoted: false,
+        ignored: false,
+        duplicateSuppressed: true,
+        promotionLatencyMs: null,
+        newTurnDispatched: false,
+        newTurnDispatchBlockedReason: blockedReason,
+        bargeInConfirmationSource: currentBargeInConfirmationSource(),
+        bargeInConfirmationReason: currentBargeInConfirmationReason() ?? confirmation.reason,
+      });
+      return;
+    }
+
+    const promotionLatencyMs = latencyMsFromIso(receiveMetadata.providerReceivedAt, timestamp);
+    bargeInTranscriptPromotedCount += 1;
+    bargeInTranscriptPromotionLatencyMs = promotionLatencyMs;
+    if (fingerprint) {
+      rememberPromotedBargeInTranscriptFingerprint(fingerprint);
+    }
+    promotedBargeInTranscriptFenceGeneration = activeBargeInFenceGeneration;
+
+    let dispatched = false;
+    let blockedReason: GeminiBargeInNewTurnDispatchBlockedReason = 'none';
+    if (websocket?.readyState !== WEBSOCKET_OPEN) {
+      blockedReason = 'websocket_not_open';
+    } else {
+      try {
+        websocket.send(JSON.stringify({ realtimeInput: { text } }));
+        dispatched = true;
+        bargeInNewTurnDispatchCount += 1;
+      } catch {
+        blockedReason = 'websocket_send_failed';
+      }
+    }
+    bargeInNewTurnDispatchBlockedReason = blockedReason;
+
+    emitBargeInTranscriptHandoff({
+      timestamp,
+      providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+      providerReceivedAt: receiveMetadata.providerReceivedAt,
+      relayCorrelationId: receiveMetadata.relayCorrelationId,
+      text,
+      transcriptPreview,
+      transcriptLength: text.length,
+      captured: true,
+      promoted: true,
+      ignored: false,
+      duplicateSuppressed: false,
+      promotionLatencyMs,
+      newTurnDispatched: dispatched,
+      newTurnDispatchBlockedReason: blockedReason,
+      bargeInConfirmationSource: currentBargeInConfirmationSource(),
+      bargeInConfirmationReason: currentBargeInConfirmationReason() ?? confirmation.reason,
+    });
   };
 
   const emitStaleOutputSuppression = (
@@ -1181,12 +1412,7 @@ export async function connectGeminiBrowserLiveDogfood(
         markAssistantOutputStarted(event, categories, receiveMetadata);
         if (categories.includes('inputTranscription')) {
           const confirmation = providerInputTranscriptionConfirmation(event, receiveMetadata);
-          if (!staleOutputSuppressionActive && confirmation.confirmed) {
-            confirmBargeIn('provider_input_transcription', receiveMetadata.providerReceivedAt, {
-              stopPlayback: false,
-              reason: confirmation.reason,
-            });
-          }
+          promoteBargeInInputTranscription(event, receiveMetadata, confirmation);
         }
         const transcriptSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (transcriptSuppressionReason && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))) {

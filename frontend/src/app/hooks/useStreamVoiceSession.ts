@@ -19,6 +19,7 @@ import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
   type GeminiBrowserLiveDogfoodConnection,
+  type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiBrowserLiveSessionBootstrap,
 } from "../lib/gemini-browser-live-websocket-dogfood"
 import { recordSophiaCaptureEvent } from "../lib/session-capture"
@@ -131,6 +132,7 @@ const STARTUP_READY_TIMEOUT_MS = 10_000
 const STARTUP_READY_TIMEOUT_MESSAGE = "Sophia voice is unavailable right now. Try again."
 const TOKEN_ENDPOINT = "/api/sophia"
 const RECENT_UTTERANCE_IDS_LIMIT = 20
+const RECENT_BARGE_IN_TRANSCRIPT_FINGERPRINTS_LIMIT = 10
 const AUTO_PRECONNECT_DELAY_MS = 250
 const PREPARED_VOICE_CONNECT_TTL_MS = 30_000
 const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
@@ -184,6 +186,14 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     staleAssistantOutputSuppressionCount: params.staleAssistantOutputSuppressionCount ?? 0,
     playbackGeneration: params.playbackGeneration ?? 0,
     assistantUserOverlapMs: params.assistantUserOverlapMs ?? 0,
+    bargeInTranscriptCapturedCount: params.bargeInTranscriptCapturedCount ?? 0,
+    bargeInTranscriptPromotedCount: params.bargeInTranscriptPromotedCount ?? 0,
+    bargeInTranscriptPromotionLatencyMs: params.bargeInTranscriptPromotionLatencyMs ?? null,
+    bargeInTranscriptIgnoredCount: params.bargeInTranscriptIgnoredCount ?? 0,
+    bargeInTranscriptDuplicateSuppressedCount: params.bargeInTranscriptDuplicateSuppressedCount ?? 0,
+    lastBargeInTranscriptPreview: params.lastBargeInTranscriptPreview ?? null,
+    bargeInNewTurnDispatchCount: params.bargeInNewTurnDispatchCount ?? 0,
+    bargeInNewTurnDispatchBlockedReason: params.bargeInNewTurnDispatchBlockedReason ?? "none",
     interruptedResponseIds: params.interruptedResponseIds ?? [],
     interruptionCount: params.interruptionCount ?? 0,
     playbackFlushCount: params.playbackFlushCount ?? 0,
@@ -304,6 +314,52 @@ function describeProviderEventType(event: unknown): string {
     "usage_metadata",
     "error",
   ].find((key) => key in record) ?? "unknown"
+}
+
+function userTranscriptFingerprint(text: string): string {
+  return text
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+}
+
+function publicBargeInUtteranceId(diagnostic: GeminiBargeInTranscriptHandoffDiagnostic): string {
+  if (diagnostic.relayCorrelationId) {
+    return `gemini-barge-in:${diagnostic.relayCorrelationId}`
+  }
+  if (diagnostic.providerReceiveSequence !== null) {
+    return `gemini-barge-in:${diagnostic.providerReceiveSequence}`
+  }
+  return `gemini-barge-in:${diagnostic.timestamp}`
+}
+
+function publicBargeInTranscriptData(diagnostic: GeminiBargeInTranscriptHandoffDiagnostic): Record<string, unknown> | null {
+  if (!diagnostic.text) return null
+  const data: Record<string, unknown> = {
+    text: diagnostic.text,
+    utterance_id: publicBargeInUtteranceId(diagnostic),
+    handoff_source: "gemini_barge_in_transcript",
+  }
+  if (diagnostic.providerReceiveSequence !== null) {
+    data.source_sequence = diagnostic.providerReceiveSequence
+  }
+  if (diagnostic.providerReceivedAt) {
+    data.provider_received_at = diagnostic.providerReceivedAt
+  }
+  if (diagnostic.relayCorrelationId) {
+    data.relay_correlation_id = diagnostic.relayCorrelationId
+  }
+  return data
+}
+
+function sanitizedBargeInTranscriptDiagnostic(
+  diagnostic: GeminiBargeInTranscriptHandoffDiagnostic,
+): Omit<GeminiBargeInTranscriptHandoffDiagnostic, "text"> {
+  const safeDiagnostic: Partial<GeminiBargeInTranscriptHandoffDiagnostic> = { ...diagnostic }
+  delete safeDiagnostic.text
+  return safeDiagnostic as Omit<GeminiBargeInTranscriptHandoffDiagnostic, "text">
 }
 
 // ---------------------------------------------------------------------------
@@ -523,6 +579,7 @@ export function useStreamVoiceSession(
   const thinkingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const startupReadyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const recentUserTranscriptIdsRef = useRef<string[]>([])
+  const recentBargeInTranscriptFingerprintsRef = useRef<string[]>([])
   const currentTurnUserTranscriptRef = useRef<string | null>(null)
   const softBargeInActiveRef = useRef(false)
   const userMicMutedRef = useRef(false)
@@ -644,9 +701,100 @@ export function useStreamVoiceSession(
     ].slice(-RECENT_UTTERANCE_IDS_LIMIT)
   }, [])
 
+  const hasSeenBargeInTranscriptFingerprint = useCallback((fingerprint: string) => {
+    return fingerprint.length > 0 && recentBargeInTranscriptFingerprintsRef.current.includes(fingerprint)
+  }, [])
+
+  const rememberBargeInTranscriptFingerprint = useCallback((fingerprint: string) => {
+    if (!fingerprint) return
+    recentBargeInTranscriptFingerprintsRef.current = [
+      ...recentBargeInTranscriptFingerprintsRef.current.filter((existing) => existing !== fingerprint),
+      fingerprint,
+    ].slice(-RECENT_BARGE_IN_TRANSCRIPT_FINGERPRINTS_LIMIT)
+  }, [])
+
+  const forgetBargeInTranscriptFingerprint = useCallback((fingerprint: string) => {
+    if (!fingerprint) return
+    recentBargeInTranscriptFingerprintsRef.current = recentBargeInTranscriptFingerprintsRef.current.filter(
+      (existing) => existing !== fingerprint,
+    )
+  }, [])
+
   const clearCurrentTurnUserTranscript = useCallback(() => {
     currentTurnUserTranscriptRef.current = null
   }, [])
+
+  const applyUserTranscriptData = useCallback((
+    data: Record<string, unknown> | undefined,
+    source: "public_user_transcript" | "barge_in_transcript_handoff",
+  ): boolean => {
+    const text = typeof data?.text === "string" ? data.text : ""
+    if (!text) return false
+
+    const fingerprint = userTranscriptFingerprint(text)
+    const utteranceId = typeof data?.utterance_id === "string" ? data.utterance_id : null
+    if (source === "public_user_transcript" && hasSeenBargeInTranscriptFingerprint(fingerprint)) {
+      if (utteranceId) rememberUserTranscriptId(utteranceId)
+      forgetBargeInTranscriptFingerprint(fingerprint)
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "duplicate-barge-in-user-transcript-ignored",
+        payload: {
+          utteranceId,
+          source,
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
+      return false
+    }
+
+    const interruptedKeys = markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
+    if (interruptedKeys.length > 0) {
+      resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
+      setPartialReply("")
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "assistant-transcript-interrupted-by-user",
+        payload: {
+          interruptedKeys,
+          source,
+          sessionId: sessionIdRef.current ?? null,
+        },
+      })
+    }
+
+    if (utteranceId) {
+      if (hasSeenUserTranscriptId(utteranceId)) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "duplicate-user-transcript-ignored",
+          payload: {
+            utteranceId,
+            source,
+            sessionId: sessionIdRef.current ?? null,
+          },
+        })
+        return false
+      }
+
+      rememberUserTranscriptId(utteranceId)
+    }
+
+    const reconciledTranscript = reconcileVoiceTranscript(currentTurnUserTranscriptRef.current, text)
+    if (!reconciledTranscript.changed && currentTurnUserTranscriptRef.current) {
+      if (source === "barge_in_transcript_handoff") {
+        rememberBargeInTranscriptFingerprint(fingerprint)
+      }
+      return false
+    }
+
+    currentTurnUserTranscriptRef.current = reconciledTranscript.text
+    if (source === "barge_in_transcript_handoff") {
+      rememberBargeInTranscriptFingerprint(userTranscriptFingerprint(reconciledTranscript.text))
+    }
+    onUserTranscriptRef.current?.(reconciledTranscript.text)
+    return true
+  }, [forgetBargeInTranscriptFingerprint, hasSeenBargeInTranscriptFingerprint, hasSeenUserTranscriptId, rememberBargeInTranscriptFingerprint, rememberUserTranscriptId])
 
   const cancelPendingStartRequest = useCallback(() => {
     startRequestVersionRef.current += 1
@@ -1209,48 +1357,7 @@ export function useStreamVoiceSession(
     }
 
     if (type === "sophia.user_transcript") {
-      const text = typeof data?.text === "string" ? data.text : ""
-      if (!text) return
-
-      const interruptedKeys = markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
-      if (interruptedKeys.length > 0) {
-        resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
-        setPartialReply("")
-        recordSophiaCaptureEvent({
-          category: "voice-session",
-          name: "assistant-transcript-interrupted-by-user",
-          payload: {
-            interruptedKeys,
-            source: "public_user_transcript",
-            sessionId: sessionIdRef.current ?? null,
-          },
-        })
-      }
-
-      const utteranceId = typeof data?.utterance_id === "string" ? data.utterance_id : null
-      if (utteranceId) {
-        if (hasSeenUserTranscriptId(utteranceId)) {
-          recordSophiaCaptureEvent({
-            category: "voice-session",
-            name: "duplicate-user-transcript-ignored",
-            payload: {
-              utteranceId,
-              sessionId: sessionIdRef.current ?? null,
-            },
-          })
-          return
-        }
-
-        rememberUserTranscriptId(utteranceId)
-      }
-
-      const reconciledTranscript = reconcileVoiceTranscript(currentTurnUserTranscriptRef.current, text)
-      if (!reconciledTranscript.changed && currentTurnUserTranscriptRef.current) {
-        return
-      }
-
-      currentTurnUserTranscriptRef.current = reconciledTranscript.text
-      onUserTranscriptRef.current?.(reconciledTranscript.text)
+      applyUserTranscriptData(data, "public_user_transcript")
     }
 
     if (type === "sophia.artifact" && data) {
@@ -1297,7 +1404,7 @@ export function useStreamVoiceSession(
         startThinkingTimeout()
       }
     }
-  }, [addVoiceMessage, clearCurrentTurnUserTranscript, clearThinking, hasSeenUserTranscriptId, rememberUserTranscriptId, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
+  }, [addVoiceMessage, applyUserTranscriptData, clearCurrentTurnUserTranscript, clearThinking, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
 
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
   useEffect(() => {
@@ -1713,6 +1820,7 @@ export function useStreamVoiceSession(
     clearStartupReadyTimeout()
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
     userMicMutedRef.current = false
     setIsSophiaReady(false)
@@ -1929,6 +2037,53 @@ export function useStreamVoiceSession(
                 sessionId: sessionIdRef.current ?? null,
                 voiceAgentSessionId: creds.session_id,
                 diagnostic,
+              },
+            })
+          },
+          onBargeInTranscriptHandoff: (diagnostic) => {
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? {
+                  ...current,
+                  bargeInTranscriptCapturedCount: Math.max(current.bargeInTranscriptCapturedCount ?? 0, diagnostic.bargeInTranscriptCapturedCount),
+                  bargeInTranscriptPromotedCount: Math.max(current.bargeInTranscriptPromotedCount ?? 0, diagnostic.bargeInTranscriptPromotedCount),
+                  bargeInTranscriptPromotionLatencyMs: diagnostic.bargeInTranscriptPromotionLatencyMs ?? current.bargeInTranscriptPromotionLatencyMs ?? null,
+                  bargeInTranscriptIgnoredCount: Math.max(current.bargeInTranscriptIgnoredCount ?? 0, diagnostic.bargeInTranscriptIgnoredCount),
+                  bargeInTranscriptDuplicateSuppressedCount: Math.max(current.bargeInTranscriptDuplicateSuppressedCount ?? 0, diagnostic.bargeInTranscriptDuplicateSuppressedCount),
+                  lastBargeInTranscriptPreview: diagnostic.lastBargeInTranscriptPreview ?? current.lastBargeInTranscriptPreview ?? null,
+                  bargeInNewTurnDispatchCount: Math.max(current.bargeInNewTurnDispatchCount ?? 0, diagnostic.bargeInNewTurnDispatchCount),
+                  bargeInNewTurnDispatchBlockedReason: diagnostic.bargeInNewTurnDispatchBlockedReason ?? current.bargeInNewTurnDispatchBlockedReason ?? "none",
+                  bargeInConfirmed: current.bargeInConfirmed === true || diagnostic.captured,
+                  bargeInConfirmationSource: diagnostic.bargeInConfirmationSource ?? current.bargeInConfirmationSource ?? "none",
+                  bargeInConfirmationReason: diagnostic.bargeInConfirmationReason ?? current.bargeInConfirmationReason ?? null,
+                }
+              : current)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-barge-in-transcript-handoff",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                diagnostic: sanitizedBargeInTranscriptDiagnostic(diagnostic),
+              },
+            })
+
+            if (!diagnostic.promoted || !diagnostic.text) {
+              return
+            }
+
+            const userTranscriptData = publicBargeInTranscriptData(diagnostic)
+            if (!userTranscriptData) return
+            const applied = applyUserTranscriptData(userTranscriptData, "barge_in_transcript_handoff")
+            if (!applied) return
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "sophia.user_transcript",
+              payload: {
+                data: userTranscriptData,
+                source: "barge_in_transcript_handoff",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
               },
             })
           },
@@ -2374,6 +2529,7 @@ export function useStreamVoiceSession(
       }
     }
   }, [
+    applyUserTranscriptData,
     cancelPendingStartRequest,
     callingState,
     clearAutoPreconnectTimer,
@@ -2421,6 +2577,7 @@ export function useStreamVoiceSession(
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
     setIsSophiaReady(false)
     setCredentials(null)
@@ -2501,6 +2658,7 @@ export function useStreamVoiceSession(
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
     userMicMutedRef.current = false
     resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
@@ -2550,6 +2708,7 @@ export function useStreamVoiceSession(
     errorStageLockRef.current = false
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
+    recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
     userMicMutedRef.current = false
     resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)

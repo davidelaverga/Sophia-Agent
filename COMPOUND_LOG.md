@@ -26,6 +26,29 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-24 · [gemini-barge-in-transcript-handoff] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | voice | backend · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
+
+### What Changed
+- Promoted confirmed Gemini barge-in `inputTranscription` text into the visible current user turn and dispatched it through the active Gemini Live WebSocket as a native text turn.
+- Added duplicate suppression for repeated provider transcription frames and later public `sophia.user_transcript` echoes of the same promoted barge-in text.
+- Added barge-in transcript handoff diagnostics, metrics panel rows, telemetry report fields, and turn-capture counts for captured/promoted/ignored/duplicate/dispatch state.
+- Preserved Gemini relay source metadata through the gateway to the voice runtime for both dogfood and production relay routes.
+
+### What We Learned
+- Public `sophia.user_transcript` continuity is not automatically provider-visible Gemini conversation continuity. A confirmed barge-in transcript needs an explicit native Live turn dispatch.
+- Intent-gated suppression solved the cutoff problem, but the follow-up failure was a handoff gap rather than another stale assistant-tail bug.
+- Relay ordering metadata must survive the gateway proxy; otherwise browser-source diagnostics and backend normalization can diverge on the events used to prove turn continuity.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
 ## 2026-05-24 · [gemini-barge-in-intent-gating] · PR #TBD
 **Author:** GitHub Copilot · **Track:** frontend | voice · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
 

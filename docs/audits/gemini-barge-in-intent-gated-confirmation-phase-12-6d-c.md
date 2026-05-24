@@ -69,3 +69,9 @@ No skills or prompt behavior changed. This phase does not change memory, Builder
 ## 8. Bottom Line
 
 12.6D-C changes the guard from activity-gated to intent-gated. Mic frames are not user intent; only provider interruption, explicit manual interruption, or conservative provider input transcription can make assistant output stale.
+
+## 9. Phase 12.6D-D Follow-up
+
+The next smoke showed that intent gating fixed cutoff/over-suppression but did not by itself make a confirmed provider `inputTranscription` model-visible as a new Gemini turn. Phase 12.6D-D promotes confirmed non-empty barge-in input transcription into the current visible user turn and dispatches the same text through the active Gemini Live WebSocket, with duplicate suppression for repeated provider frames and later public `sophia.user_transcript` echoes.
+
+Full follow-up report: `docs/audits/gemini-barge-in-transcript-handoff-phase-12-6d-d.md`.

@@ -22,6 +22,7 @@ import {
   type GeminiBrowserLiveDogfoodRelayStatus,
   type GeminiBrowserLiveDogfoodStage,
   type GeminiBrowserLiveDogfoodInterruptionDiagnostic,
+  type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
 
@@ -465,6 +466,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     const interruptionDiagnostics: GeminiBrowserLiveDogfoodInterruptionDiagnostic[] = [];
     const staleSuppressionDiagnostics: unknown[] = [];
     const inputAudioDiagnostics: unknown[] = [];
+    const handoffDiagnostics: GeminiBargeInTranscriptHandoffDiagnostic[] = [];
     const outputAudioDetected = vi.fn();
     let websocket: FakeWebSocket | null = null;
 
@@ -485,6 +487,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       onInterruption: (diagnostic) => interruptionDiagnostics.push(diagnostic),
       onStaleOutputSuppression: (diagnostic) => staleSuppressionDiagnostics.push(diagnostic),
       onInputAudioActivity: (diagnostic) => inputAudioDiagnostics.push(diagnostic),
+      onBargeInTranscriptHandoff: (diagnostic) => handoffDiagnostics.push(diagnostic),
     });
 
     expect(connection.sessionId).toBe('browser-gemini-1');
@@ -594,6 +597,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       suppressionDeferredReason: 'input_frame_only_not_barge_in',
       inputFrameOnlyNotBargeInCount: 1,
     }));
+    expect(handoffDiagnostics).toEqual([]);
 
     const fetchCallsAfterIncidentalFrame = fetchMock.mock.calls.length;
     websocket?.emitMessage({
@@ -760,6 +764,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
     const fakeAudioContext = new FakeAudioContext();
     const staleSuppressionDiagnostics: unknown[] = [];
+    const handoffDiagnostics: GeminiBargeInTranscriptHandoffDiagnostic[] = [];
     let websocket: FakeWebSocket | null = null;
 
     const connection = await connectGeminiBrowserLiveDogfood({
@@ -772,6 +777,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
       audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
       onStaleOutputSuppression: (diagnostic) => staleSuppressionDiagnostics.push(diagnostic),
+      onBargeInTranscriptHandoff: (diagnostic) => handoffDiagnostics.push(diagnostic),
     });
 
     websocket?.emitMessage({
@@ -790,7 +796,34 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       '/api/sophia/voice/dogfood/gemini/relay',
       expect.objectContaining({ body: expect.stringContaining('Actually pause there') }),
     ));
+    await vi.waitFor(() => expect(handoffDiagnostics).toHaveLength(1));
+    expect(handoffDiagnostics[0]).toEqual(expect.objectContaining({
+      text: 'Actually pause there',
+      transcriptPreview: 'Actually pause there',
+      captured: true,
+      promoted: true,
+      newTurnDispatched: true,
+      newTurnDispatchBlockedReason: 'none',
+      bargeInTranscriptCapturedCount: 1,
+      bargeInTranscriptPromotedCount: 1,
+      bargeInNewTurnDispatchCount: 1,
+    }));
+    expect(websocket?.sent.map((message) => JSON.parse(message))).toContainEqual({
+      realtimeInput: { text: 'Actually pause there' },
+    });
     expect(fakeAudioContext.createdSources[0]?.stop).not.toHaveBeenCalled();
+
+    const sentCountAfterPromotion = websocket?.sent.length ?? 0;
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Actually pause there' } } });
+    await vi.waitFor(() => expect(handoffDiagnostics).toHaveLength(2));
+    expect(handoffDiagnostics[1]).toEqual(expect.objectContaining({
+      captured: true,
+      promoted: false,
+      duplicateSuppressed: true,
+      newTurnDispatched: false,
+      bargeInTranscriptDuplicateSuppressedCount: 1,
+    }));
+    expect(websocket?.sent).toHaveLength(sentCountAfterPromotion);
 
     websocket?.emitMessage({
       serverContent: {

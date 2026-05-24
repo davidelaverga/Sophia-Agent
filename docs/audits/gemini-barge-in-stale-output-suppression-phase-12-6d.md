@@ -114,3 +114,13 @@ The follow-up integrated smoke after 12.6D-B still cut Sophia off after one word
 New diagnostics include `bargeInConfirmationSource`, `bargeInConfirmationReason`, `candidateFramesDidNotConfirmCount`, `candidateExpiredCount`, `suppressionBlockedBecauseNoIntentCount`, `staleSuppressionArmedBy`, `rawAssistantUserOverlapMs`, and `confirmedAssistantUserOverlapMs`.
 
 Full follow-up report: `docs/audits/gemini-barge-in-intent-gated-confirmation-phase-12-6d-c.md`.
+
+## 13. Phase 12.6D-D Transcript Handoff
+
+The next integrated smoke showed that 12.6D-C fixed cutoff/over-suppression but left a provider-visible turn handoff gap. Gemini could emit real `serverContent.inputTranscription` for the barge-in and the UI could eventually receive `sophia.user_transcript`, but the native Gemini conversation did not reliably answer that text unless the user repeated it.
+
+12.6D-D promotes confirmed, non-empty barge-in input transcription into the current user turn and dispatches the same text over the active Gemini Live WebSocket as a native text turn. It dedupes repeated provider frames and later public `sophia.user_transcript` echoes, preserves stale assistant tail suppression, and keeps raw mic frames from creating fake handoffs.
+
+New diagnostics include barge-in transcript captured/promoted/ignored/duplicate counts, promotion latency, new-turn dispatch count, and dispatch blocked reason. Gateway relay routes now forward browser source-order metadata to the voice runtime.
+
+Full follow-up report: `docs/audits/gemini-barge-in-transcript-handoff-phase-12-6d-d.md`.

@@ -207,6 +207,20 @@ Telemetry distinguishes `rawAssistantUserOverlapMs` from `confirmedAssistantUser
 
 This phase did not change skills, prompt behavior, memory, Builder, artifact schema, provider routing, crisis behavior, `users/**`, `backend/users/**`, `voice/sophia_llm.py`, or Vision Agents files.
 
+## Phase 12.6D-D Gemini Barge-in Transcript Handoff
+
+Phase 12.6D-D follows the next manual smoke after 12.6D-C. Intent gating stopped over-suppression, but a confirmed barge-in with a real Gemini `inputTranscription` could still fail to produce a new provider response unless the user repeated the utterance. The implementation report lives at `docs/audits/gemini-barge-in-transcript-handoff-phase-12-6d-d.md`.
+
+The runtime contract now distinguishes public continuity from provider-visible continuity. `sophia.user_transcript` updates UI/session state, but Gemini Live does not automatically read public events back into its native conversation. When a confirmed barge-in carries non-empty provider input transcription, the browser promotes that text into the visible current user turn and dispatches it over the existing Gemini Live WebSocket as `{ realtimeInput: { text } }`. This keeps the native Gemini flow intact without routing through the separate text-companion cascade.
+
+The handoff is fenced and deduped. Raw microphone frames do not fabricate transcript handoffs. Repeated provider transcription frames for the same barge-in fence do not create duplicate user turns. Later public `sophia.user_transcript` echoes for the same promoted text are consumed as duplicates so the Session transcript stays single-entry. Old assistant audio/transcript tails remain stale and cannot overwrite the promoted user turn.
+
+Gateway Gemini relay routes now preserve browser source metadata through to the voice runtime: provider receive sequence, relay sequence, provider timestamp, relay correlation id, primary category, and categories. This keeps source-order diagnostics aligned across browser relay, backend normalization, public events, and frontend ingestion.
+
+Diagnostics now include barge-in transcript captured/promoted/ignored/duplicate counts, promotion latency, last transcript preview, new-turn dispatch count, and dispatch blocked reason. Turn capture separates interrupted-without-transcript from transcript-promoted-and-dispatched cases.
+
+This phase did not change prompts, skills, crisis behavior, memory behavior, Builder behavior, artifact schema, VAD/activity settings, provider routing defaults, `voice/sophia_llm.py`, `users/**`, `backend/users/**`, or the legacy Stream/Vision Agents cascade.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.

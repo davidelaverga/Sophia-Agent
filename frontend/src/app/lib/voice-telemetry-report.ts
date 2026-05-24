@@ -505,6 +505,10 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
     .filter((event) => event.name === 'gemini-input-audio-activity')
     .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
     .filter((value): value is Record<string, unknown> => value !== null);
+  const bargeInTranscriptDiagnostics = events
+    .filter((event) => event.name === 'gemini-barge-in-transcript-handoff')
+    .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+    .filter((value): value is Record<string, unknown> => value !== null);
   const staleTranscriptIgnored = events.filter((event) => event.name === 'stale-assistant-transcript-ignored');
   const interruptionDiagnostics = events
     .filter((event) => event.name === 'gemini-interruption')
@@ -537,6 +541,35 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
   }
   if (unresolvedToolEntries.length > 0) {
     warnings.push('unresolved_gemini_tool_calls');
+  }
+  const bargeInTranscriptCapturedCount = Math.max(
+    maxNumericField(bargeInTranscriptDiagnostics, 'bargeInTranscriptCapturedCount') ?? 0,
+    bargeInTranscriptDiagnostics.filter((diagnostic) => diagnostic.captured === true).length,
+  );
+  const bargeInTranscriptPromotedCount = Math.max(
+    maxNumericField(bargeInTranscriptDiagnostics, 'bargeInTranscriptPromotedCount') ?? 0,
+    bargeInTranscriptDiagnostics.filter((diagnostic) => diagnostic.promoted === true).length,
+  );
+  const bargeInTranscriptIgnoredCount = Math.max(
+    maxNumericField(bargeInTranscriptDiagnostics, 'bargeInTranscriptIgnoredCount') ?? 0,
+    bargeInTranscriptDiagnostics.filter((diagnostic) => diagnostic.ignored === true).length,
+  );
+  const bargeInTranscriptDuplicateSuppressedCount = Math.max(
+    maxNumericField(bargeInTranscriptDiagnostics, 'bargeInTranscriptDuplicateSuppressedCount') ?? 0,
+    bargeInTranscriptDiagnostics.filter((diagnostic) => diagnostic.duplicateSuppressed === true).length,
+  );
+  const bargeInNewTurnDispatchCount = Math.max(
+    maxNumericField(bargeInTranscriptDiagnostics, 'bargeInNewTurnDispatchCount') ?? 0,
+    bargeInTranscriptDiagnostics.filter((diagnostic) => diagnostic.newTurnDispatched === true).length,
+  );
+  const bargeInNewTurnDispatchBlockedReason = latestStringField(bargeInTranscriptDiagnostics, 'bargeInNewTurnDispatchBlockedReason')
+    ?? latestStringField(bargeInTranscriptDiagnostics, 'newTurnDispatchBlockedReason')
+    ?? 'none';
+  if (bargeInTranscriptCapturedCount > bargeInTranscriptPromotedCount) {
+    warnings.push('barge_in_transcript_not_promoted');
+  }
+  if (bargeInTranscriptPromotedCount > bargeInNewTurnDispatchCount && bargeInNewTurnDispatchBlockedReason !== 'none') {
+    warnings.push('barge_in_transcript_dispatch_blocked');
   }
   const bargeInDiagnostics = [...inputAudioDiagnostics, ...staleSuppressionDiagnostics];
   const maxRawAssistantUserOverlapMs = Math.max(
@@ -579,6 +612,7 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
   if (
     !warnings.length
     && !staleSuppressionDiagnostics.length
+    && !bargeInTranscriptDiagnostics.length
     && !staleTranscriptIgnored.length
     && !unresolvedToolEntries.length
     && inputFrameOnlyNotBargeInCount === 0
@@ -607,6 +641,16 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
     candidateFramesDidNotConfirmCount,
     candidateExpiredCount,
     suppressionBlockedBecauseNoIntentCount,
+    bargeInTranscriptCapturedCount,
+    bargeInTranscriptPromotedCount,
+    bargeInTranscriptPromotionLatencyMs: maxNumericField(bargeInTranscriptDiagnostics, 'bargeInTranscriptPromotionLatencyMs')
+      ?? maxNumericField(bargeInTranscriptDiagnostics, 'promotionLatencyMs'),
+    bargeInTranscriptIgnoredCount,
+    bargeInTranscriptDuplicateSuppressedCount,
+    lastBargeInTranscriptPreview: latestStringField(bargeInTranscriptDiagnostics, 'lastBargeInTranscriptPreview')
+      ?? latestStringField(bargeInTranscriptDiagnostics, 'transcriptPreview'),
+    bargeInNewTurnDispatchCount,
+    bargeInNewTurnDispatchBlockedReason,
     suppressionDeferredReasons,
     staleSuppressionArmedAt: asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedAt)
       ?? asString(latestInputAudioDiagnostic?.staleSuppressionArmedAt),

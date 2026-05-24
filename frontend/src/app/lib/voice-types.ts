@@ -86,6 +86,14 @@ export type GeminiRuntimeTelemetry = {
   candidateFramesDidNotConfirmCount?: number
   candidateExpiredCount?: number
   suppressionBlockedBecauseNoIntentCount?: number
+  bargeInTranscriptCapturedCount?: number
+  bargeInTranscriptPromotedCount?: number
+  bargeInTranscriptPromotionLatencyMs?: number | null
+  bargeInTranscriptIgnoredCount?: number
+  bargeInTranscriptDuplicateSuppressedCount?: number
+  lastBargeInTranscriptPreview?: string | null
+  bargeInNewTurnDispatchCount?: number
+  bargeInNewTurnDispatchBlockedReason?: string | null
   staleSuppressionArmedAt?: string | null
   staleSuppressionArmedBy?: string | null
   assistantAudioDropReason?: string | null

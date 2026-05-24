@@ -221,6 +221,47 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
 
     session_id: str = Field(..., description="Dogfood session id returned by browser-session")
     event: dict[str, object] = Field(..., description="Raw Gemini Live server message payload")
+    provider_receive_sequence: int | None = Field(
+        default=None,
+        gt=0,
+        description="Browser-assigned monotonic Gemini WebSocket receive sequence for this provider message",
+    )
+    provider_relay_sequence: int | None = Field(
+        default=None,
+        gt=0,
+        description="Browser-assigned monotonic sequence for relayed Gemini provider messages",
+    )
+    provider_received_at: str | None = Field(
+        default=None,
+        description="Browser ISO timestamp recorded when the provider WebSocket message was received",
+    )
+    relay_correlation_id: str | None = Field(
+        default=None,
+        description="Browser-stable relay correlation id derived at provider receive time",
+    )
+    provider_primary_category: str | None = Field(
+        default=None,
+        description="Browser-classified primary provider event category",
+    )
+    provider_categories: list[str] | None = Field(
+        default=None,
+        description="Browser-classified provider event categories",
+    )
+
+    def voice_relay_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {"event": self.event}
+        for key in (
+            "provider_receive_sequence",
+            "provider_relay_sequence",
+            "provider_received_at",
+            "relay_correlation_id",
+            "provider_primary_category",
+            "provider_categories",
+        ):
+            value = getattr(self, key)
+            if value is not None:
+                payload[key] = value
+        return payload
 
 
 class GeminiBrowserDogfoodDisconnectRequest(BaseModel):
@@ -912,7 +953,7 @@ async def gemini_browser_dogfood_relay(
     payload = await _proxy_voice_dogfood_json(
         "POST",
         f"/dogfood/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
-        json_body={"event": body.event},
+        json_body=body.voice_relay_payload(),
     )
     payload["stream_url"] = _build_gemini_dogfood_events_stream_url(user_id, body.session_id)
     return payload
@@ -1019,7 +1060,7 @@ async def gemini_production_relay(
     payload = await _proxy_voice_runtime_json(
         "POST",
         f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
-        json_body={"event": body.event},
+        json_body=body.voice_relay_payload(),
     )
     payload["stream_url"] = _build_gemini_production_events_stream_url(body.session_id)
     return payload

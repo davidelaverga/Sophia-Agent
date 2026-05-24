@@ -471,13 +471,39 @@ describe('buildVoiceTelemetryReport', () => {
         },
         {
           seq: 4,
+          recordedAt: '2026-05-20T12:00:01.150Z',
+          category: 'voice-session',
+          name: 'gemini-barge-in-transcript-handoff',
+          payload: {
+            diagnostic: {
+              transcriptPreview: 'Actually pause there',
+              captured: true,
+              promoted: true,
+              ignored: false,
+              duplicateSuppressed: false,
+              promotionLatencyMs: 80,
+              newTurnDispatched: true,
+              newTurnDispatchBlockedReason: 'none',
+              bargeInTranscriptCapturedCount: 1,
+              bargeInTranscriptPromotedCount: 1,
+              bargeInTranscriptPromotionLatencyMs: 80,
+              bargeInTranscriptIgnoredCount: 0,
+              bargeInTranscriptDuplicateSuppressedCount: 0,
+              lastBargeInTranscriptPreview: 'Actually pause there',
+              bargeInNewTurnDispatchCount: 1,
+              bargeInNewTurnDispatchBlockedReason: 'none',
+            },
+          },
+        },
+        {
+          seq: 5,
           recordedAt: '2026-05-20T12:00:01.200Z',
           category: 'voice-session',
           name: 'stale-assistant-transcript-ignored',
           payload: { reason: 'interrupted_or_pre_barge_in_assistant_transcript' },
         },
         {
-          seq: 5,
+          seq: 6,
           recordedAt: '2026-05-20T12:00:02.000Z',
           category: 'voice-session',
           name: 'gemini-relay-trace',
@@ -501,7 +527,7 @@ describe('buildVoiceTelemetryReport', () => {
           },
         },
         {
-          seq: 6,
+          seq: 7,
           recordedAt: '2026-05-20T12:00:03.000Z',
           category: 'voice-session',
           name: 'gemini-tool-call-ledger',
@@ -539,6 +565,14 @@ describe('buildVoiceTelemetryReport', () => {
       inputFrameOnlyNotBargeInCount: 2,
       candidateFramesDidNotConfirmCount: 2,
       suppressionBlockedBecauseNoIntentCount: 0,
+      bargeInTranscriptCapturedCount: 1,
+      bargeInTranscriptPromotedCount: 1,
+      bargeInTranscriptPromotionLatencyMs: 80,
+      bargeInTranscriptIgnoredCount: 0,
+      bargeInTranscriptDuplicateSuppressedCount: 0,
+      lastBargeInTranscriptPreview: 'Actually pause there',
+      bargeInNewTurnDispatchCount: 1,
+      bargeInNewTurnDispatchBlockedReason: 'none',
       maxOldestQueuedAgeMs: 109707,
       maxTranscriptRelayLatencyMs: 109931,
       unresolvedToolCallCount: 1,
@@ -811,6 +845,23 @@ describe('buildVoiceTelemetryReport', () => {
         },
         {
           seq: 5,
+          recordedAt: '2026-05-20T12:00:01.100Z',
+          category: 'voice-session',
+          name: 'gemini-barge-in-transcript-handoff',
+          payload: {
+            diagnostic: {
+              providerReceiveSequence: 11,
+              relayCorrelationId: 'relay-11',
+              transcriptPreview: 'Quick question before I go. Reflect briefly on what I just said.',
+              captured: true,
+              promoted: true,
+              newTurnDispatched: true,
+              bargeInNewTurnDispatchBlockedReason: 'none',
+            },
+          },
+        },
+        {
+          seq: 6,
           recordedAt: '2026-05-20T12:00:01.200Z',
           category: 'voice-sse',
           name: 'sophia.user_transcript',
@@ -824,14 +875,14 @@ describe('buildVoiceTelemetryReport', () => {
           },
         },
         {
-          seq: 6,
+          seq: 7,
           recordedAt: '2026-05-20T12:00:01.400Z',
           category: 'voice-session',
           name: 'gemini-interruption',
           payload: { diagnostic: { playbackFlushed: true } },
         },
         {
-          seq: 7,
+          seq: 8,
           recordedAt: '2026-05-20T12:00:01.450Z',
           category: 'voice-session',
           name: 'gemini-tool-call-ledger',
@@ -849,7 +900,7 @@ describe('buildVoiceTelemetryReport', () => {
           },
         },
         {
-          seq: 8,
+          seq: 9,
           recordedAt: '2026-05-20T12:00:01.600Z',
           category: 'voice-session',
           name: 'gemini-input-audio-activity',
@@ -863,7 +914,7 @@ describe('buildVoiceTelemetryReport', () => {
           },
         },
         {
-          seq: 9,
+          seq: 10,
           recordedAt: '2026-05-20T12:00:01.610Z',
           category: 'voice-session',
           name: 'gemini-input-audio-activity',
@@ -882,6 +933,9 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.turnCaptureDiagnostics.summary.counts.inputAudioFrameSent).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.counts.providerInputTranscription).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.counts.publicUserTranscript).toBe(1);
+    expect(report.turnCaptureDiagnostics.summary.counts.bargeInTranscriptCaptured).toBe(1);
+    expect(report.turnCaptureDiagnostics.summary.counts.bargeInTranscriptPromoted).toBe(1);
+    expect(report.turnCaptureDiagnostics.summary.counts.bargeInNewTurnDispatch).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.counts.interruptions).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.counts.playbackFlush).toBe(1);
     expect(report.turnCaptureDiagnostics.summary.counts.toolCancellation).toBe(1);

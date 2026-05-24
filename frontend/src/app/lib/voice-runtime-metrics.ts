@@ -223,6 +223,14 @@ export type GeminiSessionTelemetry = {
     candidateFramesDidNotConfirmCount: number
     candidateExpiredCount: number
     suppressionBlockedBecauseNoIntentCount: number
+    bargeInTranscriptCapturedCount: number
+    bargeInTranscriptPromotedCount: number
+    bargeInTranscriptPromotionLatencyMs: number | null
+    bargeInTranscriptIgnoredCount: number
+    bargeInTranscriptDuplicateSuppressedCount: number
+    lastBargeInTranscriptPreview: string | null
+    bargeInNewTurnDispatchCount: number
+    bargeInNewTurnDispatchBlockedReason: string
     staleSuppressionArmedAt: string | null
     staleSuppressionArmedBy: string | null
     assistantAudioDropReason: string | null
@@ -857,6 +865,16 @@ function latestStringFromRecords(records: Record<string, unknown>[], key: string
   return null
 }
 
+function latestFiniteFromRecords(records: Record<string, unknown>[], key: string): number | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const value = asFiniteNumber(records[index]?.[key])
+    if (value !== null) {
+      return value
+    }
+  }
+  return null
+}
+
 function latestRelayDurationFor(
   records: Record<string, unknown>[],
   predicate: (record: Record<string, unknown>) => boolean,
@@ -944,6 +962,10 @@ function buildSessionTelemetry(params: {
       .filter((event) => event.name === "gemini-input-audio-activity")
       .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
       .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
+    const bargeInTranscriptDiagnostics = activeEvents
+      .filter((event) => event.name === "gemini-barge-in-transcript-handoff")
+      .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+      .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
     const toolDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-tool-loop-diagnostic")
     const providerPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event")
     const providerCorrelationPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event-correlation")
@@ -1016,6 +1038,43 @@ function buildSessionTelemetry(params: {
       hookTelemetry?.suppressionBlockedBecauseNoIntentCount ?? 0,
       maxFiniteFromRecords(bargeInDiagnostics, "suppressionBlockedBecauseNoIntentCount") ?? 0,
     )
+    const bargeInTranscriptCapturedCount = Math.max(
+      hookTelemetry?.bargeInTranscriptCapturedCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptCapturedCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.captured) === true).length,
+    )
+    const bargeInTranscriptPromotedCount = Math.max(
+      hookTelemetry?.bargeInTranscriptPromotedCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptPromotedCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.promoted) === true).length,
+    )
+    const bargeInTranscriptPromotionLatencyMs = latestFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptPromotionLatencyMs")
+      ?? latestFiniteFromRecords(bargeInTranscriptDiagnostics, "promotionLatencyMs")
+      ?? hookTelemetry?.bargeInTranscriptPromotionLatencyMs
+      ?? null
+    const bargeInTranscriptIgnoredCount = Math.max(
+      hookTelemetry?.bargeInTranscriptIgnoredCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptIgnoredCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.ignored) === true).length,
+    )
+    const bargeInTranscriptDuplicateSuppressedCount = Math.max(
+      hookTelemetry?.bargeInTranscriptDuplicateSuppressedCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptDuplicateSuppressedCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.duplicateSuppressed) === true).length,
+    )
+    const lastBargeInTranscriptPreview = latestStringFromRecords(bargeInTranscriptDiagnostics, "lastBargeInTranscriptPreview")
+      ?? latestStringFromRecords(bargeInTranscriptDiagnostics, "transcriptPreview")
+      ?? hookTelemetry?.lastBargeInTranscriptPreview
+      ?? null
+    const bargeInNewTurnDispatchCount = Math.max(
+      hookTelemetry?.bargeInNewTurnDispatchCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInNewTurnDispatchCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.newTurnDispatched) === true).length,
+    )
+    const bargeInNewTurnDispatchBlockedReason = latestStringFromRecords(bargeInTranscriptDiagnostics, "bargeInNewTurnDispatchBlockedReason")
+      ?? latestStringFromRecords(bargeInTranscriptDiagnostics, "newTurnDispatchBlockedReason")
+      ?? hookTelemetry?.bargeInNewTurnDispatchBlockedReason
+      ?? "none"
     const bargeInCandidateFrameCount = Math.max(
       hookTelemetry?.bargeInCandidateFrameCount ?? 0,
       maxFiniteFromRecords(bargeInDiagnostics, "bargeInCandidateFrameCount") ?? 0,
@@ -1179,6 +1238,14 @@ function buildSessionTelemetry(params: {
         candidateFramesDidNotConfirmCount,
         candidateExpiredCount,
         suppressionBlockedBecauseNoIntentCount,
+        bargeInTranscriptCapturedCount,
+        bargeInTranscriptPromotedCount,
+        bargeInTranscriptPromotionLatencyMs,
+        bargeInTranscriptIgnoredCount,
+        bargeInTranscriptDuplicateSuppressedCount,
+        lastBargeInTranscriptPreview,
+        bargeInNewTurnDispatchCount,
+        bargeInNewTurnDispatchBlockedReason,
         staleSuppressionArmedAt,
         staleSuppressionArmedBy,
         assistantAudioDropReason,

@@ -284,6 +284,8 @@ describe('VoiceMetricsPanel', () => {
     expect(screen.getByText('Runtime: Gemini Live')).toBeInTheDocument();
     expect(screen.getByText('Gemini transport + session')).toBeInTheDocument();
     expect(screen.getByText('Gemini live activity')).toBeInTheDocument();
+    expect(screen.getByText('Barge-in transcript captured')).toBeInTheDocument();
+    expect(screen.getByText('Barge-in dispatches')).toBeInTheDocument();
     expect(screen.getByText('Tool loop')).toBeInTheDocument();
     expect(screen.queryByText('Join latency')).not.toBeInTheDocument();
     expect(screen.queryByText('Raw backend done')).not.toBeInTheDocument();

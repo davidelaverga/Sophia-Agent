@@ -627,13 +627,39 @@ describe('buildVoiceDeveloperMetrics', () => {
       }),
       buildEvent({
         seq: 6,
+        at: '2026-04-07T12:00:01.180Z',
+        category: 'voice-session',
+        name: 'gemini-barge-in-transcript-handoff',
+        payload: {
+          diagnostic: {
+            transcriptPreview: 'Actually pause there',
+            captured: true,
+            promoted: true,
+            ignored: false,
+            duplicateSuppressed: false,
+            promotionLatencyMs: 90,
+            newTurnDispatched: true,
+            newTurnDispatchBlockedReason: 'none',
+            bargeInTranscriptCapturedCount: 1,
+            bargeInTranscriptPromotedCount: 1,
+            bargeInTranscriptPromotionLatencyMs: 90,
+            bargeInTranscriptIgnoredCount: 0,
+            bargeInTranscriptDuplicateSuppressedCount: 0,
+            lastBargeInTranscriptPreview: 'Actually pause there',
+            bargeInNewTurnDispatchCount: 1,
+            bargeInNewTurnDispatchBlockedReason: 'none',
+          },
+        },
+      }),
+      buildEvent({
+        seq: 7,
         at: '2026-04-07T12:00:01.200Z',
         category: 'voice-session',
         name: 'stale-assistant-transcript-ignored',
         payload: { reason: 'interrupted_or_pre_barge_in_assistant_transcript' },
       }),
       buildEvent({
-        seq: 7,
+        seq: 8,
         at: '2026-04-07T12:00:01.300Z',
         category: 'voice-session',
         name: 'gemini-tool-call-ledger',
@@ -669,6 +695,14 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.inputFrameOnlyNotBargeInCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.candidateFramesDidNotConfirmCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.suppressionBlockedBecauseNoIntentCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.bargeInTranscriptCapturedCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.bargeInTranscriptPromotedCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.bargeInTranscriptPromotionLatencyMs).toBe(90);
+    expect(metrics.sessionTelemetry.gemini?.bargeInTranscriptIgnoredCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.bargeInTranscriptDuplicateSuppressedCount).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.lastBargeInTranscriptPreview).toBe('Actually pause there');
+    expect(metrics.sessionTelemetry.gemini?.bargeInNewTurnDispatchCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.bargeInNewTurnDispatchBlockedReason).toBe('none');
     expect(metrics.sessionTelemetry.gemini?.staleSuppressionArmedAt).toBe('2026-04-07T12:00:01.000Z');
     expect(metrics.sessionTelemetry.gemini?.staleSuppressionArmedBy).toBe('provider_interruption');
     expect(metrics.sessionTelemetry.gemini?.assistantAudioDropReason).toBe('interrupted_response_id');
