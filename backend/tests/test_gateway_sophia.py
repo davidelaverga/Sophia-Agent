@@ -415,9 +415,13 @@ class TestListMemories:
 
 class TestCreateMemory:
     def test_create_memory_returns_item(self, client, mock_review_store):
-        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
-            {"id": "m1", "memory": "Likes pizza", "categories": ["food"]}
-        ]) as mock_add:
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=(
+                [{"id": "m1", "memory": "Likes pizza", "categories": ["food"]}],
+                "resolved",
+            ),
+        ) as mock_add:
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Likes pizza", "category": "food", "metadata": {"status": "approved"}},
@@ -441,9 +445,12 @@ class TestCreateMemory:
             sync_state="manual",
         )
 
-    def test_create_memory_empty_result_returns_503(self, client):
-        """When add_memories returns empty (Mem0 unavailable), return 503."""
-        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[]):
+    def test_create_memory_unavailable_returns_503(self, client):
+        """When Mem0 client cannot be initialized (outcome=unavailable), return 503."""
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([], "unavailable"),
+        ):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Keeps going", "metadata": {"status": "approved"}},
@@ -451,10 +458,57 @@ class TestCreateMemory:
         assert resp.status_code == 503
         assert resp.json()["detail"] == "Memory service unavailable"
 
+    def test_create_memory_failed_returns_503(self, client):
+        """When Mem0 add raised or event reached FAILED (outcome=failed), return 503."""
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([], "failed"),
+        ):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "Keeps going", "metadata": {"status": "approved"}},
+            )
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Memory service unavailable"
+
+    def test_create_memory_completed_empty_returns_200_noop(self, client, mock_review_store):
+        """Codex P2 R10: when Mem0 succeeds but extracts no memory (low-signal
+        text), return 200 with a synthesized no-op MemoryItem, NOT 503.
+
+        Returning 503 here forces clients to retry a guaranteed-to-fail-again
+        request. The new contract returns a deterministic application-level
+        result with ``metadata.mem0_sync_state="no_extraction"`` so callers
+        can render "we processed this but didn't store it" without polling.
+        """
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([], "completed_empty"),
+        ):
+            resp = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "the", "metadata": {"status": "approved"}},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["content"] == "the"
+        assert data["metadata"]["mem0_sync_state"] == "no_extraction", (
+            "completed_empty MUST surface as mem0_sync_state=no_extraction "
+            "so clients don't render this as a real memory or retry"
+        )
+        # Stable placeholder ID prefix marks the response as non-persistent.
+        assert data["id"].startswith("local:noext:"), (
+            f"Expected local:noext: prefix to mark non-persistent placeholder; "
+            f"got {data['id']!r}"
+        )
+        # Critically: no review_metadata write — the item isn't a real memory.
+        mock_review_store["upsert"].assert_not_called()
+
     def test_create_memory_accepts_id_only_resolved_memory(self, client, mock_review_store):
-        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
-            {"id": "mem_1"}
-        ]):
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([{"id": "mem_1"}], "resolved"),
+        ):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Resolved memory", "metadata": {"status": "approved"}},
@@ -480,9 +534,10 @@ class TestCreateMemory:
         pending creates with identical text get distinct local handles
         (see test_create_memory_duplicate_content_distinct_local_ids below).
         """
-        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
-            {"event_id": "evt_1", "memory": None}
-        ]):
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([{"event_id": "evt_1", "memory": None}], "queued"),
+        ):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Queued memory", "category": "lesson", "metadata": {"status": "approved"}},
@@ -511,13 +566,13 @@ class TestCreateMemory:
         )
 
     def test_create_memory_offloads_add_memories_to_thread(self, client, mock_review_store):
-        """create_memory MUST run the sync add_memories in asyncio.to_thread.
+        """create_memory MUST run the sync add_memories_with_outcome in asyncio.to_thread.
 
-        add_memories can block up to ~30s while polling Mem0 events. Calling it
-        directly from an async FastAPI handler stalls the event loop and degrades
-        responsiveness for concurrent requests on the same worker. Codex P2
-        review on PR #130 flagged this. This test pins the contract by patching
-        asyncio.to_thread and asserting it was called.
+        add_memories_with_outcome can block up to ~30s while polling Mem0 events.
+        Calling it directly from an async FastAPI handler stalls the event loop
+        and degrades responsiveness for concurrent requests on the same worker.
+        Codex P2 review on PR #130 flagged this. This test pins the contract by
+        patching asyncio.to_thread and asserting it was called.
         """
         from unittest.mock import patch as mock_patch
 
@@ -525,11 +580,11 @@ class TestCreateMemory:
 
         async def _fake_to_thread(func, *args, **kwargs):
             # Capture which sync function was offloaded so we can assert it
-            # was add_memories, not something else.
+            # was add_memories_with_outcome, not something else.
             captured["func"] = func
             captured["args"] = args
             captured["kwargs"] = kwargs
-            return [{"event_id": "evt_offload", "memory": None}]
+            return ([{"event_id": "evt_offload", "memory": None}], "queued")
 
         with mock_patch(
             "app.gateway.routers.sophia.asyncio.to_thread",
@@ -541,9 +596,11 @@ class TestCreateMemory:
             )
 
         assert resp.status_code == 202
-        assert spy.call_count == 1, "add_memories MUST be offloaded via asyncio.to_thread"
+        assert spy.call_count == 1, (
+            "add_memories_with_outcome MUST be offloaded via asyncio.to_thread"
+        )
         # The first positional arg of to_thread is the sync callable
-        assert captured["func"].__name__ == "add_memories"
+        assert captured["func"].__name__ == "add_memories_with_outcome"
         # Verify the kwargs we expect
         assert captured["kwargs"]["user_id"] == "test_user"
         assert captured["kwargs"]["session_id"] == "manual-create"
@@ -560,10 +617,10 @@ class TestCreateMemory:
         event_id discriminator, the IDs differ even when content is identical.
         """
         with patch(
-            "deerflow.sophia.mem0_client.add_memories",
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
             side_effect=[
-                [{"event_id": "evt_first", "memory": None}],
-                [{"event_id": "evt_second", "memory": None}],
+                ([{"event_id": "evt_first", "memory": None}], "queued"),
+                ([{"event_id": "evt_second", "memory": None}], "queued"),
             ],
         ):
             resp1 = client.post(
@@ -588,9 +645,13 @@ class TestCreateMemory:
 
     def test_create_memory_raw_event_with_nested_memory_returns_pending(self, client, mock_review_store):
         """Raw add results can include nested memory payloads but still be event wrappers."""
-        with patch("deerflow.sophia.mem0_client.add_memories", return_value=[
-            {"id": "evt_1", "memory": {"id": "mem_1", "memory": "Queued memory"}}
-        ]):
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=(
+                [{"id": "evt_1", "memory": {"id": "mem_1", "memory": "Queued memory"}}],
+                "resolved",
+            ),
+        ):
             resp = client.post(
                 "/api/sophia/test_user/memories",
                 json={"text": "Queued memory", "metadata": {"status": "approved"}},

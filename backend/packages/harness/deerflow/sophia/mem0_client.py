@@ -628,6 +628,28 @@ def _expiration_for_importance(importance: float | str | None) -> str | None:
     return None
 
 
+#: Outcome strings returned by ``add_memories_with_outcome``.
+#:
+#: - ``"resolved"``         — Mem0 returned memories (sync) or async events
+#:                            reached SUCCEEDED/COMPLETED with non-empty payload.
+#: - ``"completed_empty"``  — Mem0 reported success but extracted no memories.
+#:                            This is a valid outcome for low-signal content
+#:                            (definitions, single-word inputs, etc.) and is
+#:                            NOT a service failure. Callers should NOT treat
+#:                            this as 503 / retryable.
+#: - ``"queued"``           — async events timed out before reaching terminal
+#:                            status; raw event wrappers are returned for
+#:                            later reconciliation. Caller should surface a
+#:                            202-style pending response.
+#: - ``"failed"``           — Mem0 reported FAILED status, or ``client.add()``
+#:                            raised. Memory was NOT persisted. Caller should
+#:                            treat this as 502 / 503 (service error).
+#: - ``"unavailable"``      — Mem0 client could not be initialized
+#:                            (missing API key, SDK, or init crash). Caller
+#:                            should treat this as 503 (configuration issue).
+MemoryAddOutcome = str
+
+
 def add_memories(
     user_id: str,
     messages: list[dict],
@@ -638,22 +660,57 @@ def add_memories(
 ) -> list[dict]:
     """Write memories to Mem0 for a user session using v3 SDK.
 
+    Backwards-compatible thin wrapper around ``add_memories_with_outcome``.
+    Existing callers that only care about the memory list keep their
+    current contract; callers that need to differentiate
+    "completed-empty" from "service failure" should use
+    ``add_memories_with_outcome`` instead.
+    """
+    memories, _outcome = add_memories_with_outcome(
+        user_id,
+        messages,
+        session_id,
+        metadata=metadata,
+        timestamp=timestamp,
+    )
+    return memories
+
+
+def add_memories_with_outcome(
+    user_id: str,
+    messages: list[dict],
+    session_id: str,
+    *,
+    metadata: dict | None = None,
+    timestamp: int | None = None,
+) -> tuple[list[dict], MemoryAddOutcome]:
+    """Write memories to Mem0 and return BOTH the memories AND the outcome.
+
     metadata is passed directly to the v3 add() call (no REST backfill).
     importance is translated into expiration_date automatically.
     session_id is persisted as run_id so session-scoped recap retrieval
     remains exact.
 
     v3 add() is async-by-default; this helper blocks until pending
-    events resolve (up to a default timeout) and returns the resolved
-    memory dicts.  If the timeout elapses it falls back to the raw
-    add-result payload so callers still have event IDs for later polling.
+    events resolve (up to a default timeout). The returned outcome
+    string lets the caller distinguish:
 
-    Thread-safe: invalidates the user cache so subsequent searches reflect
-    the new data.
+      - ``"resolved"``        — success, memories returned
+      - ``"completed_empty"`` — success but Mem0 extracted nothing (200 no-op)
+      - ``"queued"``          — timeout, returned event wrappers (202 pending)
+      - ``"failed"``          — Mem0 add or event reached FAILED (503)
+      - ``"unavailable"``     — client could not be initialized (503)
+
+    Codex P2 review on PR #130 R10: the gateway ``create_memory``
+    endpoint was returning 503 for completed-empty cases, forcing
+    pointless retries on valid low-signal inputs.
+
+    Thread-safe: invalidates the user cache on terminal outcomes so
+    subsequent searches reflect the new data.
     """
     client = _get_client()
     if client is None:
-        return []
+        return [], "unavailable"
 
     resolved_metadata = dict(metadata) if metadata else {}
 
@@ -705,7 +762,7 @@ def add_memories(
         result = client.add(**add_kwargs)
     except Exception:
         logger.warning("Mem0 add failed for user %s", user_id, exc_info=True)
-        return []
+        return [], "failed"
 
     normalized = _normalize_add_result(result)
     first_item = normalized[0] if normalized else None
@@ -742,7 +799,7 @@ def add_memories(
                 event_ids,
                 exc_info=True,
             )
-            return []
+            return [], "failed"
         if not still_pending:
             # All events reached terminal status (SUCCEEDED / COMPLETED).
             # Differentiate "completed with memories" from "completed empty"
@@ -769,7 +826,8 @@ def add_memories(
                     event_ids,
                 )
             invalidate_user_cache(user_id)
-            return resolved  # may be [] on completed-empty — that's correct
+            outcome: MemoryAddOutcome = "resolved" if resolved else "completed_empty"
+            return resolved, outcome
         # Real timeout: some events never reached terminal status.
         # Return the raw add result so downstream can persist event_ids
         # for later reconciliation.
@@ -783,9 +841,15 @@ def add_memories(
             len(still_pending),
             sorted(still_pending),
         )
+        invalidate_user_cache(user_id)
+        return normalized, "queued"
 
     invalidate_user_cache(user_id)
-    return normalized
+    # Sync path: client.add() returned memory records directly (no event_ids).
+    # An empty list here means Mem0 processed the input but extracted nothing —
+    # a valid outcome, not a service failure.
+    sync_outcome: MemoryAddOutcome = "resolved" if normalized else "completed_empty"
+    return normalized, sync_outcome
 
 
 def wait_for_pending_events(
@@ -845,7 +909,8 @@ def wait_for_pending_events(
     if not event_ids:
         return [], set()
 
-    poll = _select_event_poll_strategy(user_id)
+    deadline = time.monotonic() + timeout_seconds
+    poll = _select_event_poll_strategy(user_id, deadline)
     if poll is None:
         logger.warning(
             "Mem0 event APIs unavailable for user %s (no SDK methods, no REST "
@@ -856,7 +921,6 @@ def wait_for_pending_events(
         # rather than silently dropping the event_ids.
         return [], set(event_ids)
 
-    deadline = time.monotonic() + timeout_seconds
     resolved: list[dict] = []
     pending = set(event_ids)
 
@@ -883,7 +947,9 @@ def wait_for_pending_events(
     return resolved, pending
 
 
-def _select_event_poll_strategy(user_id: str) -> Callable[[set[str], list[dict]], None] | None:
+def _select_event_poll_strategy(
+    user_id: str, deadline: float
+) -> Callable[[set[str], list[dict]], None] | None:
     """Pick the polling strategy ONCE up front so the hot loop stays branch-free.
 
     Priority:
@@ -892,6 +958,13 @@ def _select_event_poll_strategy(user_id: str) -> Callable[[set[str], list[dict]]
       3. REST ``GET /v1/events/`` via httpx — the only strategy that works on
          the pinned ``mem0ai>=2.0.2`` SDK, which exposes neither SDK method.
 
+    The ``deadline`` (monotonic clock value) is threaded into strategies that
+    can iterate internally (paginated SDK, REST) so they break early instead
+    of blowing past ``wait_for_pending_events``'s outer timeout. Codex P2
+    review on PR #130 R10: without this, the REST path could do 10 page
+    requests × 10s timeout = 100s, blocking worker threads far longer than
+    the advertised 30s ceiling under Mem0 slowness or outage.
+
     Returns a closure that takes ``(pending, resolved)`` and mutates them in
     place. Returns ``None`` if no strategy is available (no SDK client, no
     httpx, no API key) — caller logs warning and short-circuits.
@@ -899,14 +972,16 @@ def _select_event_poll_strategy(user_id: str) -> Callable[[set[str], list[dict]]
     client = _get_client()
     if client is not None and hasattr(client, "get_event"):
         return lambda pending, resolved: _poll_events_via_sdk_per_id(
-            client, pending, resolved
+            client, pending, resolved, deadline=deadline
         )
     if client is not None and hasattr(client, "get_events"):
         return lambda pending, resolved: _poll_events_via_sdk_paginated(
-            client, user_id, pending, resolved
+            client, user_id, pending, resolved, deadline=deadline
         )
     if _rest_fallback_available():
-        return _poll_events_via_rest
+        return lambda pending, resolved: _poll_events_via_rest(
+            pending, resolved, deadline=deadline
+        )
     return None
 
 
@@ -942,9 +1017,18 @@ def _poll_events_via_sdk_per_id(
     client: Any,
     pending: set[str],
     resolved: list[dict],
+    *,
+    deadline: float | None = None,
 ) -> None:
-    """Per-event-ID SDK lookup. No pagination, exact match."""
+    """Per-event-ID SDK lookup. No pagination, exact match.
+
+    ``deadline`` (monotonic clock) breaks the per-ID loop early when the
+    outer ``wait_for_pending_events`` cap is about to fire — relevant
+    when ``pending`` is large and SDK calls are slow.
+    """
     for evt_id in list(pending):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         event_result = client.get_event(event_id=evt_id)
         events, _ = _normalize_paginated_result(event_result)
         _consume_events(events, pending, resolved, fallback_id=evt_id)
@@ -955,10 +1039,18 @@ def _poll_events_via_sdk_paginated(
     user_id: str,
     pending: set[str],
     resolved: list[dict],
+    *,
+    deadline: float | None = None,
 ) -> None:
-    """Paginated SDK list. Walks every page so off-page events aren't missed."""
+    """Paginated SDK list. Walks every page so off-page events aren't missed.
+
+    ``deadline`` (monotonic clock) breaks the page-walk loop early when the
+    outer ``wait_for_pending_events`` cap is about to fire.
+    """
     cursor: str | None = None
     while True:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
         kwargs: dict[str, Any] = {"filters": {"user_id": user_id}}
         if cursor:
             kwargs["cursor"] = cursor
@@ -971,11 +1063,15 @@ def _poll_events_via_sdk_paginated(
 
 _REST_EVENTS_PAGE_SIZE = 50
 _REST_EVENTS_MAX_PAGES = 10  # 500 events of buffer for busy projects
+_REST_EVENTS_DEFAULT_REQUEST_TIMEOUT = 10.0
+_REST_EVENTS_MIN_REQUEST_TIMEOUT = 0.5
 
 
 def _poll_events_via_rest(
     pending: set[str],
     resolved: list[dict],
+    *,
+    deadline: float | None = None,
 ) -> None:
     """REST ``GET /v1/events/`` fallback for SDKs without get_event(s).
 
@@ -991,6 +1087,19 @@ def _poll_events_via_rest(
     alternative would walk the entire event log (often 10k+) on every poll
     cycle, which is wasteful for the common case where events are within
     the first 1-2 pages.
+
+    Deadline honouring (Codex P2 R10): if ``deadline`` (monotonic clock) is
+    supplied, every page request:
+
+      1. Aborts the loop early when ``time.monotonic() >= deadline``.
+      2. Caps the per-request httpx timeout to the remaining budget so a
+         single slow request can't itself overrun ``wait_for_pending_events``'s
+         advertised ceiling by more than the per-request floor
+         (``_REST_EVENTS_MIN_REQUEST_TIMEOUT`` = 0.5s).
+
+    Without this, an unhealthy Mem0 backend could keep a worker thread
+    blocked for ~100s (10 pages × 10s timeout each) even with a 30s outer
+    cap, tying up gateway request threads and delaying unrelated calls.
     """
     httpx = _httpx_module()
     api_key = os.environ.get("MEM0_API_KEY", "").strip()
@@ -1000,16 +1109,36 @@ def _poll_events_via_rest(
     headers = {"Authorization": f"Token {api_key}"}
     url: str | None = f"{base_url}/v1/events/?limit={_REST_EVENTS_PAGE_SIZE}"
 
-    with httpx.Client(timeout=10.0) as http:
+    with httpx.Client(timeout=_REST_EVENTS_DEFAULT_REQUEST_TIMEOUT) as http:
         for _ in range(_REST_EVENTS_MAX_PAGES):
             if url is None or not pending:
                 break
-            resp = http.get(url, headers=headers)
+            per_request_timeout = _rest_per_request_timeout(deadline)
+            if per_request_timeout is None:
+                # Outer deadline already elapsed — stop polling immediately.
+                break
+            resp = http.get(url, headers=headers, timeout=per_request_timeout)
             resp.raise_for_status()
             data = resp.json()
             events = _events_from_rest_payload(data)
             _consume_events(events, pending, resolved)
             url = _resolve_rest_next_url(data, base_url)
+
+
+def _rest_per_request_timeout(deadline: float | None) -> float | None:
+    """Compute the per-request httpx timeout for a REST event poll iteration.
+
+    Returns ``None`` when the deadline has already elapsed (caller should
+    abort the loop). Otherwise returns ``min(default, remaining)`` floored
+    at ``_REST_EVENTS_MIN_REQUEST_TIMEOUT`` so the request still has time
+    to complete a healthy reply.
+    """
+    if deadline is None:
+        return _REST_EVENTS_DEFAULT_REQUEST_TIMEOUT
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return None
+    return max(_REST_EVENTS_MIN_REQUEST_TIMEOUT, min(_REST_EVENTS_DEFAULT_REQUEST_TIMEOUT, remaining))
 
 
 def _events_from_rest_payload(data: Any) -> list[dict]:

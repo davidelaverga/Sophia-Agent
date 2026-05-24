@@ -435,6 +435,39 @@ def _is_memory_record(item: dict) -> bool:
     return True
 
 
+def _no_extraction_memory_item(content: str, metadata: dict) -> MemoryItem:
+    """Synthesize a 200-OK MemoryItem for the completed-empty case.
+
+    Codex P2 review on PR #130 R10: Mem0 can legitimately succeed without
+    extracting any memory (low-signal content like definitions or single
+    words). The endpoint previously returned 503 here, forcing clients to
+    retry a guaranteed-to-fail-again request. Returning a deterministic
+    application-level result with ``mem0_sync_state="no_extraction"`` lets
+    callers render a "we processed this but didn't save anything" message
+    without polling.
+
+    The ID is intentionally not registered in review_metadata — it's a
+    transient response shape, not a persisted record. Clients should treat
+    ``metadata.mem0_sync_state == "no_extraction"`` as "do not retry; do
+    not display as a real memory".
+    """
+    response_metadata = dict(metadata or {})
+    response_metadata["mem0_sync_state"] = "no_extraction"
+    # Stable per-content placeholder ID so identical retries don't generate
+    # divergent IDs — but clearly marked as a non-persistent local handle
+    # via the ``local:noext:`` prefix.
+    local_id = _local_memory_id_for_content(content) or "local:noext"
+    if local_id.startswith("local:") and not local_id.startswith("local:noext:"):
+        local_id = "local:noext:" + local_id.split(":", 1)[1]
+    return MemoryItem(
+        id=local_id,
+        content=content,
+        category=response_metadata.get("category"),
+        session_id="manual-create",
+        metadata=response_metadata,
+    )
+
+
 def _pending_memory_item_from_add_result(
     item: dict,
     *,
@@ -799,27 +832,56 @@ async def create_memory(user_id: str, body: MemoryCreateRequest, response: Respo
         sorted((body.metadata or {}).keys()),
     )
     try:
-        from deerflow.sophia.mem0_client import add_memories
+        from deerflow.sophia.mem0_client import add_memories_with_outcome
 
         memory_metadata = dict(body.metadata or {})
         if body.category and "category" not in memory_metadata:
             memory_metadata["category"] = body.category
 
-        # ``add_memories`` is synchronous and can block up to ~30s while it
-        # polls Mem0 events to wait for terminal status (see
+        # ``add_memories_with_outcome`` is synchronous and can block up to
+        # ~30s while it polls Mem0 events to wait for terminal status (see
         # ``wait_for_pending_events`` in mem0_client). Run it in a worker
         # thread so the async route doesn't stall the event loop for any
-        # other concurrent requests on this worker.
-        created = await asyncio.to_thread(
-            add_memories,
+        # other concurrent requests on this worker. The outcome string
+        # (Codex P2 R10) lets us distinguish "Mem0 succeeded but extracted
+        # nothing" (200 no-op) from "Mem0 unavailable / failed" (503).
+        created, outcome = await asyncio.to_thread(
+            add_memories_with_outcome,
             user_id=user_id,
             messages=[{"role": "user", "content": body.text}],
             session_id="manual-create",
             metadata=memory_metadata or None,
         )
 
+        if outcome in ("unavailable", "failed"):
+            logger.warning(
+                "Mem0 add did not persist for user %s — outcome=%s", user_id, outcome
+            )
+            raise HTTPException(status_code=503, detail="Memory service unavailable")
+
+        if outcome == "completed_empty":
+            # Mem0 processed the input but extracted no memories — a valid
+            # outcome for low-signal text (definitions, single words, etc.).
+            # Return 200 with a synthesized no-op MemoryItem so the client
+            # sees a deterministic application-level result and doesn't
+            # retry. (Codex P2 review on PR #130 R10.)
+            logger.info(
+                "Mem0 create_memory completed empty for user %s — "
+                "no extraction (text_len=%d)",
+                user_id,
+                len(body.text or ""),
+            )
+            return _no_extraction_memory_item(body.text, memory_metadata)
+
         if not created:
-            logger.warning("Mem0 add returned empty for user %s — memory not persisted", user_id)
+            # Defensive: outcome was "resolved"/"queued" but the list is
+            # empty. Should be unreachable given the contract, but treat
+            # as service error rather than silently 200-ing.
+            logger.warning(
+                "Mem0 add returned empty list with outcome=%s for user %s",
+                outcome,
+                user_id,
+            )
             raise HTTPException(status_code=503, detail="Memory service unavailable")
 
         first = created[0]
@@ -865,6 +927,8 @@ async def create_memory(user_id: str, body: MemoryCreateRequest, response: Respo
             first,
         )
         raise HTTPException(status_code=503, detail="Memory service unavailable")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.warning("Failed to create memory for %s: %s", user_id, e)
         raise HTTPException(status_code=503, detail="Memory service unavailable")

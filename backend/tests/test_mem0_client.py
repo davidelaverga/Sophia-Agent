@@ -760,6 +760,112 @@ class TestAddMemories:
             f"the events as still pending forever."
         )
 
+    def test_add_with_outcome_distinguishes_resolved_completed_empty_queued_failed_unavailable(self):
+        """Codex P2 R10: add_memories_with_outcome returns a (memories, outcome)
+        tuple so callers can branch on the FIVE distinct outcomes that
+        ``add_memories``'s single-list return collapsed:
+
+        - resolved        — got memories
+        - completed_empty — Mem0 succeeded but extracted nothing (200 no-op)
+        - queued          — events timed out; raw wrappers returned (202)
+        - failed          — Mem0EventFailedError or add() raised (503)
+        - unavailable     — client could not be initialized (503)
+
+        Each case is exercised below.
+        """
+        from deerflow.sophia.mem0_client import (
+            Mem0EventFailedError,
+            add_memories_with_outcome,
+        )
+
+        # 1. unavailable: client is None
+        with patch("deerflow.sophia.mem0_client._get_client", return_value=None):
+            memories, outcome = add_memories_with_outcome(
+                "user1", [{"role": "user", "content": "x"}], "sess"
+            )
+            assert memories == []
+            assert outcome == "unavailable"
+
+        # 2. failed: client.add() raises
+        crash_client = MagicMock()
+        crash_client.add.side_effect = RuntimeError("boom")
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=crash_client
+        ):
+            memories, outcome = add_memories_with_outcome(
+                "user1", [{"role": "user", "content": "x"}], "sess"
+            )
+            assert memories == []
+            assert outcome == "failed"
+
+        # 3. failed: Mem0EventFailedError on pending event
+        failed_client = MagicMock()
+        failed_client.add.return_value = [{"event_id": "evt_1", "memory": None}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=failed_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                side_effect=Mem0EventFailedError("fail"),
+            ):
+                memories, outcome = add_memories_with_outcome(
+                    "user1", [{"role": "user", "content": "x"}], "sess"
+                )
+                assert memories == []
+                assert outcome == "failed"
+
+        # 4. resolved: events SUCCEEDED with memories
+        resolved_client = MagicMock()
+        resolved_client.add.return_value = [{"event_id": "evt_ok", "memory": None}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=resolved_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=([{"id": "mem_resolved"}], set()),
+            ):
+                memories, outcome = add_memories_with_outcome(
+                    "user1", [{"role": "user", "content": "x"}], "sess"
+                )
+                assert memories == [{"id": "mem_resolved"}]
+                assert outcome == "resolved"
+
+        # 5. completed_empty: events SUCCEEDED but no memories extracted
+        empty_client = MagicMock()
+        empty_client.add.return_value = [{"event_id": "evt_empty", "memory": None}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=empty_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=([], set()),
+            ):
+                memories, outcome = add_memories_with_outcome(
+                    "user1", [{"role": "user", "content": "x"}], "sess"
+                )
+                assert memories == []
+                assert outcome == "completed_empty", (
+                    "Empty resolved + no pending MUST be 'completed_empty' "
+                    "so the gateway returns 200 no-op, not 503 outage"
+                )
+
+        # 6. queued: timeout with still-pending events
+        timeout_client = MagicMock()
+        timeout_client.add.return_value = [{"event_id": "evt_stuck", "memory": None}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=timeout_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=([], {"evt_stuck"}),
+            ):
+                memories, outcome = add_memories_with_outcome(
+                    "user1", [{"role": "user", "content": "x"}], "sess"
+                )
+                assert outcome == "queued"
+                # Raw event wrappers preserved so the caller can return 202.
+                assert memories == [{"event_id": "evt_stuck", "memory": None}]
+
     def test_add_returns_empty_when_pending_event_fails(self):
         """FAILED async add events are write failures, not pending results."""
         from deerflow.sophia.mem0_client import Mem0EventFailedError, add_memories
@@ -1051,7 +1157,7 @@ class TestWaitForPendingEvents:
             def __exit__(self, *_args):
                 return False
 
-            def get(self, url, headers=None):
+            def get(self, url, headers=None, timeout=None):
                 self.calls.append((url, headers))
                 return FakeResponse(rest_response_body)
 
@@ -1106,7 +1212,7 @@ class TestWaitForPendingEvents:
             def __exit__(self, *_a):  # noqa: ANN204
                 return False
 
-            def get(self, url, headers=None):  # noqa: ANN001
+            def get(self, url, headers=None, timeout=None):  # noqa: ANN001
                 return _Resp()
 
         with (
@@ -1185,7 +1291,7 @@ class TestWaitForPendingEvents:
             def __exit__(self, *_a):
                 return False
 
-            def get(self, url, headers=None):
+            def get(self, url, headers=None, timeout=None):
                 requested_urls.append(url)
                 return responses.pop(0)
 
@@ -1214,6 +1320,99 @@ class TestWaitForPendingEvents:
         assert pending == set()
         assert len(resolved) == 1
         assert resolved[0]["id"] == "mem_resolved"
+
+    def test_rest_fallback_honors_outer_timeout_across_pages(self):
+        """REST poll MUST stop paginating once the outer ``timeout_seconds``
+        deadline elapses.
+
+        Codex P2 review on PR #130 R10: without deadline propagation,
+        ``_poll_events_via_rest`` could do 10 pages × 10s timeout = 100s
+        on an unhealthy Mem0 backend even with a 30s outer cap, blocking
+        worker threads far longer than advertised. This test pins the
+        contract: a slow REST endpoint that takes ~150ms per page is
+        capped at ~0.4s total when timeout_seconds=0.4 (i.e. it must
+        return in roughly the outer cap, not run all 10 pages).
+        """
+        import time as _time
+        from types import SimpleNamespace
+
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["search"])  # no get_event / get_events
+
+        # Always returns "next" so without deadline check we'd walk
+        # _REST_EVENTS_MAX_PAGES pages.
+        def _page_body(page_num: int) -> dict:
+            return {
+                "count": 9999,
+                "next": f"/v1/events/?limit=50&page={page_num + 1}",
+                "results": [
+                    {"id": f"evt_filler_{page_num}", "status": "SUCCEEDED", "results": []}
+                ],
+            }
+
+        request_count = {"n": 0}
+
+        class _Resp:
+            def __init__(self, body):
+                self.body = body
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.body
+
+        class _SlowClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def get(self, url, headers=None, timeout=None):
+                # Simulate a slow Mem0 backend (~150ms per page) so the
+                # outer 0.4s deadline trips after ~2-3 pages instead of
+                # running all 10.
+                _time.sleep(0.15)
+                request_count["n"] += 1
+                return _Resp(_page_body(request_count["n"]))
+
+        start = _time.monotonic()
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch(
+                "deerflow.sophia.mem0_client._httpx_module",
+                return_value=SimpleNamespace(Client=_SlowClient),
+            ),
+            patch.dict("os.environ", {"MEM0_API_KEY": "k"}),
+        ):
+            resolved, pending = wait_for_pending_events(
+                "user1",
+                ["evt_never_appears"],
+                timeout_seconds=0.4,
+                poll_interval=0.05,
+            )
+        elapsed = _time.monotonic() - start
+
+        # Pending wasn't found (we never put it in the results). What we're
+        # asserting is the wall-clock bound: well under the worst-case
+        # 10 pages × 150ms = 1.5s. Outer cap 0.4s + one in-flight page
+        # = ~0.55s upper bound, with healthy slack for CI noise.
+        assert pending == {"evt_never_appears"}
+        assert elapsed < 1.0, (
+            f"REST poll exceeded outer deadline by too much: elapsed={elapsed:.2f}s "
+            f"with timeout_seconds=0.4. Without deadline propagation this "
+            f"would run all _REST_EVENTS_MAX_PAGES=10 pages."
+        )
+        # Should have done multiple pages but NOT all 10.
+        assert 1 <= request_count["n"] < 10, (
+            f"Expected partial pagination respecting deadline; "
+            f"got {request_count['n']} requests"
+        )
 
     def test_returns_pending_set_on_timeout(self):
         """The tuple's second element (pending) reports which IDs timed out.
