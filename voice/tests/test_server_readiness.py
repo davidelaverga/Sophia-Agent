@@ -98,6 +98,79 @@ def test_resolve_invalid_call_id_exception_falls_back_to_local_exception(
     assert resolved.__name__ == "InvalidCallId"
 
 
+def test_resolve_vision_agents_exception_prefers_sdk_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SDKSessionsExceeded(Exception):
+        pass
+
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(MaxConcurrentSessionsExceeded=SDKSessionsExceeded),
+    )
+
+    resolved = server._resolve_vision_agents_exception("MaxConcurrentSessionsExceeded")
+
+    assert resolved is SDKSessionsExceeded
+
+
+def test_resolve_vision_agents_exception_falls_back_to_named_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(),
+    )
+
+    resolved = server._resolve_vision_agents_exception("MaxSessionsPerCallExceeded")
+
+    assert issubclass(resolved, Exception)
+    assert resolved.__name__ == "MaxSessionsPerCallExceeded"
+
+
+def test_resolve_stt_event_symbol_prefers_sdk_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SDKPartialEvent:
+        pass
+
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(STTPartialTranscriptEvent=SDKPartialEvent),
+    )
+
+    resolved = server._resolve_stt_event_symbol("STTPartialTranscriptEvent")
+
+    assert resolved is SDKPartialEvent
+
+
+def test_resolve_stt_event_symbol_falls_back_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(STTTranscriptEvent=object),
+    )
+
+    resolved = server._resolve_stt_event_symbol("STTPartialTranscriptEvent")
+
+    assert resolved.__name__ == "STTPartialTranscriptEvent"
+
+
+@pytest.mark.parametrize("missing_symbol", ["STTTranscriptEvent", "STTErrorEvent"])
+def test_resolve_stt_event_symbol_falls_back_for_other_missing_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_symbol: str,
+) -> None:
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(),
+    )
+
+    resolved = server._resolve_stt_event_symbol(missing_symbol)
+
+    assert resolved.__name__ == missing_symbol
+
+
 @pytest.mark.anyio
 async def test_create_agent_allows_experimental_runtime_startup_for_dogfood(monkeypatch: pytest.MonkeyPatch) -> None:
     created: dict[str, object] = {}
