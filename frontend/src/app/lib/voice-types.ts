@@ -73,6 +73,22 @@ export type GeminiRuntimeTelemetry = {
   staleAssistantOutputSuppressionCount: number
   playbackGeneration: number
   assistantUserOverlapMs: number
+  rawAssistantUserOverlapMs?: number
+  maxRawAssistantUserOverlapMs?: number
+  confirmedAssistantUserOverlapMs?: number
+  maxConfirmedAssistantUserOverlapMs?: number
+  userInputActiveAgeMs?: number | null
+  bargeInConfirmed?: boolean
+  bargeInConfirmationSource?: string | null
+  bargeInConfirmationReason?: string | null
+  bargeInCandidateFrameCount?: number
+  inputFrameOnlyNotBargeInCount?: number
+  candidateFramesDidNotConfirmCount?: number
+  candidateExpiredCount?: number
+  suppressionBlockedBecauseNoIntentCount?: number
+  staleSuppressionArmedAt?: string | null
+  staleSuppressionArmedBy?: string | null
+  assistantAudioDropReason?: string | null
   interruptedResponseIds: string[]
   interruptionCount: number
   playbackFlushCount: number

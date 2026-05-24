@@ -210,11 +210,21 @@ export type GeminiSessionTelemetry = {
     playbackGeneration: number
     assistantUserOverlapMs: number
     maxAssistantUserOverlapMs: number
+    rawAssistantUserOverlapMs: number
+    maxRawAssistantUserOverlapMs: number
+    confirmedAssistantUserOverlapMs: number
+    maxConfirmedAssistantUserOverlapMs: number
     userInputActiveAgeMs: number | null
     bargeInConfirmed: boolean
+    bargeInConfirmationSource: string
+    bargeInConfirmationReason: string | null
     bargeInCandidateFrameCount: number
     inputFrameOnlyNotBargeInCount: number
+    candidateFramesDidNotConfirmCount: number
+    candidateExpiredCount: number
+    suppressionBlockedBecauseNoIntentCount: number
     staleSuppressionArmedAt: string | null
+    staleSuppressionArmedBy: string | null
     assistantAudioDropReason: string | null
     interruptedResponseIds: string[]
     interruptionCount: number
@@ -837,6 +847,16 @@ function maxFiniteFromRecords(records: Record<string, unknown>[], key: string): 
   return maxValue
 }
 
+function latestStringFromRecords(records: Record<string, unknown>[], key: string): string | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const value = asString(records[index]?.[key])
+    if (value !== null) {
+      return value
+    }
+  }
+  return null
+}
+
 function latestRelayDurationFor(
   records: Record<string, unknown>[],
   predicate: (record: Record<string, unknown>) => boolean,
@@ -958,33 +978,72 @@ function buildSessionTelemetry(params: {
       asFiniteNumber(interruptionDiagnostic?.playbackGeneration) ?? 0,
       maxFiniteFromRecords(staleSuppressionDiagnostics, "playbackGeneration") ?? 0,
     )
-    const assistantUserOverlapMs = Math.max(
+    const bargeInDiagnostics = [...inputAudioDiagnostics, ...staleSuppressionDiagnostics]
+    const rawAssistantUserOverlapMs = Math.max(
+      hookTelemetry?.rawAssistantUserOverlapMs ?? 0,
+      hookTelemetry?.maxRawAssistantUserOverlapMs ?? 0,
       hookTelemetry?.assistantUserOverlapMs ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "rawAssistantUserOverlapMs") ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.rawAssistantUserOverlapMs) ?? 0,
       asFiniteNumber(interruptionDiagnostic?.assistantUserOverlapMs) ?? 0,
     )
+    const confirmedAssistantUserOverlapMs = Math.max(
+      hookTelemetry?.confirmedAssistantUserOverlapMs ?? 0,
+      hookTelemetry?.maxConfirmedAssistantUserOverlapMs ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "confirmedAssistantUserOverlapMs") ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.confirmedAssistantUserOverlapMs) ?? 0,
+    )
+    const assistantUserOverlapMs = rawAssistantUserOverlapMs
     const latestInputAudioDiagnostic = inputAudioDiagnostics.at(-1)
     const latestSuppressedAudioDiagnostic = staleSuppressionDiagnostics
       .filter((diagnostic) => asString(diagnostic.outputType) === "audio")
       .at(-1)
     const inputFrameOnlyNotBargeInCount = Math.max(
+      hookTelemetry?.inputFrameOnlyNotBargeInCount ?? 0,
       maxFiniteFromRecords(inputAudioDiagnostics, "inputFrameOnlyNotBargeInCount") ?? 0,
       maxFiniteFromRecords(staleSuppressionDiagnostics, "inputFrameOnlyNotBargeInCount") ?? 0,
       inputAudioDiagnostics.filter((diagnostic) => asString(diagnostic.suppressionDeferredReason) === "input_frame_only_not_barge_in").length,
     )
-    const bargeInCandidateFrameCount = maxFiniteFromRecords(
-      [...inputAudioDiagnostics, ...staleSuppressionDiagnostics],
-      "bargeInCandidateFrameCount",
-    ) ?? 0
-    const bargeInConfirmed = staleSuppressionDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
-      || inputAudioDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
-    const userInputActiveAgeMs = maxFiniteFromRecords(
-      [...inputAudioDiagnostics, ...staleSuppressionDiagnostics],
-      "userInputActiveAgeMs",
+    const candidateFramesDidNotConfirmCount = Math.max(
+      hookTelemetry?.candidateFramesDidNotConfirmCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "candidateFramesDidNotConfirmCount") ?? 0,
     )
+    const candidateExpiredCount = Math.max(
+      hookTelemetry?.candidateExpiredCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "candidateExpiredCount") ?? 0,
+    )
+    const suppressionBlockedBecauseNoIntentCount = Math.max(
+      hookTelemetry?.suppressionBlockedBecauseNoIntentCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "suppressionBlockedBecauseNoIntentCount") ?? 0,
+    )
+    const bargeInCandidateFrameCount = Math.max(
+      hookTelemetry?.bargeInCandidateFrameCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "bargeInCandidateFrameCount") ?? 0,
+    )
+    const bargeInConfirmed = hookTelemetry?.bargeInConfirmed === true
+      || staleSuppressionDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
+      || inputAudioDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
+    const bargeInConfirmationSource = latestStringFromRecords(bargeInDiagnostics, "bargeInConfirmationSource")
+      ?? asString(interruptionDiagnostic?.bargeInConfirmationSource)
+      ?? hookTelemetry?.bargeInConfirmationSource
+      ?? "none"
+    const bargeInConfirmationReason = latestStringFromRecords(bargeInDiagnostics, "bargeInConfirmationReason")
+      ?? asString(interruptionDiagnostic?.bargeInConfirmationReason)
+      ?? hookTelemetry?.bargeInConfirmationReason
+      ?? null
+    const userInputActiveAgeMs = maxFiniteFromRecords(
+      bargeInDiagnostics,
+      "userInputActiveAgeMs",
+    ) ?? hookTelemetry?.userInputActiveAgeMs ?? null
     const staleSuppressionArmedAt = asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedAt)
       ?? asString(latestInputAudioDiagnostic?.staleSuppressionArmedAt)
+      ?? hookTelemetry?.staleSuppressionArmedAt
+    const staleSuppressionArmedBy = asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedBy)
+      ?? hookTelemetry?.staleSuppressionArmedBy
+      ?? null
     const assistantAudioDropReason = asString(latestSuppressedAudioDiagnostic?.assistantAudioDropReason)
       ?? asString(latestSuppressedAudioDiagnostic?.reason)
+      ?? hookTelemetry?.assistantAudioDropReason
     const interruptedResponseIds = hookTelemetry?.interruptedResponseIds
       ?? asStringArray(interruptionDiagnostic?.interruptedResponseIds)
       ?? asStringArray(staleSuppressionDiagnostics.at(-1)?.interruptedResponseIds)
@@ -1107,11 +1166,21 @@ function buildSessionTelemetry(params: {
         playbackGeneration,
         assistantUserOverlapMs,
         maxAssistantUserOverlapMs: assistantUserOverlapMs,
+        rawAssistantUserOverlapMs,
+        maxRawAssistantUserOverlapMs: rawAssistantUserOverlapMs,
+        confirmedAssistantUserOverlapMs,
+        maxConfirmedAssistantUserOverlapMs: confirmedAssistantUserOverlapMs,
         userInputActiveAgeMs,
         bargeInConfirmed,
+        bargeInConfirmationSource,
+        bargeInConfirmationReason,
         bargeInCandidateFrameCount,
         inputFrameOnlyNotBargeInCount,
+        candidateFramesDidNotConfirmCount,
+        candidateExpiredCount,
+        suppressionBlockedBecauseNoIntentCount,
         staleSuppressionArmedAt,
+        staleSuppressionArmedBy,
         assistantAudioDropReason,
         interruptedResponseIds,
         interruptionCount,

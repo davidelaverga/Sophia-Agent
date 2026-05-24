@@ -131,6 +131,28 @@ describe('voice-session-event-ingestion', () => {
     }, guard)).toBe(true);
   });
 
+  it('keeps assistant transcript updates valid when raw mic frames never confirm intent', () => {
+    const guard = createAssistantTranscriptStaleGuardState();
+
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'I can keep going here.',
+      isFinal: false,
+      sourceSequence: 30,
+      responseId: 'response-valid',
+      segmentId: 'gemini-segment-0',
+      providerReceivedAt: '2026-05-24T12:00:01.000Z',
+    }, guard)).toBe(true);
+
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'I can keep going here with the rest of the sentence.',
+      isFinal: false,
+      sourceSequence: 31,
+      responseId: 'response-valid',
+      segmentId: 'gemini-segment-0',
+      providerReceivedAt: '2026-05-24T12:00:02.000Z',
+    }, guard)).toBe(true);
+  });
+
   it('forwards partial assistant transcripts into the Session message path', () => {
     const handlers = {
       setFinalReply: vi.fn(),

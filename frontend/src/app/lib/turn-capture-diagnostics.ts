@@ -57,6 +57,8 @@ export type TurnCaptureDiagnosticEvent = {
   staleOutputType?: string | null;
   playbackGeneration?: number | null;
   assistantUserOverlapMs?: number | null;
+  rawAssistantUserOverlapMs?: number | null;
+  confirmedAssistantUserOverlapMs?: number | null;
 };
 
 export type TurnCaptureTranscriptPreview = {
@@ -108,6 +110,8 @@ export type TurnCaptureAssistantTranscriptEvidenceWindow = {
   playbackFlush: boolean;
   userInputOverlappedAudio: boolean;
   assistantUserOverlapMs: number;
+  rawAssistantUserOverlapMs: number;
+  confirmedAssistantUserOverlapMs: number;
   publicTranscriptMissingSourceSequence: boolean;
   publicTranscriptMissingResponseId: boolean;
   assistantTranscriptMissingWhileAudioPresent: boolean;
@@ -129,6 +133,8 @@ export type TurnCaptureAssistantTranscriptEvidence = {
   staleAssistantAudioDroppedCount: number;
   staleAssistantTranscriptDroppedCount: number;
   maxAssistantUserOverlapMs: number;
+  maxRawAssistantUserOverlapMs: number;
+  maxConfirmedAssistantUserOverlapMs: number;
   publicTranscriptFinalSeen: boolean;
   providerToPublicTranscriptRatio: number | null;
   latestProviderOutputTranscriptionPreview: string | null;
@@ -286,6 +292,9 @@ export function buildTurnCaptureDiagnostics(
         frameByteLength: numericValue(diagnostic?.frameByteLength),
         frameDurationMs: numericValue(diagnostic?.frameDurationMs),
         micState,
+        assistantUserOverlapMs: numericValue(diagnostic?.rawAssistantUserOverlapMs),
+        rawAssistantUserOverlapMs: numericValue(diagnostic?.rawAssistantUserOverlapMs),
+        confirmedAssistantUserOverlapMs: numericValue(diagnostic?.confirmedAssistantUserOverlapMs),
         assistantAudioActive,
         userInputActive,
       });
@@ -479,6 +488,9 @@ export function buildTurnCaptureDiagnostics(
         staleOutputType: outputType,
         suppressionReason: stringValue(diagnostic?.reason),
         playbackGeneration: numericValue(diagnostic?.playbackGeneration),
+        assistantUserOverlapMs: numericValue(diagnostic?.rawAssistantUserOverlapMs),
+        rawAssistantUserOverlapMs: numericValue(diagnostic?.rawAssistantUserOverlapMs),
+        confirmedAssistantUserOverlapMs: numericValue(diagnostic?.confirmedAssistantUserOverlapMs),
         assistantAudioActive,
         userInputActive,
       });
@@ -521,6 +533,8 @@ export function buildTurnCaptureDiagnostics(
         playbackFlushed: booleanValue(diagnostic?.playbackFlushed),
         playbackGeneration: numericValue(diagnostic?.playbackGeneration),
         assistantUserOverlapMs: numericValue(diagnostic?.assistantUserOverlapMs),
+        rawAssistantUserOverlapMs: numericValue(diagnostic?.rawAssistantUserOverlapMs),
+        confirmedAssistantUserOverlapMs: numericValue(diagnostic?.confirmedAssistantUserOverlapMs),
         assistantAudioActive,
         userInputActive,
       });
@@ -852,6 +866,8 @@ function buildAssistantTranscriptEvidence(
         playbackFlush: false,
         userInputOverlappedAudio: false,
         assistantUserOverlapMs: 0,
+        rawAssistantUserOverlapMs: 0,
+        confirmedAssistantUserOverlapMs: 0,
         publicTranscriptMissingSourceSequence: false,
         publicTranscriptMissingResponseId: false,
       };
@@ -885,6 +901,12 @@ function buildAssistantTranscriptEvidence(
     current.playbackFlush = current.playbackFlush || event.playbackFlushed === true;
     if (event.assistantUserOverlapMs != null) {
       current.assistantUserOverlapMs = Math.max(current.assistantUserOverlapMs, event.assistantUserOverlapMs);
+    }
+    if (event.rawAssistantUserOverlapMs != null) {
+      current.rawAssistantUserOverlapMs = Math.max(current.rawAssistantUserOverlapMs, event.rawAssistantUserOverlapMs);
+    }
+    if (event.confirmedAssistantUserOverlapMs != null) {
+      current.confirmedAssistantUserOverlapMs = Math.max(current.confirmedAssistantUserOverlapMs, event.confirmedAssistantUserOverlapMs);
     }
     current = null;
   };
@@ -973,6 +995,17 @@ function buildAssistantTranscriptEvidence(
     numericValue(metricGemini?.maxAssistantUserOverlapMs) ?? 0,
     numericValue(metricGemini?.assistantUserOverlapMs) ?? 0,
   );
+  const maxRawAssistantUserOverlapMs = Math.max(
+    finalizedWindows.reduce((max, window) => Math.max(max, window.rawAssistantUserOverlapMs), 0),
+    numericValue(metricGemini?.maxRawAssistantUserOverlapMs) ?? 0,
+    numericValue(metricGemini?.rawAssistantUserOverlapMs) ?? 0,
+    maxAssistantUserOverlapMs,
+  );
+  const maxConfirmedAssistantUserOverlapMs = Math.max(
+    finalizedWindows.reduce((max, window) => Math.max(max, window.confirmedAssistantUserOverlapMs), 0),
+    numericValue(metricGemini?.maxConfirmedAssistantUserOverlapMs) ?? 0,
+    numericValue(metricGemini?.confirmedAssistantUserOverlapMs) ?? 0,
+  );
   const sourceProviderEventCorrelationCount = sourceEvents.filter((event) => event.name === 'gemini-provider-event-correlation').length;
   const warnings = uniqueStrings(finalizedWindows.flatMap((window) => window.warnings));
   const captureMayOmitEarlierProviderEvents = reportedProviderEventCount != null
@@ -1008,6 +1041,8 @@ function buildAssistantTranscriptEvidence(
     staleAssistantAudioDroppedCount,
     staleAssistantTranscriptDroppedCount,
     maxAssistantUserOverlapMs,
+    maxRawAssistantUserOverlapMs,
+    maxConfirmedAssistantUserOverlapMs,
     publicTranscriptFinalSeen: finalizedWindows.some((window) => window.publicAssistantTranscriptFinalSeen),
     providerToPublicTranscriptRatio: transcriptRatio(publicAssistantTranscriptMaxTextLength, providerOutputTranscriptionTextLength),
     latestProviderOutputTranscriptionPreview: latestProviderWindow?.latestProviderOutputTranscriptionPreview ?? null,

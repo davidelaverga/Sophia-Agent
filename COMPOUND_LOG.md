@@ -26,6 +26,29 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-24 · [gemini-barge-in-intent-gating] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | voice · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
+
+### What Changed
+- Removed raw Gemini mic-frame count/duration as a barge-in confirmation path in the browser Live runtime.
+- Confirmed stale-output suppression only from provider interruption, explicit manual/local interrupt, or conservative provider input transcription with real text after assistant output begins.
+- Kept provider interruption as the strong playback-flush path while letting provider input transcription fence future old-generation chunks without retroactively flushing already scheduled audio.
+- Added diagnostics for confirmation source/reason, candidate frames that did not confirm, candidate expiry, suppression blocked for lack of intent, and raw vs confirmed assistant/user overlap.
+
+### What We Learned
+- Phase 12.6D stopped stale repetition, and 12.6D-B separated candidate from confirmed state, but the remaining frame-count confirmation still over-classified residual mic activity.
+- `inputFrameOnlyNotBargeInCount=0` is a useful red flag: it means raw frames are not being retained as benign candidates.
+- Raw mic overlap and confirmed barge-in overlap must be separate telemetry dimensions; high raw overlap can be harmless when no user intent is confirmed.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
 ## 2026-05-24 · [gemini-barge-in-guard-sensitivity] · PR #TBD
 **Author:** GitHub Copilot · **Track:** frontend | voice · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
 

@@ -78,6 +78,10 @@ export interface GeminiBrowserLiveDogfoodInterruptionDiagnostic {
   playbackGeneration: number;
   interruptedResponseIds: string[];
   assistantUserOverlapMs: number;
+  rawAssistantUserOverlapMs: number;
+  confirmedAssistantUserOverlapMs: number;
+  bargeInConfirmationSource: GeminiBargeInConfirmationSource;
+  bargeInConfirmationReason: string | null;
 }
 
 export type GeminiStaleOutputSuppressionType = 'audio' | 'transcript';
@@ -88,10 +92,11 @@ export type GeminiStaleOutputSuppressionReason =
   | 'pre_barge_in_relay_backlog';
 
 export type GeminiBargeInConfirmationSource =
+  | 'none'
   | 'provider_interruption'
-  | 'playback_flush'
-  | 'input_transcription'
-  | 'sustained_input_audio';
+  | 'provider_input_transcription'
+  | 'manual_interrupt'
+  | 'sustained_speech';
 
 export type GeminiSuppressionDeferredReason =
   | 'input_frame_only_not_barge_in'
@@ -109,12 +114,19 @@ export interface GeminiStaleOutputSuppressionDiagnostic {
   interruptedResponseIds: string[];
   userInputActiveAgeMs: number | null;
   bargeInConfirmed: boolean;
+  bargeInConfirmationSource: GeminiBargeInConfirmationSource;
+  bargeInConfirmationReason: string | null;
   bargeInCandidateFrameCount: number;
   suppressionDeferredReason: GeminiSuppressionDeferredReason | null;
   staleSuppressionArmedAt: string | null;
   staleSuppressionArmedBy: GeminiBargeInConfirmationSource | null;
   assistantAudioDropReason: GeminiStaleOutputSuppressionReason | null;
   inputFrameOnlyNotBargeInCount: number;
+  candidateFramesDidNotConfirmCount: number;
+  candidateExpiredCount: number;
+  suppressionBlockedBecauseNoIntentCount: number;
+  rawAssistantUserOverlapMs: number;
+  confirmedAssistantUserOverlapMs: number;
 }
 
 export type GeminiInputAudioActivityEventType =
@@ -138,11 +150,18 @@ export interface GeminiInputAudioActivityDiagnostic {
   assistantAudioActive?: boolean;
   userInputActiveAgeMs?: number | null;
   bargeInConfirmed?: boolean;
+  bargeInConfirmationSource?: GeminiBargeInConfirmationSource;
+  bargeInConfirmationReason?: string | null;
   bargeInCandidateFrameCount?: number;
   suppressionDeferredReason?: GeminiSuppressionDeferredReason | null;
   staleSuppressionArmedAt?: string | null;
   assistantAudioDropReason?: GeminiStaleOutputSuppressionReason | null;
   inputFrameOnlyNotBargeInCount?: number;
+  candidateFramesDidNotConfirmCount?: number;
+  candidateExpiredCount?: number;
+  suppressionBlockedBecauseNoIntentCount?: number;
+  rawAssistantUserOverlapMs?: number;
+  confirmedAssistantUserOverlapMs?: number;
 }
 
 export type GeminiProviderEventCategory =
@@ -545,8 +564,7 @@ const GEMINI_RETRIEVE_MEMORIES_TOOL_NAME = 'retrieve_memories';
 const GEMINI_TRANSCRIPT_COALESCING_DISABLED_REASON: GeminiTranscriptCoalescingDisabledReason = 'provider_output_transcription_is_delta_like';
 const WEBSOCKET_OPEN = 1;
 const BARGE_IN_CANDIDATE_DECAY_MS = 650;
-const BARGE_IN_CONFIRMATION_MIN_FRAMES = 4;
-const BARGE_IN_CONFIRMATION_MIN_AUDIO_MS = 280;
+const PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS = 350;
 const RELAYABLE_GEMINI_PROVIDER_EVENT_KEYS = new Set([
   'setupComplete',
   'setup_complete',
@@ -633,15 +651,21 @@ export async function connectGeminiBrowserLiveDogfood(
   let staleOutputSuppressionStartedAtMs: number | null = null;
   let staleOutputSuppressionArmedAt: string | null = null;
   let staleOutputSuppressionArmedBy: GeminiBargeInConfirmationSource | null = null;
-  let inputTranscriptionSeenAfterStaleFence = false;
-  let assistantUserOverlapStartedAtMs: number | null = null;
-  let assistantUserOverlapMs = 0;
+  let bargeInConfirmationReason: string | null = null;
+  let rawAssistantUserOverlapStartedAtMs: number | null = null;
+  let rawAssistantUserOverlapMs = 0;
+  let confirmedAssistantUserOverlapStartedAtMs: number | null = null;
+  let confirmedAssistantUserOverlapMs = 0;
+  let assistantOutputStartedAtMs: number | null = null;
+  let latestAssistantOutputTranscriptText: string | null = null;
   let bargeInCandidateStartedAtMs: number | null = null;
   let bargeInCandidateLastFrameAtMs: number | null = null;
   let bargeInCandidateFrameCount = 0;
-  let bargeInCandidateAudioMs = 0;
   let confirmedBargeInCandidateFrameCount = 0;
   let inputFrameOnlyNotBargeInCount = 0;
+  let candidateFramesDidNotConfirmCount = 0;
+  let candidateExpiredCount = 0;
+  let suppressionBlockedBecauseNoIntentCount = 0;
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -775,11 +799,32 @@ export async function connectGeminiBrowserLiveDogfood(
     return playbackState.activeSourceCount > 0 || playbackState.nextPlaybackTime > currentTime;
   };
 
+  const closeRawAssistantUserOverlap = (endedAtMs = monotonicNowMs()) => {
+    if (rawAssistantUserOverlapStartedAtMs === null) {
+      return;
+    }
+    rawAssistantUserOverlapMs += Math.max(0, endedAtMs - rawAssistantUserOverlapStartedAtMs);
+    rawAssistantUserOverlapStartedAtMs = null;
+  };
+
+  const closeConfirmedAssistantUserOverlap = (endedAtMs = monotonicNowMs()) => {
+    if (confirmedAssistantUserOverlapStartedAtMs === null) {
+      return;
+    }
+    confirmedAssistantUserOverlapMs += Math.max(0, endedAtMs - confirmedAssistantUserOverlapStartedAtMs);
+    confirmedAssistantUserOverlapStartedAtMs = null;
+  };
+
+  const rawAssistantUserOverlapTotalMs = (nowMs = monotonicNowMs()) => rawAssistantUserOverlapMs
+    + (rawAssistantUserOverlapStartedAtMs === null ? 0 : Math.max(0, nowMs - rawAssistantUserOverlapStartedAtMs));
+
+  const confirmedAssistantUserOverlapTotalMs = (nowMs = monotonicNowMs()) => confirmedAssistantUserOverlapMs
+    + (confirmedAssistantUserOverlapStartedAtMs === null ? 0 : Math.max(0, nowMs - confirmedAssistantUserOverlapStartedAtMs));
+
   const resetBargeInCandidate = () => {
     bargeInCandidateStartedAtMs = null;
     bargeInCandidateLastFrameAtMs = null;
     bargeInCandidateFrameCount = 0;
-    bargeInCandidateAudioMs = 0;
   };
 
   const decayBargeInCandidateIfStale = (nowMs: number) => {
@@ -790,13 +835,18 @@ export async function connectGeminiBrowserLiveDogfood(
     ) {
       return false;
     }
+    if (bargeInCandidateFrameCount > 0) {
+      candidateExpiredCount += 1;
+    }
+    closeRawAssistantUserOverlap(bargeInCandidateLastFrameAtMs);
     resetBargeInCandidate();
     return true;
   };
 
   const userInputActiveAgeMs = (nowMs = monotonicNowMs()) => {
-    if (assistantUserOverlapStartedAtMs !== null) {
-      return Math.max(0, Math.round(nowMs - assistantUserOverlapStartedAtMs));
+    decayBargeInCandidateIfStale(nowMs);
+    if (confirmedAssistantUserOverlapStartedAtMs !== null) {
+      return Math.max(0, Math.round(nowMs - confirmedAssistantUserOverlapStartedAtMs));
     }
     if (bargeInCandidateStartedAtMs !== null) {
       return Math.max(0, Math.round(nowMs - bargeInCandidateStartedAtMs));
@@ -804,12 +854,18 @@ export async function connectGeminiBrowserLiveDogfood(
     return null;
   };
 
-  const assistantUserOverlapTotalMs = () => assistantUserOverlapMs
-    + (assistantUserOverlapStartedAtMs === null ? 0 : elapsedMs(assistantUserOverlapStartedAtMs));
+  const currentBargeInConfirmationSource = (): GeminiBargeInConfirmationSource => (
+    staleOutputSuppressionActive ? staleOutputSuppressionArmedBy ?? 'none' : 'none'
+  );
+
+  const currentBargeInConfirmationReason = () => (
+    staleOutputSuppressionActive ? bargeInConfirmationReason : null
+  );
 
   const markStaleOutputFence = (
     timestampIso: string,
     armedBy: GeminiBargeInConfirmationSource,
+    reason: string,
     overlapStartedAtMs: number | null,
   ) => {
     if (staleOutputSuppressionActive) {
@@ -820,26 +876,32 @@ export async function connectGeminiBrowserLiveDogfood(
     staleOutputSuppressionStartedAtMs = Number.isFinite(parsedTimestampMs) ? parsedTimestampMs : null;
     staleOutputSuppressionArmedAt = timestampIso;
     staleOutputSuppressionArmedBy = armedBy;
-    inputTranscriptionSeenAfterStaleFence = false;
-    assistantUserOverlapStartedAtMs = overlapStartedAtMs;
+    bargeInConfirmationReason = reason;
+    confirmedAssistantUserOverlapStartedAtMs = overlapStartedAtMs;
     return true;
   };
 
   const confirmBargeIn = (
     armedBy: GeminiBargeInConfirmationSource,
     timestampIso: string,
-    options: { stopPlayback?: boolean } = {},
+    options: { stopPlayback?: boolean; reason?: string } = {},
   ) => {
     const playbackActive = hasPendingAssistantAudioPlayback();
     const overlapStartedAtMs = playbackActive
-      ? bargeInCandidateStartedAtMs ?? monotonicNowMs()
+      ? bargeInCandidateStartedAtMs ?? rawAssistantUserOverlapStartedAtMs ?? monotonicNowMs()
       : null;
-    const armed = markStaleOutputFence(timestampIso, armedBy, overlapStartedAtMs);
+    const armed = markStaleOutputFence(
+      timestampIso,
+      armedBy,
+      options.reason ?? 'confirmed_user_intent',
+      overlapStartedAtMs,
+    );
     if (armed) {
       confirmedBargeInCandidateFrameCount = bargeInCandidateFrameCount;
     }
     if (options.stopPlayback) {
       outputAudioPlayer?.stop();
+      closeRawAssistantUserOverlap();
     }
     resetBargeInCandidate();
     return armed;
@@ -850,18 +912,62 @@ export async function connectGeminiBrowserLiveDogfood(
     staleOutputSuppressionStartedAtMs = null;
     staleOutputSuppressionArmedAt = null;
     staleOutputSuppressionArmedBy = null;
-    inputTranscriptionSeenAfterStaleFence = false;
-    closeAssistantUserOverlap();
+    bargeInConfirmationReason = null;
+    closeConfirmedAssistantUserOverlap();
     resetBargeInCandidate();
     confirmedBargeInCandidateFrameCount = 0;
   };
 
-  const closeAssistantUserOverlap = () => {
-    if (assistantUserOverlapStartedAtMs === null) {
+  const clearAssistantOutputState = () => {
+    assistantOutputStartedAtMs = null;
+    latestAssistantOutputTranscriptText = null;
+    closeRawAssistantUserOverlap();
+  };
+
+  const markAssistantOutputStarted = (
+    event: Record<string, unknown>,
+    categories: GeminiProviderEventCategory[],
+    receiveMetadata?: GeminiProviderReceiveMetadata,
+  ) => {
+    if (!isAssistantOutputCategories(categories)) {
       return;
     }
-    assistantUserOverlapMs += elapsedMs(assistantUserOverlapStartedAtMs);
-    assistantUserOverlapStartedAtMs = null;
+    const timestampIso = receiveMetadata?.providerReceivedAt ?? new Date().toISOString();
+    const parsedTimestampMs = Date.parse(timestampIso);
+    if (assistantOutputStartedAtMs === null) {
+      assistantOutputStartedAtMs = Number.isFinite(parsedTimestampMs) ? parsedTimestampMs : Date.now();
+    }
+    const outputText = readTranscriptionText(event, 'outputTranscription', 'output_transcription');
+    if (outputText) {
+      latestAssistantOutputTranscriptText = outputText;
+    }
+  };
+
+  const providerInputTranscriptionConfirmation = (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ): { confirmed: boolean; reason: string } => {
+    const text = readTranscriptionText(event, 'inputTranscription', 'input_transcription');
+    if (!text) {
+      return { confirmed: false, reason: 'empty_provider_input_transcription' };
+    }
+    if (assistantOutputStartedAtMs === null) {
+      return { confirmed: false, reason: 'provider_input_transcription_before_assistant_output' };
+    }
+    const providerReceivedAtMs = Date.parse(receiveMetadata.providerReceivedAt);
+    if (!Number.isFinite(providerReceivedAtMs)) {
+      return { confirmed: false, reason: 'provider_input_transcription_missing_timestamp' };
+    }
+    if (providerReceivedAtMs < assistantOutputStartedAtMs + PROVIDER_INPUT_TRANSCRIPTION_CONFIRMATION_DELAY_MS) {
+      return { confirmed: false, reason: 'provider_input_transcription_too_close_to_assistant_start' };
+    }
+    if (!isConfirmableProviderInputTranscription(text)) {
+      return { confirmed: false, reason: 'provider_input_transcription_trivial_or_noise' };
+    }
+    if (isLikelyAssistantEcho(text, latestAssistantOutputTranscriptText)) {
+      return { confirmed: false, reason: 'provider_input_transcription_likely_echo' };
+    }
+    return { confirmed: true, reason: 'provider_input_transcription_after_assistant_output_with_text' };
   };
 
   const emitStaleOutputSuppression = (
@@ -882,12 +988,19 @@ export async function connectGeminiBrowserLiveDogfood(
       interruptedResponseIds: Array.from(interruptedResponseIds).slice(-12),
       userInputActiveAgeMs: userInputActiveAgeMs(),
       bargeInConfirmed: staleOutputSuppressionActive,
+      bargeInConfirmationSource: currentBargeInConfirmationSource(),
+      bargeInConfirmationReason: currentBargeInConfirmationReason(),
       bargeInCandidateFrameCount: Math.max(bargeInCandidateFrameCount, confirmedBargeInCandidateFrameCount),
       suppressionDeferredReason: null,
       staleSuppressionArmedAt: staleOutputSuppressionArmedAt,
       staleSuppressionArmedBy: staleOutputSuppressionArmedBy,
       assistantAudioDropReason: outputType === 'audio' ? reason : null,
       inputFrameOnlyNotBargeInCount,
+      candidateFramesDidNotConfirmCount,
+      candidateExpiredCount,
+      suppressionBlockedBecauseNoIntentCount,
+      rawAssistantUserOverlapMs: Math.round(rawAssistantUserOverlapTotalMs()),
+      confirmedAssistantUserOverlapMs: Math.round(confirmedAssistantUserOverlapTotalMs()),
     });
   };
 
@@ -904,6 +1017,9 @@ export async function connectGeminiBrowserLiveDogfood(
       return 'interrupted_response_id';
     }
     if (!staleOutputSuppressionActive) {
+      if (bargeInCandidateFrameCount > 0 || rawAssistantUserOverlapStartedAtMs !== null) {
+        suppressionBlockedBecauseNoIntentCount += 1;
+      }
       return null;
     }
     const parsedProviderReceivedAtMs = receiveMetadata?.providerReceivedAt ? Date.parse(receiveMetadata.providerReceivedAt) : Number.NaN;
@@ -913,15 +1029,18 @@ export async function connectGeminiBrowserLiveDogfood(
       && staleOutputSuppressionStartedAtMs !== null
       && providerReceivedAtMs <= staleOutputSuppressionStartedAtMs
     ) {
+      if (staleOutputSuppressionArmedBy === 'provider_input_transcription') {
+        return null;
+      }
       return 'pre_barge_in_relay_backlog';
     }
-    return inputTranscriptionSeenAfterStaleFence ? null : 'barge_in_generation_active';
+    return 'barge_in_generation_active';
   };
 
   const handleInputAudioActivity = (diagnostic: GeminiInputAudioActivityDiagnostic) => {
     const nowMs = monotonicNowMs();
     const assistantAudioActive = hasPendingAssistantAudioPlayback();
-    let bargeInConfirmed = staleOutputSuppressionActive;
+    const bargeInConfirmed = staleOutputSuppressionActive;
     let suppressionDeferredReason: GeminiSuppressionDeferredReason | null = null;
 
     if (diagnostic.eventType === 'input_audio_frame_sent') {
@@ -930,25 +1049,19 @@ export async function connectGeminiBrowserLiveDogfood(
         if (bargeInCandidateStartedAtMs === null) {
           bargeInCandidateStartedAtMs = nowMs;
         }
+        if (rawAssistantUserOverlapStartedAtMs === null) {
+          rawAssistantUserOverlapStartedAtMs = nowMs;
+        }
         bargeInCandidateLastFrameAtMs = nowMs;
         const framesRepresented = Math.max(1, diagnostic.framesRepresented ?? 1);
-        const frameDurationMs = Math.max(0, diagnostic.frameDurationMs ?? 0);
         bargeInCandidateFrameCount += framesRepresented;
-        bargeInCandidateAudioMs += frameDurationMs * framesRepresented;
-
-        if (
-          bargeInCandidateFrameCount >= BARGE_IN_CONFIRMATION_MIN_FRAMES
-          && bargeInCandidateAudioMs >= BARGE_IN_CONFIRMATION_MIN_AUDIO_MS
-        ) {
-          confirmBargeIn('sustained_input_audio', diagnostic.recordedAt, { stopPlayback: true });
-          bargeInConfirmed = true;
-        } else {
-          inputFrameOnlyNotBargeInCount += 1;
-          suppressionDeferredReason = bargeInCandidateFrameCount <= 1
-            ? 'input_frame_only_not_barge_in'
-            : 'barge_in_confirmation_pending';
-        }
+        inputFrameOnlyNotBargeInCount += framesRepresented;
+        candidateFramesDidNotConfirmCount += framesRepresented;
+        suppressionDeferredReason = bargeInCandidateFrameCount <= framesRepresented
+          ? 'input_frame_only_not_barge_in'
+          : 'barge_in_confirmation_pending';
       } else if (!assistantAudioActive && !staleOutputSuppressionActive) {
+        closeRawAssistantUserOverlap(nowMs);
         resetBargeInCandidate();
       }
     }
@@ -957,11 +1070,18 @@ export async function connectGeminiBrowserLiveDogfood(
       assistantAudioActive,
       userInputActiveAgeMs: userInputActiveAgeMs(nowMs),
       bargeInConfirmed,
+      bargeInConfirmationSource: currentBargeInConfirmationSource(),
+      bargeInConfirmationReason: currentBargeInConfirmationReason(),
       bargeInCandidateFrameCount: Math.max(bargeInCandidateFrameCount, confirmedBargeInCandidateFrameCount),
       suppressionDeferredReason,
       staleSuppressionArmedAt: staleOutputSuppressionArmedAt,
       assistantAudioDropReason: null,
       inputFrameOnlyNotBargeInCount,
+      candidateFramesDidNotConfirmCount,
+      candidateExpiredCount,
+      suppressionBlockedBecauseNoIntentCount,
+      rawAssistantUserOverlapMs: Math.round(rawAssistantUserOverlapTotalMs(nowMs)),
+      confirmedAssistantUserOverlapMs: Math.round(confirmedAssistantUserOverlapTotalMs(nowMs)),
     });
   };
 
@@ -1058,12 +1178,14 @@ export async function connectGeminiBrowserLiveDogfood(
           return;
         }
         const categories = classification.categories;
+        markAssistantOutputStarted(event, categories, receiveMetadata);
         if (categories.includes('inputTranscription')) {
-          if (!staleOutputSuppressionActive && hasPendingAssistantAudioPlayback()) {
-            confirmBargeIn('input_transcription', receiveMetadata.providerReceivedAt, { stopPlayback: true });
-          }
-          if (staleOutputSuppressionActive) {
-            inputTranscriptionSeenAfterStaleFence = true;
+          const confirmation = providerInputTranscriptionConfirmation(event, receiveMetadata);
+          if (!staleOutputSuppressionActive && confirmation.confirmed) {
+            confirmBargeIn('provider_input_transcription', receiveMetadata.providerReceivedAt, {
+              stopPlayback: false,
+              reason: confirmation.reason,
+            });
           }
         }
         const transcriptSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
@@ -1072,8 +1194,11 @@ export async function connectGeminiBrowserLiveDogfood(
           emitStaleOutputSuppression(event, receiveMetadata, 'transcript', transcriptSuppressionReason);
           return;
         }
-        if (hasGeminiServerContentTurnBoundary(event) && !isGeminiServerInterruptedEvent(event) && staleOutputSuppressionActive) {
-          clearStaleOutputFence();
+        if (hasGeminiServerContentTurnBoundary(event) && !isGeminiServerInterruptedEvent(event)) {
+          if (staleOutputSuppressionActive) {
+            clearStaleOutputFence();
+          }
+          clearAssistantOutputState();
         }
         const eventCategory = categories[0] ?? 'unknown';
         const correlationId = receiveMetadata.relayCorrelationId;
@@ -1248,7 +1373,9 @@ export async function connectGeminiBrowserLiveDogfood(
         if (!audioChunks.length) {
           return;
         }
-        const audioSuppressionReason = staleOutputSuppressionReason(event, classifyGeminiProviderEventForRelay(event).categories, receiveMetadata);
+        const categories = classifyGeminiProviderEventForRelay(event).categories;
+        markAssistantOutputStarted(event, categories, receiveMetadata);
+        const audioSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (audioSuppressionReason) {
           emitStaleOutputSuppression(event, receiveMetadata, 'audio', audioSuppressionReason);
           return;
@@ -1266,10 +1393,14 @@ export async function connectGeminiBrowserLiveDogfood(
         const timestamp = new Date().toISOString();
         const wasStaleFenceActive = staleOutputSuppressionActive;
         const playbackStateBefore = outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
-        confirmBargeIn('provider_interruption', timestamp, { stopPlayback: true });
+        confirmBargeIn('provider_interruption', timestamp, {
+          stopPlayback: true,
+          reason: 'gemini_server_interrupted_event',
+        });
         const playbackStateAfter = outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
-        const currentAssistantUserOverlapMs = assistantUserOverlapTotalMs();
-        closeAssistantUserOverlap();
+        const currentRawAssistantUserOverlapMs = Math.round(rawAssistantUserOverlapTotalMs());
+        const currentConfirmedAssistantUserOverlapMs = Math.round(confirmedAssistantUserOverlapTotalMs());
+        closeConfirmedAssistantUserOverlap();
         options.onInterruption?.({
           timestamp,
           reason: 'server_interrupted',
@@ -1280,7 +1411,11 @@ export async function connectGeminiBrowserLiveDogfood(
           playbackStateAfter,
           playbackGeneration: playbackStateAfter.playbackGeneration,
           interruptedResponseIds: Array.from(interruptedResponseIds).slice(-12),
-          assistantUserOverlapMs: currentAssistantUserOverlapMs,
+          assistantUserOverlapMs: currentRawAssistantUserOverlapMs,
+          rawAssistantUserOverlapMs: currentRawAssistantUserOverlapMs,
+          confirmedAssistantUserOverlapMs: currentConfirmedAssistantUserOverlapMs,
+          bargeInConfirmationSource: 'provider_interruption',
+          bargeInConfirmationReason: 'gemini_server_interrupted_event',
         });
       },
       onToolLoopDiagnostic: options.onToolLoopDiagnostic,
@@ -1332,7 +1467,10 @@ export async function connectGeminiBrowserLiveDogfood(
         audioPipeline?.setMuted(muted);
       },
       flushOutputAudio: () => {
-        confirmBargeIn('playback_flush', new Date().toISOString(), { stopPlayback: true });
+        confirmBargeIn('manual_interrupt', new Date().toISOString(), {
+          stopPlayback: true,
+          reason: 'local_manual_output_flush',
+        });
         return outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
       },
       close: async () => {
@@ -2855,6 +2993,46 @@ function hasTranscriptionText(event: unknown, ...transcriptionKeys: string[]): b
   const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
   const text = stringFromAnyKey(transcription, 'text');
   return Boolean(text?.trim());
+}
+
+function readTranscriptionText(event: unknown, ...transcriptionKeys: string[]): string | null {
+  const serverContent = recordFromAnyKey(event, 'serverContent', 'server_content');
+  const transcription = recordFromAnyKey(serverContent, ...transcriptionKeys);
+  const text = stringFromAnyKey(transcription, 'text')?.replace(/\s+/g, ' ').trim();
+  return text || null;
+}
+
+function normalizeTranscriptionForIntent(text: string): string {
+  return text
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function isConfirmableProviderInputTranscription(text: string): boolean {
+  const normalized = normalizeTranscriptionForIntent(text);
+  if (!normalized) {
+    return false;
+  }
+  const compact = normalized.replace(/\s/g, '');
+  if (compact.length < 2) {
+    return false;
+  }
+  return !new Set(['ah', 'eh', 'hm', 'hmm', 'mm', 'mmm', 'oh', 'uh', 'um']).has(normalized);
+}
+
+function isLikelyAssistantEcho(inputText: string, assistantText: string | null): boolean {
+  if (!assistantText) {
+    return false;
+  }
+  const normalizedInput = normalizeTranscriptionForIntent(inputText);
+  if (normalizedInput.length < 8) {
+    return false;
+  }
+  const normalizedAssistant = normalizeTranscriptionForIntent(assistantText);
+  return normalizedAssistant.includes(normalizedInput);
 }
 
 function readTranscriptionTextPreview(event: unknown, ...transcriptionKeys: string[]): string | null {

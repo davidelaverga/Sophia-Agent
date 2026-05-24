@@ -197,6 +197,16 @@ Diagnostics now expose `userInputActiveAgeMs`, `bargeInConfirmed`, `bargeInCandi
 
 This hotfix did not change skills, prompt behavior, memory, Builder, artifact schema, provider routing, crisis behavior, `users/**`, `backend/users/**`, `voice/sophia_llm.py`, or Vision Agents files.
 
+## Phase 12.6D-C Intent-Gated Gemini Barge-in Confirmation
+
+Phase 12.6D-C follows a second local Gemini smoke where Sophia still cut off after one word. The report showed Gemini produced the answer (`modelTurnAudio=200`, `outputTranscription=74`) while the browser guard suppressed it (`staleAssistantAudioDroppedCount=148`, `staleAssistantTranscriptDroppedCount=59`, `staleAssistantOutputSuppressionCount=207`). The red flag was `inputFrameOnlyNotBargeInCount=0`: raw mic frames were still escalating into confirmed suppression.
+
+The realtime contract is now intent-gated. Browser `input_audio_frame_sent` diagnostics can update candidate counts, raw mic overlap, and `userInputActiveAgeMs`, but cannot confirm barge-in, increment playback generation, arm stale suppression, drop assistant audio/transcript, or interrupt transcript state. Confirmation requires provider `serverContent.interrupted`, explicit manual/local playback flush, or provider input transcription with real non-noise text received after the current assistant output has begun. Provider input transcription fences future old-generation chunks without flushing already scheduled audio; provider interruption remains the immediate flush path.
+
+Telemetry distinguishes `rawAssistantUserOverlapMs` from `confirmedAssistantUserOverlapMs` and reports `bargeInConfirmationSource`, `bargeInConfirmationReason`, `candidateFramesDidNotConfirmCount`, `candidateExpiredCount`, and `suppressionBlockedBecauseNoIntentCount`. `staleSuppressionArmedBy` must never be raw input audio.
+
+This phase did not change skills, prompt behavior, memory, Builder, artifact schema, provider routing, crisis behavior, `users/**`, `backend/users/**`, `voice/sophia_llm.py`, or Vision Agents files.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.

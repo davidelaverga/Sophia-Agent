@@ -618,6 +618,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       playbackStateAfter: { nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 1 },
       playbackGeneration: 1,
       interruptedResponseIds: ['gemini-old-response'],
+      bargeInConfirmationSource: 'provider_interruption',
+      bargeInConfirmationReason: 'gemini_server_interrupted_event',
     }));
     expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
     expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
@@ -634,6 +636,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         reason: 'interrupted_response_id',
         responseId: 'gemini-old-response',
         playbackGeneration: 1,
+        bargeInConfirmationSource: 'provider_interruption',
+        staleSuppressionArmedBy: 'provider_interruption',
       }),
     ]);
     expect(fetchMock).toHaveBeenCalledTimes(fetchCallsAfterInterruption);
@@ -659,7 +663,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(relayStatuses.at(-1)).toBe('disconnected');
   });
 
-  it('confirms sustained user input before suppressing stale assistant audio', async () => {
+  it('keeps multiple raw input frames as candidates without suppressing assistant audio', async () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(
@@ -709,15 +713,84 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       } as unknown as AudioProcessingEvent);
     }
 
-    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
+    expect(fakeAudioContext.createdSources[0]?.stop).not.toHaveBeenCalled();
     expect(inputAudioDiagnostics.at(-1)).toEqual(expect.objectContaining({
       eventType: 'input_audio_frame_sent',
       assistantAudioActive: true,
-      bargeInConfirmed: true,
+      bargeInConfirmed: false,
+      bargeInConfirmationSource: 'none',
       bargeInCandidateFrameCount: 4,
-      staleSuppressionArmedAt: expect.any(String),
-      inputFrameOnlyNotBargeInCount: 3,
+      staleSuppressionArmedAt: null,
+      suppressionDeferredReason: 'barge_in_confirmation_pending',
+      inputFrameOnlyNotBargeInCount: 4,
+      candidateFramesDidNotConfirmCount: 4,
+      rawAssistantUserOverlapMs: expect.any(Number),
+      confirmedAssistantUserOverlapMs: 0,
     }));
+
+    websocket?.emitMessage({
+      serverContent: {
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAABAA==' } }],
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(fakeAudioContext.createdSources).toHaveLength(2));
+    expect(staleSuppressionDiagnostics).toEqual([]);
+
+    await connection.close();
+  });
+
+  it('confirms provider input transcription without flushing already scheduled assistant audio', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            session_id: 'browser-gemini-provider-transcription-barge-in',
+            websocket_url: 'wss://gemini.example/live',
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
+            stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-provider-transcription-barge-in',
+          }),
+          { status: 201, headers: { 'Content-Type': 'application/json' } },
+        ),
+      )
+      .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    const fakeAudioContext = new FakeAudioContext();
+    const staleSuppressionDiagnostics: unknown[] = [];
+    let websocket: FakeWebSocket | null = null;
+
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onStaleOutputSuppression: (diagnostic) => staleSuppressionDiagnostics.push(diagnostic),
+    });
+
+    websocket?.emitMessage({
+      serverContent: {
+        outputTranscription: { text: 'Let me lay this out clearly.' },
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: 'AAABAA==' } }],
+        },
+      },
+    });
+    await vi.waitFor(() => expect(fakeAudioContext.createdSources).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 380));
+
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Actually pause there' } } });
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+      '/api/sophia/voice/dogfood/gemini/relay',
+      expect.objectContaining({ body: expect.stringContaining('Actually pause there') }),
+    ));
+    expect(fakeAudioContext.createdSources[0]?.stop).not.toHaveBeenCalled();
 
     websocket?.emitMessage({
       serverContent: {
@@ -733,7 +806,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         outputType: 'audio',
         reason: 'barge_in_generation_active',
         bargeInConfirmed: true,
-        staleSuppressionArmedBy: 'sustained_input_audio',
+        bargeInConfirmationSource: 'provider_input_transcription',
+        staleSuppressionArmedBy: 'provider_input_transcription',
         assistantAudioDropReason: 'barge_in_generation_active',
       }),
     ]);

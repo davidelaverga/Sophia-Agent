@@ -538,7 +538,17 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
   if (unresolvedToolEntries.length > 0) {
     warnings.push('unresolved_gemini_tool_calls');
   }
-  const maxAssistantUserOverlapMs = maxNumericField(interruptionDiagnostics, 'assistantUserOverlapMs');
+  const bargeInDiagnostics = [...inputAudioDiagnostics, ...staleSuppressionDiagnostics];
+  const maxRawAssistantUserOverlapMs = Math.max(
+    maxNumericField(bargeInDiagnostics, 'rawAssistantUserOverlapMs') ?? 0,
+    maxNumericField(interruptionDiagnostics, 'rawAssistantUserOverlapMs') ?? 0,
+    maxNumericField(interruptionDiagnostics, 'assistantUserOverlapMs') ?? 0,
+  );
+  const maxConfirmedAssistantUserOverlapMs = Math.max(
+    maxNumericField(bargeInDiagnostics, 'confirmedAssistantUserOverlapMs') ?? 0,
+    maxNumericField(interruptionDiagnostics, 'confirmedAssistantUserOverlapMs') ?? 0,
+  );
+  const maxAssistantUserOverlapMs = maxRawAssistantUserOverlapMs || maxNumericField(interruptionDiagnostics, 'assistantUserOverlapMs');
   if ((maxAssistantUserOverlapMs ?? 0) >= 1_500) {
     warnings.push('assistant_audio_overlapped_user_input');
   }
@@ -548,9 +558,12 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
     inputAudioDiagnostics.filter((diagnostic) => asString(diagnostic.suppressionDeferredReason) === 'input_frame_only_not_barge_in').length,
   );
   const bargeInCandidateFrameCount = maxNumericField(
-    [...inputAudioDiagnostics, ...staleSuppressionDiagnostics],
+    bargeInDiagnostics,
     'bargeInCandidateFrameCount',
   );
+  const candidateFramesDidNotConfirmCount = maxNumericField(bargeInDiagnostics, 'candidateFramesDidNotConfirmCount') ?? 0;
+  const candidateExpiredCount = maxNumericField(bargeInDiagnostics, 'candidateExpiredCount') ?? 0;
+  const suppressionBlockedBecauseNoIntentCount = maxNumericField(bargeInDiagnostics, 'suppressionBlockedBecauseNoIntentCount') ?? 0;
   const bargeInConfirmed = staleSuppressionDiagnostics.some((diagnostic) => diagnostic.bargeInConfirmed === true)
     || inputAudioDiagnostics.some((diagnostic) => diagnostic.bargeInConfirmed === true);
   const latestInputAudioDiagnostic = inputAudioDiagnostics.at(-1);
@@ -581,12 +594,23 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
     staleAssistantTranscriptDroppedCount: staleTranscriptDroppedCount,
     staleAssistantOutputSuppressionCount: staleSuppressionDiagnostics.length + staleTranscriptIgnored.length,
     maxAssistantUserOverlapMs,
+    maxRawAssistantUserOverlapMs,
+    maxConfirmedAssistantUserOverlapMs,
     userInputActiveAgeMs: maxNumericField([...inputAudioDiagnostics, ...staleSuppressionDiagnostics], 'userInputActiveAgeMs'),
     bargeInConfirmed,
+    bargeInConfirmationSource: latestStringField(bargeInDiagnostics, 'bargeInConfirmationSource')
+      ?? latestStringField(interruptionDiagnostics, 'bargeInConfirmationSource')
+      ?? 'none',
+    bargeInConfirmationReason: latestStringField(bargeInDiagnostics, 'bargeInConfirmationReason')
+      ?? latestStringField(interruptionDiagnostics, 'bargeInConfirmationReason'),
     bargeInCandidateFrameCount,
+    candidateFramesDidNotConfirmCount,
+    candidateExpiredCount,
+    suppressionBlockedBecauseNoIntentCount,
     suppressionDeferredReasons,
     staleSuppressionArmedAt: asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedAt)
       ?? asString(latestInputAudioDiagnostic?.staleSuppressionArmedAt),
+    staleSuppressionArmedBy: asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedBy),
     assistantAudioDropReason: asString(latestSuppressedAudioDiagnostic?.assistantAudioDropReason)
       ?? asString(latestSuppressedAudioDiagnostic?.reason),
     inputFrameOnlyNotBargeInCount,
@@ -633,6 +657,16 @@ function maxNumericField(values: Record<string, unknown>[], key: string): number
     maxValue = maxValue === null ? candidate : Math.max(maxValue, candidate);
   }
   return maxValue;
+}
+
+function latestStringField(values: Record<string, unknown>[], key: string): string | null {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = asString(values[index]?.[key]);
+    if (value !== null) {
+      return value;
+    }
+  }
+  return null;
 }
 
 function numericFallback(primary: number, fallback: unknown): number {

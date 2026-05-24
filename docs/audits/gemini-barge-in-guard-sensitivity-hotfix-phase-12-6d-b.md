@@ -1,7 +1,7 @@
 # Phase 12.6D-B - Gemini Barge-in Guard Sensitivity Hotfix
 
 Date: 2026-05-24
-Status: implemented on `integrate/realtime-voice-main`
+Status: implemented on `integrate/realtime-voice-main`; superseded by Phase 12.6D-C intent gating
 Source commit: pending
 
 ## 1. Why This Hotfix Exists
@@ -97,3 +97,11 @@ This hotfix does not change skills, prompt behavior, memory, Builder, artifact s
 ## 8. Bottom Line
 
 12.6D-B keeps stale-output suppression but requires confirmed barge-in before dropping Gemini audio. Input audio frames alone are not enough to classify assistant output as stale.
+
+## 9. Phase 12.6D-C Follow-up
+
+The next local smoke (`sophia-voice-telemetry-report-2026-05-24T05-04-34-187Z.json`) showed that 12.6D-B was still too sensitive. It had healthy tool/artifact lifecycle, but `modelTurnAudio=200`, `outputTranscription=74`, `staleAssistantAudioDroppedCount=148`, `staleAssistantTranscriptDroppedCount=59`, and `inputFrameOnlyNotBargeInCount=0`. The remaining bug was that raw frame count plus duration still promoted residual mic activity into `sustained_input_audio` confirmation.
+
+12.6D-C removes raw-frame confirmation entirely unless a future layer provides actual speech confidence/amplitude evidence. Stale suppression is now intent-gated: provider interruption and manual interrupt remain strong; provider input transcription must contain real non-noise text after assistant output begins; raw mic frames stay candidates and cannot arm `staleSuppressionArmedAt`.
+
+Full follow-up report: `docs/audits/gemini-barge-in-intent-gated-confirmation-phase-12-6d-c.md`.

@@ -1902,6 +1902,25 @@ export function useStreamVoiceSession(
                 setPartialReply("")
               }
             }
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? {
+                  ...current,
+                  userInputActiveAgeMs: diagnostic.userInputActiveAgeMs ?? current.userInputActiveAgeMs ?? null,
+                  bargeInConfirmed: current.bargeInConfirmed === true || diagnostic.bargeInConfirmed === true,
+                  bargeInConfirmationSource: diagnostic.bargeInConfirmationSource ?? current.bargeInConfirmationSource ?? "none",
+                  bargeInConfirmationReason: diagnostic.bargeInConfirmationReason ?? current.bargeInConfirmationReason ?? null,
+                  bargeInCandidateFrameCount: Math.max(current.bargeInCandidateFrameCount ?? 0, diagnostic.bargeInCandidateFrameCount ?? 0),
+                  inputFrameOnlyNotBargeInCount: Math.max(current.inputFrameOnlyNotBargeInCount ?? 0, diagnostic.inputFrameOnlyNotBargeInCount ?? 0),
+                  candidateFramesDidNotConfirmCount: Math.max(current.candidateFramesDidNotConfirmCount ?? 0, diagnostic.candidateFramesDidNotConfirmCount ?? 0),
+                  candidateExpiredCount: Math.max(current.candidateExpiredCount ?? 0, diagnostic.candidateExpiredCount ?? 0),
+                  suppressionBlockedBecauseNoIntentCount: Math.max(current.suppressionBlockedBecauseNoIntentCount ?? 0, diagnostic.suppressionBlockedBecauseNoIntentCount ?? 0),
+                  staleSuppressionArmedAt: diagnostic.staleSuppressionArmedAt ?? current.staleSuppressionArmedAt ?? null,
+                  rawAssistantUserOverlapMs: Math.max(current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs ?? 0, diagnostic.rawAssistantUserOverlapMs ?? 0),
+                  maxRawAssistantUserOverlapMs: Math.max(current.maxRawAssistantUserOverlapMs ?? current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs ?? 0, diagnostic.rawAssistantUserOverlapMs ?? 0),
+                  confirmedAssistantUserOverlapMs: Math.max(current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs ?? 0),
+                  maxConfirmedAssistantUserOverlapMs: Math.max(current.maxConfirmedAssistantUserOverlapMs ?? current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs ?? 0),
+                }
+              : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-input-audio-activity",
@@ -1932,6 +1951,13 @@ export function useStreamVoiceSession(
                   playbackGeneration: diagnostic.playbackStateAfter.playbackGeneration,
                   interruptedResponseIds: diagnostic.interruptedResponseIds,
                   assistantUserOverlapMs: Math.max(current.assistantUserOverlapMs, diagnostic.assistantUserOverlapMs),
+                  rawAssistantUserOverlapMs: Math.max(current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs, diagnostic.rawAssistantUserOverlapMs),
+                  maxRawAssistantUserOverlapMs: Math.max(current.maxRawAssistantUserOverlapMs ?? current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs, diagnostic.rawAssistantUserOverlapMs),
+                  confirmedAssistantUserOverlapMs: Math.max(current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs),
+                  maxConfirmedAssistantUserOverlapMs: Math.max(current.maxConfirmedAssistantUserOverlapMs ?? current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs),
+                  bargeInConfirmed: true,
+                  bargeInConfirmationSource: diagnostic.bargeInConfirmationSource,
+                  bargeInConfirmationReason: diagnostic.bargeInConfirmationReason,
                 }
               : current)
             recordSophiaCaptureEvent({
@@ -1958,6 +1984,22 @@ export function useStreamVoiceSession(
                   staleAssistantOutputSuppressionCount: current.staleAssistantOutputSuppressionCount + 1,
                   playbackGeneration: diagnostic.playbackGeneration ?? current.playbackGeneration,
                   interruptedResponseIds: diagnostic.interruptedResponseIds,
+                  userInputActiveAgeMs: diagnostic.userInputActiveAgeMs ?? current.userInputActiveAgeMs ?? null,
+                  bargeInConfirmed: current.bargeInConfirmed === true || diagnostic.bargeInConfirmed === true,
+                  bargeInConfirmationSource: diagnostic.bargeInConfirmationSource ?? current.bargeInConfirmationSource ?? "none",
+                  bargeInConfirmationReason: diagnostic.bargeInConfirmationReason ?? current.bargeInConfirmationReason ?? null,
+                  bargeInCandidateFrameCount: Math.max(current.bargeInCandidateFrameCount ?? 0, diagnostic.bargeInCandidateFrameCount ?? 0),
+                  inputFrameOnlyNotBargeInCount: Math.max(current.inputFrameOnlyNotBargeInCount ?? 0, diagnostic.inputFrameOnlyNotBargeInCount ?? 0),
+                  candidateFramesDidNotConfirmCount: Math.max(current.candidateFramesDidNotConfirmCount ?? 0, diagnostic.candidateFramesDidNotConfirmCount ?? 0),
+                  candidateExpiredCount: Math.max(current.candidateExpiredCount ?? 0, diagnostic.candidateExpiredCount ?? 0),
+                  suppressionBlockedBecauseNoIntentCount: Math.max(current.suppressionBlockedBecauseNoIntentCount ?? 0, diagnostic.suppressionBlockedBecauseNoIntentCount ?? 0),
+                  staleSuppressionArmedAt: diagnostic.staleSuppressionArmedAt ?? current.staleSuppressionArmedAt ?? null,
+                  staleSuppressionArmedBy: diagnostic.staleSuppressionArmedBy ?? current.staleSuppressionArmedBy ?? null,
+                  assistantAudioDropReason: diagnostic.assistantAudioDropReason ?? current.assistantAudioDropReason ?? null,
+                  rawAssistantUserOverlapMs: Math.max(current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs ?? 0, diagnostic.rawAssistantUserOverlapMs),
+                  maxRawAssistantUserOverlapMs: Math.max(current.maxRawAssistantUserOverlapMs ?? current.rawAssistantUserOverlapMs ?? current.assistantUserOverlapMs ?? 0, diagnostic.rawAssistantUserOverlapMs),
+                  confirmedAssistantUserOverlapMs: Math.max(current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs),
+                  maxConfirmedAssistantUserOverlapMs: Math.max(current.maxConfirmedAssistantUserOverlapMs ?? current.confirmedAssistantUserOverlapMs ?? 0, diagnostic.confirmedAssistantUserOverlapMs),
                 }
               : current)
             recordSophiaCaptureEvent({

@@ -104,3 +104,13 @@ The integrated-branch smoke after 12.6D showed that stale-output suppression was
 New diagnostics distinguish candidate vs confirmed state: `userInputActiveAgeMs`, `bargeInConfirmed`, `bargeInCandidateFrameCount`, `suppressionDeferredReason`, `staleSuppressionArmedAt`, `staleSuppressionArmedBy`, `assistantAudioDropReason`, and `inputFrameOnlyNotBargeInCount`. Unconfirmed candidates decay when frames stop, and assistant/user overlap closes once playback is flushed so it cannot keep aging after audio has stopped.
 
 Full hotfix report: `docs/audits/gemini-barge-in-guard-sensitivity-hotfix-phase-12-6d-b.md`.
+
+## 12. Phase 12.6D-C Intent-Gated Confirmation
+
+The follow-up integrated smoke after 12.6D-B still cut Sophia off after one word. Gemini produced a full answer (`modelTurnAudio=200`, `outputTranscription=74`), but the browser stale-output guard suppressed valid chunks (`staleAssistantAudioDroppedCount=148`, `staleAssistantTranscriptDroppedCount=59`, `staleAssistantOutputSuppressionCount=207`). `inputFrameOnlyNotBargeInCount=0` showed that incidental frames were not staying benign.
+
+12.6D-C keeps the stale repetition fix but removes raw-frame confirmation. `input_audio_frame_sent` can update candidate counters and raw mic overlap, but it cannot increment playback generation, arm stale suppression, drop assistant output, or interrupt transcript state. Confirmation now requires provider interruption, explicit manual/local interrupt, or conservative provider input transcription with real text after assistant output has begun. Provider input transcription fences future old-generation chunks without retroactively flushing already scheduled audio; provider interruption remains the strong immediate flush path.
+
+New diagnostics include `bargeInConfirmationSource`, `bargeInConfirmationReason`, `candidateFramesDidNotConfirmCount`, `candidateExpiredCount`, `suppressionBlockedBecauseNoIntentCount`, `staleSuppressionArmedBy`, `rawAssistantUserOverlapMs`, and `confirmedAssistantUserOverlapMs`.
+
+Full follow-up report: `docs/audits/gemini-barge-in-intent-gated-confirmation-phase-12-6d-c.md`.

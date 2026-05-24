@@ -574,6 +574,10 @@ describe('buildVoiceDeveloperMetrics', () => {
             playbackFlushed: true,
             playbackGeneration: 4,
             assistantUserOverlapMs: 2450,
+            rawAssistantUserOverlapMs: 2450,
+            confirmedAssistantUserOverlapMs: 2450,
+            bargeInConfirmationSource: 'provider_interruption',
+            bargeInConfirmationReason: 'gemini_server_interrupted_event',
             interruptedResponseIds: ['response-stale'],
           },
         },
@@ -591,10 +595,18 @@ describe('buildVoiceDeveloperMetrics', () => {
             interruptedResponseIds: ['response-stale'],
             userInputActiveAgeMs: 350,
             bargeInConfirmed: true,
+            bargeInConfirmationSource: 'provider_interruption',
+            bargeInConfirmationReason: 'gemini_server_interrupted_event',
             bargeInCandidateFrameCount: 4,
             staleSuppressionArmedAt: '2026-04-07T12:00:01.000Z',
+            staleSuppressionArmedBy: 'provider_interruption',
             assistantAudioDropReason: 'interrupted_response_id',
             inputFrameOnlyNotBargeInCount: 1,
+            candidateFramesDidNotConfirmCount: 1,
+            candidateExpiredCount: 0,
+            suppressionBlockedBecauseNoIntentCount: 0,
+            rawAssistantUserOverlapMs: 2450,
+            confirmedAssistantUserOverlapMs: 2450,
           },
         },
       }),
@@ -649,15 +661,67 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.staleAssistantOutputSuppressionCount).toBe(2);
     expect(metrics.sessionTelemetry.gemini?.playbackGeneration).toBe(4);
     expect(metrics.sessionTelemetry.gemini?.maxAssistantUserOverlapMs).toBe(2450);
+    expect(metrics.sessionTelemetry.gemini?.maxRawAssistantUserOverlapMs).toBe(2450);
+    expect(metrics.sessionTelemetry.gemini?.maxConfirmedAssistantUserOverlapMs).toBe(2450);
     expect(metrics.sessionTelemetry.gemini?.bargeInConfirmed).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.bargeInConfirmationSource).toBe('provider_interruption');
     expect(metrics.sessionTelemetry.gemini?.bargeInCandidateFrameCount).toBe(4);
     expect(metrics.sessionTelemetry.gemini?.inputFrameOnlyNotBargeInCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.candidateFramesDidNotConfirmCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.suppressionBlockedBecauseNoIntentCount).toBe(0);
     expect(metrics.sessionTelemetry.gemini?.staleSuppressionArmedAt).toBe('2026-04-07T12:00:01.000Z');
+    expect(metrics.sessionTelemetry.gemini?.staleSuppressionArmedBy).toBe('provider_interruption');
     expect(metrics.sessionTelemetry.gemini?.assistantAudioDropReason).toBe('interrupted_response_id');
     expect(metrics.sessionTelemetry.gemini?.interruptedResponseIds).toEqual(['response-stale']);
     expect(metrics.sessionTelemetry.gemini?.unresolvedToolCallCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactToolCallUnknownCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.oldestUnresolvedToolCallAgeMs).toBe(5000);
+  });
+
+  it('separates raw assistant-user overlap from confirmed barge-in overlap', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev', runtime: 'gemini_live' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.500Z',
+        category: 'voice-session',
+        name: 'gemini-input-audio-activity',
+        payload: {
+          diagnostic: {
+            eventType: 'input_audio_frame_sent',
+            userInputActiveAgeMs: 2100,
+            bargeInConfirmed: false,
+            bargeInConfirmationSource: 'none',
+            bargeInCandidateFrameCount: 12,
+            inputFrameOnlyNotBargeInCount: 12,
+            candidateFramesDidNotConfirmCount: 12,
+            suppressionBlockedBecauseNoIntentCount: 3,
+            rawAssistantUserOverlapMs: 2450,
+            confirmedAssistantUserOverlapMs: 0,
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'speaking',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:03.000Z'),
+    });
+
+    expect(metrics.sessionTelemetry.runtime).toBe('gemini_live');
+    expect(metrics.sessionTelemetry.gemini?.maxRawAssistantUserOverlapMs).toBe(2450);
+    expect(metrics.sessionTelemetry.gemini?.maxConfirmedAssistantUserOverlapMs).toBe(0);
+    expect(metrics.sessionTelemetry.gemini?.bargeInConfirmed).toBe(false);
+    expect(metrics.sessionTelemetry.gemini?.bargeInConfirmationSource).toBe('none');
+    expect(metrics.sessionTelemetry.gemini?.suppressionBlockedBecauseNoIntentCount).toBe(3);
   });
 
   it('counts rendered session artifacts when the public artifact event is absent from the active slice', () => {
