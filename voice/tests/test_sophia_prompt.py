@@ -77,6 +77,22 @@ def test_voice_dockerfile_copies_realtime_prompt_sources() -> None:
     assert "!skills/public/sophia/**" in dockerignore
 
 
+def test_voice_dockerfile_copies_dependency_safe_tool_contracts() -> None:
+    dockerfile = (REPO_ROOT / "voice" / "Dockerfile").read_text(encoding="utf-8")
+
+    for contract_path in [
+        "backend/packages/harness/deerflow/__init__.py",
+        "backend/packages/harness/deerflow/sophia/__init__.py",
+        "backend/packages/harness/deerflow/sophia/tools/__init__.py",
+        "backend/packages/harness/deerflow/sophia/tools/emit_artifact_contract.py",
+        "backend/packages/harness/deerflow/sophia/tools/builder_lifecycle_contract.py",
+        "backend/packages/harness/deerflow/sophia/tools/retrieve_memories_contract.py",
+    ]:
+        assert f"COPY {contract_path}" in dockerfile
+
+    assert 'ENV PYTHONPATH="/app/backend/packages/harness:${PYTHONPATH}"' in dockerfile
+
+
 def _system_instruction_text(setup: dict[str, Any]) -> str:
     system_instruction = setup["systemInstruction"]
     return system_instruction["parts"][0]["text"]
