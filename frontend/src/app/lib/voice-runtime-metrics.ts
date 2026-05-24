@@ -210,6 +210,12 @@ export type GeminiSessionTelemetry = {
     playbackGeneration: number
     assistantUserOverlapMs: number
     maxAssistantUserOverlapMs: number
+    userInputActiveAgeMs: number | null
+    bargeInConfirmed: boolean
+    bargeInCandidateFrameCount: number
+    inputFrameOnlyNotBargeInCount: number
+    staleSuppressionArmedAt: string | null
+    assistantAudioDropReason: string | null
     interruptedResponseIds: string[]
     interruptionCount: number
     playbackFlushCount: number
@@ -914,6 +920,10 @@ function buildSessionTelemetry(params: {
       .filter((event) => event.name === "gemini-stale-output-suppressed")
       .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
       .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
+    const inputAudioDiagnostics = activeEvents
+      .filter((event) => event.name === "gemini-input-audio-activity")
+      .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+      .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
     const toolDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-tool-loop-diagnostic")
     const providerPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event")
     const providerCorrelationPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event-correlation")
@@ -952,6 +962,29 @@ function buildSessionTelemetry(params: {
       hookTelemetry?.assistantUserOverlapMs ?? 0,
       asFiniteNumber(interruptionDiagnostic?.assistantUserOverlapMs) ?? 0,
     )
+    const latestInputAudioDiagnostic = inputAudioDiagnostics.at(-1)
+    const latestSuppressedAudioDiagnostic = staleSuppressionDiagnostics
+      .filter((diagnostic) => asString(diagnostic.outputType) === "audio")
+      .at(-1)
+    const inputFrameOnlyNotBargeInCount = Math.max(
+      maxFiniteFromRecords(inputAudioDiagnostics, "inputFrameOnlyNotBargeInCount") ?? 0,
+      maxFiniteFromRecords(staleSuppressionDiagnostics, "inputFrameOnlyNotBargeInCount") ?? 0,
+      inputAudioDiagnostics.filter((diagnostic) => asString(diagnostic.suppressionDeferredReason) === "input_frame_only_not_barge_in").length,
+    )
+    const bargeInCandidateFrameCount = maxFiniteFromRecords(
+      [...inputAudioDiagnostics, ...staleSuppressionDiagnostics],
+      "bargeInCandidateFrameCount",
+    ) ?? 0
+    const bargeInConfirmed = staleSuppressionDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
+      || inputAudioDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
+    const userInputActiveAgeMs = maxFiniteFromRecords(
+      [...inputAudioDiagnostics, ...staleSuppressionDiagnostics],
+      "userInputActiveAgeMs",
+    )
+    const staleSuppressionArmedAt = asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedAt)
+      ?? asString(latestInputAudioDiagnostic?.staleSuppressionArmedAt)
+    const assistantAudioDropReason = asString(latestSuppressedAudioDiagnostic?.assistantAudioDropReason)
+      ?? asString(latestSuppressedAudioDiagnostic?.reason)
     const interruptedResponseIds = hookTelemetry?.interruptedResponseIds
       ?? asStringArray(interruptionDiagnostic?.interruptedResponseIds)
       ?? asStringArray(staleSuppressionDiagnostics.at(-1)?.interruptedResponseIds)
@@ -1074,6 +1107,12 @@ function buildSessionTelemetry(params: {
         playbackGeneration,
         assistantUserOverlapMs,
         maxAssistantUserOverlapMs: assistantUserOverlapMs,
+        userInputActiveAgeMs,
+        bargeInConfirmed,
+        bargeInCandidateFrameCount,
+        inputFrameOnlyNotBargeInCount,
+        staleSuppressionArmedAt,
+        assistantAudioDropReason,
         interruptedResponseIds,
         interruptionCount,
         playbackFlushCount,

@@ -501,6 +501,10 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
     .filter((event) => event.name === 'gemini-stale-output-suppressed')
     .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
     .filter((value): value is Record<string, unknown> => value !== null);
+  const inputAudioDiagnostics = events
+    .filter((event) => event.name === 'gemini-input-audio-activity')
+    .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+    .filter((value): value is Record<string, unknown> => value !== null);
   const staleTranscriptIgnored = events.filter((event) => event.name === 'stale-assistant-transcript-ignored');
   const interruptionDiagnostics = events
     .filter((event) => event.name === 'gemini-interruption')
@@ -538,8 +542,35 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
   if ((maxAssistantUserOverlapMs ?? 0) >= 1_500) {
     warnings.push('assistant_audio_overlapped_user_input');
   }
+  const inputFrameOnlyNotBargeInCount = Math.max(
+    maxNumericField(inputAudioDiagnostics, 'inputFrameOnlyNotBargeInCount') ?? 0,
+    maxNumericField(staleSuppressionDiagnostics, 'inputFrameOnlyNotBargeInCount') ?? 0,
+    inputAudioDiagnostics.filter((diagnostic) => asString(diagnostic.suppressionDeferredReason) === 'input_frame_only_not_barge_in').length,
+  );
+  const bargeInCandidateFrameCount = maxNumericField(
+    [...inputAudioDiagnostics, ...staleSuppressionDiagnostics],
+    'bargeInCandidateFrameCount',
+  );
+  const bargeInConfirmed = staleSuppressionDiagnostics.some((diagnostic) => diagnostic.bargeInConfirmed === true)
+    || inputAudioDiagnostics.some((diagnostic) => diagnostic.bargeInConfirmed === true);
+  const latestInputAudioDiagnostic = inputAudioDiagnostics.at(-1);
+  const latestSuppressedAudioDiagnostic = staleSuppressionDiagnostics
+    .filter((diagnostic) => asString(diagnostic.outputType) === 'audio')
+    .at(-1);
+  const suppressionDeferredReasons = Array.from(new Set(
+    inputAudioDiagnostics
+      .map((diagnostic) => asString(diagnostic.suppressionDeferredReason))
+      .filter((reason): reason is string => reason !== null),
+  ));
 
-  if (!warnings.length && !staleSuppressionDiagnostics.length && !staleTranscriptIgnored.length && !unresolvedToolEntries.length) {
+  if (
+    !warnings.length
+    && !staleSuppressionDiagnostics.length
+    && !staleTranscriptIgnored.length
+    && !unresolvedToolEntries.length
+    && inputFrameOnlyNotBargeInCount === 0
+    && !suppressionDeferredReasons.length
+  ) {
     return null;
   }
 
@@ -550,6 +581,15 @@ function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Recor
     staleAssistantTranscriptDroppedCount: staleTranscriptDroppedCount,
     staleAssistantOutputSuppressionCount: staleSuppressionDiagnostics.length + staleTranscriptIgnored.length,
     maxAssistantUserOverlapMs,
+    userInputActiveAgeMs: maxNumericField([...inputAudioDiagnostics, ...staleSuppressionDiagnostics], 'userInputActiveAgeMs'),
+    bargeInConfirmed,
+    bargeInCandidateFrameCount,
+    suppressionDeferredReasons,
+    staleSuppressionArmedAt: asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedAt)
+      ?? asString(latestInputAudioDiagnostic?.staleSuppressionArmedAt),
+    assistantAudioDropReason: asString(latestSuppressedAudioDiagnostic?.assistantAudioDropReason)
+      ?? asString(latestSuppressedAudioDiagnostic?.reason),
+    inputFrameOnlyNotBargeInCount,
     maxOldestQueuedAgeMs,
     maxTranscriptRelayLatencyMs,
     unresolvedToolCallCount: unresolvedToolEntries.length,

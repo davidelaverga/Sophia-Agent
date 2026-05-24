@@ -26,6 +26,29 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-24 · [gemini-barge-in-guard-sensitivity] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | voice · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
+
+### What Changed
+- Hotfixed the Phase 12.6D Gemini stale-output guard so raw `input_audio_frame_sent` diagnostics are candidate evidence only, not confirmed barge-in.
+- Required provider interruption, explicit playback flush, provider input transcription, or sustained input audio before arming stale-output suppression and dropping assistant audio.
+- Added candidate/confirmed diagnostics for `userInputActiveAgeMs`, `bargeInConfirmed`, `bargeInCandidateFrameCount`, `suppressionDeferredReason`, `staleSuppressionArmedAt`, `staleSuppressionArmedBy`, `assistantAudioDropReason`, and `inputFrameOnlyNotBargeInCount`.
+- Updated frontend tests and telemetry summaries while preserving artifact/tool lifecycle, B4 artifact reconciliation, and the existing realtime voice tool surface.
+
+### What We Learned
+- Phase 12.6D correctly stopped stale repetition, but its local browser guard over-classified residual mic frames as barge-in. The smoke telemetry showed healthy tool/artifact lifecycle (`toolResponseCount=3`, `unresolvedToolCallCount=0`, `artifactCountMismatch=false`) alongside playback over-suppression (`assistantUserOverlapMs=23583`, `staleAssistantOutputSuppressionCount=30`).
+- Assistant/user overlap must close when playback is flushed; otherwise a stale candidate can keep aging long after audio has stopped.
+- `input_audio_frame_sent` is transport evidence, not user intent. Confirmation needs a stronger signal or sustained frames.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
 ## 2026-05-22 · [companion-builder-lifecycle-discipline] · PR #129
 **Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `~/.claude/plans/users-davidelaverga-desktop-subagents-a-woolly-haven.md` (PR #129 + Phase 2A–2F)
 

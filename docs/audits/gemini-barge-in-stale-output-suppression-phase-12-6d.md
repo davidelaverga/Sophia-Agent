@@ -94,3 +94,13 @@ Validated focused slices:
 ## 10. Bottom Line
 
 Phase 12.6D adds stale-output fences at the three places that can leak old assistant behavior: browser PCM playback, public transcript ingestion, and backend normalization. It preserves the 12.6A/12.6C skill architecture and B4 artifact reconciliation while making future barge-in smokes diagnosable instead of ambiguous.
+
+## 11. Phase 12.6D-B Sensitivity Hotfix
+
+The integrated-branch smoke after 12.6D showed that stale-output suppression was too aggressive. The supplied telemetry for `sophia-voice-telemetry-report-2026-05-24T03-51-15-905Z.json` had healthy tool/artifact lifecycle (`toolCallCount=3`, `toolResponseCount=3`, `unresolvedToolCallCount=0`, `artifactCountMismatch=false`) but unhealthy playback (`assistantUserOverlapMs=23583`, `maxAssistantUserOverlapMs=23583`, and `staleAssistantOutputSuppressionCount=30`).
+
+12.6D-B keeps the stale repetition fix but changes the local browser guard so raw `input_audio_frame_sent` diagnostics are only candidates. A single residual mic frame during assistant playback no longer stops PCM playback, arms stale-output suppression, or interrupts the assistant transcript guard. Suppression is armed only after provider interruption, explicit playback flush, provider input transcription, or sustained input audio over a short confirmation threshold.
+
+New diagnostics distinguish candidate vs confirmed state: `userInputActiveAgeMs`, `bargeInConfirmed`, `bargeInCandidateFrameCount`, `suppressionDeferredReason`, `staleSuppressionArmedAt`, `staleSuppressionArmedBy`, `assistantAudioDropReason`, and `inputFrameOnlyNotBargeInCount`. Unconfirmed candidates decay when frames stop, and assistant/user overlap closes once playback is flushed so it cannot keep aging after audio has stopped.
+
+Full hotfix report: `docs/audits/gemini-barge-in-guard-sensitivity-hotfix-phase-12-6d-b.md`.

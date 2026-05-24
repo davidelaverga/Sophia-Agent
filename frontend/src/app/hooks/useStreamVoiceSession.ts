@@ -1895,7 +1895,7 @@ export function useStreamVoiceSession(
             })
           },
           onInputAudioActivity: (diagnostic) => {
-            if (diagnostic.eventType === "input_audio_frame_sent") {
+            if (diagnostic.eventType === "input_audio_frame_sent" && diagnostic.bargeInConfirmed === true) {
               const interruptedKeys = markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
               if (interruptedKeys.length > 0) {
                 resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)

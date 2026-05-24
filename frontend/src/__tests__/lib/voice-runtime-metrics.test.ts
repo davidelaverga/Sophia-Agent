@@ -589,18 +589,39 @@ describe('buildVoiceDeveloperMetrics', () => {
             reason: 'interrupted_response_id',
             playbackGeneration: 4,
             interruptedResponseIds: ['response-stale'],
+            userInputActiveAgeMs: 350,
+            bargeInConfirmed: true,
+            bargeInCandidateFrameCount: 4,
+            staleSuppressionArmedAt: '2026-04-07T12:00:01.000Z',
+            assistantAudioDropReason: 'interrupted_response_id',
+            inputFrameOnlyNotBargeInCount: 1,
           },
         },
       }),
       buildEvent({
         seq: 5,
+        at: '2026-04-07T12:00:01.150Z',
+        category: 'voice-session',
+        name: 'gemini-input-audio-activity',
+        payload: {
+          diagnostic: {
+            eventType: 'input_audio_frame_sent',
+            suppressionDeferredReason: 'input_frame_only_not_barge_in',
+            bargeInConfirmed: false,
+            bargeInCandidateFrameCount: 1,
+            inputFrameOnlyNotBargeInCount: 1,
+          },
+        },
+      }),
+      buildEvent({
+        seq: 6,
         at: '2026-04-07T12:00:01.200Z',
         category: 'voice-session',
         name: 'stale-assistant-transcript-ignored',
         payload: { reason: 'interrupted_or_pre_barge_in_assistant_transcript' },
       }),
       buildEvent({
-        seq: 6,
+        seq: 7,
         at: '2026-04-07T12:00:01.300Z',
         category: 'voice-session',
         name: 'gemini-tool-call-ledger',
@@ -628,6 +649,11 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.staleAssistantOutputSuppressionCount).toBe(2);
     expect(metrics.sessionTelemetry.gemini?.playbackGeneration).toBe(4);
     expect(metrics.sessionTelemetry.gemini?.maxAssistantUserOverlapMs).toBe(2450);
+    expect(metrics.sessionTelemetry.gemini?.bargeInConfirmed).toBe(true);
+    expect(metrics.sessionTelemetry.gemini?.bargeInCandidateFrameCount).toBe(4);
+    expect(metrics.sessionTelemetry.gemini?.inputFrameOnlyNotBargeInCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.staleSuppressionArmedAt).toBe('2026-04-07T12:00:01.000Z');
+    expect(metrics.sessionTelemetry.gemini?.assistantAudioDropReason).toBe('interrupted_response_id');
     expect(metrics.sessionTelemetry.gemini?.interruptedResponseIds).toEqual(['response-stale']);
     expect(metrics.sessionTelemetry.gemini?.unresolvedToolCallCount).toBe(1);
     expect(metrics.sessionTelemetry.gemini?.artifactToolCallUnknownCount).toBe(1);

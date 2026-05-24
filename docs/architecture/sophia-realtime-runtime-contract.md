@@ -183,6 +183,20 @@ Diagnostics now include stale assistant audio/transcript drop counts, playback g
 
 This phase did not change baked skills, prompt files, crisis behavior, artifact schema, Builder behavior, memory behavior, provider routing, or VAD/activity tuning.
 
+## Phase 12.6D-B Gemini Barge-in Guard Sensitivity Hotfix
+
+Phase 12.6D-B follows the integrated-branch smoke where the 12.6D stale-output fence cut Sophia audio off after about one word. The implementation report lives at `docs/audits/gemini-barge-in-guard-sensitivity-hotfix-phase-12-6d-b.md`.
+
+The root cause was local guard sensitivity, not artifact/tool lifecycle. The smoke showed `toolCallCount=3`, `toolResponseCount=3`, `unresolvedToolCallCount=0`, and `artifactCountMismatch=false`, but also `assistantUserOverlapMs=23583`, `maxAssistantUserOverlapMs=23583`, and `staleAssistantOutputSuppressionCount=30`.
+
+The runtime contract now distinguishes barge-in candidates from confirmed barge-ins. Browser `input_audio_frame_sent` diagnostics alone are not enough to invalidate assistant output. They become short-lived candidates and decay if frames stop. Stale-output suppression is armed only by provider interruption, explicit playback flush, provider input transcription, or sustained user audio over a short threshold.
+
+Confirmed interruption behavior stays intact: playback flushes, playback generation advances, old interrupted response ids remain stale, and old transcripts cannot mutate the next turn. The difference is that incidental residual mic frames no longer stop valid Gemini audio or mark assistant transcript state interrupted.
+
+Diagnostics now expose `userInputActiveAgeMs`, `bargeInConfirmed`, `bargeInCandidateFrameCount`, `suppressionDeferredReason`, `staleSuppressionArmedAt`, `staleSuppressionArmedBy`, `assistantAudioDropReason`, and `inputFrameOnlyNotBargeInCount` in input/stale-output telemetry.
+
+This hotfix did not change skills, prompt behavior, memory, Builder, artifact schema, provider routing, crisis behavior, `users/**`, `backend/users/**`, `voice/sophia_llm.py`, or Vision Agents files.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.
