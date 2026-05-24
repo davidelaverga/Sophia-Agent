@@ -1340,3 +1340,106 @@ class TestInFlightProtection:
             f"Deferred rerun MUST use the second caller's thread_state, "
             f"not reuse the first's. Got marker sequence: {seen_markers!r}"
         )
+
+
+# ==================================================================
+# Epoch unit normalization (Codex P1 R8)
+# ==================================================================
+
+
+class TestNormalizeEpochToSeconds:
+    """Pin the epoch ms / µs / ns → seconds heuristic.
+
+    Codex P1 review on PR #130 R8: a JavaScript ``Date.now()`` style 13-digit
+    millisecond timestamp landing in a message's ``timestamp`` field used to
+    propagate untouched into ``session_start_unix``. The subsequent
+    ``datetime.fromtimestamp(value, UTC)`` inside ``_run_pipeline_steps``'s
+    ``[Pipeline] session_start_iso`` log line raised ``ValueError: year out
+    of range`` and aborted the entire offline pipeline. These tests pin the
+    detection thresholds so that regression can't recur.
+    """
+
+    def test_seconds_pass_through_unchanged(self):
+        from deerflow.sophia.offline_pipeline import _normalize_epoch_to_seconds
+
+        assert _normalize_epoch_to_seconds(1779564975) == 1779564975
+
+    def test_milliseconds_downscale_to_seconds(self):
+        from deerflow.sophia.offline_pipeline import _normalize_epoch_to_seconds
+
+        # JavaScript Date.now() at the same instant as the seconds value above
+        assert _normalize_epoch_to_seconds(1779564975000) == 1779564975
+
+    def test_microseconds_downscale_to_seconds(self):
+        from deerflow.sophia.offline_pipeline import _normalize_epoch_to_seconds
+
+        assert _normalize_epoch_to_seconds(1779564975000000) == 1779564975
+
+    def test_nanoseconds_downscale_to_seconds(self):
+        from deerflow.sophia.offline_pipeline import _normalize_epoch_to_seconds
+
+        assert _normalize_epoch_to_seconds(1779564975000000000) == 1779564975
+
+    def test_normalized_value_is_safe_for_datetime_fromtimestamp(self):
+        """The whole point: the normalized value MUST NOT crash
+        datetime.fromtimestamp, which is what _run_pipeline_steps does
+        on the [Pipeline] session_start_iso log line.
+        """
+        from datetime import UTC, datetime
+
+        from deerflow.sophia.offline_pipeline import _normalize_epoch_to_seconds
+
+        # Without normalization, this raises ValueError: year out of range
+        ms_value = 1779564975000
+        normalized = _normalize_epoch_to_seconds(ms_value)
+        # Must succeed (would crash on raw ms)
+        iso = datetime.fromtimestamp(normalized, UTC).isoformat()
+        assert iso == "2026-05-23T19:36:15+00:00"
+
+
+class TestCoerceTimestampUnix:
+    """Pin _coerce_timestamp_unix's unit-normalization across all input shapes."""
+
+    def test_int_ms_normalized(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(1779564975000) == 1779564975
+
+    def test_float_ms_normalized(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(1779564975000.5) == 1779564975
+
+    def test_string_int_ms_normalized(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        # "1779564975000" → int → normalize → 1779564975
+        assert _coerce_timestamp_unix("1779564975000") == 1779564975
+
+    def test_string_float_ms_normalized(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        # "1779564975000.0" → float → int → normalize → 1779564975
+        assert _coerce_timestamp_unix("1779564975000.0") == 1779564975
+
+    def test_iso_string_unchanged(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        # ISO already gives seconds; normalization is a no-op.
+        assert _coerce_timestamp_unix("2026-05-23T19:36:15Z") == 1779564975
+
+    def test_seconds_pass_through(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(1779564975) == 1779564975
+
+    def test_invalid_string_returns_none(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix("not a timestamp") is None
+        assert _coerce_timestamp_unix("") is None
+
+    def test_none_returns_none(self):
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(None) is None

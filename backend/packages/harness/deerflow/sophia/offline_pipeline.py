@@ -750,11 +750,11 @@ def _message_metadata_containers(msg: Any) -> list[dict]:
 
 def _coerce_timestamp_unix(value: Any) -> int | None:
     if isinstance(value, (int, float)):
-        return int(value)
+        return _normalize_epoch_to_seconds(int(value))
     if not isinstance(value, str) or not value:
         return None
     try:
-        return int(float(value))
+        return _normalize_epoch_to_seconds(int(float(value)))
     except ValueError:
         pass
     try:
@@ -765,6 +765,43 @@ def _coerce_timestamp_unix(value: Any) -> int | None:
         return int(parsed.timestamp())
     except ValueError:
         return None
+
+
+# Plausibility thresholds for normalising an epoch value to seconds.
+# Year 2286 in seconds is ~1e10, so anything <1e10 we treat as seconds.
+# Year 2286 in milliseconds is ~1e13, etc. Anything <1970 is invalid
+# regardless of unit and falls through unchanged (caller's responsibility).
+_EPOCH_SECONDS_MAX = 10**10   # ~year 2286 in seconds
+_EPOCH_MILLIS_MAX = 10**13   # ~year 2286 in milliseconds
+_EPOCH_MICROS_MAX = 10**16   # ~year 2286 in microseconds
+
+
+def _normalize_epoch_to_seconds(value: int) -> int:
+    """Detect epoch ms / µs / ns and downscale to seconds.
+
+    Codex P1 review on PR #130 R8: JavaScript ``Date.now()`` and many
+    web APIs return 13-digit MILLISECOND epochs, but Python's
+    ``datetime.fromtimestamp`` expects SECONDS. Passing ms through unchanged
+    triggered ``ValueError: year out of range`` inside
+    ``_run_pipeline_steps``'s ``[Pipeline] session_start_iso`` log line,
+    aborting the entire offline pipeline before extraction or handoff.
+
+    Detection is by magnitude (no client-side hint required): anything
+    larger than ~year-2286 in the smaller unit is interpreted as the next
+    unit up. Real values from session traffic (post-2024) easily satisfy
+    this — values < 1e10 are decades old; > 1e10 means "must be ms or
+    finer". Negative or tiny values are left unchanged (caller's
+    responsibility — _coerce_timestamp_unix only feeds in unsigned epochs
+    from messages / SessionStore / Mem0).
+    """
+    abs_value = abs(value)
+    if abs_value < _EPOCH_SECONDS_MAX:
+        return value
+    if abs_value < _EPOCH_MILLIS_MAX:
+        return value // 1_000
+    if abs_value < _EPOCH_MICROS_MAX:
+        return value // 1_000_000
+    return value // 1_000_000_000
 
 
 def _extract_artifacts(thread_state: dict[str, Any]) -> list[dict]:
