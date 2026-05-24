@@ -218,11 +218,29 @@ def extract_session_memories(
     platform = metadata.get("platform", "text")
     context_mode = metadata.get("context_mode", "life")
 
-    # Upgrade A: anchor memories to session start time if available
+    # Upgrade A: anchor memories to session start time if available.
+    #
+    # IMPORTANT: do NOT fall back to ``datetime.now()`` when the metadata
+    # lacks ``session_start_unix``. Doing so would write the ingestion time
+    # as the memory's anchor, re-dating historical turns to "right now" and
+    # breaking Mem0 v3 temporal reasoning ("yesterday" / "last week" queries
+    # would treat ancient memories as if they just happened). Codex P1 review
+    # on PR #130 flagged this as a data-accuracy regression.
+    #
+    # When the anchor is missing we pass ``timestamp=None`` to
+    # ``add_memories``, which simply omits the timestamp kwarg from the Mem0
+    # add call. Mem0's server-side default (ingestion time) is no worse than
+    # the prior fallback, but we don't actively write a wrong anchor into the
+    # metadata that downstream temporal ranking would trust.
     session_start_unix = metadata.get("session_start_unix")
     if session_start_unix is None:
-        # Fallback: use current time
-        session_start_unix = int(datetime.now(UTC).timestamp())
+        logger.warning(
+            "session.finalization extraction_no_session_anchor user_id=%s session_id=%s "
+            "— Mem0 will fall back to ingestion-time for these memories; "
+            "relative-time queries may incorrectly date them",
+            user_id,
+            session_id,
+        )
 
     for entry in extracted:
         if not isinstance(entry, dict) or not entry.get("content"):

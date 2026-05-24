@@ -54,6 +54,13 @@ logger = logging.getLogger(__name__)
 # next pipeline trigger (inactivity, explicit end_session, etc.) will retry.
 _processed_sessions: set[str] = set()
 _in_flight_sessions: set[str] = set()
+# `_rerun_pending_sessions`: sessions whose explicit force_reprocess request
+#   arrived while the session was already in flight. The in-flight run's
+#   `finally` block detects this flag, clears it, and immediately re-invokes
+#   the pipeline with force_reprocess=True so the explicit caller's intent
+#   isn't silently dropped (e.g. an end_session click landing on top of an
+#   inactivity-triggered run that's still processing a thinner version).
+_rerun_pending_sessions: set[str] = set()
 _processed_lock = threading.Lock()
 
 _LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:2024")
@@ -180,7 +187,7 @@ def run_offline_pipeline(
             steps,
         )
 
-        return {
+        result = {
             "status": "completed",
             "session_id": session_id,
             "steps": steps,
@@ -189,8 +196,38 @@ def run_offline_pipeline(
     finally:
         # Always release the in-flight guard, regardless of how this run
         # exited (success, abort-on-no-thread-state, or unhandled exception).
+        # Atomically capture whether a force_reprocess request landed while
+        # this run was in flight — if so, honor it after we release the slot
+        # so the explicit caller's intent isn't silently dropped.
         with _processed_lock:
             _in_flight_sessions.discard(session_id)
+            rerun_queued = session_id in _rerun_pending_sessions
+            if rerun_queued:
+                _rerun_pending_sessions.discard(session_id)
+
+    if rerun_queued:
+        logger.info(
+            "[Pipeline] honoring queued force_reprocess user_id=%s session_id=%s "
+            "— in-flight run completed, now executing the deferred rerun",
+            user_id,
+            session_id,
+        )
+        # Tail-call with force_reprocess=True. The recursive call re-acquires
+        # the slot normally (the session was just removed from _in_flight, and
+        # force_reprocess clears _processed_sessions inside _acquire_pipeline_slot).
+        # rerun_pending is a set, so any further force_reprocess requests during
+        # the rerun collapse to at most one additional deferred rerun — no
+        # unbounded recursion under concurrent traffic.
+        #
+        # Reuse the resolved thread_state so the rerun doesn't need a fresh
+        # LangGraph fetch (we already have the data, and the second caller
+        # that triggered the rerun has already returned its in_flight status —
+        # there's no one waiting for a fresher state).
+        return run_offline_pipeline(
+            user_id, session_id, thread_id, thread_state, force_reprocess=True,
+        )
+
+    return result
 
 
 def _run_pipeline_steps(
@@ -359,10 +396,11 @@ def _run_pipeline_steps(
 
 
 def reset_processed_sessions() -> None:
-    """Clear both idempotency sets. For testing only."""
+    """Clear all idempotency sets. For testing only."""
     with _processed_lock:
         _processed_sessions.clear()
         _in_flight_sessions.clear()
+        _rerun_pending_sessions.clear()
 
 
 def _collect_extracted_ids(extracted_memories: list[dict]) -> list[str]:
@@ -410,8 +448,15 @@ def _acquire_pipeline_slot(
                                 caller should short-circuit with the
                                 ``already_processed`` status.
         "in_flight"          -- another concurrent call is mid-pipeline;
-                                caller should short-circuit with
-                                ``in_flight`` status.
+                                caller should short-circuit. If THIS call had
+                                ``force_reprocess=True``, the session_id is
+                                additionally added to ``_rerun_pending_sessions``
+                                so the in-flight run's ``finally`` will
+                                immediately re-invoke the pipeline with
+                                ``force_reprocess=True`` after releasing the
+                                slot. This guarantees an explicit reprocess
+                                request is never silently dropped just because
+                                an inactivity-triggered run was running.
 
     The lock is held only for the check + registration; the pipeline runs
     outside it. The release of ``_in_flight_sessions`` happens in the caller's
@@ -436,12 +481,22 @@ def _acquire_pipeline_slot(
                 session_id,
             )
         if session_id in _in_flight_sessions:
-            logger.info(
-                "[Pipeline] skipped_in_flight user_id=%s session_id=%s thread_id=%s",
-                user_id,
-                session_id,
-                thread_id,
-            )
+            if force_reprocess:
+                _rerun_pending_sessions.add(session_id)
+                logger.info(
+                    "[Pipeline] queued_rerun_after_in_flight user_id=%s session_id=%s thread_id=%s "
+                    "— explicit force_reprocess will run after current in-flight pipeline releases",
+                    user_id,
+                    session_id,
+                    thread_id,
+                )
+            else:
+                logger.info(
+                    "[Pipeline] skipped_in_flight user_id=%s session_id=%s thread_id=%s",
+                    user_id,
+                    session_id,
+                    thread_id,
+                )
             return "in_flight"
         _in_flight_sessions.add(session_id)
         return "proceed"

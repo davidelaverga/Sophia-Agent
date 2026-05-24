@@ -1112,3 +1112,88 @@ class TestInFlightProtection:
         mock_steps["extraction"].side_effect = RuntimeError("boom")
         run_offline_pipeline("user_abc", "sess_release_err", "t2", _make_thread_state())
         assert "sess_release_err" not in _in_flight_sessions
+
+    def test_force_reprocess_during_in_flight_queues_deferred_rerun(self, mock_steps):
+        """force_reprocess=True landing on an in-flight session MUST queue a rerun.
+
+        Codex P2 review on PR #130: previously the in-flight guard ignored
+        force_reprocess, so an explicit end_session click landing on top of
+        an inactivity-triggered run would be silently dropped — the explicit
+        caller's intent was lost and the thinner inactivity result stood.
+
+        Now the second call sets _rerun_pending_sessions and the first
+        call's finally re-invokes the pipeline with force_reprocess=True
+        after releasing the in-flight slot. Net result: extraction runs
+        TWICE — once for the in-flight call, once for the queued rerun.
+        """
+        import threading as _threading
+
+        from deerflow.sophia.offline_pipeline import (
+            _in_flight_sessions,
+            _processed_sessions,
+            _rerun_pending_sessions,
+            run_offline_pipeline,
+        )
+
+        # Pause the first run inside extraction so we can land the second
+        # call (with force_reprocess=True) while it's still in flight.
+        first_started = _threading.Event()
+        let_first_finish = _threading.Event()
+        extraction_call_count = {"n": 0}
+        extraction_lock = _threading.Lock()
+
+        def slow_then_quick_extraction(*args, **kwargs):
+            with extraction_lock:
+                extraction_call_count["n"] += 1
+                call_num = extraction_call_count["n"]
+            if call_num == 1:
+                # First call: pause until released
+                first_started.set()
+                let_first_finish.wait(timeout=5.0)
+            # Both calls return a non-empty result (so the session gets
+            # promoted to _processed_sessions after each run, and the rerun
+            # path is exercised cleanly).
+            return [{"content": f"extraction #{call_num}", "category": "fact", "importance": "structural"}]
+
+        mock_steps["extraction"].side_effect = slow_then_quick_extraction
+
+        first_result = {}
+        def run_first():
+            first_result["r"] = run_offline_pipeline(
+                "user_abc", "sess_qrerun", "t_qrerun", _make_thread_state(),
+            )
+
+        first_thread = _threading.Thread(target=run_first)
+        first_thread.start()
+        assert first_started.wait(timeout=5.0), "First call should have entered extraction"
+
+        # Second call WITH force_reprocess=True while first is in flight.
+        # Should return in_flight (the first hasn't released its slot yet)
+        # AND mark the session as having a pending rerun.
+        second_result = run_offline_pipeline(
+            "user_abc", "sess_qrerun", "t_qrerun", _make_thread_state(),
+            force_reprocess=True,
+        )
+        assert second_result["status"] == "in_flight"
+        assert "sess_qrerun" in _rerun_pending_sessions, (
+            "force_reprocess during in_flight MUST set _rerun_pending_sessions "
+            "so the first run's finally honors the explicit reprocess request"
+        )
+
+        # Release the first call. Its finally will detect the queued rerun
+        # and re-invoke the pipeline with force_reprocess=True.
+        let_first_finish.set()
+        first_thread.join(timeout=5.0)
+
+        # Extraction ran TWICE: once for the in-flight first call, once for
+        # the deferred rerun.
+        assert extraction_call_count["n"] == 2, (
+            f"Expected extraction to run twice (first + queued rerun), "
+            f"got {extraction_call_count['n']}"
+        )
+        # _rerun_pending_sessions cleared by the rerun consumption
+        assert "sess_qrerun" not in _rerun_pending_sessions
+        # in_flight released after the rerun completed
+        assert "sess_qrerun" not in _in_flight_sessions
+        # Final state: session marked processed (rerun succeeded)
+        assert "sess_qrerun" in _processed_sessions

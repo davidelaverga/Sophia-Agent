@@ -473,3 +473,84 @@ class TestStripMarkdownFences:
 
         result = _strip_markdown_fences('  ```json\n{"a": 1}\n```  ')
         assert result == '{"a": 1}'
+
+
+class TestSessionStartUnixAnchor:
+    """Regression tests for the Upgrade A timestamp anchoring contract."""
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_missing_session_start_unix_passes_none_not_now(self, mock_anthropic_mod, mock_add_memories):
+        """When session_start_unix is missing, add_memories MUST receive None.
+
+        Codex P1 review on PR #130: the old behavior fell back to
+        ``datetime.now(UTC).timestamp()``, which re-dated historical turns
+        to ingestion time and broke Mem0 v3 temporal reasoning. Now we pass
+        None so Mem0 uses its server-side default rather than us actively
+        writing a wrong anchor.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        mock_add_memories.return_value = [{"id": "mem_1"}]
+
+        # session_metadata WITHOUT session_start_unix
+        metadata_no_anchor = {
+            "session_date": "2026-03-27",
+            "context_mode": "work",
+            "platform": "text",
+        }
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_no_anchor",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=metadata_no_anchor,
+        )
+
+        assert mock_add_memories.call_count == 1
+        kwargs = mock_add_memories.call_args.kwargs
+        assert kwargs["timestamp"] is None, (
+            "Missing session_start_unix MUST result in timestamp=None, "
+            "NOT datetime.now() — falling back to now would re-date historical "
+            "turns to ingestion time and break temporal queries"
+        )
+
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_present_session_start_unix_is_propagated(self, mock_anthropic_mod, mock_add_memories):
+        """When session_start_unix is present, it MUST be passed as the timestamp."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])
+        )
+        mock_add_memories.return_value = [{"id": "mem_1"}]
+
+        # A specific historical timestamp — Mar 27 2026 12:00 UTC
+        historical_anchor = 1774785600
+        metadata_with_anchor = {
+            "session_date": "2026-03-27",
+            "context_mode": "work",
+            "platform": "text",
+            "session_start_unix": historical_anchor,
+        }
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_with_anchor",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=metadata_with_anchor,
+        )
+
+        kwargs = mock_add_memories.call_args.kwargs
+        assert kwargs["timestamp"] == historical_anchor, (
+            "Present session_start_unix MUST flow through unchanged "
+            "(this is the Upgrade A anchor)"
+        )
