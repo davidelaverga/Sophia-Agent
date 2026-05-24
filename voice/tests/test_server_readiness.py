@@ -195,10 +195,23 @@ async def test_create_agent_allows_experimental_runtime_startup_for_dogfood(monk
             return None
 
     class FakeAgent:
-        def __init__(self, **kwargs) -> None:  # noqa: ANN003
-            self.turn_detection = kwargs["turn_detection"]
-            self.stt = kwargs["stt"]
-            self.tts = kwargs["tts"]
+        def __init__(
+            self,
+            edge: object,
+            llm: object,
+            agent_user: object,
+            instructions: str,
+            stt: object,
+            tts: object,
+            turn_detection: object,
+        ) -> None:
+            self.edge = edge
+            self.llm = llm
+            self.agent_user = agent_user
+            self.instructions = instructions
+            self.turn_detection = turn_detection
+            self.stt = stt
+            self.tts = tts
             created["agent"] = self
 
         async def send_custom_event(self, data: dict) -> None:

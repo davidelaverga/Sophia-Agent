@@ -63,6 +63,7 @@ from voice.vision_agents_compat import (
     STTTranscriptEvent,
     TTSSynthesisStartEvent,
     TurnEndedEvent,
+    resolve_agent_constructor_kwargs,
 )
 
 
@@ -1218,16 +1219,27 @@ async def create_agent(**kwargs) -> Agent:
         if offset:
             turn_detection.set_rhythm_offset(offset)
 
-    agent = Agent(
-        edge=StreamEdge(),
-        llm=llm,
-        agent_user=User(id=settings.agent_user_id, name=settings.agent_user_name),
-        instructions=settings.instructions,
-        stt=stt,
-        tts=tts,
-        turn_detection=turn_detection,
-        streaming_tts=True,
+    agent_kwargs, omitted_agent_kwargs = resolve_agent_constructor_kwargs(
+        Agent,
+        {
+            "edge": StreamEdge(),
+            "llm": llm,
+            "agent_user": User(id=settings.agent_user_id, name=settings.agent_user_name),
+            "instructions": settings.instructions,
+            "stt": stt,
+            "tts": tts,
+            "turn_detection": turn_detection,
+        },
+        {
+            "streaming_tts": True,
+        },
     )
+    if omitted_agent_kwargs:
+        logger.info(
+            "[VOICE:AGENT] Omitting unsupported Agent kwargs | kwargs=%s",
+            ",".join(omitted_agent_kwargs),
+        )
+    agent = Agent(**agent_kwargs)
     llm.attach_call_emitter(agent.send_custom_event)
 
     def _resolve_turn_transcript(participant: object, fallback: str) -> str:

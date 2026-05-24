@@ -137,3 +137,69 @@ def test_compat_reraises_unrelated_module_errors() -> None:
         assert raised is True
     finally:
         importlib.import_module = original_import_module
+
+
+def test_resolve_agent_constructor_kwargs_includes_streaming_tts_when_supported() -> None:
+    import voice.vision_agents_compat as compat
+
+    class StreamingAgent:
+        def __init__(self, edge: object, streaming_tts: bool = False) -> None:
+            self.edge = edge
+            self.streaming_tts = streaming_tts
+
+    edge = object()
+    kwargs, omitted = compat.resolve_agent_constructor_kwargs(
+        StreamingAgent,
+        {"edge": edge},
+        {"streaming_tts": True},
+    )
+
+    assert kwargs == {"edge": edge, "streaming_tts": True}
+    assert omitted == ()
+
+
+def test_resolve_agent_constructor_kwargs_omits_streaming_tts_when_unsupported() -> None:
+    import voice.vision_agents_compat as compat
+
+    class LegacyAgent:
+        def __init__(self, edge: object) -> None:
+            self.edge = edge
+
+    edge = object()
+    kwargs, omitted = compat.resolve_agent_constructor_kwargs(
+        LegacyAgent,
+        {"edge": edge},
+        {"streaming_tts": True},
+    )
+
+    assert kwargs == {"edge": edge}
+    assert omitted == ("streaming_tts",)
+
+
+def test_resolve_agent_constructor_kwargs_preserves_unrelated_supported_kwargs() -> None:
+    import voice.vision_agents_compat as compat
+
+    class MetricsAgent:
+        def __init__(
+            self,
+            edge: object,
+            streaming_tts: bool = False,
+            broadcast_metrics: bool = False,
+        ) -> None:
+            self.edge = edge
+            self.streaming_tts = streaming_tts
+            self.broadcast_metrics = broadcast_metrics
+
+    edge = object()
+    kwargs, omitted = compat.resolve_agent_constructor_kwargs(
+        MetricsAgent,
+        {"edge": edge},
+        {"streaming_tts": True, "broadcast_metrics": True},
+    )
+
+    assert kwargs == {
+        "edge": edge,
+        "streaming_tts": True,
+        "broadcast_metrics": True,
+    }
+    assert omitted == ()

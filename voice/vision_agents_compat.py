@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from importlib import import_module
+from inspect import Parameter, signature
+from typing import Any
 
 
 class _FallbackEvent:
@@ -41,6 +44,36 @@ def resolve_symbol(
             return symbol
 
     return _make_fallback_type(symbol_name, fallback_base)
+
+
+def agent_constructor_supports_kwarg(agent_cls: type, kwarg: str) -> bool:
+    try:
+        parameters = signature(agent_cls.__init__).parameters
+    except (TypeError, ValueError):
+        return True
+
+    parameter = parameters.get(kwarg)
+    if parameter is not None and parameter.kind is not Parameter.POSITIONAL_ONLY:
+        return True
+
+    return any(parameter.kind is Parameter.VAR_KEYWORD for parameter in parameters.values())
+
+
+def resolve_agent_constructor_kwargs(
+    agent_cls: type,
+    required_kwargs: Mapping[str, Any],
+    optional_kwargs: Mapping[str, Any],
+) -> tuple[dict[str, Any], tuple[str, ...]]:
+    agent_kwargs = dict(required_kwargs)
+    omitted_kwargs: list[str] = []
+
+    for key, value in optional_kwargs.items():
+        if agent_constructor_supports_kwarg(agent_cls, key):
+            agent_kwargs[key] = value
+        else:
+            omitted_kwargs.append(key)
+
+    return agent_kwargs, tuple(omitted_kwargs)
 
 
 InvalidCallId = resolve_symbol(
