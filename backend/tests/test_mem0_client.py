@@ -930,7 +930,12 @@ class TestWaitForPendingEvents:
             assert result[0]["id"] == "mem_1"
 
     def test_no_event_api_returns_empty_without_get_all(self):
-        """get_all cannot map event ids to new memories, so never use it here."""
+        """get_all cannot map event ids to new memories, so never use it here.
+
+        With no SDK methods AND no REST fallback (mocked httpx away + no
+        API key), wait_for_pending_events must short-circuit to [] without
+        misusing get_all.
+        """
         from deerflow.sophia.mem0_client import wait_for_pending_events
 
         mock_client = MagicMock(spec=["get_all"])
@@ -938,14 +943,139 @@ class TestWaitForPendingEvents:
             "count": 1,
             "results": [{"id": "mem_1", "memory": "resolved"}],
         }
-        with patch(
-            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch("deerflow.sophia.mem0_client._httpx_module", return_value=None),
+            patch.dict("os.environ", {"MEM0_API_KEY": ""}),
         ):
             result = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert result == []
             mock_client.get_all.assert_not_called()
+
+    def test_rest_fallback_resolves_events_when_sdk_methods_missing(self):
+        """Codex P1 review on PR #130 R7: when the SDK doesn't expose get_event
+        or get_events (true for the pinned ``mem0ai>=2.0.2``), wait_for_pending_events
+        MUST fall back to the REST ``/v1/events/?limit=50`` endpoint with httpx,
+        not silently return ``[]`` and break add_memories' resolution path.
+        """
+        from types import SimpleNamespace
+
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        # SDK client exposes neither get_event nor get_events.
+        mock_client = MagicMock(spec=["search", "add", "get_all"])
+
+        # Mock REST response: one of our event_ids is SUCCEEDED with results.
+        rest_response_body = {
+            "count": 2,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "event_type": "ADD",
+                    "status": "SUCCEEDED",
+                    "results": [{"id": "mem_alpha", "memory": "resolved alpha"}],
+                },
+                {
+                    "id": "evt_other_user",
+                    "event_type": "SEARCH",
+                    "status": "SUCCEEDED",
+                    "results": [],
+                },
+            ],
+        }
+
+        class FakeResponse:
+            def __init__(self, body):
+                self.body = body
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.body
+
+        class FakeHttpClient:
+            def __init__(self, *args, **kwargs):
+                self.calls = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def get(self, url, headers=None):
+                self.calls.append((url, headers))
+                return FakeResponse(rest_response_body)
+
+        fake_httpx = SimpleNamespace(Client=FakeHttpClient)
+
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch("deerflow.sophia.mem0_client._httpx_module", return_value=fake_httpx),
+            patch.dict("os.environ", {"MEM0_API_KEY": "rest-fallback-key"}),
+        ):
+            result = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=2.0, poll_interval=0.1
+            )
+
+        assert len(result) == 1
+        assert result[0]["id"] == "mem_alpha"
+        # SDK get_all MUST NOT have been touched (the REST path is independent).
+        mock_client.get_all.assert_not_called()
+
+    def test_rest_fallback_propagates_failed_status(self):
+        """REST fallback must raise Mem0EventFailedError on FAILED status,
+        matching the SDK polling paths."""
+        from types import SimpleNamespace
+
+        import pytest
+
+        from deerflow.sophia.mem0_client import (
+            Mem0EventFailedError,
+            wait_for_pending_events,
+        )
+
+        mock_client = MagicMock(spec=["search"])
+
+        class _Resp:
+            def raise_for_status(self):  # noqa: ANN202
+                return None
+
+            def json(self):  # noqa: ANN202
+                return {
+                    "results": [
+                        {"id": "evt_failed", "status": "FAILED", "results": []},
+                    ]
+                }
+
+        class _Client:
+            def __init__(self, *a, **kw):  # noqa: ANN002, ANN003, ANN204
+                pass
+
+            def __enter__(self):  # noqa: ANN204
+                return self
+
+            def __exit__(self, *_a):  # noqa: ANN204
+                return False
+
+            def get(self, url, headers=None):  # noqa: ANN001
+                return _Resp()
+
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch(
+                "deerflow.sophia.mem0_client._httpx_module",
+                return_value=SimpleNamespace(Client=_Client),
+            ),
+            patch.dict("os.environ", {"MEM0_API_KEY": "k"}),
+            pytest.raises(Mem0EventFailedError),
+        ):
+            wait_for_pending_events(
+                "user1", ["evt_failed"], timeout_seconds=2.0, poll_interval=0.1
+            )
 
     def test_paginated_get_events_follows_next_cursor(self):
         """Walk every page until pending IDs are found or pages exhausted."""

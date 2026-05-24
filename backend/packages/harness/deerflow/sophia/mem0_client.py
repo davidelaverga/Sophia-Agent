@@ -31,6 +31,7 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -773,77 +774,58 @@ def wait_for_pending_events(
 ) -> list[dict]:
     """Poll Mem0 until pending add events resolve to memory records.
 
-    v3 add() may return event_ids for async processing. This helper
-    blocks (up to timeout_seconds) and returns the resolved memories.
-    If the timeout elapses, returns whatever is available.
+    v3 add() may return event_ids for async processing. This helper blocks
+    (up to ``timeout_seconds``) and returns the resolved memories. If the
+    timeout elapses, returns whatever is available.
+
+    Polling strategy is chosen ONCE up front:
+
+    1. ``client.get_event(event_id=...)`` — per-ID SDK lookup, no
+       pagination issues. Used when the SDK exposes it.
+    2. ``client.get_events(filters=...)`` — paginated SDK list. Used
+       when only get_events exists.
+    3. ``GET /v1/events/?limit=50`` via httpx — REST fallback for
+       Mem0 SDKs that don't wrap the events endpoint (e.g. mem0ai>=2.0.2
+       at time of writing exposes neither get_event nor get_events). The
+       REST endpoint doesn't accept event_id / user_id query filters
+       server-side (verified empirically), so we fetch the most-recent N
+       events and client-side filter for our pending IDs. Best for the
+       common case where event_ids were just created.
+    4. None of the above → log warning, return []. ``add_memories`` then
+       falls back to the raw add result (event wrappers) and downstream
+       callers treat them as pending.
+
+    Codex P1 review on PR #130: the previous build short-circuited at the
+    has_get_event/has_get_events check, breaking event resolution entirely
+    on the pinned SDK version. The REST fallback restores correctness
+    without requiring any SDK update.
     """
-    client = _get_client()
-    if client is None:
+    if not event_ids:
+        return []
+
+    poll = _select_event_poll_strategy(user_id)
+    if poll is None:
+        logger.warning(
+            "Mem0 event APIs unavailable for user %s (no SDK methods, no REST "
+            "fallback); cannot resolve pending add events",
+            user_id,
+        )
         return []
 
     deadline = time.monotonic() + timeout_seconds
     resolved: list[dict] = []
     pending = set(event_ids)
 
-    # v3 async event IDs are different from memory IDs.
-    # Prefer per-ID get_event() when the SDK supports it — avoids
-    # pagination issues with busy projects. Fall back to paginated
-    # get_events() only; get_all() cannot safely map event IDs to new
-    # memory rows and would return unrelated historical memories.
-    has_get_event = hasattr(client, "get_event")
-    has_get_events = hasattr(client, "get_events")
-    if not has_get_event and not has_get_events:
-        logger.warning(
-            "Mem0 event APIs unavailable for user %s; cannot resolve pending add events",
-            user_id,
-        )
-        return []
-
     while pending and time.monotonic() < deadline:
         try:
-            if has_get_event:
-                # Per-ID polling: exact lookup, no pagination problems.
-                for evt_id in list(pending):
-                    event_result = client.get_event(event_id=evt_id)
-                    events, _ = _normalize_paginated_result(event_result)
-                    for evt in events:
-                        status = evt.get("status", evt.get("event_status", "")).upper()
-                        if status == "FAILED":
-                            raise Mem0EventFailedError(f"Mem0 add event failed: {evt_id}")
-                        if status not in ("SUCCEEDED", "COMPLETED"):
-                            continue
-                        resolved.extend(_extract_memories_from_event(evt))
-                        pending.discard(evt_id)
-            elif has_get_events:
-                # Paginated get_events: walk every page so newly-queued
-                # events cannot be off-page and missed.
-                cursor = None
-                while True:
-                    page_kwargs: dict[str, Any] = {
-                        "filters": {"user_id": user_id},
-                    }
-                    if cursor:
-                        page_kwargs["cursor"] = cursor
-                    events_result = client.get_events(**page_kwargs)
-                    events, cursor = _normalize_paginated_result(events_result)
-                    for evt in events:
-                        evt_id = evt.get("event_id") or evt.get("id")
-                        if evt_id not in pending:
-                            continue
-                        status = evt.get("status", evt.get("event_status", "")).upper()
-                        if status == "FAILED":
-                            raise Mem0EventFailedError(f"Mem0 add event failed: {evt_id}")
-                        if status not in ("SUCCEEDED", "COMPLETED"):
-                            continue
-                        resolved.extend(_extract_memories_from_event(evt))
-                        pending.discard(evt_id)
-                    if not cursor or not pending:
-                        break
+            poll(pending, resolved)
         except Mem0EventFailedError:
             raise
         except Exception:
             logger.warning(
-                "Mem0 poll for pending events failed for user %s", user_id, exc_info=True
+                "Mem0 poll for pending events failed for user %s",
+                user_id,
+                exc_info=True,
             )
         if pending:
             time.sleep(poll_interval)
@@ -855,6 +837,127 @@ def wait_for_pending_events(
             len(pending),
         )
     return resolved
+
+
+def _select_event_poll_strategy(user_id: str) -> Callable[[set[str], list[dict]], None] | None:
+    """Pick the polling strategy ONCE up front so the hot loop stays branch-free.
+
+    Priority:
+      1. ``client.get_event(event_id=...)`` — per-ID SDK lookup (forward-compat).
+      2. ``client.get_events(filters=...)`` — paginated SDK list (forward-compat).
+      3. REST ``GET /v1/events/`` via httpx — the only strategy that works on
+         the pinned ``mem0ai>=2.0.2`` SDK, which exposes neither SDK method.
+
+    Returns a closure that takes ``(pending, resolved)`` and mutates them in
+    place. Returns ``None`` if no strategy is available (no SDK client, no
+    httpx, no API key) — caller logs warning and short-circuits.
+    """
+    client = _get_client()
+    if client is not None and hasattr(client, "get_event"):
+        return lambda pending, resolved: _poll_events_via_sdk_per_id(
+            client, pending, resolved
+        )
+    if client is not None and hasattr(client, "get_events"):
+        return lambda pending, resolved: _poll_events_via_sdk_paginated(
+            client, user_id, pending, resolved
+        )
+    if _rest_fallback_available():
+        return _poll_events_via_rest
+    return None
+
+
+def _consume_events(
+    events: list[dict],
+    pending: set[str],
+    resolved: list[dict],
+    *,
+    fallback_id: str | None = None,
+) -> None:
+    """Walk ``events``, draining terminal-success ones from ``pending``.
+
+    Mutates both ``pending`` (discards resolved IDs) and ``resolved`` (appends
+    extracted memories). Raises ``Mem0EventFailedError`` on FAILED status.
+
+    ``fallback_id`` is used when polling per-ID and the API returns a
+    single-event payload that lacks its own id (rare but defensive).
+    """
+    for evt in events:
+        evt_id = evt.get("event_id") or evt.get("id") or fallback_id
+        if evt_id is None or evt_id not in pending:
+            continue
+        status = (evt.get("status") or evt.get("event_status") or "").upper()
+        if status == "FAILED":
+            raise Mem0EventFailedError(f"Mem0 add event failed: {evt_id}")
+        if status not in ("SUCCEEDED", "COMPLETED"):
+            continue
+        resolved.extend(_extract_memories_from_event(evt))
+        pending.discard(evt_id)
+
+
+def _poll_events_via_sdk_per_id(
+    client: Any,
+    pending: set[str],
+    resolved: list[dict],
+) -> None:
+    """Per-event-ID SDK lookup. No pagination, exact match."""
+    for evt_id in list(pending):
+        event_result = client.get_event(event_id=evt_id)
+        events, _ = _normalize_paginated_result(event_result)
+        _consume_events(events, pending, resolved, fallback_id=evt_id)
+
+
+def _poll_events_via_sdk_paginated(
+    client: Any,
+    user_id: str,
+    pending: set[str],
+    resolved: list[dict],
+) -> None:
+    """Paginated SDK list. Walks every page so off-page events aren't missed."""
+    cursor: str | None = None
+    while True:
+        kwargs: dict[str, Any] = {"filters": {"user_id": user_id}}
+        if cursor:
+            kwargs["cursor"] = cursor
+        events_result = client.get_events(**kwargs)
+        events, cursor = _normalize_paginated_result(events_result)
+        _consume_events(events, pending, resolved)
+        if not cursor or not pending:
+            break
+
+
+def _poll_events_via_rest(
+    pending: set[str],
+    resolved: list[dict],
+) -> None:
+    """REST ``GET /v1/events/`` fallback for SDKs without get_event(s).
+
+    Mem0's REST list endpoint doesn't accept event_id or user_id query
+    filters server-side (verified empirically against api.mem0.ai), so we
+    fetch the most-recent N events and client-side filter for our pending
+    IDs. ``limit=50`` is a heuristic — it captures recently-queued events
+    under normal concurrent traffic; busy projects may need pagination, but
+    that's a corner case not worth the extra request overhead in the
+    common path.
+    """
+    httpx = _httpx_module()
+    api_key = os.environ.get("MEM0_API_KEY", "").strip()
+    if httpx is None or not api_key:
+        return
+    base_url = (os.environ.get("MEM0_BASE_URL") or "https://api.mem0.ai").rstrip("/")
+    url = f"{base_url}/v1/events/?limit=50"
+    headers = {"Authorization": f"Token {api_key}"}
+    with httpx.Client(timeout=10.0) as http:
+        resp = http.get(url, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
+    events: list[dict] = []
+    if isinstance(data, dict):
+        results = data.get("results")
+        if isinstance(results, list):
+            events = [e for e in results if isinstance(e, dict)]
+    elif isinstance(data, list):
+        events = [e for e in data if isinstance(e, dict)]
+    _consume_events(events, pending, resolved)
 
 
 def _extract_memories_from_event(evt: dict) -> list[dict]:
