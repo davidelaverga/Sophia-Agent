@@ -5,6 +5,8 @@ import {
   applyPacedAssistantTranscriptUpdate,
   createAssistantTranscriptPacingState,
   createAssistantTranscriptStaleGuardState,
+  markAssistantTranscriptGenerationStarted,
+  markAssistantTranscriptUserInputStarted,
   parseAssistantTranscriptUpdate,
   shouldApplyAssistantTranscriptUpdate,
 } from '../../app/hooks/voice-session-event-ingestion';
@@ -17,6 +19,7 @@ describe('voice-session-event-ingestion', () => {
       sourceSequence: null,
       responseId: null,
       segmentId: null,
+      providerReceivedAt: null,
     });
     expect(parseAssistantTranscriptUpdate({
       text: 'Hello',
@@ -24,12 +27,14 @@ describe('voice-session-event-ingestion', () => {
       source_sequence: 12,
       response_id: 'response-1',
       segment_id: 'gemini-segment-0',
+      provider_received_at: '2026-05-24T12:00:00.000Z',
     })).toEqual({
       text: 'Hello',
       isFinal: true,
       sourceSequence: 12,
       responseId: 'response-1',
       segmentId: 'gemini-segment-0',
+      providerReceivedAt: '2026-05-24T12:00:00.000Z',
     });
     expect(parseAssistantTranscriptUpdate({ text: 123 })).toBeNull();
   });
@@ -57,6 +62,72 @@ describe('voice-session-event-ingestion', () => {
       sourceSequence: 1,
       responseId: 'response-2',
       segmentId: 'gemini-segment-0',
+    }, guard)).toBe(true);
+  });
+
+  it('rejects later transcript fragments for an assistant segment interrupted by user input', () => {
+    const guard = createAssistantTranscriptStaleGuardState();
+
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'Done and ready.',
+      isFinal: false,
+      sourceSequence: 18,
+      responseId: 'response-stale',
+      segmentId: 'gemini-segment-0',
+      providerReceivedAt: '2026-05-24T12:00:01.000Z',
+    }, guard)).toBe(true);
+
+    expect(markAssistantTranscriptUserInputStarted(guard, Date.parse('2026-05-24T12:00:02.000Z'))).toEqual([
+      'response-stale:gemini-segment-0',
+    ]);
+
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'Done and ready. I can keep going.',
+      isFinal: false,
+      sourceSequence: 19,
+      responseId: 'response-stale',
+      segmentId: 'gemini-segment-0',
+      providerReceivedAt: '2026-05-24T12:00:02.250Z',
+    }, guard)).toBe(false);
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'Done and ready. Final stale tail.',
+      isFinal: true,
+      sourceSequence: 20,
+      responseId: 'response-stale',
+      segmentId: 'gemini-segment-0',
+      providerReceivedAt: '2026-05-24T12:00:03.000Z',
+    }, guard)).toBe(false);
+  });
+
+  it('uses provider receive timestamps to reject queued stale transcript fragments after barge-in', () => {
+    const guard = createAssistantTranscriptStaleGuardState();
+
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'I will summarize this.',
+      isFinal: false,
+      sourceSequence: 21,
+      responseId: null,
+      segmentId: null,
+      providerReceivedAt: '2026-05-24T12:00:01.000Z',
+    }, guard)).toBe(true);
+    markAssistantTranscriptUserInputStarted(guard, Date.parse('2026-05-24T12:00:04.000Z'));
+    markAssistantTranscriptGenerationStarted(guard);
+
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'I will summarize this. Queued old tail.',
+      isFinal: false,
+      sourceSequence: 22,
+      responseId: null,
+      segmentId: null,
+      providerReceivedAt: '2026-05-24T12:00:03.750Z',
+    }, guard)).toBe(false);
+    expect(shouldApplyAssistantTranscriptUpdate({
+      text: 'New answer after your Spanish turn.',
+      isFinal: false,
+      sourceSequence: 23,
+      responseId: null,
+      segmentId: null,
+      providerReceivedAt: '2026-05-24T12:00:05.000Z',
     }, guard)).toBe(true);
   });
 

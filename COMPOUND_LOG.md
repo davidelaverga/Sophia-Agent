@@ -129,6 +129,31 @@ We shipped 28+ commits across Phase 4 with `quality_signal` deltas all within to
 - **Restore bash visibility for legitimate generator-script execution** (chart-visualization, ppt-generation): if the blank-stream trade-off becomes noticeable on binary-deliverable workflows, swap the blanket `_HIDDEN_TOOLS` entry for a command-pattern heuristic (hide only heredocs / `python -c` / `echo > …`).
 
 ---
+## 2026-05-24 · [gemini-barge-in-stale-output-suppression] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** Phase 12.6D Gemini barge-in stale-output suppression
+
+### What Changed
+- Added generation-aware Gemini playback flushing and stale assistant audio/transcript suppression after user barge-in or provider interruption.
+- Made frontend assistant transcript ingestion remember interrupted response/segment keys and reject queued pre-barge-in fragments.
+- Made `SophiaEventNormalizer` close the active assistant response on user input and reject later transcript mutations for closed/interrupted responses.
+- Added telemetry/report/panel diagnostics for stale output suppression, assistant/user overlap, relay backlog, playback generation, and unresolved Gemini tool calls.
+- Added focused frontend and backend tests plus the Phase 12.6D audit documentation.
+
+### What We Learned
+- Stopping active PCM sources is not enough; queued or late provider output needs a playback generation fence.
+- Source-sequence stale guards are insufficient after interruption because stale continuations can arrive with higher source sequences.
+- Resetting transcript guards on interruption loses the exact state needed to reject stale assistant tails.
+- Artifact reconciliation must keep using public validated artifacts, not raw Gemini tool-call attempts, especially when interruption cancels tool calls.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (transport/ingestion/diagnostics/docs/tests only; no Sophia prompt files, skills, crisis behavior, artifact schema, Builder, memory, VAD, or provider routing changed).
+
 ## 2026-05-23 · [voice-skill-slow-state-seed] · PR #[pending]
 **Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** Phase 12.6C skill slow-state seed contract
 

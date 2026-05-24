@@ -33,6 +33,7 @@ export type VoiceTelemetryReport = {
   diagnosticsSummary: {
     geminiRelayBackend: Record<string, unknown> | null;
     geminiRelayThroughput: Record<string, unknown> | null;
+    geminiStaleOutput: Record<string, unknown> | null;
   };
   turnCaptureDiagnostics: TurnCaptureDiagnostics;
   captureBundle: VoiceTelemetryCaptureBundle;
@@ -495,6 +496,70 @@ function buildGeminiRelayThroughputSummary(events: CaptureEvent[]): Record<strin
   };
 }
 
+function buildGeminiStaleOutputDiagnosticsSummary(events: CaptureEvent[]): Record<string, unknown> | null {
+  const staleSuppressionDiagnostics = events
+    .filter((event) => event.name === 'gemini-stale-output-suppressed')
+    .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+    .filter((value): value is Record<string, unknown> => value !== null);
+  const staleTranscriptIgnored = events.filter((event) => event.name === 'stale-assistant-transcript-ignored');
+  const interruptionDiagnostics = events
+    .filter((event) => event.name === 'gemini-interruption')
+    .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+    .filter((value): value is Record<string, unknown> => value !== null);
+  const throughputSummary = buildGeminiRelayThroughputSummary(events);
+  const latestToolEntries = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    if (event.name !== 'gemini-tool-call-ledger') {
+      continue;
+    }
+    const entry = asRecord(asRecord(event.payload)?.entry);
+    const toolCallId = asString(entry?.toolCallId);
+    if (entry && toolCallId) {
+      latestToolEntries.set(toolCallId, entry);
+    }
+  }
+  const unresolvedToolEntries = [...latestToolEntries.values()].filter((entry) => asString(entry.finalState) === 'unknown');
+  const warnings: string[] = [];
+  const maxOldestQueuedAgeMs = asFiniteNumber(throughputSummary?.maxOldestQueuedAgeMs);
+  const maxTranscriptRelayLatencyMs = asFiniteNumber(throughputSummary?.maxTranscriptRelayLatencyMs);
+  const staleAudioDroppedCount = staleSuppressionDiagnostics.filter((diagnostic) => asString(diagnostic.outputType) === 'audio').length;
+  const staleTranscriptDroppedCount = staleSuppressionDiagnostics.filter((diagnostic) => asString(diagnostic.outputType) === 'transcript').length
+    + staleTranscriptIgnored.length;
+  if (staleAudioDroppedCount > 0 || staleTranscriptDroppedCount > 0) {
+    warnings.push('stale_assistant_output_suppressed');
+  }
+  if ((maxOldestQueuedAgeMs ?? 0) >= 30_000 || (maxTranscriptRelayLatencyMs ?? 0) >= 30_000) {
+    warnings.push('transcript_relay_backlog_exceeded');
+  }
+  if (unresolvedToolEntries.length > 0) {
+    warnings.push('unresolved_gemini_tool_calls');
+  }
+  const maxAssistantUserOverlapMs = maxNumericField(interruptionDiagnostics, 'assistantUserOverlapMs');
+  if ((maxAssistantUserOverlapMs ?? 0) >= 1_500) {
+    warnings.push('assistant_audio_overlapped_user_input');
+  }
+
+  if (!warnings.length && !staleSuppressionDiagnostics.length && !staleTranscriptIgnored.length && !unresolvedToolEntries.length) {
+    return null;
+  }
+
+  return {
+    schema: 'gemini_stale_output_diagnostics_summary_v1',
+    warnings,
+    staleAssistantAudioDroppedCount: staleAudioDroppedCount,
+    staleAssistantTranscriptDroppedCount: staleTranscriptDroppedCount,
+    staleAssistantOutputSuppressionCount: staleSuppressionDiagnostics.length + staleTranscriptIgnored.length,
+    maxAssistantUserOverlapMs,
+    maxOldestQueuedAgeMs,
+    maxTranscriptRelayLatencyMs,
+    unresolvedToolCallCount: unresolvedToolEntries.length,
+    artifactToolCallUnknownCount: unresolvedToolEntries.filter((entry) => asString(entry.toolName) === 'emit_artifact').length,
+    interruptedResponseIds: asRecord(interruptionDiagnostics.at(-1))
+      ? interruptionDiagnostics.at(-1)?.interruptedResponseIds ?? []
+      : [],
+  };
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -550,6 +615,7 @@ function buildDiagnosticsSummary(
   return {
     geminiRelayBackend: buildGeminiRelayBackendDiagnosticsSummary(selected.events),
     geminiRelayThroughput: buildGeminiRelayThroughputSummary(selected.events),
+    geminiStaleOutput: buildGeminiStaleOutputDiagnosticsSummary(selected.events),
   };
 }
 

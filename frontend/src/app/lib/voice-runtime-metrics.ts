@@ -204,6 +204,13 @@ export type GeminiSessionTelemetry = {
     providerCategoryCounts: Record<string, { count: number; lastAt: string | null }>
     outputAudioEventCount: number
     lastOutputAudioAt: string | null
+    staleAssistantAudioDroppedCount: number
+    staleAssistantTranscriptDroppedCount: number
+    staleAssistantOutputSuppressionCount: number
+    playbackGeneration: number
+    assistantUserOverlapMs: number
+    maxAssistantUserOverlapMs: number
+    interruptedResponseIds: string[]
     interruptionCount: number
     playbackFlushCount: number
     lastInterruptionAt: string | null
@@ -246,7 +253,10 @@ export type GeminiSessionTelemetry = {
     toolRejectionCount: number
     toolCancellationCount: number
     artifactToolCallCount: number
+    artifactToolCallUnknownCount: number
     builderToolCallCount: number
+    unresolvedToolCallCount: number
+    oldestUnresolvedToolCallAgeMs: number | null
     lastToolPhase: string | null
     lastToolName: string | null
     lastToolAt: string | null
@@ -450,6 +460,12 @@ function asFiniteNumber(value: unknown): number | null {
 
 function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null
+}
+
+function asStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const strings = value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  return strings.length > 0 ? strings : []
 }
 
 function asBoolean(value: unknown): boolean | null {
@@ -873,8 +889,9 @@ function buildSessionTelemetry(params: {
   timings: VoiceDeveloperMetrics["timings"]
   counts: VoiceDeveloperMetrics["counts"]
   lastTurn: VoiceDeveloperMetrics["lastTurn"]
+  nowMs: number
 }): VoiceSessionTelemetry {
-  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn } = params
+  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, nowMs } = params
   const captureRuntime = latestRuntimeFromCapture(activeEvents)
   const runtime = runtimeTelemetry?.runtime ?? captureRuntime ?? "legacy_cascade"
   const source = runtimeTelemetry?.runtime === runtime
@@ -893,6 +910,10 @@ function buildSessionTelemetry(params: {
     const relayThroughput = asRecord(relayTrace?.throughput)
     const websocketDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-websocket-diagnostic")
     const interruptionDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-interruption")
+    const staleSuppressionDiagnostics = activeEvents
+      .filter((event) => event.name === "gemini-stale-output-suppressed")
+      .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+      .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
     const toolDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-tool-loop-diagnostic")
     const providerPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event")
     const providerCorrelationPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event-correlation")
@@ -902,6 +923,39 @@ function buildSessionTelemetry(params: {
       .map((event) => asRecord(asRecord(event.payload)?.trace))
       .filter((trace): trace is Record<string, unknown> => trace !== null)
     const ledgerEntries = latestGeminiToolCallLedger(activeEvents)
+    const unresolvedToolEntries = ledgerEntries.filter((entry) => asString(entry.finalState) === "unknown")
+    const oldestUnresolvedToolCallAtMs = unresolvedToolEntries.reduce<number | null>((oldest, entry) => {
+      const receivedAt = asString(entry.receivedAt)
+      const parsed = receivedAt ? Date.parse(receivedAt) : Number.NaN
+      if (!Number.isFinite(parsed)) return oldest
+      return oldest === null ? parsed : Math.min(oldest, parsed)
+    }, null)
+    const staleSuppressionCount = Math.max(
+      hookTelemetry?.staleAssistantOutputSuppressionCount ?? 0,
+      staleSuppressionDiagnostics.length + countWhere(activeEvents, (event) => event.name === "stale-assistant-transcript-ignored"),
+    )
+    const staleAssistantAudioDroppedCount = Math.max(
+      hookTelemetry?.staleAssistantAudioDroppedCount ?? 0,
+      staleSuppressionDiagnostics.filter((diagnostic) => asString(diagnostic.outputType) === "audio").length,
+    )
+    const staleAssistantTranscriptDroppedCount = Math.max(
+      hookTelemetry?.staleAssistantTranscriptDroppedCount ?? 0,
+      staleSuppressionDiagnostics.filter((diagnostic) => asString(diagnostic.outputType) === "transcript").length,
+      countWhere(activeEvents, (event) => event.name === "stale-assistant-transcript-ignored"),
+    )
+    const playbackGeneration = Math.max(
+      hookTelemetry?.playbackGeneration ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.playbackGeneration) ?? 0,
+      maxFiniteFromRecords(staleSuppressionDiagnostics, "playbackGeneration") ?? 0,
+    )
+    const assistantUserOverlapMs = Math.max(
+      hookTelemetry?.assistantUserOverlapMs ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.assistantUserOverlapMs) ?? 0,
+    )
+    const interruptedResponseIds = hookTelemetry?.interruptedResponseIds
+      ?? asStringArray(interruptionDiagnostic?.interruptedResponseIds)
+      ?? asStringArray(staleSuppressionDiagnostics.at(-1)?.interruptedResponseIds)
+      ?? []
     const latestStage = hookTelemetry?.stage ?? asString(stagePayload?.stage)
     const providerEventCount = Math.max(
       hookTelemetry?.providerEventCount ?? 0,
@@ -963,6 +1017,10 @@ function buildSessionTelemetry(params: {
           && geminiToolName(event) === GEMINI_EMIT_ARTIFACT_TOOL_NAME
       }),
     )
+    const artifactToolCallUnknownCount = Math.max(
+      hookTelemetry?.artifactToolCallUnknownCount ?? 0,
+      unresolvedToolEntries.filter((entry) => asString(entry.toolName) === GEMINI_EMIT_ARTIFACT_TOOL_NAME).length,
+    )
     const builderToolCallCount = Math.max(
       hookTelemetry?.builderToolCallCount ?? 0,
       countWhere(activeEvents, (event) => {
@@ -973,6 +1031,14 @@ function buildSessionTelemetry(params: {
           && GEMINI_BUILDER_TOOL_NAMES.has(toolName)
       }),
     )
+    const unresolvedToolCallCount = Math.max(
+      hookTelemetry?.unresolvedToolCallCount ?? 0,
+      unresolvedToolEntries.length,
+    )
+    const oldestUnresolvedToolCallAgeMs = Math.max(
+      hookTelemetry?.oldestUnresolvedToolCallAgeMs ?? 0,
+      oldestUnresolvedToolCallAtMs === null ? 0 : Math.max(0, nowMs - oldestUnresolvedToolCallAtMs),
+    ) || null
 
     return {
       runtime: "gemini_live",
@@ -1002,6 +1068,13 @@ function buildSessionTelemetry(params: {
         providerCategoryCounts: hookTelemetry?.providerCategoryCounts ?? asGeminiCategoryCounts(providerTelemetry?.categoryCounts),
         outputAudioEventCount,
         lastOutputAudioAt: hookTelemetry?.lastOutputAudioAt ?? latestEventAt(activeEvents, "gemini-output-audio-started"),
+        staleAssistantAudioDroppedCount,
+        staleAssistantTranscriptDroppedCount,
+        staleAssistantOutputSuppressionCount: staleSuppressionCount,
+        playbackGeneration,
+        assistantUserOverlapMs,
+        maxAssistantUserOverlapMs: assistantUserOverlapMs,
+        interruptedResponseIds,
         interruptionCount,
         playbackFlushCount,
         lastInterruptionAt: hookTelemetry?.lastInterruptionAt ?? asString(interruptionDiagnostic?.timestamp),
@@ -1052,7 +1125,10 @@ function buildSessionTelemetry(params: {
         toolRejectionCount,
         toolCancellationCount,
         artifactToolCallCount,
+        artifactToolCallUnknownCount,
         builderToolCallCount,
+        unresolvedToolCallCount,
+        oldestUnresolvedToolCallAgeMs,
         lastToolPhase: hookTelemetry?.lastToolPhase ?? asString(toolDiagnostic?.phase),
         lastToolName: hookTelemetry?.lastToolName ?? asString(asRecord(toolDiagnostic?.toolCall)?.name),
         lastToolAt: hookTelemetry?.lastToolAt ?? asString(toolDiagnostic?.timestamp),
@@ -2703,6 +2779,7 @@ export function buildVoiceDeveloperMetrics({
     timings,
     counts,
     lastTurn,
+    nowMs,
   })
 
   return {

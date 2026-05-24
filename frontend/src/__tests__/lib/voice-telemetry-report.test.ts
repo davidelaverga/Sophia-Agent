@@ -156,6 +156,13 @@ function buildMetrics(): VoiceDeveloperMetrics {
         },
         outputAudioEventCount: 1,
         lastOutputAudioAt: '2026-05-20T12:00:02.500Z',
+        staleAssistantAudioDroppedCount: 0,
+        staleAssistantTranscriptDroppedCount: 0,
+        staleAssistantOutputSuppressionCount: 0,
+        playbackGeneration: 0,
+        assistantUserOverlapMs: 0,
+        maxAssistantUserOverlapMs: 0,
+        interruptedResponseIds: [],
         interruptionCount: 0,
         playbackFlushCount: 0,
         lastInterruptionAt: null,
@@ -181,7 +188,10 @@ function buildMetrics(): VoiceDeveloperMetrics {
         toolRejectionCount: 0,
         toolCancellationCount: 0,
         artifactToolCallCount: 1,
+        artifactToolCallUnknownCount: 0,
         builderToolCallCount: 0,
+        unresolvedToolCallCount: 0,
+        oldestUnresolvedToolCallAgeMs: null,
         lastToolPhase: 'tool_response_sent',
         lastToolName: 'emit_artifact',
         lastToolAt: '2026-05-20T12:00:02.100Z',
@@ -385,6 +395,104 @@ describe('buildVoiceTelemetryReport', () => {
     expect(report.captureBundle.snapshot.transcript.voiceMessages).toEqual([]);
     expect(report.captureBundle.snapshot.artifacts.sessionArtifacts).toBeNull();
     expect(report.captureBundle.snapshot.artifacts.recapArtifacts).toBeNull();
+  });
+
+  it('adds compact warnings for Gemini stale output, relay backlog, overlap, and unresolved tools', () => {
+    const report = buildVoiceTelemetryReport({
+      exportedAt: '2026-05-20T12:00:04.000Z',
+      metrics: buildMetrics(),
+      summary: buildSummary(),
+      captureBundle: buildCaptureBundle([
+        {
+          seq: 1,
+          recordedAt: '2026-05-20T12:00:00.000Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+          payload: { sessionId: 'current-session' },
+        },
+        {
+          seq: 2,
+          recordedAt: '2026-05-20T12:00:01.000Z',
+          category: 'voice-session',
+          name: 'gemini-interruption',
+          payload: {
+            diagnostic: {
+              timestamp: '2026-05-20T12:00:01.000Z',
+              assistantUserOverlapMs: 3100,
+              interruptedResponseIds: ['response-stale'],
+            },
+          },
+        },
+        {
+          seq: 3,
+          recordedAt: '2026-05-20T12:00:01.100Z',
+          category: 'voice-session',
+          name: 'gemini-stale-output-suppressed',
+          payload: { diagnostic: { outputType: 'audio', reason: 'interrupted_response_id' } },
+        },
+        {
+          seq: 4,
+          recordedAt: '2026-05-20T12:00:01.200Z',
+          category: 'voice-session',
+          name: 'stale-assistant-transcript-ignored',
+          payload: { reason: 'interrupted_or_pre_barge_in_assistant_transcript' },
+        },
+        {
+          seq: 5,
+          recordedAt: '2026-05-20T12:00:02.000Z',
+          category: 'voice-session',
+          name: 'gemini-relay-trace',
+          payload: {
+            trace: {
+              throughput: {
+                orderedRelayQueueDepth: 105,
+                oldestQueuedAgeMs: 109707,
+                transcriptPartialsCoalesced: 0,
+                transcriptPartialsSent: 18,
+                transcriptPartialsDropped: 0,
+                transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
+                finalTranscriptEventsSent: 0,
+                nonDroppableCriticalEventsSent: 4,
+                lastTranscriptRelayLatencyMs: 109931,
+                maxTranscriptRelayLatencyMs: 109931,
+                p95TranscriptRelayLatencyMs: 106203,
+                coalescedBySegment: {},
+              },
+            },
+          },
+        },
+        {
+          seq: 6,
+          recordedAt: '2026-05-20T12:00:03.000Z',
+          category: 'voice-session',
+          name: 'gemini-tool-call-ledger',
+          payload: {
+            entry: {
+              toolCallId: 'artifact-call-unknown',
+              toolName: 'emit_artifact',
+              finalState: 'unknown',
+            },
+          },
+        },
+      ]),
+    });
+
+    expect(report.diagnosticsSummary.geminiStaleOutput).toMatchObject({
+      schema: 'gemini_stale_output_diagnostics_summary_v1',
+      warnings: expect.arrayContaining([
+        'stale_assistant_output_suppressed',
+        'transcript_relay_backlog_exceeded',
+        'unresolved_gemini_tool_calls',
+        'assistant_audio_overlapped_user_input',
+      ]),
+      staleAssistantAudioDroppedCount: 1,
+      staleAssistantTranscriptDroppedCount: 1,
+      maxAssistantUserOverlapMs: 3100,
+      maxOldestQueuedAgeMs: 109707,
+      maxTranscriptRelayLatencyMs: 109931,
+      unresolvedToolCallCount: 1,
+      artifactToolCallUnknownCount: 1,
+    });
   });
 
   it('reconciles rendered artifact state into exported artifact counts', () => {

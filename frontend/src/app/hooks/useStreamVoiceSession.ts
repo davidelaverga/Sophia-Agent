@@ -48,6 +48,9 @@ import {
   applyPacedAssistantTranscriptUpdate,
   createAssistantTranscriptStaleGuardState,
   createAssistantTranscriptPacingState,
+  markActiveAssistantTranscriptInterrupted,
+  markAssistantTranscriptGenerationStarted,
+  markAssistantTranscriptUserInputStarted,
   parseAssistantTranscriptUpdate,
   resetAssistantTranscriptStaleGuardState,
   resetAssistantTranscriptPacingState,
@@ -176,6 +179,12 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     providerCategoryCounts: params.providerCategoryCounts ?? {},
     outputAudioEventCount: params.outputAudioEventCount ?? 0,
     lastOutputAudioAt: params.lastOutputAudioAt ?? null,
+    staleAssistantAudioDroppedCount: params.staleAssistantAudioDroppedCount ?? 0,
+    staleAssistantTranscriptDroppedCount: params.staleAssistantTranscriptDroppedCount ?? 0,
+    staleAssistantOutputSuppressionCount: params.staleAssistantOutputSuppressionCount ?? 0,
+    playbackGeneration: params.playbackGeneration ?? 0,
+    assistantUserOverlapMs: params.assistantUserOverlapMs ?? 0,
+    interruptedResponseIds: params.interruptedResponseIds ?? [],
     interruptionCount: params.interruptionCount ?? 0,
     playbackFlushCount: params.playbackFlushCount ?? 0,
     lastInterruptionAt: params.lastInterruptionAt ?? null,
@@ -222,7 +231,10 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     toolRejectionCount: params.toolRejectionCount ?? 0,
     toolCancellationCount: params.toolCancellationCount ?? 0,
     artifactToolCallCount: params.artifactToolCallCount ?? 0,
+    artifactToolCallUnknownCount: params.artifactToolCallUnknownCount ?? 0,
     builderToolCallCount: params.builderToolCallCount ?? 0,
+    unresolvedToolCallCount: params.unresolvedToolCallCount ?? 0,
+    oldestUnresolvedToolCallAgeMs: params.oldestUnresolvedToolCallAgeMs ?? null,
     lastToolPhase: params.lastToolPhase ?? null,
     lastToolName: params.lastToolName ?? null,
     lastToolAt: params.lastToolAt ?? null,
@@ -1169,6 +1181,8 @@ export function useStreamVoiceSession(
             sourceSequence: update.sourceSequence,
             responseId: update.responseId,
             segmentId: update.segmentId,
+            providerReceivedAt: update.providerReceivedAt,
+            reason: "interrupted_or_pre_barge_in_assistant_transcript",
             sessionId: sessionIdRef.current ?? null,
           },
         })
@@ -1197,6 +1211,21 @@ export function useStreamVoiceSession(
     if (type === "sophia.user_transcript") {
       const text = typeof data?.text === "string" ? data.text : ""
       if (!text) return
+
+      const interruptedKeys = markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
+      if (interruptedKeys.length > 0) {
+        resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
+        setPartialReply("")
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "assistant-transcript-interrupted-by-user",
+          payload: {
+            interruptedKeys,
+            source: "public_user_transcript",
+            sessionId: sessionIdRef.current ?? null,
+          },
+        })
+      }
 
       const utteranceId = typeof data?.utterance_id === "string" ? data.utterance_id : null
       if (utteranceId) {
@@ -1246,6 +1275,7 @@ export function useStreamVoiceSession(
           // Voice command intercepted this turn — don't transition to speaking.
           return
         }
+        markAssistantTranscriptGenerationStarted(assistantTranscriptStaleGuardRef.current)
         clearThinking()
         setStage("speaking")
         setListeningPresence(false)
@@ -1865,6 +1895,13 @@ export function useStreamVoiceSession(
             })
           },
           onInputAudioActivity: (diagnostic) => {
+            if (diagnostic.eventType === "input_audio_frame_sent") {
+              const interruptedKeys = markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
+              if (interruptedKeys.length > 0) {
+                resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
+                setPartialReply("")
+              }
+            }
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-input-audio-activity",
@@ -1878,7 +1915,7 @@ export function useStreamVoiceSession(
           },
           onInterruption: (diagnostic) => {
             resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
-            resetAssistantTranscriptStaleGuardState(assistantTranscriptStaleGuardRef.current)
+            markActiveAssistantTranscriptInterrupted(assistantTranscriptStaleGuardRef.current, { atMs: Date.parse(diagnostic.timestamp) })
             setPartialReply("")
             setStage(userMicMutedRef.current ? "idle" : "listening")
             setSpeakingPresence(false)
@@ -1892,11 +1929,40 @@ export function useStreamVoiceSession(
                   playbackFlushCount: current.playbackFlushCount + (diagnostic.playbackFlushed ? 1 : 0),
                   lastInterruptionAt: diagnostic.timestamp,
                   lastPlaybackFlushAt: diagnostic.playbackFlushed ? diagnostic.timestamp : current.lastPlaybackFlushAt,
+                  playbackGeneration: diagnostic.playbackStateAfter.playbackGeneration,
+                  interruptedResponseIds: diagnostic.interruptedResponseIds,
+                  assistantUserOverlapMs: Math.max(current.assistantUserOverlapMs, diagnostic.assistantUserOverlapMs),
                 }
               : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-interruption",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                diagnostic,
+              },
+            })
+          },
+          onStaleOutputSuppression: (diagnostic) => {
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? {
+                  ...current,
+                  staleAssistantAudioDroppedCount: diagnostic.outputType === "audio"
+                    ? current.staleAssistantAudioDroppedCount + 1
+                    : current.staleAssistantAudioDroppedCount,
+                  staleAssistantTranscriptDroppedCount: diagnostic.outputType === "transcript"
+                    ? current.staleAssistantTranscriptDroppedCount + 1
+                    : current.staleAssistantTranscriptDroppedCount,
+                  staleAssistantOutputSuppressionCount: current.staleAssistantOutputSuppressionCount + 1,
+                  playbackGeneration: diagnostic.playbackGeneration ?? current.playbackGeneration,
+                  interruptedResponseIds: diagnostic.interruptedResponseIds,
+                }
+              : current)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-stale-output-suppressed",
               payload: {
                 runtime: "gemini_live",
                 sessionId: sessionIdRef.current ?? null,
@@ -2348,14 +2414,15 @@ export function useStreamVoiceSession(
     softBargeInActiveRef.current = true
     clearThinking()
     resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
-    resetAssistantTranscriptStaleGuardState(assistantTranscriptStaleGuardRef.current)
-    geminiConnectionRef.current?.flushOutputAudio()
+    markAssistantTranscriptUserInputStarted(assistantTranscriptStaleGuardRef.current)
+    const playbackState = geminiConnectionRef.current?.flushOutputAudio()
     currentTurnUserTranscriptRef.current = null
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "soft-barge-in",
       payload: {
         sessionId: sessionIdRef.current ?? null,
+        playbackState,
       },
     })
     setStage(userMicMutedRef.current ? "idle" : "listening")

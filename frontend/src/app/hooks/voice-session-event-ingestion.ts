@@ -11,10 +11,14 @@ export type AssistantTranscriptUpdate = {
   sourceSequence?: number | null;
   responseId?: string | null;
   segmentId?: string | null;
+  providerReceivedAt?: string | null;
 };
 
 export type AssistantTranscriptStaleGuardState = {
   highestSourceSequenceByKey: Map<string, number>;
+  interruptedKeys: Set<string>;
+  activeKey: string | null;
+  latestUserInputStartedAtMs: number | null;
 };
 
 export type AssistantTranscriptPacingState = {
@@ -45,32 +49,81 @@ export function parseAssistantTranscriptUpdate(data: Record<string, unknown> | u
     sourceSequence: readPositiveInteger(data?.source_sequence ?? data?.sourceSequence),
     responseId: readOptionalString(data?.response_id ?? data?.responseId),
     segmentId: readOptionalString(data?.segment_id ?? data?.segmentId),
+    providerReceivedAt: readOptionalString(data?.provider_received_at ?? data?.providerReceivedAt),
   };
 }
 
 export function createAssistantTranscriptStaleGuardState(): AssistantTranscriptStaleGuardState {
   return {
     highestSourceSequenceByKey: new Map(),
+    interruptedKeys: new Set(),
+    activeKey: null,
+    latestUserInputStartedAtMs: null,
   };
 }
 
 export function resetAssistantTranscriptStaleGuardState(state: AssistantTranscriptStaleGuardState): void {
   state.highestSourceSequenceByKey.clear();
+  state.interruptedKeys.clear();
+  state.activeKey = null;
+  state.latestUserInputStartedAtMs = null;
+}
+
+export function markActiveAssistantTranscriptInterrupted(
+  state: AssistantTranscriptStaleGuardState,
+  options: { atMs?: number | null } = {},
+): string[] {
+  const interruptedKeys: string[] = [];
+  if (state.activeKey) {
+    state.interruptedKeys.add(state.activeKey);
+    interruptedKeys.push(state.activeKey);
+  }
+  if (typeof options.atMs === 'number' && Number.isFinite(options.atMs)) {
+    state.latestUserInputStartedAtMs = Math.max(state.latestUserInputStartedAtMs ?? 0, options.atMs);
+  }
+  return interruptedKeys;
+}
+
+export function markAssistantTranscriptUserInputStarted(
+  state: AssistantTranscriptStaleGuardState,
+  atMs = Date.now(),
+): string[] {
+  return markActiveAssistantTranscriptInterrupted(state, { atMs });
+}
+
+export function markAssistantTranscriptGenerationStarted(state: AssistantTranscriptStaleGuardState): void {
+  state.activeKey = null;
+  state.interruptedKeys.delete('active:default');
 }
 
 export function shouldApplyAssistantTranscriptUpdate(
   update: AssistantTranscriptUpdate,
   state: AssistantTranscriptStaleGuardState,
 ): boolean {
+  const key = assistantTranscriptStaleGuardKey(update);
+  const providerReceivedAtMs = parseTimestampMs(update.providerReceivedAt);
+  if (
+    providerReceivedAtMs !== null
+    && state.latestUserInputStartedAtMs !== null
+    && providerReceivedAtMs <= state.latestUserInputStartedAtMs
+  ) {
+    return false;
+  }
+
+  if (state.interruptedKeys.has(key)) {
+    return false;
+  }
+
   if (update.sourceSequence == null) {
+    state.activeKey = key;
     return true;
   }
-  const key = assistantTranscriptStaleGuardKey(update);
   const highest = state.highestSourceSequenceByKey.get(key);
   if (highest !== undefined && update.sourceSequence <= highest) {
     return false;
   }
   state.highestSourceSequenceByKey.set(key, update.sourceSequence);
+  state.activeKey = key;
   return true;
 }
 
@@ -177,4 +230,12 @@ function readPositiveInteger(value: unknown): number | null {
     return null;
   }
   return value;
+}
+
+function parseTimestampMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
 }

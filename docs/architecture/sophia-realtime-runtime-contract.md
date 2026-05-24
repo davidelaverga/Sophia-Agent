@@ -169,6 +169,20 @@ Gemini Live appends this seed after authenticated setup context (identity/handof
 
 The harness boundary is intentionally narrow: it gates slow structural appropriateness, especially early-session `trust_building` and `challenging_growth`, while the model still reads the live emotional moment. Unknown state defaults conservatively: trust unknown, recurring patterns unknown, `default_posture=trust_building`, and `challenging_growth_allowed=false`. This phase does not implement trust analytics, trace/session-history counting, crisis classification, ritual tools, memory writeback, artifact schema changes, Builder changes, VAD tuning, or provider promotion.
 
+## Phase 12.6D Gemini Barge-in / Stale Assistant Output Suppression
+
+Phase 12.6D follows the first 12.6C smoke where Gemini continued or repeated stale assistant speech after user barge-in, including stale `Done and ready...` text leaking through a later Spanish turn. The implementation report lives at `docs/audits/gemini-barge-in-stale-output-suppression-phase-12-6d.md`.
+
+The runtime contract now treats barge-in as a multi-layer fence, not a single playback stop. Browser-owned Gemini playback has a generation counter: interruption and `flushOutputAudio()` stop active PCM sources, reset scheduled playback state, and make later stale output diagnosable. The browser connector can suppress stale assistant audio/transcript after a barge-in fence before old output is scheduled or relayed.
+
+The public transcript contract remains replace-by-snapshot, but ingestion now remembers interrupted response/segment keys and latest user-input time. User input and public `sophia.user_transcript` close the active assistant transcript segment locally. New assistant generations reopen the default/no-id path; explicitly interrupted response ids stay rejected until the provider sends a new response start.
+
+On the backend, `SophiaEventNormalizer` closes the active assistant response when a finalized user transcript arrives during assistant output. Later assistant deltas/finals for that closed response become compact diagnostics instead of public `sophia.transcript` mutations, even when their source sequence is higher than the interruption boundary. An explicit new `RESPONSE_STARTED` can reopen a reused provider response id for provider compatibility.
+
+Diagnostics now include stale assistant audio/transcript drop counts, playback generation, interrupted response ids, assistant/user overlap duration, transcript relay backlog warnings, and unresolved Gemini tool-call counts. Raw Gemini `emit_artifact` calls still do not count as public artifacts; artifact reconciliation remains based on validated public/runtime/rendered artifact evidence.
+
+This phase did not change baked skills, prompt files, crisis behavior, artifact schema, Builder behavior, memory behavior, provider routing, or VAD/activity tuning.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.

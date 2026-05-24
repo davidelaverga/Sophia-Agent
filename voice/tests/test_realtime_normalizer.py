@@ -36,8 +36,8 @@ def _event(
     data: dict[str, Any] | None = None,
     *,
     provider: str = "fixture-provider",
-    response_id: str = "response-1",
-    turn_id: str = "turn-1",
+    response_id: str | None = "response-1",
+    turn_id: str | None = "turn-1",
 ) -> ProviderEvent:
     return ProviderEvent(
         event_type,
@@ -345,6 +345,171 @@ def test_gemini_style_realtime_fixture_can_use_audio_lifecycle_for_turns() -> No
         for payload in payloads
         if payload["type"] == "sophia.turn"
     ] == ["user_ended", "agent_started", "agent_ended"]
+
+
+def test_normalizer_rejects_higher_sequence_transcript_after_interruption() -> None:
+    normalizer = SophiaEventNormalizer()
+    payloads = [
+        event.as_payload()
+        for event in normalizer.normalize_events(
+            [
+                _event(
+                    ProviderEventType.RESPONSE_STARTED,
+                    response_id="gemini-response-stale",
+                ),
+                _event(
+                    ProviderEventType.ASSISTANT_TEXT_DELTA,
+                    {
+                        "text": "Done and ready.",
+                        "is_delta": False,
+                        "transcript_assembly": "auto",
+                        "segment_id": "gemini-segment-0",
+                        "source_sequence": 20,
+                    },
+                    provider="google-gemini-live",
+                    response_id="gemini-response-stale",
+                ),
+                _event(
+                    ProviderEventType.RESPONSE_INTERRUPTED,
+                    {"source_sequence": 21},
+                    provider="google-gemini-live",
+                    response_id="gemini-response-stale",
+                ),
+                _event(
+                    ProviderEventType.ASSISTANT_TEXT_DELTA,
+                    {
+                        "text": "Done and ready. Old tail should not return.",
+                        "is_delta": False,
+                        "transcript_assembly": "auto",
+                        "segment_id": "gemini-segment-0",
+                        "source_sequence": 22,
+                    },
+                    provider="google-gemini-live",
+                    response_id="gemini-response-stale",
+                ),
+            ]
+        )
+    ]
+
+    transcripts = [payload for payload in payloads if payload["type"] == "sophia.transcript"]
+    diagnostics = [payload for payload in payloads if payload["type"] == "sophia.turn_diagnostic"]
+
+    assert [payload["data"]["text"] for payload in transcripts] == ["Done and ready."]
+    assert diagnostics[-1]["data"]["reason"] == "transcript_response_interrupted_rejected"
+    assert "Old tail" not in str(transcripts)
+
+
+def test_normalizer_closes_active_response_when_user_barges_in_with_spanish_turn() -> None:
+    normalizer = SophiaEventNormalizer()
+    payloads = [
+        event.as_payload()
+        for event in normalizer.normalize_events(
+            [
+                _event(
+                    ProviderEventType.RESPONSE_STARTED,
+                    provider="google-gemini-live",
+                    response_id="gemini-response-before-spanish",
+                ),
+                _event(
+                    ProviderEventType.ASSISTANT_TEXT_DELTA,
+                    {
+                        "text": "Done and ready.",
+                        "is_delta": False,
+                        "transcript_assembly": "auto",
+                        "segment_id": "gemini-segment-0",
+                        "source_sequence": 30,
+                    },
+                    provider="google-gemini-live",
+                    response_id="gemini-response-before-spanish",
+                ),
+                _event(
+                    ProviderEventType.USER_TRANSCRIPT_FINAL,
+                    {
+                        "text": "¿Puedes responder en español?",
+                        "utterance_id": "spanish-utt-1",
+                        "source_sequence": 31,
+                    },
+                    provider="google-gemini-live",
+                    response_id=None,
+                    turn_id=None,
+                ),
+                _event(
+                    ProviderEventType.ASSISTANT_TEXT_DELTA,
+                    {
+                        "text": "Done and ready. This stale continuation must stay hidden.",
+                        "is_delta": False,
+                        "transcript_assembly": "auto",
+                        "segment_id": "gemini-segment-0",
+                        "source_sequence": 32,
+                    },
+                    provider="google-gemini-live",
+                    response_id="gemini-response-before-spanish",
+                ),
+                _event(
+                    ProviderEventType.RESPONSE_STARTED,
+                    provider="google-gemini-live",
+                    response_id="gemini-response-spanish-answer",
+                ),
+                _event(
+                    ProviderEventType.ASSISTANT_TEXT_DELTA,
+                    {
+                        "text": "Sí, puedo responder en español.",
+                        "is_delta": False,
+                        "transcript_assembly": "auto",
+                        "segment_id": "gemini-segment-0",
+                        "source_sequence": 33,
+                    },
+                    provider="google-gemini-live",
+                    response_id="gemini-response-spanish-answer",
+                ),
+            ]
+        )
+    ]
+
+    turns = [payload["data"] for payload in payloads if payload["type"] == "sophia.turn"]
+    transcripts = [payload["data"]["text"] for payload in payloads if payload["type"] == "sophia.transcript"]
+    diagnostics = [payload["data"] for payload in payloads if payload["type"] == "sophia.turn_diagnostic"]
+
+    assert {payload["data"]["text"] for payload in payloads if payload["type"] == "sophia.user_transcript"} == {
+        "¿Puedes responder en español?"
+    }
+    assert {turn.get("reason") for turn in turns} >= {"interrupted_by_user_input"}
+    assert transcripts == ["Done and ready.", "Sí, puedo responder en español."]
+    assert diagnostics[-1]["reason"] == "transcript_response_interrupted_rejected"
+    assert "stale continuation" not in str(transcripts)
+
+
+def test_normalizer_allows_non_stale_transcript_after_interruption_on_new_response() -> None:
+    normalizer = SophiaEventNormalizer()
+    payloads = [
+        event.as_payload()
+        for event in normalizer.normalize_events(
+            [
+                _event(ProviderEventType.RESPONSE_STARTED, response_id="old-response"),
+                _event(
+                    ProviderEventType.RESPONSE_INTERRUPTED,
+                    {"source_sequence": 40},
+                    response_id="old-response",
+                ),
+                _event(ProviderEventType.RESPONSE_STARTED, response_id="new-response"),
+                _event(
+                    ProviderEventType.ASSISTANT_TEXT_DELTA,
+                    {
+                        "text": "Fresh answer.",
+                        "is_delta": False,
+                        "transcript_assembly": "auto",
+                        "segment_id": "gemini-segment-0",
+                        "source_sequence": 41,
+                    },
+                    response_id="new-response",
+                ),
+            ]
+        )
+    ]
+
+    assert [payload["data"]["text"] for payload in payloads if payload["type"] == "sophia.transcript"] == [
+        "Fresh answer."
+    ]
 
 
     def test_normalizer_rejects_stale_assistant_transcript_snapshot_for_same_segment() -> None:

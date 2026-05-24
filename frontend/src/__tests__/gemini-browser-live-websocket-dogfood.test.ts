@@ -191,7 +191,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(fakeAudioContext.createdSources[1]?.stop).toHaveBeenCalledTimes(1);
     expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
     expect(fakeAudioContext.createdSources[1]?.disconnect).toHaveBeenCalledTimes(1);
-    expect(player.snapshot()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0 });
+    expect(player.snapshot()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 1 });
   });
 
   it('records bounded non-raw diagnostics for scheduled Gemini output audio chunks', () => {
@@ -238,6 +238,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       audioContextCurrentTime: 12,
       scheduledStartTime: 12,
       scheduled: true,
+      playbackGeneration: 0,
+      dropReason: null,
       activeSourceCountBefore: 0,
       activeSourceCountAfter: 1,
     });
@@ -247,6 +249,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       scheduledStartTime: 12 + 2 / 24000,
       activeSourceCountBefore: 1,
       activeSourceCountAfter: 2,
+      playbackGeneration: 0,
     });
     expect((diagnostics[0] as { chunkHash?: unknown }).chunkHash).toMatch(/^[0-9a-f]{8}$/);
   });
@@ -460,6 +463,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
     const providerEvents: unknown[] = [];
     const interruptionDiagnostics: GeminiBrowserLiveDogfoodInterruptionDiagnostic[] = [];
+    const staleSuppressionDiagnostics: unknown[] = [];
     const outputAudioDetected = vi.fn();
     let websocket: FakeWebSocket | null = null;
 
@@ -478,6 +482,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       onRelayStatus: (status) => relayStatuses.push(status),
       onOutputAudio: outputAudioDetected,
       onInterruption: (diagnostic) => interruptionDiagnostics.push(diagnostic),
+      onStaleOutputSuppression: (diagnostic) => staleSuppressionDiagnostics.push(diagnostic),
     });
 
     expect(connection.sessionId).toBe('browser-gemini-1');
@@ -574,7 +579,32 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(fakeAudioContext.createdSources).toHaveLength(1);
     expect(fakeAudioContext.createdSources[0]?.start).toHaveBeenCalledWith(10);
 
-    const interruptionEvent = { serverContent: { interrupted: true } };
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array([0, 0.5, -0.5, 0.25]) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4) },
+    } as unknown as AudioProcessingEvent);
+    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
+
+    const fetchCallsAfterLocalBargeIn = fetchMock.mock.calls.length;
+    websocket?.emitMessage({
+      responseId: 'gemini-old-response',
+      serverContent: {
+        responseId: 'gemini-old-response',
+        outputTranscription: { text: 'This response-id tail should be suppressed before provider interruption.' },
+      },
+    });
+    await Promise.resolve();
+    expect(staleSuppressionDiagnostics).toEqual([
+      expect.objectContaining({
+        outputType: 'transcript',
+        reason: expect.stringMatching(/^(barge_in_generation_active|pre_barge_in_relay_backlog)$/),
+        responseId: 'gemini-old-response',
+        playbackGeneration: 1,
+      }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallsAfterLocalBargeIn);
+
+    const interruptionEvent = { responseId: 'gemini-old-response', serverContent: { responseId: 'gemini-old-response', interrupted: true } };
     expect(isGeminiServerInterruptedEvent(interruptionEvent)).toBe(true);
     websocket?.emitMessage(interruptionEvent);
     await vi.waitFor(() => expect(interruptionDiagnostics).toHaveLength(1));
@@ -582,12 +612,36 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(interruptionDiagnostics[0]).toEqual(expect.objectContaining({
       reason: 'server_interrupted',
       playbackFlushed: true,
-      playbackStateBefore: expect.objectContaining({ activeSourceCount: 1 }),
-      playbackStateAfter: { nextPlaybackTime: 0, activeSourceCount: 0 },
+      playbackStateBefore: expect.objectContaining({ activeSourceCount: 0, playbackGeneration: 1 }),
+      playbackStateAfter: { nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 2 },
+      playbackGeneration: 2,
+      interruptedResponseIds: ['gemini-old-response'],
     }));
     expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
     expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
-    expect(connection.flushOutputAudio()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0 });
+
+    const fetchCallsAfterInterruption = fetchMock.mock.calls.length;
+    websocket?.emitMessage({
+      responseId: 'gemini-old-response',
+      serverContent: { responseId: 'gemini-old-response', outputTranscription: { text: 'Done and ready. Old tail.' } },
+    });
+    await Promise.resolve();
+    expect(staleSuppressionDiagnostics).toEqual([
+      expect.objectContaining({
+        outputType: 'transcript',
+        reason: expect.stringMatching(/^(barge_in_generation_active|pre_barge_in_relay_backlog)$/),
+        playbackGeneration: 1,
+      }),
+      expect.objectContaining({
+        outputType: 'transcript',
+        reason: 'interrupted_response_id',
+        responseId: 'gemini-old-response',
+        playbackGeneration: 2,
+      }),
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(fetchCallsAfterInterruption);
+
+    expect(connection.flushOutputAudio()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 3 });
 
     await connection.close();
 

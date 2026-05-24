@@ -547,6 +547,93 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.artifactCountSource).toBe('public_event');
   });
 
+  it('summarizes Gemini stale-output suppression and unresolved tool diagnostics', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.100Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: { runtime: 'gemini_live', callType: 'gemini_live', voiceAgentSessionId: 'gemini-session-dev' },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:01.000Z',
+        category: 'voice-session',
+        name: 'gemini-interruption',
+        payload: {
+          diagnostic: {
+            timestamp: '2026-04-07T12:00:01.000Z',
+            playbackFlushed: true,
+            playbackGeneration: 4,
+            assistantUserOverlapMs: 2450,
+            interruptedResponseIds: ['response-stale'],
+          },
+        },
+      }),
+      buildEvent({
+        seq: 4,
+        at: '2026-04-07T12:00:01.100Z',
+        category: 'voice-session',
+        name: 'gemini-stale-output-suppressed',
+        payload: {
+          diagnostic: {
+            outputType: 'audio',
+            reason: 'interrupted_response_id',
+            playbackGeneration: 4,
+            interruptedResponseIds: ['response-stale'],
+          },
+        },
+      }),
+      buildEvent({
+        seq: 5,
+        at: '2026-04-07T12:00:01.200Z',
+        category: 'voice-session',
+        name: 'stale-assistant-transcript-ignored',
+        payload: { reason: 'interrupted_or_pre_barge_in_assistant_transcript' },
+      }),
+      buildEvent({
+        seq: 6,
+        at: '2026-04-07T12:00:01.300Z',
+        category: 'voice-session',
+        name: 'gemini-tool-call-ledger',
+        payload: {
+          entry: {
+            toolCallId: 'artifact-call-unknown',
+            toolName: 'emit_artifact',
+            receivedAt: '2026-04-07T12:00:00.300Z',
+            finalState: 'unknown',
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:05.300Z'),
+    });
+
+    expect(metrics.sessionTelemetry.runtime).toBe('gemini_live');
+    expect(metrics.sessionTelemetry.gemini?.staleAssistantAudioDroppedCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.staleAssistantTranscriptDroppedCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.staleAssistantOutputSuppressionCount).toBe(2);
+    expect(metrics.sessionTelemetry.gemini?.playbackGeneration).toBe(4);
+    expect(metrics.sessionTelemetry.gemini?.maxAssistantUserOverlapMs).toBe(2450);
+    expect(metrics.sessionTelemetry.gemini?.interruptedResponseIds).toEqual(['response-stale']);
+    expect(metrics.sessionTelemetry.gemini?.unresolvedToolCallCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.artifactToolCallUnknownCount).toBe(1);
+    expect(metrics.sessionTelemetry.gemini?.oldestUnresolvedToolCallAgeMs).toBe(5000);
+  });
+
   it('counts rendered session artifacts when the public artifact event is absent from the active slice', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

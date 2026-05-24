@@ -68,6 +68,12 @@ export type GeminiRuntimeTelemetry = {
   providerCategoryCounts: Record<string, GeminiRuntimeCategoryCounter>
   outputAudioEventCount: number
   lastOutputAudioAt: string | null
+  staleAssistantAudioDroppedCount: number
+  staleAssistantTranscriptDroppedCount: number
+  staleAssistantOutputSuppressionCount: number
+  playbackGeneration: number
+  assistantUserOverlapMs: number
+  interruptedResponseIds: string[]
   interruptionCount: number
   playbackFlushCount: number
   lastInterruptionAt: string | null
@@ -110,7 +116,10 @@ export type GeminiRuntimeTelemetry = {
   toolRejectionCount: number
   toolCancellationCount: number
   artifactToolCallCount: number
+  artifactToolCallUnknownCount: number
   builderToolCallCount: number
+  unresolvedToolCallCount: number
+  oldestUnresolvedToolCallAgeMs: number | null
   lastToolPhase: string | null
   lastToolName: string | null
   lastToolAt: string | null

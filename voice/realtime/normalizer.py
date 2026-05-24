@@ -30,6 +30,7 @@ class SophiaEventNormalizer:
         self._active_assistant_text_key_by_response: dict[str, str] = {}
         self._highest_transcript_source_sequence_by_key: dict[str, int] = {}
         self._closed_response_source_sequence_by_response: dict[str, int] = {}
+        self._closed_response_ids: set[str] = set()
         self._active_response_id: str | None = None
         self._agent_started_response_ids: set[str] = set()
         self._agent_ended_response_ids: set[str] = set()
@@ -53,6 +54,7 @@ class SophiaEventNormalizer:
 
             utterance_id = _string_value(event.data.get("utterance_id")) or str(uuid4())
             return [
+                *self._interrupt_active_response_for_user_input(event),
                 SophiaEvent(
                     "sophia.user_transcript",
                     self._user_transcript_payload(text, utterance_id=utterance_id, event=event),
@@ -81,7 +83,7 @@ class SophiaEventNormalizer:
                         status="completed",
                         reason=stale_reason,
                         extra={
-                            "provider_event_name": "transcript_sequence_stale_rejected",
+                            "provider_event_name": stale_reason,
                             "source_sequence": _int_value(event.data.get("source_sequence")),
                             "transcript_key": transcript_key,
                         },
@@ -123,7 +125,7 @@ class SophiaEventNormalizer:
                         status="completed",
                         reason=stale_reason,
                         extra={
-                            "provider_event_name": "transcript_sequence_stale_rejected",
+                            "provider_event_name": stale_reason,
                             "source_sequence": _int_value(event.data.get("source_sequence")),
                             "transcript_key": transcript_key,
                         },
@@ -165,7 +167,9 @@ class SophiaEventNormalizer:
         }:
             reason = "interrupted" if event_type == ProviderEventType.RESPONSE_INTERRUPTED else "cancelled"
             self._record_response_boundary_source_sequence(event)
-            self._clear_assistant_text_for_response(self._response_id(event))
+            response_id = self._response_id(event)
+            self._closed_response_ids.add(response_id)
+            self._clear_assistant_text_for_response(response_id)
             return [
                 *self._agent_ended(event, reason=reason),
                 self._diagnostic_event(
@@ -284,6 +288,8 @@ class SophiaEventNormalizer:
         transcript_key: str,
     ) -> str | None:
         source_sequence = _int_value(event.data.get("source_sequence"))
+        if response_id in self._closed_response_ids:
+            return "transcript_response_interrupted_rejected"
         if source_sequence is None:
             return None
         highest = self._highest_transcript_source_sequence_by_key.get(transcript_key)
@@ -308,6 +314,22 @@ class SophiaEventNormalizer:
         if source_sequence is None:
             return
         response_id = self._response_id(event)
+        self._closed_response_ids.add(response_id)
+        self._closed_response_source_sequence_by_response[response_id] = max(
+            source_sequence,
+            self._closed_response_source_sequence_by_response.get(response_id, 0),
+        )
+
+    def _record_response_boundary_source_sequence_for_response(
+        self,
+        event: ProviderEvent,
+        *,
+        response_id: str,
+    ) -> None:
+        self._closed_response_ids.add(response_id)
+        source_sequence = _int_value(event.data.get("source_sequence"))
+        if source_sequence is None:
+            return
         self._closed_response_source_sequence_by_response[response_id] = max(
             source_sequence,
             self._closed_response_source_sequence_by_response.get(response_id, 0),
@@ -326,12 +348,50 @@ class SophiaEventNormalizer:
 
     def _agent_started(self, event: ProviderEvent) -> list[SophiaEvent]:
         response_id = self._response_id(event)
+        if response_id in self._agent_ended_response_ids:
+            self._agent_started_response_ids.discard(response_id)
+            self._agent_ended_response_ids.discard(response_id)
+            self._closed_response_ids.discard(response_id)
+            self._closed_response_source_sequence_by_response.pop(response_id, None)
         self._active_response_id = response_id
         if response_id in self._agent_started_response_ids:
             return []
 
         self._agent_started_response_ids.add(response_id)
         return [SophiaEvent("sophia.turn", {"phase": "agent_started"})]
+
+    def _interrupt_active_response_for_user_input(self, event: ProviderEvent) -> list[SophiaEvent]:
+        response_id = self._active_response_id
+        if response_id is None:
+            return []
+
+        response_event = replace(event, response_id=response_id, turn_id=response_id)
+        self._record_response_boundary_source_sequence_for_response(response_event, response_id=response_id)
+        self._clear_assistant_text_for_response(response_id)
+        events: list[SophiaEvent] = []
+        if response_id not in self._agent_ended_response_ids:
+            self._agent_ended_response_ids.add(response_id)
+            self._active_response_id = None
+            self._active_assistant_text_key_by_response.pop(response_id, None)
+            events.append(
+                SophiaEvent(
+                    "sophia.turn",
+                    {"phase": "agent_ended", "reason": "interrupted_by_user_input"},
+                )
+            )
+        events.append(
+            self._diagnostic_event(
+                response_event,
+                status="failed",
+                reason="interrupted_by_user_input",
+                extra={
+                    "interrupted": True,
+                    "provider_event_name": "assistant_interrupted_by_user_input",
+                    "source_sequence": _int_value(event.data.get("source_sequence")),
+                },
+            )
+        )
+        return events
 
     def _agent_ended(
         self,

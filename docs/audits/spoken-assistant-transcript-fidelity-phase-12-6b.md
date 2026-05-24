@@ -139,6 +139,12 @@ Expected: artifact counts still reconcile, Builder remains at zero, and transcri
 - Add an audio-level transcription/capture proof path only in a later privacy-reviewed phase; do not fabricate transcript text from audio here.
 - Broaden export retention for high-risk/crisis windows or latest assistant audio/transcript correlations if current-run scoping continues to omit the key turn.
 
+## 10b. Follow-up In Phase 12.6D
+
+Phase 12.6D addressed a different but adjacent failure mode from the next smoke: stale assistant output after barge-in. It added browser playback generation fences, frontend interrupted-segment guards, and backend closed-response rejection so old Gemini audio/transcript cannot continue mutating the visible session after the user starts a new turn.
+
+That follow-up does not change this audit's interpretation of the 12.6A crisis smoke. 12.6B remains an evidence-fidelity phase; 12.6D is the stale-output suppression phase for interruption/backlog leakage.
+
 ## 11. Bottom Line
 
 Phase 12.6B does not prove a crisis prompt failure. It proves the previous report did not preserve enough assistant transcript evidence to audit spoken crisis behavior, and it adds the compact diagnostics needed for the next smoke to classify the gap.

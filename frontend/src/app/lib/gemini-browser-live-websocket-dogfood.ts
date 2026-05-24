@@ -75,6 +75,28 @@ export interface GeminiBrowserLiveDogfoodInterruptionDiagnostic {
   playbackFlushed: boolean;
   playbackStateBefore: GeminiOutputAudioPlaybackState;
   playbackStateAfter: GeminiOutputAudioPlaybackState;
+  playbackGeneration: number;
+  interruptedResponseIds: string[];
+  assistantUserOverlapMs: number;
+}
+
+export type GeminiStaleOutputSuppressionType = 'audio' | 'transcript';
+
+export type GeminiStaleOutputSuppressionReason =
+  | 'interrupted_response_id'
+  | 'barge_in_generation_active'
+  | 'pre_barge_in_relay_backlog';
+
+export interface GeminiStaleOutputSuppressionDiagnostic {
+  timestamp: string;
+  outputType: GeminiStaleOutputSuppressionType;
+  reason: GeminiStaleOutputSuppressionReason;
+  responseId: string | null;
+  providerReceiveSequence: number | null;
+  providerReceivedAt: string | null;
+  relayCorrelationId: string | null;
+  playbackGeneration: number | null;
+  interruptedResponseIds: string[];
 }
 
 export type GeminiInputAudioActivityEventType =
@@ -184,6 +206,8 @@ export interface GeminiOutputAudioChunkDiagnostic {
   nextPlaybackTimeAfter: number;
   activeSourceCountBefore: number;
   activeSourceCountAfter: number;
+  playbackGeneration: number;
+  dropReason: GeminiStaleOutputSuppressionReason | null;
   scheduled: boolean;
 }
 
@@ -314,6 +338,7 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   onToolCallLedgerUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void;
   onWebSocketDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodWebSocketDiagnostic) => void;
   onInterruption?: (diagnostic: GeminiBrowserLiveDogfoodInterruptionDiagnostic) => void;
+  onStaleOutputSuppression?: (diagnostic: GeminiStaleOutputSuppressionDiagnostic) => void;
   onInputAudioActivity?: (diagnostic: GeminiInputAudioActivityDiagnostic) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
 }
@@ -427,6 +452,7 @@ interface AudioPipeline {
 export interface GeminiOutputAudioPlaybackState {
   nextPlaybackTime: number;
   activeSourceCount: number;
+  playbackGeneration: number;
 }
 
 export interface GeminiOutputAudioPlaybackController {
@@ -573,6 +599,12 @@ export async function connectGeminiBrowserLiveDogfood(
   const providerCategoryCounts = createGeminiProviderEventCategoryCounts();
   const relayClassificationCounts = createGeminiRelayClassificationCounts();
   const toolCallLedger = new Map<string, GeminiBrowserLiveToolCallLedgerEntry>();
+  const interruptedResponseIds = new Set<string>();
+  let staleOutputSuppressionActive = false;
+  let staleOutputSuppressionStartedAtMs: number | null = null;
+  let inputTranscriptionSeenAfterStaleFence = false;
+  let assistantUserOverlapStartedAtMs: number | null = null;
+  let assistantUserOverlapMs = 0;
 
   const relayQueueOldestQueuedAgeMs = () => {
     const oldestQueuedAtMs = orderedRelayQueue[0]?.queuedAtMs;
@@ -691,6 +723,95 @@ export async function connectGeminiBrowserLiveDogfood(
     options.onToolCallLedgerUpdate?.({ ...entry });
   };
 
+  const defaultPlaybackState = (): GeminiOutputAudioPlaybackState => ({
+    nextPlaybackTime: 0,
+    activeSourceCount: 0,
+    playbackGeneration: outputAudioPlayer?.snapshot().playbackGeneration ?? 0,
+  });
+
+  const hasPendingAssistantAudioPlayback = () => {
+    const playbackState = outputAudioPlayer?.snapshot();
+    if (!playbackState) {
+      return false;
+    }
+    const currentTime = audioContext && Number.isFinite(audioContext.currentTime) ? audioContext.currentTime : 0;
+    return playbackState.activeSourceCount > 0 || playbackState.nextPlaybackTime > currentTime;
+  };
+
+  const markStaleOutputFence = (timestampIso: string) => {
+    if (staleOutputSuppressionActive) {
+      return;
+    }
+    staleOutputSuppressionActive = true;
+    const parsedTimestampMs = Date.parse(timestampIso);
+    staleOutputSuppressionStartedAtMs = Number.isFinite(parsedTimestampMs) ? parsedTimestampMs : null;
+    inputTranscriptionSeenAfterStaleFence = false;
+    assistantUserOverlapStartedAtMs = monotonicNowMs();
+  };
+
+  const closeAssistantUserOverlap = () => {
+    if (assistantUserOverlapStartedAtMs === null) {
+      return;
+    }
+    assistantUserOverlapMs += elapsedMs(assistantUserOverlapStartedAtMs);
+    assistantUserOverlapStartedAtMs = null;
+  };
+
+  const emitStaleOutputSuppression = (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata | undefined,
+    outputType: GeminiStaleOutputSuppressionType,
+    reason: GeminiStaleOutputSuppressionReason,
+  ) => {
+    options.onStaleOutputSuppression?.({
+      timestamp: new Date().toISOString(),
+      outputType,
+      reason,
+      responseId: readGeminiResponseId(event),
+      providerReceiveSequence: receiveMetadata?.providerReceiveSequence ?? null,
+      providerReceivedAt: receiveMetadata?.providerReceivedAt ?? null,
+      relayCorrelationId: receiveMetadata?.relayCorrelationId ?? null,
+      playbackGeneration: outputAudioPlayer?.snapshot().playbackGeneration ?? null,
+      interruptedResponseIds: Array.from(interruptedResponseIds).slice(-12),
+    });
+  };
+
+  const staleOutputSuppressionReason = (
+    event: Record<string, unknown>,
+    categories: GeminiProviderEventCategory[],
+    receiveMetadata?: GeminiProviderReceiveMetadata,
+  ): GeminiStaleOutputSuppressionReason | null => {
+    if (!isAssistantOutputCategories(categories) || isGeminiServerInterruptedEvent(event)) {
+      return null;
+    }
+    const responseId = readGeminiResponseId(event);
+    if (responseId && interruptedResponseIds.has(responseId)) {
+      return 'interrupted_response_id';
+    }
+    if (!staleOutputSuppressionActive) {
+      return null;
+    }
+    const parsedProviderReceivedAtMs = receiveMetadata?.providerReceivedAt ? Date.parse(receiveMetadata.providerReceivedAt) : Number.NaN;
+    const providerReceivedAtMs = Number.isFinite(parsedProviderReceivedAtMs) ? parsedProviderReceivedAtMs : null;
+    if (
+      providerReceivedAtMs !== null
+      && staleOutputSuppressionStartedAtMs !== null
+      && providerReceivedAtMs <= staleOutputSuppressionStartedAtMs
+    ) {
+      return 'pre_barge_in_relay_backlog';
+    }
+    return inputTranscriptionSeenAfterStaleFence ? null : 'barge_in_generation_active';
+  };
+
+  const handleInputAudioActivity = (diagnostic: GeminiInputAudioActivityDiagnostic) => {
+    if (diagnostic.eventType === 'input_audio_frame_sent' && hasPendingAssistantAudioPlayback()) {
+      const timestamp = diagnostic.recordedAt;
+      markStaleOutputFence(timestamp);
+      outputAudioPlayer?.stop();
+    }
+    options.onInputAudioActivity?.(diagnostic);
+  };
+
   const updateToolCallLedger = (
     toolCallId: string | null,
     update: Partial<Omit<GeminiBrowserLiveToolCallLedgerEntry, 'toolCallId'>>,
@@ -784,6 +905,19 @@ export async function connectGeminiBrowserLiveDogfood(
           return;
         }
         const categories = classification.categories;
+        if (categories.includes('inputTranscription') && staleOutputSuppressionActive) {
+          inputTranscriptionSeenAfterStaleFence = true;
+        }
+        const transcriptSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
+        if (transcriptSuppressionReason && (categories.includes('outputTranscription') || categories.includes('modelTurnText'))) {
+          relayThroughputMetrics.transcriptPartialsDropped += 1;
+          emitStaleOutputSuppression(event, receiveMetadata, 'transcript', transcriptSuppressionReason);
+          return;
+        }
+        if (hasGeminiServerContentTurnBoundary(event) && !isGeminiServerInterruptedEvent(event) && staleOutputSuppressionActive) {
+          staleOutputSuppressionActive = false;
+          closeAssistantUserOverlap();
+        }
         const eventCategory = categories[0] ?? 'unknown';
         const correlationId = receiveMetadata.relayCorrelationId;
         const rawAssistantTranscriptPartial = isRawAssistantOutputTranscriptPartial(event, categories);
@@ -953,21 +1087,44 @@ export async function connectGeminiBrowserLiveDogfood(
         });
       },
       onOutputAudio: (event, receiveMetadata) => {
-        if (readGeminiOutputAudioChunks(event).length) {
+        const audioChunks = readGeminiOutputAudioChunks(event);
+        if (!audioChunks.length) {
+          return;
+        }
+        const audioSuppressionReason = staleOutputSuppressionReason(event, classifyGeminiProviderEventForRelay(event).categories, receiveMetadata);
+        if (audioSuppressionReason) {
+          emitStaleOutputSuppression(event, receiveMetadata, 'audio', audioSuppressionReason);
+          return;
+        }
+        if (audioChunks.length) {
           options.onOutputAudio?.();
         }
         outputAudioPlayer?.playEvent(event, receiveMetadata);
       },
-      onInterruption: () => {
-        const playbackStateBefore = outputAudioPlayer?.snapshot() ?? { nextPlaybackTime: 0, activeSourceCount: 0 };
+      onInterruption: (event) => {
+        const responseId = readGeminiResponseId(event);
+        if (responseId) {
+          interruptedResponseIds.add(responseId);
+        }
+        const timestamp = new Date().toISOString();
+        const wasStaleFenceActive = staleOutputSuppressionActive;
+        const playbackStateBefore = outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
+        markStaleOutputFence(timestamp);
         outputAudioPlayer?.stop();
-        const playbackStateAfter = outputAudioPlayer?.snapshot() ?? { nextPlaybackTime: 0, activeSourceCount: 0 };
+        const playbackStateAfter = outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
+        const currentAssistantUserOverlapMs = assistantUserOverlapMs
+          + (assistantUserOverlapStartedAtMs === null ? 0 : elapsedMs(assistantUserOverlapStartedAtMs));
         options.onInterruption?.({
-          timestamp: new Date().toISOString(),
+          timestamp,
           reason: 'server_interrupted',
-          playbackFlushed: playbackStateBefore.activeSourceCount > 0 || playbackStateBefore.nextPlaybackTime > 0,
+          playbackFlushed: playbackStateBefore.activeSourceCount > 0
+            || playbackStateBefore.nextPlaybackTime > 0
+            || wasStaleFenceActive,
           playbackStateBefore,
           playbackStateAfter,
+          playbackGeneration: playbackStateAfter.playbackGeneration,
+          interruptedResponseIds: Array.from(interruptedResponseIds).slice(-12),
+          assistantUserOverlapMs: currentAssistantUserOverlapMs,
         });
       },
       onToolLoopDiagnostic: options.onToolLoopDiagnostic,
@@ -990,7 +1147,7 @@ export async function connectGeminiBrowserLiveDogfood(
       localStream,
       audioContext,
       websocket,
-      onInputAudioActivity: options.onInputAudioActivity,
+      onInputAudioActivity: handleInputAudioActivity,
     });
     notifyStage('streaming_audio');
 
@@ -1019,8 +1176,9 @@ export async function connectGeminiBrowserLiveDogfood(
         audioPipeline?.setMuted(muted);
       },
       flushOutputAudio: () => {
+        markStaleOutputFence(new Date().toISOString());
         outputAudioPlayer?.stop();
-        return outputAudioPlayer?.snapshot() ?? { nextPlaybackTime: 0, activeSourceCount: 0 };
+        return outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
       },
       close: async () => {
         if (closed) {
@@ -1265,6 +1423,12 @@ export function createGeminiProviderEventCategoryCounts(): GeminiProviderEventCa
   return Object.fromEntries(
     GEMINI_PROVIDER_EVENT_CATEGORIES.map((category) => [category, { count: 0, lastAt: null }]),
   ) as GeminiProviderEventCategoryCounts;
+}
+
+function isAssistantOutputCategories(categories: GeminiProviderEventCategory[]): boolean {
+  return categories.includes('outputTranscription')
+    || categories.includes('modelTurnAudio')
+    || categories.includes('modelTurnText');
 }
 
 export function createGeminiRelayClassificationCounts(): GeminiRelayClassificationCounts {
@@ -2046,6 +2210,7 @@ export function createGeminiOutputAudioPlaybackController(
   const activeSources = new Set<AudioBufferSourceNode>();
   const chunkHashCounts = new Map<string, number>();
   let diagnosticsEmitted = 0;
+  let playbackGeneration = 0;
 
   const emitChunkDiagnostic = (diagnostic: GeminiOutputAudioChunkDiagnostic) => {
     if (!options.onChunkDiagnostic) {
@@ -2089,6 +2254,8 @@ export function createGeminiOutputAudioPlaybackController(
         nextPlaybackTimeAfter: nextPlaybackTime,
         activeSourceCountBefore,
         activeSourceCountAfter: activeSources.size,
+        playbackGeneration,
+        dropReason: null,
         scheduled: false,
       });
       return false;
@@ -2136,6 +2303,8 @@ export function createGeminiOutputAudioPlaybackController(
       nextPlaybackTimeAfter: nextPlaybackTime,
       activeSourceCountBefore,
       activeSourceCountAfter: activeSources.size,
+      playbackGeneration,
+      dropReason: null,
       scheduled: true,
     });
     return true;
@@ -2174,10 +2343,12 @@ export function createGeminiOutputAudioPlaybackController(
       }
       activeSources.clear();
       nextPlaybackTime = 0;
+      playbackGeneration += 1;
     },
     snapshot: () => ({
       nextPlaybackTime,
       activeSourceCount: activeSources.size,
+      playbackGeneration,
     }),
   };
 }

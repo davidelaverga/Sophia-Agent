@@ -54,6 +54,9 @@ export type TurnCaptureDiagnosticEvent = {
   cancellationBeforeResponsePrepared?: boolean | null;
   cancellationBeforeResponseSent?: boolean | null;
   playbackFlushed?: boolean | null;
+  staleOutputType?: string | null;
+  playbackGeneration?: number | null;
+  assistantUserOverlapMs?: number | null;
 };
 
 export type TurnCaptureTranscriptPreview = {
@@ -104,6 +107,7 @@ export type TurnCaptureAssistantTranscriptEvidenceWindow = {
   interrupted: boolean;
   playbackFlush: boolean;
   userInputOverlappedAudio: boolean;
+  assistantUserOverlapMs: number;
   publicTranscriptMissingSourceSequence: boolean;
   publicTranscriptMissingResponseId: boolean;
   assistantTranscriptMissingWhileAudioPresent: boolean;
@@ -122,6 +126,9 @@ export type TurnCaptureAssistantTranscriptEvidence = {
   publicAssistantTranscriptEventCount: number;
   publicAssistantTranscriptMaxTextLength: number;
   publicAssistantTranscriptLatestTextLength: number;
+  staleAssistantAudioDroppedCount: number;
+  staleAssistantTranscriptDroppedCount: number;
+  maxAssistantUserOverlapMs: number;
   publicTranscriptFinalSeen: boolean;
   providerToPublicTranscriptRatio: number | null;
   latestProviderOutputTranscriptionPreview: string | null;
@@ -150,6 +157,8 @@ export type TurnCaptureDiagnostics = {
       assistantAudioChunkEvents: number;
       interruptions: number;
       playbackFlush: number;
+      staleAssistantAudioDropped: number;
+      staleAssistantTranscriptDropped: number;
       turnBoundary: number;
       toolCall: number;
       toolCancellation: number;
@@ -450,6 +459,50 @@ export function buildTurnCaptureDiagnostics(
       continue;
     }
 
+    if (captureEvent.name === 'gemini-stale-output-suppressed') {
+      const diagnostic = recordValue(payload?.diagnostic);
+      const outputType = stringValue(diagnostic?.outputType);
+      if (outputType === 'audio') {
+        counts.staleAssistantAudioDropped += 1;
+      } else if (outputType === 'transcript') {
+        counts.staleAssistantTranscriptDropped += 1;
+      }
+      pushTimeline({
+        captureSeq: numericValue(captureEvent.seq),
+        timestamp: captureEvent.recordedAt,
+        family: 'assistant_output',
+        eventType: 'stale_assistant_output_suppressed',
+        source: 'gemini_browser_stale_output_guard',
+        providerReceiveSequence: numericValue(diagnostic?.providerReceiveSequence),
+        relayCorrelationId: stringValue(diagnostic?.relayCorrelationId),
+        responseId: stringValue(diagnostic?.responseId),
+        staleOutputType: outputType,
+        suppressionReason: stringValue(diagnostic?.reason),
+        playbackGeneration: numericValue(diagnostic?.playbackGeneration),
+        assistantAudioActive,
+        userInputActive,
+      });
+      continue;
+    }
+
+    if (captureEvent.name === 'stale-assistant-transcript-ignored') {
+      counts.staleAssistantTranscriptDropped += 1;
+      pushTimeline({
+        captureSeq: numericValue(captureEvent.seq),
+        timestamp: captureEvent.recordedAt,
+        family: 'assistant_output',
+        eventType: 'stale_assistant_transcript_ignored',
+        source: 'frontend_transcript_stale_guard',
+        providerReceiveSequence: numericValue(payload?.sourceSequence),
+        responseId: stringValue(payload?.responseId),
+        segmentId: stringValue(payload?.segmentId),
+        suppressionReason: stringValue(payload?.reason),
+        assistantAudioActive,
+        userInputActive,
+      });
+      continue;
+    }
+
     if (captureEvent.name === 'gemini-interruption') {
       const diagnostic = recordValue(payload?.diagnostic);
       counts.interruptions += 1;
@@ -466,6 +519,8 @@ export function buildTurnCaptureDiagnostics(
         eventType: 'interrupted',
         source: 'gemini_browser_interruption',
         playbackFlushed: booleanValue(diagnostic?.playbackFlushed),
+        playbackGeneration: numericValue(diagnostic?.playbackGeneration),
+        assistantUserOverlapMs: numericValue(diagnostic?.assistantUserOverlapMs),
         assistantAudioActive,
         userInputActive,
       });
@@ -752,6 +807,8 @@ function createEmptyCounts(): TurnCaptureDiagnostics['summary']['counts'] {
     assistantAudioChunkEvents: 0,
     interruptions: 0,
     playbackFlush: 0,
+    staleAssistantAudioDropped: 0,
+    staleAssistantTranscriptDropped: 0,
     turnBoundary: 0,
     toolCall: 0,
     toolCancellation: 0,
@@ -794,6 +851,7 @@ function buildAssistantTranscriptEvidence(
         interrupted: false,
         playbackFlush: false,
         userInputOverlappedAudio: false,
+        assistantUserOverlapMs: 0,
         publicTranscriptMissingSourceSequence: false,
         publicTranscriptMissingResponseId: false,
       };
@@ -825,6 +883,9 @@ function buildAssistantTranscriptEvidence(
     current.endedAt = event.timestamp;
     current.interrupted = current.interrupted || interrupted;
     current.playbackFlush = current.playbackFlush || event.playbackFlushed === true;
+    if (event.assistantUserOverlapMs != null) {
+      current.assistantUserOverlapMs = Math.max(current.assistantUserOverlapMs, event.assistantUserOverlapMs);
+    }
     current = null;
   };
 
@@ -890,6 +951,15 @@ function buildAssistantTranscriptEvidence(
   const providerOutputTranscriptionFragmentCount = finalizedWindows.reduce((sum, window) => sum + window.providerOutputTranscriptionFragmentCount, 0);
   const providerOutputTranscriptionTextLength = finalizedWindows.reduce((sum, window) => sum + window.providerOutputTranscriptionTextLength, 0);
   const publicAssistantTranscriptEventCount = finalizedWindows.reduce((sum, window) => sum + window.publicAssistantTranscriptEventCount, 0);
+  const staleAssistantAudioDroppedCount = sourceEvents.filter((event) => {
+    if (event.name !== 'gemini-stale-output-suppressed') return false;
+    return stringValue(recordValue(recordValue(event.payload)?.diagnostic)?.outputType) === 'audio';
+  }).length;
+  const staleAssistantTranscriptDroppedCount = sourceEvents.filter((event) => {
+    if (event.name === 'stale-assistant-transcript-ignored') return true;
+    if (event.name !== 'gemini-stale-output-suppressed') return false;
+    return stringValue(recordValue(recordValue(event.payload)?.diagnostic)?.outputType) === 'transcript';
+  }).length;
   const publicAssistantTranscriptMaxTextLength = finalizedWindows.reduce(
     (max, window) => Math.max(max, window.publicAssistantTranscriptMaxTextLength),
     0,
@@ -897,6 +967,12 @@ function buildAssistantTranscriptEvidence(
   const latestPublicWindow = findLast(finalizedWindows, (window) => Boolean(window.latestPublicAssistantTranscriptPreview));
   const latestProviderWindow = findLast(finalizedWindows, (window) => Boolean(window.latestProviderOutputTranscriptionPreview));
   const reportedProviderEventCount = numericValue(recordValue(recordValue(metrics?.sessionTelemetry)?.gemini)?.providerEventCount);
+  const metricGemini = recordValue(recordValue(metrics?.sessionTelemetry)?.gemini);
+  const maxAssistantUserOverlapMs = Math.max(
+    finalizedWindows.reduce((max, window) => Math.max(max, window.assistantUserOverlapMs), 0),
+    numericValue(metricGemini?.maxAssistantUserOverlapMs) ?? 0,
+    numericValue(metricGemini?.assistantUserOverlapMs) ?? 0,
+  );
   const sourceProviderEventCorrelationCount = sourceEvents.filter((event) => event.name === 'gemini-provider-event-correlation').length;
   const warnings = uniqueStrings(finalizedWindows.flatMap((window) => window.warnings));
   const captureMayOmitEarlierProviderEvents = reportedProviderEventCount != null
@@ -911,6 +987,12 @@ function buildAssistantTranscriptEvidence(
   if (assistantAudioChunkCount > 0 && publicAssistantTranscriptEventCount === 0) {
     warnings.push('assistant_audio_present_without_public_transcript');
   }
+  if (staleAssistantAudioDroppedCount > 0 || staleAssistantTranscriptDroppedCount > 0) {
+    warnings.push('stale_assistant_output_suppressed');
+  }
+  if (maxAssistantUserOverlapMs >= 1500) {
+    warnings.push('assistant_audio_overlapped_user_input');
+  }
 
   return {
     schema: 'assistant_transcript_evidence_v1',
@@ -923,6 +1005,9 @@ function buildAssistantTranscriptEvidence(
     publicAssistantTranscriptEventCount,
     publicAssistantTranscriptMaxTextLength,
     publicAssistantTranscriptLatestTextLength: latestPublicWindow?.publicAssistantTranscriptLatestTextLength ?? 0,
+    staleAssistantAudioDroppedCount,
+    staleAssistantTranscriptDroppedCount,
+    maxAssistantUserOverlapMs,
     publicTranscriptFinalSeen: finalizedWindows.some((window) => window.publicAssistantTranscriptFinalSeen),
     providerToPublicTranscriptRatio: transcriptRatio(publicAssistantTranscriptMaxTextLength, providerOutputTranscriptionTextLength),
     latestProviderOutputTranscriptionPreview: latestProviderWindow?.latestProviderOutputTranscriptionPreview ?? null,
@@ -973,6 +1058,9 @@ function finalizeAssistantTranscriptEvidenceWindow(
   }
   if (window.userInputOverlappedAudio) {
     warnings.push('assistant_audio_overlapped_user_input');
+  }
+  if (window.assistantUserOverlapMs >= 1500) {
+    warnings.push('assistant_user_overlap_duration_exceeded');
   }
   if (window.publicTranscriptMissingSourceSequence) {
     warnings.push('public_assistant_transcript_missing_source_sequence');
