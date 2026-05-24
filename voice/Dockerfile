@@ -15,5 +15,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy voice service code
 COPY voice/ ./voice/
 
+# Copy realtime prompt sources used by voice/realtime/sophia_prompt.py
+COPY skills/public/sophia/ ./skills/public/sophia/
+COPY backend/packages/harness/deerflow/agents/sophia_agent/middlewares/platform_context.py \
+    ./backend/packages/harness/deerflow/agents/sophia_agent/middlewares/platform_context.py
+COPY backend/packages/harness/deerflow/agents/sophia_agent/middlewares/artifact.py \
+    ./backend/packages/harness/deerflow/agents/sophia_agent/middlewares/artifact.py
+
 # Voice server uses $PORT from Render
 CMD ["sh", "-c", "python -m voice.server serve --host 0.0.0.0 --port ${PORT:-8000}"]

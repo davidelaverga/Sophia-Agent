@@ -10,9 +10,12 @@ from voice.realtime.gemini_memory_context import (
     build_gemini_live_realtime_instructions_with_memory_context,
 )
 from voice.realtime.sophia_prompt import (
+    CORE_SKILL_FILES,
     EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
     GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
+    REPO_ROOT,
     REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE,
+    SOPHIA_AGENT_MIDDLEWARE_PATH,
     build_gemini_live_realtime_instructions,
     build_gemini_live_realtime_setup_instructions,
     build_gemini_live_spoken_turn_policy_overlay,
@@ -40,6 +43,38 @@ EMOTIONAL_SKILL_NAMES = [
     "identity_fluidity_support",
     "celebrating_breakthrough",
 ]
+
+
+def test_realtime_prompt_source_files_exist_for_voice_runtime() -> None:
+    assert {path.name for path in CORE_SKILL_FILES} == {
+        "soul.md",
+        "voice.md",
+        "techniques.md",
+        "AGENTS.md",
+    }
+
+    for path in CORE_SKILL_FILES:
+        assert path.is_file(), f"Missing realtime prompt source: {path}"
+
+    assert (SOPHIA_AGENT_MIDDLEWARE_PATH / "platform_context.py").is_file()
+    assert (SOPHIA_AGENT_MIDDLEWARE_PATH / "artifact.py").is_file()
+    assert build_sophia_realtime_instructions()
+
+
+def test_voice_dockerfile_copies_realtime_prompt_sources() -> None:
+    dockerfile = (REPO_ROOT / "voice" / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    assert "COPY skills/public/sophia/ ./skills/public/sophia/" in dockerfile
+    assert (
+        "COPY backend/packages/harness/deerflow/agents/sophia_agent/middlewares/"
+        "platform_context.py"
+    ) in dockerfile
+    assert (
+        "COPY backend/packages/harness/deerflow/agents/sophia_agent/middlewares/"
+        "artifact.py"
+    ) in dockerfile
+    assert "!skills/public/sophia/**" in dockerignore
 
 
 def _system_instruction_text(setup: dict[str, Any]) -> str:
