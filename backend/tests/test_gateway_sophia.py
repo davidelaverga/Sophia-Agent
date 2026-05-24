@@ -504,6 +504,63 @@ class TestCreateMemory:
         # Critically: no review_metadata write — the item isn't a real memory.
         mock_review_store["upsert"].assert_not_called()
 
+    def test_create_memory_completed_empty_id_is_deterministic_across_retries(
+        self, client, mock_review_store
+    ):
+        """Codex P2 R11: completed-empty placeholder IDs MUST be
+        deterministic for identical input.
+
+        ``_no_extraction_memory_item`` calls ``_local_memory_id_for_content``
+        with a fixed ``"noext"`` discriminator so two retries of the same
+        input collide on the SAME ID. Without the salt, the helper falls
+        back to ``time.time_ns()`` and every retry gets a fresh ID,
+        breaking client-side dedup / reconciliation.
+        """
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([], "completed_empty"),
+        ):
+            resp1 = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "the", "metadata": {"status": "approved"}},
+            )
+            resp2 = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "the", "metadata": {"status": "approved"}},
+            )
+
+        assert resp1.status_code == 200
+        assert resp2.status_code == 200
+        id1 = resp1.json()["id"]
+        id2 = resp2.json()["id"]
+        assert id1 == id2, (
+            f"completed-empty IDs MUST be deterministic for retries of the "
+            f"same input; got {id1!r} vs {id2!r}. Clients that dedupe or "
+            f"reconcile by ID would otherwise treat each retry as a fresh "
+            f"placeholder."
+        )
+        assert id1.startswith("local:noext:")
+
+    def test_create_memory_completed_empty_id_differs_per_content(
+        self, client, mock_review_store
+    ):
+        """Different no-extraction inputs MUST yield different placeholder IDs
+        (sanity check on the deterministic-hash contract)."""
+        with patch(
+            "deerflow.sophia.mem0_client.add_memories_with_outcome",
+            return_value=([], "completed_empty"),
+        ):
+            resp_a = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "alpha", "metadata": {"status": "approved"}},
+            )
+            resp_b = client.post(
+                "/api/sophia/test_user/memories",
+                json={"text": "beta", "metadata": {"status": "approved"}},
+            )
+
+        assert resp_a.json()["id"] != resp_b.json()["id"]
+
     def test_create_memory_accepts_id_only_resolved_memory(self, client, mock_review_store):
         with patch(
             "deerflow.sophia.mem0_client.add_memories_with_outcome",

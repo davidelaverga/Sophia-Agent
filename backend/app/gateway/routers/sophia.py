@@ -450,15 +450,24 @@ def _no_extraction_memory_item(content: str, metadata: dict) -> MemoryItem:
     transient response shape, not a persisted record. Clients should treat
     ``metadata.mem0_sync_state == "no_extraction"`` as "do not retry; do
     not display as a real memory".
+
+    ID stability (Codex P2 review on PR #130 R11): the helper passes a
+    fixed ``"noext"`` discriminator to ``_local_memory_id_for_content``
+    so identical retries of the same content collide on the SAME
+    deterministic ID. The unsalted ``_local_memory_id_for_content(content)``
+    call would fall back to ``time.time_ns()``, giving every retry a fresh
+    ID and breaking client-side dedup / reconciliation.
     """
     response_metadata = dict(metadata or {})
     response_metadata["mem0_sync_state"] = "no_extraction"
-    # Stable per-content placeholder ID so identical retries don't generate
-    # divergent IDs — but clearly marked as a non-persistent local handle
-    # via the ``local:noext:`` prefix.
-    local_id = _local_memory_id_for_content(content) or "local:noext"
-    if local_id.startswith("local:") and not local_id.startswith("local:noext:"):
-        local_id = "local:noext:" + local_id.split(":", 1)[1]
+    # Deterministic placeholder ID — same (content, "noext") always hashes
+    # to the same local handle. Clearly marked non-persistent via the
+    # ``local:noext:`` prefix so clients don't confuse it with a real ID.
+    salted = _local_memory_id_for_content(content, discriminator="noext")
+    if salted and salted.startswith("local:"):
+        local_id = "local:noext:" + salted.split(":", 1)[1]
+    else:
+        local_id = "local:noext"
     return MemoryItem(
         id=local_id,
         content=content,
