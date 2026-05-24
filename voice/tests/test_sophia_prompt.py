@@ -247,6 +247,21 @@ def test_realtime_memory_recall_guidance_contains_epistemic_rules() -> None:
         assert expected in guidance
 
 
+def test_realtime_prompt_contains_companion_artifact_builder_boundary() -> None:
+    prompt = build_sophia_realtime_instructions().lower()
+
+    for expected in [
+        "companion artifact vs builder deliverable",
+        "short reflection artifact",
+        "use `emit_artifact` and do not start builder",
+        "document/file/report/build/downloadable deliverable -> builder",
+        "ambiguous artifact wording -> ask one clarifying question",
+        "if the user asks to test artifact functionality",
+        "use builder only when the user explicitly asks for a document",
+    ]:
+        assert expected in prompt
+
+
 def test_gemini_live_setup_contains_overlay_after_artifact_contract() -> None:
     prompt = build_gemini_live_realtime_instructions()
     setup = build_gemini_live_setup_config(instructions=prompt)

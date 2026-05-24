@@ -339,8 +339,21 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     emit_artifact_declaration = tool_declarations[0]
     assert set(emit_artifact_declaration["parameters"]["properties"]) == ARTIFACT_FIELD_NAMES
     assert set(emit_artifact_declaration["parameters"]["required"]) == ARTIFACT_FIELD_NAMES
+    emit_description = emit_artifact_declaration["description"].lower()
+    assert "lightweight sophia companion/session artifacts" in emit_description
+    assert "short reflection artifact" in emit_description
+    assert "presence artifact ui" in emit_description
+    assert "do not ask a" in emit_description
+    assert "reflective follow-up question first" in emit_description
+    assert "do not start builder" in emit_description
     start_builder_declaration = tool_declarations[1]
     assert set(start_builder_declaration["parameters"]["required"]) == {"description", "task_type"}
+    start_description = start_builder_declaration["description"].lower()
+    assert "async user-facing deliverable" in start_description
+    assert "document, file, report" in start_description
+    assert "do not use builder for lightweight sophia companion/session artifacts" in start_description
+    assert "belong to emit_artifact" in start_description
+    assert "ask one clarifying question" in start_description
     assert "FIRST builder tool" in start_builder_declaration["description"]
     assert "Returns the real task_id" in start_builder_declaration["description"]
     assert start_builder_declaration["parameters"]["properties"]["task_type"]["enum"] == [
@@ -364,6 +377,8 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     assert "Never invent task ids" in cancel_declaration["description"]
     assert "not as a substitute for starting a new build" in list_declaration["description"]
     assert "start_builder_task first" in list_declaration["description"]
+    assert "short reflection or companion/session artifact" in list_declaration["description"]
+    assert "emit_artifact instead" in list_declaration["description"]
     assert retrieve_declaration["name"] == "retrieve_memories"
     assert set(retrieve_declaration["parameters"]["properties"]) == {"query"}
     assert retrieve_declaration["parameters"]["required"] == ["query"]
@@ -460,13 +475,14 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
         "<gemini_live_spoken_turn_policy>"
     )
     assert "<artifact_contract>" in system_instruction
-    assert "For a fresh user request to create, build, generate, research, or present something" in system_instruction
-    assert "Never invent task IDs" in system_instruction
+    assert "Use Builder only when the user explicitly asks for a document" in system_instruction
     assert "Tool calls must use the structured tool/function channel only" in system_instruction
     assert "try{emit_artifact" in system_instruction
     assert "<gemini_live_spoken_turn_policy>" in system_instruction
     assert "Choose one main conversational intent per assistant turn" in system_instruction
     assert "Ask at most one question total" in system_instruction
+    assert "call emit_artifact directly with a minimal valid companion artifact" in system_instruction
+    assert "Do not ask the user for a reflection question" in system_instruction
     assert "Do not assume the user is gaming" in system_instruction
     assert "latest complete user utterance" in system_instruction
     assert "quick question before I go" in system_instruction
@@ -610,9 +626,13 @@ async def test_browser_relay_tool_call_executes_existing_emit_artifact_and_retur
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_gemini_env(monkeypatch)
+    fake_builder_backend = FakeBuilderLifecycleBackend()
     manager = GeminiBrowserDogfoodSessionManager(
         RealtimeDogfoodSessionManager(),
         token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+        tool_executor=gemini_tool_loop.GeminiDogfoodToolExecutor(
+            builder_lifecycle_backend=fake_builder_backend,  # type: ignore[arg-type]
+        ),
     )
     browser_session = await manager.start_browser_session(
         _gemini_settings(),
@@ -660,15 +680,87 @@ async def test_browser_relay_tool_call_executes_existing_emit_artifact_and_retur
     assert diagnostics_payload["function_calls_extracted"] == {
         "artifact-call-1": GEMINI_EMIT_ARTIFACT_TOOL_NAME
     }
+    assert diagnostics_payload["artifact_emission_attempt_count"] == 1
+    assert diagnostics_payload["artifact_emission_completed_count"] == 1
+    assert diagnostics_payload["artifact_public_event_emitted_count"] == 1
+    assert diagnostics_payload["artifact_tool_response_prepared_count"] == 1
+    assert diagnostics_payload["artifact_emission_cancelled_count"] == 0
 
-    payloads = await browser_session.dogfood_session.wait_for_public_payloads(2)
-    assert any(payload == {"type": "sophia.artifact", "data": _artifact_payload()} for payload in payloads)
+    payloads = await browser_session.dogfood_session.wait_for_public_payloads(3)
+    artifacts = [payload for payload in payloads if payload["type"] == "sophia.artifact"]
+    assert artifacts == [{"type": "sophia.artifact", "data": _artifact_payload()}]
     diagnostics = [payload for payload in payloads if payload["type"] == "sophia.turn_diagnostic"]
     assert diagnostics
     assert diagnostics[0]["data"]["tool_loop_status"] == "completed"
     assert diagnostics[0]["data"]["tool_names"] == [GEMINI_EMIT_ARTIFACT_TOOL_NAME]
+    assert fake_builder_backend.calls == []
 
     await manager.close_session("browser-gemini-tool-loop")
+
+
+@pytest.mark.anyio
+async def test_browser_relay_duplicate_emit_artifact_tool_call_id_is_single_shot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-artifact-duplicate",
+    )
+    event = {
+        "toolCall": {
+            "functionCalls": [
+                {
+                    "id": "artifact-call-duplicate",
+                    "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+                    "args": _artifact_payload(active_goal="First artifact only."),
+                }
+            ]
+        }
+    }
+
+    first_response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event=event,
+    )
+    assert first_response["client_actions"][0]["type"] == "gemini_tool_response"
+    assert first_response["diagnostics"]["artifact_public_event_emitted_count"] == 1
+
+    await browser_session.dogfood_session.wait_for_public_payloads(3)
+
+    second_response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event=event,
+    )
+
+    assert "client_actions" not in second_response
+    assert second_response["tool_diagnostics"] == [
+        {
+            "id": "artifact-call-duplicate",
+            "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+            "success": False,
+            "duplicate_suppressed": True,
+            "result_summary": "Duplicate tool call id suppressed; no duplicate backend side effect or toolResponse was produced.",
+        }
+    ]
+    assert second_response["diagnostics"]["artifact_duplicate_suppressed_count"] == 1
+    assert second_response["diagnostics"]["artifact_public_event_emitted_count"] == 1
+    assert second_response["diagnostics"]["artifact_tool_response_prepared_count"] == 1
+
+    payloads = browser_session.dogfood_session.public_payloads
+    artifacts = [payload for payload in payloads if payload["type"] == "sophia.artifact"]
+    assert artifacts == [
+        {"type": "sophia.artifact", "data": _artifact_payload(active_goal="First artifact only.")}
+    ]
+
+    await manager.close_session("browser-gemini-artifact-duplicate")
 
 
 @pytest.mark.anyio
@@ -1409,9 +1501,15 @@ async def test_browser_relay_emit_artifact_tool_call_surfaces_artifact_and_respo
     assert function_response["response"]["artifact_recorded"] is True
     assert function_response["response"]["backend_tool_result"] == "Artifact recorded."
     assert function_response["response"]["tool"] == GEMINI_EMIT_ARTIFACT_TOOL_NAME
+    assert response["diagnostics"]["artifact_emission_attempt_count"] == 1
+    assert response["diagnostics"]["artifact_emission_completed_count"] == 1
+    assert response["diagnostics"]["artifact_public_event_emitted_count"] == 1
+    assert response["diagnostics"]["artifact_tool_response_prepared_count"] == 1
 
     payloads = await browser_session.dogfood_session.wait_for_public_payloads(3)
-    assert any(payload == {"type": "sophia.artifact", "data": artifact} for payload in payloads)
+    assert [payload for payload in payloads if payload["type"] == "sophia.artifact"] == [
+        {"type": "sophia.artifact", "data": artifact}
+    ]
     assert any(payload["type"] == "sophia.turn_diagnostic" for payload in payloads)
 
     await manager.close_session("browser-gemini-artifact-tool")
@@ -1489,6 +1587,13 @@ async def test_browser_relay_tool_call_cancellation_suppresses_late_response(
 
     assert "client_actions" not in response
     assert response["tool_diagnostics"][0]["cancelled"] is True
+    assert response["diagnostics"]["artifact_emission_attempt_count"] == 1
+    assert response["diagnostics"]["artifact_emission_cancelled_count"] == 1
+    assert response["diagnostics"]["artifact_cancelled_before_backend_execution"] == 1
+    assert response["diagnostics"]["artifact_public_event_emitted_count"] == 0
+
+    payloads = browser_session.dogfood_session.public_payloads
+    assert not any(payload["type"] == "sophia.artifact" for payload in payloads)
 
     await manager.close_session("browser-gemini-cancel-tool")
 
@@ -1547,6 +1652,13 @@ async def test_browser_relay_inflight_cancellation_records_completion_without_cl
     assert diagnostics["function_calls_extracted"] == {
         "probe-call-inflight": GEMINI_EMIT_ARTIFACT_TOOL_NAME
     }
+    assert diagnostics["artifact_emission_attempt_count"] == 1
+    assert diagnostics["artifact_emission_cancelled_count"] == 1
+    assert diagnostics["artifact_cancelled_after_backend_execution"] == 1
+    assert diagnostics["artifact_public_event_emitted_count"] == 0
+
+    payloads = browser_session.dogfood_session.public_payloads
+    assert not any(payload["type"] == "sophia.artifact" for payload in payloads)
 
     await manager.close_session("browser-gemini-inflight-cancel-tool")
 

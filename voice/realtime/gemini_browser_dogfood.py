@@ -14,12 +14,13 @@ from voice.realtime.dogfood_session import (
     RealtimeDogfoodSession,
     RealtimeDogfoodSessionManager,
 )
-from voice.realtime.events import ProviderEvent
+from voice.realtime.events import ProviderEvent, ProviderEventType
 from voice.realtime.gemini_live import DEFAULT_GEMINI_LIVE_MODEL
 from voice.realtime.gemini_memory_context import (
     build_gemini_live_realtime_instructions_with_memory_context,
 )
 from voice.realtime.gemini_tool_loop import (
+    GEMINI_EMIT_ARTIFACT_TOOL_NAME,
     GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
     GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
     GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
@@ -185,6 +186,14 @@ class GeminiReliabilityDiagnostics:
     transcript_boundary_stale_rejected: int = 0
     source_sequence_stale_rejected: int = 0
     memory_context: dict[str, Any] = field(default_factory=dict)
+    artifact_emission_attempt_count: int = 0
+    artifact_emission_completed_count: int = 0
+    artifact_emission_cancelled_count: int = 0
+    artifact_duplicate_suppressed_count: int = 0
+    artifact_cancelled_before_backend_execution: int = 0
+    artifact_cancelled_after_backend_execution: int = 0
+    artifact_public_event_emitted_count: int = 0
+    artifact_tool_response_prepared_count: int = 0
 
     def as_public_payload(self) -> dict[str, Any]:
         recent_function_calls = dict(list(self.function_calls_extracted.items())[-10:])
@@ -212,6 +221,14 @@ class GeminiReliabilityDiagnostics:
             "transcript_boundary_stale_rejected": self.transcript_boundary_stale_rejected,
             "source_sequence_stale_rejected": self.source_sequence_stale_rejected,
             "memory_context": dict(self.memory_context),
+            "artifact_emission_attempt_count": self.artifact_emission_attempt_count,
+            "artifact_emission_completed_count": self.artifact_emission_completed_count,
+            "artifact_emission_cancelled_count": self.artifact_emission_cancelled_count,
+            "artifact_duplicate_suppressed_count": self.artifact_duplicate_suppressed_count,
+            "artifact_cancelled_before_backend_execution": self.artifact_cancelled_before_backend_execution,
+            "artifact_cancelled_after_backend_execution": self.artifact_cancelled_after_backend_execution,
+            "artifact_public_event_emitted_count": self.artifact_public_event_emitted_count,
+            "artifact_tool_response_prepared_count": self.artifact_tool_response_prepared_count,
         }
 
     def record_provider_event(
@@ -230,6 +247,27 @@ class GeminiReliabilityDiagnostics:
     def record_function_calls(self, function_calls: list[GeminiLiveFunctionCall]) -> None:
         for function_call in function_calls:
             self.function_calls_extracted[function_call.call_id] = function_call.name
+            if function_call.name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+                self.artifact_emission_attempt_count += 1
+
+    def record_artifact_cancelled(self, *, before_backend_execution: bool) -> None:
+        self.artifact_emission_cancelled_count += 1
+        if before_backend_execution:
+            self.artifact_cancelled_before_backend_execution += 1
+        else:
+            self.artifact_cancelled_after_backend_execution += 1
+
+    def record_artifact_completed(self) -> None:
+        self.artifact_emission_completed_count += 1
+
+    def record_artifact_duplicate_suppressed(self) -> None:
+        self.artifact_duplicate_suppressed_count += 1
+
+    def record_artifact_public_event_emitted(self) -> None:
+        self.artifact_public_event_emitted_count += 1
+
+    def record_artifact_tool_response_prepared(self) -> None:
+        self.artifact_tool_response_prepared_count += 1
 
     def record_cancellations(self, cancelled_ids: list[str]) -> None:
         for cancelled_id in cancelled_ids:
@@ -416,6 +454,8 @@ class GeminiBrowserDogfoodSessionManager:
         self._tool_executor = tool_executor or GeminiDogfoodToolExecutor()
         self._cancelled_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._inflight_tool_call_ids_by_session: dict[str, set[str]] = {}
+        self._completed_tool_call_ids_by_session: dict[str, set[str]] = {}
+        self._public_artifact_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._async_tasks_by_session: dict[str, dict[str, dict[str, Any]]] = {}
         self._diagnostics_by_session: dict[str, GeminiReliabilityDiagnostics] = {}
         self._source_order_locks_by_session: dict[str, asyncio.Lock] = {}
@@ -503,9 +543,10 @@ class GeminiBrowserDogfoodSessionManager:
         )
         categories = categorize_gemini_provider_event(validated_event)
         diagnostics.record_provider_event(validated_event, source_metadata)
+        provider_event_for_public_boundary = _without_automatic_artifact_public_events(validated_event)
         stale_payload = await self._apply_provider_event_in_source_order(
             dogfood_session,
-            validated_event,
+            provider_event_for_public_boundary,
             diagnostics,
             source_metadata=source_metadata,
             categories=categories,
@@ -550,18 +591,32 @@ class GeminiBrowserDogfoodSessionManager:
             action = gemini_tool_response_client_action(respondable_executions)
             if action is not None:
                 client_actions.append(action)
+                for execution in respondable_executions:
+                    if execution.call.name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+                        diagnostics.record_artifact_tool_response_prepared()
+            await self._publish_public_artifacts_from_executions(
+                dogfood_session,
+                respondable_executions,
+                diagnostics,
+            )
 
         if function_calls:
             rejected_executions = [execution for execution in executions if not execution.success]
+            duplicate_suppressed = bool(tool_diagnostics) and all(
+                bool(diagnostic.get("duplicate_suppressed")) for diagnostic in tool_diagnostics
+            )
+            tool_loop_status = (
+                "execution_rejected"
+                if rejected_executions
+                else "completed_after_cancellation" if executions and not client_actions
+                else "completed" if executions
+                else "duplicate_suppressed" if duplicate_suppressed
+                else "cancelled"
+            )
             await dogfood_session.publish_provider_metric(
                 {
                     "provider_event_name": "toolCall",
-                    "tool_loop_status": (
-                        "execution_rejected"
-                        if rejected_executions
-                        else "completed_after_cancellation" if executions and not client_actions
-                        else "completed" if executions else "cancelled"
-                    ),
+                    "tool_loop_status": tool_loop_status,
                     "tool_call_ids": [call.call_id for call in function_calls],
                     "tool_names": [call.name for call in function_calls],
                     "client_action_count": len(client_actions),
@@ -717,11 +772,33 @@ class GeminiBrowserDogfoodSessionManager:
             dogfood_session.session_id,
             set(),
         )
+        completed_ids = self._completed_tool_call_ids_by_session.setdefault(
+            dogfood_session.session_id,
+            set(),
+        )
 
         for function_call in function_calls:
+            if function_call.call_id in inflight_ids or function_call.call_id in completed_ids:
+                if reliability_diagnostics is not None:
+                    reliability_diagnostics.record_tool_execution("duplicate_suppressed", function_call)
+                    if function_call.name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+                        reliability_diagnostics.record_artifact_duplicate_suppressed()
+                tool_diagnostics.append(
+                    {
+                        "id": function_call.call_id,
+                        "name": function_call.name,
+                        "success": False,
+                        "duplicate_suppressed": True,
+                        "result_summary": "Duplicate tool call id suppressed; no duplicate backend side effect or toolResponse was produced.",
+                    }
+                )
+                continue
+
             if function_call.call_id in cancelled_ids:
                 if reliability_diagnostics is not None:
                     reliability_diagnostics.record_tool_execution("skipped_due_prior_cancellation", function_call)
+                    if function_call.name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+                        reliability_diagnostics.record_artifact_cancelled(before_backend_execution=True)
                 tool_diagnostics.append(
                     {
                         "id": function_call.call_id,
@@ -753,6 +830,8 @@ class GeminiBrowserDogfoodSessionManager:
             if execution.updated_async_tasks:
                 async_tasks.update(execution.updated_async_tasks)
             executions.append(execution)
+            if execution.success:
+                completed_ids.add(function_call.call_id)
             completed_after_cancellation = function_call.call_id in cancelled_ids
             diagnostic = execution.diagnostic()
             if reliability_diagnostics is not None:
@@ -763,6 +842,11 @@ class GeminiBrowserDogfoodSessionManager:
                     function_call,
                     diagnostic,
                 )
+                if function_call.name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+                    if completed_after_cancellation:
+                        reliability_diagnostics.record_artifact_cancelled(before_backend_execution=False)
+                    elif execution.success:
+                        reliability_diagnostics.record_artifact_completed()
             if completed_after_cancellation:
                 diagnostic["cancelled"] = True
                 diagnostic["completed_after_cancellation"] = True
@@ -774,9 +858,46 @@ class GeminiBrowserDogfoodSessionManager:
 
         return executions, tool_diagnostics
 
+    async def _publish_public_artifacts_from_executions(
+        self,
+        dogfood_session: RealtimeDogfoodSession,
+        executions: list[GeminiDogfoodToolExecution],
+        reliability_diagnostics: GeminiReliabilityDiagnostics,
+    ) -> None:
+        published_ids = self._public_artifact_tool_call_ids_by_session.setdefault(
+            dogfood_session.session_id,
+            set(),
+        )
+        for execution in executions:
+            if execution.call.name != GEMINI_EMIT_ARTIFACT_TOOL_NAME:
+                continue
+            if not execution.success or execution.public_artifact is None:
+                continue
+            if execution.call.call_id in published_ids:
+                reliability_diagnostics.record_artifact_duplicate_suppressed()
+                continue
+            published_ids.add(execution.call.call_id)
+            reliability_diagnostics.record_artifact_public_event_emitted()
+            await dogfood_session.publish_provider_event(
+                ProviderEvent(
+                    ProviderEventType.ARTIFACT_PAYLOAD,
+                    {
+                        "artifact": dict(execution.public_artifact),
+                        "call_id": execution.call.call_id,
+                        "provider_event_name": "toolCall.respondable",
+                    },
+                    provider=dogfood_session.provider_name,
+                    session_id=dogfood_session.session_id,
+                    response_id=execution.call.call_id,
+                    turn_id=execution.call.call_id,
+                )
+            )
+
     async def close_session(self, dogfood_session_id: str) -> bool:
         self._cancelled_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._inflight_tool_call_ids_by_session.pop(dogfood_session_id, None)
+        self._completed_tool_call_ids_by_session.pop(dogfood_session_id, None)
+        self._public_artifact_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._async_tasks_by_session.pop(dogfood_session_id, None)
         self._diagnostics_by_session.pop(dogfood_session_id, None)
         self._source_order_locks_by_session.pop(dogfood_session_id, None)
@@ -971,6 +1092,85 @@ def categorize_gemini_provider_event(event: Mapping[str, Any]) -> list[str]:
     if _record_value(event.get("error")) is not None:
         categories.append("error")
     return categories
+
+
+def _without_automatic_artifact_public_events(event: Mapping[str, Any]) -> dict[str, Any]:
+    """Remove emit_artifact function calls from the raw mapper path.
+
+    The Gemini mapper still knows how to turn function-call args into an
+    artifact payload for provider-level proofs. The browser relay publishes the
+    public artifact later, after backend validation and cancellation filtering,
+    so cancelled tool calls do not leak companion artifacts into the UI.
+    """
+    sanitized_event = dict(event)
+    changed = False
+
+    tool_call_key = "toolCall" if "toolCall" in event else "tool_call" if "tool_call" in event else None
+    tool_call = _record_value(event.get(tool_call_key)) if tool_call_key is not None else None
+    function_calls_key = _function_calls_key(tool_call) if tool_call is not None else None
+    if tool_call_key is not None and tool_call is not None and function_calls_key is not None:
+        original_calls = tool_call.get(function_calls_key, [])
+        function_calls = [
+            function_call
+            for function_call in original_calls
+            if not _is_emit_artifact_function_call(function_call)
+        ]
+        if len(function_calls) != len(original_calls):
+            sanitized_tool_call = dict(tool_call)
+            sanitized_tool_call[function_calls_key] = function_calls
+            sanitized_event[tool_call_key] = sanitized_tool_call
+            changed = True
+
+    server_content_key = (
+        "serverContent" if "serverContent" in sanitized_event else "server_content" if "server_content" in sanitized_event else None
+    )
+    server_content = _record_value(sanitized_event.get(server_content_key)) if server_content_key is not None else None
+    model_turn_key = None
+    model_turn = None
+    if server_content is not None:
+        model_turn_key = "modelTurn" if "modelTurn" in server_content else "model_turn" if "model_turn" in server_content else None
+        model_turn = _record_value(server_content.get(model_turn_key)) if model_turn_key is not None else None
+    parts = model_turn.get("parts") if model_turn is not None else None
+    if isinstance(parts, list):
+        sanitized_parts: list[Any] = []
+        for part in parts:
+            if not isinstance(part, Mapping):
+                sanitized_parts.append(part)
+                continue
+            function_call_key = "functionCall" if "functionCall" in part else "function_call" if "function_call" in part else None
+            function_call = _record_value(part.get(function_call_key)) if function_call_key is not None else None
+            if function_call_key is not None and _is_emit_artifact_function_call(function_call):
+                sanitized_part = dict(part)
+                sanitized_part.pop(function_call_key, None)
+                sanitized_parts.append(sanitized_part)
+                changed = True
+            else:
+                sanitized_parts.append(part)
+        if changed and server_content_key is not None and model_turn_key is not None and model_turn is not None:
+            sanitized_model_turn = dict(model_turn)
+            sanitized_model_turn["parts"] = sanitized_parts
+            sanitized_server_content = dict(server_content)
+            sanitized_server_content[model_turn_key] = sanitized_model_turn
+            sanitized_event[server_content_key] = sanitized_server_content
+
+    return sanitized_event if changed else dict(event)
+
+
+def _function_calls_key(tool_call: Mapping[str, Any] | None) -> str | None:
+    if tool_call is None:
+        return None
+    if isinstance(tool_call.get("functionCalls"), list):
+        return "functionCalls"
+    if isinstance(tool_call.get("function_calls"), list):
+        return "function_calls"
+    return None
+
+
+def _is_emit_artifact_function_call(function_call: Any) -> bool:
+    return (
+        isinstance(function_call, Mapping)
+        and _string_value(function_call.get("name")) == GEMINI_EMIT_ARTIFACT_TOOL_NAME
+    )
 
 
 def _is_transcript_event(categories: list[str]) -> bool:

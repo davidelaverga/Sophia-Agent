@@ -15,10 +15,17 @@ EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 EMIT_ARTIFACT_RESULT = "Artifact recorded."
 EMIT_ARTIFACT_DESCRIPTION = (
     "REQUIRED ON EVERY TURN. Call this ONCE per turn alongside your spoken response. "
+    "Use this for lightweight Sophia companion/session artifacts: short reflection "
+    "artifacts, session takeaways, emotional or meta-assessments, internal orientation, "
+    "and Presence artifact UI state. If the user asks to create or test a short "
+    "reflection artifact, satisfy it directly with emit_artifact and do not ask a "
+    "reflective follow-up question first. If the user says again or new one after a "
+    "completed artifact, emit exactly one new artifact. Do not start Builder. "
     "Your spoken response goes in the message content. This tool carries the metadata "
     "that drives voice emotion, session continuity, and self-improvement. The user "
-    "never sees this output. IMPORTANT: Call this exactly once per turn. After calling, "
-    "do NOT call any more tools. Your turn is complete after this tool call."
+    "never sees this raw tool output, though the UI may render the companion artifact. "
+    "IMPORTANT: Call this exactly once per turn. After calling, do NOT call any more "
+    "tools. Your turn is complete after this tool call."
 )
 
 

@@ -132,10 +132,14 @@ class ListAsyncTasksInput(BaseModel):
 
 TOOL_DESCRIPTIONS: dict[str, str] = {
     START_BUILDER_TASK_TOOL_NAME: (
-        "Delegate a build/create/generate/research/present request to Sophia's existing builder graph. "
-        "This is the FIRST builder tool for a fresh user request that needs execution, including "
-        "file creation, research with sources, document, presentation, visual_report, or frontend "
-        "generation. Returns the real task_id to use later; keep talking to the user."
+        "Delegate an async user-facing deliverable to Sophia's existing builder graph. "
+        "Use this only for requests that need external execution or a downloadable/user-facing "
+        "document, file, report, presentation, visual_report, frontend, or research deliverable. "
+        "Do NOT use Builder for lightweight Sophia companion/session artifacts, short reflection "
+        "artifacts, session takeaways, internal orientation, or Presence artifact UI state; those "
+        "belong to emit_artifact. If artifact vs document is ambiguous, ask one clarifying question "
+        "instead of starting Builder. This is the FIRST builder tool for an explicit fresh builder "
+        "request. Returns the real task_id to use later; keep talking to the user."
     ),
     CHECK_ASYNC_TASK_TOOL_NAME: (
         "Check the status of an existing async builder task. Use ONLY with a real task_id "
@@ -155,7 +159,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     LIST_ASYNC_TASKS_TOOL_NAME: (
         "List tracked async builder tasks for the current runtime/session scope. Use when recalling "
         "active/completed tasks or recovering identifiers, not as a substitute for starting a new build. "
-        "For a fresh build/create/generate request, call start_builder_task first."
+        "For an explicit fresh document/file/report/build request, call start_builder_task first. "
+        "For a short reflection or companion/session artifact request, use emit_artifact instead."
     ),
 }
 

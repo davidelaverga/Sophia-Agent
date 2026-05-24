@@ -76,6 +76,7 @@ class GeminiDogfoodToolExecution:
     success: bool = True
     error_text: str | None = None
     updated_async_tasks: dict[str, dict[str, Any]] | None = None
+    public_artifact: dict[str, Any] | None = None
 
     def diagnostic(self) -> dict[str, Any]:
         if self.call.name == GEMINI_RETRIEVE_MEMORIES_TOOL_NAME:
@@ -516,6 +517,7 @@ class GeminiDogfoodToolExecutor:
                 call=call,
                 response=response,
                 result_summary="Existing Sophia emit_artifact tool executed.",
+                public_artifact=artifact,
             )
 
         if call.name == GEMINI_RETRIEVE_MEMORIES_TOOL_NAME:

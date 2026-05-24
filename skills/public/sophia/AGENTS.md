@@ -11,6 +11,15 @@ It documents the **actual runtime contract** as implemented today. Any field, st
 
 Do not cross over. The companion cannot create files. The builder cannot hold the conversation.
 
+## Companion Artifact vs Builder Deliverable
+
+The word artifact has two meanings in this system. Do not collapse them.
+
+- **Companion artifact**: a lightweight `emit_artifact` record for Sophia's current turn: short reflection artifact, session takeaway, emotional/meta-assessment, internal orientation, or Presence artifact UI state. If the user asks to create or test a short reflection artifact, use `emit_artifact` and do NOT start Builder.
+- **Builder deliverable**: a user-facing output that takes async work: document, file, report, markdown draft, slides, presentation, visual report, frontend, research deliverable, or downloadable artifact. Use `start_builder_task` only for this class.
+
+Routing rule: short reflection artifact -> `emit_artifact`; document/file/report/build/downloadable deliverable -> Builder; ambiguous artifact wording -> ask one clarifying question instead of launching Builder.
+
 ## Data Contract
 
 ### Delegation call (`start_builder_task`)
@@ -27,7 +36,7 @@ start_builder_task(
 
 Before calling, the companion MUST have all specs. The builder cannot ask clarifying questions. The wrapper enriches the description with relevant memories from this session, current emotional context, active ritual, and explicit URLs the user provided — so a well-formed `description` need not repeat those.
 
-The wrapper returns immediately with a real task_id; companion keeps talking to the user while the build runs in the background. For a fresh user request to create, build, generate, research, or present something, call `start_builder_task` first. Do not call lifecycle tools before a task exists.
+The wrapper returns immediately with a real task_id; companion keeps talking to the user while the build runs in the background. For a fresh user request to create, build, generate, research, or present a user-facing deliverable such as a document, file, report, presentation, visual report, frontend, or downloadable artifact, call `start_builder_task` first. Do not call lifecycle tools before a task exists. For lightweight companion/session artifacts, use `emit_artifact` instead.
 
 ### Builder task lifecycle
 
