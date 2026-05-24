@@ -399,7 +399,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "mem_1"}, {"id": "mem_2"}],
+                return_value=([{"id": "mem_1"}, {"id": "mem_2"}], set()),
             ) as mock_wait:
                 result = add_memories(
                     user_id="user1",
@@ -424,7 +424,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "mem_1"}, {"id": "mem_2"}],
+                return_value=([{"id": "mem_1"}, {"id": "mem_2"}], set()),
             ) as mock_wait:
                 result = add_memories(
                     user_id="user1",
@@ -463,7 +463,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "mem_1"}],
+                return_value=([{"id": "mem_1"}], set()),
             ):
                 add_memories(
                     user_id="user1",
@@ -513,7 +513,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "new_m1"}],
+                return_value=([{"id": "new_m1"}], set()),
             ):
                 # Populate cache
                 search_memories("user1", "query")
@@ -540,7 +540,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "mem_1"}],
+                return_value=([{"id": "mem_1"}], set()),
             ):
                 result = add_memories(
                     user_id="user1",
@@ -569,7 +569,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "mem_1"}],
+                return_value=([{"id": "mem_1"}], set()),
             ):
                 add_memories(
                     user_id="user1",
@@ -593,7 +593,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "m1"}],
+                return_value=([{"id": "m1"}], set()),
             ):
                 result = add_memories(
                     user_id="user1",
@@ -613,7 +613,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "m1"}],
+                return_value=([{"id": "m1"}], set()),
             ):
                 add_memories(
                     user_id="user1",
@@ -634,7 +634,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "m1"}],
+                return_value=([{"id": "m1"}], set()),
             ):
                 add_memories(
                     user_id="user1",
@@ -659,7 +659,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "m1"}],
+                return_value=([{"id": "m1"}], set()),
             ):
                 add_memories(
                     user_id="user1",
@@ -681,7 +681,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[{"id": "m1"}],
+                return_value=([{"id": "m1"}], set()),
             ):
                 result = add_memories(
                     user_id="user1",
@@ -692,8 +692,17 @@ class TestAddMemories:
                 assert mock_client.add.call_args.kwargs["run_id"] == "sess_123"
 
     def test_add_falls_back_to_raw_result_when_wait_times_out(self):
-        """If wait_for_pending_events returns empty, add_memories falls back
-        to the raw normalized add result so callers still have event IDs."""
+        """When wait_for_pending_events returns ``([], {pending_id})``
+        (real timeout — events never reached terminal status),
+        add_memories falls back to the raw normalized add result so
+        callers still have event IDs to reconcile later.
+
+        Codex P2 review on PR #130 R9: wait_for_pending_events now returns
+        a ``(resolved, still_pending)`` tuple. A non-empty still_pending
+        means real timeout; an empty still_pending means all events
+        completed (even if no memories came out of them — handled in a
+        separate test).
+        """
         from deerflow.sophia.mem0_client import add_memories
 
         mock_client = MagicMock()
@@ -703,7 +712,7 @@ class TestAddMemories:
         ):
             with patch(
                 "deerflow.sophia.mem0_client.wait_for_pending_events",
-                return_value=[],
+                return_value=([], {"evt_1"}),  # real timeout: still pending
             ) as mock_wait:
                 result = add_memories(
                     user_id="user1",
@@ -714,6 +723,42 @@ class TestAddMemories:
                 # Falls back to raw normalized result (event id, not memory id)
                 assert len(result) == 1
                 assert result[0]["event_id"] == "evt_1"
+
+    def test_add_completed_empty_returns_empty_not_event_wrappers(self):
+        """When wait_for_pending_events returns ``([], set())`` — meaning all
+        events reached SUCCEEDED/COMPLETED but Mem0 extracted no memories —
+        add_memories MUST return ``[]``, NOT fall back to event wrappers.
+
+        Codex P2 review on PR #130 R9: the old code conflated this case
+        with timeout, returning event_id wrappers that downstream interpreted
+        as "still pending" — leaving placeholder review state permanently
+        stale even though Mem0 had finished and decided to extract nothing.
+        """
+        from deerflow.sophia.mem0_client import add_memories
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [{"event_id": "evt_empty", "memory": None}]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch(
+                "deerflow.sophia.mem0_client.wait_for_pending_events",
+                return_value=([], set()),  # completed empty: no resolved, no pending
+            ):
+                result = add_memories(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "low-signal content"}],
+                    session_id="sess_empty",
+                )
+
+        # MUST be empty list, NOT event wrappers — events are done, nothing
+        # is actually pending, so downstream shouldn't create stale local:HASH
+        # placeholders waiting for Mem0 to "finish".
+        assert result == [], (
+            f"Completed-empty case MUST return []; got {result!r}. "
+            f"Returning event wrappers here makes downstream APIs treat "
+            f"the events as still pending forever."
+        )
 
     def test_add_returns_empty_when_pending_event_fails(self):
         """FAILED async add events are write failures, not pending results."""
@@ -778,7 +823,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
@@ -802,7 +847,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
@@ -826,7 +871,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.2, poll_interval=0.1
             )
             # evt_1 never reached SUCCEEDED — should time out with nothing
@@ -873,7 +918,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
@@ -899,7 +944,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             # Event is terminal so removed from pending, but no memory extracted
@@ -923,7 +968,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
@@ -948,7 +993,7 @@ class TestWaitForPendingEvents:
             patch("deerflow.sophia.mem0_client._httpx_module", return_value=None),
             patch.dict("os.environ", {"MEM0_API_KEY": ""}),
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert result == []
@@ -1017,7 +1062,7 @@ class TestWaitForPendingEvents:
             patch("deerflow.sophia.mem0_client._httpx_module", return_value=fake_httpx),
             patch.dict("os.environ", {"MEM0_API_KEY": "rest-fallback-key"}),
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=2.0, poll_interval=0.1
             )
 
@@ -1077,6 +1122,130 @@ class TestWaitForPendingEvents:
                 "user1", ["evt_failed"], timeout_seconds=2.0, poll_interval=0.1
             )
 
+    def test_rest_fallback_paginates_until_target_event_found(self):
+        """REST fallback MUST follow the ``next`` cursor across pages.
+
+        Codex P2 review on PR #130 R9: under moderate / high concurrent
+        traffic our event_id can be off the first 50-event page even when
+        it has already completed. The previous build fetched limit=50 once
+        and gave up, causing successful writes to look perpetually pending.
+
+        This test pins pagination behavior: page 1 returns unrelated events
+        + a ``next`` cursor, page 2 returns the target event. Both must be
+        fetched in a single poll cycle.
+        """
+        from types import SimpleNamespace
+
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["search"])  # no get_event / get_events
+
+        # Page 1: all unrelated events + a `next` cursor (relative URL)
+        page1 = {
+            "count": 60,
+            "next": "/v1/events/?limit=50&page=2",
+            "results": [
+                {"id": f"evt_unrelated_{i}", "status": "SUCCEEDED", "results": []}
+                for i in range(50)
+            ],
+        }
+        # Page 2: our target event resolved
+        page2 = {
+            "count": 60,
+            "next": None,
+            "results": [
+                {
+                    "id": "evt_target",
+                    "status": "SUCCEEDED",
+                    "results": [{"id": "mem_resolved", "memory": "found via page 2"}],
+                },
+            ],
+        }
+
+        class _Resp:
+            def __init__(self, body):
+                self.body = body
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.body
+
+        responses = [_Resp(page1), _Resp(page2)]
+        requested_urls: list[str] = []
+
+        class _Client:
+            def __init__(self, *a, **kw):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_a):
+                return False
+
+            def get(self, url, headers=None):
+                requested_urls.append(url)
+                return responses.pop(0)
+
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=mock_client),
+            patch(
+                "deerflow.sophia.mem0_client._httpx_module",
+                return_value=SimpleNamespace(Client=_Client),
+            ),
+            patch.dict("os.environ", {"MEM0_API_KEY": "k"}),
+        ):
+            resolved, pending = wait_for_pending_events(
+                "user1", ["evt_target"], timeout_seconds=2.0, poll_interval=0.1
+            )
+
+        # Both pages MUST have been fetched in the single poll cycle.
+        assert len(requested_urls) == 2, (
+            f"Expected two REST GETs (page 1 + page 2 via next cursor); "
+            f"got {len(requested_urls)}: {requested_urls!r}"
+        )
+        # Page 2 URL must come from the page 1 `next` field, joined with base.
+        assert requested_urls[1].endswith("/v1/events/?limit=50&page=2"), (
+            f"Page 2 must follow page 1's next cursor; got {requested_urls[1]!r}"
+        )
+        # And the target memory should have been found on page 2.
+        assert pending == set()
+        assert len(resolved) == 1
+        assert resolved[0]["id"] == "mem_resolved"
+
+    def test_returns_pending_set_on_timeout(self):
+        """The tuple's second element (pending) reports which IDs timed out.
+
+        Codex P2 R9 contract: caller (``add_memories``) uses non-empty
+        ``pending`` to differentiate real timeout from "completed empty"
+        (where pending=set() AND resolved=[]).
+        """
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_event"])
+        # Always returns "RUNNING" status — never terminal.
+        mock_client.get_event.return_value = {
+            "id": "evt_stuck",
+            "status": "RUNNING",
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            resolved, pending = wait_for_pending_events(
+                "user1",
+                ["evt_stuck"],
+                timeout_seconds=0.3,
+                poll_interval=0.1,
+            )
+
+        assert resolved == []
+        assert pending == {"evt_stuck"}, (
+            "Timeout MUST report the still-pending event_ids so caller can "
+            "differentiate timeout from 'completed empty'"
+        )
+
     def test_paginated_get_events_follows_next_cursor(self):
         """Walk every page until pending IDs are found or pages exhausted."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
@@ -1105,7 +1274,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
@@ -1136,7 +1305,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0
             )
 
@@ -1159,7 +1328,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 1
@@ -1182,7 +1351,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0
             )
 
@@ -1205,7 +1374,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.2, poll_interval=0.1
             )
             # Non-terminal → stays pending, times out with nothing
@@ -1233,7 +1402,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
             )
             assert len(result) == 3
@@ -1248,7 +1417,7 @@ class TestWaitForPendingEvents:
         with patch(
             "deerflow.sophia.mem0_client._get_client", return_value=mock_client
         ):
-            result = wait_for_pending_events(
+            result, pending = wait_for_pending_events(
                 "user1", ["evt_1"], timeout_seconds=0.2, poll_interval=0.1
             )
             assert result == []

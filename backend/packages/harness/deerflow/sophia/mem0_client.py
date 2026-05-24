@@ -733,7 +733,7 @@ def add_memories(
     ]
     if event_ids:
         try:
-            resolved = wait_for_pending_events(user_id, event_ids)
+            resolved, still_pending = wait_for_pending_events(user_id, event_ids)
         except Mem0EventFailedError:
             logger.warning(
                 "session.finalization mem0_add_failed user_id=%s session_id=%s event_ids=%s",
@@ -743,22 +743,45 @@ def add_memories(
                 exc_info=True,
             )
             return []
-        if resolved:
-            logger.info(
-                "session.finalization mem0_add_resolved user_id=%s session_id=%s "
-                "resolved_count=%s",
-                user_id,
-                session_id,
-                len(resolved),
-            )
+        if not still_pending:
+            # All events reached terminal status (SUCCEEDED / COMPLETED).
+            # Differentiate "completed with memories" from "completed empty"
+            # — the latter is rare but valid (low-signal content where Mem0
+            # extracted nothing). Codex P2 review on PR #130 R9: previously
+            # both cases logged ``mem0_add_timeout`` and returned event
+            # wrappers, which downstream interpreted as "still pending" and
+            # never reconciled.
+            if resolved:
+                logger.info(
+                    "session.finalization mem0_add_resolved user_id=%s session_id=%s "
+                    "resolved_count=%s",
+                    user_id,
+                    session_id,
+                    len(resolved),
+                )
+            else:
+                logger.info(
+                    "session.finalization mem0_add_completed_empty user_id=%s session_id=%s "
+                    "event_ids=%s — Mem0 reported success with no extracted memories "
+                    "(no fallback to raw event wrappers; nothing pending)",
+                    user_id,
+                    session_id,
+                    event_ids,
+                )
             invalidate_user_cache(user_id)
-            return resolved
+            return resolved  # may be [] on completed-empty — that's correct
+        # Real timeout: some events never reached terminal status.
+        # Return the raw add result so downstream can persist event_ids
+        # for later reconciliation.
         logger.warning(
             "session.finalization mem0_add_timeout user_id=%s session_id=%s "
-            "event_ids=%s — returning raw add result",
+            "resolved_count=%d still_pending=%d event_ids=%s — returning raw "
+            "add result so callers can track the remaining events",
             user_id,
             session_id,
-            event_ids,
+            len(resolved),
+            len(still_pending),
+            sorted(still_pending),
         )
 
     invalidate_user_cache(user_id)
@@ -771,12 +794,31 @@ def wait_for_pending_events(
     *,
     timeout_seconds: float = 30.0,
     poll_interval: float = 1.0,
-) -> list[dict]:
-    """Poll Mem0 until pending add events resolve to memory records.
+) -> tuple[list[dict], set[str]]:
+    """Poll Mem0 until pending add events resolve.
 
     v3 add() may return event_ids for async processing. This helper blocks
-    (up to ``timeout_seconds``) and returns the resolved memories. If the
-    timeout elapses, returns whatever is available.
+    (up to ``timeout_seconds``) and returns BOTH the resolved memories AND
+    the set of event_ids that are still pending.
+
+    The two-value return lets callers (Codex P2 R9) distinguish three outcomes
+    that the old single-list return conflated:
+
+    - ``(resolved, set())``           — all events reached terminal status
+                                        (SUCCEEDED / COMPLETED). ``resolved``
+                                        may be empty: Mem0 finished but
+                                        extracted no memories (rare but valid
+                                        for low-signal content). Caller should
+                                        NOT fall back to event wrappers — the
+                                        events are done.
+    - ``(partial, {ids})``            — timeout fired with some events still
+                                        in flight. Caller should fall back to
+                                        the raw add-result event wrappers so
+                                        downstream can reconcile later.
+    - ``([], set(event_ids))``        — no poll strategy was available at all
+                                        (no SDK methods, no REST fallback).
+                                        Conservative: treat as timeout so the
+                                        caller doesn't drop the event_ids.
 
     Polling strategy is chosen ONCE up front:
 
@@ -801,7 +843,7 @@ def wait_for_pending_events(
     without requiring any SDK update.
     """
     if not event_ids:
-        return []
+        return [], set()
 
     poll = _select_event_poll_strategy(user_id)
     if poll is None:
@@ -810,7 +852,9 @@ def wait_for_pending_events(
             "fallback); cannot resolve pending add events",
             user_id,
         )
-        return []
+        # Treat as "all pending" so the caller falls back to event wrappers
+        # rather than silently dropping the event_ids.
+        return [], set(event_ids)
 
     deadline = time.monotonic() + timeout_seconds
     resolved: list[dict] = []
@@ -836,7 +880,7 @@ def wait_for_pending_events(
             user_id,
             len(pending),
         )
-    return resolved
+    return resolved, pending
 
 
 def _select_event_poll_strategy(user_id: str) -> Callable[[set[str], list[dict]], None] | None:
@@ -925,6 +969,10 @@ def _poll_events_via_sdk_paginated(
             break
 
 
+_REST_EVENTS_PAGE_SIZE = 50
+_REST_EVENTS_MAX_PAGES = 10  # 500 events of buffer for busy projects
+
+
 def _poll_events_via_rest(
     pending: set[str],
     resolved: list[dict],
@@ -933,31 +981,63 @@ def _poll_events_via_rest(
 
     Mem0's REST list endpoint doesn't accept event_id or user_id query
     filters server-side (verified empirically against api.mem0.ai), so we
-    fetch the most-recent N events and client-side filter for our pending
-    IDs. ``limit=50`` is a heuristic — it captures recently-queued events
-    under normal concurrent traffic; busy projects may need pagination, but
-    that's a corner case not worth the extra request overhead in the
-    common path.
+    fetch most-recent events and client-side filter for our pending IDs.
+
+    Pagination (Codex P2 R9): under moderate / high concurrent traffic the
+    target event_id can be off the first page even when it has already
+    completed. We follow the response's ``next`` cursor for up to
+    ``_REST_EVENTS_MAX_PAGES`` pages (= 500 events of buffer) or until all
+    pending IDs are resolved — whichever comes first. The unbounded
+    alternative would walk the entire event log (often 10k+) on every poll
+    cycle, which is wasteful for the common case where events are within
+    the first 1-2 pages.
     """
     httpx = _httpx_module()
     api_key = os.environ.get("MEM0_API_KEY", "").strip()
     if httpx is None or not api_key:
         return
     base_url = (os.environ.get("MEM0_BASE_URL") or "https://api.mem0.ai").rstrip("/")
-    url = f"{base_url}/v1/events/?limit=50"
     headers = {"Authorization": f"Token {api_key}"}
+    url: str | None = f"{base_url}/v1/events/?limit={_REST_EVENTS_PAGE_SIZE}"
+
     with httpx.Client(timeout=10.0) as http:
-        resp = http.get(url, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-    events: list[dict] = []
+        for _ in range(_REST_EVENTS_MAX_PAGES):
+            if url is None or not pending:
+                break
+            resp = http.get(url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            events = _events_from_rest_payload(data)
+            _consume_events(events, pending, resolved)
+            url = _resolve_rest_next_url(data, base_url)
+
+
+def _events_from_rest_payload(data: Any) -> list[dict]:
+    """Normalize Mem0 REST ``/v1/events/`` response to a flat list of dicts."""
     if isinstance(data, dict):
         results = data.get("results")
         if isinstance(results, list):
-            events = [e for e in results if isinstance(e, dict)]
-    elif isinstance(data, list):
-        events = [e for e in data if isinstance(e, dict)]
-    _consume_events(events, pending, resolved)
+            return [e for e in results if isinstance(e, dict)]
+        return []
+    if isinstance(data, list):
+        return [e for e in data if isinstance(e, dict)]
+    return []
+
+
+def _resolve_rest_next_url(data: Any, base_url: str) -> str | None:
+    """Resolve the ``next`` cursor field to an absolute URL, or None when done.
+
+    Mem0 returns ``next`` as either a relative path (``/v1/events/?page=2``)
+    or a full URL. Both shapes are accepted.
+    """
+    if not isinstance(data, dict):
+        return None
+    next_url = data.get("next")
+    if not isinstance(next_url, str) or not next_url:
+        return None
+    if next_url.startswith("/"):
+        return f"{base_url.rstrip('/')}{next_url}"
+    return next_url
 
 
 def _extract_memories_from_event(evt: dict) -> list[dict]:
