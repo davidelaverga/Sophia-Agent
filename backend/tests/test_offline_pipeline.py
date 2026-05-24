@@ -1113,6 +1113,62 @@ class TestInFlightProtection:
         run_offline_pipeline("user_abc", "sess_release_err", "t2", _make_thread_state())
         assert "sess_release_err" not in _in_flight_sessions
 
+    def test_no_thread_state_path_honors_queued_rerun(self, mock_steps):
+        """The no_thread_state error path MUST NOT bypass the rerun_queued check.
+
+        Codex P1 review on PR #130 R5: a bare ``return {"status": "error", ...}``
+        inside the try block ran the ``finally`` but skipped the
+        ``if rerun_queued:`` branch that lives AFTER the finally. So any
+        force_reprocess request landing while the in-flight pipeline's
+        thread_state fetch was failing got silently dropped — breaking the
+        guarantee documented in ``_acquire_pipeline_slot``.
+
+        Fix: the no_thread_state path now sets ``result`` and falls through to
+        the rerun check. This test pins the contract.
+        """
+        from unittest.mock import patch
+
+        from deerflow.sophia.offline_pipeline import (
+            _rerun_pending_sessions,
+            run_offline_pipeline,
+        )
+
+        # _fetch_thread_state fails on the FIRST call (the in-flight one)
+        # and succeeds on the SECOND (the deferred rerun). Inside the failing
+        # call, we seed _rerun_pending_sessions to simulate a concurrent
+        # force_reprocess landing while the first call's fetch was in progress.
+        fetch_calls = {"n": 0}
+        SESSION_ID = "sess_rerun_through_err"
+
+        def fetch_side_effect(thread_id):
+            fetch_calls["n"] += 1
+            if fetch_calls["n"] == 1:
+                _rerun_pending_sessions.add(SESSION_ID)
+                return None
+            return _make_thread_state()
+
+        with patch(
+            "deerflow.sophia.offline_pipeline._fetch_thread_state",
+            side_effect=fetch_side_effect,
+        ):
+            result = run_offline_pipeline(
+                "user_abc", SESSION_ID, "t_err", None,
+            )
+
+        # The rerun should have fired and SUCCEEDED, so the final result
+        # is from the rerun ("completed"), not from the first error.
+        assert result["status"] == "completed", (
+            f"Rerun MUST fire even when the in-flight call hit the "
+            f"no_thread_state error path. Got: {result!r}"
+        )
+        assert fetch_calls["n"] == 2, (
+            f"Expected _fetch_thread_state called twice "
+            f"(in-flight + rerun), got {fetch_calls['n']}"
+        )
+        # The pipeline steps ran exactly once — only on the rerun (the
+        # in-flight call exited before reaching them).
+        assert mock_steps["extraction"].call_count == 1
+
     def test_force_reprocess_during_in_flight_queues_deferred_rerun(self, mock_steps):
         """force_reprocess=True landing on an in-flight session MUST queue a rerun.
 

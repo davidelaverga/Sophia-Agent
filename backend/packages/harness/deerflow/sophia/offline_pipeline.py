@@ -149,50 +149,47 @@ def run_offline_pipeline(
     # exception so the next pipeline trigger retries.
     try:
         # --- Thread state: fetch from LangGraph if not provided ---
+        #
+        # Codex P1 review on PR #130: this block MUST NOT early-return.
+        # A bare ``return {"status": "error", ...}`` inside the try would
+        # bypass the post-finally ``if rerun_queued:`` branch below, silently
+        # dropping any explicit force_reprocess request queued while we were
+        # in flight. Instead we set ``result`` to the error envelope and let
+        # control fall through to the rerun check after finally.
+        thread_state = _ensure_thread_state(thread_state, thread_id, user_id, session_id)
+
         if thread_state is None:
-            thread_state = _fetch_thread_state(thread_id)
-            if thread_state is None:
-                logger.warning(
-                    "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
-                    user_id,
-                    session_id,
-                    thread_id,
-                )
-                # Do NOT promote to _processed_sessions — transient fetch
-                # failure should allow retry. _in_flight cleanup runs in the
-                # `finally` block below.
-                return {"status": "error", "reason": "no_thread_state", "session_id": session_id}
-            logger.info("Fetched thread_state from LangGraph for session %s", session_id)
+            result = {"status": "error", "reason": "no_thread_state", "session_id": session_id}
+        else:
+            # Run the 7-step body in a helper to keep this orchestrator below
+            # the sentrux CC threshold. ``_run_pipeline_steps`` owns all the
+            # per-step try/except + extraction parse-error handling.
+            steps, extraction_retryable = _run_pipeline_steps(
+                user_id, session_id, thread_id, thread_state,
+            )
 
-        # Run the 7-step body in a helper to keep this orchestrator below
-        # the sentrux CC threshold. ``_run_pipeline_steps`` owns all the
-        # per-step try/except + extraction parse-error handling.
-        steps, extraction_retryable = _run_pipeline_steps(
-            user_id, session_id, thread_id, thread_state,
-        )
+            # --- PROMOTE to _processed_sessions ONLY if extraction was not retryable.
+            # On parse error / other extraction exception, leave the session
+            # unprocessed so the next trigger (inactivity, explicit end_session
+            # with force_reprocess=True, etc.) gets a chance to retry.
+            if not extraction_retryable:
+                with _processed_lock:
+                    _processed_sessions.add(session_id)
 
-        # --- PROMOTE to _processed_sessions ONLY if extraction was not retryable.
-        # On parse error / other extraction exception, leave the session
-        # unprocessed so the next trigger (inactivity, explicit end_session
-        # with force_reprocess=True, etc.) gets a chance to retry.
-        if not extraction_retryable:
-            with _processed_lock:
-                _processed_sessions.add(session_id)
+            logger.info(
+                "session.finalization pipeline_complete user_id=%s session_id=%s extraction_retryable=%s steps=%s",
+                user_id,
+                session_id,
+                extraction_retryable,
+                steps,
+            )
 
-        logger.info(
-            "session.finalization pipeline_complete user_id=%s session_id=%s extraction_retryable=%s steps=%s",
-            user_id,
-            session_id,
-            extraction_retryable,
-            steps,
-        )
-
-        result = {
-            "status": "completed",
-            "session_id": session_id,
-            "steps": steps,
-            "extraction_retryable": extraction_retryable,
-        }
+            result = {
+                "status": "completed",
+                "session_id": session_id,
+                "steps": steps,
+                "extraction_retryable": extraction_retryable,
+            }
     finally:
         # Always release the in-flight guard, regardless of how this run
         # exited (success, abort-on-no-thread-state, or unhandled exception).
@@ -430,6 +427,38 @@ def _collect_extracted_ids(extracted_memories: list[dict]) -> list[str]:
             if mid:
                 ids.append(mid)
     return ids
+
+
+def _ensure_thread_state(
+    thread_state: dict[str, Any] | None,
+    thread_id: str,
+    user_id: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Return the thread_state to use, fetching from LangGraph if not provided.
+
+    Returns ``None`` if the caller didn't pass a state AND the LangGraph fetch
+    failed — the caller (``run_offline_pipeline``) treats this as a transient
+    error and writes a ``no_thread_state`` error envelope into ``result`` (so
+    control still falls through to the post-finally rerun check).
+
+    Extracted into a helper so ``run_offline_pipeline`` doesn't need an early
+    ``return`` inside its try block (which would bypass the rerun_queued
+    branch after finally — Codex P1 review on PR #130).
+    """
+    if thread_state is not None:
+        return thread_state
+    fetched = _fetch_thread_state(thread_id)
+    if fetched is None:
+        logger.warning(
+            "session.finalization pipeline_abort_no_thread_state user_id=%s session_id=%s thread_id=%s",
+            user_id,
+            session_id,
+            thread_id,
+        )
+        return None
+    logger.info("Fetched thread_state from LangGraph for session %s", session_id)
+    return fetched
 
 
 def _acquire_pipeline_slot(
