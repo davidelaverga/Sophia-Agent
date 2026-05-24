@@ -1224,3 +1224,67 @@ class TestClientSingleton:
 
                 assert len(results) == 5
                 assert all(r is results[0] for r in results)
+
+
+class TestWarmUp:
+    """Regression tests for the boot-time Mem0 connectivity ping."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_warm_up_flag(self):
+        """warm_up has a module-level once-flag; clear it between tests."""
+        import deerflow.sophia.mem0_client as mod
+
+        mod._warm_up_completed = False
+        yield
+        mod._warm_up_completed = False
+
+    def test_warm_up_uses_top_k_not_limit(self):
+        """warm_up MUST send top_k (Mem0 v3 contract), not the legacy limit.
+
+        Codex P2 review on PR #130 flagged that warm_up was still passing
+        ``limit=1``. On strict SDK/server combos that reject unknown kwargs,
+        the warm-up ping fails on every boot — and because
+        ``_warm_up_completed = True`` is set in ``finally``, we never retry.
+        The first real user search then pays the cold-start latency that
+        warm_up exists to absorb.
+        """
+        from deerflow.sophia.mem0_client import warm_up
+
+        mock_client = MagicMock()
+        mock_client.search.return_value = []
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            warm_up()
+
+        assert mock_client.search.call_count == 1
+        kwargs = mock_client.search.call_args.kwargs
+        assert kwargs.get("top_k") == 1, "warm_up must send top_k=1 on the wire"
+        assert "limit" not in kwargs, (
+            "Don't send the legacy 'limit' kwarg — strict SDKs reject unknown "
+            "kwargs and warm_up silently fails forever (the finally sets "
+            "_warm_up_completed=True even on failure)"
+        )
+
+    def test_warm_up_is_idempotent_after_failure(self):
+        """If warm_up fails, the finally still sets the once-flag.
+
+        This documents the existing behavior so we notice if it ever changes
+        — the operational impact is exactly why P2 above matters: a single
+        wrong-kwarg failure permanently disables warm_up for the process
+        lifetime, so the kwarg name MUST be correct.
+        """
+        import deerflow.sophia.mem0_client as mod
+        from deerflow.sophia.mem0_client import warm_up
+
+        mock_client = MagicMock()
+        mock_client.search.side_effect = Exception("network blip")
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            warm_up()
+            assert mod._warm_up_completed is True
+
+            # Second call must short-circuit (no second search call)
+            warm_up()
+            assert mock_client.search.call_count == 1

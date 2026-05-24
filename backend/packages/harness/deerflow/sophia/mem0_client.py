@@ -113,7 +113,13 @@ def warm_up() -> None:
             _warm_up_completed = True
             return
         try:
-            client.search(query="warm_up", filters={"user_id": "__warmup__"}, limit=1)
+            # Mem0 v3 SDK uses ``top_k`` for result count, not ``limit``
+            # (same fix as ``search_memories``). On strict SDK/server combos
+            # that reject unknown kwargs, ``limit=1`` makes warm-up fail on
+            # every boot — and since ``_warm_up_completed`` is set in
+            # ``finally``, we never retry. The first real user search then
+            # pays the cold-start latency this warm-up exists to avoid.
+            client.search(query="warm_up", filters={"user_id": "__warmup__"}, top_k=1)
             elapsed = (time.perf_counter() - _t0) * 1000
             logger.info("[Mem0] warm_up completed (%.0fms)", elapsed)
         except Exception:
