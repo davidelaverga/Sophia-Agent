@@ -3,6 +3,11 @@ from __future__ import annotations
 from importlib import import_module
 
 
+class _FallbackEvent:
+    def __init__(self, **attributes: object) -> None:
+        self.__dict__.update(attributes)
+
+
 def _missing_requested_module(exc: ModuleNotFoundError, module_name: str) -> bool:
     missing_name = getattr(exc, "name", None)
     if not missing_name:
@@ -10,7 +15,7 @@ def _missing_requested_module(exc: ModuleNotFoundError, module_name: str) -> boo
     return missing_name == module_name or module_name.startswith(f"{missing_name}.")
 
 
-def _make_fallback_type(symbol_name: str, fallback_base: type = object) -> type:
+def _make_fallback_type(symbol_name: str, fallback_base: type = _FallbackEvent) -> type:
     fallback_type = type(symbol_name, (fallback_base,), {})
     fallback_type.__module__ = __name__
     return fallback_type
@@ -20,7 +25,7 @@ def resolve_symbol(
     module_name: str,
     symbol_name: str,
     *,
-    fallback_base: type = object,
+    fallback_base: type = _FallbackEvent,
     expect_exception: bool = False,
 ) -> type:
     try:
@@ -67,6 +72,18 @@ STTTranscriptEvent = resolve_symbol(
 STTErrorEvent = resolve_symbol(
     "vision_agents.core.stt.events",
     "STTErrorEvent",
+)
+TTSAudioEvent = resolve_symbol(
+    "vision_agents.core.tts.events",
+    "TTSAudioEvent",
+)
+TTSErrorEvent = resolve_symbol(
+    "vision_agents.core.tts.events",
+    "TTSErrorEvent",
+)
+TTSSynthesisStartEvent = resolve_symbol(
+    "vision_agents.core.tts.events",
+    "TTSSynthesisStartEvent",
 )
 TurnEndedEvent = resolve_symbol(
     "vision_agents.core.turn_detection.events",

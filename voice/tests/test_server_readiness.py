@@ -89,6 +89,42 @@ def test_server_import_succeeds_when_turn_detection_events_module_missing(
     assert reloaded_server.TurnEndedEvent.__name__ == "TurnEndedEvent"
 
 
+def test_tts_and_server_import_succeed_when_tts_event_symbols_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import_module = importlib.import_module
+
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.tts.events":
+            return SimpleNamespace()
+        return original_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", import_hook)
+
+    import voice.sophia_tts as sophia_tts
+    import voice.vision_agents_compat as compat
+
+    importlib.reload(compat)
+    reloaded_tts = importlib.reload(sophia_tts)
+    reloaded_server = importlib.reload(server)
+
+    assert reloaded_tts.TTSAudioEvent.__name__ == "TTSAudioEvent"
+    assert reloaded_tts.TTSErrorEvent.__name__ == "TTSErrorEvent"
+    assert reloaded_server.TTSSynthesisStartEvent.__name__ == "TTSSynthesisStartEvent"
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "voice.sophia_tts",
+        "voice.sophia_turn",
+        "voice.server",
+    ],
+)
+def test_voice_startup_modules_import(module_name: str) -> None:
+    importlib.import_module(module_name)
+
+
 @pytest.mark.anyio
 async def test_create_agent_allows_experimental_runtime_startup_for_dogfood(monkeypatch: pytest.MonkeyPatch) -> None:
     created: dict[str, object] = {}

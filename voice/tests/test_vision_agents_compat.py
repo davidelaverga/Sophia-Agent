@@ -29,6 +29,20 @@ def test_compat_prefers_real_symbol_when_present() -> None:
     assert compat.STTTranscriptEvent is SDKTranscriptEvent
 
 
+def test_compat_prefers_real_tts_symbol_when_present() -> None:
+    class SDKAudioEvent:
+        pass
+
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.tts.events":
+            return SimpleNamespace(TTSAudioEvent=SDKAudioEvent)
+        return SimpleNamespace()
+
+    compat = _reload_compat_with_import_hook(import_hook)
+
+    assert compat.TTSAudioEvent is SDKAudioEvent
+
+
 def test_compat_returns_fallback_when_module_missing() -> None:
     def import_hook(name: str, package=None):  # noqa: ANN001
         if name == "vision_agents.core.turn_detection.events":
@@ -51,6 +65,19 @@ def test_compat_returns_fallback_when_symbol_missing() -> None:
     assert compat.STTPartialTranscriptEvent.__name__ == "STTPartialTranscriptEvent"
 
 
+def test_compat_returns_tts_fallbacks_when_symbols_missing() -> None:
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.tts.events":
+            return SimpleNamespace()
+        return SimpleNamespace()
+
+    compat = _reload_compat_with_import_hook(import_hook)
+
+    assert compat.TTSAudioEvent.__name__ == "TTSAudioEvent"
+    assert compat.TTSErrorEvent.__name__ == "TTSErrorEvent"
+    assert compat.TTSSynthesisStartEvent.__name__ == "TTSSynthesisStartEvent"
+
+
 def test_compat_fallback_exceptions_subclass_exception() -> None:
     def import_hook(name: str, package=None):  # noqa: ANN001
         if name == "vision_agents.core.agents.exceptions":
@@ -69,6 +96,7 @@ def test_compat_fallback_events_support_isinstance() -> None:
         if name in {
             "vision_agents.core.stt.events",
             "vision_agents.core.turn_detection.events",
+            "vision_agents.core.tts.events",
         }:
             raise ModuleNotFoundError("missing", name=name)
         return SimpleNamespace()
@@ -77,9 +105,15 @@ def test_compat_fallback_events_support_isinstance() -> None:
 
     turn_event = compat.TurnEndedEvent()
     partial_event = compat.STTPartialTranscriptEvent()
+    audio_event = compat.TTSAudioEvent(data=b"audio")
+    error_event = compat.TTSErrorEvent(error_message="bad audio")
 
     assert isinstance(turn_event, compat.TurnEndedEvent)
     assert isinstance(partial_event, compat.STTPartialTranscriptEvent)
+    assert isinstance(audio_event, compat.TTSAudioEvent)
+    assert audio_event.data == b"audio"
+    assert isinstance(error_event, compat.TTSErrorEvent)
+    assert error_event.error_message == "bad audio"
 
 
 def test_compat_reraises_unrelated_module_errors() -> None:

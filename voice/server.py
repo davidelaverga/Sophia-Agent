@@ -25,7 +25,6 @@ from vision_agents.core.runner.http.dependencies import (
 )
 from vision_agents.core.runner.http.models import StartSessionResponse
 from vision_agents.core.runner.http.options import ServeOptions
-from vision_agents.core.tts.events import TTSSynthesisStartEvent
 from vision_agents.plugins.deepgram import STT as DeepgramSTT
 from vision_agents.plugins.getstream import Edge as StreamEdge
 from voice.config import get_settings
@@ -62,6 +61,7 @@ from voice.vision_agents_compat import (
     STTErrorEvent,
     STTPartialTranscriptEvent,
     STTTranscriptEvent,
+    TTSSynthesisStartEvent,
     TurnEndedEvent,
 )
 
