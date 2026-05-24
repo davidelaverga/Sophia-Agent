@@ -92,6 +92,8 @@ export type StreamVoiceSessionReturn = {
   error: string | undefined
   startTalking: () => Promise<void>
   stopTalking: () => Promise<void>
+  /** Cleanup-only transport stop. Does not finalize the Sophia session or queue recap/offline work. */
+  stopVoiceTransport: () => Promise<void>
   /** Mute the microphone while keeping the call + agent alive. Cheap toggle (~0ms).
    *  Use instead of stopTalking when the user is still in-session and only wants to pause mic. */
   muteMic: () => Promise<void>
@@ -2873,6 +2875,7 @@ export function useStreamVoiceSession(
     error,
     startTalking,
     stopTalking,
+    stopVoiceTransport: stopTalking,
     muteMic,
     unmuteMic,
     isMuted,

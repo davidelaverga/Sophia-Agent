@@ -1178,6 +1178,34 @@ describe("useStreamVoiceSession", () => {
     )
   })
 
+  it("stopVoiceTransport is cleanup-only and uses the voice disconnect route", async () => {
+    mockCall = makeCallMock()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    await act(async () => {
+      await result.current.stopVoiceTransport()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/disconnect",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
+        }),
+      }),
+    )
+    expect(getFetchCalls("/api/sophia/end-session", "POST")).toHaveLength(0)
+  })
+
   it("bargeIn leaves call synchronously and resets to idle", async () => {
     mockCallingState = CallingState.JOINED
     mockCall = makeCallMock()

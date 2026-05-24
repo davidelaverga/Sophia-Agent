@@ -663,6 +663,20 @@ class TestVoiceDisconnect:
             )
         assert resp.status_code == 204
 
+    def test_disconnect_is_cleanup_only_by_default(self):
+        with patch(
+            "app.gateway.routers.voice._disconnect_voice_session",
+            new_callable=AsyncMock,
+        ) as mock_disconnect, patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue:
+            resp = client.post(
+                "/api/sophia/user_123/voice/disconnect",
+                json={"call_id": "sophia-user_123-abc12345", "session_id": "test-session-id"},
+            )
+
+        assert resp.status_code == 204
+        mock_disconnect.assert_awaited_once_with("sophia-user_123-abc12345", "test-session-id")
+        mock_queue.assert_not_called()
+
     def test_disconnect_session_already_gone(self):
         mock_response = httpx.Response(404, request=httpx.Request("DELETE", "http://test/"))
         with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:

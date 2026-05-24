@@ -37,6 +37,16 @@ The recommended parity levels are:
 5. Keep artifact and builder state structured through tools/events/UI, not spoken prompt text.
 6. Avoid full per-turn Sophia middleware execution in the critical realtime audio path unless a future evidence phase chooses deterministic cascade behavior over native realtime latency.
 
+## Session Finalization And Recap Boundary
+
+Memory recap is a session-finalization responsibility, not a provider-transport responsibility. The canonical web close path is Sophia `end-session`: it persists the recap envelope, unregisters inactivity tracking, and queues the offline pipeline that writes traces, Mem0 pending-review memories, handoff, identity updates, and sparse offline recap fallback state.
+
+Provider disconnect endpoints are transport cleanup unless they explicitly invoke that canonical finalization path. Stream/Vision Agents disconnect, Gemini production disconnect, and OpenAI/Gemini dogfood disconnect close runtime sessions and active voice tracking; by themselves they do not prove recap persistence or Mem0 extraction. Session UI end controls and spoken end-session commands must continue to call the session finalizer, while mic toggles, hook cleanup, preconnect cleanup, and provider teardown should not be described as memory recap completion.
+
+Phase 12.6E codifies this boundary in code. The Session exit flow calls the canonical finalizer for intentional text/voice end, then invokes `stopVoiceTransport()` for cleanup when a voice transport exists. `stopVoiceTransport()` is explicitly cleanup-only and must not queue recap/offline work. The gateway Sophia `end-session` route suppresses duplicate queueing once a recap envelope already exists; voice disconnect routes still do not finalize by default.
+
+Any future realtime provider promotion must keep this boundary testable. Either provider disconnect remains deliberately transport-only and another guaranteed session-finalization trigger exists, or provider disconnect is upgraded to call the canonical finalizer with trusted `user_id`, companion `session_id`, `thread_id`, platform, context mode, started time, and enough transcript/artifact state for the offline pipeline.
+
 This boundary applies to both Gemini Live and GPT Realtime as a product policy. Provider differences still matter: current Gemini Live setup is effectively immutable during an open session, while OpenAI/GPT Realtime code advertises session-update support and semantic VAD, but those differences do not justify full prompt, memory, or tool expansion without dogfood evidence.
 
 Phase 12.5A made no runtime, prompt-file, VAD, tool, default-provider, or canonical Sophia identity changes.

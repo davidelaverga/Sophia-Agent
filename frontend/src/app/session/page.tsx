@@ -654,6 +654,7 @@ function SessionPageContent() {
     stopStreaming: () => {
       void stopStreaming();
     },
+    stopVoiceTransport: voiceState.stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt: session?.startedAt,

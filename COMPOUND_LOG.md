@@ -26,6 +26,52 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-24 · [voice-session-finalization-contract] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | backend · **Spec:** `docs/specs/03_memory_system.md`, `docs/specs/04_backend_integration.md`
+
+### What Changed
+- Routed intentional voice session end through the canonical Sophia end-session finalizer before voice transport cleanup.
+- Added an explicit cleanup-only `stopVoiceTransport()` hook surface for voice transport teardown.
+- Added backend duplicate suppression so an already-persisted recap envelope does not queue the offline pipeline again.
+- Documented the Phase 12.6E session finalization contract and updated realtime/common-pitfall notes.
+
+### What We Learned
+- The safest fix is to preserve transport disconnect as cleanup-only and make user intent explicit at the Session exit flow boundary.
+- Recap envelope existence is a narrow practical idempotency signal for duplicate explicit finalization attempts.
+- Mic stop, hook cleanup, provider teardown, and previous-session cleanup must stay separate from recap/offline finalization.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
+## 2026-05-24 · [memory-recap-system-audit] · PR #TBD
+**Author:** GitHub Copilot · **Track:** backend | frontend | voice · **Spec:** `docs/specs/03_memory_system.md`, `docs/specs/04_backend_integration.md`
+
+### What Changed
+- Added a docs-only deep audit of the memory recap system before realtime voice mainline migration.
+- Mapped explicit Sophia end-session, legacy session end, Stream voice disconnect, Gemini production disconnect, and dogfood disconnect paths.
+- Documented recap/Mem0 review state ownership, async hydration races, review persistence semantics, observability gaps, and test coverage gaps.
+- Added a realtime runtime contract note that provider disconnect is transport cleanup unless it explicitly invokes canonical session finalization.
+
+### What We Learned
+- The healthy path is explicit Sophia `end-session`: it persists recap, unregisters idle tracking, synthesizes thread state from request messages/artifacts, and queues the offline pipeline.
+- Voice provider disconnect is currently transport-only. The Session UI end controls and voice command do call the finalizer, but hook cleanup, mic stop, previous-session cleanup, and provider disconnect routes do not.
+- Approve/edit in recap are local review decisions until the final save action; discard is immediate for real Mem0 ids; Journal refreshes on mount rather than via live invalidation.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
 ## 2026-05-24 · [gemini-barge-in-transcript-handoff] · PR #TBD
 **Author:** GitHub Copilot · **Track:** frontend | voice | backend · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
 

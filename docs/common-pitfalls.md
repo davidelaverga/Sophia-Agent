@@ -6,6 +6,8 @@ Date created: 2026-05-17
 
 - Do not treat `voice/adapters/base.py` `BackendAdapter` as the realtime provider seam. It is a text-backend bridge for finalized user turns; native realtime providers need session, audio, tool-call, cancellation, and lifecycle events.
 - Do not emit provider-native event names to the browser. Frontend voice consumers in `frontend/src/app/hooks/useStreamVoiceSession.ts` understand the public `sophia.*` envelope, not OpenAI, Gemini, Deepgram, Cartesia, or Vision Agents wire names.
+- Do not treat voice provider disconnect as memory recap finalization. Stream/Gemini/OpenAI disconnect endpoints close transport sessions; recap persistence and Mem0 extraction belong to the Sophia session finalizer or an explicitly documented offline finalization path.
+- Do not add recap finalization to hook cleanup, mic stop, preconnect cleanup, previous-session cleanup, or provider disconnect by default. In Phase 12.6E, intentional voice end finalizes through Sophia `end-session` first, then calls cleanup-only `stopVoiceTransport()`.
 - Do not overfit the provider-neutral contract to OpenAI before Gemini exists. Keep capability flags and event names semantic enough for both provider-owned audio and audio-lifecycle-driven turn events.
 - Do not switch the active runtime while doing architecture-only plumbing. Phase 1 adds `voice.realtime` as an inactive contract layer; the current cascade in `voice/server.py` stays default.
 - Do not confuse the legacy cascade compatibility bridge with a production runtime replacement. It proves the current cascade can be represented as `ProviderEvent`; it does not route live sessions through `voice.realtime`.
