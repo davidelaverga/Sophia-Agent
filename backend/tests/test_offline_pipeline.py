@@ -1342,6 +1342,169 @@ class TestInFlightProtection:
         )
 
 
+    def test_pipeline_body_exception_still_honors_deferred_rerun(self, mock_steps):
+        """Codex P1 R12: if _run_pipeline_steps raises, the queued
+        force_reprocess MUST still fire AND the primary exception MUST be
+        re-raised so the original caller sees their failure.
+
+        Before the fix: ``finally`` popped rerun_state but the exception
+        propagated past the post-finally rerun-dispatch branch, silently
+        dropping the second caller's force_reprocess request.
+        """
+        import threading as _threading
+        from unittest.mock import patch
+
+        import pytest
+
+        from deerflow.sophia.offline_pipeline import (
+            _pending_reruns,
+            run_offline_pipeline,
+        )
+
+        first_started = _threading.Event()
+        let_first_finish = _threading.Event()
+        call_count = {"n": 0}
+
+        def crash_first_then_succeed(user_id, session_id, thread_id, thread_state):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                first_started.set()
+                let_first_finish.wait(timeout=5.0)
+                raise RuntimeError("step-helper-crash")
+            # Rerun path: succeed normally so the test asserts the rerun
+            # actually ran end-to-end.
+            return ({"trace": "ok", "extraction": "ok"}, False)
+
+        from deerflow.sophia import offline_pipeline as op_mod
+
+        with patch.object(op_mod, "_run_pipeline_steps", side_effect=crash_first_then_succeed):
+            primary_exc: dict[str, BaseException | None] = {"e": None}
+
+            def run_first():
+                try:
+                    run_offline_pipeline(
+                        "u", "sess_p1_r12", "t_p1_r12", _make_thread_state(),
+                    )
+                except BaseException as e:
+                    primary_exc["e"] = e
+
+            first_thread = _threading.Thread(target=run_first)
+            first_thread.start()
+            assert first_started.wait(timeout=5.0)
+
+            # Second caller (force_reprocess) lands while first is paused
+            # mid-step. This MUST be queued in _pending_reruns.
+            second_result = run_offline_pipeline(
+                "u", "sess_p1_r12", "t_p1_r12", _make_thread_state(),
+                force_reprocess=True,
+            )
+            assert second_result["status"] == "in_flight"
+            assert "sess_p1_r12" in _pending_reruns
+
+            # Now release the first call — it will raise, but the rerun
+            # MUST still fire from the post-finally branch.
+            let_first_finish.set()
+            first_thread.join(timeout=5.0)
+
+        # The primary call MUST surface the original exception to its caller.
+        assert isinstance(primary_exc["e"], RuntimeError), (
+            f"Primary caller MUST see the original exception re-raised; "
+            f"got {primary_exc['e']!r}"
+        )
+        # Both call paths invoked _run_pipeline_steps: the crashing first
+        # run + the deferred rerun.
+        assert call_count["n"] == 2, (
+            f"Deferred rerun MUST fire even when the primary run raised. "
+            f"Expected _run_pipeline_steps called twice (crash + rerun); "
+            f"got {call_count['n']}"
+        )
+        # Rerun consumed the pending entry.
+        assert "sess_p1_r12" not in _pending_reruns
+        # Suppress unused-import warning for pytest.
+        _ = pytest
+
+
+# ==================================================================
+# Defensive log-conversion guard (Codex P2 R12)
+# ==================================================================
+
+
+class TestSafeSessionStartIso:
+    """Pin the defensive ``_safe_session_start_iso`` helper.
+
+    Codex P2 review on PR #130 R12: the [Pipeline] log line ran
+    ``datetime.fromtimestamp(sstart, UTC).isoformat()`` directly. A
+    truly out-of-range value (negative overflow, ``float('inf')``, a
+    non-numeric value smuggled past upstream coercion) raises
+    ``OverflowError`` / ``OSError`` / ``ValueError`` BEFORE the
+    step-level try/except blocks, aborting the entire pipeline run
+    on a non-critical observability line.
+    """
+
+    def test_none_renders_dash(self):
+        from deerflow.sophia.offline_pipeline import _safe_session_start_iso
+
+        assert _safe_session_start_iso(None) == "-"
+        assert _safe_session_start_iso(0) == "-"
+
+    def test_valid_seconds_renders_isoformat(self):
+        from deerflow.sophia.offline_pipeline import _safe_session_start_iso
+
+        # 2026-05-24T00:00:00+00:00
+        assert _safe_session_start_iso(1779667200).startswith("2026-05-")
+
+    def test_overflow_value_does_not_raise(self):
+        """A value that ``datetime.fromtimestamp`` cannot represent MUST
+        be tagged ``invalid:`` instead of raising."""
+        from deerflow.sophia.offline_pipeline import _safe_session_start_iso
+
+        result = _safe_session_start_iso(10**18)
+        assert result.startswith("invalid:"), (
+            f"Out-of-range epoch MUST render as invalid:<value>, "
+            f"not raise OverflowError. Got: {result!r}"
+        )
+
+    def test_non_numeric_value_does_not_raise(self):
+        """A type-shape drift (e.g. string slipping through upstream
+        coercion) MUST NOT crash the log line."""
+        from deerflow.sophia.offline_pipeline import _safe_session_start_iso
+
+        result = _safe_session_start_iso("not-a-number")
+        assert result.startswith("invalid:")
+
+    def test_pipeline_completes_when_session_start_unix_is_garbage(self, mock_steps):
+        """End-to-end: a corrupt session_start_unix in session_metadata MUST
+        NOT abort the offline pipeline. Without ``_safe_session_start_iso``
+        the [Pipeline] log line would raise before step 1 and skip
+        extraction / handoff / recap entirely."""
+        from unittest.mock import patch
+
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        # Inject a bogus value that ``datetime.fromtimestamp`` rejects.
+        def bad_metadata(thread_state, *, user_id, session_id):
+            return {
+                "session_start_unix": 10**18,  # year ~3.2 trillion AD
+                "platform": "text",
+                "context_mode": "life",
+            }
+
+        from deerflow.sophia import offline_pipeline as op_mod
+
+        with patch.object(op_mod, "_build_session_metadata", side_effect=bad_metadata):
+            result = run_offline_pipeline(
+                "u_garbage", "sess_garbage_epoch", "t_garbage", _make_thread_state(),
+            )
+
+        # Pipeline completed — log line was safely guarded, extraction
+        # still ran.
+        assert result["status"] == "completed", (
+            f"Pipeline MUST survive a garbage session_start_unix value. "
+            f"Got: {result!r}"
+        )
+        assert mock_steps["extraction"].call_count >= 1
+
+
 # ==================================================================
 # Epoch unit normalization (Codex P1 R8)
 # ==================================================================

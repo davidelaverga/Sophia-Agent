@@ -168,6 +168,17 @@ def run_offline_pipeline(
     # `extraction_retryable` gates promotion to `_processed_sessions` at the
     # bottom. Set to True on ExtractionParseError or any other extraction
     # exception so the next pipeline trigger retries.
+    result: dict[str, Any] | None = None
+    # Codex P1 review on PR #130 R12: if the pipeline body raises, we MUST
+    # still honor any deferred force_reprocess queued by a second caller
+    # (typically /end_session landing while inactivity_watcher was already
+    # running). The naive try/finally pattern drops the rerun because the
+    # exception propagates BEFORE the post-finally rerun-dispatch branch.
+    # Capture the exception, let control fall through to the rerun, then
+    # re-raise it after the rerun is launched. The primary caller still
+    # sees the original exception; the second caller's intent is honored
+    # via the recursive rerun's side effects (memories, recap, handoff).
+    pending_exception: BaseException | None = None
     try:
         # --- Thread state: fetch from LangGraph if not provided ---
         #
@@ -211,6 +222,22 @@ def run_offline_pipeline(
                 "steps": steps,
                 "extraction_retryable": extraction_retryable,
             }
+    except Exception as exc:
+        # Capture for re-raise AFTER the deferred rerun (P1 R12). Do NOT
+        # catch BaseException — KeyboardInterrupt / SystemExit should
+        # propagate immediately without trying to run a rerun.
+        pending_exception = exc
+        logger.exception(
+            "Pipeline body raised for session %s — will still honor any "
+            "queued force_reprocess before re-raising",
+            session_id,
+        )
+        result = {
+            "status": "error",
+            "reason": "pipeline_exception",
+            "session_id": session_id,
+            "error_type": type(exc).__name__,
+        }
     finally:
         # Always release the in-flight guard, regardless of how this run
         # exited (success, abort-on-no-thread-state, or unhandled exception).
@@ -226,10 +253,12 @@ def run_offline_pipeline(
     if rerun_state is not _NOT_PENDING:
         logger.info(
             "[Pipeline] honoring queued force_reprocess user_id=%s session_id=%s "
-            "has_pending_state=%s — running deferred rerun with second caller's state",
+            "has_pending_state=%s primary_exception=%s — running deferred "
+            "rerun with second caller's state",
             user_id,
             session_id,
             rerun_state is not None,
+            type(pending_exception).__name__ if pending_exception else None,
         )
         # Tail-call with force_reprocess=True. The recursive call re-acquires
         # the slot normally (the session was just removed from _in_flight,
@@ -243,10 +272,28 @@ def run_offline_pipeline(
         # rerun's ``_ensure_thread_state`` will fetch fresh from LangGraph
         # (which gives us the absolute newest state at rerun time — even
         # better than reusing a snapshot).
-        return run_offline_pipeline(
-            user_id, session_id, thread_id, rerun_state, force_reprocess=True,
-        )
+        try:
+            rerun_result = run_offline_pipeline(
+                user_id, session_id, thread_id, rerun_state, force_reprocess=True,
+            )
+        except Exception:
+            # Log but don't lose the primary exception (if any). The rerun
+            # is best-effort — the primary caller's failure mode is what
+            # matters to surface.
+            logger.exception(
+                "Deferred rerun failed for session %s — primary exception "
+                "(if any) will still be re-raised",
+                session_id,
+            )
+            rerun_result = None
+        # Primary exception still wins if there was one — caller MUST see
+        # that their call failed even though we honored the deferred rerun.
+        if pending_exception is not None:
+            raise pending_exception
+        return rerun_result if rerun_result is not None else result
 
+    if pending_exception is not None:
+        raise pending_exception
     return result
 
 
@@ -289,7 +336,7 @@ def _run_pipeline_steps(
         user_id,
         session_id,
         _sstart,
-        (datetime.fromtimestamp(_sstart, UTC).isoformat() if _sstart else "-"),
+        _safe_session_start_iso(_sstart),
         session_metadata.get("platform"),
         session_metadata.get("context_mode"),
     )
@@ -802,6 +849,34 @@ def _normalize_epoch_to_seconds(value: int) -> int:
     if abs_value < _EPOCH_MICROS_MAX:
         return value // 1_000_000
     return value // 1_000_000_000
+
+
+def _safe_session_start_iso(sstart: Any) -> str:
+    """Defensively convert a session_start epoch to an ISO-8601 string for logging.
+
+    Codex P2 review on PR #130 R12: the ``[Pipeline] session_start_iso``
+    log expression ``datetime.fromtimestamp(sstart, UTC).isoformat()``
+    runs BEFORE the step-level try/except blocks. If ``sstart`` is a
+    truly out-of-range value that ``_coerce_timestamp_unix`` /
+    ``_normalize_epoch_to_seconds`` couldn't tame (e.g. a negative
+    overflow, ``float('inf')``, a non-numeric value smuggled past type
+    coercion via dict shape drift), ``datetime.fromtimestamp`` raises
+    ``OverflowError`` or ``OSError`` — and that exception aborts the
+    entire pipeline run before any extraction / handoff / recap step
+    gets a chance to run.
+
+    Observability lines MUST NEVER abort the pipeline. This helper
+    swallows the conversion error and emits a recognizable
+    ``invalid:<value>`` token in the log so an operator grepping for
+    bad timestamps still sees the offending value, without taking the
+    rest of the pipeline down.
+    """
+    if not sstart:
+        return "-"
+    try:
+        return datetime.fromtimestamp(sstart, UTC).isoformat()
+    except (OverflowError, OSError, ValueError, TypeError):
+        return f"invalid:{sstart!r}"
 
 
 def _extract_artifacts(thread_state: dict[str, Any]) -> list[dict]:
