@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -13,12 +14,11 @@ from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from vision_agents.core import Agent, AgentLauncher, Runner, User
-from vision_agents.core.llm.llm import LLMResponseEvent
 from vision_agents.core.agents.exceptions import (
-    InvalidCallId,
     MaxConcurrentSessionsExceeded,
     MaxSessionsPerCallExceeded,
 )
+from vision_agents.core.llm.llm import LLMResponseEvent
 from vision_agents.core.runner.http.api import lifespan as runner_http_lifespan
 from vision_agents.core.runner.http.api import router as runner_http_router
 from vision_agents.core.runner.http.dependencies import (
@@ -69,6 +69,21 @@ from voice.sse_broker import VoiceEventBroker, format_sse_event
 
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_invalid_call_id_exception() -> type[Exception]:
+    exceptions_module = importlib.import_module("vision_agents.core.agents.exceptions")
+    invalid_call_id = getattr(exceptions_module, "InvalidCallId", None)
+    if isinstance(invalid_call_id, type) and issubclass(invalid_call_id, Exception):
+        return invalid_call_id
+
+    class InvalidCallId(Exception):
+        """Compatibility fallback for vision-agents variants without InvalidCallId."""
+
+    return InvalidCallId
+
+
+InvalidCallId = _resolve_invalid_call_id_exception()
 voice_event_broker = VoiceEventBroker()
 realtime_dogfood_sessions = RealtimeDogfoodSessionManager()
 openai_browser_dogfood_sessions = OpenAIBrowserDogfoodSessionManager(realtime_dogfood_sessions)

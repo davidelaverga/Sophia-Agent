@@ -68,6 +68,36 @@ def test_vision_agents_route_rejects_experimental_runtime_without_silent_fallbac
         validate_vision_agents_session_runtime(settings)
 
 
+def test_resolve_invalid_call_id_exception_prefers_sdk_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    class SDKInvalidCallId(Exception):
+        pass
+
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(InvalidCallId=SDKInvalidCallId),
+    )
+
+    resolved = server._resolve_invalid_call_id_exception()
+
+    assert resolved is SDKInvalidCallId
+
+
+def test_resolve_invalid_call_id_exception_falls_back_to_local_exception(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda _name: SimpleNamespace(),
+    )
+
+    resolved = server._resolve_invalid_call_id_exception()
+
+    assert issubclass(resolved, Exception)
+    assert resolved.__name__ == "InvalidCallId"
+
+
 @pytest.mark.anyio
 async def test_create_agent_allows_experimental_runtime_startup_for_dogfood(monkeypatch: pytest.MonkeyPatch) -> None:
     created: dict[str, object] = {}
