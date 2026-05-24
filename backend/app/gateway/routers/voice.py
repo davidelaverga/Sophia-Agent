@@ -305,7 +305,14 @@ def _get_configured_bool(name: str, default: bool = False) -> bool:
 
 
 def _get_configured_voice_runtime_mode() -> str:
-    return (_get_configured_env("SOPHIA_VOICE_RUNTIME_MODE") or "legacy_cascade").strip().lower().replace("-", "_")
+    configured_mode = _get_configured_env("SOPHIA_VOICE_RUNTIME_MODE")
+    if configured_mode:
+        return configured_mode.strip().lower().replace("-", "_")
+
+    if _gemini_production_route_enabled():
+        return "gemini_live"
+
+    return "legacy_cascade"
 
 
 def _gemini_production_route_enabled() -> bool:

@@ -384,14 +384,144 @@ class TestVoiceConnect:
         assert data["provider_event_relay_url"] == "/api/sophia/voice/gemini/relay"
         assert data["disconnect_url"] == "/api/sophia/voice/gemini/disconnect"
         dispatch.assert_not_awaited()
-        proxy_runtime.assert_awaited_once()
-        assert proxy_runtime.await_args.kwargs["json_body"] == {
-            "user_id": "user_123",
-            "session_id": ANY,
-            "platform": "voice",
-            "context_mode": "work",
-            "ritual": "debrief",
+        proxy_runtime.assert_awaited_once_with(
+            "POST",
+            "/production/realtime/gemini/browser-sessions",
+            json_body={
+                "user_id": "user_123",
+                "session_id": ANY,
+                "platform": "voice",
+                "context_mode": "work",
+                "ritual": "debrief",
+            },
+        )
+
+    def test_gemini_production_flag_routes_to_realtime_when_gateway_runtime_unset(self, monkeypatch):
+        monkeypatch.delenv("SOPHIA_VOICE_RUNTIME_MODE", raising=False)
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+        monkeypatch.setattr("app.gateway.routers.voice._get_voice_env_fallback", lambda: {})
+
+        runtime_payload = {
+            "runtime": "gemini_live",
+            "voice_runtime": "gemini_live",
+            "production_route": True,
+            "session_id": "gemini-prod-session-2",
+            "stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-2/events",
+            "event_stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-2/events",
+            "provider_event_relay_url": (
+                "/production/realtime/gemini/browser-sessions/gemini-prod-session-2/provider-events"
+            ),
+            "disconnect_url": "/production/realtime/gemini/browser-sessions/gemini-prod-session-2",
+            "browser_audio": "gemini_live_websocket_production_candidate",
+            "transport": "gemini_browser_websocket_ephemeral_token_with_backend_relay",
+            "websocket_url": "wss://gemini.example/live",
+            "websocket_auth": "ephemeral_access_token",
+            "ephemeral_token": {"value": "auth_tokens/test"},
+            "setup": {"model": "models/gemini-live"},
+            "public_event_boundary": "SophiaEventNormalizer",
         }
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            return_value=runtime_payload,
+        ) as proxy_runtime, patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+            side_effect=AssertionError("legacy /calls session route must not run in Gemini production mode"),
+        ) as dispatch:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime"] == "gemini_live"
+        assert data["voice_runtime"] == "gemini_live"
+        assert data["session_id"] == "gemini-prod-session-2"
+        assert data["stream_url"] == "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-2"
+        assert data["event_stream_url"] == "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-2"
+        assert data["provider_event_relay_url"] == "/api/sophia/voice/gemini/relay"
+        assert data["disconnect_url"] == "/api/sophia/voice/gemini/disconnect"
+        dispatch.assert_not_awaited()
+        proxy_runtime.assert_awaited_once_with(
+            "POST",
+            "/production/realtime/gemini/browser-sessions",
+            json_body={
+                "user_id": "user_123",
+                "session_id": ANY,
+                "platform": "voice",
+                "context_mode": "life",
+                "ritual": None,
+            },
+        )
+
+    def test_explicit_legacy_runtime_keeps_stream_dispatch_when_promotion_flag_set(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "legacy_cascade")
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+        ) as proxy_runtime, patch(
+            "app.gateway.routers.voice._dispatch_voice_agent",
+            new_callable=AsyncMock,
+            return_value="legacy-session-id",
+        ) as dispatch:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime"] == "legacy_cascade"
+        assert data["voice_runtime"] == "legacy_cascade"
+        assert data["session_id"] == "legacy-session-id"
+        proxy_runtime.assert_not_awaited()
+        dispatch.assert_awaited_once_with(
+            call_id=ANY,
+            call_type="default",
+            platform="voice",
+            context_mode="life",
+            ritual=None,
+            session_id=None,
+            thread_id=None,
+        )
+
+    @pytest.mark.anyio
+    async def test_legacy_dispatch_posts_to_calls_session_endpoint(self):
+        request = httpx.Request("POST", "http://test/calls/sophia-user_123-abc12345/sessions")
+        mock_response = httpx.Response(201, request=request, json={"session_id": "test-session-id"})
+
+        with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_client
+
+            session_id = await _dispatch_voice_agent(
+                call_id="sophia-user_123-abc12345",
+                call_type="default",
+                platform="voice",
+                context_mode="life",
+                ritual=None,
+            )
+
+        assert session_id == "test-session-id"
+        mock_client.post.assert_awaited_once_with(
+            f"{_get_voice_server_url()}/calls/sophia-user_123-abc12345/sessions",
+            json={
+                "call_type": "default",
+                "platform": "voice",
+                "context_mode": "life",
+                "ritual": None,
+                "session_id": None,
+                "thread_id": None,
+            },
+        )
 
 
 class TestVoiceEvents:
