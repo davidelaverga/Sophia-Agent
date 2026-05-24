@@ -654,6 +654,7 @@ function SessionPageContent() {
     stopStreaming: () => {
       void stopStreaming();
     },
+    stopVoiceTransport: voiceState.stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt: session?.startedAt,
@@ -885,10 +886,7 @@ function SessionPageContent() {
       <div className="relative flex h-full animate-fadeIn">
         {/* Main Chat Area */}
         <div className="relative z-10 flex-1 flex flex-col min-w-0 overflow-hidden">
-          {/* Voice telemetry panel is intentionally hidden in production sessions. It served its
-              diagnostic purpose during the voice transport migration. Keep the component mounted
-              path commented for quick re-enable when benchmarking regressions. */}
-          {false && <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />}
+            <VoiceMetricsPanel voiceState={voiceState} defaultExpanded={false} layout="floating" />
 
           {/* Reading corridor — calms the nebula behind text so messages are effortless to read.
               A radial vignette that darkens the center (where text lives) and fades to

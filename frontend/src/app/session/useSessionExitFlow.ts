@@ -186,6 +186,7 @@ interface UseSessionExitFlowParams {
   isReadOnly: boolean;
   isSophiaResponding: boolean;
   stopStreaming: () => void;
+  stopVoiceTransport?: () => Promise<void> | void;
   setEnding: (isEnding: boolean) => void;
   sessionId: string;
   sessionStartedAt?: string;
@@ -210,6 +211,7 @@ export function useSessionExitFlow({
   isReadOnly,
   isSophiaResponding,
   stopStreaming,
+  stopVoiceTransport,
   setEnding,
   sessionId,
   sessionStartedAt,
@@ -429,12 +431,29 @@ export function useSessionExitFlow({
       }
     }
 
+    if (stopVoiceTransport) {
+      try {
+        await stopVoiceTransport();
+      } catch (error) {
+        logger.logError(error, {
+          component: 'SessionPage',
+          action: 'voice_intentional_end_cleanup',
+          metadata: {
+            voiceDisconnectKind: 'intentional_end_cleanup',
+            sessionIdPresent: Boolean(recapSessionId),
+            threadIdPresent: Boolean(recapThreadId),
+          },
+        });
+      }
+    }
+
     // Start emergence flow instead of navigating directly
     setPendingRecapSessionId(recapSessionId);
     setShowEmergence(true);
     setEnding(false);
   }, [
     stopStreaming,
+    stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt,

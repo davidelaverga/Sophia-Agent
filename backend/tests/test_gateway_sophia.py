@@ -1263,6 +1263,52 @@ class TestSessionEnd:
         assert queued_state is not None
         assert queued_state["messages"][0]["content"] == "I needed to talk this through."
 
+    def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-dupe",
+                thread_id="thread-dupe",
+                user_id="test_user",
+                status="open",
+            )
+        )
+        payload = {
+            "session_id": "sess-dupe",
+            "thread_id": "thread-dupe",
+            "started_at": "2026-04-05T09:52:00+00:00",
+            "ended_at": "2026-04-05T10:00:00+00:00",
+            "offer_debrief": False,
+            "session_type": "open",
+            "context_mode": "life",
+            "turn_count": 2,
+            "messages": [
+                {"role": "user", "content": "Let's close this cleanly."},
+                {"role": "assistant", "content": "Closed with care."},
+            ],
+        }
+
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
+            first = client.post("/api/sophia/test_user/end-session", json=payload)
+            second_payload = {**payload, "ended_at": "2026-04-05T10:05:00+00:00"}
+            second = client.post("/api/sophia/test_user/end-session", json=second_payload)
+
+        assert first.status_code == 202
+        assert second.status_code == 202
+        assert first.json()["status"] == "pipeline_queued"
+        assert second.json()["status"] == "pipeline_queued"
+        assert second.json()["ended_at"] == "2026-04-05T10:00:00+00:00"
+        mock_queue.assert_called_once()
+
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-dupe.json").read_text(encoding="utf-8"))
+        assert saved["ended_at"] == "2026-04-05T10:00:00+00:00"
+        record = store.get("test_user", "sess-dupe")
+        assert record is not None
+        assert record.status == "ended"
+        assert record.ended_at == "2026-04-05T10:00:00+00:00"
+
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(
             "/api/sophia/test_user/end-session",

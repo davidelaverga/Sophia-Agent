@@ -27,6 +27,7 @@ import {
   type VoiceDeveloperMetrics,
   type VoiceRegressionMarker,
 } from "../../lib/voice-runtime-metrics"
+import { buildVoiceTelemetryReport } from "../../lib/voice-telemetry-report"
 import type { VoiceStateProps } from "../../lib/voice-types"
 import { useUiStore } from "../../stores/ui-store"
 
@@ -48,6 +49,16 @@ type PointerInteraction = {
   startX: number
   startY: number
   origin: FloatingPanelBounds
+}
+
+type SummaryMetricCard = {
+  label: string
+  value: string
+  hint: string
+  icon: typeof Activity
+  tone: "good" | "warn" | "bad" | "neutral"
+  thresholdKey?: keyof VoiceDeveloperMetrics["thresholds"]
+  emphasize?: boolean
 }
 
 const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v1"
@@ -150,6 +161,7 @@ export function VoiceMetricsPanel({
       events: [],
       snapshot: null,
       runtimeError: voiceState.error,
+      runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
     }),
   )
 
@@ -172,6 +184,7 @@ export function VoiceMetricsPanel({
             events,
             snapshot,
             runtimeError: voiceState.error,
+            runtimeTelemetry: voiceState.runtimeTelemetry ?? null,
           }),
         )
       })
@@ -183,7 +196,10 @@ export function VoiceMetricsPanel({
     return () => {
       window.clearInterval(intervalId)
     }
-  }, [voiceState.error, voiceState.stage])
+  }, [voiceState.error, voiceState.runtimeTelemetry, voiceState.stage])
+
+  const isGeminiRuntime = metrics.sessionTelemetry.runtime === "gemini_live"
+  const geminiHeaderTelemetry = metrics.sessionTelemetry.gemini
 
   const panelTone = useMemo(() => {
     if (metrics.regressions.some((marker) => marker.level === "bad")) {
@@ -197,68 +213,144 @@ export function VoiceMetricsPanel({
     return metrics.health.level
   }, [metrics.health.level, metrics.regressions])
 
-  const summaryCards = useMemo(
-    () => [
+  const summaryCards = useMemo<SummaryMetricCard[]>(
+    () => {
+      if (metrics.sessionTelemetry.runtime === "gemini_live") {
+        const gemini = metrics.sessionTelemetry.gemini
+        return [
+          {
+            label: "Session ready",
+            value: formatMs(metrics.timings.sessionReadyMs),
+            hint: "start -> Gemini setup complete",
+            icon: Sparkles,
+            tone: metrics.thresholds.sessionReady.status,
+            thresholdKey: "sessionReady",
+          },
+          {
+            label: "Public SSE",
+            value: formatStatus(gemini.publicSseState),
+            hint: "normalized sophia.* event stream",
+            icon: Radio,
+            tone: statusTone(gemini.publicSseState),
+          },
+          {
+            label: "Gemini WebSocket",
+            value: formatStatus(gemini.websocketState),
+            hint: "browser Live websocket state",
+            icon: Activity,
+            tone: statusTone(gemini.websocketState),
+          },
+          {
+            label: "Relay",
+            value: formatStatus(gemini.relayStatus),
+            hint: "provider event relay status",
+            icon: Gauge,
+            tone: relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures),
+          },
+          {
+            label: "Provider events",
+            value: String(gemini.providerEventCount),
+            hint: "Gemini server messages observed",
+            icon: AudioLines,
+            tone: gemini.providerEventCount > 0 ? "good" : "neutral",
+          },
+          {
+            label: "Artifacts",
+            value: String(gemini.artifactCount),
+            hint: "public companion artifacts",
+            icon: Sparkles,
+            tone: gemini.artifactCount > 0 ? "good" : "neutral",
+          },
+          {
+            label: "Tool calls",
+            value: String(gemini.toolCallCount),
+            hint: "Gemini tool-loop handoffs",
+            icon: Clipboard,
+            tone: gemini.toolRejectionCount > 0 ? "warn" : "neutral",
+          },
+          {
+            label: "Last event",
+            value: formatMs(gemini.lastEventAgeMs),
+            hint: "age of most recent captured event",
+            icon: Clock3,
+            tone: gemini.lastEventAgeMs !== null && gemini.lastEventAgeMs > 10_000 ? "warn" : "neutral",
+          },
+        ]
+      }
+
+      return [
       {
         label: "Session ready",
-        value: metrics.timings.sessionReadyMs,
+        value: formatMs(metrics.timings.sessionReadyMs),
         hint: "start -> Sophia ready",
         icon: Sparkles,
         tone: metrics.thresholds.sessionReady.status,
+        thresholdKey: "sessionReady",
       },
       {
         label: "Join latency",
-        value: metrics.timings.joinLatencyMs,
+        value: formatMs(metrics.timings.joinLatencyMs),
         hint: "credentials -> joined",
         icon: Radio,
         tone: metrics.thresholds.joinLatency.status,
+        thresholdKey: "joinLatency",
       },
       {
         label: "Committed response",
-        value: metrics.pipeline.committedTurnCloseMs ?? metrics.pipeline.userEndedToFirstTextMs ?? metrics.pipeline.userEndedToAgentStartMs,
+        value: formatMs(metrics.pipeline.committedTurnCloseMs ?? metrics.pipeline.userEndedToFirstTextMs ?? metrics.pipeline.userEndedToAgentStartMs),
         hint: metrics.pipeline.committedTurnCloseMs !== null
           ? "committed transcript -> agent start"
           : "public turn -> first visible response",
         icon: Clock3,
         tone: metrics.thresholds.committedResponse.status,
+        thresholdKey: "committedResponse",
       },
       {
         label: "Raw first text",
-        value: metrics.lastTurn.firstTextMs,
+        value: formatMs(metrics.lastTurn.firstTextMs),
         hint: "diagnostic raw speech end -> first text",
         icon: AudioLines,
         tone: metrics.thresholds.firstText.status,
+        thresholdKey: "firstText",
       },
       {
         label: "Raw first audio",
-        value: metrics.lastTurn.firstAudioMs,
+        value: formatMs(metrics.lastTurn.firstAudioMs),
         hint: "diagnostic raw speech end -> first audio",
         icon: AudioLines,
         tone: metrics.thresholds.firstAudio.status,
+        thresholdKey: "firstAudio",
       },
       {
         label: "Raw backend done",
-        value: metrics.lastTurn.backendCompleteMs,
+        value: formatMs(metrics.lastTurn.backendCompleteMs),
         hint: "diagnostic raw speech end -> backend complete",
         icon: Gauge,
         tone: metrics.thresholds.backendComplete.status,
+        thresholdKey: "backendComplete",
       },
       {
         label: metrics.thresholds.responseWindow.label,
-        value: metrics.stage === "thinking"
+        value: formatMs(metrics.stage === "thinking"
           ? metrics.timings.currentThinkingMs
-          : metrics.lastTurn.responseDurationMs,
+          : metrics.lastTurn.responseDurationMs),
         hint: metrics.stage === "thinking" ? "live thinking timer" : "agent started -> ended",
         icon: Activity,
         tone: metrics.thresholds.responseWindow.status,
+        thresholdKey: "responseWindow",
       },
-    ],
+    ]
+    },
     [metrics],
   )
 
   const compactSummaryCards = useMemo(
-    () => summaryCards.filter((card) => ["Session ready", "Committed response", "Raw first text"].includes(card.label)),
-    [summaryCards],
+    () => summaryCards.filter((card) => (
+      isGeminiRuntime
+        ? ["Session ready", "Gemini WebSocket", "Relay"].includes(card.label)
+        : ["Session ready", "Committed response", "Raw first text"].includes(card.label)
+    )),
+    [isGeminiRuntime, summaryCards],
   )
 
   const displayedSummaryCards = layout === "floating" && !expanded ? compactSummaryCards : summaryCards
@@ -360,15 +452,12 @@ export function VoiceMetricsPanel({
     }
 
     return JSON.stringify(
-      {
-        reportType: "voice-telemetry-report",
-        version: 1,
-        source: "session-ui",
+      buildVoiceTelemetryReport({
         exportedAt: new Date().toISOString(),
         summary: buildVoiceTelemetrySummary(metrics),
         metrics,
         captureBundle: capture.export(),
-      },
+      }),
       null,
       2,
     )
@@ -500,12 +589,26 @@ export function VoiceMetricsPanel({
               Voice runtime telemetry
             </div>
             <div className="flex flex-wrap items-center gap-2">
+              <ToneBadge label={`Runtime: ${metrics.sessionTelemetry.runtimeLabel}`} tone={isGeminiRuntime ? "good" : "neutral"} />
               <ToneBadge label={metrics.health.title} tone={metrics.health.level} />
               <ToneBadge label={`Stage: ${metrics.stage}`} tone="neutral" />
-              <ToneBadge
-                label={`Transport: ${metrics.transport.activeSource.toUpperCase()}`}
-                tone={metrics.transport.activeSource === "custom" ? "warn" : "good"}
-              />
+              {isGeminiRuntime ? (
+                <>
+                  <ToneBadge
+                    label={`Gemini WSS: ${formatStatus(geminiHeaderTelemetry?.websocketState ?? null)}`}
+                    tone={statusTone(geminiHeaderTelemetry?.websocketState ?? null)}
+                  />
+                  <ToneBadge
+                    label={`Relay: ${formatStatus(geminiHeaderTelemetry?.relayStatus ?? null)}`}
+                    tone={relayTone(geminiHeaderTelemetry?.relayStatus ?? null, geminiHeaderTelemetry?.consecutiveRelayFailures ?? 0)}
+                  />
+                </>
+              ) : (
+                <ToneBadge
+                  label={`Transport: ${metrics.transport.activeSource.toUpperCase()}`}
+                  tone={metrics.transport.activeSource === "custom" ? "warn" : "good"}
+                />
+              )}
               <ToneBadge
                 label={metrics.microphone.detectedAudio ? "Mic signal detected" : "No mic signal yet"}
                 tone={metrics.microphone.detectedAudio ? "good" : "warn"}
@@ -594,16 +697,18 @@ export function VoiceMetricsPanel({
               key={card.label}
               icon={card.icon}
               label={card.label}
-              hint={withThresholdHint(card.hint, metrics.thresholds[thresholdKeyForLabel(card.label)])}
-              value={formatMs(card.value)}
+              hint={card.thresholdKey ? withThresholdHint(card.hint, metrics.thresholds[card.thresholdKey]) : card.hint}
+              value={card.value}
               tone={card.tone}
-              emphasize={card.label === "Current wait" && metrics.timings.currentThinkingMs !== null && metrics.timings.currentThinkingMs > 4000}
+              emphasize={card.emphasize ?? (card.label === "Current wait" && metrics.timings.currentThinkingMs !== null && metrics.timings.currentThinkingMs > 4000)}
               compact={layout === "floating" && !expanded}
             />
           ))}
         </div>
 
-        {expanded && (
+        {expanded && (isGeminiRuntime ? (
+          <GeminiRuntimeDetails metrics={metrics} builderTone={builderTone} />
+        ) : (
           <>
             <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[1.1fr_0.9fr]">
               <BottleneckCard metrics={metrics} />
@@ -830,7 +935,7 @@ export function VoiceMetricsPanel({
               </div>
             </div>
           </>
-        )}
+        ))}
       </div>
 
       {layout === "floating" && expanded && (
@@ -893,6 +998,256 @@ function BottleneckCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
         {metrics.bottleneck.evidence.map((item) => (
           <div key={item} className="rounded-2xl border border-white/8 bg-black/15 px-3 py-2 text-xs text-sophia-text2">
             {item}
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function GeminiRuntimeDetails({
+  metrics,
+  builderTone,
+}: {
+  metrics: VoiceDeveloperMetrics
+  builderTone: "good" | "warn" | "bad" | "neutral"
+}) {
+  const gemini = metrics.sessionTelemetry.gemini
+  if (!gemini) return null
+
+  return (
+    <>
+      <div className="grid gap-4 border-t border-white/8 px-5 py-5 lg:grid-cols-[0.85fr_1.15fr]">
+        <InfoCard
+          icon={Sparkles}
+          title="Gemini readiness"
+          rows={[
+            ["request -> credentials", formatMs(metrics.startup.requestToCredentialsMs)],
+            ["start -> setup complete", formatMs(metrics.timings.sessionReadyMs)],
+            ["credentials -> public SSE", formatMs(metrics.timings.sseOpenMs)],
+            ["setup complete", gemini.setupComplete ? "yes" : "pending"],
+            ["last provider event", formatIsoAge(gemini.lastProviderEventAt)],
+            ["last captured event", formatMs(gemini.lastEventAgeMs)],
+          ]}
+          footer="Gemini readiness is measured against browser Live setup completion and the public sophia.* stream, not Stream join latency."
+          tone={metrics.thresholds.sessionReady.status}
+        />
+        <InfoCard
+          icon={Radio}
+          title="Gemini transport + session"
+          rows={[
+            ["Runtime", metrics.sessionTelemetry.runtimeLabel],
+            ["Source", metrics.sessionTelemetry.source],
+            ["Session", gemini.sessionId ?? "pending"],
+            ["Connection", formatStatus(gemini.connectionState)],
+            ["Stage", formatStatus(gemini.stage)],
+            ["Gemini WebSocket", formatStatus(gemini.websocketState)],
+            ["Public SSE", formatStatus(gemini.publicSseState)],
+            ["Relay", formatStatus(gemini.relayStatus)],
+            ["Transport", gemini.transport ?? "pending"],
+            ["Boundary", gemini.publicEventBoundary ? truncate(gemini.publicEventBoundary, 42) : "pending"],
+          ]}
+          footer={gemini.streamUrl
+            ? "The public event stream is the same normalized event boundary consumed by the Session UI."
+            : "Waiting for Gemini bootstrap URLs from /voice/connect."}
+          tone={relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures)}
+        />
+      </div>
+
+      <div className="grid gap-4 border-t border-white/8 px-5 py-5 xl:grid-cols-[1.15fr_0.85fr]">
+        <div className="space-y-4">
+          <div className="grid gap-4 lg:grid-cols-2">
+            <InfoCard
+              icon={Mic}
+              title="Microphone"
+              rows={[
+                ["Gemini mic state", formatStatus(gemini.microphoneState)],
+                ["Streams", String(metrics.microphone.streamCount)],
+                ["Tracks", String(metrics.microphone.audioTrackCount)],
+                ["Detected audio", metrics.microphone.detectedAudio ? "yes" : "no"],
+                ["First audio", formatIsoAge(metrics.microphone.firstAudioAt)],
+                ["Last audio", formatIsoAge(metrics.microphone.lastAudioAt)],
+                ["Peak RMS", formatDecimal(metrics.microphone.maxRms)],
+                ["Sample windows", String(metrics.microphone.totalSampleWindows)],
+                ["Probe errors", String(metrics.microphone.errorCount)],
+              ]}
+              footer={metrics.microphone.lastError ?? "Browser microphone probe remains provider-neutral for both runtime paths."}
+              tone={metrics.microphone.detectedAudio || gemini.microphoneState === "connected" ? "good" : "warn"}
+            />
+            <InfoCard
+              icon={AudioLines}
+              title="Gemini live activity"
+              rows={[
+                ["Provider events", String(gemini.providerEventCount)],
+                ["Last provider type", gemini.lastProviderEventType ?? "pending"],
+                ["Output audio events", String(gemini.outputAudioEventCount)],
+                ["Stale audio dropped", String(gemini.staleAssistantAudioDroppedCount)],
+                ["Stale transcript dropped", String(gemini.staleAssistantTranscriptDroppedCount)],
+                ["Barge-in confirmed", gemini.bargeInConfirmed ? "yes" : "no"],
+                ["Confirmation source", gemini.bargeInConfirmationSource],
+                ["Candidate frames", String(gemini.bargeInCandidateFrameCount)],
+                ["Input-frame false alarms", String(gemini.inputFrameOnlyNotBargeInCount)],
+                ["Candidate frames no intent", String(gemini.candidateFramesDidNotConfirmCount)],
+                ["Candidate expirations", String(gemini.candidateExpiredCount)],
+                ["Suppression blocked", String(gemini.suppressionBlockedBecauseNoIntentCount)],
+                ["Barge-in transcript captured", String(gemini.bargeInTranscriptCapturedCount)],
+                ["Barge-in transcript promoted", String(gemini.bargeInTranscriptPromotedCount)],
+                ["Barge-in transcript ignored", String(gemini.bargeInTranscriptIgnoredCount)],
+                ["Barge-in transcript duplicates", String(gemini.bargeInTranscriptDuplicateSuppressedCount)],
+                ["Barge-in dispatches", String(gemini.bargeInNewTurnDispatchCount)],
+                ["Barge-in dispatch block", gemini.bargeInNewTurnDispatchBlockedReason],
+                ["Barge-in promotion latency", formatMs(gemini.bargeInTranscriptPromotionLatencyMs)],
+                ["Last barge-in transcript", gemini.lastBargeInTranscriptPreview ?? "none"],
+                ["Last audio drop reason", gemini.assistantAudioDropReason ?? "none"],
+                ["Raw mic overlap", formatMs(gemini.maxRawAssistantUserOverlapMs)],
+                ["Confirmed overlap", formatMs(gemini.maxConfirmedAssistantUserOverlapMs)],
+                ["Remote audio", formatStatus(gemini.remoteAudioState)],
+                ["Public turns", String(gemini.publicTurnCount)],
+                ["Artifacts", String(gemini.artifactCount)],
+                ["Artifact public events", String(gemini.artifactPublicEventCount)],
+                ["Artifact runtime ingest", String(gemini.artifactRuntimeIngestCount)],
+                ["Artifact rendered", String(gemini.artifactRenderedCount)],
+                ["Artifact source", gemini.artifactCountSource],
+                ["Public diagnostics", String(gemini.publicDiagnosticCount)],
+                ["Last user transcript", formatIsoAge(gemini.lastUserTranscriptAt)],
+                ["Last Sophia transcript", formatIsoAge(gemini.lastAssistantTranscriptAt)],
+              ]}
+              footer="These are Gemini production-path signals; legacy backend/TTS cascade timings are intentionally not shown here."
+              tone={gemini.providerEventCount > 0 || gemini.publicTurnCount > 0 ? "good" : "neutral"}
+            />
+          </div>
+
+          <InfoCard
+            icon={Gauge}
+            title="Relay + WebSocket diagnostics"
+            rows={[
+              ["Relay status", formatStatus(gemini.relayStatus)],
+              ["Critical relays", String(gemini.relayClassificationCounts.critical?.count ?? 0)],
+              ["Summary/local", String(gemini.relayClassificationCounts.summary?.count ?? 0)],
+              ["Skipped/local", String(gemini.relayClassificationCounts.skip?.count ?? 0)],
+              ["Relay diagnostics", String(gemini.relayDiagnosticCount)],
+              ["Consecutive relay failures", String(gemini.consecutiveRelayFailures)],
+              ["Last relay event", gemini.lastRelayEventType ?? "pending"],
+              ["Last critical relay", formatMs(gemini.lastCriticalRelayDurationMs)],
+              ["Last transcript relay", formatMs(gemini.lastTranscriptionRelayDurationMs)],
+              ["Last tool relay", formatMs(gemini.lastToolCallRelayDurationMs)],
+              ["Max relay", formatMs(gemini.maxRelayDurationMs)],
+              ["Relay queue depth", String(gemini.orderedRelayQueueDepth)],
+              ["Oldest queued relay", formatMs(gemini.oldestQueuedAgeMs)],
+              ["Playback generation", String(gemini.playbackGeneration)],
+              ["Last relay diagnostic", formatIsoAge(gemini.lastRelayDiagnosticAt)],
+              ["WebSocket diagnostics", String(gemini.websocketDiagnosticCount)],
+              ["Last WebSocket diagnostic", formatIsoAge(gemini.lastWebSocketDiagnosticAt)],
+              ["Last relay error", gemini.lastRelayErrorText ? truncate(gemini.lastRelayErrorText, 52) : "none"],
+              ["Last WebSocket error", gemini.lastWebSocketErrorText ? truncate(gemini.lastWebSocketErrorText, 52) : "none"],
+            ]}
+            footer="Relay degradation is allowed to be visible here without re-labeling it as a legacy Stream or TTS bottleneck."
+            tone={relayTone(gemini.relayStatus, gemini.consecutiveRelayFailures)}
+          />
+        </div>
+
+        <div className="space-y-4">
+          <InfoCard
+            icon={Clipboard}
+            title="Tool loop"
+            rows={[
+              ["Tool calls", String(gemini.toolCallCount)],
+              ["Tool responses", String(gemini.toolResponseCount)],
+              ["Tool rejections", String(gemini.toolRejectionCount)],
+              ["Unresolved tools", String(gemini.unresolvedToolCallCount)],
+              ["Unknown artifact tools", String(gemini.artifactToolCallUnknownCount)],
+              ["Oldest unresolved", formatMs(gemini.oldestUnresolvedToolCallAgeMs)],
+              ["Last tool phase", gemini.lastToolPhase ?? "pending"],
+              ["Last tool", gemini.lastToolName ?? "pending"],
+              ["Last tool event", formatIsoAge(gemini.lastToolAt)],
+            ]}
+            footer="Gemini tool-loop diagnostics are counted from production-safe callback metadata, not raw provider payload display."
+            tone={gemini.toolRejectionCount > 0 ? "warn" : gemini.toolCallCount > 0 ? "good" : "neutral"}
+          />
+
+          <InfoCard
+            icon={Activity}
+            title="Event counters"
+            rows={[
+              ["Total events", String(metrics.events.total)],
+              ["voice-sse", String(metrics.events.voiceSse)],
+              ["voice-runtime", String(metrics.events.voiceRuntime)],
+              ["voice-session", String(metrics.events.voiceSession)],
+              ["builder", String(metrics.events.builder)],
+              ["SSE errors", String(metrics.events.sseErrors)],
+              ["Invalid payloads", String(metrics.events.invalidPayloads)],
+              ["Stale connect", String(metrics.events.staleConnectResponses)],
+            ]}
+            footer="The public event contract remains sophia.* even when the selected runtime is Gemini Live."
+            tone={metrics.events.sseErrors > 0 || metrics.events.invalidPayloads > 0 ? "warn" : "neutral"}
+          />
+
+          <InfoCard
+            icon={AlertTriangle}
+            title="Latest public diagnostic"
+            rows={[
+              ["Turn ID", metrics.lastTurn.turnId ?? "pending"],
+              ["Status", metrics.lastTurn.status ?? "pending"],
+              ["Reason", metrics.lastTurn.reason ?? "pending"],
+              ["Last user", metrics.lastTurn.lastUserTranscript ? truncate(metrics.lastTurn.lastUserTranscript, 34) : "pending"],
+              ["Last Sophia", metrics.lastTurn.lastAssistantTranscript ? truncate(metrics.lastTurn.lastAssistantTranscript, 34) : "pending"],
+            ]}
+            footer="Public turn diagnostics are shown without legacy raw backend/audio latency labels for Gemini sessions."
+            tone={metrics.lastTurn.status === "failed" ? "bad" : metrics.lastTurn.reason && metrics.lastTurn.reason !== "completed" ? "warn" : "neutral"}
+          />
+
+          <InfoCard
+            icon={Activity}
+            title="Builder workflow"
+            rows={[
+              ["Phase", metrics.builder.phase ?? "inactive"],
+              ["Progress", formatPercent(metrics.builder.progressPercent)],
+              ["Steps", metrics.builder.totalSteps !== null ? `${metrics.builder.completedSteps ?? 0}/${metrics.builder.totalSteps}` : "pending"],
+              ["Active step", metrics.builder.activeStepTitle ?? "pending"],
+              ["Idle", formatMs(metrics.builder.idleMs)],
+              ["Last update", formatIsoAge(metrics.builder.lastUpdateAt)],
+              ["Last progress", formatIsoAge(metrics.builder.lastProgressAt)],
+            ]}
+            footer={metrics.builder.stuckReason
+              ?? metrics.builder.detail
+              ?? (metrics.builder.phase === "running"
+                ? "Builder heartbeats and todo completion are recorded here while the deliverable is assembled."
+                : "Builder telemetry appears once a companion turn delegates to the builder.")}
+            tone={builderTone}
+          />
+
+          <TimelineCard metrics={metrics} />
+        </div>
+      </div>
+    </>
+  )
+}
+
+function TimelineCard({ metrics }: { metrics: VoiceDeveloperMetrics }) {
+  return (
+    <div className="rounded-3xl border border-white/8 bg-white/4 p-4">
+      <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-sophia-text">
+        <Sparkles className="h-4 w-4 text-sophia-text2/80" />
+        Recent timeline
+      </div>
+      <div className="space-y-2.5">
+        {metrics.timeline.length === 0 && (
+          <p className="text-sm text-sophia-text2">
+            Waiting for capture events from the current voice turn.
+          </p>
+        )}
+        {metrics.timeline.map((item) => (
+          <div key={item.id} className="rounded-2xl border border-white/6 bg-black/15 px-3 py-2.5">
+            <div className="flex items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2 text-sophia-text">
+                <span className={timelineToneClass(item.tone)} />
+                <span className="font-medium">{item.label}</span>
+              </div>
+              <span className="text-sophia-text2/70">{item.sinceStartMs === null ? "--" : `+${formatMsCompact(item.sinceStartMs)}`}</span>
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-sophia-text2">
+              {item.detail}
+            </p>
           </div>
         ))}
       </div>
@@ -1069,6 +1424,11 @@ function formatMs(value: number | null): string {
   return `${(value / 1000).toFixed(2)} s`
 }
 
+function formatStatus(value: string | null): string {
+  if (!value) return "pending"
+  return value.replace(/_/g, " ")
+}
+
 function formatIsoAge(value: string | null): string {
   if (!value) return "--"
 
@@ -1092,30 +1452,39 @@ function formatPercent(value: number | null): string {
   return value === null ? "--" : `${value}%`
 }
 
-function thresholdKeyForLabel(label: string): keyof VoiceDeveloperMetrics["thresholds"] {
-  switch (label) {
-    case "Session ready":
-      return "sessionReady"
-    case "Join latency":
-      return "joinLatency"
-    case "Committed response":
-      return "committedResponse"
-    case "Raw first text":
-      return "firstText"
-    case "Raw first audio":
-      return "firstAudio"
-    case "Raw backend done":
-      return "backendComplete"
-    default:
-      return "responseWindow"
-  }
-}
-
 function withThresholdHint(
   hint: string,
   threshold: VoiceDeveloperMetrics["thresholds"][keyof VoiceDeveloperMetrics["thresholds"]],
 ): string {
   return `${hint} | warn ${formatMsCompact(threshold.warnAtMs)} | bad ${formatMsCompact(threshold.badAtMs)}`
+}
+
+function statusTone(value: string | null): "good" | "warn" | "bad" | "neutral" {
+  switch (value) {
+    case "active":
+    case "connected":
+    case "setup_complete":
+    case "granted":
+      return "good"
+    case "connecting":
+    case "setup_pending":
+    case "waiting":
+    case "expected":
+    case "degraded":
+      return "warn"
+    case "error":
+    case "terminal_error":
+      return "bad"
+    default:
+      return "neutral"
+  }
+}
+
+function relayTone(status: string | null, consecutiveFailures: number): "good" | "warn" | "bad" | "neutral" {
+  if (status === "terminal_error") return "bad"
+  if (status === "degraded" || consecutiveFailures > 0) return "warn"
+  if (status === "active") return "good"
+  return statusTone(status)
 }
 
 function truncate(value: string, maxLength: number): string {

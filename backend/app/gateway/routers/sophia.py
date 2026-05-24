@@ -611,6 +611,35 @@ def _build_session_recap_payload(body: SessionEndRequest, ended_at: str) -> dict
     }
 
 
+def _build_session_end_response_from_recap(
+    body: SessionEndRequest,
+    recap_payload: dict,
+    status: str = "pipeline_queued",
+) -> SessionEndResponse:
+    ended_at = recap_payload.get("ended_at") if isinstance(recap_payload.get("ended_at"), str) else body.ended_at
+    started_at = recap_payload.get("started_at") if isinstance(recap_payload.get("started_at"), str) else body.started_at
+    turn_count = recap_payload.get("turn_count")
+    if not isinstance(turn_count, int):
+        turn_count = body.turn_count if body.turn_count is not None else len(body.messages)
+
+    recap_artifacts = recap_payload.get("recap_artifacts")
+    if not isinstance(recap_artifacts, dict):
+        recap_artifacts = None
+
+    duration_minutes = _compute_duration_minutes(started_at, ended_at)
+    debrief_prompt = _build_debrief_prompt(body, recap_artifacts, duration_minutes)
+    return SessionEndResponse(
+        status=status,
+        session_id=body.session_id,
+        ended_at=ended_at,
+        duration_minutes=duration_minutes,
+        turn_count=turn_count,
+        recap_artifacts=recap_artifacts,
+        offer_debrief=debrief_prompt is not None,
+        debrief_prompt=debrief_prompt,
+    )
+
+
 def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None:
     serialized_messages = [
         {
@@ -692,6 +721,25 @@ def _queue_offline_pipeline(
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+
+
+def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> None:
+    owner_user_id, record = _resolve_session_record_owner(user_id, session_id)
+    if record is None or record.status == "ended":
+        return
+
+    ended_record = _session_store.update(
+        owner_user_id,
+        session_id,
+        status="ended",
+        ended_at=ended_at,
+    )
+    if ended_record is None:
+        logger.warning(
+            "session.finalization failed_to_persist_session_end user_id=%s session_id=%s",
+            owner_user_id,
+            session_id,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1696,6 +1744,7 @@ async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
 )
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
+    ended_at = body.ended_at or datetime.now(UTC).isoformat()
 
     logger.info(
         "session.finalization end_session_request user_id=%s session_id=%s thread_id=%s message_count=%s has_recap_artifacts=%s",
@@ -1706,7 +1755,40 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         body.recap_artifacts is not None,
     )
 
-    ended_at = body.ended_at or datetime.now(UTC).isoformat()
+    try:
+        existing_recap = _read_session_recap(user_id, body.session_id)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning(
+            "session.finalization existing_recap_read_failed user_id=%s session_id=%s error=%s",
+            user_id,
+            body.session_id,
+            exc,
+        )
+        existing_recap = None
+
+    if isinstance(existing_recap, dict):
+        existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
+        _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
+        try:
+            from app.gateway.inactivity_watcher import unregister_thread
+            unregister_thread(body.thread_id)
+        except ImportError:
+            pass
+
+        logger.info(
+            "session.finalization duplicate_suppressed user_id=%s session_id=%s thread_id=%s duplicateFinalizationSuppressed=%s recapPipelineQueued=%s",
+            user_id,
+            body.session_id,
+            body.thread_id,
+            True,
+            False,
+        )
+        return _build_session_end_response_from_recap(
+            body,
+            existing_recap,
+            status="pipeline_queued",
+        )
+
     recap_payload = _build_session_recap_payload(body, ended_at)
     duration_minutes = _compute_duration_minutes(body.started_at, ended_at)
     turn_count = recap_payload.get("turn_count", 0)
@@ -1724,20 +1806,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
     except OSError as e:
         logger.warning("Failed to persist recap for %s/%s: %s", user_id, body.session_id, e)
 
-    owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
-    if record is not None and record.status != "ended":
-        ended_record = _session_store.update(
-            owner_user_id,
-            body.session_id,
-            status="ended",
-            ended_at=ended_at,
-        )
-        if ended_record is None:
-            logger.warning(
-                "session.finalization failed_to_persist_session_end user_id=%s session_id=%s",
-                owner_user_id,
-                body.session_id,
-            )
+    _mark_session_record_ended(user_id, body.session_id, ended_at)
 
     # Remove from inactivity tracking — session explicitly ended
     try:
@@ -1760,10 +1829,11 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             force_reprocess=True,
         )
         logger.info(
-            "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s",
+            "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s recapPipelineQueued=%s",
             user_id,
             body.session_id,
             body.thread_id,
+            True,
         )
         return SessionEndResponse(
             status="pipeline_queued",

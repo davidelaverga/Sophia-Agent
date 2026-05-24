@@ -66,6 +66,17 @@ def test_document_command_middleware_leaves_normal_chat_to_model():
     assert result is expected
 
 
+def test_reflection_artifact_request_does_not_fast_path_to_builder():
+    middleware = BuilderCommandMiddleware()
+    user_message = HumanMessage(content="Create a short reflection artifact.")
+    request = _make_request([user_message])
+    expected = AIMessage(content="Companion artifact path")
+
+    result = middleware.wrap_model_call(request, lambda _request: expected)
+
+    assert result is expected
+
+
 def test_document_command_middleware_routes_after_conversational_preamble():
     middleware = BuilderCommandMiddleware()
     user_message = HumanMessage(

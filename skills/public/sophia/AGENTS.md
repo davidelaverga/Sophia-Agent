@@ -11,6 +11,15 @@ It documents the **actual runtime contract** as implemented today. Any field, st
 
 Do not cross over. The companion cannot create files. The builder cannot hold the conversation.
 
+## Companion Artifact vs Builder Deliverable
+
+The word artifact has two meanings in this system. Do not collapse them.
+
+- **Companion artifact**: a lightweight `emit_artifact` record for Sophia's current turn: short reflection artifact, session takeaway, emotional/meta-assessment, internal orientation, or Presence artifact UI state. If the user asks to create or test a short reflection artifact, use `emit_artifact` and do NOT start Builder.
+- **Builder deliverable**: a user-facing output that takes async work: document, file, report, markdown draft, slides, presentation, visual report, frontend, research deliverable, or downloadable artifact. Use `start_builder_task` only for this class.
+
+Routing rule: short reflection artifact -> `emit_artifact`; document/file/report/build/downloadable deliverable -> Builder; ambiguous artifact wording -> ask one clarifying question instead of launching Builder.
+
 ## Data Contract
 
 ### Delegation call (`start_builder_task`)
@@ -27,7 +36,7 @@ start_builder_task(
 
 Before calling, the companion MUST have all specs. The builder cannot ask clarifying questions. The wrapper enriches the description with relevant memories from this session, current emotional context, active ritual, and explicit URLs the user provided — so a well-formed `description` need not repeat those.
 
-The wrapper returns immediately with a task_id; companion keeps talking to the user while the build runs in the background.
+The wrapper returns immediately with a real task_id; companion keeps talking to the user while the build runs in the background. For a fresh user request to create, build, generate, research, or present a user-facing deliverable such as a document, file, report, presentation, visual report, frontend, or downloadable artifact, call `start_builder_task` first. Do not call lifecycle tools before a task exists. For lightweight companion/session artifacts, use `emit_artifact` instead.
 
 ### Builder task lifecycle
 
@@ -56,12 +65,12 @@ Status semantics (terminal-status blacklist; default-active for forward-compat):
 
 ### Lifecycle tools (deepagents native)
 
-Once a task is running, the model has four lifecycle tools available:
+Once a task is running, the model has four lifecycle tools available. These tools require a real task_id returned by `start_builder_task` or recovered from `list_async_tasks` in the current trusted session. Never invent task IDs.
 
-- `check_async_task(task_id)` — fetch live status + result. Use only when the user asks "how's it going?" or after a clearly-long-enough wait. Do NOT poll on a timer; statuses cached in conversation history are stale.
-- `update_async_task(task_id, message)` — send new instructions to a running build (e.g. "actually, make it 2 slides not 5"). The thread_id stays the same; the builder picks up the update mid-run.
-- `cancel_async_task(task_id)` — stop a running build at the user's request.
-- `list_async_tasks(status_filter?)` — recall task_ids after context compaction or when the user references "that document we started".
+- `check_async_task(task_id)` — fetch live status + result. Use only with a real tracked task_id, only when the user asks "how's it going?" or after a clearly-long-enough wait. Do NOT poll on a timer; statuses cached in conversation history are stale.
+- `update_async_task(task_id, message)` — send new instructions to a running build (e.g. "actually, make it 2 slides not 5"). Use only with a real tracked task_id. The thread_id stays the same; the builder picks up the update mid-run.
+- `cancel_async_task(task_id)` — stop a running build at the user's request. Use only with a real tracked task_id.
+- `list_async_tasks(status_filter?)` — recall task_ids after context compaction or when the user references "that document we started". Do not use it instead of `start_builder_task` for a new build request.
 
 When `check_async_task` returns `status="success"`, the result is included in the response. The companion presents the deliverable in Sophia's voice using `companion_summary` / `companion_tone_hint` from the artifact metadata produced by `emit_builder_artifact`.
 

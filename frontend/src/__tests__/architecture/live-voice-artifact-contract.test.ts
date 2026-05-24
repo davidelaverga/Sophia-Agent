@@ -85,7 +85,91 @@ describe('live voice artifact contract', () => {
       capturedOptions?.onArtifacts?.(artifactPayload);
     });
 
-    expect(ingestArtifacts).toHaveBeenCalledWith(artifactPayload, 'voice');
+    const { reflection: ignoredReflection, ...expectedArtifactPayload } = artifactPayload;
+    expect(ignoredReflection).toBeNull();
+    expect(ingestArtifacts).toHaveBeenCalledWith(expectedArtifactPayload, 'voice');
+  });
+
+  it('drops stringified null reflection values before canonical voice artifact ingestion', () => {
+    let capturedOptions: CapturedVoiceOptions | undefined;
+
+    useStreamVoiceSessionMock.mockImplementation((userId: string, options: CapturedVoiceOptions) => {
+      capturedOptions = options;
+      return makeVoiceState();
+    });
+
+    const ingestArtifacts = vi.fn();
+
+    renderHook(() =>
+      useCompanionVoiceRuntime({
+        userId: 'user-1',
+        sessionId: 'session-1',
+        onUserTranscriptFallback: vi.fn(),
+        appendAssistantMessage: vi.fn(),
+        ingestArtifacts,
+        onRateLimitError: vi.fn(),
+        sendMessage: vi.fn(async () => undefined),
+        latestAssistantMessage: undefined,
+        isTyping: false,
+      })
+    );
+
+    act(() => {
+      capturedOptions?.onArtifacts?.({
+        takeaway: 'The user stayed with the feeling instead of bailing out.',
+        reflection: 'null',
+        tone_estimate: 2.0,
+        voice_speed: 'gentle',
+      });
+    });
+
+    expect(ingestArtifacts).toHaveBeenCalledWith(
+      {
+        takeaway: 'The user stayed with the feeling instead of bailing out.',
+        tone_estimate: 2.0,
+        voice_speed: 'gentle',
+      },
+      'voice',
+    );
+  });
+
+  it('unwraps nested live sophia.artifact envelopes before voice artifact ingestion', () => {
+    let capturedOptions: CapturedVoiceOptions | undefined;
+
+    useStreamVoiceSessionMock.mockImplementation((userId: string, options: CapturedVoiceOptions) => {
+      capturedOptions = options;
+      return makeVoiceState();
+    });
+
+    const ingestArtifacts = vi.fn();
+
+    renderHook(() =>
+      useCompanionVoiceRuntime({
+        userId: 'user-1',
+        sessionId: 'session-1',
+        onUserTranscriptFallback: vi.fn(),
+        appendAssistantMessage: vi.fn(),
+        ingestArtifacts,
+        onRateLimitError: vi.fn(),
+        sendMessage: vi.fn(async () => undefined),
+        latestAssistantMessage: undefined,
+        isTyping: false,
+      })
+    );
+
+    const canonicalArtifact = {
+      session_goal: 'Week 1 voice proof',
+      takeaway: 'The user stayed with the feeling instead of bailing out.',
+      reflection: 'What got easier when you stopped pushing it away?',
+      tone_estimate: 2.0,
+      voice_speed: 'gentle',
+    };
+
+    act(() => {
+      capturedOptions?.onArtifacts?.({ artifact: canonicalArtifact });
+    });
+
+    expect(ingestArtifacts).toHaveBeenCalledWith(canonicalArtifact, 'voice');
   });
 
   it('routes final live transcript events into the canonical assistant message append path', () => {

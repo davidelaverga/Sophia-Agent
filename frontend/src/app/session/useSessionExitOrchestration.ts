@@ -19,6 +19,7 @@ type UseSessionExitOrchestrationParams = {
   isReadOnly: boolean;
   isSophiaResponding: boolean;
   stopStreaming: () => void;
+  stopVoiceTransport?: () => Promise<void> | void;
   setEnding: (isEnding: boolean) => void;
   sessionId: string;
   sessionStartedAt?: string;
@@ -52,6 +53,7 @@ export function useSessionExitOrchestration({
   isReadOnly,
   isSophiaResponding,
   stopStreaming,
+  stopVoiceTransport,
   setEnding,
   sessionId,
   sessionStartedAt,
@@ -93,6 +95,7 @@ export function useSessionExitOrchestration({
     isReadOnly,
     isSophiaResponding,
     stopStreaming,
+    stopVoiceTransport,
     setEnding,
     sessionId,
     sessionStartedAt,

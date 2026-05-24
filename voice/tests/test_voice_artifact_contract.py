@@ -269,6 +269,9 @@ async def test_create_agent_wires_llm_to_stream_custom_events(monkeypatch) -> No
         def note_first_text_emitted(self, user_id: str) -> None:
             return None
 
+        def note_backend_progress(self, user_id: str) -> None:
+            return None
+
     class FakeRhythmTracker:
         def __init__(self, **kwargs) -> None:  # noqa: ANN003
             return None
@@ -484,6 +487,9 @@ async def test_create_agent_skips_non_substantive_simple_response(monkeypatch) -
             return None
 
         def note_first_text_emitted(self, user_id: str) -> None:
+            return None
+
+        def note_backend_progress(self, user_id: str) -> None:
             return None
 
         def note_continuation_handling(self, user_id: str | None) -> None:

@@ -26,6 +26,121 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-05-24 · [voice-session-finalization-contract] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | backend · **Spec:** `docs/specs/03_memory_system.md`, `docs/specs/04_backend_integration.md`
+
+### What Changed
+- Routed intentional voice session end through the canonical Sophia end-session finalizer before voice transport cleanup.
+- Added an explicit cleanup-only `stopVoiceTransport()` hook surface for voice transport teardown.
+- Added backend duplicate suppression so an already-persisted recap envelope does not queue the offline pipeline again.
+- Documented the Phase 12.6E session finalization contract and updated realtime/common-pitfall notes.
+
+### What We Learned
+- The safest fix is to preserve transport disconnect as cleanup-only and make user intent explicit at the Session exit flow boundary.
+- Recap envelope existence is a narrow practical idempotency signal for duplicate explicit finalization attempts.
+- Mic stop, hook cleanup, provider teardown, and previous-session cleanup must stay separate from recap/offline finalization.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
+## 2026-05-24 · [memory-recap-system-audit] · PR #TBD
+**Author:** GitHub Copilot · **Track:** backend | frontend | voice · **Spec:** `docs/specs/03_memory_system.md`, `docs/specs/04_backend_integration.md`
+
+### What Changed
+- Added a docs-only deep audit of the memory recap system before realtime voice mainline migration.
+- Mapped explicit Sophia end-session, legacy session end, Stream voice disconnect, Gemini production disconnect, and dogfood disconnect paths.
+- Documented recap/Mem0 review state ownership, async hydration races, review persistence semantics, observability gaps, and test coverage gaps.
+- Added a realtime runtime contract note that provider disconnect is transport cleanup unless it explicitly invokes canonical session finalization.
+
+### What We Learned
+- The healthy path is explicit Sophia `end-session`: it persists recap, unregisters idle tracking, synthesizes thread state from request messages/artifacts, and queues the offline pipeline.
+- Voice provider disconnect is currently transport-only. The Session UI end controls and voice command do call the finalizer, but hook cleanup, mic stop, previous-session cleanup, and provider disconnect routes do not.
+- Approve/edit in recap are local review decisions until the final save action; discard is immediate for real Mem0 ids; Journal refreshes on mount rather than via live invalidation.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
+## 2026-05-24 · [gemini-barge-in-transcript-handoff] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | voice | backend · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
+
+### What Changed
+- Promoted confirmed Gemini barge-in `inputTranscription` text into the visible current user turn and dispatched it through the active Gemini Live WebSocket as a native text turn.
+- Added duplicate suppression for repeated provider transcription frames and later public `sophia.user_transcript` echoes of the same promoted barge-in text.
+- Added barge-in transcript handoff diagnostics, metrics panel rows, telemetry report fields, and turn-capture counts for captured/promoted/ignored/duplicate/dispatch state.
+- Preserved Gemini relay source metadata through the gateway to the voice runtime for both dogfood and production relay routes.
+
+### What We Learned
+- Public `sophia.user_transcript` continuity is not automatically provider-visible Gemini conversation continuity. A confirmed barge-in transcript needs an explicit native Live turn dispatch.
+- Intent-gated suppression solved the cutoff problem, but the follow-up failure was a handoff gap rather than another stale assistant-tail bug.
+- Relay ordering metadata must survive the gateway proxy; otherwise browser-source diagnostics and backend normalization can diverge on the events used to prove turn continuity.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
+## 2026-05-24 · [gemini-barge-in-intent-gating] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | voice · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
+
+### What Changed
+- Removed raw Gemini mic-frame count/duration as a barge-in confirmation path in the browser Live runtime.
+- Confirmed stale-output suppression only from provider interruption, explicit manual/local interrupt, or conservative provider input transcription with real text after assistant output begins.
+- Kept provider interruption as the strong playback-flush path while letting provider input transcription fence future old-generation chunks without retroactively flushing already scheduled audio.
+- Added diagnostics for confirmation source/reason, candidate frames that did not confirm, candidate expiry, suppression blocked for lack of intent, and raw vs confirmed assistant/user overlap.
+
+### What We Learned
+- Phase 12.6D stopped stale repetition, and 12.6D-B separated candidate from confirmed state, but the remaining frame-count confirmation still over-classified residual mic activity.
+- `inputFrameOnlyNotBargeInCount=0` is a useful red flag: it means raw frames are not being retained as benign candidates.
+- Raw mic overlap and confirmed barge-in overlap must be separate telemetry dimensions; high raw overlap can be harmless when no user intent is confirmed.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
+## 2026-05-24 · [gemini-barge-in-guard-sensitivity] · PR #TBD
+**Author:** GitHub Copilot · **Track:** frontend | voice · **Spec:** `docs/architecture/sophia-realtime-runtime-contract.md`
+
+### What Changed
+- Hotfixed the Phase 12.6D Gemini stale-output guard so raw `input_audio_frame_sent` diagnostics are candidate evidence only, not confirmed barge-in.
+- Required provider interruption, explicit playback flush, provider input transcription, or sustained input audio before arming stale-output suppression and dropping assistant audio.
+- Added candidate/confirmed diagnostics for `userInputActiveAgeMs`, `bargeInConfirmed`, `bargeInCandidateFrameCount`, `suppressionDeferredReason`, `staleSuppressionArmedAt`, `staleSuppressionArmedBy`, `assistantAudioDropReason`, and `inputFrameOnlyNotBargeInCount`.
+- Updated frontend tests and telemetry summaries while preserving artifact/tool lifecycle, B4 artifact reconciliation, and the existing realtime voice tool surface.
+
+### What We Learned
+- Phase 12.6D correctly stopped stale repetition, but its local browser guard over-classified residual mic frames as barge-in. The smoke telemetry showed healthy tool/artifact lifecycle (`toolResponseCount=3`, `unresolvedToolCallCount=0`, `artifactCountMismatch=false`) alongside playback over-suppression (`assistantUserOverlapMs=23583`, `staleAssistantOutputSuppressionCount=30`).
+- Assistant/user overlap must close when playback is flushed; otherwise a stale candidate can keep aging long after audio has stopped.
+- `input_audio_frame_sent` is transport evidence, not user intent. Confirmation needs a stronger signal or sustained frames.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A - no prompt or skill files changed.
+
 ## 2026-05-22 · [companion-builder-lifecycle-discipline] · PR #129
 **Author:** Claude Code (with Davide) · **Track:** backend · **Spec:** `~/.claude/plans/users-davidelaverga-desktop-subagents-a-woolly-haven.md` (PR #129 + Phase 2A–2F)
 
@@ -129,6 +244,1463 @@ We shipped 28+ commits across Phase 4 with `quality_signal` deltas all within to
 - **Restore bash visibility for legitimate generator-script execution** (chart-visualization, ppt-generation): if the blank-stream trade-off becomes noticeable on binary-deliverable workflows, swap the blanket `_HIDDEN_TOOLS` entry for a command-pattern heuristic (hide only heredocs / `python -c` / `echo > …`).
 
 ---
+## 2026-05-24 · [gemini-barge-in-stale-output-suppression] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** Phase 12.6D Gemini barge-in stale-output suppression
+
+### What Changed
+- Added generation-aware Gemini playback flushing and stale assistant audio/transcript suppression after user barge-in or provider interruption.
+- Made frontend assistant transcript ingestion remember interrupted response/segment keys and reject queued pre-barge-in fragments.
+- Made `SophiaEventNormalizer` close the active assistant response on user input and reject later transcript mutations for closed/interrupted responses.
+- Added telemetry/report/panel diagnostics for stale output suppression, assistant/user overlap, relay backlog, playback generation, and unresolved Gemini tool calls.
+- Added focused frontend and backend tests plus the Phase 12.6D audit documentation.
+
+### What We Learned
+- Stopping active PCM sources is not enough; queued or late provider output needs a playback generation fence.
+- Source-sequence stale guards are insufficient after interruption because stale continuations can arrive with higher source sequences.
+- Resetting transcript guards on interruption loses the exact state needed to reject stale assistant tails.
+- Artifact reconciliation must keep using public validated artifacts, not raw Gemini tool-call attempts, especially when interruption cancels tool calls.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (transport/ingestion/diagnostics/docs/tests only; no Sophia prompt files, skills, crisis behavior, artifact schema, Builder, memory, VAD, or provider routing changed).
+
+## 2026-05-23 · [voice-skill-slow-state-seed] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** Phase 12.6C skill slow-state seed contract
+
+### What Changed
+- Added a dynamic `### Voice Skill State` seed block for realtime voice setup instructions.
+- Conditioned `challenging_growth` and default posture with conservative trust/session/pattern defaults while leaving the model as the live emotional reader.
+- Wired Gemini setup to append the seed after authenticated user context and before the Gemini spoken-turn overlay.
+- Added OpenAI/GPT Realtime code-path readiness so default dogfood instructions and session configs can carry the same seed.
+- Added focused seed rendering/setup tests and updated the runtime docs, common pitfalls, audit trail, prompt render helper, and rendered Gemini prompt debug doc.
+
+### What We Learned
+- Phase 12.6A's baked skill repertoire needed a dynamic setup seed to make the in-bounds promise operational.
+- The current realtime path has bounded identity/handoff/memory setup context, but no reliable full trust analytics; unknown state must stay conservative.
+- Recurring-pattern evidence can be surfaced from already-fetched bounded setup memories without adding per-turn or extra Mem0 calls.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- Realtime voice prompt before behavior: the stable repertoire said a session seed may constrain in-bounds skills, but setup did not always provide the slow-state gate.
+- Realtime voice prompt after behavior: setup includes a dynamic slow-state seed with conservative defaults; the stable repertoire now states the dynamic seed tells Sophia which modes are in bounds.
+- `tone_delta`: not measurable in this implementation phase.
+- Trace pair available: no.
+
+## 2026-05-23 · [voice-transcript-fidelity-diagnostics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** Phase 12.6B spoken assistant transcript fidelity audit
+
+### What Changed
+- Added `turnCaptureDiagnostics.version = 2` with compact assistant audio/provider transcript/public transcript evidence windows and warnings.
+- Added bounded Gemini provider `responseId` telemetry when the raw provider event exposes one.
+- Added focused frontend telemetry tests and backend normalizer metadata coverage for assistant transcript evidence.
+- Documented that the 12.6A crisis smoke should be interpreted as transcript audit-fidelity failure, not spoken crisis prompt failure, unless future evidence proves otherwise.
+
+### What We Learned
+- The inspected 12.6A report retained only the final current-run slice, after the crisis turn, so it cannot prove what the public crisis transcript path did.
+- The retained slice shows provider output transcription and audio can exist while public captions arrive seconds later, remain partial-only, and lack response/source metadata.
+- High relay latency, interruptions/playback flushes, and export scoping must be separated before diagnosing prompt behavior.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (diagnostics/docs/tests only; no Sophia prompt files, skills, crisis behavior, artifact schema, Builder, memory, VAD, or provider routing changed).
+
+## 2026-05-23 · [voice-emotional-skills-prompt] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** `sophia_voice_system_prompt_spec_v1.md` + `sophia_voice_skills_and_crisis_spec_v1.md`
+
+### What Changed
+- Added the eight Sophia emotional skill modes directly to the realtime voice prompt as a cached in-context repertoire.
+- Kept the Gemini voice tool surface to existing tools only: `emit_artifact`, builder lifecycle tools, and `retrieve_memories`; `consult_skill` remains absent.
+- Updated voice artifact prompt wording so `skill_loaded` means the mode Sophia is in this turn, not a tool-call record.
+- Replaced crisis-as-loaded-skill wording with in-prompt crisis override behavior and minimal crisis acknowledgment wording, without changing artifact schema.
+- Added focused prompt/tool-surface tests and updated the rendered Gemini prompt debug doc.
+
+### What We Learned
+- The clean B4 worktree already avoided declaring `consult_skill`, but it also lacked the baked eight-skill repertoire in realtime prompt assembly.
+- The right implementation point is a stable prompt block before dynamic platform/context/ritual/user seed material, plus source-list coverage so Gemini setup parity tests can see it.
+- The current 13-field artifact schema cannot implement a one-field crisis signal yet; this phase keeps that as prompt/docs wording and defers schema/tool support.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None; existing skill files were read as source material but not changed.
+
+### GEPA Log Entry
+- Realtime voice prompt before behavior: Sophia had core identity/voice/techniques but no cached emotional skills repertoire, and artifact wording described `skill_loaded` as injected skill visibility.
+- Realtime voice prompt after behavior: Sophia holds all eight emotional skills in context, crisis is an in-prompt override, and `skill_loaded` is self-observed mode.
+- `tone_delta`: not measurable in this implementation phase.
+- Trace pair available: no.
+
+## 2026-05-22 · [working-tree-cleanup-before-12-5c-b] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** repo hygiene + docs · **Spec:** Phase 12.5C-Prep cleanup request
+
+### What Changed
+- Created cleanup branch `cleanup/working-tree-hygiene-before-12-5c-b` from `audit/conversation-context-artifact-orientation-phase-12-5c` without touching `main`.
+- Inventoried the dirty migration working tree before Phase 12.5C-B and documented keep/review/cleanup decisions in `docs/audits/working-tree-cleanup-before-12-5c-b.md`.
+- Removed only exact ignored cache directories (`.pytest_cache/`, `.ruff_cache/`) and added a narrow generated telemetry zip ignore alongside the existing telemetry JSON ignore.
+
+### What We Learned
+- The visible dirty tree is mostly legitimate migration source, tests, and audit/spec documentation; runtime `users/` artifacts and deleted tracked session files need human review before deletion.
+- Local generated telemetry exports were already handled for JSON by the Phase 12.5B-E ignore rule; zip exports need the same narrow generated-prefix treatment.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (cleanup/hygiene only; no Sophia prompt files, runtime routing, VAD, memory behavior, artifact behavior, builder behavior, or tool behavior changed).
+
+## 2026-05-22 · [conversation-context-artifact-orientation] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** specs/sophia_voice_context_engineering_spec_v1.md + specs/sophia_artifact_traces_architecture_v1.md
+
+### What Changed
+- Added Phase 12.5C docs-only design report at `docs/audits/conversation-context-artifact-orientation-phase-12-5c.md` mapping text companion checkpointer/middleware context to realtime replacements.
+- Separated GPT Realtime default-conversation assumptions from Gemini Live setup/toolResponse realities.
+- Defined a latest-only compact artifact-orientation policy and documented reconnect/reseed contents without changing runtime code or artifact schema.
+- Updated realtime runtime contract and common pitfalls with guardrails against full per-turn context replay, full artifact history injection, and treating public `sophia.artifact` events as provider-visible model context.
+
+### What We Learned
+- The text companion's `previous_artifact` is stored in LangGraph state and conditionally re-injected, but current realtime paths only prove public artifact observation, not next-turn provider model visibility.
+- GPT Realtime is the cleaner conceptual fit for artifact trails because function calls/outputs can live in the default conversation, but the repo still needs a live proof harness.
+- Gemini Live returns backend `toolResponse` through the browser WSS, yet public `sophia.*` events and frontend Presence state are not automatic provider context.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (docs-only design phase; no Sophia prompt skill files, runtime defaults, VAD settings, tool behavior, artifact schemas, memory writeback, provider routing, or Builder storage/UI changed).
+
+## 2026-05-22 · [memory-attribution-current-session-boundary] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + frontend + docs · **Spec:** specs/sophia_voice_runtime_and_tools_spec_v1.md + specs/sophia_voice_context_engineering_spec_v1.md
+
+### What Changed
+- Added safe attribution metadata to realtime `retrieve_memories(query)` diagnostics: query fingerprint/length, result fingerprints, term-match counts, `has_results`, and explicit raw-query/raw-memory exclusion flags.
+- Strengthened success/no-results guidance so Sophia answers directly from a matching returned memory, but treats user-revealed answers after no match as current-session knowledge only.
+- Redacted browser Gemini tool-loop diagnostics and current-run telemetry exports so raw memory text remains in the actual Gemini `toolResponse` only, not diagnostic capture events.
+- Carried safe memory attribution through backend Gemini reliability diagnostics and documented the Phase 12.5B-E classification matrix.
+
+### What We Learned
+- A successful tool call is not enough to classify recall failure; diagnostics need to show whether returned results plausibly matched the query.
+- Backend-only redaction is insufficient if the browser captures the raw function response for telemetry.
+- Setup/name continuity and current-session learning need explicit language, or live voice can overclaim durable stored memory.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no Sophia skill files changed; realtime prompt assembly was narrowly strengthened for current-session memory boundaries, with no artifact schema, VAD, runtime default, provider routing, writeback, or Builder storage/UI changes).
+
+## 2026-05-22 · [realtime-memory-routing-epistemics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + docs · **Spec:** specs/sophia_voice_runtime_and_tools_spec_v1.md + specs/sophia_voice_context_engineering_spec_v1.md
+
+### What Changed
+- Strengthened realtime `retrieve_memories(query)` routing guidance for explicit recall, repeated specific recall, and negative cases such as greetings, current-session facts, and `what is my name?` when setup context already has the preferred name.
+- Added compact realtime memory epistemics guidance distinguishing stored memory, setup context, current-session context, inference/guess, `no_results`, and unavailable/error states.
+- Made realtime memory tool result guidance status-specific so `no_results` is not confused with provider failure, and provider failure is not phrased as absent memory.
+- Clarified Gemini setup context wording so identity/handoff context is not mislabeled as stored memory.
+- Documented Phase 12.5B-D and added focused tests for declaration text, result guidance, Gemini prompt/setup behavior, diagnostics, and OpenAI query-only schema compatibility.
+
+### What We Learned
+- Once provider availability was fixed, the next failure mode was model routing and epistemic labeling rather than Mem0 reachability.
+- Broad memory recall does not reliably cover later specific recall unless the model is explicitly told that the later question is a new focused retrieval opportunity.
+- Missing-memory and hint/guess flows need explicit wording; otherwise the model can turn a user-provided answer into a false `I knew it` moment.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no Sophia skill files changed; realtime prompt assembly added a narrow memory guidance block, with no artifact schema, VAD, runtime default, provider routing, writeback, or Builder storage/UI changes).
+
+## 2026-05-22 · [realtime-memory-tool-availability] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + docs · **Spec:** specs/sophia_voice_runtime_and_tools_spec_v1.md + specs/sophia_voice_context_engineering_spec_v1.md
+
+### What Changed
+- Made the shared Mem0 wrapper importable from slim realtime voice runtimes without `cachetools` and added an SDK-free REST fallback for read-only search when `MEM0_API_KEY` plus `httpx` are available.
+- Added safe provider status/reason/search diagnostics and wired realtime `retrieve_memories(query)` to distinguish `success`, `no_results`, `unavailable`, `error`, and `invalid_query`.
+- Aligned Gemini setup-time memory context with the same shared provider helper and added safe provider reason diagnostics so identity/handoff continuity is not mistaken for Mem0 reachability.
+- Strengthened the query-only recall description and Gemini diagnostics while continuing to ignore model-supplied `user_id`, categories, filters, and provider controls.
+- Documented Phase 12.5B-C in the realtime runtime contract, common pitfalls, and a dedicated audit report.
+
+### What We Learned
+- Backend Mem0 health does not prove voice realtime Mem0 health; the voice runtime can have different dependencies and env loading.
+- Setup-time preferred-name continuity can come from local identity/handoff files even when Mem0 search is unavailable.
+- A list-returning search helper cannot distinguish provider-reachable zero matches from swallowed provider exceptions; realtime needs status-aware search diagnostics.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt skill files changed; no artifact schema, VAD, runtime default, provider routing, or Builder storage/UI changes).
+
+## 2026-05-21 · [realtime-retrieve-memories-tool] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + docs · **Spec:** specs/sophia_voice_runtime_and_tools_spec_v1.md + specs/sophia_voice_context_engineering_spec_v1.md
+
+### What Changed
+- Added a dependency-safe shared `retrieve_memories` contract/core for realtime voice while preserving the existing LangChain text companion wrapper.
+- Exposed query-only Gemini Live `retrieve_memories` declarations and backend relay execution with trusted session `user_id` binding.
+- Added a tested OpenAI function-schema conversion for a later GPT Realtime wiring phase without advertising the tool on OpenAI routes yet.
+- Added privacy-minimized diagnostics and disabled raw Mem0 content-preview logging for realtime memory calls.
+- Documented Phase 12.5B-B in the realtime runtime contract, common pitfalls, and a dedicated audit report.
+
+### What We Learned
+- The text companion can keep its category-aware LangChain shape while realtime providers receive only the smaller query-only surface.
+- Gemini's existing tool relay was the right first integration point because it already owns trusted session identity and `toolResponse.functionResponses` send-back.
+- Diagnostics needed a special redacted path because the generic Gemini tool diagnostic copied the full tool response, which would have duplicated memory text.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt skill files changed; no artifact schema, VAD, runtime default, or provider routing changes).
+
+## 2026-05-21 · [sophia-voice-spec-alignment-audit] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** specs/sophia_voice_runtime_and_tools_spec_v1.md + specs/sophia_voice_system_prompt_spec_v1.md + specs/sophia_voice_context_engineering_spec_v1.md + specs/sophia_artifact_traces_architecture_v1.md
+
+### What Changed
+- Added Phase 12.5B-A docs-only audit at `docs/audits/sophia-voice-spec-alignment-phase-12-5b-a.md` comparing the new Sophia Voice spec set against the current Gemini Live, OpenAI/GPT Realtime, memory, artifact, and builder implementation surfaces.
+- Documented that the new target is stable prompt + dynamic session seed + native provider conversation + narrow function tools + offline writeback, not a full text-companion middleware clone.
+- Identified `retrieve_memories(query)` as the safest first implementation slice and deferred skill/time/wait tools, artifact schema migration, VAD tuning, builder traces, provider defaults, and routing changes.
+- Updated realtime runtime contract and common pitfalls with Phase 12.5B-A provider-specific implications.
+
+### What We Learned
+- Current Gemini Live is more wired than GPT Realtime in this repo, but Gemini setup immutability and browser-relay semantics mean GPT default-conversation assumptions cannot be copied over blindly.
+- Current `retrieve_memories` is still text-companion/LangChain-shaped: query plus categories, closure-bound user id, and up to 15 bullet lines. It needs a dependency-safe query-only realtime core before provider promotion.
+- The 15-field artifact and builder per-step trace specs are larger schema/storage/UI migrations and should not be mixed into the memory-tool phase.
+- The new prompt spec's crisis-turn artifact exception conflicts with the older every-turn artifact hard rule and needs explicit sign-off before artifact work.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (docs-only audit; no prompt skill files, runtime defaults, VAD settings, tool behavior, artifact schemas, or provider routing changed).
+
+## 2026-05-21 · [realtime-context-value-decision] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added Phase 12.5A decision report at `docs/audits/realtime-context-value-decision-phase-12-5a.md` for Davide and the team before continuing Gemini Live / GPT Realtime parity work.
+- Classified legacy cascade and native realtime context capabilities as setup context, bounded setup context, on-demand tool, sideband/asynchronous, backend/UI-only, outside realtime, harmful, or unknown/needs tests.
+- Documented the recommended strategy: selective realtime parity through trusted bounded setup context, on-demand memory/profile tools, sideband memory/session persistence, and structured artifact/builder bridges instead of full cascade-in-the-loop parity.
+- Updated realtime pitfalls and runtime-contract docs to preserve this boundary before any future implementation phase.
+
+### What We Learned
+- Legacy cascade parity is not one feature; it is a stateful middleware chain plus tools, artifact capture, builder lifecycle, Mem0 retrieval/writeback, telemetry, and offline side effects.
+- Gemini Live already has useful setup-time memory/profile parity, but setup immutability makes full per-turn middleware parity a poor default fit.
+- Native realtime voice can regress if the team optimizes for full internal parity instead of the smallest high-value context needed for the spoken turn.
+- GPT Realtime should be evaluated under the same context policy, but provider-specific claims still need direct dogfood evidence.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (docs-only decision phase; no prompt skill files, canonical identity files, runtime defaults, VAD settings, or tool behavior changed).
+
+## 2026-05-21 · [gemini-transcript-coalescing-correctness] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Implemented Phase 12.4K-B after the failed Phase 12.4K live smoke by treating raw Gemini `serverContent.outputTranscription` fragments as non-droppable ordered critical events.
+- Kept the explicit ordered browser relay queue, provider receive metadata, contiguous send-time relay sequence metadata, stale transcript guards, and relay throughput telemetry.
+- Disabled raw assistant transcript coalescing and exposed `transcriptCoalescingDisabledReason: "provider_output_transcription_is_delta_like"` in throughput telemetry.
+- Rewrote the unsafe coalescing regression test around ordered delta-like fragments and added coverage for user transcript, tool call, tool cancellation, and turn-boundary non-droppability behind a blocked transcript relay.
+
+### What We Learned
+- The Phase 12.4K assumption was wrong for the observed production run: Gemini non-final output transcription behaved like ordered delta fragments, not replaceable cumulative snapshots.
+- Dropping pending raw transcript fragments before backend assembly can preserve relay sequence contiguity while destroying semantic content, producing sparse scrambled captions.
+- Future caption-latency work needs an app-owned source-ordered cumulative assembler before any coalescing can be safe.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt skill files changed; no spoken policy, memory, artifact, VAD, or runtime-default behavior changed).
+
+## 2026-05-21 · [gemini-ordered-relay-caption-throughput] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + backend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Implemented Phase 12.4K after Phase 12.4M by replacing the Gemini browser ordered relay promise tail with an explicit queue that coalesces pending non-final assistant `outputTranscription` partial snapshots.
+- Moved `provider_relay_sequence` assignment to send time so coalesced partials never create gaps in the backend's contiguous relay-order buffer.
+- Kept final assistant transcript boundaries, user transcripts, tool calls, tool cancellations, interruptions, setup/lifecycle events, errors, and turn boundaries non-droppable.
+- Added relay throughput/coalescing telemetry to connector traces, Session runtime telemetry, derived developer metrics, and scoped telemetry reports, plus Gemini-only faster caption pacing.
+- Added frontend relay regression tests and a backend normalizer test proving increasing non-contiguous transcript source sequences are accepted while stale lower sequences are rejected.
+
+### What We Learned
+- Phase 12.4G-B fixed correctness, but strict FIFO relay of every assistant partial could still make captions feel stale when old replaceable snapshots sat ahead of newer snapshots.
+- The safe optimization boundary is before relay sequence assignment: dropping pending partials locally is safe only if skipped snapshots never receive `provider_relay_sequence` values.
+- Gemini source sequences can legitimately have gaps after browser coalescing; normalizer correctness depends on monotonic increase, not contiguity.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt skill files changed; no spoken policy, memory, artifact, VAD, or runtime-default behavior changed).
+
+## 2026-05-21 · [gemini-memory-parity-artifact-contract] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + backend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Implemented Phase 12.4M by adding setup-time Gemini Live user context from the authenticated user id: preferred name, bounded identity excerpt, bounded latest handoff excerpt, and up to four bounded Mem0 snippets when Mem0 is configured.
+- Wired compact memory-context diagnostics into Gemini browser setup payloads and relay diagnostics without raw memory text.
+- Hardened `emit_artifact` reflection handling so stringified null values are normalized to absent across backend validation, Sophia artifact capture, Gemini artifact mapping, frontend live parsing, merge/status helpers, Presence panel rendering, and recap adapter mapping.
+- Added focused Python and frontend tests for memory-context injection/diagnostics and `reflection: "null"` handling.
+- Documented that no VAD, `realtimeInputConfig`, relay throughput/order, runtime default, Builder storage UI, or canonical identity files changed.
+
+### What We Learned
+- Legacy cascade memory parity is not only prompt-file parity: the cascade reaches `UserIdentityMiddleware`, `SessionStateMiddleware`, and `Mem0MemoryMiddleware` through DeerFlow, while Gemini Live needs setup-time continuity because the Live setup message is immutable after session start.
+- Preferred-name continuity can be restored safely from stored user files without rewriting identity files or trusting model/tool arguments.
+- Artifact UI readiness must treat stringified nulls as absent at every contract boundary; fixing only the visual component leaves stale/persisted payloads able to reintroduce fake reflections.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt skill files changed; Gemini setup composition changed by adding bounded stored user context before the existing Gemini spoken overlay).
+
+## 2026-05-21 · [gemini-spoken-intent-deictic-policy] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Implemented Phase 12.4L by strengthening the Gemini Live-only spoken turn policy overlay for one-intent turns, hearing checks, anti-assumption behavior, recommendation/focus prompts, deictic references, filler/setup phrases, and artifact/tool non-verbalization.
+- Kept the base Sophia realtime prompt and canonical skill files overlay-free; `soul.md` and other identity files were not edited.
+- Updated focused prompt, dogfood, production setup, and debug-rendered prompt assertions for the strengthened overlay.
+- Documented that this phase changed no VAD, `realtimeInputConfig`, relay throughput/order, frontend suppression, tool behavior, runtime default, or Builder storage/output UI.
+
+### What We Learned
+- The Phase 12.4J evidence run keeps pointing at provider-level spoken policy for complete-input cases: Gemini can obey shortness while still binding `what I just said` to too broad a topic unless the Live overlay says how to resolve the latest meaningful user content.
+- Hearing checks need explicit anti-assumption language because the full Sophia context can otherwise pull Gemini into gaming/session-prep phrasing even when the user only checked the connection.
+- Setup/filler phrases need to be named directly so Live native audio does not treat `quick question before I go` or `um` as the actionable request when a deictic reflection follows.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- Gemini Live spoken overlay: before behavior → one-intent/max-one-question guidance without explicit deictic, filler/setup, or gaming/session anti-assumption policy; after behavior → explicit latest-meaningful-user-content resolution, hearing-check anti-assumption rules, one-clarifier recommendation policy, and artifact/tool non-verbalization. tone_delta not measured; trace pair available: Phase 12.4J evidence run yes, no scored tone pair.
+
+## 2026-05-21 · [gemini-turn-capture-evidence] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Implemented Phase 12.4J as a compact current-run `turnCaptureDiagnostics` section in the Session voice telemetry export.
+- Added browser Gemini input-audio activity capture for sampled microphone frame sends, manual mute/unmute, stream pause, and actual `audioStreamEnd` sends without exporting raw audio.
+- Preserved provider source metadata on public `sophia.user_transcript` events when Gemini input transcription arrives with source/correlation metadata.
+- Added focused frontend and Python tests for report scoping, diagnostic evidence, audio privacy, connector callbacks, and user-transcript metadata propagation.
+- Documented how to interpret the harness before changing VAD, prompts, runtime policy, or tool/artifact behavior.
+
+### What We Learned
+- The useful diagnostic boundary is the current-run export, not a broader app-state dump: provider correlation, public `sophia.*` evidence, mic boundaries, and tool ledgers are enough to classify the failure layer.
+- Aggregate provider or public counts are too blunt for wrong-intent Gemini turns; the timeline needs source sequence, correlation id, and recent transcript previews.
+- Browser microphone evidence can stay privacy-safe by logging only sampled frame metadata and explicit `audioStreamEnd` markers.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-21 · [gemini-turn-capture-intent-continuity] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Investigated Phase 12.4I as a docs-only forensic pass after the Gemini spoken turn policy overlay.
+- Audited Gemini setup, frontend browser Live WSS/audio handling, Session `sophia.*` ingestion, backend relay ordering, tool-call cancellation suppression, and public normalizer behavior.
+- Documented that the reported reflection failure is a turn-capture/intent-continuity class, not only over-continuation: the reply was short but appeared to miss the antecedent for `what I just said`.
+- Clarified that current Gemini setup does not set `realtimeInputConfig`; activity detection, pause tolerance, interruption handling, and turn coverage remain Gemini Live defaults.
+- Recommended a narrow Phase 12.4J turn-capture evidence harness before any VAD tuning, prompt change, or runtime fix.
+
+### What We Learned
+- Phase 12.4H-C can constrain spoken response shape, but it cannot recover a prior utterance that Gemini did not capture, retain, or select as the antecedent.
+- The current browser pipeline sends `audioStreamEnd` on manual mute only; normal pauses and fillers such as `um` are governed by provider automatic activity detection.
+- Existing relay/tool safeguards make stale toolResponse, Builder/storage UI, and public transcript order lower-probability causes for this specific wrong-intent class unless future telemetry proves otherwise.
+- Missing turn-level telemetry prevents proving the exact VAD split, interruption timing, or tool cancellation state for the reported bad segment.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-21 · [gemini-spoken-turn-policy] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Implemented Phase 12.4H-C as a Gemini Live-specific spoken turn policy overlay in the realtime Sophia prompt assembly.
+- Routed Gemini dogfood and production setup instructions through the overlay while preserving the base canonical Sophia instruction builder for non-Gemini callers.
+- Added focused tests proving the overlay is present in Gemini Live setup, absent from the base prompt path, includes the required one-intent/max-one-question rules, and renders after the artifact contract.
+- Documented the overlay design, targeted behavior, manual smoke plan, and deferred config/UI strategies.
+
+### What We Learned
+- The canonical Sophia prompt can stay rich and intact, but Gemini native audio needs an explicit spoken stop policy because it owns response timing, speech, transcription, and tool choice in one Live session.
+- Artifact and builder instructions remain structured obligations; they should not expand what Sophia says aloud or turn simple checks into session bookkeeping.
+- The first corrective move is provider-specific prompt policy. VAD, token limits, temperature, first-turn presentation, prompt slimming, and classifier work remain deferred until live smokes show what remains.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- Gemini Live setup prompt: before behavior → full canonical Sophia prompt with diffuse short-response guidance; after behavior → canonical prompt plus Gemini-specific spoken turn overlay for one main intent, max one question, immediate-intent-first, and structured-tool-only bookkeeping. tone_delta not measured; trace pair available: no.
+
+## 2026-05-21 · [gemini-over-continuation-forensics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Investigated Gemini over-continuation, duplicate intent, and turn-policy failures without implementing a prompt or runtime behavior fix.
+- Audited the current bad-run telemetry, official Gemini Live behavior, Gemini setup config, Sophia realtime prompt assembly, frontend bootstrap greeting/session message paths, and relevant context/ritual prompt sources.
+- Documented that the captured hearing-check turn has no tools, cancellations, interruptions, or playback flushes and is already malformed at the public assistant transcript boundary.
+- Documented that the recommendation/focus example makes this a general duplicate-intent class, not a greeting-only bug.
+- Added the Phase 12.4H-B audit and runtime-contract/common-pitfall notes recommending a narrow Gemini Live spoken turn policy overlay as the next implementation phase.
+
+### What We Learned
+- Gemini Live is receiving a rich canonical Sophia companion prompt while also owning incremental audio input, native spoken output, output transcription, and tool choice in one provider session.
+- Existing `1-3 sentences` and `one question` rules are necessary but not sufficient when the prompt also pushes emotional depth, context routing, ritual preparation, builder spec gathering, and artifact/session-goal bookkeeping.
+- Frontend bootstrap greeting can make the first turn feel visually busy, but inspected code does not show it being fed into Gemini as a Live turn, and it does not explain the captured provider transcript content.
+- The safest next fix is a Gemini-specific spoken response policy: one main intent, at most one question, explicit simple-check behavior, no second opener, and stop.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-native-audio-forensics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Investigated Gemini native audio duplication, ordering, and turn continuity after Phase 12.4G-B without applying a behavior fix.
+- Verified official Live API guidance for raw PCM16 output audio, interruption queue flushing, independent output transcription, incremental realtime input, VAD fragmentation risk, and sequential Gemini 3.1 Flash Live function calling.
+- Audited browser WSS receive, local PCM decode/scheduling, interruption flushing, backend relay, normalizer, and Session telemetry boundaries.
+- Added bounded non-raw `gemini-output-audio-chunk` diagnostics with provider receive metadata, compact chunk hash, byte length, decode/schedule timing, queue state, and duplicate ordinal.
+- Analyzed the newly supplied double-reply telemetry report and added bounded provider input/output transcription previews to future provider-correlation diagnostics.
+- Added the Phase 12.4H-A forensic audit plus focused frontend coverage for the diagnostic ledger.
+
+### What We Learned
+- Phase 12.4G-B protects relayed transcript/lifecycle events, but pure Gemini native audio is browser-local and needs its own source-order evidence.
+- The current PCM scheduler is synchronous once a provider event is parsed, but WebSocket message handling is async and un-serialized; Blob/ArrayBuffer parsing can theoretically schedule later messages first.
+- A duplicated semantic spoken reply is more likely provider or turn-lifecycle output than PCM replay, but the exact bad turn cannot be classified without chunk-level capture.
+- The supplied report rules out tool lifecycle, interruption/flush leakage, and stale relayed transcript ordering for that captured turn; the malformed transcript was already at the public `sophia.transcript` boundary.
+- Transcript correctness is not sufficient proof of native audio correctness.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-sequence-safe-transcript-relay] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added browser-assigned Gemini provider receive metadata and contiguous relay sequence metadata to every relayed provider message.
+- Serialized continuity-critical browser relays through an ordered lane and recorded relay queue/source-order diagnostics.
+- Extended backend relay schema, source metadata preservation, relay-order buffering, stale sequence rejection, and pre-tool provider-event application.
+- Preserved source metadata through `GeminiLiveEventMapper`, added normalizer stale transcript guards, and added frontend stale public snapshot rejection.
+- Added the Phase 12.4G-B audit plus focused backend/frontend regression coverage for out-of-order transcript fragments and late interruption snapshots.
+
+### What We Learned
+- Provider receive sequence is the truth for source order, but the backend also needs a contiguous relay sequence because pure audio and other local-only provider messages are intentionally skipped.
+- Tool execution can be slower than transcript/boundary processing, so source-order application must happen before backend tool work that can delay publication.
+- Stale rejection belongs in multiple layers: backend ingress, normalizer mutation, and frontend Session ingestion each catch a different regression class.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-transcript-forensics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Investigated residual Gemini assistant transcript corruption after Phase 12.4F without applying a transcript behavior fix.
+- Verified official Google Live API docs: output transcription text is not specified as cumulative or delta, and transcription-bearing server content has no guaranteed ordering relative to other server messages.
+- Audited the browser relay, backend mapper, normalizer, SSE stream, and Session ingestion path for ordering and segment identity guarantees.
+- Documented that the current relay is fire-and-forget, source sequence is not sent to the backend, mapper sequence is processing-order only, and the auto merge helper can reproduce the observed corruption prefixes when clean chunks are processed out of order.
+- Added the Phase 12.4G-A forensic audit and deferred implementation to a narrower sequence-safe follow-up phase.
+
+### What We Learned
+- Phase 12.4F fixed append-only duplication, but not unordered fragment assembly.
+- `gemini-event-N` style correlation ids are currently local relay trace labels, not a backend ordering contract.
+- Public Session reducers are not the first suspect when public `sophia.transcript` text is already malformed; the upstream relay/mapper/normalizer path must preserve provider event order first.
+- The next fix should carry provider receive sequence through relay and reject or buffer stale transcript snapshots rather than adding more text-merge guesses.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-output-transcript-assembly] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Stopped treating Gemini `serverContent.outputTranscription.text` as guaranteed append-only deltas.
+- Added backend auto assembly for unknown assistant transcript chunks, covering cumulative snapshots, duplicate/subset chunks, revised snapshots, overlap merges, safe fragment spacing, interruption/cancel resets, and tool-adjacent segment isolation.
+- Kept public `sophia.transcript` payloads as `{ text, is_final }` replaceable snapshots; internal Gemini segment ids do not leak into the frontend contract.
+- Added backend and frontend fixtures for malformed assistant transcript accumulation, duplicated/overlapped phrases, and Session snapshot replacement.
+- Documented the Phase 12.4F audit, runtime contract, and common pitfalls.
+
+### What We Learned
+- Gemini output transcription is a provider text surface with uncertain chunk semantics; the backend/public boundary must normalize it before UI pacing or reducers see it.
+- Frontend transcript corruption was not the primary bug here: Session ingestion already replaces public assistant snapshots, so corrupted public snapshots were arriving from backend assembly.
+- Tool-call boundaries can split one apparent spoken answer. Segment metadata is useful internally, but exposing it publicly would unnecessarily widen the `sophia.transcript` contract.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-user-transcript-builder-surfacing] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Hardened Gemini input transcription mapping so `inputTranscription` values with `text`, `transcript`, or string payloads can become normalized `sophia.user_transcript` events.
+- Replayed durable normalized public state for late dogfood/production SSE subscribers, scoped to `sophia.user_transcript` and `sophia.builder_task` only.
+- Updated Gemini telemetry health so provider input transcription without public user transcript is reported as a public continuity/transport gap, not a microphone bottleneck.
+- Added focused backend/frontend tests for transcript mapping, durable replay, builder state replay, builder payload parsing, and Gemini public-continuity diagnosis.
+- Documented the Phase 12.4E audit, runtime contract, and common pitfalls.
+
+### What We Learned
+- Gemini provider input transcription counts are necessary but not sufficient; Session continuity begins only at the normalized `sophia.user_transcript` boundary.
+- The event pump already retained normalized public history, but subscribers only received future events; replay needs to be durable-event scoped to avoid duplicate assistant messages.
+- Builder execution evidence and builder UI state are separate surfaces. The UI becomes healthy only when a trusted builder lifecycle payload is emitted as `sophia.builder_task` and reaches Session capture.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [voice-telemetry-export-scoping] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Scoped the default Session voice telemetry export to the current diagnostic run instead of serializing broad persisted app state.
+- Removed localStorage-backed Session/recap/history snapshots, persisted message arrays, recap artifacts, and rendered transcript/artifact text from the default downloaded report.
+- Preserved Phase 12.4B Gemini correlation diagnostics: provider category counters, relay traces, tool-call ledgers, public event counts, artifact/builder continuity counters, and microphone/audio evidence.
+- Redacted auth-bearing transport material such as Gemini `access_token` WebSocket query values and token/secret-shaped diagnostic fields.
+- Added focused frontend tests for export shape, current-run scoping, history exclusion, token redaction, and the default panel copy/export path.
+
+### What We Learned
+- A diagnostic telemetry report can accidentally become a privacy-heavy app-state archive if it reuses generic capture snapshots without an explicit export boundary.
+- Current-run event scoping plus compact snapshot summaries are enough for Gemini reliability diagnosis; persisted Zustand/localStorage slices are noise for this workflow.
+- Ephemeral Live API WebSocket tokens are still credentials for export purposes and should be redacted while retaining protocol/host/path evidence.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-production-reliability] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added Gemini production correlation instrumentation across browser provider categories, relay traces, tool-call ledgers, Session telemetry/capture export, and backend relay diagnostics.
+- Suppressed stale browser `toolResponse` send-back for cancelled Gemini function-call ids and filtered mixed toolResponse payloads safely.
+- Tracked backend tool cancellations before execution and while in flight, including honest `completed_after_cancellation` diagnostics for side effects that already happened.
+- Made Gemini manual mic-off durable: outgoing audio frames are gated, `audioStreamEnd` is sent under automatic VAD, and UI stage callbacks do not reactivate listening until explicit unmute.
+- Documented the Phase 12.4B audit, runtime contract, common pitfalls, and manual smoke plan.
+
+### What We Learned
+- Zero-field Gemini messages such as `setupComplete: {}` must be categorized without truthiness checks; `{}` is protocol data here.
+- Cancellation needs correlation by function-call id on both browser and backend sides; aggregate tool counts cannot explain stale send-back races.
+- Backend completion after provider cancellation is not a rollback story. Diagnostics must say the side effect completed and the browser must avoid returning a stale client action.
+- Public continuity counters remain meaningful only when tied to actual normalized `sophia.*` events.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-production-reliability-audit] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Investigated the latest Gemini production Session failure without implementing broad fixes.
+- Documented the evidence split between healthy browser-owned Gemini audio transport and missing public Sophia transcript/artifact/builder events.
+- Verified Gemini interruption, transcription, tool cancellation, audio stream pause, and session-resumption semantics against official Google Live API docs.
+- Defined Phase 12.4B as an instrumentation-first reliability phase before targeted cancellation, event-boundary, builder, artifact, and mic-intent fixes.
+
+### What We Learned
+- `providerEventCount` and `outputAudioEventCount` can be healthy while the normalized `sophia.*` event boundary is broken.
+- `artifactToolCallCount > 0` with `artifactCount = 0` is not a simple renderer bug; it means an `emit_artifact` request did not become a public companion artifact.
+- Gemini `toolCallCancellation` is a protocol-level cancellation signal; current relay protection only reliably handles ids cancelled before backend execution begins.
+- Manual mic-off needs durable user intent plus `audioStreamEnd`, not only a local track toggle and stage change.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-production-hardening] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Flushed Gemini browser PCM playback immediately on `serverContent.interrupted` and surfaced interruption/audio-flush telemetry in the production Session hook.
+- Added Gemini-only assistant transcript pacing so partials update in natural chunks while final transcripts remain exact; legacy partial behavior is unchanged.
+- Published successful Gemini builder lifecycle executions as normalized `sophia.builder_task` events for the existing Session builder UI.
+- Split Gemini tool metrics into execution rejections, provider cancellations, artifact tool calls, builder tool calls, and public artifact counts.
+- Documented the Phase 12.3 audit, pitfalls, and runtime-contract behavior.
+
+### What We Learned
+- Gemini barge-in is only user-visible when the browser clears its own scheduled output audio queue on the provider interruption signal.
+- `outputTranscription` is event evidence, not an audio-synchronous subtitle stream; the Session UI needs paced Gemini partials.
+- Builder UI was already mounted in the Session surface; the missing production layer was the public builder-task event bridge.
+- `artifactCount: 0` should stay truthful and be interpreted alongside artifact tool-call telemetry.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-20 · [gemini-session-ui-parity] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Routed normalized assistant transcript partials through the real Session assistant-message bridge while keeping final transcript voice-store appends single-shot.
+- Added a pure transcript ingestion helper and focused tests for partial/final behavior without relying on the heavyweight Stream hook test file.
+- Routed live voice artifacts through the shared stream artifact parser and added nested companion artifact envelope unwrapping.
+- Added architecture-level coverage that voice artifact ingestion receives canonical companion artifact payloads.
+- Documented the Phase 12.2 audit, root causes, and Gemini/legacy smoke plan.
+
+### What We Learned
+- Gemini transport was already emitting normalized cumulative transcript events; the visible transcript gap was that partials stopped in hook-local `partialReply` while the Session UI renders from messages.
+- Artifact visibility depends on canonical top-level companion artifact fields at the UI boundary; voice ingestion must share the text stream artifact adapter.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [session-telemetry-runtime] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added runtime-aware voice telemetry state to the production Session voice hook: `legacy_cascade` remains explicit, and Gemini Live carries production callback status from `/voice/connect` through the UI.
+- Extended Session telemetry metrics with a runtime union so legacy sessions keep Stream/Vision Agents latency cards while Gemini sessions show WSS, relay, provider-event, output-audio, tool-loop, artifact, and public diagnostic stats.
+- Mounted the real Session telemetry panel and added runtime labels plus Gemini-specific rendering that hides legacy-only backend/TTS/join labels.
+- Added focused hook, metrics, and panel tests for runtime identity and Gemini telemetry presentation.
+
+### What We Learned
+- Telemetry parity does not mean identical cards across runtimes; Gemini needs truthful provider/session health fields while legacy keeps cascade latency breakdowns.
+- The selected runtime should be carried from the real session bootstrap, not re-derived from frontend configuration.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-production-route] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + frontend + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md + docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md
+
+### What Changed
+- Added a default-off Gemini production route candidate behind `SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED` in addition to the existing Gemini runtime and adapter gates.
+- Kept `/voice/connect` as the production selector: legacy returns the existing Stream payload by default; Gemini returns a browser Live bootstrap only when explicitly promoted.
+- Added production voice-service, gateway, and Next relay/events/disconnect routes for Gemini under production URL surfaces instead of debug/dogfood paths.
+- Reused the proven Gemini browser Live connector through a production bootstrap wrapper, with auto-preconnect rejected for Gemini so sessions start only on user intent.
+- Added regression coverage for legacy default behavior, fail-closed Gemini config, production relay aliases, connector bootstrap, and hook runtime selection.
+
+### What We Learned
+- The safest first production migration step is not a new unconditional frontend runtime, but a response-driven branch from the existing `/voice/connect` contract.
+- Auto-preconnect is a hidden production behavior that can create provider sessions before user intent unless the gateway recognizes and refuses it for browser-owned Gemini.
+- Dogfood transport code can be reused safely only when public URLs, flags, and failure semantics are production-specific.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-production-readiness] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Fixed `/debug/realtime/gemini` stale Builder task instrumentation by preserving successful start ids and trusted tracked ids outside the capped recent diagnostic log.
+- Kept rejected/model-invented lifecycle ids visible as rejection evidence without promoting them into trusted tracked task ids.
+- Added deterministic frontend coverage for capped-log persistence and `update_async_task` / `list_async_tasks` / `cancel_async_task` Gemini toolResponse send-back.
+- Added backend bridge coverage for update/list/cancel LangGraph HTTP request shapes.
+- Added a production replacement readiness audit mapping Gemini dogfood proof against the current Stream/Vision Agents, Deepgram, SmartTurn, SophiaLLM, Cartesia, SSE, gateway, and frontend production cascade.
+
+### What We Learned
+- Live start/check evidence can be real while the debug page still loses the original start id if it derives state from a rolling display buffer.
+- `list_async_tasks`, `update_async_task`, and `cancel_async_task` are now deterministic-bridge-covered, but still need manual live evidence because fast builder completion can shrink the update/cancel window.
+- Gemini dogfood success must be evaluated against production route parity; `/debug/realtime/gemini` success alone is not a cutover signal.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-builder-tool-discipline] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Hardened Gemini Builder/Lifecycle tool declarations so `start_builder_task` is clearly first for fresh build requests and lifecycle tools require real tracked task ids.
+- Added canonical prompt guidance forbidding invented task IDs and raw pseudo-tool syntax in spoken/text replies.
+- Changed unknown lifecycle task ids from relay-level 422s into fail-closed, model-recoverable Gemini `toolResponse` payloads with `ok:false`, `error_type: "unknown_task_id"`, tracked ids, and recovery guidance.
+- Filtered Gemini assistant text surfaces that begin like raw tool invocations before they can become public `sophia.transcript`.
+- Updated `/debug/realtime/gemini` to show last start id, tracked ids, lifecycle id use, execution rejection, and recovery guidance.
+
+### What We Learned
+- The first real Builder smoke showed Gemini may jump to lifecycle tools and invent ids unless both declarations and prompt guidance state sequencing directly.
+- Backend session scoping was correct; the missing piece was a structured tool result that lets Gemini recover without treating execution rejection as transport failure.
+- Pseudo-tool leakage was model text on Gemini transcript/text surfaces, not structured `toolCall` mapping.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- `skills/public/sophia/AGENTS.md` updated with task-id discipline.
+
+### GEPA Log Entry
+- Prompt contract changed: before behavior allowed ambiguous lifecycle id use and only said not to print JSON; after behavior explicitly forbids invented task ids and pseudo-tool syntax. tone_delta not measured; trace pair available: no.
+
+## 2026-05-19 · [gemini-builder-lifecycle-tools] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added a dependency-safe builder/lifecycle contract for Gemini declarations covering `start_builder_task`, `check_async_task`, `update_async_task`, `cancel_async_task`, and `list_async_tasks`.
+- Expanded Gemini Live setup from `emit_artifact` only to the real existing Sophia artifact + builder/lifecycle tool surface, with `sophia_tool_probe` remaining absent.
+- Wired Gemini relayed builder tool calls to backend-owned LangGraph HTTP execution, session-scoped `async_tasks`, trusted dogfood-session user identity, and official Live API `toolResponse` send-back.
+- Updated the Gemini debug helper/page to surface builder task id/status and added focused backend/frontend regression tests.
+
+### What We Learned
+- The voice runtime can truthfully advertise existing builder capabilities without importing deepagents/LangChain modules, but only if declarations and execution are split by a lightweight contract boundary.
+- Gemini tool args are model-produced data, not authority. User identity for builder launches must come from the authenticated browser dogfood session.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-emit-artifact-tool-boundary] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + backend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Fixed the live Phase 11.0 Gemini browser-session regression where `emit_artifact` declaration construction imported the LangChain-decorated backend tool module inside the voice runtime.
+- Added a dependency-safe backend `emit_artifact` contract module shared by the real LangChain tool wrapper and the Gemini dogfood declaration/execution path.
+- Updated Gemini tool declaration setup so `/debug/realtime/gemini` can advertise the real existing `emit_artifact` tool without requiring `langchain_core` in `voice/.venv`.
+- Added regression coverage that makes the old `deerflow.sophia.tools.emit_artifact` import path fail during declaration/session setup while keeping `emit_artifact` present and `sophia_tool_probe` absent.
+
+### What We Learned
+- Live smoke exposed a dependency-boundary leak before any Gemini provider auth/session work: declaration building imported a backend-only LangChain module.
+- Existing-tool promotion is still the right product direction, but realtime transports need lightweight declaration contracts instead of importing backend tool implementations for schema data.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-real-sophia-capabilities] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Confirmed Gemini Live was previously using a compact runtime prompt rather than the full Sophia prompt assembly.
+- Added canonical-source Gemini setup instructions built from existing Sophia skill files, platform guidance, context/ritual files, and the voice artifact contract.
+- Removed per-session Gemini instruction overrides from the browser dogfood path so the default live debug flow cannot silently drift to a custom prompt.
+- Promoted Gemini tool declarations to the existing backend `emit_artifact` tool only, deriving the declaration from `ArtifactInput` and executing the real backend tool on the relay path.
+- Removed the temporary diagnostic probe from the normal Gemini session tool surface and updated debug/test/docs expectations to validate `emit_artifact` instead.
+
+### What We Learned
+- Transport-loop success and Sophia-capability coverage are separate proof points; the first real capability target should execute an existing backend tool, not a synthetic bridge.
+- Gemini/OpenAI voice comparisons are invalid unless both providers receive Sophia-equivalent prompt sources.
+- Live API tool responses remain a split responsibility: backend executes Sophia tools, browser sends the returned `toolResponse` over the active WSS.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (prompt assembly code changed, no prompt file changed; no trace pair available).
+
+## 2026-05-19 · [gemini-live-backend-tool-loop] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added a Gemini dogfood backend tool bridge that validates Live API `toolCall.functionCalls[]`, executes the narrow allowed backend tool subset, and returns `client_actions[].type = "gemini_tool_response"` with official `toolResponse.functionResponses[]` payloads for browser send-back.
+- Exposed `emit_artifact` and a dogfood-only `sophia_tool_probe` in the Gemini setup tool declarations; the probe is the manual no-side-effect roundtrip trigger.
+- Updated the browser Gemini helper to preserve tool calls, process relay client actions, send `toolResponse` over the already-open Gemini WSS, and surface send failures without marking the provider transport dead.
+- Updated `/debug/realtime/gemini` with compact tool-loop diagnostics: configured tools, last tool call, backend result, send-back status, and tool-loop errors.
+- Added focused voice, frontend, gateway, and documentation coverage for the `toolCall -> backend -> toolResponse` roundtrip.
+
+### What We Learned
+- Gemini Live voice transport is now stable enough to test Sophia-specific runtime behavior; the next proof layer is backend-owned tool execution, not more microphone/audio plumbing.
+- Browser-owned Gemini WSS and backend-owned tools are compatible only if the relay response becomes an explicit client-action channel.
+- A normalized `sophia.turn_diagnostic` is useful evidence, but it is not a substitute for the actual Gemini `toolResponse` message that must be sent back to the provider.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [openai-audio-only-sideband-probe] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + voice + docs · **Spec:** docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Changed the OpenAI browser dogfood helper so a successful browser WebRTC session no longer auto-disconnects just because backend sideband attach fails after readiness.
+- Added explicit degraded audio-only mode to `/debug/realtime/openai`, with honest status labels for voice transport, sideband health, and public SSE availability.
+- Added `Retry Sideband Attach` on the live debug page so the existing backend sideband route can be retried against the still-active `rtc_*` without recreating the browser call.
+- Preserved attach diagnostics on the page and in backend readiness metadata, including raw `Location`, extracted `rtc_*`, requested model, current WebRTC readiness, provider request id, provider status, remote-audio activation, and session age at retry.
+- Added focused frontend/backend regression coverage for degraded mode, live retry success/failure, and safe repeated attach attempts on the same active dogfood session.
+
+### What We Learned
+- OpenAI browser WebRTC audio is confirmed live enough to keep dogfooding even while backend sideband remains the isolated blocker.
+- An attach 404 observed after teardown is weaker evidence than a 404 observed while the same `rtc_*` is still alive. The live retry path is the conclusive diagnostic.
+- For dogfood, session usability and transport truthfulness need to be decoupled: audio can remain useful while backend-controlled Sophia observation is unavailable.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-audio-playback-relay-diagnostics] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md
+
+### What Changed
+- Stabilized `/debug/realtime/gemini` output playback by decoding Gemini Live `serverContent.modelTurn.parts[].inlineData` audio as raw PCM16 little-endian at 24 kHz and scheduling Web Audio buffers sequentially instead of starting every chunk immediately.
+- Added cleanup for scheduled Gemini output `AudioBufferSourceNode`s so disconnect clears queued playback state before closing the shared audio context.
+- Reworked normal Gemini provider relay POSTs to use standard fetch semantics instead of `keepalive`, reserving keepalive for disconnect cleanup.
+- Added relay degraded vs terminal failure diagnostics with target path, provider message type, response-vs-fetch-exception evidence, HTTP status when available, error text, consecutive failure count, WebSocket state, and request body size.
+- Updated the Gemini debug page to show relay degradation separately from Gemini WSS and public SSE state, plus compact Gemini WSS close/error diagnostics.
+
+### What We Learned
+- Gemini browser dogfood reached the first real live speech loop: setup complete, microphone connected, remote audio active, Gemini WSS connected, public SSE connected, and normalized `sophia.*` events including transcript/turn diagnostics.
+- The new blocker moved from transport setup to playback stability and relay observability. A real response produced transcript/audio, but immediate chunk starts can make streamed PCM sound overlapped or corrupted.
+- A relay `Failed to fetch` after earlier `202 Accepted` calls is not automatically provider session death. It can be an isolated browser-level fetch failure on the observation relay while Gemini WSS and SSE remain alive.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-setupcomplete-zero-field-event] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + voice + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md
+
+### What Changed
+- Refined the Gemini browser helper relay guard so official zero-field provider messages, specifically `setupComplete: {}`, are preserved while empty strings, plain `{}`, and semantically empty unsupported envelopes remain filtered.
+- Decoded text, Blob, ArrayBuffer, and typed-array WebSocket message payloads before applying the meaningful-event guard so browser-delivered Gemini handshake frames cannot be dropped before parsing.
+- Tightened the backend Gemini browser relay validator to accept zero-field `setupComplete` while rejecting empty `serverContent`, and added focused frontend/page/backend regression coverage.
+- Updated Gemini dogfood troubleshooting notes and common pitfalls for the `Waiting for setupComplete` failure mode.
+
+### What We Learned
+- Live Gemini dogfood exposed that `setupComplete: {}` is a valid zero-field server event, not an empty no-op payload.
+- The prior empty-event guard needed a protocol-shaped exception so transport guardrails do not suppress handshake completion.
+- A missing `/provider-events` request after successful token/session creation can mean the browser helper discarded the first provider message before relay, not that token minting or CSP failed.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-19 · [gemini-browser-relay-empty-event-guard] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + voice + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md
+
+### What Changed
+- Hardened `frontend/src/app/lib/gemini-browser-live-websocket-dogfood.ts` so the browser relay posts only meaningful documented Gemini server envelopes instead of forwarding every parsed WebSocket object.
+- Added focused helper regression coverage for empty-string frames, parsed `{}` frames, semantically empty `serverContent`, and websocket lifecycle `error` / `close` events so harmless browser noise cannot trigger relay failures.
+- Added backend relay regression tests confirming the existing `422 Gemini browser relay event cannot be empty` behavior remains intact for `{}` while valid provider payloads such as `setupComplete` still return `202 Accepted`.
+- Updated Gemini dogfood docs and pitfalls so a successful browser-session creation followed by relay `422` is diagnosed as empty/no-op browser relay payloads, not provider auth.
+
+### What We Learned
+- The backend was already rejecting the right thing. The blocker was a frontend relay boundary that treated any parsed object as relayable, including `{}`.
+- A successful Gemini auth-token mint and browser-session creation do not prove provider-message handling is correct. The next boundary is whether the browser forwards only meaningful server messages.
+- Empty/no-op WebSocket frames should be absorbed at the browser helper boundary so debug UI errors stay reserved for genuine relay failures.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-18 · [openai-sideband-conformance-probe] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend + docs · **Spec:** docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md
+
+### What Changed
+- Added raw OpenAI WebRTC call diagnostics to the browser dogfood flow: requested model, SDP status, raw `Location`, extracted `rtc_*` call id, documented-shape checks, and unexpected variant classification.
+- Added a minimal isolated sideband probe at `voice/realtime/openai_sideband_probe.py` that attempts only the documented `wss://api.openai.com/v1/realtime?call_id=...` WebSocket with the standard backend API key and reports success/failure, status, request id, elapsed time, and URL.
+- Carried the captured call diagnostics through the existing dogfood sideband route and backend metadata/logging without changing production runtime selection, retry width, CSP, Gemini, or OpenAI defaults.
+- Updated OpenAI dogfood testing docs and pitfalls with the Phase 10.3 isolation procedure and baseline `gpt-realtime` comparison path.
+
+### What We Learned
+- WebRTC readiness can be confirmed before sideband attach, yet OpenAI can still return 404 for the documented sideband URL. At that point, retry timing is no longer the highest-value hypothesis.
+- The next required conclusion is provider-vs-integration: if the isolated probe succeeds, inspect Sophia's attach path; if it also fails with a documented `rtc_*` Location, preserve request IDs and test model/account/session behavior.
+- Model/version differences must be tested directly with `gpt-realtime` versus `gpt-realtime-2`, not guessed from examples.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-18 · [openai-browser-dogfood-csp-cleanup] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + voice + docs · **Spec:** docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added `https://api.openai.com` to the frontend `Content-Security-Policy` `connect-src` in `frontend/next.config.js` so the browser-owned OpenAI SDP exchange to `POST /v1/realtime/calls` is no longer blocked during `/debug/realtime/openai` dogfooding.
+- Hardened the OpenAI dogfood Next proxy helper in `frontend/src/app/api/sophia/[userId]/voice/dogfood/openai/_lib.ts` so empty-body disconnect responses are forwarded as a real no-body response instead of constructing an invalid `NextResponse` that turns expected cleanup into a frontend 500.
+- Added focused regression coverage for CSP, the OpenAI disconnect proxy route, failed-connect cleanup in `frontend/src/app/lib/openai-browser-webrtc-dogfood.ts`, and partial-session cleanup idempotency in `voice/tests/test_openai_browser_dogfood.py`.
+- Manual OpenAI browser dogfood should now advance past the earlier CSP-driven `Failed to fetch` blocker, and failed mid-connect cleanup should no longer explode on the frontend route when the backend returns `204 No Content`.
+
+### What We Learned
+- Browser-owned realtime transports have an extra security surface that backend-only API success does not prove: the browser still needs an explicit CSP allow-list entry for the provider origin.
+- A `500` on the browser-facing disconnect route can be a proxy-construction bug rather than a voice-runtime teardown failure. In this case the failing layer was the Next route handler wrapping a valid empty backend response.
+- Partial OpenAI dogfood sessions are a normal failed-connect state. Cleanup has to tolerate "session started, sideband never attached" as a first-class path.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-18 · [frontend-realtime-comparative-launcher] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/testing/sophia-realtime-comparative-dogfood-phase-9.md + docs/architecture/sophia_frontend_architecture_spec_v2.md
+
+### What Changed
+- Added the internal comparative launcher at `frontend/src/app/debug/realtime/page.tsx`. It explains the OpenAI and Gemini dogfood paths, links directly to `/debug/realtime/openai` and `/debug/realtime/gemini`, and keeps the transport distinction explicit: OpenAI is browser WebRTC plus backend sideband; Gemini is browser-owned WSS plus backend relay.
+- Added a small schema-aligned manual run recorder on the same page. It captures provider, metadata, S01-S15 execution state with compact notes, event evidence fields, rubric scores, recommendation, JSON export, Markdown summary copy, and browser-local draft restore/reset.
+- Added `frontend/src/app/debug/realtime/run-recorder.ts` so the draft state, export payload, summary formatting, and filename generation stay pure and easy to test.
+- Added `frontend/src/__tests__/debug/realtime-comparative-dogfood-page.test.tsx` for the new hub and updated the Phase 9 schema/template/docs so exported run records can include general notes and per-scenario result notes.
+- Edward now has one internal entry point for starting both experimental provider pages and preserving the result immediately after each run, instead of splitting launch and evidence capture across separate docs and ad hoc notes.
+
+### What We Learned
+- Once both provider pages exist, the next usability bottleneck is not transport code. It is disciplined comparison: one launcher, one recorder, one export path.
+- The existing run schema was almost enough for UI export, but per-scenario notes needed a small optional extension so the recorder would not drop the most useful run evidence.
+- A manual comparison hub is most useful when it stays narrow: no backend persistence, no production routing changes, and no attempt to grade providers automatically.
+- Next recommended step: run paired OpenAI and Gemini passes through the new launcher and start collecting real exported JSON records so the migration discussion uses evidence instead of recollection.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-18 · [frontend-gemini-realtime-dogfood-ui] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md + docs/architecture/sophia_frontend_architecture_spec_v2.md
+
+### What Changed
+- Added the internal Gemini dogfood page at `frontend/src/app/debug/realtime/gemini/page.tsx`. It reuses `frontend/src/app/lib/gemini-browser-live-websocket-dogfood.ts` instead of reimplementing the browser-owned Gemini Live transport.
+- The page exposes connect/disconnect controls, authenticated-user gating, session id display, microphone and remote-audio status, Gemini WebSocket lifecycle visibility, relay status, a bounded normalized `sophia.*` SSE event log, and clear runtime-conflict guidance.
+- Extended `frontend/src/app/lib/gemini-browser-live-websocket-dogfood.ts` so backend failures preserve returned `detail` text, relay success/error can surface cleanly to the UI, output-audio activity can be observed, and start-session metadata such as relay URL and public event boundary are available to the page.
+- Added `frontend/src/__tests__/debug/gemini-realtime-dogfood-page.test.tsx`, kept `frontend/src/__tests__/gemini-browser-live-websocket-dogfood.test.ts` green, and updated `docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md` plus `docs/common-pitfalls.md` so product dogfooding points to the new page first.
+- Manual Gemini browser testing is now possible by opening `/debug/realtime/gemini`, clicking `Connect`, granting microphone permission, and watching normalized public events without replaying low-level API and WebSocket steps by hand.
+
+### What We Learned
+- A transport-complete Gemini dogfood path is still not a useful operator path until setup progress, relay health, and normalized SSE visibility are legible in one place.
+- For Gemini, `setupComplete` and backend relay acceptance are the two operator states that matter most; copying OpenAI's sideband mental model would hide the real failure modes.
+- Reusing the helper and preserving backend `detail` text is enough for a polished internal UI. The missing layer was usability and observability, not more transport code.
+- Next recommended step: add a small comparative launcher or run-recorder on top of the two debug pages so OpenAI and Gemini dogfood runs can be captured under the same manual protocol.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `cd frontend && pnpm vitest run src/__tests__/debug/gemini-realtime-dogfood-page.test.tsx src/__tests__/gemini-browser-live-websocket-dogfood.test.ts src/__tests__/api/voice-session-proxy.route.test.ts src/__tests__/debug/openai-realtime-dogfood-page.test.tsx` passed (25 tests).
+- `cd frontend && pnpm lint && pnpm typecheck` passed.
+- `git diff --check` passed.
+
+## 2026-05-17 · [frontend-openai-realtime-dogfood-ui] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** frontend + docs · **Spec:** docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md + docs/architecture/sophia_frontend_architecture_spec_v2.md
+
+### What Changed
+- Added the internal OpenAI dogfood page at `frontend/src/app/debug/realtime/openai/page.tsx`. It reuses `frontend/src/app/lib/openai-browser-webrtc-dogfood.ts` instead of reimplementing the WebRTC flow.
+- The page exposes connect/disconnect controls, authenticated-user gating, session id and `rtc_*` call id display, microphone and remote-audio status, sideband attach visibility, runtime-conflict error messaging, and a bounded live log of normalized `sophia.*` SSE events only.
+- Extended `frontend/src/app/lib/openai-browser-webrtc-dogfood.ts` so backend proxy failures preserve `detail` text instead of collapsing to bare `HTTP 409` style errors, and typed the returned sideband metadata for UI consumers.
+- Added `frontend/src/__tests__/debug/openai-realtime-dogfood-page.test.tsx` for the new page, kept `frontend/src/__tests__/openai-browser-webrtc-dogfood.test.ts` green, and updated `docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md` plus `docs/common-pitfalls.md` to point product dogfooding toward the UI route.
+- Manual testing is now possible by opening `/debug/realtime/openai`, clicking `Connect`, granting microphone permission, and watching normalized public events without writing PowerShell or browser snippets by hand.
+
+### What We Learned
+- A transport-complete dogfood path is still not a usable operator path until there is an internal page that wraps the helper and makes connection state legible.
+- Reusing the existing helper plus normalized SSE is enough for a polished internal surface; the missing piece was usability, not more OpenAI transport plumbing.
+- Preserving backend conflict detail inside the helper matters because otherwise runtime-gate failures look like opaque status codes instead of actionable env guidance.
+- Next recommended step: add either a Gemini sibling page or a lightweight comparative launcher so the two experimental browser paths can be exercised from the same internal UI layer.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `cd frontend && pnpm vitest run src/__tests__/debug/openai-realtime-dogfood-page.test.tsx src/__tests__/openai-browser-webrtc-dogfood.test.ts src/__tests__/api/voice-session-proxy.route.test.ts` passed (18 tests).
+- `cd frontend && pnpm lint` passed.
+- `cd frontend && pnpm typecheck` passed.
+- `git diff --check` passed.
+
+## 2026-05-17 · [voice-realtime-comparative-dogfood-evaluation] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + docs · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md + docs/testing/sophia-realtime-comparative-dogfood-phase-9.md
+
+### What Changed
+- Created `docs/testing/sophia-realtime-comparative-dogfood-phase-9.md`, a repeatable manual protocol for comparing OpenAI browser WebRTC + backend sideband against Gemini browser Live WSS + backend relay.
+- Added `docs/testing/templates/sophia-realtime-dogfood-run-template.md` and `docs/testing/schemas/sophia-realtime-dogfood-run.schema.json` so manual dogfood runs capture provider, runtime mode, model, branch, scenario coverage, latency notes, event health, sideband/relay health, scores, and recommendation.
+- Added `voice/realtime/dogfood_evaluation.py`, a small internal helper that summarizes already-normalized public dogfood payloads: `sophia.*` counts, first event timestamps when present, `agent_started` / `agent_ended`, final transcript/artifact presence, interruption markers, provider error markers, close reason, missing required events, and public provider-event leaks.
+- Added `voice/tests/test_dogfood_evaluation.py` for the helper. No dogfood status endpoint was added in this phase; normalized SSE plus run records are the manual verification surface.
+- Updated `docs/common-pitfalls.md` and `docs/architecture/sophia-realtime-runtime-contract.md` with Phase 9 comparative-evaluation guardrails.
+
+### What We Learned
+- The next safe proof layer after transport completion is repeatable human evaluation, not more provider plumbing or a runtime default switch.
+- OpenAI sideband health and Gemini relay health need separate notes because the transports are intentionally different.
+- A provider can sound impressive and still fail the migration gate if `sophia.*` lifecycle, artifact, interruption, or session-close evidence is missing.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `python -m pytest voice/tests/test_dogfood_evaluation.py voice/tests/test_openai_browser_dogfood.py voice/tests/test_gemini_browser_dogfood.py voice/tests/test_realtime_dogfood_session.py -q` passed (16 tests; 4 warnings).
+- `python -m pytest voice/tests/test_realtime_runtime_selection.py voice/tests/test_realtime_runtime_factory.py voice/tests/test_openai_realtime_provider_adapter.py voice/tests/test_gemini_live_provider_adapter.py voice/tests/test_realtime_normalizer.py -q` passed (36 tests).
+- `python -m compileall -q voice/realtime` passed.
+- `python -m ruff check voice/realtime/dogfood_evaluation.py voice/realtime/__init__.py voice/tests/test_dogfood_evaluation.py` passed.
+- `python -m pytest voice/tests -q` passed (329 tests; 4 warnings).
+- `uv run pytest tests/test_voice_gateway.py -q` from `backend/` passed (28 tests).
+- `pnpm vitest run src/__tests__/openai-browser-webrtc-dogfood.test.ts src/__tests__/gemini-browser-live-websocket-dogfood.test.ts src/__tests__/api/voice-session-proxy.route.test.ts` from `frontend/` passed (13 tests).
+- `pnpm lint` and `pnpm typecheck` from `frontend/` passed.
+- `git diff --check` passed.
+
+## 2026-05-17 · [voice-gemini-browser-live-websocket-relay-dogfood] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md + docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md
+
+### What Changed
+- Added `voice/realtime/gemini_browser_dogfood.py`, which gates Gemini browser dogfood behind `SOPHIA_VOICE_RUNTIME_MODE=gemini_live`, `SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED=true`, `SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED=true`, and backend-only `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
+- Added backend auth-token minting for Google Live `v1alpha/auth_tokens`; the browser receives only the ephemeral token and the locked `setup` payload, never the standard API key.
+- Added browser-relay ingestion for documented Gemini Live server messages. The relay rejects client input payloads such as `realtimeInput`; microphone audio stays on the direct Gemini WebSocket.
+- Added direct voice-server endpoints under `/dogfood/realtime/gemini/browser-sessions*`, authenticated gateway proxies under `/api/sophia/{user_id}/voice/dogfood/gemini/*`, and matching Next proxy routes.
+- Added `frontend/src/app/lib/gemini-browser-live-websocket-dogfood.ts`, a separate internal browser connector that opens Gemini Live WSS with the ephemeral token, sends `setup`, waits for `setupComplete`, streams mic audio as PCM16 16 kHz, relays server messages, and attempts best-effort PCM16 24 kHz playback.
+- Updated `.env.example`, `docs/common-pitfalls.md`, `docs/architecture/sophia-realtime-runtime-contract.md`, and added `docs/testing/sophia-gemini-browser-live-dogfood-phase-8b.md`.
+
+### What We Learned
+- Gemini browser dogfood should be described as browser-owned client-to-server WSS plus backend observation relay. OpenAI's backend sideband model does not transfer to Gemini.
+- `setupComplete` is load-bearing for Gemini. The browser connector must not send microphone audio until the setup handshake completes.
+- The relay boundary should accept server messages only. Relaying client audio to the backend would blur the architecture and leak unnecessary media payloads into the observation path.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- Pending.
+
+## 2026-05-17 · [voice-openai-browser-webrtc-sideband-dogfood] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice + frontend · **Spec:** docs/architecture/sophia-realtime-runtime-contract.md + docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md
+
+### What Changed
+- Created the Phase 8A branch `feat/openai-browser-webrtc-sideband-phase-8a` from `feat/internal-realtime-dogfood-session-path-phase-7`; `main` was not used for edits.
+- Added `voice/realtime/openai_browser_dogfood.py`, which gates OpenAI browser dogfood behind `SOPHIA_VOICE_RUNTIME_MODE=openai_realtime`, `SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED=true`, `SOPHIA_VOICE_OPENAI_REALTIME_ADAPTER_ENABLED=true`, and backend-only `OPENAI_API_KEY`.
+- Added backend client-secret minting for the official OpenAI `POST /v1/realtime/client_secrets` shape, including a hashed server-side `OpenAI-Safety-Identifier`. The browser receives only the ephemeral `client_secret.value`.
+- Added an OpenAI sideband manager that attaches to `wss://api.openai.com/v1/realtime?call_id={rtc_*}` and feeds raw sideband messages into the existing dogfood raw-event stream, so `OpenAIRealtimeEventMapper` and `SophiaEventNormalizer` remain the only public event path.
+- Added direct voice-server endpoints under `/dogfood/realtime/openai/browser-sessions*`, authenticated gateway proxies under `/api/sophia/{user_id}/voice/dogfood/openai/*`, and matching Next proxy routes.
+- Added `frontend/src/app/lib/openai-browser-webrtc-dogfood.ts`, a separate internal browser connector that starts the protected session, opens microphone WebRTC to OpenAI with the ephemeral token, extracts the `rtc_*` call id from the `Location` header, and then attaches the backend sideband.
+- Updated `.env.example`, `docs/common-pitfalls.md`, `docs/architecture/sophia-realtime-runtime-contract.md`, and added `docs/testing/sophia-openai-browser-webrtc-dogfood-phase-8a.md`.
+
+### What We Learned
+- Browser WebRTC connection success is not enough evidence. Phase 8A is only successful when the backend sideband attaches to the OpenAI `rtc_*` call id and public SSE stays normalized as `sophia.*`.
+- The safe user-facing boundary remains the normalized event stream, not the OpenAI data channel. OpenAI wire events can be observed on the sideband, but frontend consumers should not start depending on provider event names.
+- Keeping the OpenAI browser connector separate from `useStreamVoiceSession` preserves the production legacy-cascade UX and makes dogfood activation explicit.
+- The OpenAI standard API key has exactly two trusted backend uses in this phase: client-secret minting and sideband attach. The browser only needs the ephemeral token.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `python -m pytest tests/test_openai_browser_dogfood.py tests/test_realtime_dogfood_session.py tests/test_openai_realtime_provider_adapter.py tests/test_server_readiness.py -q` from `voice/` passed (22 tests; 3 warnings).
+- `python -m compileall -q realtime` from `voice/` passed.
+- `pnpm vitest run src/__tests__/openai-browser-webrtc-dogfood.test.ts src/__tests__/api/voice-session-proxy.route.test.ts` from `frontend/` passed (9 tests).
+- `python -m ruff check voice/realtime/openai_browser_dogfood.py voice/realtime/__init__.py voice/server.py voice/tests/test_openai_browser_dogfood.py backend/app/gateway/routers/voice.py` passed.
+- `pnpm lint` and `pnpm typecheck` from `frontend/` passed.
+- `python -m pytest voice/tests -q` passed (321 tests; 3 warnings).
+- `uv run pytest tests/test_voice_gateway.py -q` from `backend/` passed (26 tests).
+- `git diff --check` passed.
+
+## 2026-05-17 · [voice-internal-realtime-dogfood-session-path] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Created the Phase 7 branch `feat/internal-realtime-dogfood-session-path-phase-7` from `feat/experimental-realtime-runtime-activation-phase-6`; `main` was not used for edits.
+- Added `voice/realtime/dogfood_session.py`, an internal provider event-pump runner that builds OpenAI/Gemini sessions through the Phase 6 factory and streams public output only through `SophiaRealtimeTurnRuntime.public_events()`.
+- Added direct voice-server dogfood endpoints under `/dogfood/realtime/*` for starting sessions, sending text, ingesting internal provider events, streaming normalized SSE, and closing sessions.
+- Kept the existing Stream/Vision Agents `/calls/{call_id}/sessions` route legacy-only. Experimental provider modes now conflict there instead of silently falling back to the Deepgram -> DeerFlow -> Cartesia cascade.
+- Added provider credential validation for experimental runtimes: OpenAI requires `OPENAI_API_KEY`; Gemini accepts `GOOGLE_API_KEY` or `GEMINI_API_KEY`.
+- Added focused Phase 7 tests for OpenAI/Gemini dogfood event pumps, provider credential requirements, and the legacy-only Vision Agents guard.
+- Updated `.env.example`, `docs/common-pitfalls.md`, `docs/architecture/sophia-realtime-runtime-contract.md`, and `docs/testing/sophia-realtime-provider-dogfood-phase-7.md`.
+
+### What We Learned
+- The first safe dogfood surface is the provider session lifecycle and normalized event pump, not the existing browser media route. This lets internal harnesses exercise provider events without changing the Stream-based frontend.
+- A provider mode selected in `SOPHIA_VOICE_RUNTIME_MODE` must not create a legacy `Agent`; failing the Stream route loudly is safer than an accidental cascade session that looks like a provider run.
+- Phase 7 still stops before browser audio. OpenAI needs WebRTC media routing for browser/mobile, and Gemini needs a real Live API WebSocket/audio bridge before either can replace the current call path.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `python -m pytest voice/tests/test_realtime_dogfood_session.py voice/tests/test_config.py voice/tests/test_server_readiness.py -q` passed (28 tests; 2 pre-existing optional dependency/deprecation warnings).
+- `python -m pytest voice/tests/test_realtime_runtime_selection.py voice/tests/test_realtime_runtime_factory.py voice/tests/test_openai_realtime_provider_adapter.py voice/tests/test_gemini_live_provider_adapter.py voice/tests/test_realtime_normalizer.py voice/tests/test_realtime_legacy_cascade_bridge.py voice/tests/test_realtime_shadow_parity.py voice/tests/test_realtime_dogfood_session.py voice/tests/test_config.py voice/tests/test_server_readiness.py -q` passed (75 tests; same warnings).
+- `python -m pytest voice/tests -q` passed (316 tests; same warnings).
+- `python -m compileall -q voice/realtime` passed.
+- `python -m ruff check voice/realtime/dogfood_session.py voice/realtime/__init__.py voice/config.py voice/server.py voice/tests/test_realtime_dogfood_session.py voice/tests/test_config.py voice/tests/test_server_readiness.py` passed.
+- `git diff --check` passed.
+
+## 2026-05-17 · [voice-experimental-runtime-activation] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md + docs/architecture/sophia_gpt_realtime_experiment_spec_v1_3.md
+
+### What Changed
+- Created the Phase 6 branch `feat/experimental-realtime-runtime-activation-phase-6` from `feat/gemini-live-provider-phase-5` before implementation; `main` was not used for edits.
+- Added a fail-closed experimental runtime gate: `SOPHIA_VOICE_RUNTIME_MODE=openai_realtime|gemini_live` now validates only when `SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED=true` and the matching provider adapter flag are both set.
+- Preserved the default `legacy_cascade` runtime and kept shadow parity legacy-only; enabling shadow parity with an experimental provider now fails validation.
+- Added `voice/realtime/runtime_factory.py` with a single resolver/factory that constructs the selected `RealtimeProviderSession` plus `SophiaRealtimeTurnRuntime` bundle without leaking provider-native events.
+- Added `voice/realtime/smoke_harness.py`, a comparative fixture harness that runs legacy, OpenAI, and Gemini turns through the same factory and `SophiaEventNormalizer` boundary.
+- Added a live-server guard so experimental runtime settings prove factory constructibility and then fail closed instead of silently falling back to the legacy cascade before transport routing is wired.
+- Updated focused runtime-selection/config tests and added factory/smoke coverage for the Phase 6 activation path.
+- Updated `.env.example`, `docs/common-pitfalls.md`, and `docs/architecture/sophia-realtime-runtime-contract.md` with the new double opt-in semantics.
+
+### What We Learned
+- Adapter availability and active experimental runtime selection are now three separate switches: mode selection, global experimental activation, and the provider adapter flag. All three are needed for provider-native runtime construction.
+- The safest first activation surface is the provider-neutral factory and comparative smoke harness, not a silent fallback inside the live legacy `voice/server.py` cascade.
+- Shadow parity remains useful only beside the live legacy cascade. Provider-native comparisons should use the comparative smoke harness until there is live provider transport to compare.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `python -m pytest voice/tests/test_realtime_runtime_selection.py voice/tests/test_realtime_runtime_factory.py voice/tests/test_config.py voice/tests/test_server_readiness.py -q` passed (33 tests; only pre-existing optional dependency/deprecation warnings).
+- `python -m pytest voice/tests -q` passed (309 tests; same redis/websockets warnings).
+- `python -m ruff check voice/realtime/runtime_selection.py voice/realtime/runtime_factory.py voice/realtime/smoke_harness.py voice/realtime/__init__.py voice/config.py voice/server.py voice/tests/test_realtime_runtime_selection.py voice/tests/test_realtime_runtime_factory.py voice/tests/test_config.py voice/tests/test_server_readiness.py` passed.
+
+## 2026-05-17 · [voice-gemini-live-provider-adapter] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Created the Phase 5 branch `feat/gemini-live-provider-phase-5` from `chore/voice-suite-failure-triage-phase-4-5` before making changes; `main` was not used for edits.
+- Added `voice/realtime/gemini_live.py` with the feature-flagged `GeminiLiveProviderSession`, `GeminiLiveEventMapper`, Gemini Live capabilities, and a documented setup-config helper.
+- Mapped official Gemini Live API server-message fields into provider-neutral `ProviderEvent` values, including setup completion, server content, input/output transcriptions, model-turn text/audio parts, generation/turn completion, structured function calls, tool-call cancellation, session resumption, go-away, usage metrics, and errors.
+- Preserved non-default behavior: `SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED=true` is required to construct the adapter, and `SOPHIA_VOICE_RUNTIME_MODE=gemini_live` is still rejected as an active runtime.
+- Added focused Gemini adapter tests plus config/runtime-selection assertions proving the adapter is available for isolated work but not wired into live `voice/server.py` routing.
+- Updated the realtime runtime contract, common pitfalls, `.env.example`, and repo memory with Phase 5 Gemini Live guardrails.
+
+### What We Learned
+- Gemini Live's safe Phase 5 shape matches OpenAI's transport-injected adapter pattern, but the wire semantics are different enough that OpenAI event names must not leak into the adapter.
+- The official Live API session starts with a first-message `setup` and `setupComplete` handshake. Configuration cannot be updated while the connection is open, so Gemini capability metadata must keep `session_updates=False`.
+- Gemini Live reports output text through output audio transcription when using native audio response modality. The adapter must select one assistant transcript surface per response to avoid duplicate public `sophia.transcript` output.
+- Gemini Live tool responses use dedicated `toolResponse.functionResponses` messages matched by function-call ids. Tool-call cancellation is also provider-native and should become interruption diagnostics rather than frontend-specific events.
+- Current Google docs distinguish Gemini 3.1 Flash Live and Gemini 2.5 Flash Live on async function calling, affective dialog, proactive audio, and client-content behavior. Adapter docs should preserve those distinctions instead of flattening them.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+### Validation
+- `python -m pytest voice/tests/test_gemini_live_provider_adapter.py voice/tests/test_openai_realtime_provider_adapter.py voice/tests/test_realtime_runtime_selection.py voice/tests/test_realtime_normalizer.py voice/tests/test_realtime_legacy_cascade_bridge.py voice/tests/test_realtime_shadow_parity.py voice/tests/test_config.py voice/tests/test_sophia_llm_streaming.py -q` -> `79 passed, 1 warning`.
+- `python -m pytest voice/tests -q` -> `294 passed, 2 warnings`.
+
+## 2026-05-17 · [voice-suite-failure-triage-phase-4-5] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Created the triage branch `chore/voice-suite-failure-triage-phase-4-5` from `feat/openai-realtime-provider-phase-4` before making changes; `main` was not used for edits.
+- Reproduced the reported full voice suite baseline: `python -m pytest voice/tests -q` returned `58 failed, 226 passed, 2 warnings` before fixes.
+- Compared against a temporary clean detached worktree at `2a0ea5cd` with dummy voice env vars; the clean run returned the same 58 failing tests (`58 failed, 187 passed, 2 warnings`), proving the failures preexisted the dirty Phase 1-4 realtime work.
+- Classified the failures as stale baseline test debt: DeerFlow payload expectations missing `config.recursion_limit`, adaptive-turn tests still expecting pre-`a76f45bb` silence tuning, `SophiaTTS.__new__` test stubs missing current runtime fields, and fake LLM objects missing `note_backend_progress`.
+- Made test-only stabilizations in `voice/tests/test_deerflow_adapter.py`, `voice/tests/test_sophia_turn.py`, `voice/tests/conftest.py`, and `voice/tests/test_voice_artifact_contract.py`; no production runtime code changed.
+- Added the detailed triage record in `docs/testing/sophia-voice-full-suite-failure-triage-phase-4-5.md` and grounded pitfalls in `docs/common-pitfalls.md`.
+
+### What We Learned
+- The Phase 4 OpenAI adapter did not cause the 58 red full-suite failures. The exact failing set reproduced on clean HEAD before untracked `voice/realtime/**` files were present.
+- Focused green realtime tests were accurate but incomplete as evidence; the missing step was a clean-baseline comparison for the red global suite.
+- The current voice suite can be green without weakening migration guardrails: final post-fix result was `284 passed, 2 warnings`, and the focused realtime set remained `69 passed, 1 warning`.
+- Older adaptive-turn planning docs still mention the original 1000/1500/2000/2800ms values, but production code has intentionally used the aggressive 600/800/1200/1400ms tuning since `a76f45bb`.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-17 · [voice-openai-realtime-adapter] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md + docs/architecture/sophia_gpt_realtime_experiment_spec_v1_3.md
+
+### What Changed
+- Added `voice/realtime/openai_realtime.py` with the feature-flagged `OpenAIRealtimeProviderSession`, `OpenAIRealtimeEventMapper`, OpenAI GPT-Realtime-2 capabilities, and a documented session-config helper.
+- Mapped official OpenAI Realtime GA server events into provider-neutral `ProviderEvent` values, including input transcription, response lifecycle, assistant text/audio transcript deltas, audio lifecycle, structured function-call arguments, tool results, cancellation, and errors.
+- Preserved non-default behavior: `SOPHIA_VOICE_OPENAI_REALTIME_ADAPTER_ENABLED=true` is required to construct the adapter, and `SOPHIA_VOICE_RUNTIME_MODE=openai_realtime` is still rejected as an active runtime.
+- Added focused OpenAI adapter tests plus config/runtime-selection assertions proving the adapter is available for isolated work but not wired into live `voice/server.py` routing.
+- Updated the realtime runtime contract and common pitfalls with Phase 4 OpenAI adapter guardrails.
+
+### What We Learned
+- The safe Phase 4 shape is transport-injected: the adapter can map real OpenAI GA events and emit documented client events without adding an OpenAI SDK/socket dependency to the active voice service.
+- OpenAI can expose assistant text through both `response.output_text.*` and `response.output_audio_transcript.*`; the adapter must select one transcript surface per response before `SophiaEventNormalizer` accumulates public text.
+- `emit_artifact` belongs in structured function-call arguments. Mapping it to `artifact_payload` keeps the no-text-parsing artifact guarantee intact for GPT-Realtime.
+- Adapter availability and active runtime selection are separate axes. OpenAI is now an implemented provider adapter, but only `legacy_cascade` remains an implemented active voice runtime.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-17 · [voice-realtime-shadow-parity] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added `voice/realtime/runtime_selection.py` with the inactive-by-default voice runtime selector, `SOPHIA_VOICE_RUNTIME_MODE`, and explicit validation that only `legacy_cascade` is currently implemented as an active runtime.
+- Added `voice/realtime/shadow_parity.py` with `LegacyCascadeShadowParity`, stable-field comparison, and diagnostics for match, missing expected event, unexpected actual event, type mismatch, payload mismatch, and sequencing mismatch.
+- Wired `SophiaLLM` to create shadow expectations around the existing live event path and observe actual public payloads only after `_emit_call_event` succeeds. No new public event path was added.
+- Added focused runtime-selection, shadow-parity, config, and `SophiaLLM` regression tests proving default-off behavior and unchanged public event output when shadow parity is enabled.
+- Updated the realtime migration contract and common pitfalls with Phase 3 runtime selection and shadow diagnostics guardrails.
+
+### What We Learned
+- The safe Phase 3 hook is inside `SophiaLLM`, where the live cascade already knows finalized user text, turn phases, accumulated transcript text, artifacts, builder tasks, and diagnostics.
+- Shadow parity must generate expected public envelopes via `LegacyCascadeCompatibilityBridge` and `SophiaEventNormalizer`, then compare against actual events after the existing emitter succeeds. Observing before emitter success would count events the frontend never received.
+- Runtime selection needs its own configuration axis. `SOPHIA_BACKEND_MODE` remains the text backend selection (`shim`/`deerflow`), while `SOPHIA_VOICE_RUNTIME_MODE` is reserved for the future realtime runtime switch.
+- The checked-in target specs now exist: `docs/architecture/sophia_gpt_realtime_experiment_spec_v1_3.md` and `docs/architecture/sophia_frontend_architecture_spec_v2.md`. Phase 3 still stops before provider integration.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-17 · [voice-realtime-legacy-cascade-bridge] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added an inactive legacy cascade compatibility bridge in `voice/realtime/legacy_cascade.py` with `LegacyCascadeCompatibilityBridge`, `LegacyCascadeProviderSession`, and explicit legacy cascade capabilities.
+- The bridge maps current cascade lifecycle markers and `BackendEvent` semantics into provider-neutral `ProviderEvent` values: final user transcripts, response start/end, assistant text deltas/finals, artifacts, builder tasks, cancellation/interruption, stage errors, and diagnostics.
+- Added `voice/tests/test_realtime_legacy_cascade_bridge.py` to prove bridge output normalizes through `SophiaEventNormalizer` into the existing public `sophia.*` envelope without touching live voice runtime code.
+- Updated the realtime runtime contract docs and common pitfalls with the Phase 2 compatibility boundary.
+
+### What We Learned
+- The current cascade can be represented cleanly behind the Phase 1 provider-neutral contract without using the bridge as the production runtime path.
+- Existing browser-facing event order is load-bearing: final user transcript and `user_ended`, one `agent_started`, accumulated assistant partials, final assistant text, artifact, builder task payloads, one `agent_ended`, and terminal diagnostics must remain stable.
+- Artifact compatibility is best proven by routing bridge artifacts through the normalizer's validator hook, not by validating inside the bridge or bypassing `SophiaLLM`'s production artifact checks.
+- Legacy delivery metadata should stay as `DeliveryIntent.provider_hints`; provider-neutral speech semantics should not be inferred from Cartesia-specific emotion names.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
+
+## 2026-05-17 · [voice-realtime-runtime-contract] · PR #[pending]
+**Author:** GitHub Copilot · **Track:** voice · **Spec:** docs/audits/sophia-voice-realtime-migration-audit.md + docs/architecture/sophia-realtime-runtime-contract.md
+
+### What Changed
+- Added an inactive provider-neutral realtime contract package under `voice/realtime/` with `RealtimeProviderSession`, `ProviderEvent`, `ProviderCapabilities`, `DeliveryIntent`, `SophiaRealtimeTurnRuntime`, and `SophiaEventNormalizer`.
+- Added fixture contract tests in `voice/tests/test_realtime_normalizer.py` proving legacy cascade-shaped, synthetic OpenAI-style, and synthetic Gemini-style provider events normalize into the existing public `sophia.*` vocabulary.
+- Documented the new seam in `docs/architecture/sophia-realtime-runtime-contract.md`, including why `BackendAdapter` remains a text-backend seam rather than the realtime provider seam.
+- Created `docs/common-pitfalls.md` because no repo-wide common pitfalls document existed; seeded it with voice realtime migration pitfalls grounded in this implementation.
+
+### What We Learned
+- The safest Phase 1 shape is contract-first and inactive: preserve `voice/server.py`, the Deepgram/DeerFlow/Cartesia cascade, gateway routes, and frontend consumers while adding a tested normalizer boundary.
+- Provider response lifecycle and audio lifecycle can both imply frontend turn phases. The normalizer guards duplicate `agent_started` and `agent_ended` events per response id so future native providers do not double-flip UI state.
+- `sophia.user_transcript` should stay final-only for now. Provider partial transcripts are represented internally but intentionally produce no public event until the frontend contract is expanded.
+- Candidate tool/artifact events are useful internally, but Phase 1 only publishes structured payload events. This keeps future adapters from leaking half-built provider semantics to the browser.
+
+### CLAUDE.md Updates
+- None.
+
+### Skills Created / Modified
+- None.
+
+### GEPA Log Entry
+- N/A (no prompt files changed).
 
 ## 2026-05-07 · [phase-2-telegram-memory-handoff] · PRs #[pending]
 **Author:** Claude Code (with Davide) · **Track:** backend + frontend · **Spec:** `~/Desktop/sophia_async_migration_telegram_diagnostic_spec.md` (Phase 2) + plan at `~/.claude/plans/users-davidelaverga-desktop-sophia-asyn-peppy-riddle.md`

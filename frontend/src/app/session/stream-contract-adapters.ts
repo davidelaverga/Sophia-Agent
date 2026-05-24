@@ -40,6 +40,17 @@ const BUILDER_TASK_PHASE_MAP = {
   task_cancelled: 'cancelled',
 } as const satisfies Record<string, BuilderTaskPhaseV1>;
 
+const NULL_LIKE_ARTIFACT_STRINGS = new Set(['', 'null', 'none', 'undefined', 'n/a']);
+
+function isNullLikeArtifactString(value: string): boolean {
+  return NULL_LIKE_ARTIFACT_STRINGS.has(value.trim().toLowerCase());
+}
+
+function isNullLikeReflectionObject(value: unknown): boolean {
+  const record = asRecord(value);
+  return typeof record?.prompt === 'string' && isNullLikeArtifactString(record.prompt);
+}
+
 function parseBuilderTodos(data: unknown): BuilderTodoV1[] | undefined {
   if (!Array.isArray(data)) {
     return undefined;
@@ -198,8 +209,24 @@ export function normalizeStreamDataPart(dataPart: unknown): StreamContractPart |
 }
 
 export function parseArtifactsPayload(data: unknown): StreamArtifactsPayload | null {
-  const record = asRecord(data);
+  let record = asRecord(data);
   if (!record) return null;
+
+  const nestedArtifact =
+    asRecord(record.artifact) ?? asRecord(record.payload) ?? asRecord(record.data);
+  const hasTopLevelArtifactFields =
+    typeof record.takeaway === 'string' ||
+    typeof record.reflection === 'string' ||
+    typeof record.reflection_candidate === 'string' ||
+    asRecord(record.reflection_candidate) !== null ||
+    Array.isArray(record.memory_candidates) ||
+    typeof record.session_goal === 'string' ||
+    typeof record.tone_estimate === 'number' ||
+    typeof record.voice_speed === 'string';
+
+  if (nestedArtifact && !hasTopLevelArtifactFields) {
+    record = nestedArtifact;
+  }
 
   const payload: StreamArtifactsPayload = { ...record };
 
@@ -209,16 +236,24 @@ export function parseArtifactsPayload(data: unknown): StreamArtifactsPayload | n
 
   if (
     payload.reflection_candidate !== undefined &&
-    typeof payload.reflection_candidate !== 'string' &&
-    (typeof payload.reflection_candidate !== 'object' || payload.reflection_candidate === null)
+    (
+      (typeof payload.reflection_candidate === 'string' && isNullLikeArtifactString(payload.reflection_candidate)) ||
+      (typeof payload.reflection_candidate !== 'string' &&
+        (typeof payload.reflection_candidate !== 'object' || payload.reflection_candidate === null)) ||
+      isNullLikeReflectionObject(payload.reflection_candidate)
+    )
   ) {
     delete payload.reflection_candidate;
   }
 
   if (
     payload.reflection !== undefined &&
-    typeof payload.reflection !== 'string' &&
-    (typeof payload.reflection !== 'object' || payload.reflection === null)
+    (
+      (typeof payload.reflection === 'string' && isNullLikeArtifactString(payload.reflection)) ||
+      (typeof payload.reflection !== 'string' &&
+        (typeof payload.reflection !== 'object' || payload.reflection === null)) ||
+      isNullLikeReflectionObject(payload.reflection)
+    )
   ) {
     delete payload.reflection;
   }

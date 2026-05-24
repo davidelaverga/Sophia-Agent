@@ -4,7 +4,7 @@ import type {
   SophiaCaptureMicrophoneSummary,
   SophiaCaptureSnapshot,
 } from "./session-capture"
-import type { VoiceStage } from "./voice-types"
+import type { SessionRuntime, VoiceRuntimeTelemetry, VoiceStage } from "./voice-types"
 
 export type VoiceCaptureEvent = {
   seq: number
@@ -15,6 +15,19 @@ export type VoiceCaptureEvent = {
 }
 
 export type VoiceMetricsHealthLevel = "good" | "warn" | "bad" | "neutral"
+
+export type VoiceTransportSource = "sse" | "custom" | "pending"
+
+export type VoiceArtifactCountSource = "public_event" | "runtime_ingest" | "rendered_state" | "none"
+
+export type VoiceArtifactTelemetryCounts = {
+  artifactCount: number
+  artifactPublicEventCount: number
+  artifactRuntimeIngestCount: number
+  artifactRenderedCount: number
+  artifactCountSource: VoiceArtifactCountSource
+  artifactCountMismatch: boolean
+}
 
 export type VoiceMetricsTimelineItem = {
   id: string
@@ -34,7 +47,7 @@ export type VoiceMetricThreshold = {
 }
 
 export type VoiceRegressionMarker = {
-  key: "microphone" | "turn-segmentation" | "backend-stall" | "commit-boundary" | "builder-stall"
+  key: "microphone" | "public-continuity" | "turn-segmentation" | "backend-stall" | "commit-boundary" | "builder-stall"
   title: string
   detail: string
   level: "warn" | "bad"
@@ -120,6 +133,8 @@ export type VoiceBottleneckDiagnosis = {
 export type VoiceBottleneckKind = VoiceBottleneckDiagnosis["kind"]
 
 export type VoiceTelemetrySummary = {
+  runtime: SessionRuntime
+  runtimeLabel: string
   stage: VoiceStage
   healthLevel: VoiceMetricsHealthLevel
   healthTitle: string
@@ -143,8 +158,152 @@ export type VoiceTelemetrySummary = {
   builderStuck: boolean
 }
 
+export type LegacySessionTelemetry = {
+  runtime: "legacy_cascade"
+  runtimeLabel: "Legacy Cascade"
+  source: "default" | "voice-connect" | "capture"
+  legacy: {
+    sessionId: string | null
+    threadId: string | null
+    callId: string | null
+    voiceAgentSessionId: string | null
+    streamUrl: string | null
+    streamOpen: boolean
+    activeSource: VoiceTransportSource
+    remoteParticipantCount: number | null
+    sessionReadyMs: number | null
+    joinLatencyMs: number | null
+    sseOpenMs: number | null
+  }
+  gemini: null
+}
+
+export type GeminiSessionTelemetry = {
+  runtime: "gemini_live"
+  runtimeLabel: "Gemini Live"
+  source: "default" | "voice-connect" | "capture"
+  legacy: null
+  gemini: {
+    sessionId: string | null
+    streamUrl: string | null
+    websocketUrl: string | null
+    relayUrl: string | null
+    transport: string | null
+    publicEventBoundary: string | null
+    connectionState: string | null
+    stage: string | null
+    websocketState: string | null
+    relayStatus: string | null
+    publicSseState: string | null
+    microphoneState: string | null
+    remoteAudioState: string | null
+    setupComplete: boolean
+    providerEventCount: number
+    lastProviderEventAt: string | null
+    lastProviderEventType: string | null
+    providerCategoryCounts: Record<string, { count: number; lastAt: string | null }>
+    outputAudioEventCount: number
+    lastOutputAudioAt: string | null
+    staleAssistantAudioDroppedCount: number
+    staleAssistantTranscriptDroppedCount: number
+    staleAssistantOutputSuppressionCount: number
+    playbackGeneration: number
+    assistantUserOverlapMs: number
+    maxAssistantUserOverlapMs: number
+    rawAssistantUserOverlapMs: number
+    maxRawAssistantUserOverlapMs: number
+    confirmedAssistantUserOverlapMs: number
+    maxConfirmedAssistantUserOverlapMs: number
+    userInputActiveAgeMs: number | null
+    bargeInConfirmed: boolean
+    bargeInConfirmationSource: string
+    bargeInConfirmationReason: string | null
+    bargeInCandidateFrameCount: number
+    inputFrameOnlyNotBargeInCount: number
+    candidateFramesDidNotConfirmCount: number
+    candidateExpiredCount: number
+    suppressionBlockedBecauseNoIntentCount: number
+    bargeInTranscriptCapturedCount: number
+    bargeInTranscriptPromotedCount: number
+    bargeInTranscriptPromotionLatencyMs: number | null
+    bargeInTranscriptIgnoredCount: number
+    bargeInTranscriptDuplicateSuppressedCount: number
+    lastBargeInTranscriptPreview: string | null
+    bargeInNewTurnDispatchCount: number
+    bargeInNewTurnDispatchBlockedReason: string
+    staleSuppressionArmedAt: string | null
+    staleSuppressionArmedBy: string | null
+    assistantAudioDropReason: string | null
+    interruptedResponseIds: string[]
+    interruptionCount: number
+    playbackFlushCount: number
+    lastInterruptionAt: string | null
+    lastPlaybackFlushAt: string | null
+    relayDiagnosticCount: number
+    lastRelayDiagnosticAt: string | null
+    lastRelayEventType: string | null
+    relayAttemptCount: number
+    relaySuccessCount: number
+    relayFailureCount: number
+    relayTraceCount: number
+    relayClassificationCounts: Record<string, { count: number; lastAt: string | null }>
+    lastRelayTraceAt: string | null
+    lastRelayCorrelationId: string | null
+    lastRelayResponseKind: string | null
+    lastRelayDurationMs: number | null
+    maxRelayDurationMs: number | null
+    lastCriticalRelayDurationMs: number | null
+    lastTranscriptionRelayDurationMs: number | null
+    lastToolCallRelayDurationMs: number | null
+    orderedRelayQueueDepth: number
+    oldestQueuedAgeMs: number | null
+    transcriptPartialsCoalesced: number
+    transcriptPartialsSent: number
+    transcriptPartialsDropped: number
+    transcriptCoalescingDisabledReason: string | null
+    finalTranscriptEventsSent: number
+    nonDroppableCriticalEventsSent: number
+    lastTranscriptRelayLatencyMs: number | null
+    maxTranscriptRelayLatencyMs: number | null
+    p95TranscriptRelayLatencyMs: number | null
+    coalescedBySegment: Record<string, number>
+    consecutiveRelayFailures: number
+    lastRelayErrorText: string | null
+    websocketDiagnosticCount: number
+    lastWebSocketDiagnosticAt: string | null
+    lastWebSocketErrorText: string | null
+    toolCallCount: number
+    toolResponseCount: number
+    toolRejectionCount: number
+    toolCancellationCount: number
+    artifactToolCallCount: number
+    artifactToolCallUnknownCount: number
+    builderToolCallCount: number
+    unresolvedToolCallCount: number
+    oldestUnresolvedToolCallAgeMs: number | null
+    lastToolPhase: string | null
+    lastToolName: string | null
+    lastToolAt: string | null
+    toolCallLedger: Array<Record<string, unknown>>
+    publicTurnCount: number
+    artifactCount: number
+    artifactPublicEventCount: number
+    artifactRuntimeIngestCount: number
+    artifactRenderedCount: number
+    artifactCountSource: VoiceArtifactCountSource
+    artifactCountMismatch: boolean
+    publicDiagnosticCount: number
+    lastUserTranscriptAt: string | null
+    lastAssistantTranscriptAt: string | null
+    lastEventAgeMs: number | null
+  }
+}
+
+export type VoiceSessionTelemetry = LegacySessionTelemetry | GeminiSessionTelemetry
+
 export type VoiceDeveloperMetrics = {
   stage: VoiceStage
+  sessionTelemetry: VoiceSessionTelemetry
   sessionIds: {
     sessionId: string | null
     threadId: string | null
@@ -153,7 +312,7 @@ export type VoiceDeveloperMetrics = {
     runId: string | null
   }
   transport: {
-    activeSource: "sse" | "custom" | "pending"
+    activeSource: VoiceTransportSource
     remoteParticipantCount: number | null
     streamOpen: boolean
     lastEventAt: string | null
@@ -163,6 +322,11 @@ export type VoiceDeveloperMetrics = {
     userTranscripts: number
     assistantTranscripts: number
     artifacts: number
+    artifactPublicEventCount: number
+    artifactRuntimeIngestCount: number
+    artifactRenderedCount: number
+    artifactCountSource: VoiceArtifactCountSource
+    artifactCountMismatch: boolean
     diagnostics: number
     builderEvents: number
   }
@@ -254,6 +418,7 @@ type BuildVoiceDeveloperMetricsParams = {
   snapshot?: SophiaCaptureSnapshot | null
   nowMs?: number
   runtimeError?: string
+  runtimeTelemetry?: VoiceRuntimeTelemetry | null
 }
 
 type BuildVoiceDeveloperMetricsFromCaptureParams = {
@@ -264,6 +429,7 @@ type BuildVoiceDeveloperMetricsFromCaptureParams = {
   nowMs?: number
   runtimeError?: string
   stage?: VoiceStage
+  runtimeTelemetry?: VoiceRuntimeTelemetry | null
 }
 
 type NormalizedVoiceCaptureEvent = VoiceCaptureEvent & {
@@ -286,6 +452,26 @@ const DEFAULT_MICROPHONE: VoiceDeveloperMetrics["microphone"] = {
   lastError: null,
 }
 
+const GEMINI_EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
+const GEMINI_BUILDER_TOOL_NAMES = new Set([
+  "start_builder_task",
+  "check_async_task",
+  "update_async_task",
+  "cancel_async_task",
+  "list_async_tasks",
+])
+
+const NULL_LIKE_ARTIFACT_STRINGS = new Set(["null", "none", "undefined", "n/a"])
+const FALLBACK_ARTIFACT_TAKEAWAYS = new Set([
+  "session completed",
+  "companion error - fallback response",
+])
+const FALLBACK_ARTIFACT_REFLECTIONS = new Set([
+  "what mattered most in this conversation?",
+  "general reflection prompt",
+  "general reflection",
+])
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -300,8 +486,87 @@ function asString(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null
 }
 
+function asStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null
+  const strings = value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0)
+  return strings.length > 0 ? strings : []
+}
+
 function asBoolean(value: unknown): boolean | null {
   return typeof value === "boolean" ? value : null
+}
+
+function asRealArtifactString(value: unknown): string | null {
+  const text = asString(value)
+  if (!text) return null
+  return NULL_LIKE_ARTIFACT_STRINGS.has(text.toLowerCase()) ? null : text
+}
+
+function hasRealArtifactTakeaway(value: unknown): boolean {
+  const text = asRealArtifactString(value)
+  return Boolean(text && !FALLBACK_ARTIFACT_TAKEAWAYS.has(text.toLowerCase()))
+}
+
+function hasRealArtifactReflection(value: unknown): boolean {
+  const text = asRealArtifactString(value)
+  return Boolean(text && !FALLBACK_ARTIFACT_REFLECTIONS.has(text.toLowerCase()))
+}
+
+function artifactReflectionPrompt(value: unknown): unknown {
+  const direct = asRealArtifactString(value)
+  if (direct) return direct
+  return asRecord(value)?.prompt
+}
+
+function hasArtifactContent(value: unknown): boolean {
+  const record = asRecord(value)
+  if (!record) return false
+
+  if (hasRealArtifactTakeaway(record.takeaway) || hasRealArtifactTakeaway(record.session_takeaway)) {
+    return true
+  }
+
+  if (hasRealArtifactReflection(artifactReflectionPrompt(record.reflection_candidate ?? record.reflection))) {
+    return true
+  }
+
+  return Array.isArray(record.memory_candidates) && record.memory_candidates.length > 0
+}
+
+function hasArtifactsRuntimeIngestContent(event: NormalizedVoiceCaptureEvent): boolean {
+  if (event.category !== "artifacts-runtime") return false
+  if (event.name !== "ingest-artifacts" && event.name !== "apply-memory-candidates") return false
+
+  const payload = event.payloadRecord
+  return hasArtifactContent(payload?.merged) || hasArtifactContent(payload?.incoming)
+}
+
+function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | undefined): boolean {
+  if (!snapshot) return false
+  if (hasArtifactContent(snapshot.artifacts.sessionArtifacts)) return true
+
+  const dom = snapshot.artifacts.dom
+  return Boolean(
+    asRealArtifactString(dom.takeawayText)
+      || asRealArtifactString(dom.reflectionText)
+      || asRealArtifactString(dom.memoriesText),
+  )
+}
+
+function resolveArtifactCountSource({
+  artifactPublicEventCount,
+  artifactRuntimeIngestCount,
+  artifactRenderedCount,
+}: {
+  artifactPublicEventCount: number
+  artifactRuntimeIngestCount: number
+  artifactRenderedCount: number
+}): VoiceArtifactCountSource {
+  const maxCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
+  if (maxCount <= 0) return "none"
+  if (artifactPublicEventCount === maxCount) return "public_event"
+  if (artifactRuntimeIngestCount === maxCount) return "runtime_ingest"
+  return "rendered_state"
 }
 
 function getBuilderDebugDetail(payload: Record<string, unknown> | null | undefined): string | null {
@@ -391,6 +656,40 @@ function normalizeEvent(event: VoiceCaptureEvent): NormalizedVoiceCaptureEvent {
   }
 }
 
+function buildArtifactTelemetryCountsFromEvents(
+  activeEvents: NormalizedVoiceCaptureEvent[],
+  snapshot: SophiaCaptureSnapshot | null | undefined,
+): VoiceArtifactTelemetryCounts {
+  const artifactPublicEventCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
+  const artifactRuntimeIngestCount = countWhere(activeEvents, hasArtifactsRuntimeIngestContent)
+  const artifactRenderedCount = hasRenderedArtifactSnapshot(snapshot) ? 1 : 0
+  const artifactCount = Math.max(artifactPublicEventCount, artifactRuntimeIngestCount, artifactRenderedCount)
+  const artifactCountSource = resolveArtifactCountSource({
+    artifactPublicEventCount,
+    artifactRuntimeIngestCount,
+    artifactRenderedCount,
+  })
+
+  return {
+    artifactCount,
+    artifactPublicEventCount,
+    artifactRuntimeIngestCount,
+    artifactRenderedCount,
+    artifactCountSource,
+    artifactCountMismatch: artifactCount !== artifactPublicEventCount,
+  }
+}
+
+export function buildVoiceArtifactTelemetryCounts({
+  events,
+  snapshot,
+}: {
+  events: VoiceCaptureEvent[]
+  snapshot?: SophiaCaptureSnapshot | null
+}): VoiceArtifactTelemetryCounts {
+  return buildArtifactTelemetryCountsFromEvents(events.map(normalizeEvent), snapshot ?? null)
+}
+
 function eventData(event: NormalizedVoiceCaptureEvent): Record<string, unknown> | null {
   return event.dataRecord ?? event.payloadRecord
 }
@@ -398,6 +697,13 @@ function eventData(event: NormalizedVoiceCaptureEvent): Record<string, unknown> 
 function eventPhase(event: NormalizedVoiceCaptureEvent): string | null {
   const data = eventData(event)
   return asString(data?.phase) ?? asString(data?.status)
+}
+
+function geminiToolName(event: NormalizedVoiceCaptureEvent): string | null {
+  const data = eventData(event)
+  const diagnostic = asRecord(data?.diagnostic)
+  const toolCall = asRecord(diagnostic?.toolCall)
+  return asString(data?.toolName) ?? asString(toolCall?.name)
 }
 
 function asVoiceStage(value: string | null): VoiceStage | null {
@@ -440,6 +746,603 @@ function latestNumber(events: NormalizedVoiceCaptureEvent[], keys: string[]): nu
   }
 
   return null
+}
+
+function asSessionRuntime(value: string | null): SessionRuntime | null {
+  switch (value) {
+    case "legacy_cascade":
+    case "gemini_live":
+      return value
+    default:
+      return null
+  }
+}
+
+function latestPayloadForEvent(events: NormalizedVoiceCaptureEvent[], name: string): Record<string, unknown> | null {
+  const event = findLast(events, (entry) => entry.name === name)
+  return event ? eventData(event) : null
+}
+
+function latestNestedDiagnostic(events: NormalizedVoiceCaptureEvent[], name: string): Record<string, unknown> | null {
+  const payload = latestPayloadForEvent(events, name)
+  return asRecord(payload?.diagnostic)
+}
+
+function latestEventAt(events: NormalizedVoiceCaptureEvent[], name: string): string | null {
+  return findLast(events, (event) => event.name === name)?.recordedAt ?? null
+}
+
+function latestGeminiToolCallLedger(events: NormalizedVoiceCaptureEvent[]): Array<Record<string, unknown>> {
+  const entriesById = new Map<string, Record<string, unknown>>()
+  for (const event of events) {
+    if (event.name !== "gemini-tool-call-ledger") {
+      continue
+    }
+    const entry = asRecord(eventData(event)?.entry)
+    const toolCallId = asString(entry?.toolCallId)
+    if (!entry || !toolCallId) {
+      continue
+    }
+    entriesById.set(toolCallId, entry)
+  }
+  return [...entriesById.values()].slice(-25)
+}
+
+function asGeminiCategoryCounts(value: unknown): Record<string, { count: number; lastAt: string | null }> {
+  const record = asRecord(value)
+  if (!record) {
+    return {}
+  }
+  const counts: Record<string, { count: number; lastAt: string | null }> = {}
+  for (const [category, counterValue] of Object.entries(record)) {
+    const counter = asRecord(counterValue)
+    if (!counter) {
+      continue
+    }
+    counts[category] = {
+      count: asFiniteNumber(counter.count) ?? 0,
+      lastAt: asString(counter.lastAt),
+    }
+  }
+  return counts
+}
+
+function asNumericRecord(value: unknown): Record<string, number> {
+  const record = asRecord(value)
+  if (!record) {
+    return {}
+  }
+  const numeric: Record<string, number> = {}
+  for (const [key, entry] of Object.entries(record)) {
+    const count = asFiniteNumber(entry)
+    if (count !== null) {
+      numeric[key] = count
+    }
+  }
+  return numeric
+}
+
+function geminiProviderCategoryCount(
+  events: NormalizedVoiceCaptureEvent[],
+  runtimeTelemetry: VoiceRuntimeTelemetry | null | undefined,
+  category: string,
+): number {
+  let count = runtimeTelemetry?.runtime === "gemini_live"
+    ? runtimeTelemetry.providerCategoryCounts[category]?.count ?? 0
+    : 0
+
+  for (const event of events) {
+    if (event.name !== "gemini-provider-event-correlation") {
+      continue
+    }
+    const telemetry = asRecord(eventData(event)?.telemetry)
+    const categoryCounts = asGeminiCategoryCounts(telemetry?.categoryCounts)
+    count = Math.max(count, categoryCounts[category]?.count ?? 0)
+  }
+
+  return count
+}
+
+function maxFiniteFromRecords(records: Record<string, unknown>[], key: string): number | null {
+  let maxValue: number | null = null
+  for (const record of records) {
+    const value = asFiniteNumber(record[key])
+    if (value === null) {
+      continue
+    }
+    maxValue = maxValue === null ? value : Math.max(maxValue, value)
+  }
+  return maxValue
+}
+
+function latestStringFromRecords(records: Record<string, unknown>[], key: string): string | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const value = asString(records[index]?.[key])
+    if (value !== null) {
+      return value
+    }
+  }
+  return null
+}
+
+function latestFiniteFromRecords(records: Record<string, unknown>[], key: string): number | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const value = asFiniteNumber(records[index]?.[key])
+    if (value !== null) {
+      return value
+    }
+  }
+  return null
+}
+
+function latestRelayDurationFor(
+  records: Record<string, unknown>[],
+  predicate: (record: Record<string, unknown>) => boolean,
+): number | null {
+  for (let index = records.length - 1; index >= 0; index -= 1) {
+    const record = records[index]
+    if (!predicate(record)) {
+      continue
+    }
+    const value = asFiniteNumber(record.durationMs)
+    if (value !== null) {
+      return value
+    }
+  }
+  return null
+}
+
+function latestRuntimeFromCapture(events: NormalizedVoiceCaptureEvent[]): SessionRuntime | null {
+  return asSessionRuntime(latestValue(events, ["runtime", "voice_runtime"]))
+    ?? (latestValue(events, ["callType"]) === "gemini_live" ? "gemini_live" : null)
+}
+
+function derivePublicSseState(events: NormalizedVoiceCaptureEvent[]): GeminiSessionTelemetry["gemini"]["publicSseState"] {
+  const openIndex = findLastIndex(events, (event) => event.name === "stream-open")
+  const errorIndex = findLastIndex(events, (event) => event.name === "stream-error")
+
+  if (errorIndex > openIndex) {
+    return "error"
+  }
+
+  return openIndex >= 0 ? "connected" : "disconnected"
+}
+
+function deriveGeminiWebSocketState(stage: string | null): GeminiSessionTelemetry["gemini"]["websocketState"] {
+  switch (stage) {
+    case "opening_websocket":
+      return "connecting"
+    case "sending_setup":
+    case "waiting_setup_complete":
+      return "setup_pending"
+    case "connected":
+    case "streaming_audio":
+      return "connected"
+    case "closed":
+      return "closed"
+    default:
+      return null
+  }
+}
+
+function buildSessionTelemetry(params: {
+  runtimeTelemetry?: VoiceRuntimeTelemetry | null
+  activeEvents: NormalizedVoiceCaptureEvent[]
+  sessionIds: VoiceDeveloperMetrics["sessionIds"]
+  transport: VoiceDeveloperMetrics["transport"]
+  timings: VoiceDeveloperMetrics["timings"]
+  counts: VoiceDeveloperMetrics["counts"]
+  lastTurn: VoiceDeveloperMetrics["lastTurn"]
+  nowMs: number
+}): VoiceSessionTelemetry {
+  const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, nowMs } = params
+  const captureRuntime = latestRuntimeFromCapture(activeEvents)
+  const runtime = runtimeTelemetry?.runtime ?? captureRuntime ?? "legacy_cascade"
+  const source = runtimeTelemetry?.runtime === runtime
+    ? runtimeTelemetry.source
+    : captureRuntime === runtime
+      ? "capture"
+      : "default"
+
+  if (runtime === "gemini_live") {
+    const hookTelemetry = runtimeTelemetry?.runtime === "gemini_live" ? runtimeTelemetry : null
+    const stagePayload = latestPayloadForEvent(activeEvents, "gemini-stage-changed")
+    const relayStatusPayload = latestPayloadForEvent(activeEvents, "gemini-relay-status")
+    const relayDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-relay-diagnostic")
+    const relayTracePayload = latestPayloadForEvent(activeEvents, "gemini-relay-trace")
+    const relayTrace = asRecord(relayTracePayload?.trace)
+    const relayThroughput = asRecord(relayTrace?.throughput)
+    const websocketDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-websocket-diagnostic")
+    const interruptionDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-interruption")
+    const staleSuppressionDiagnostics = activeEvents
+      .filter((event) => event.name === "gemini-stale-output-suppressed")
+      .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+      .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
+    const inputAudioDiagnostics = activeEvents
+      .filter((event) => event.name === "gemini-input-audio-activity")
+      .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+      .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
+    const bargeInTranscriptDiagnostics = activeEvents
+      .filter((event) => event.name === "gemini-barge-in-transcript-handoff")
+      .map((event) => asRecord(asRecord(event.payload)?.diagnostic))
+      .filter((diagnostic): diagnostic is Record<string, unknown> => diagnostic !== null)
+    const toolDiagnostic = latestNestedDiagnostic(activeEvents, "gemini-tool-loop-diagnostic")
+    const providerPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event")
+    const providerCorrelationPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event-correlation")
+    const providerTelemetry = asRecord(providerCorrelationPayload?.telemetry)
+    const relayTraces = activeEvents
+      .filter((event) => event.name === "gemini-relay-trace")
+      .map((event) => asRecord(asRecord(event.payload)?.trace))
+      .filter((trace): trace is Record<string, unknown> => trace !== null)
+    const ledgerEntries = latestGeminiToolCallLedger(activeEvents)
+    const unresolvedToolEntries = ledgerEntries.filter((entry) => asString(entry.finalState) === "unknown")
+    const oldestUnresolvedToolCallAtMs = unresolvedToolEntries.reduce<number | null>((oldest, entry) => {
+      const receivedAt = asString(entry.receivedAt)
+      const parsed = receivedAt ? Date.parse(receivedAt) : Number.NaN
+      if (!Number.isFinite(parsed)) return oldest
+      return oldest === null ? parsed : Math.min(oldest, parsed)
+    }, null)
+    const staleSuppressionCount = Math.max(
+      hookTelemetry?.staleAssistantOutputSuppressionCount ?? 0,
+      staleSuppressionDiagnostics.length + countWhere(activeEvents, (event) => event.name === "stale-assistant-transcript-ignored"),
+    )
+    const staleAssistantAudioDroppedCount = Math.max(
+      hookTelemetry?.staleAssistantAudioDroppedCount ?? 0,
+      staleSuppressionDiagnostics.filter((diagnostic) => asString(diagnostic.outputType) === "audio").length,
+    )
+    const staleAssistantTranscriptDroppedCount = Math.max(
+      hookTelemetry?.staleAssistantTranscriptDroppedCount ?? 0,
+      staleSuppressionDiagnostics.filter((diagnostic) => asString(diagnostic.outputType) === "transcript").length,
+      countWhere(activeEvents, (event) => event.name === "stale-assistant-transcript-ignored"),
+    )
+    const playbackGeneration = Math.max(
+      hookTelemetry?.playbackGeneration ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.playbackGeneration) ?? 0,
+      maxFiniteFromRecords(staleSuppressionDiagnostics, "playbackGeneration") ?? 0,
+    )
+    const bargeInDiagnostics = [...inputAudioDiagnostics, ...staleSuppressionDiagnostics]
+    const rawAssistantUserOverlapMs = Math.max(
+      hookTelemetry?.rawAssistantUserOverlapMs ?? 0,
+      hookTelemetry?.maxRawAssistantUserOverlapMs ?? 0,
+      hookTelemetry?.assistantUserOverlapMs ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "rawAssistantUserOverlapMs") ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.rawAssistantUserOverlapMs) ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.assistantUserOverlapMs) ?? 0,
+    )
+    const confirmedAssistantUserOverlapMs = Math.max(
+      hookTelemetry?.confirmedAssistantUserOverlapMs ?? 0,
+      hookTelemetry?.maxConfirmedAssistantUserOverlapMs ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "confirmedAssistantUserOverlapMs") ?? 0,
+      asFiniteNumber(interruptionDiagnostic?.confirmedAssistantUserOverlapMs) ?? 0,
+    )
+    const assistantUserOverlapMs = rawAssistantUserOverlapMs
+    const latestInputAudioDiagnostic = inputAudioDiagnostics.at(-1)
+    const latestSuppressedAudioDiagnostic = staleSuppressionDiagnostics
+      .filter((diagnostic) => asString(diagnostic.outputType) === "audio")
+      .at(-1)
+    const inputFrameOnlyNotBargeInCount = Math.max(
+      hookTelemetry?.inputFrameOnlyNotBargeInCount ?? 0,
+      maxFiniteFromRecords(inputAudioDiagnostics, "inputFrameOnlyNotBargeInCount") ?? 0,
+      maxFiniteFromRecords(staleSuppressionDiagnostics, "inputFrameOnlyNotBargeInCount") ?? 0,
+      inputAudioDiagnostics.filter((diagnostic) => asString(diagnostic.suppressionDeferredReason) === "input_frame_only_not_barge_in").length,
+    )
+    const candidateFramesDidNotConfirmCount = Math.max(
+      hookTelemetry?.candidateFramesDidNotConfirmCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "candidateFramesDidNotConfirmCount") ?? 0,
+    )
+    const candidateExpiredCount = Math.max(
+      hookTelemetry?.candidateExpiredCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "candidateExpiredCount") ?? 0,
+    )
+    const suppressionBlockedBecauseNoIntentCount = Math.max(
+      hookTelemetry?.suppressionBlockedBecauseNoIntentCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "suppressionBlockedBecauseNoIntentCount") ?? 0,
+    )
+    const bargeInTranscriptCapturedCount = Math.max(
+      hookTelemetry?.bargeInTranscriptCapturedCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptCapturedCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.captured) === true).length,
+    )
+    const bargeInTranscriptPromotedCount = Math.max(
+      hookTelemetry?.bargeInTranscriptPromotedCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptPromotedCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.promoted) === true).length,
+    )
+    const bargeInTranscriptPromotionLatencyMs = latestFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptPromotionLatencyMs")
+      ?? latestFiniteFromRecords(bargeInTranscriptDiagnostics, "promotionLatencyMs")
+      ?? hookTelemetry?.bargeInTranscriptPromotionLatencyMs
+      ?? null
+    const bargeInTranscriptIgnoredCount = Math.max(
+      hookTelemetry?.bargeInTranscriptIgnoredCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptIgnoredCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.ignored) === true).length,
+    )
+    const bargeInTranscriptDuplicateSuppressedCount = Math.max(
+      hookTelemetry?.bargeInTranscriptDuplicateSuppressedCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInTranscriptDuplicateSuppressedCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.duplicateSuppressed) === true).length,
+    )
+    const lastBargeInTranscriptPreview = latestStringFromRecords(bargeInTranscriptDiagnostics, "lastBargeInTranscriptPreview")
+      ?? latestStringFromRecords(bargeInTranscriptDiagnostics, "transcriptPreview")
+      ?? hookTelemetry?.lastBargeInTranscriptPreview
+      ?? null
+    const bargeInNewTurnDispatchCount = Math.max(
+      hookTelemetry?.bargeInNewTurnDispatchCount ?? 0,
+      maxFiniteFromRecords(bargeInTranscriptDiagnostics, "bargeInNewTurnDispatchCount") ?? 0,
+      bargeInTranscriptDiagnostics.filter((diagnostic) => asBoolean(diagnostic.newTurnDispatched) === true).length,
+    )
+    const bargeInNewTurnDispatchBlockedReason = latestStringFromRecords(bargeInTranscriptDiagnostics, "bargeInNewTurnDispatchBlockedReason")
+      ?? latestStringFromRecords(bargeInTranscriptDiagnostics, "newTurnDispatchBlockedReason")
+      ?? hookTelemetry?.bargeInNewTurnDispatchBlockedReason
+      ?? "none"
+    const bargeInCandidateFrameCount = Math.max(
+      hookTelemetry?.bargeInCandidateFrameCount ?? 0,
+      maxFiniteFromRecords(bargeInDiagnostics, "bargeInCandidateFrameCount") ?? 0,
+    )
+    const bargeInConfirmed = hookTelemetry?.bargeInConfirmed === true
+      || staleSuppressionDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
+      || inputAudioDiagnostics.some((diagnostic) => asBoolean(diagnostic.bargeInConfirmed) === true)
+    const bargeInConfirmationSource = latestStringFromRecords(bargeInDiagnostics, "bargeInConfirmationSource")
+      ?? asString(interruptionDiagnostic?.bargeInConfirmationSource)
+      ?? hookTelemetry?.bargeInConfirmationSource
+      ?? "none"
+    const bargeInConfirmationReason = latestStringFromRecords(bargeInDiagnostics, "bargeInConfirmationReason")
+      ?? asString(interruptionDiagnostic?.bargeInConfirmationReason)
+      ?? hookTelemetry?.bargeInConfirmationReason
+      ?? null
+    const userInputActiveAgeMs = maxFiniteFromRecords(
+      bargeInDiagnostics,
+      "userInputActiveAgeMs",
+    ) ?? hookTelemetry?.userInputActiveAgeMs ?? null
+    const staleSuppressionArmedAt = asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedAt)
+      ?? asString(latestInputAudioDiagnostic?.staleSuppressionArmedAt)
+      ?? hookTelemetry?.staleSuppressionArmedAt
+    const staleSuppressionArmedBy = asString(staleSuppressionDiagnostics.at(-1)?.staleSuppressionArmedBy)
+      ?? hookTelemetry?.staleSuppressionArmedBy
+      ?? null
+    const assistantAudioDropReason = asString(latestSuppressedAudioDiagnostic?.assistantAudioDropReason)
+      ?? asString(latestSuppressedAudioDiagnostic?.reason)
+      ?? hookTelemetry?.assistantAudioDropReason
+    const interruptedResponseIds = hookTelemetry?.interruptedResponseIds
+      ?? asStringArray(interruptionDiagnostic?.interruptedResponseIds)
+      ?? asStringArray(staleSuppressionDiagnostics.at(-1)?.interruptedResponseIds)
+      ?? []
+    const latestStage = hookTelemetry?.stage ?? asString(stagePayload?.stage)
+    const providerEventCount = Math.max(
+      hookTelemetry?.providerEventCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-provider-event"),
+    )
+    const relayDiagnosticCount = Math.max(
+      hookTelemetry?.relayDiagnosticCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-relay-diagnostic"),
+    )
+    const websocketDiagnosticCount = Math.max(
+      hookTelemetry?.websocketDiagnosticCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-websocket-diagnostic"),
+    )
+    const outputAudioEventCount = Math.max(
+      hookTelemetry?.outputAudioEventCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-output-audio-started"),
+    )
+    const interruptionCount = Math.max(
+      hookTelemetry?.interruptionCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-interruption"),
+    )
+    const playbackFlushCount = Math.max(
+      hookTelemetry?.playbackFlushCount ?? 0,
+      countWhere(activeEvents, (event) => {
+        if (event.name !== "gemini-interruption") return false
+        const diagnostic = asRecord(eventData(event)?.diagnostic)
+        return asBoolean(diagnostic?.playbackFlushed) === true
+      }),
+    )
+    const toolCallCount = Math.max(
+      hookTelemetry?.toolCallCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-tool-loop-diagnostic" && asString(eventData(event)?.phase) === "tool_call_received"),
+    )
+    const toolResponseCount = Math.max(
+      hookTelemetry?.toolResponseCount ?? 0,
+      countWhere(activeEvents, (event) => event.name === "gemini-tool-loop-diagnostic" && asString(eventData(event)?.phase) === "tool_response_sent"),
+    )
+    const toolRejectionCount = Math.max(
+      hookTelemetry?.toolRejectionCount ?? 0,
+      countWhere(activeEvents, (event) => {
+        if (event.name !== "gemini-tool-loop-diagnostic") return false
+        const phase = asString(eventData(event)?.phase)
+        return phase === "tool_execution_rejected"
+      }),
+    )
+    const toolCancellationCount = Math.max(
+      hookTelemetry?.toolCancellationCount ?? 0,
+      countWhere(activeEvents, (event) => {
+        if (event.name !== "gemini-tool-loop-diagnostic") return false
+        const phase = asString(eventData(event)?.phase)
+        return phase === "tool_call_cancelled"
+      }),
+    )
+    const artifactToolCallCount = Math.max(
+      hookTelemetry?.artifactToolCallCount ?? 0,
+      countWhere(activeEvents, (event) => {
+        if (event.name !== "gemini-tool-loop-diagnostic") return false
+        return asString(eventData(event)?.phase) === "tool_call_received"
+          && geminiToolName(event) === GEMINI_EMIT_ARTIFACT_TOOL_NAME
+      }),
+    )
+    const artifactToolCallUnknownCount = Math.max(
+      hookTelemetry?.artifactToolCallUnknownCount ?? 0,
+      unresolvedToolEntries.filter((entry) => asString(entry.toolName) === GEMINI_EMIT_ARTIFACT_TOOL_NAME).length,
+    )
+    const builderToolCallCount = Math.max(
+      hookTelemetry?.builderToolCallCount ?? 0,
+      countWhere(activeEvents, (event) => {
+        if (event.name !== "gemini-tool-loop-diagnostic") return false
+        const toolName = geminiToolName(event)
+        return asString(eventData(event)?.phase) === "tool_call_received"
+          && toolName !== null
+          && GEMINI_BUILDER_TOOL_NAMES.has(toolName)
+      }),
+    )
+    const unresolvedToolCallCount = Math.max(
+      hookTelemetry?.unresolvedToolCallCount ?? 0,
+      unresolvedToolEntries.length,
+    )
+    const oldestUnresolvedToolCallAgeMs = Math.max(
+      hookTelemetry?.oldestUnresolvedToolCallAgeMs ?? 0,
+      oldestUnresolvedToolCallAtMs === null ? 0 : Math.max(0, nowMs - oldestUnresolvedToolCallAtMs),
+    ) || null
+
+    return {
+      runtime: "gemini_live",
+      runtimeLabel: "Gemini Live",
+      source,
+      legacy: null,
+      gemini: {
+        sessionId: hookTelemetry?.sessionId ?? sessionIds.voiceAgentSessionId,
+        streamUrl: hookTelemetry?.streamUrl ?? latestValue(activeEvents, ["streamUrl"]),
+        websocketUrl: hookTelemetry?.websocketUrl ?? latestValue(activeEvents, ["websocketUrl", "websocket_url"]),
+        relayUrl: hookTelemetry?.relayUrl ?? latestValue(activeEvents, ["relayUrl", "relay_url"]),
+        transport: hookTelemetry?.transport ?? latestValue(activeEvents, ["transport"]),
+        publicEventBoundary: hookTelemetry?.publicEventBoundary ?? latestValue(activeEvents, ["publicEventBoundary", "public_event_boundary"]),
+        connectionState: hookTelemetry?.connectionState ?? asString(stagePayload?.connectionState),
+        stage: latestStage,
+        websocketState: hookTelemetry?.websocketState
+          ?? asString(websocketDiagnostic?.websocketState)
+          ?? deriveGeminiWebSocketState(latestStage),
+        relayStatus: hookTelemetry?.relayStatus ?? asString(relayStatusPayload?.relayStatus),
+        publicSseState: hookTelemetry?.publicSseState ?? derivePublicSseState(activeEvents),
+        microphoneState: hookTelemetry?.microphoneState ?? asString(stagePayload?.microphoneState),
+        remoteAudioState: hookTelemetry?.remoteAudioState ?? (outputAudioEventCount > 0 ? "active" : "idle"),
+        setupComplete: hookTelemetry?.setupComplete ?? asBoolean(providerPayload?.setupComplete) ?? false,
+        providerEventCount,
+        lastProviderEventAt: hookTelemetry?.lastProviderEventAt ?? latestEventAt(activeEvents, "gemini-provider-event"),
+        lastProviderEventType: hookTelemetry?.lastProviderEventType ?? asString(providerPayload?.eventType),
+        providerCategoryCounts: hookTelemetry?.providerCategoryCounts ?? asGeminiCategoryCounts(providerTelemetry?.categoryCounts),
+        outputAudioEventCount,
+        lastOutputAudioAt: hookTelemetry?.lastOutputAudioAt ?? latestEventAt(activeEvents, "gemini-output-audio-started"),
+        staleAssistantAudioDroppedCount,
+        staleAssistantTranscriptDroppedCount,
+        staleAssistantOutputSuppressionCount: staleSuppressionCount,
+        playbackGeneration,
+        assistantUserOverlapMs,
+        maxAssistantUserOverlapMs: assistantUserOverlapMs,
+        rawAssistantUserOverlapMs,
+        maxRawAssistantUserOverlapMs: rawAssistantUserOverlapMs,
+        confirmedAssistantUserOverlapMs,
+        maxConfirmedAssistantUserOverlapMs: confirmedAssistantUserOverlapMs,
+        userInputActiveAgeMs,
+        bargeInConfirmed,
+        bargeInConfirmationSource,
+        bargeInConfirmationReason,
+        bargeInCandidateFrameCount,
+        inputFrameOnlyNotBargeInCount,
+        candidateFramesDidNotConfirmCount,
+        candidateExpiredCount,
+        suppressionBlockedBecauseNoIntentCount,
+        bargeInTranscriptCapturedCount,
+        bargeInTranscriptPromotedCount,
+        bargeInTranscriptPromotionLatencyMs,
+        bargeInTranscriptIgnoredCount,
+        bargeInTranscriptDuplicateSuppressedCount,
+        lastBargeInTranscriptPreview,
+        bargeInNewTurnDispatchCount,
+        bargeInNewTurnDispatchBlockedReason,
+        staleSuppressionArmedAt,
+        staleSuppressionArmedBy,
+        assistantAudioDropReason,
+        interruptedResponseIds,
+        interruptionCount,
+        playbackFlushCount,
+        lastInterruptionAt: hookTelemetry?.lastInterruptionAt ?? asString(interruptionDiagnostic?.timestamp),
+        lastPlaybackFlushAt: hookTelemetry?.lastPlaybackFlushAt
+          ?? (asBoolean(interruptionDiagnostic?.playbackFlushed) === true ? asString(interruptionDiagnostic?.timestamp) : null),
+        relayDiagnosticCount,
+        lastRelayDiagnosticAt: hookTelemetry?.lastRelayDiagnosticAt ?? asString(relayDiagnostic?.timestamp),
+        lastRelayEventType: hookTelemetry?.lastRelayEventType ?? asString(relayDiagnostic?.eventType),
+        relayAttemptCount: hookTelemetry?.relayAttemptCount ?? asFiniteNumber(relayTrace?.attemptCount) ?? 0,
+        relaySuccessCount: hookTelemetry?.relaySuccessCount ?? asFiniteNumber(relayTrace?.successCount) ?? 0,
+        relayFailureCount: hookTelemetry?.relayFailureCount ?? asFiniteNumber(relayTrace?.failureCount) ?? 0,
+        relayTraceCount: hookTelemetry?.relayTraceCount ?? countWhere(activeEvents, (event) => event.name === "gemini-relay-trace"),
+        relayClassificationCounts: hookTelemetry?.relayClassificationCounts
+          ?? asGeminiCategoryCounts(asRecord(providerTelemetry?.relayClassificationCounts)),
+        lastRelayTraceAt: hookTelemetry?.lastRelayTraceAt ?? asString(relayTrace?.timestamp),
+        lastRelayCorrelationId: hookTelemetry?.lastRelayCorrelationId ?? asString(relayTrace?.correlationId),
+        lastRelayResponseKind: hookTelemetry?.lastRelayResponseKind ?? asString(relayTrace?.responseKind),
+        lastRelayDurationMs: hookTelemetry?.lastRelayDurationMs ?? asFiniteNumber(relayTrace?.durationMs),
+        maxRelayDurationMs: hookTelemetry?.maxRelayDurationMs ?? maxFiniteFromRecords(relayTraces, "durationMs"),
+        lastCriticalRelayDurationMs: hookTelemetry?.lastCriticalRelayDurationMs ?? latestRelayDurationFor(relayTraces, (trace) => asString(trace.relayClassification) === "critical"),
+        lastTranscriptionRelayDurationMs: hookTelemetry?.lastTranscriptionRelayDurationMs ?? latestRelayDurationFor(relayTraces, (trace) => {
+          const categories = Array.isArray(trace.categories) ? trace.categories : []
+          return categories.includes("inputTranscription") || categories.includes("outputTranscription")
+        }),
+        lastToolCallRelayDurationMs: hookTelemetry?.lastToolCallRelayDurationMs ?? latestRelayDurationFor(relayTraces, (trace) => {
+          const categories = Array.isArray(trace.categories) ? trace.categories : []
+          return categories.includes("toolCall") || categories.includes("toolCallCancellation")
+        }),
+        orderedRelayQueueDepth: hookTelemetry?.orderedRelayQueueDepth ?? asFiniteNumber(relayThroughput?.orderedRelayQueueDepth) ?? 0,
+        oldestQueuedAgeMs: hookTelemetry?.oldestQueuedAgeMs ?? asFiniteNumber(relayThroughput?.oldestQueuedAgeMs),
+        transcriptPartialsCoalesced: hookTelemetry?.transcriptPartialsCoalesced ?? asFiniteNumber(relayThroughput?.transcriptPartialsCoalesced) ?? 0,
+        transcriptPartialsSent: hookTelemetry?.transcriptPartialsSent ?? asFiniteNumber(relayThroughput?.transcriptPartialsSent) ?? 0,
+        transcriptPartialsDropped: hookTelemetry?.transcriptPartialsDropped ?? asFiniteNumber(relayThroughput?.transcriptPartialsDropped) ?? 0,
+        transcriptCoalescingDisabledReason: hookTelemetry?.transcriptCoalescingDisabledReason ?? asString(relayThroughput?.transcriptCoalescingDisabledReason),
+        finalTranscriptEventsSent: hookTelemetry?.finalTranscriptEventsSent ?? asFiniteNumber(relayThroughput?.finalTranscriptEventsSent) ?? 0,
+        nonDroppableCriticalEventsSent: hookTelemetry?.nonDroppableCriticalEventsSent ?? asFiniteNumber(relayThroughput?.nonDroppableCriticalEventsSent) ?? 0,
+        lastTranscriptRelayLatencyMs: hookTelemetry?.lastTranscriptRelayLatencyMs ?? asFiniteNumber(relayThroughput?.lastTranscriptRelayLatencyMs),
+        maxTranscriptRelayLatencyMs: hookTelemetry?.maxTranscriptRelayLatencyMs ?? asFiniteNumber(relayThroughput?.maxTranscriptRelayLatencyMs),
+        p95TranscriptRelayLatencyMs: hookTelemetry?.p95TranscriptRelayLatencyMs ?? asFiniteNumber(relayThroughput?.p95TranscriptRelayLatencyMs),
+        coalescedBySegment: hookTelemetry?.coalescedBySegment ?? asNumericRecord(relayThroughput?.coalescedBySegment),
+        consecutiveRelayFailures: hookTelemetry?.consecutiveRelayFailures ?? asFiniteNumber(relayDiagnostic?.consecutiveFailures) ?? 0,
+        lastRelayErrorText: hookTelemetry?.lastRelayErrorText ?? asString(relayDiagnostic?.errorText),
+        websocketDiagnosticCount,
+        lastWebSocketDiagnosticAt: hookTelemetry?.lastWebSocketDiagnosticAt ?? asString(websocketDiagnostic?.timestamp),
+        lastWebSocketErrorText: hookTelemetry?.lastWebSocketErrorText ?? asString(websocketDiagnostic?.message),
+        toolCallCount,
+        toolResponseCount,
+        toolRejectionCount,
+        toolCancellationCount,
+        artifactToolCallCount,
+        artifactToolCallUnknownCount,
+        builderToolCallCount,
+        unresolvedToolCallCount,
+        oldestUnresolvedToolCallAgeMs,
+        lastToolPhase: hookTelemetry?.lastToolPhase ?? asString(toolDiagnostic?.phase),
+        lastToolName: hookTelemetry?.lastToolName ?? asString(asRecord(toolDiagnostic?.toolCall)?.name),
+        lastToolAt: hookTelemetry?.lastToolAt ?? asString(toolDiagnostic?.timestamp),
+        toolCallLedger: hookTelemetry?.toolCallLedger ?? ledgerEntries,
+        publicTurnCount: counts.turns,
+        artifactCount: counts.artifacts,
+        artifactPublicEventCount: counts.artifactPublicEventCount,
+        artifactRuntimeIngestCount: counts.artifactRuntimeIngestCount,
+        artifactRenderedCount: counts.artifactRenderedCount,
+        artifactCountSource: counts.artifactCountSource,
+        artifactCountMismatch: counts.artifactCountMismatch,
+        publicDiagnosticCount: counts.diagnostics,
+        lastUserTranscriptAt: lastTurn.lastUserTranscriptAt,
+        lastAssistantTranscriptAt: lastTurn.lastAssistantTranscriptAt,
+        lastEventAgeMs: timings.lastEventAgeMs,
+      },
+    }
+  }
+
+  const hookTelemetry = runtimeTelemetry?.runtime === "legacy_cascade" ? runtimeTelemetry : null
+  return {
+    runtime: "legacy_cascade",
+    runtimeLabel: "Legacy Cascade",
+    source,
+    legacy: {
+      sessionId: hookTelemetry?.sessionId ?? sessionIds.sessionId,
+      threadId: hookTelemetry?.threadId ?? sessionIds.threadId,
+      callId: hookTelemetry?.callId ?? sessionIds.callId,
+      voiceAgentSessionId: hookTelemetry?.voiceAgentSessionId ?? sessionIds.voiceAgentSessionId,
+      streamUrl: hookTelemetry?.streamUrl ?? latestValue(activeEvents, ["streamUrl"]),
+      streamOpen: transport.streamOpen,
+      activeSource: transport.activeSource,
+      remoteParticipantCount: transport.remoteParticipantCount,
+      sessionReadyMs: timings.sessionReadyMs,
+      joinLatencyMs: timings.joinLatencyMs,
+      sseOpenMs: timings.sseOpenMs,
+    },
+    gemini: null,
+  }
 }
 
 function buildMicrophone(metrics: SophiaCaptureMicrophoneSummary | undefined): VoiceDeveloperMetrics["microphone"] {
@@ -654,6 +1557,7 @@ function buildRegressionMarkers(params: {
   microphone: VoiceDeveloperMetrics["microphone"]
   builder: VoiceDeveloperMetrics["builder"]
   userTranscriptCount: number
+  providerInputTranscriptionCount: number
   falseUserEndedCount: number | null
   duplicatePhaseCounts: Record<string, number>
   latestReason: string | null
@@ -666,6 +1570,7 @@ function buildRegressionMarkers(params: {
     microphone,
     builder,
     userTranscriptCount,
+    providerInputTranscriptionCount,
     falseUserEndedCount,
     latestReason,
     currentThinkingMs,
@@ -694,6 +1599,13 @@ function buildRegressionMarkers(params: {
       title: "Mic stream without signal",
       detail: "The browser created a stream, but the microphone probe never observed non-silent audio.",
       level: "bad",
+    })
+  } else if (providerInputTranscriptionCount > 0 && userTranscriptCount === 0 && stage !== "idle" && stage !== "connecting") {
+    markers.push({
+      key: "public-continuity",
+      title: "Provider transcript not surfaced",
+      detail: "Gemini emitted input transcription, but no normalized sophia.user_transcript reached Session.",
+      level: "warn",
     })
   } else if (microphone.detectedAudio && userTranscriptCount === 0 && stage !== "idle" && stage !== "connecting") {
     markers.push({
@@ -983,6 +1895,7 @@ function buildBottleneckDiagnosis(params: {
   turnCount: number
   microphone: VoiceDeveloperMetrics["microphone"]
   userTranscriptCount: number
+  providerInputTranscriptionCount: number
   assistantTranscriptCount: number
   falseUserEndedCount: number | null
   duplicatePhaseCounts: Record<string, number>
@@ -999,6 +1912,7 @@ function buildBottleneckDiagnosis(params: {
     turnCount,
     microphone,
     userTranscriptCount,
+    providerInputTranscriptionCount,
     assistantTranscriptCount,
     falseUserEndedCount,
     duplicatePhaseCounts,
@@ -1066,6 +1980,20 @@ function buildBottleneckDiagnosis(params: {
         formatEvidenceMs("request -> credentials", startup.requestToCredentialsMs),
         formatEvidenceMs("credentials -> join", startup.credentialsToJoinMs),
         formatEvidenceMs("join -> ready", startup.joinToReadyMs),
+      ]),
+    }
+  }
+
+  if (providerInputTranscriptionCount > 0 && userTranscriptCount === 0 && stage !== "idle" && stage !== "connecting") {
+    return {
+      kind: "transport",
+      level: "warn",
+      title: "Provider transcript is not surfaced",
+      detail: "Gemini input transcription is present, but the public Session stream has no sophia.user_transcript event.",
+      evidence: compactStrings([
+        `provider input transcripts: ${providerInputTranscriptionCount}`,
+        `public user transcripts: ${userTranscriptCount}`,
+        formatEvidenceMs("mic audio -> transcript", pipeline.micToUserTranscriptMs),
       ]),
     }
   }
@@ -1273,6 +2201,7 @@ export function buildVoiceDeveloperMetricsFromCapture({
   nowMs,
   runtimeError,
   stage,
+  runtimeTelemetry,
 }: BuildVoiceDeveloperMetricsFromCaptureParams): VoiceDeveloperMetrics {
   return buildVoiceDeveloperMetrics({
     stage: stage ?? inferVoiceStageFromCapture({ events: capture.events, runtimeError }),
@@ -1280,6 +2209,7 @@ export function buildVoiceDeveloperMetricsFromCapture({
     snapshot: capture.snapshot ?? null,
     nowMs,
     runtimeError,
+    runtimeTelemetry,
   })
 }
 
@@ -1291,6 +2221,8 @@ export function buildVoiceTelemetrySummary(metrics: VoiceDeveloperMetrics): Voic
   })
 
   return {
+    runtime: metrics.sessionTelemetry.runtime,
+    runtimeLabel: metrics.sessionTelemetry.runtimeLabel,
     stage: metrics.stage,
     healthLevel: metrics.health.level,
     healthTitle: metrics.health.title,
@@ -1327,6 +2259,7 @@ function summarizeHealth(params: {
   currentThinkingMs: number | null
   latestDiagnostic: Record<string, unknown> | null
   userTranscriptCount: number
+  providerInputTranscriptionCount: number
   assistantTranscriptCount: number
   turnCount: number
   pipeline: VoicePipelineMetrics
@@ -1341,6 +2274,7 @@ function summarizeHealth(params: {
     currentThinkingMs,
     latestDiagnostic,
     userTranscriptCount,
+    providerInputTranscriptionCount,
     assistantTranscriptCount,
     turnCount,
     pipeline,
@@ -1384,6 +2318,14 @@ function summarizeHealth(params: {
       level: "bad",
       title: "Mic stream without signal",
       detail: "The browser created a microphone stream, but no non-silent audio window was observed.",
+    }
+  }
+
+  if (providerInputTranscriptionCount > 0 && userTranscriptCount === 0 && stage !== "idle" && stage !== "connecting") {
+    return {
+      level: "warn",
+      title: "Provider transcript not surfaced",
+      detail: "Gemini input transcription exists, but Session has not received a normalized user transcript yet.",
     }
   }
 
@@ -1740,6 +2682,7 @@ export function buildVoiceDeveloperMetrics({
   snapshot,
   nowMs = Date.now(),
   runtimeError,
+  runtimeTelemetry,
 }: BuildVoiceDeveloperMetricsParams): VoiceDeveloperMetrics {
   const normalizedEvents = events.map(normalizeEvent)
   const lastStartIndex = findLastIndex(
@@ -1803,7 +2746,7 @@ export function buildVoiceDeveloperMetrics({
     activeEvents,
     (event) => event.name === "sophia.transcript" && (eventData(event)?.is_final === true || eventData(event)?.final === true),
   )
-  const artifactCount = countWhere(activeEvents, (event) => event.name === "sophia.artifact")
+  const artifactMetrics = buildArtifactTelemetryCountsFromEvents(activeEvents, snapshot)
   const diagnosticCount = countWhere(activeEvents, (event) => event.name === "sophia.turn_diagnostic")
   const builderEvents = countWhere(activeEvents, (event) => event.category === "builder" || event.name === "sophia.builder_task")
   const turnCount = Math.max(
@@ -1814,6 +2757,11 @@ export function buildVoiceDeveloperMetrics({
 
   const microphone = buildMicrophone(snapshot?.harness?.microphone)
   const builder = buildBuilderMetrics(activeEvents, nowMs)
+  const providerInputTranscriptionCount = geminiProviderCategoryCount(
+    activeEvents,
+    runtimeTelemetry,
+    "inputTranscription",
+  )
   const lastEventAgeMs = diffMs(latestEvent?.atMs ?? null, nowMs)
   const currentThinkingMs = stage === "thinking" ? diffMs(lastUserEndedEvent?.atMs ?? null, nowMs) : null
   const transportSource: VoiceDeveloperMetrics["transport"]["activeSource"] =
@@ -1903,6 +2851,7 @@ export function buildVoiceDeveloperMetrics({
     microphone,
     builder,
     userTranscriptCount,
+    providerInputTranscriptionCount,
     falseUserEndedCount,
     duplicatePhaseCounts,
     latestReason: asString(lastDiagnostic?.reason),
@@ -1917,6 +2866,7 @@ export function buildVoiceDeveloperMetrics({
     turnCount,
     microphone,
     userTranscriptCount,
+    providerInputTranscriptionCount,
     assistantTranscriptCount,
     falseUserEndedCount,
     duplicatePhaseCounts,
@@ -1938,60 +2888,83 @@ export function buildVoiceDeveloperMetrics({
     currentThinkingMs,
     latestDiagnostic: lastDiagnostic,
     userTranscriptCount,
+    providerInputTranscriptionCount,
     assistantTranscriptCount,
     turnCount,
     pipeline,
     thresholds,
   })
 
+  const sessionIds = {
+    sessionId,
+    threadId,
+    callId,
+    voiceAgentSessionId,
+    runId,
+  }
+  const transport = {
+    activeSource: transportSource,
+    remoteParticipantCount,
+    streamOpen: Boolean(sseOpenEvent),
+    lastEventAt: latestEvent?.recordedAt ?? null,
+  }
+  const counts = {
+    turns: turnCount,
+    userTranscripts: userTranscriptCount,
+    assistantTranscripts: assistantTranscriptCount,
+    artifacts: artifactMetrics.artifactCount,
+    artifactPublicEventCount: artifactMetrics.artifactPublicEventCount,
+    artifactRuntimeIngestCount: artifactMetrics.artifactRuntimeIngestCount,
+    artifactRenderedCount: artifactMetrics.artifactRenderedCount,
+    artifactCountSource: artifactMetrics.artifactCountSource,
+    artifactCountMismatch: artifactMetrics.artifactCountMismatch,
+    diagnostics: diagnosticCount,
+    builderEvents,
+  }
+  const timings = {
+    joinLatencyMs: thresholds.joinLatency.valueMs,
+    sessionReadyMs: thresholds.sessionReady.valueMs,
+    sseOpenMs: diffMs(credentialsReceivedEvent?.atMs ?? null, sseOpenEvent?.atMs ?? null),
+    currentThinkingMs,
+    lastEventAgeMs,
+  }
+  const lastTurn = {
+    turnId: asString(lastDiagnostic?.turn_id),
+    status: asString(lastDiagnostic?.status),
+    reason: asString(lastDiagnostic?.reason),
+    backendRequestStartMs,
+    backendFirstEventMs,
+    firstTextMs,
+    backendCompleteMs,
+    firstAudioMs,
+    agentStartLatencyMs: diffMs(lastUserEndedEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null),
+    responseDurationMs,
+    falseUserEndedCount,
+    duplicatePhaseCounts,
+    lastUserTranscript,
+    lastAssistantTranscript,
+    lastUserTranscriptAt: lastUserTranscriptEvent?.recordedAt ?? null,
+    lastAssistantTranscriptAt: lastAssistantTranscriptEvent?.recordedAt ?? null,
+  }
+  const sessionTelemetry = buildSessionTelemetry({
+    runtimeTelemetry,
+    activeEvents,
+    sessionIds,
+    transport,
+    timings,
+    counts,
+    lastTurn,
+    nowMs,
+  })
+
   return {
     stage,
-    sessionIds: {
-      sessionId,
-      threadId,
-      callId,
-      voiceAgentSessionId,
-      runId,
-    },
-    transport: {
-      activeSource: transportSource,
-      remoteParticipantCount,
-      streamOpen: Boolean(sseOpenEvent),
-      lastEventAt: latestEvent?.recordedAt ?? null,
-    },
-    counts: {
-      turns: turnCount,
-      userTranscripts: userTranscriptCount,
-      assistantTranscripts: assistantTranscriptCount,
-      artifacts: artifactCount,
-      diagnostics: diagnosticCount,
-      builderEvents,
-    },
-    timings: {
-      joinLatencyMs: thresholds.joinLatency.valueMs,
-      sessionReadyMs: thresholds.sessionReady.valueMs,
-      sseOpenMs: diffMs(credentialsReceivedEvent?.atMs ?? null, sseOpenEvent?.atMs ?? null),
-      currentThinkingMs,
-      lastEventAgeMs,
-    },
-    lastTurn: {
-      turnId: asString(lastDiagnostic?.turn_id),
-      status: asString(lastDiagnostic?.status),
-      reason: asString(lastDiagnostic?.reason),
-      backendRequestStartMs,
-      backendFirstEventMs,
-      firstTextMs,
-      backendCompleteMs,
-      firstAudioMs,
-      agentStartLatencyMs: diffMs(lastUserEndedEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null),
-      responseDurationMs,
-      falseUserEndedCount,
-      duplicatePhaseCounts,
-      lastUserTranscript,
-      lastAssistantTranscript,
-      lastUserTranscriptAt: lastUserTranscriptEvent?.recordedAt ?? null,
-      lastAssistantTranscriptAt: lastAssistantTranscriptEvent?.recordedAt ?? null,
-    },
+    sessionTelemetry,
+    sessionIds,
+    transport,
+    counts,
+    timings,
+    lastTurn,
     microphone,
     builder,
     health,

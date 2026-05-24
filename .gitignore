@@ -46,6 +46,10 @@ skills/custom/*
 logs/
 log/
 
+# Sophia voice local telemetry exports
+**/sophia-voice-telemetry-report-*.json
+**/sophia-voice-telemetry-report-*.zip
+
 # Local git hooks (keep only on this machine, do not push)
 .githooks/
 

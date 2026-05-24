@@ -30,12 +30,43 @@ vi.mock("../../app/hooks/useStreamVoice", () => ({
   }),
 }))
 
+const mockGeminiClose = vi.fn().mockResolvedValue(undefined)
+const mockGeminiTrack = { enabled: true, stop: vi.fn() }
+const mockGeminiConnection = {
+  userId: "user-1",
+  sessionId: "gemini-prod-session-1",
+  streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+  websocketUrl: "wss://gemini.example/live?access_token=test",
+  relayUrl: "/api/sophia/voice/gemini/relay",
+  publicEventBoundary: "SophiaEventNormalizer",
+  transport: "gemini_browser_websocket_ephemeral_token_with_backend_relay",
+  setup: { model: "models/gemini-live" },
+  setupComplete: true,
+  websocket: { readyState: 1, send: vi.fn(), close: vi.fn() },
+  localStream: {
+    getAudioTracks: () => [mockGeminiTrack],
+    getTracks: () => [mockGeminiTrack],
+  },
+  sendText: vi.fn(),
+  close: mockGeminiClose,
+}
+const mockConnectGeminiBrowserLiveFromBootstrap = vi.fn().mockResolvedValue(mockGeminiConnection)
+
+vi.mock("../../app/lib/gemini-browser-live-websocket-dogfood", () => ({
+  connectGeminiBrowserLiveFromBootstrap: (...args: unknown[]) => mockConnectGeminiBrowserLiveFromBootstrap(...args),
+}))
+
 // ---------------------------------------------------------------------------
 // Mock: stores
 // ---------------------------------------------------------------------------
 
 const mockAddMessage = vi.fn()
 const mockSetVoiceFailed = vi.fn()
+const mockSetListeningPresence = vi.fn()
+const mockSetSpeakingPresence = vi.fn()
+const mockSetMetaPresence = vi.fn()
+const mockSettlePresence = vi.fn()
+const mockResetPresence = vi.fn()
 let mockSessionContextMode: ContextMode = "gaming"
 let mockSessionPresetType: PresetType | null = "vent"
 
@@ -60,11 +91,11 @@ vi.mock("../../app/stores/voice-store", () => ({
 vi.mock("../../app/stores/presence-store", () => ({
   usePresenceStore: (selector: (s: Record<string, unknown>) => unknown) =>
     selector({
-      setListening: vi.fn(),
-      setSpeaking: vi.fn(),
-      setMetaStage: vi.fn(),
-      settleToRestingSoon: vi.fn(),
-      reset: vi.fn(),
+      setListening: mockSetListeningPresence,
+      setSpeaking: mockSetSpeakingPresence,
+      setMetaStage: mockSetMetaPresence,
+      settleToRestingSoon: mockSettlePresence,
+      reset: mockResetPresence,
     }),
 }))
 
@@ -173,12 +204,23 @@ describe("useStreamVoiceSession", () => {
     mockSessionPresetType = "vent"
     callEventHandlers.clear()
     MockEventSource.latest = null
+    mockGeminiTrack.enabled = true
+    mockGeminiClose.mockClear()
+    mockSetListeningPresence.mockClear()
+    mockSetSpeakingPresence.mockClear()
+    mockSetMetaPresence.mockClear()
+    mockSettlePresence.mockClear()
+    mockResetPresence.mockClear()
+    mockConnectGeminiBrowserLiveFromBootstrap.mockClear()
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValue(mockGeminiConnection)
     vi.useRealTimers()
 
     mockFetch.mockResolvedValue({
       ok: true,
       json: () =>
         Promise.resolve({
+          runtime: "legacy_cascade",
+          voice_runtime: "legacy_cascade",
           api_key: "test-key",
           token: "test-token",
           call_type: "audio_room",
@@ -198,6 +240,7 @@ describe("useStreamVoiceSession", () => {
     expect(result.current.partialReply).toBe("")
     expect(result.current.finalReply).toBe("")
     expect(result.current.error).toBeUndefined()
+    expect(result.current.runtime).toBe("legacy_cascade")
   })
 
   it("startTalking fetches credentials and transitions to connecting", async () => {
@@ -221,6 +264,225 @@ describe("useStreamVoiceSession", () => {
     )
     // Stage should be connecting while waiting for call to be created
     expect(result.current.stage).toBe("connecting")
+    expect(result.current.runtime).toBe("legacy_cascade")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("legacy_cascade")
+    if (telemetry.runtime !== "legacy_cascade") throw new Error("Expected legacy telemetry")
+    expect(telemetry.callId).toBe("test-call-123")
+    expect(telemetry.voiceAgentSessionId).toBe("voice-session-123")
+  })
+
+  it("uses Gemini browser Live connector when voice connect returns gemini_live", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        runtime: "gemini_live",
+        voice_runtime: "gemini_live",
+        production_route: true,
+        session_id: "gemini-prod-session-1",
+        websocket_url: "wss://gemini.example/live",
+        websocket_auth: "ephemeral_access_token",
+        ephemeral_token: { value: "auth_tokens/test" },
+        setup: { model: "models/gemini-live" },
+        stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+        event_stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+        provider_event_relay_url: "/api/sophia/voice/gemini/relay",
+        disconnect_url: "/api/sophia/voice/gemini/disconnect",
+      }),
+      text: () => Promise.resolve(""),
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledTimes(1)
+    expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-1",
+        sessionId: "gemini-prod-session-1",
+        bootstrap: expect.objectContaining({ runtime: "gemini_live" }),
+      }),
+    )
+    expect(mockJoin).not.toHaveBeenCalled()
+    expect(result.current.stage).toBe("listening")
+    expect(result.current.runtime).toBe("gemini_live")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("gemini_live")
+    if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
+    expect(telemetry.sessionId).toBe("gemini-prod-session-1")
+    expect(telemetry.setupComplete).toBe(true)
+    expect(telemetry.publicSseState).toBe("connecting")
+    expect(result.current.hasLiveCall).toBe(true)
+    await waitFor(() => {
+      expect(MockEventSource.latest?.url).toBe(
+        "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+      )
+    })
+  })
+
+  it("promotes Gemini barge-in transcript handoffs and ignores duplicate public echoes", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        runtime: "gemini_live",
+        voice_runtime: "gemini_live",
+        production_route: true,
+        session_id: "gemini-prod-session-1",
+        websocket_url: "wss://gemini.example/live",
+        websocket_auth: "ephemeral_access_token",
+        ephemeral_token: { value: "auth_tokens/test" },
+        setup: { model: "models/gemini-live" },
+        stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+        event_stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+        provider_event_relay_url: "/api/sophia/voice/gemini/relay",
+        disconnect_url: "/api/sophia/voice/gemini/disconnect",
+      }),
+      text: () => Promise.resolve(""),
+    })
+    const onUserTranscript = vi.fn()
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { onUserTranscript }))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    const options = mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as {
+      onBargeInTranscriptHandoff?: (diagnostic: Record<string, unknown>) => void
+    }
+    act(() => {
+      options.onBargeInTranscriptHandoff?.({
+        timestamp: "2026-05-24T05:28:01.000Z",
+        providerReceiveSequence: 84,
+        providerReceivedAt: "2026-05-24T05:28:00.900Z",
+        relayCorrelationId: "gemini-84",
+        text: "Actually pause there",
+        transcriptPreview: "Actually pause there",
+        transcriptLength: 20,
+        captured: true,
+        promoted: true,
+        ignored: false,
+        duplicateSuppressed: false,
+        promotionLatencyMs: 100,
+        newTurnDispatched: true,
+        newTurnDispatchBlockedReason: "none",
+        bargeInConfirmationSource: "provider_input_transcription",
+        bargeInConfirmationReason: "provider_input_transcription_after_assistant_output_with_text",
+        bargeInTranscriptCapturedCount: 1,
+        bargeInTranscriptPromotedCount: 1,
+        bargeInTranscriptPromotionLatencyMs: 100,
+        bargeInTranscriptIgnoredCount: 0,
+        bargeInTranscriptDuplicateSuppressedCount: 0,
+        lastBargeInTranscriptPreview: "Actually pause there",
+        bargeInNewTurnDispatchCount: 1,
+        bargeInNewTurnDispatchBlockedReason: "none",
+      })
+    })
+
+    expect(onUserTranscript).toHaveBeenCalledTimes(1)
+    expect(onUserTranscript).toHaveBeenCalledWith("Actually pause there")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("gemini_live")
+    if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
+    expect(telemetry.bargeInTranscriptCapturedCount).toBe(1)
+    expect(telemetry.bargeInTranscriptPromotedCount).toBe(1)
+    expect(telemetry.bargeInNewTurnDispatchCount).toBe(1)
+
+    act(() => {
+      emitCustomEvent("sophia.user_transcript", {
+        text: "Actually pause there",
+        utterance_id: "provider-user-84",
+        source_sequence: 84,
+        relay_correlation_id: "gemini-84",
+      })
+    })
+
+    expect(onUserTranscript).toHaveBeenCalledTimes(1)
+  })
+
+  it("exposes Gemini runtime callback telemetry to the session UI", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        runtime: "gemini_live",
+        voice_runtime: "gemini_live",
+        production_route: true,
+        session_id: "gemini-prod-session-1",
+        websocket_url: "wss://gemini.example/live",
+        websocket_auth: "ephemeral_access_token",
+        ephemeral_token: { value: "auth_tokens/test" },
+        setup: { model: "models/gemini-live" },
+        stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+        event_stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
+        provider_event_relay_url: "/api/sophia/voice/gemini/relay",
+        disconnect_url: "/api/sophia/voice/gemini/disconnect",
+      }),
+      text: () => Promise.resolve(""),
+    })
+    mockConnectGeminiBrowserLiveFromBootstrap.mockImplementationOnce(async (options: {
+      onStage?: (stage: string) => void
+      onProviderEvent?: (event: unknown) => void
+      onRelayStatus?: (status: "active") => void
+      onRelayDiagnostic?: (diagnostic: Record<string, unknown>) => void
+      onWebSocketDiagnostic?: (diagnostic: Record<string, unknown>) => void
+      onToolLoopDiagnostic?: (diagnostic: {
+        timestamp: string
+        phase: string
+        toolCall: { name: string | null }
+        success: boolean | null
+      }) => void
+      onOutputAudio?: () => void
+    }) => {
+      options.onStage?.("opening_websocket")
+      options.onProviderEvent?.({ setupComplete: {} })
+      options.onRelayStatus?.("active")
+      options.onRelayDiagnostic?.({
+        timestamp: "2026-04-07T12:00:00.320Z",
+        eventType: "serverContent",
+        consecutiveFailures: 0,
+        errorText: "",
+      })
+      options.onWebSocketDiagnostic?.({
+        timestamp: "2026-04-07T12:00:00.330Z",
+        kind: "close",
+        message: "normal close",
+      })
+      options.onToolLoopDiagnostic?.({
+        timestamp: "2026-04-07T12:00:00.340Z",
+        phase: "tool_call_received",
+        toolCall: { name: "emit_artifact" },
+        success: null,
+      })
+      options.onToolLoopDiagnostic?.({
+        timestamp: "2026-04-07T12:00:00.360Z",
+        phase: "tool_response_sent",
+        toolCall: { name: "emit_artifact" },
+        success: true,
+      })
+      options.onOutputAudio?.()
+      return mockGeminiConnection
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(result.current.runtime).toBe("gemini_live")
+    const telemetry = result.current.runtimeTelemetry
+    expect(telemetry.runtime).toBe("gemini_live")
+    if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
+    expect(telemetry.providerEventCount).toBe(1)
+    expect(telemetry.relayStatus).toBe("active")
+    expect(telemetry.relayDiagnosticCount).toBe(1)
+    expect(telemetry.websocketDiagnosticCount).toBe(1)
+    expect(telemetry.toolCallCount).toBe(1)
+    expect(telemetry.toolResponseCount).toBe(1)
+    expect(telemetry.outputAudioEventCount).toBe(1)
+    expect(telemetry.lastToolName).toBe("emit_artifact")
   })
 
   it("includes session_id and thread_id when the voice session is bound to an active session", async () => {
@@ -914,6 +1176,34 @@ describe("useStreamVoiceSession", () => {
         }),
       }),
     )
+  })
+
+  it("stopVoiceTransport is cleanup-only and uses the voice disconnect route", async () => {
+    mockCall = makeCallMock()
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    await act(async () => {
+      await result.current.stopVoiceTransport()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/disconnect",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          call_id: "test-call-123",
+          session_id: "voice-session-123",
+          thread_id: "thread-voice-123",
+        }),
+      }),
+    )
+    expect(getFetchCalls("/api/sophia/end-session", "POST")).toHaveLength(0)
   })
 
   it("bargeIn leaves call synchronously and resets to idle", async () => {

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -39,15 +41,39 @@ from vision_agents.plugins.deepgram import STT as DeepgramSTT
 from vision_agents.plugins.getstream import Edge as StreamEdge
 from voice.config import get_settings
 from voice.conversation_flow import ConversationFlowCoordinator
+from voice.realtime.dogfood_session import (
+    RealtimeDogfoodConfigurationError,
+    RealtimeDogfoodSession,
+    RealtimeDogfoodSessionManager,
+)
+from voice.realtime.openai_browser_dogfood import (
+    OpenAIBrowserDogfoodSessionManager,
+    OpenAIClientSecretMintError,
+    OpenAISidebandAttachError,
+    extract_openai_call_id_from_location,
+)
+from voice.realtime.gemini_browser_dogfood import (
+    GeminiBrowserDogfoodSessionManager,
+    GeminiBrowserRelayError,
+    GeminiEphemeralTokenMintError,
+    GeminiRelaySourceMetadata,
+)
+from voice.realtime.gemini_production_session import GeminiProductionBrowserSessionManager
+from voice.realtime.runtime_factory import build_realtime_runtime_bundle_from_settings
+from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.rhythm import RhythmTracker
 from voice.sophia_llm import SophiaLLM
 from voice.sophia_turn import SophiaTurnDetection
 from voice.sophia_tts import SophiaTTS
-from voice.sse_broker import VoiceEventBroker
+from voice.sse_broker import VoiceEventBroker, format_sse_event
 
 
 logger = logging.getLogger(__name__)
 voice_event_broker = VoiceEventBroker()
+realtime_dogfood_sessions = RealtimeDogfoodSessionManager()
+openai_browser_dogfood_sessions = OpenAIBrowserDogfoodSessionManager(realtime_dogfood_sessions)
+gemini_browser_dogfood_sessions = GeminiBrowserDogfoodSessionManager(realtime_dogfood_sessions)
+gemini_production_browser_sessions = GeminiProductionBrowserSessionManager(gemini_browser_dogfood_sessions)
 
 
 def _has_substantive_transcript(text: str) -> bool:
@@ -80,7 +106,122 @@ class SophiaWarmupSessionRequest(BaseModel):
     user_id: str = Field(..., description="Authenticated user ID for the upcoming turn")
 
 
+class SophiaRealtimeDogfoodStartRequest(BaseModel):
+    """Internal-only request body for an experimental provider event-pump session."""
+
+    user_id: str = Field(default="dogfood-user", description="Internal dogfood user id")
+    session_id: str | None = Field(default=None, description="Optional deterministic dogfood session id")
+    instructions: str | None = Field(default=None, description="Optional provider session instructions override")
+
+
+class SophiaRealtimeDogfoodTextRequest(BaseModel):
+    """Internal-only text input for a provider-owned dogfood session."""
+
+    text: str = Field(..., min_length=1, description="Text input to send to the provider session")
+
+
+class SophiaRealtimeDogfoodProviderEventRequest(BaseModel):
+    """Internal-only raw provider event ingress.
+
+    This endpoint accepts provider wire payloads so dogfood harnesses can feed
+    real or recorded provider messages into the adapter. It never returns those
+    payloads to the browser-facing event stream.
+    """
+
+    event: dict[str, Any] = Field(..., description="Raw provider event/message payload")
+
+
+class SophiaOpenAIBrowserDogfoodStartRequest(BaseModel):
+    """Internal-only request body for OpenAI browser WebRTC dogfood."""
+
+    user_id: str = Field(default="dogfood-user", description="Internal dogfood user id")
+    session_id: str | None = Field(default=None, description="Optional deterministic dogfood session id")
+    instructions: str | None = Field(default=None, description="Optional provider session instructions override")
+
+
+class SophiaOpenAISidebandAttachRequest(BaseModel):
+    """OpenAI browser WebRTC call id produced by the browser SDP exchange."""
+
+    call_id: str | None = Field(
+        default=None,
+        description="OpenAI Realtime rtc_* call id parsed from the WebRTC Location header",
+    )
+    location: str | None = Field(
+        default=None,
+        description="Optional raw Location header from POST /v1/realtime/calls",
+    )
+    webrtc_readiness: dict[str, Any] | None = Field(
+        default=None,
+        description="Browser-observed WebRTC readiness evidence collected before sideband attach",
+    )
+    call_diagnostics: dict[str, Any] | None = Field(
+        default=None,
+        description="Browser-captured SDP status, raw Location header, extracted rtc_* id, and shape diagnostics",
+    )
+
+
+class SophiaGeminiBrowserDogfoodStartRequest(BaseModel):
+    """Internal-only request body for Gemini browser Live WebSocket dogfood."""
+
+    user_id: str = Field(default="dogfood-user", description="Internal dogfood user id")
+    session_id: str | None = Field(default=None, description="Optional deterministic dogfood session id")
+
+
+class SophiaGeminiBrowserRelayRequest(BaseModel):
+    """Browser-captured Gemini Live server message for normalized observation."""
+
+    event: dict[str, Any] = Field(..., description="Raw Gemini Live server message payload")
+    provider_receive_sequence: int | None = Field(
+        default=None,
+        gt=0,
+        description="Browser-assigned monotonic Gemini WebSocket receive sequence for this provider message",
+    )
+    provider_relay_sequence: int | None = Field(
+        default=None,
+        gt=0,
+        description="Browser-assigned monotonic sequence for relayed Gemini provider messages",
+    )
+    provider_received_at: str | None = Field(
+        default=None,
+        description="Browser ISO timestamp recorded when the provider WebSocket message was received",
+    )
+    relay_correlation_id: str | None = Field(
+        default=None,
+        description="Browser-stable relay correlation id derived at provider receive time",
+    )
+    provider_primary_category: str | None = Field(
+        default=None,
+        description="Browser-classified primary provider event category",
+    )
+    provider_categories: list[str] | None = Field(
+        default=None,
+        description="Browser-classified provider event categories",
+    )
+
+    def source_metadata(self) -> GeminiRelaySourceMetadata | None:
+        return GeminiRelaySourceMetadata.from_relay_fields(
+            provider_receive_sequence=self.provider_receive_sequence,
+            provider_relay_sequence=self.provider_relay_sequence,
+            provider_received_at=self.provider_received_at,
+            relay_correlation_id=self.relay_correlation_id,
+            provider_primary_category=self.provider_primary_category,
+            provider_categories=self.provider_categories,
+        )
+
+
+class SophiaGeminiProductionStartRequest(BaseModel):
+    """Production-route Gemini browser Live bootstrap request."""
+
+    user_id: str = Field(..., description="Trusted authenticated user id")
+    session_id: str | None = Field(default=None, description="Optional deterministic realtime session id")
+    platform: str = Field(default="voice", description="Platform signal: voice | text | ios_voice")
+    context_mode: str = Field(default="life", description="Context adaptation: work | gaming | life")
+    ritual: str | None = Field(default=None, description="Active ritual: prepare | debrief | vent | reset | None")
+
+
 session_router = APIRouter()
+dogfood_router = APIRouter(prefix="/dogfood/realtime", tags=["internal-realtime-dogfood"])
+production_realtime_router = APIRouter(prefix="/production/realtime", tags=["production-realtime"])
 
 
 def _bind_agent_session_context(
@@ -162,6 +303,19 @@ async def start_sophia_session(
     """Start an agent session and bind runtime context before the client joins."""
 
     session_create_time = time.time()
+    try:
+        validate_vision_agents_session_runtime(get_settings())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
     try:
         session = await launcher.start_session(
             call_id=call_id,
@@ -356,6 +510,456 @@ async def close_sophia_session_beacon(
     return Response(status_code=202)
 
 
+def _get_dogfood_session_or_404(session_id: str) -> RealtimeDogfoodSession:
+    session = realtime_dogfood_sessions.get_session(session_id)
+    if session is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dogfood session with id '{session_id}' not found",
+        )
+    return session
+
+
+async def _stream_realtime_dogfood_events(
+    session: RealtimeDogfoodSession,
+    request: Request,
+) -> AsyncIterator[str]:
+    queue = session.subscribe()
+    try:
+        while True:
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=30.0)
+            except asyncio.TimeoutError:
+                if await request.is_disconnected():
+                    break
+                yield ": heartbeat\n\n"
+                continue
+
+            if payload is None:
+                break
+
+            yield format_sse_event(payload)
+    finally:
+        session.unsubscribe(queue)
+
+
+@dogfood_router.post(
+    "/sessions",
+    status_code=status.HTTP_201_CREATED,
+    summary="Start an internal realtime dogfood session",
+    description="Start an experimental provider event-pump session without using Stream/Vision Agents media routing.",
+)
+async def start_realtime_dogfood_session(
+    request: SophiaRealtimeDogfoodStartRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        validate_live_voice_server_runtime(settings)
+        session = await realtime_dogfood_sessions.start_session(
+            settings,
+            user_id=request.user_id,
+            session_id=request.session_id,
+            instructions=request.instructions,
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        **session.metadata(),
+        "event_stream_url": f"/dogfood/realtime/sessions/{session.session_id}/events",
+    }
+
+
+@dogfood_router.post(
+    "/openai/browser-sessions",
+    status_code=status.HTTP_201_CREATED,
+    summary="Start an OpenAI browser WebRTC dogfood session",
+    description=(
+        "Mint an OpenAI ephemeral client secret and start the internal provider-event "
+        "dogfood session that the server sideband will feed."
+    ),
+)
+async def start_openai_browser_dogfood_session(
+    request: SophiaOpenAIBrowserDogfoodStartRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        validate_live_voice_server_runtime(settings)
+        browser_session = await openai_browser_dogfood_sessions.start_browser_session(
+            settings,
+            user_id=request.user_id,
+            session_id=request.session_id,
+            instructions=request.instructions,
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except OpenAIClientSecretMintError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return browser_session.as_public_payload()
+
+
+@dogfood_router.post(
+    "/openai/browser-sessions/{session_id}/sideband",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Attach the backend OpenAI sideband to a browser WebRTC dogfood session",
+)
+async def attach_openai_browser_dogfood_sideband(
+    session_id: str,
+    request: SophiaOpenAISidebandAttachRequest,
+) -> dict[str, object]:
+    call_id = request.call_id or extract_openai_call_id_from_location(request.location)
+    if call_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Provide the OpenAI Realtime rtc_* call id or the WebRTC Location header.",
+        )
+    _get_dogfood_session_or_404(session_id)
+
+    try:
+        settings = get_settings()
+        sideband_session = await openai_browser_dogfood_sessions.attach_sideband(
+            settings,
+            dogfood_session_id=session_id,
+            call_id=call_id,
+            location=request.location,
+            call_diagnostics=request.call_diagnostics,
+            webrtc_readiness=request.webrtc_readiness,
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except OpenAISidebandAttachError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    return {
+        **sideband_session.metadata(),
+        "event_stream_url": f"/dogfood/realtime/sessions/{session_id}/events",
+        "public_event_boundary": "SophiaEventNormalizer",
+    }
+
+
+@dogfood_router.delete(
+    "/openai/browser-sessions/{session_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Close an OpenAI browser WebRTC dogfood session",
+)
+async def close_openai_browser_dogfood_session(session_id: str) -> Response:
+    closed = await openai_browser_dogfood_sessions.close_session(session_id)
+    if not closed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dogfood session with id '{session_id}' not found",
+        )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@dogfood_router.post(
+    "/gemini/browser-sessions",
+    status_code=status.HTTP_201_CREATED,
+    summary="Start a Gemini browser Live WebSocket dogfood session",
+    description=(
+        "Mint a Gemini Live ephemeral auth token and start the internal "
+        "provider-event dogfood session that the browser relay will feed."
+    ),
+)
+async def start_gemini_browser_dogfood_session(
+    request: SophiaGeminiBrowserDogfoodStartRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        validate_live_voice_server_runtime(settings)
+        browser_session = await gemini_browser_dogfood_sessions.start_browser_session(
+            settings,
+            user_id=request.user_id,
+            session_id=request.session_id,
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except GeminiEphemeralTokenMintError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return browser_session.as_public_payload()
+
+
+@dogfood_router.post(
+    "/gemini/browser-sessions/{session_id}/provider-events",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Relay one browser-captured Gemini Live server message",
+    description="Feed a Gemini Live server message into the provider adapter and Sophia normalizer.",
+)
+async def relay_gemini_browser_dogfood_provider_event(
+    session_id: str,
+    request: SophiaGeminiBrowserRelayRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        payload = await gemini_browser_dogfood_sessions.ingest_browser_provider_event(
+            settings,
+            dogfood_session_id=session_id,
+            event=request.event,
+            source_metadata=request.source_metadata(),
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except GeminiBrowserRelayError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "was not found" in str(exc) else status.HTTP_422_UNPROCESSABLE_ENTITY
+        raise HTTPException(
+            status_code=status_code,
+            detail=str(exc),
+        ) from exc
+
+    return payload
+
+
+@dogfood_router.delete(
+    "/gemini/browser-sessions/{session_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Close a Gemini browser Live WebSocket dogfood session",
+)
+async def close_gemini_browser_dogfood_session(session_id: str) -> Response:
+    closed = await gemini_browser_dogfood_sessions.close_session(session_id)
+    if not closed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dogfood session with id '{session_id}' not found",
+        )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@production_realtime_router.post(
+    "/gemini/browser-sessions",
+    status_code=status.HTTP_201_CREATED,
+    summary="Start a production-candidate Gemini browser Live voice session",
+    description=(
+        "Feature-flagged production route candidate: mint a Gemini Live ephemeral auth token "
+        "and start normalized Sophia SSE routing without using the debug dogfood URL surface."
+    ),
+)
+async def start_gemini_production_browser_session(
+    request: SophiaGeminiProductionStartRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        validate_live_voice_server_runtime(settings)
+        browser_session = await gemini_production_browser_sessions.start_browser_session(
+            settings,
+            user_id=request.user_id,
+            session_id=request.session_id,
+            platform=request.platform,
+            context_mode=request.context_mode,
+            ritual=request.ritual,
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except GeminiEphemeralTokenMintError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+
+    return browser_session.as_public_payload()
+
+
+@production_realtime_router.post(
+    "/gemini/browser-sessions/{session_id}/provider-events",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Relay one production Gemini Live server message",
+)
+async def relay_gemini_production_provider_event(
+    session_id: str,
+    request: SophiaGeminiBrowserRelayRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        return await gemini_production_browser_sessions.ingest_browser_provider_event(
+            settings,
+            session_id=session_id,
+            event=request.event,
+            source_metadata=request.source_metadata(),
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except GeminiBrowserRelayError as exc:
+        status_code = status.HTTP_404_NOT_FOUND if "was not found" in str(exc) else status.HTTP_422_UNPROCESSABLE_ENTITY
+        raise HTTPException(
+            status_code=status_code,
+            detail=str(exc),
+        ) from exc
+
+
+@production_realtime_router.get(
+    "/gemini/sessions/{session_id}/events",
+    summary="Stream normalized Sophia events for a production Gemini candidate session",
+)
+async def stream_gemini_production_session_events(
+    session_id: str,
+    request: Request,
+) -> StreamingResponse:
+    session = _get_dogfood_session_or_404(session_id)
+    if session.runtime_mode != VoiceRuntimeMode.GEMINI_LIVE:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Production Gemini event stream requires a gemini_live session.",
+        )
+    return StreamingResponse(
+        _stream_realtime_dogfood_events(session, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@production_realtime_router.delete(
+    "/gemini/browser-sessions/{session_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Close a production-candidate Gemini browser Live voice session",
+)
+async def close_gemini_production_browser_session(session_id: str) -> Response:
+    closed = await gemini_production_browser_sessions.close_session(session_id)
+    if not closed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Gemini production session with id '{session_id}' not found",
+        )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
+@dogfood_router.post(
+    "/sessions/{session_id}/input/text",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Send text to an internal realtime dogfood session",
+)
+async def send_realtime_dogfood_text(
+    session_id: str,
+    request: SophiaRealtimeDogfoodTextRequest,
+) -> dict[str, object]:
+    session = _get_dogfood_session_or_404(session_id)
+    await session.send_text(request.text)
+    return {
+        "accepted": True,
+        "session_id": session.session_id,
+        "sent_client_event_count": session.sent_client_event_count,
+    }
+
+
+@dogfood_router.post(
+    "/sessions/{session_id}/provider-events",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Ingest one raw provider event into an internal dogfood session",
+)
+async def ingest_realtime_dogfood_provider_event(
+    session_id: str,
+    request: SophiaRealtimeDogfoodProviderEventRequest,
+) -> dict[str, object]:
+    session = _get_dogfood_session_or_404(session_id)
+    await session.ingest_provider_event(request.event)
+    return {"accepted": True, "session_id": session.session_id}
+
+
+@dogfood_router.get(
+    "/sessions/{session_id}/events",
+    summary="Stream normalized Sophia events for an internal realtime dogfood session",
+)
+async def stream_realtime_dogfood_session_events(
+    session_id: str,
+    request: Request,
+) -> StreamingResponse:
+    session = _get_dogfood_session_or_404(session_id)
+    return StreamingResponse(
+        _stream_realtime_dogfood_events(session, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@dogfood_router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Close an internal realtime dogfood session",
+)
+async def close_realtime_dogfood_session(session_id: str) -> Response:
+    await openai_browser_dogfood_sessions.close_sideband(session_id)
+    closed = await realtime_dogfood_sessions.close_session(session_id)
+    if not closed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Dogfood session with id '{session_id}' not found",
+        )
+    return Response(status_code=status.HTTP_202_ACCEPTED)
+
+
 def create_fastapi_app(
     launcher: AgentLauncher,
     options: ServeOptions | None = None,
@@ -370,6 +974,8 @@ def create_fastapi_app(
     app.dependency_overrides[can_view_session] = resolved_options.can_view_session
     app.dependency_overrides[can_view_metrics] = resolved_options.can_view_metrics
 
+    app.include_router(production_realtime_router)
+    app.include_router(dogfood_router)
     app.include_router(session_router)
 
     runner_api_router = APIRouter()
@@ -407,11 +1013,34 @@ def create_fastapi_app(
 
 async def validate_runtime(settings, llm) -> None:  # noqa: ANN001
     logger.info(
-        "voice.ready_check backend=%s platform=%s",
+        "voice.ready_check backend=%s platform=%s runtime=%s",
         settings.backend_mode,
         settings.platform,
+        settings.voice_runtime_mode,
     )
     await llm.probe()
+
+
+def validate_live_voice_server_runtime(settings) -> None:  # noqa: ANN001
+    selection = settings.voice_runtime_selection
+    if selection.mode == VoiceRuntimeMode.LEGACY_CASCADE:
+        return
+
+    build_realtime_runtime_bundle_from_settings(settings)
+
+
+def validate_vision_agents_session_runtime(settings) -> None:  # noqa: ANN001
+    selection = settings.voice_runtime_selection
+    if selection.mode == VoiceRuntimeMode.LEGACY_CASCADE:
+        return
+
+    raise RuntimeError(
+        "Experimental realtime runtime "
+        f"{selection.mode.value!r} is enabled for the internal dogfood path. "
+        "The Stream/Vision Agents session route is legacy_cascade-only; use "
+        "/dogfood/realtime/sessions for provider event-pump dogfooding or "
+        "reset SOPHIA_VOICE_RUNTIME_MODE to 'legacy_cascade' for browser voice sessions."
+    )
 
 
 def attach_runtime_observers(
@@ -536,6 +1165,7 @@ def attach_runtime_observers(
 
 async def create_agent(**kwargs) -> Agent:
     settings = get_settings()
+    validate_live_voice_server_runtime(settings)
 
     stt = DeepgramSTT(
         model=settings.deepgram_model,

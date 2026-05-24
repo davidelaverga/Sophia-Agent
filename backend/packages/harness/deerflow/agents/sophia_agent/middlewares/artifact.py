@@ -8,6 +8,7 @@ After-model: captures emit_artifact tool call output and stores in state.
 import json
 import logging
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from typing import NotRequired, override
 
@@ -18,6 +19,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.tools.emit_artifact_contract import validate_emit_artifact_args
 
 logger = logging.getLogger(__name__)
 
@@ -26,9 +28,12 @@ TONE_DELTA_THRESHOLD = 0.3
 _VOICE_ARTIFACT_INSTRUCTIONS = """<artifact_contract>
 Every turn has two outputs:
 - Spoken reply in normal assistant text.
-- Exactly one emit_artifact tool call after the spoken reply. Never print JSON in the reply.
+- Exactly one emit_artifact tool call after the spoken reply on non-crisis turns. Never print JSON in the reply.
+- Tool calls must use the structured tool/function channel only. Never verbalize pseudo-tool syntax, JSON-ish calls, or raw expressions such as emit_artifact(...), try{emit_artifact{...}}, or start_builder_task{...} in the spoken reply.
 
-emit_artifact is REQUIRED on every turn with these 13 fields:
+On a crisis turn, do not emit the full artifact. Emit only a minimal crisis acknowledgment when that signal is supported by the runtime: a single signal that you recognized crisis and entered crisis_redirect. Nothing else.
+
+emit_artifact is REQUIRED on every non-crisis turn with these 13 fields:
 - session_goal: stable session-level aim unless the topic genuinely shifts.
 - active_goal: what you are doing for the user right now.
 - next_step: likely best next move for the following turn.
@@ -37,11 +42,23 @@ emit_artifact is REQUIRED on every turn with these 13 fields:
 - tone_estimate: honest 0.0-4.0 read of where the user ends this turn.
 - tone_target: min(tone_estimate + 0.5, 4.0).
 - active_tone_band: shutdown | grief_fear | anger_antagonism | engagement | enthusiasm.
-- skill_loaded: exact injected skill name, or active_listening if none is visible.
+- skill_loaded: the mode you are in this turn — active_listening, vulnerability_holding,
+  trust_building, boundary_holding, challenging_growth, identity_fluidity_support,
+  or celebrating_breakthrough. This is you observing which mode you are in, not the record of a tool call.
 - ritual_phase: ritual.step or freeform.topic.
 - voice_emotion_primary: choose the delivery intent, not the user's raw state.
 - voice_emotion_secondary: close fallback emotion.
 - voice_speed: slow | gentle | normal | engaged | energetic.
+
+Companion artifact vs Builder boundary:
+- Short reflection artifacts, session takeaways, emotional/meta-assessments, internal orientation, and Presence artifact UI state are companion artifacts. Use emit_artifact for them; do not start Builder.
+- If the user asks to test artifact functionality or says "create a short reflection artifact," satisfy that request directly with your spoken response plus one emit_artifact call.
+    Do not ask them to supply a reflection question, main idea, or topic first unless they explicitly asked for personalized content and no usable context exists.
+- A short reflection artifact is not a reflective follow-up prompt. Use the current available conversation context and create the artifact.
+- If the user says "again," "new one," or "another artifact" after a completed artifact, create exactly one new companion artifact and stop.
+- For artifact tests, a good spoken acknowledgement is brief: "Done — I created a short reflection artifact." Do not narrate artifact bookkeeping or repeat completion phrasing.
+- Use Builder only when the user explicitly asks for a document, file, report, presentation, frontend, visual report, downloadable deliverable, or other async build output.
+- If "artifact" could mean either a companion artifact or a downloadable document, ask one clarifying question instead of starting Builder.
 
 Voice defaults:
 - shutdown or grief: calm or sympathetic, slow or gentle.
@@ -56,7 +73,7 @@ Later turns:
 - Keep session_goal stable unless the session truly changes.
 - Update active_goal, next_step, tone_estimate, and delivery based on this turn.
 
-After the emit_artifact call, stop. Do not call more tools.
+After the emit_artifact call, stop. Do not call more tools or repeat the same spoken sentence.
 </artifact_contract>"""
 
 
@@ -178,7 +195,7 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
                     log_middleware("Artifact", "mixed tool calls with emit_artifact; loop continues", _t0)
                     return None
 
-                artifact_data = artifact_calls[-1].get("args", {})
+                artifact_data = self._normalize_artifact_args(artifact_calls[-1].get("args", {}))
                 builder_result = state.get("builder_result") or self._extract_builder_result_from_messages(messages)
                 # Close the emit_artifact tool_call(s) with synthetic ToolMessages.
                 # Without this, each turn leaves a dangling tool_call in the thread
@@ -214,6 +231,16 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
         log_middleware("Artifact", "no artifact in response", _t0)
         return None
+
+    @staticmethod
+    def _normalize_artifact_args(args: object) -> dict:
+        if not isinstance(args, Mapping):
+            return {}
+        try:
+            return validate_emit_artifact_args(args)
+        except Exception:
+            logger.warning("ArtifactMiddleware could not normalize emit_artifact args", exc_info=True)
+            return dict(args)
 
     # ------------------------------------------------------------------
     # Builder synthesis

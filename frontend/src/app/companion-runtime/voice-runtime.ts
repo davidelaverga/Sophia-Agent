@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useStreamVoiceSession } from '../hooks/useStreamVoiceSession';
 import {
+  parseArtifactsPayload,
   parseBuilderArtifactPayload,
   parseBuilderTaskPayload,
 } from '../session/stream-contract-adapters';
@@ -62,7 +63,10 @@ export function useCompanionVoiceRuntime({
   }, []);
 
   const handleVoiceArtifacts = useCallback((artifacts: Parameters<UseCompanionVoiceRuntimeOptions['ingestArtifacts']>[0]) => {
-    ingestArtifacts(artifacts, 'voice');
+    const artifactPayload = parseArtifactsPayload(artifacts);
+    if (artifactPayload) {
+      ingestArtifacts(artifactPayload, 'voice');
+    }
     const builderArtifact = parseBuilderArtifactPayload(
       artifacts.builder_result ?? artifacts.builder_artifact ?? artifacts.builderArtifact
     );

@@ -13,6 +13,16 @@ v3 changes from v2:
 - get_all returns a paginated envelope {count, next, previous, results}.
 - expiration_date set natively for contextual memories.
 - category post-filter removed — trust platform hybrid retrieval (Upgrade B).
+
+Diagnostics + REST fallback (merged from main):
+- ``search_memories_with_diagnostics`` returns a privacy-safe envelope
+  describing provider status / transport / latency so callers can show
+  honest "memory unavailable" states without exposing the raw exception.
+- When the SDK client cannot be initialised but ``MEM0_API_KEY`` + httpx
+  are present, search falls back to a direct REST call against
+  ``/v2/memories/search/`` so the slim voice runtime still gets memories.
+- ``MemoryProviderUnavailableError`` / ``MemoryProviderSearchError`` let
+  callers opt into raising on provider failure via ``raise_on_error=True``.
 """
 
 from __future__ import annotations
@@ -24,7 +34,44 @@ import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from cachetools import TTLCache
+try:
+    from cachetools import TTLCache
+except ImportError:  # pragma: no cover - exercised from the slim voice runtime
+    class TTLCache(dict):  # type: ignore[no-redef]
+        def __init__(self, *, maxsize: int, ttl: int):
+            super().__init__()
+            self.maxsize = maxsize
+            self.ttl = ttl
+            self._expires_at: dict[Any, float] = {}
+
+        def get(self, key, default=None):  # noqa: ANN001, ANN202
+            self._purge_expired()
+            return super().get(key, default)
+
+        def __setitem__(self, key, value) -> None:  # noqa: ANN001
+            self._purge_expired()
+            if len(self) >= self.maxsize and key not in self:
+                oldest_key = next(iter(self), None)
+                if oldest_key is not None:
+                    super().pop(oldest_key, None)
+                    self._expires_at.pop(oldest_key, None)
+            self._expires_at[key] = time.monotonic() + self.ttl
+            super().__setitem__(key, value)
+
+        def pop(self, key, default=None):  # noqa: ANN001, ANN202
+            self._expires_at.pop(key, None)
+            return super().pop(key, default)
+
+        def __iter__(self):  # noqa: ANN204
+            self._purge_expired()
+            return super().__iter__()
+
+        def _purge_expired(self) -> None:
+            now = time.monotonic()
+            expired = [key for key, expires_at in self._expires_at.items() if expires_at <= now]
+            for key in expired:
+                super().pop(key, None)
+                self._expires_at.pop(key, None)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +85,10 @@ _cache_lock = threading.Lock()
 # Module-level client singleton
 _client: Any | None = None
 _client_initialized: bool = False
+# Tracks why the SDK client is unavailable so diagnostics + REST fallback
+# can branch on the specific reason (missing key vs. missing SDK vs. init
+# error). ``None`` means "client healthy or not initialised yet".
+_client_unavailable_reason: str | None = None
 _client_lock = threading.Lock()
 _warm_up_completed: bool = False
 _warm_up_lock = threading.Lock()
@@ -45,6 +96,22 @@ _warm_up_lock = threading.Lock()
 
 class Mem0EventFailedError(RuntimeError):
     """Raised when a Mem0 async add event reaches FAILED status."""
+
+
+class MemoryProviderUnavailableError(RuntimeError):
+    """Raised by diagnostics-aware callers when the Mem0 provider is unavailable."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
+
+
+class MemoryProviderSearchError(RuntimeError):
+    """Raised by diagnostics-aware callers when a Mem0 search raises."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(reason)
 
 
 # ---------------------------------------------------------------------------
@@ -74,28 +141,117 @@ MEM0_REMOVE_CATEGORY_FILTER_ENABLED: bool = _env_bool(
 
 
 def _get_client() -> Any | None:
-    """Lazy-initialize the Mem0 client (singleton, thread-safe)."""
-    global _client, _client_initialized
+    """Lazy-initialize the Mem0 client (singleton, thread-safe).
+
+    Records ``_client_unavailable_reason`` (``missing_api_key`` /
+    ``missing_mem0_sdk`` / ``client_initialization_failed``) when the client
+    cannot be built. Callers like ``_memory_provider_status_from_client`` use
+    that signal to decide between REST fallback and a hard "unavailable"
+    response. Honors ``MEM0_BASE_URL`` for self-hosted Mem0 deployments.
+    """
+    global _client, _client_initialized, _client_unavailable_reason
     if _client_initialized:
         return _client
     with _client_lock:
         if _client_initialized:
             return _client
+        api_key = os.environ.get("MEM0_API_KEY", "").strip()
+        if not api_key:
+            logger.warning("MEM0_API_KEY not set — memory retrieval disabled")
+            _client = None
+            _client_unavailable_reason = "missing_api_key"
+            _client_initialized = True
+            return _client
         try:
             from mem0 import MemoryClient
-
-            api_key = os.environ.get("MEM0_API_KEY", "")
-            if not api_key:
-                logger.warning("MEM0_API_KEY not set — memory retrieval disabled")
-                _client = None
-            else:
-                _client = MemoryClient(api_key=api_key)
-                logger.info("[Mem0] Client initialized successfully (v3)")
         except ImportError:
             logger.warning("mem0 package not installed — memory retrieval disabled")
             _client = None
+            _client_unavailable_reason = "missing_mem0_sdk"
+        else:
+            try:
+                _client = MemoryClient(
+                    api_key=api_key,
+                    host=(os.environ.get("MEM0_BASE_URL") or None),
+                )
+                _client_unavailable_reason = None
+                logger.info("[Mem0] Client initialized successfully (v3)")
+            except Exception:
+                logger.warning("Mem0 client initialization failed", exc_info=True)
+                _client = None
+                _client_unavailable_reason = "client_initialization_failed"
         _client_initialized = True
         return _client
+
+
+def _httpx_module():
+    """Lazy-import helper for httpx (REST fallback only)."""
+    try:
+        import httpx
+    except ImportError:
+        return None
+    return httpx
+
+
+def _rest_fallback_available() -> bool:
+    """True iff the REST fallback transport can be used right now."""
+    return bool(os.environ.get("MEM0_API_KEY", "").strip()) and _httpx_module() is not None
+
+
+def _memory_provider_status_from_client() -> dict[str, Any]:
+    """Inspect the current client + env to describe provider availability."""
+    client = _get_client()
+    if client is not None:
+        return {
+            "available": True,
+            "provider_status": "available",
+            "provider_reason": "sdk_client",
+            "provider_transport": "mem0_sdk",
+        }
+
+    api_key_present = bool(os.environ.get("MEM0_API_KEY", "").strip())
+    if not api_key_present:
+        return {
+            "available": False,
+            "provider_status": "unavailable",
+            "provider_reason": "missing_api_key",
+            "provider_transport": "none",
+        }
+
+    if _rest_fallback_available():
+        return {
+            "available": True,
+            "provider_status": "available",
+            "provider_reason": "rest_fallback",
+            "provider_transport": "mem0_rest",
+            "sdk_unavailable_reason": _client_unavailable_reason or "missing_mem0_sdk",
+        }
+
+    return {
+        "available": False,
+        "provider_status": "unavailable",
+        "provider_reason": _client_unavailable_reason or "client_unavailable",
+        "provider_transport": "none",
+    }
+
+
+def memory_provider_available() -> bool:
+    """Return whether the Mem0 client is configured and importable."""
+    return bool(memory_provider_status().get("available"))
+
+
+def memory_provider_status() -> dict[str, Any]:
+    """Return privacy-safe Mem0 availability details for diagnostics."""
+    try:
+        return _memory_provider_status_from_client()
+    except Exception:
+        logger.warning("Mem0 provider status check failed", exc_info=True)
+        return {
+            "available": False,
+            "provider_status": "unavailable",
+            "provider_reason": "provider_status_exception",
+            "provider_transport": "none",
+        }
 
 
 def warm_up() -> None:
@@ -144,6 +300,8 @@ def search_memories(
     *,
     reference_date: datetime | None = None,
     limit: int = 25,
+    log_content_previews: bool = True,
+    raise_on_error: bool = False,
 ) -> list[dict]:
     """Search Mem0 for memories matching the query.
 
@@ -156,10 +314,53 @@ def search_memories(
         reference_date: Optional datetime used by v3 temporal reasoning
             to resolve relative time expressions ("yesterday", "last week").
         limit: Max results to return (v3 default 25).
+        log_content_previews: If False, suppress per-result content preview
+            logging (used by realtime voice paths to avoid duplicating raw
+            memory text outside the tool result).
+        raise_on_error: If True, raise MemoryProviderUnavailableError /
+            MemoryProviderSearchError instead of returning an empty list.
 
     Returns a list of normalized memory dicts with 'id', 'content',
     'category', 'score', and 'metadata' fields. Results are cached per
     (user_id, query, reference_date, limit) for 60 seconds.
+    """
+    result = search_memories_with_diagnostics(
+        user_id=user_id,
+        query=query,
+        categories=categories,
+        context_mode=context_mode,
+        reference_date=reference_date,
+        limit=limit,
+        log_content_previews=log_content_previews,
+        raise_on_error=raise_on_error,
+    )
+    return result["memories"]
+
+
+def search_memories_with_diagnostics(
+    user_id: str,
+    query: str,
+    categories: list[str] | None = None,
+    context_mode: str | None = None,
+    *,
+    reference_date: datetime | None = None,
+    limit: int = 25,
+    log_content_previews: bool = True,
+    raise_on_error: bool = False,
+) -> dict[str, Any]:
+    """Search Mem0 and return a privacy-safe diagnostics envelope.
+
+    Returns a dict with:
+        memories: normalized memory list (same shape as search_memories).
+        provider_status / provider_reason / provider_transport: which Mem0
+            backend served the result (sdk / rest / cache / unavailable).
+        cache_status: ``hit`` or ``miss``.
+        latency_ms: API wall-clock latency (0 on cache hit / unavailable).
+
+    Note: v3 deprecates the ``categories`` post-filter and the
+    ``context_mode`` client-side sort. They are accepted for backward
+    compatibility but ignored at runtime — Mem0's hybrid retrieval handles
+    relevance natively.
     """
     if categories is not None:
         logger.debug("[Mem0Search] categories parameter ignored in v3 mode")
@@ -180,36 +381,63 @@ def search_memories(
         cached_results = _cache.get(cache_key)
         if cached_results is not None:
             logger.info("[Mem0Cache] HIT (%d results cached)", len(cached_results))
-            return cached_results
+            return {
+                "memories": cached_results,
+                "provider_status": "available",
+                "provider_reason": "cache_hit",
+                "provider_transport": "cache",
+                "cache_status": "hit",
+                "latency_ms": 0,
+            }
 
     logger.info(
         "[Mem0Cache] MISS — calling Mem0 API (query='%s' limit=%d)",
         query[:80],
         limit,
     )
-    client = _get_client()
-    if client is None:
-        return []
+    provider_status = memory_provider_status()
+    if not provider_status.get("available"):
+        if raise_on_error:
+            raise MemoryProviderUnavailableError(
+                str(provider_status.get("provider_reason") or "client_unavailable")
+            )
+        return {
+            "memories": [],
+            "provider_status": provider_status.get("provider_status", "unavailable"),
+            "provider_reason": provider_status.get("provider_reason", "client_unavailable"),
+            "provider_transport": provider_status.get("provider_transport", "none"),
+            "cache_status": "miss",
+            "latency_ms": 0,
+        }
 
     _t0 = time.perf_counter()
     try:
-        # Mem0 v3 SDK uses ``top_k`` (documented in MemoryClient.search /
-        # AsyncMemoryClient.search). Older code passed ``limit`` which the
-        # server happened to accept in some environments but the v3 contract
-        # is ``top_k`` — sending ``limit`` risks being silently ignored on
-        # SDK/API combinations that strip unknown keys, falling back to the
-        # default retrieval depth and undermining voice-mode's reduced
-        # window. Keep the internal kwarg name ``limit`` so callers don't
-        # have to know about the wire format.
-        search_kwargs: dict[str, Any] = {
-            "query": query,
-            "filters": {"user_id": user_id},
-            "top_k": limit,
-        }
-        if MEM0_REFERENCE_DATE_ENABLED and reference_date is not None:
-            search_kwargs["reference_date"] = reference_date.strftime("%Y-%m-%d")
+        provider_transport = str(provider_status.get("provider_transport") or "mem0_sdk")
+        client = _get_client()
+        if client is not None:
+            # Mem0 v3 SDK uses ``top_k`` (documented in MemoryClient.search /
+            # AsyncMemoryClient.search). Older code passed ``limit`` which the
+            # server happened to accept in some environments but the v3 contract
+            # is ``top_k`` — sending ``limit`` risks being silently ignored on
+            # SDK/API combinations that strip unknown keys, falling back to the
+            # default retrieval depth and undermining voice-mode's reduced
+            # window. Keep the internal kwarg name ``limit`` so callers don't
+            # have to know about the wire format.
+            search_kwargs: dict[str, Any] = {
+                "query": query,
+                "filters": {"user_id": user_id},
+                "top_k": limit,
+            }
+            if MEM0_REFERENCE_DATE_ENABLED and reference_date is not None:
+                search_kwargs["reference_date"] = reference_date.strftime("%Y-%m-%d")
+            results = client.search(**search_kwargs)
+        else:
+            # SDK unavailable (e.g. slim voice runtime without the mem0
+            # package). Fall back to the REST API via httpx so the user
+            # still gets memory results.
+            results = _search_memories_via_rest(user_id=user_id, query=query, limit=limit)
+            provider_transport = "mem0_rest"
 
-        results = client.search(**search_kwargs)
         api_ms = (time.perf_counter() - _t0) * 1000
 
         memories = _normalize_search_results(results)
@@ -225,39 +453,81 @@ def search_memories(
             "latency_ms=%.0f results=%d categories=[%s]",
             user_id,
             query[:80],
-            search_kwargs.get("filters", {"user_id": user_id}),
-            search_kwargs.get("reference_date", "-"),
+            {"user_id": user_id},
+            (reference_date.strftime("%Y-%m-%d") if (MEM0_REFERENCE_DATE_ENABLED and reference_date is not None) else "-"),
             limit,
             api_ms,
             len(memories),
             breakdown,
         )
-        for i, mem in enumerate(memories):
-            score_str = (
-                f" score={mem['score']:.3f}"
-                if mem.get("score") is not None
-                else ""
-            )
-            logger.debug(
-                "[Mem0Search]   [%d] [%s]%s %s",
-                i,
-                mem.get("category", "?"),
-                score_str,
-                (mem.get("content", ""))[:120],
-            )
+        if log_content_previews:
+            for i, mem in enumerate(memories):
+                score_str = (
+                    f" score={mem['score']:.3f}"
+                    if mem.get("score") is not None
+                    else ""
+                )
+                logger.debug(
+                    "[Mem0Search]   [%d] [%s]%s %s",
+                    i,
+                    mem.get("category", "?"),
+                    score_str,
+                    (mem.get("content", ""))[:120],
+                )
 
         with _cache_lock:
             _cache[cache_key] = memories
 
-        return memories
+        return {
+            "memories": memories,
+            "provider_status": "available",
+            "provider_reason": provider_status.get("provider_reason", "sdk_client"),
+            "provider_transport": provider_transport,
+            "cache_status": "miss",
+            "latency_ms": int(api_ms),
+        }
+
     except Exception:
+        elapsed_ms = int((time.perf_counter() - _t0) * 1000)
         logger.warning(
-            "Mem0 search failed for user %s (%.0fms)",
-            user_id,
-            (time.perf_counter() - _t0) * 1000,
-            exc_info=True,
+            "Mem0 search failed for user %s (%.0fms)", user_id, elapsed_ms, exc_info=True
         )
-        return []
+        if raise_on_error:
+            raise MemoryProviderSearchError("provider_exception")
+        return {
+            "memories": [],
+            "provider_status": "error",
+            "provider_reason": "provider_exception",
+            "provider_transport": provider_status.get("provider_transport", "unknown"),
+            "cache_status": "miss",
+            "latency_ms": elapsed_ms,
+        }
+
+
+def _search_memories_via_rest(*, user_id: str, query: str, limit: int) -> dict[str, Any]:
+    """REST fallback for environments without the mem0 SDK installed."""
+    httpx = _httpx_module()
+    api_key = os.environ.get("MEM0_API_KEY", "").strip()
+    if httpx is None:
+        raise MemoryProviderUnavailableError("missing_httpx")
+    if not api_key:
+        raise MemoryProviderUnavailableError("missing_api_key")
+
+    host = (os.environ.get("MEM0_BASE_URL") or "https://api.mem0.ai").rstrip("/")
+    with httpx.Client(
+        base_url=host,
+        headers={"Authorization": f"Token {api_key}"},
+        timeout=30.0,
+    ) as client:
+        response = client.post(
+            "/v2/memories/search/",
+            json={"query": query, "filters": {"user_id": user_id}, "limit": limit},
+        )
+        response.raise_for_status()
+        result = response.json()
+    if isinstance(result, list):
+        return {"results": result}
+    return result if isinstance(result, dict) else {"results": []}
 
 
 def _normalize_search_results(results: object) -> list[dict]:
