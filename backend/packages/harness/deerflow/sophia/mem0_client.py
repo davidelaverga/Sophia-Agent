@@ -412,68 +412,25 @@ def search_memories_with_diagnostics(
 
     _t0 = time.perf_counter()
     try:
-        provider_transport = str(provider_status.get("provider_transport") or "mem0_sdk")
-        client = _get_client()
-        if client is not None:
-            # Mem0 v3 SDK uses ``top_k`` (documented in MemoryClient.search /
-            # AsyncMemoryClient.search). Older code passed ``limit`` which the
-            # server happened to accept in some environments but the v3 contract
-            # is ``top_k`` — sending ``limit`` risks being silently ignored on
-            # SDK/API combinations that strip unknown keys, falling back to the
-            # default retrieval depth and undermining voice-mode's reduced
-            # window. Keep the internal kwarg name ``limit`` so callers don't
-            # have to know about the wire format.
-            search_kwargs: dict[str, Any] = {
-                "query": query,
-                "filters": {"user_id": user_id},
-                "top_k": limit,
-            }
-            if MEM0_REFERENCE_DATE_ENABLED and reference_date is not None:
-                search_kwargs["reference_date"] = reference_date.strftime("%Y-%m-%d")
-            results = client.search(**search_kwargs)
-        else:
-            # SDK unavailable (e.g. slim voice runtime without the mem0
-            # package). Fall back to the REST API via httpx so the user
-            # still gets memory results.
-            results = _search_memories_via_rest(user_id=user_id, query=query, limit=limit)
-            provider_transport = "mem0_rest"
-
+        results, provider_transport = _execute_mem0_search(
+            user_id=user_id,
+            query=query,
+            limit=limit,
+            reference_date=reference_date,
+            default_transport=str(provider_status.get("provider_transport") or "mem0_sdk"),
+        )
         api_ms = (time.perf_counter() - _t0) * 1000
-
         memories = _normalize_search_results(results)
 
-        category_counts: dict[str, int] = {}
-        for mem in memories:
-            cat = (mem.get("category") or "unknown")
-            category_counts[cat] = category_counts.get(cat, 0) + 1
-        breakdown = ",".join(f"{k}:{v}" for k, v in sorted(category_counts.items()))
-
-        logger.info(
-            "[Mem0Search] user_id=%s query=%r filters=%s reference_date=%s top_k=%d "
-            "latency_ms=%.0f results=%d categories=[%s]",
-            user_id,
-            query[:80],
-            {"user_id": user_id},
-            (reference_date.strftime("%Y-%m-%d") if (MEM0_REFERENCE_DATE_ENABLED and reference_date is not None) else "-"),
-            limit,
-            api_ms,
-            len(memories),
-            breakdown,
+        _log_search_diagnostics(
+            user_id=user_id,
+            query=query,
+            reference_date=reference_date,
+            limit=limit,
+            memories=memories,
+            api_ms=api_ms,
+            log_content_previews=log_content_previews,
         )
-        if log_content_previews:
-            for i, mem in enumerate(memories):
-                score_str = (
-                    f" score={mem['score']:.3f}"
-                    if mem.get("score") is not None
-                    else ""
-                )
-                logger.debug(
-                    "[Mem0Search]   [%d] [%s]%s %s",
-                    i,
-                    mem.get("category", "?"),
-                    score_str,
-                    (mem.get("content", ""))[:120],
-                )
 
         with _cache_lock:
             _cache[cache_key] = memories
@@ -502,6 +459,99 @@ def search_memories_with_diagnostics(
             "cache_status": "miss",
             "latency_ms": elapsed_ms,
         }
+
+
+def _execute_mem0_search(
+    *,
+    user_id: str,
+    query: str,
+    limit: int,
+    reference_date: datetime | None,
+    default_transport: str,
+) -> tuple[Any, str]:
+    """Run the Mem0 search via SDK (preferred) or REST fallback (slim runtime).
+
+    Extracted from ``search_memories_with_diagnostics`` to keep that function
+    below the sentrux CC threshold (16). Returns ``(raw_results, transport)``
+    where transport is ``"mem0_sdk"`` (or whatever ``default_transport`` was)
+    when the SDK served the request, or ``"mem0_rest"`` when we fell back.
+    """
+    client = _get_client()
+    if client is not None:
+        # Mem0 v3 SDK uses ``top_k`` (documented in MemoryClient.search). Older
+        # code passed ``limit`` which the server happened to accept in some
+        # environments but the v3 contract is ``top_k`` — sending ``limit``
+        # risks being silently ignored on SDK/API combinations that strip
+        # unknown keys, falling back to the default retrieval depth and
+        # undermining voice-mode's reduced window.
+        search_kwargs: dict[str, Any] = {
+            "query": query,
+            "filters": {"user_id": user_id},
+            "top_k": limit,
+        }
+        if MEM0_REFERENCE_DATE_ENABLED and reference_date is not None:
+            search_kwargs["reference_date"] = reference_date.strftime("%Y-%m-%d")
+        return client.search(**search_kwargs), default_transport
+
+    # SDK unavailable (e.g. slim voice runtime without the mem0 package).
+    # Fall back to the REST API via httpx so the user still gets memory
+    # results. The REST endpoint is v2 and uses ``limit`` on the wire.
+    return _search_memories_via_rest(user_id=user_id, query=query, limit=limit), "mem0_rest"
+
+
+def _log_search_diagnostics(
+    *,
+    user_id: str,
+    query: str,
+    reference_date: datetime | None,
+    limit: int,
+    memories: list[dict],
+    api_ms: float,
+    log_content_previews: bool,
+) -> None:
+    """Emit the ``[Mem0Search]`` summary + optional per-result debug lines.
+
+    Extracted from ``search_memories_with_diagnostics`` to keep that function
+    below the sentrux CC threshold. The summary line is grep-friendly and
+    includes the resolved ``reference_date`` (day-precision) and a category
+    breakdown so an operator can quickly count what came back.
+    """
+    category_counts: dict[str, int] = {}
+    for mem in memories:
+        cat = (mem.get("category") or "unknown")
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+    breakdown = ",".join(f"{k}:{v}" for k, v in sorted(category_counts.items()))
+
+    ref_date_str = "-"
+    if MEM0_REFERENCE_DATE_ENABLED and reference_date is not None:
+        ref_date_str = reference_date.strftime("%Y-%m-%d")
+
+    logger.info(
+        "[Mem0Search] user_id=%s query=%r filters=%s reference_date=%s top_k=%d "
+        "latency_ms=%.0f results=%d categories=[%s]",
+        user_id,
+        query[:80],
+        {"user_id": user_id},
+        ref_date_str,
+        limit,
+        api_ms,
+        len(memories),
+        breakdown,
+    )
+
+    if not log_content_previews:
+        return
+    for i, mem in enumerate(memories):
+        score_str = ""
+        if mem.get("score") is not None:
+            score_str = f" score={mem['score']:.3f}"
+        logger.debug(
+            "[Mem0Search]   [%d] [%s]%s %s",
+            i,
+            mem.get("category", "?"),
+            score_str,
+            (mem.get("content", ""))[:120],
+        )
 
 
 def _search_memories_via_rest(*, user_id: str, query: str, limit: int) -> dict[str, Any]:
