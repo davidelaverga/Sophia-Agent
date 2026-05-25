@@ -528,6 +528,24 @@ async def test_production_browser_session_uses_production_public_payload(
         token_minter=fake_minter,  # type: ignore[arg-type]
     )
     manager = GeminiProductionBrowserSessionManager(dogfood_manager)
+    realtime_context = {
+        "preferred_name": "Luis",
+        "identity_excerpt": "Name: Luis\nLuis likes direct continuity cues.",
+        "handoff_excerpt": "Session initiated with Luis. Keep the opener grounded.",
+        "memories": [
+            {"id": "m1", "content": "Luis prefers crisp context.", "category": "preference"},
+        ],
+        "diagnostics": {
+            "schema": "sophia_realtime_context_v1",
+            "context_fetch_status": "ok",
+            "mem0_status": "available",
+            "mem0_provider_reason": "sdk_client",
+            "identity_available": True,
+            "handoff_available": True,
+            "memory_count": 1,
+            "memory_limit": 4,
+        },
+    }
 
     browser_session = await manager.start_browser_session(
         _gemini_production_settings(),
@@ -536,6 +554,7 @@ async def test_production_browser_session_uses_production_public_payload(
         platform="ios_voice",
         context_mode="work",
         ritual="debrief",
+        realtime_context=realtime_context,
     )
 
     payload = browser_session.as_public_payload()
@@ -550,12 +569,20 @@ async def test_production_browser_session_uses_production_public_payload(
     assert payload["disconnect_url"] == "/production/realtime/gemini/browser-sessions/gemini-prod-1"
     assert payload["memory_context"]["schema"] == "gemini_live_memory_context_v1"
     assert payload["memory_context"]["trusted_user_context"] is True
-    assert payload["memory_context"]["status"] in {"empty", "injected"}
+    assert payload["memory_context"]["status"] == "injected"
+    assert payload["memory_context"]["backend_context_schema"] == "sophia_realtime_context_v1"
+    assert payload["memory_context"]["mem0_status"] == "available"
+    assert payload["memory_context"]["identity_available"] is True
+    assert payload["memory_context"]["handoff_available"] is True
+    assert payload["memory_context"]["memory_count"] == 1
     system_instruction = fake_minter.requests[0]["setup"]["systemInstruction"]["parts"][0]["text"]
     assert "Platform: iOS voice. Respond in 1-3 sentences." in system_instruction
     assert "# Context: Work" in system_instruction
     assert "<realtime_memory_recall_guidance>" in system_instruction
     assert "New facts from this live conversation are not durable memory" in system_instruction
+    assert "<gemini_live_user_context>" in system_instruction
+    assert "Preferred name: Luis" in system_instruction
+    assert "Luis prefers crisp context." in system_instruction
     assert "### Voice Skill State" in system_instruction
     assert "challenging_growth_allowed: false" in system_instruction
     assert "<gemini_live_spoken_turn_policy>" in system_instruction

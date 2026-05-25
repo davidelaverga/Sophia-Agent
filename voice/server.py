@@ -216,6 +216,10 @@ class SophiaGeminiProductionStartRequest(BaseModel):
     platform: str = Field(default="voice", description="Platform signal: voice | text | ios_voice")
     context_mode: str = Field(default="life", description="Context adaptation: work | gaming | life")
     ritual: str | None = Field(default=None, description="Active ritual: prepare | debrief | vent | reset | None")
+    realtime_context: dict[str, Any] | None = Field(
+        default=None,
+        description="Backend-owned bounded realtime context payload for setup-time continuity",
+    )
 
 
 session_router = APIRouter()
@@ -796,6 +800,7 @@ async def start_gemini_production_browser_session(
             platform=request.platform,
             context_mode=request.context_mode,
             ritual=request.ritual,
+            realtime_context=request.realtime_context,
         )
     except RealtimeDogfoodConfigurationError as exc:
         raise HTTPException(

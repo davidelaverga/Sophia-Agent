@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -63,6 +64,7 @@ class GeminiProductionBrowserSessionManager:
         platform: str = "voice",
         context_mode: str = "life",
         ritual: str | None = None,
+        realtime_context: Mapping[str, Any] | None = None,
     ) -> GeminiProductionBrowserSession:
         validate_gemini_production_route_settings(settings)
         instructions, memory_context = build_gemini_live_realtime_instructions_with_memory_context(
@@ -70,6 +72,7 @@ class GeminiProductionBrowserSessionManager:
             platform=platform,
             context_mode=context_mode,
             ritual=ritual,
+            backend_context=realtime_context,
         )
         browser_session = await self._browser_sessions.start_browser_session(
             settings,

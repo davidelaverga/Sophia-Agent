@@ -145,6 +145,168 @@ class TestUserScopedAuthorization:
         assert resp.status_code == 401
 
 
+class TestRealtimeContext:
+    def test_requires_authorization_when_auth_dependency_is_active(self, secure_client):
+        resp = secure_client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 401
+
+    def test_returns_identity_and_handoff_when_available(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        user_dir = tmp_path / "test_user"
+        (user_dir / "handoffs").mkdir(parents=True)
+        (user_dir / "identity.md").write_text(
+            "Name: Luis\nLuis responds well to direct acknowledgments.",
+            encoding="utf-8",
+        )
+        (user_dir / "handoffs" / "latest.md").write_text(
+            "Session initiated with Luis. Keep the opener grounded.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": False,
+                "provider_status": "unavailable",
+                "provider_reason": "missing_api_key",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"platform": "voice"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Luis"
+        assert "direct acknowledgments" in data["identity_excerpt"]
+        assert "Keep the opener grounded" in data["handoff_excerpt"]
+        assert data["memories"] == []
+        assert data["diagnostics"]["identity_available"] is True
+        assert data["diagnostics"]["handoff_available"] is True
+        assert data["diagnostics"]["mem0_status"] == "missing_api_key"
+
+    def test_returns_bounded_mem0_snippets_when_provider_available(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [
+                    {"id": "m1", "content": "Luis prefers crisp context.", "category": "preference", "score": 0.9},
+                    {"id": "m2", "content": "Luis is preparing a demo.", "category": "commitment", "score": 0.8},
+                    {"id": "m3", "content": "This one should be outside the requested limit.", "category": "fact"},
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/context",
+            json={"context_mode": "work", "ritual": "debrief", "limit": 2},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert [memory["id"] for memory in data["memories"]] == ["m1", "m2"]
+        assert data["diagnostics"]["mem0_status"] == "available"
+        assert data["diagnostics"]["memory_count"] == 2
+        assert calls[0]["user_id"] == "test_user"
+        assert calls[0]["limit"] == 2
+        assert calls[0]["log_content_previews"] is False
+        assert calls[0]["raise_on_error"] is True
+        assert "ritual_context" in calls[0]["categories"]
+
+    def test_mem0_error_degrades_with_diagnostics(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["memories"] == []
+        assert data["diagnostics"]["mem0_status"] == "error"
+        assert data["diagnostics"]["mem0_provider_reason"] == "provider_exception"
+        assert data["diagnostics"]["memory_count"] == 0
+
+    def test_limit_is_capped_server_side(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [
+                    {"id": f"m{i}", "content": f"Memory {i}", "category": "fact"}
+                    for i in range(12)
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"limit": 99})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert calls[0]["limit"] == 10
+        assert len(data["memories"]) == 10
+        assert data["diagnostics"]["memory_limit"] == 10
+
+
 # ---------------------------------------------------------------------------
 # Memory List
 # ---------------------------------------------------------------------------

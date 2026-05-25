@@ -20,6 +20,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
+from app.gateway.sophia_realtime_context import (
+    RealtimeContextRequest,
+    build_degraded_realtime_context_response,
+    build_sophia_realtime_context,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -564,6 +569,11 @@ async def _start_gemini_production_voice_session(
         )
 
     session_id = f"gemini-prod-{uuid.uuid4().hex}"
+    realtime_context = await _build_gemini_realtime_context_payload(
+        user_id=user_id,
+        body=body,
+        session_id=session_id,
+    )
     payload = await _proxy_voice_runtime_json(
         "POST",
         "/production/realtime/gemini/browser-sessions",
@@ -573,6 +583,7 @@ async def _start_gemini_production_voice_session(
             "platform": body.platform,
             "context_mode": body.context_mode,
             "ritual": body.ritual,
+            "realtime_context": realtime_context,
         },
     )
 
@@ -593,6 +604,34 @@ async def _start_gemini_production_voice_session(
     payload["provider_event_relay_url"] = _build_gemini_production_relay_url()
     payload["disconnect_url"] = _build_gemini_production_disconnect_url()
     return GeminiVoiceConnectResponse.model_validate(payload)
+
+
+async def _build_gemini_realtime_context_payload(
+    *,
+    user_id: str,
+    body: VoiceConnectRequest,
+    session_id: str,
+) -> dict[str, Any]:
+    request = RealtimeContextRequest(
+        thread_id=body.thread_id,
+        session_id=session_id,
+        platform=body.platform,
+        context_mode=body.context_mode,
+        ritual=body.ritual,
+    )
+    try:
+        context = await asyncio.to_thread(
+            build_sophia_realtime_context,
+            user_id=user_id,
+            request=request,
+        )
+    except Exception:
+        logger.warning("voice.gemini.context_fetch_failed user_id=%s", user_id, exc_info=True)
+        context = build_degraded_realtime_context_response(
+            reason="gateway_context_fetch_failed",
+            limit=request.limit,
+        )
+    return context.model_dump(mode="json")
 
 
 @router.post(

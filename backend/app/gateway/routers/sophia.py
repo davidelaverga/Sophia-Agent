@@ -14,6 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
+from app.gateway.sophia_realtime_context import (
+    RealtimeContextRequest,
+    RealtimeContextResponse,
+    build_sophia_realtime_context,
+)
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.review_metadata_store import (
@@ -595,7 +600,29 @@ def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> 
 
 
 # ---------------------------------------------------------------------------
-# 1. Memory List
+# 1. Realtime Context
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/realtime/context",
+    response_model=RealtimeContextResponse,
+    summary="Get bounded realtime context for Sophia voice",
+    description="Returns backend-owned setup context for realtime voice sessions.",
+)
+async def get_realtime_context(
+    user_id: str,
+    body: RealtimeContextRequest | None = None,
+) -> RealtimeContextResponse:
+    _validate_user(user_id)
+    return await asyncio.to_thread(
+        build_sophia_realtime_context,
+        user_id=user_id,
+        request=body or RealtimeContextRequest(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 2. Memory List
 # ---------------------------------------------------------------------------
 
 @router.get(
@@ -634,7 +661,7 @@ async def list_memories(
 
 
 # ---------------------------------------------------------------------------
-# 2. Memory CRUD
+# 3. Memory CRUD
 # ---------------------------------------------------------------------------
 
 @router.post(

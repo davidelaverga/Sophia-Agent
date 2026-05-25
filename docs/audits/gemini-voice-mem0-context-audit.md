@@ -2,7 +2,7 @@
 
 Date: 2026-05-24
 Branch: `audit/gemini-voice-mem0-context`
-Status: audit-only; no runtime fix implemented
+Status: audit completed; Option C implemented on `fix/gemini-voice-backend-realtime-context`
 
 ## Observed Production Symptom
 
@@ -173,6 +173,22 @@ Choose Option C as the safest architectural fix: add a backend-owned, bounded re
 If a faster interim fix is needed, use a constrained Option A only for Mem0 read availability: package `mem0_client.py` plus `review_metadata_store.py`, add `MEM0_API_KEY` to the voice service, and test that missing SDK uses REST fallback. Treat it as partial because identity and handoff will remain unavailable unless fetched from backend or a shared store.
 
 Do not choose Option B. It duplicates memory logic. Option D is acceptable only as a deliberate product decision to run Gemini Live without continuity, with loud diagnostics.
+
+## Implementation Follow-up
+
+The follow-up fix implements Option C with a backend-owned realtime context path.
+
+- Added `backend/app/gateway/sophia_realtime_context.py`, which assembles a bounded `sophia_realtime_context_v1` payload from backend-owned identity, latest handoff, review-metadata-filtered Mem0 snippets, and safe diagnostics.
+- Added the protected `POST /api/sophia/{user_id}/realtime/context` endpoint for explicit backend callers. It uses the existing user-scoped Sophia gateway auth dependency; there is no unauthenticated memory-context route and no new service-token environment variable.
+- Updated authenticated gateway voice connect so the production Gemini path builds the same context in-process and passes it to `POST /production/realtime/gemini/browser-sessions` as `realtime_context`.
+- Updated `sophia-voice` Gemini production startup so `voice/realtime/gemini_memory_context.py` consumes only that payload. The production setup path no longer imports `deerflow.sophia.mem0_client` and no longer reads local `users/**` files.
+- If context fetch fails, gateway sends a degraded payload with `context_fetch_status="error"`, `mem0_status="error"`, `identity_available=false`, `handoff_available=false`, and `memory_count=0`; voice then builds the session with empty context like the previous graceful-degradation path.
+
+Remaining limitations:
+
+- The setup context is still session-start-only for Gemini Live; deeper explicit recall remains the job of the existing `retrieve_memories(query)` tool.
+- Direct dogfood/session-manager use without a gateway-provided payload intentionally degrades to empty setup context.
+- The endpoint and helper are read-only. Mem0 writes, recap, handoff updates, and identity updates remain offline/backend responsibilities.
 
 ## Files Implicated
 

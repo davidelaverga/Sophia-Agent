@@ -340,6 +340,12 @@ class TestVoiceConnect:
     def test_gemini_runtime_returns_browser_bootstrap_when_promoted(self, monkeypatch):
         monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
         monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+        realtime_context = {
+            "diagnostics": {
+                "schema": "sophia_realtime_context_v1",
+                "mem0_status": "available",
+            }
+        }
 
         runtime_payload = {
             "runtime": "gemini_live",
@@ -364,6 +370,10 @@ class TestVoiceConnect:
             new_callable=AsyncMock,
             return_value=runtime_payload,
         ) as proxy_runtime, patch(
+            "app.gateway.routers.voice._build_gemini_realtime_context_payload",
+            new_callable=AsyncMock,
+            return_value=realtime_context,
+        ) as context_payload, patch(
             "app.gateway.routers.voice._dispatch_voice_agent",
             new_callable=AsyncMock,
         ) as dispatch:
@@ -393,13 +403,66 @@ class TestVoiceConnect:
                 "platform": "voice",
                 "context_mode": "work",
                 "ritual": "debrief",
+                "realtime_context": realtime_context,
             },
         )
+        context_payload.assert_awaited_once()
+
+    def test_gemini_runtime_context_fetch_failure_degrades_safely(self, monkeypatch):
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+
+        runtime_payload = {
+            "runtime": "gemini_live",
+            "voice_runtime": "gemini_live",
+            "production_route": True,
+            "session_id": "gemini-prod-session-degraded",
+            "stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-degraded/events",
+            "event_stream_url": "/production/realtime/gemini/sessions/gemini-prod-session-degraded/events",
+            "provider_event_relay_url": (
+                "/production/realtime/gemini/browser-sessions/"
+                "gemini-prod-session-degraded/provider-events"
+            ),
+            "disconnect_url": "/production/realtime/gemini/browser-sessions/gemini-prod-session-degraded",
+            "browser_audio": "gemini_live_websocket_production_candidate",
+            "transport": "gemini_browser_websocket_ephemeral_token_with_backend_relay",
+            "websocket_url": "wss://gemini.example/live",
+            "websocket_auth": "ephemeral_access_token",
+            "ephemeral_token": {"value": "auth_tokens/test"},
+            "setup": {"model": "models/gemini-live"},
+            "public_event_boundary": "SophiaEventNormalizer",
+        }
+
+        with patch(
+            "app.gateway.routers.voice.build_sophia_realtime_context",
+            side_effect=RuntimeError("context unavailable"),
+        ), patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            return_value=runtime_payload,
+        ) as proxy_runtime:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice"},
+            )
+
+        assert resp.status_code == 200
+        json_body = proxy_runtime.await_args.kwargs["json_body"]
+        diagnostics = json_body["realtime_context"]["diagnostics"]
+        assert diagnostics["context_fetch_status"] == "error"
+        assert diagnostics["mem0_status"] == "error"
+        assert diagnostics["memory_count"] == 0
 
     def test_gemini_production_flag_routes_to_realtime_when_gateway_runtime_unset(self, monkeypatch):
         monkeypatch.delenv("SOPHIA_VOICE_RUNTIME_MODE", raising=False)
         monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
         monkeypatch.setattr("app.gateway.routers.voice._get_voice_env_fallback", lambda: {})
+        realtime_context = {
+            "diagnostics": {
+                "schema": "sophia_realtime_context_v1",
+                "mem0_status": "available",
+            }
+        }
 
         runtime_payload = {
             "runtime": "gemini_live",
@@ -426,6 +489,10 @@ class TestVoiceConnect:
             new_callable=AsyncMock,
             return_value=runtime_payload,
         ) as proxy_runtime, patch(
+            "app.gateway.routers.voice._build_gemini_realtime_context_payload",
+            new_callable=AsyncMock,
+            return_value=realtime_context,
+        ) as context_payload, patch(
             "app.gateway.routers.voice._dispatch_voice_agent",
             new_callable=AsyncMock,
             side_effect=AssertionError("legacy /calls session route must not run in Gemini production mode"),
@@ -454,8 +521,10 @@ class TestVoiceConnect:
                 "platform": "voice",
                 "context_mode": "life",
                 "ritual": None,
+                "realtime_context": realtime_context,
             },
         )
+        context_payload.assert_awaited_once()
 
     def test_explicit_legacy_runtime_keeps_stream_dispatch_when_promotion_flag_set(self, monkeypatch):
         monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "legacy_cascade")
