@@ -1016,6 +1016,15 @@ def _select_event_poll_strategy(
     return None
 
 
+def _attach_event_id_if_needed(memory: dict, event_id: str | None) -> dict:
+    """Preserve the event tracking handle when Mem0 returns no memory id."""
+    if memory.get("id") or memory.get("event_id") or not event_id:
+        return memory
+    enriched = dict(memory)
+    enriched["event_id"] = event_id
+    return enriched
+
+
 def _consume_events(
     events: list[dict],
     pending: set[str],
@@ -1040,7 +1049,7 @@ def _consume_events(
             raise Mem0EventFailedError(f"Mem0 add event failed: {evt_id}")
         if status not in ("SUCCEEDED", "COMPLETED"):
             continue
-        resolved.extend(_extract_memories_from_event(evt))
+        resolved.extend(_extract_memories_from_event(evt, event_id=evt_id))
         pending.discard(evt_id)
 
 
@@ -1225,7 +1234,7 @@ def _resolve_rest_next_url(data: Any, base_url: str) -> str | None:
     return next_url
 
 
-def _extract_memories_from_event(evt: dict) -> list[dict]:
+def _extract_memories_from_event(evt: dict, *, event_id: str | None = None) -> list[dict]:
     """Extract all memory records from a v3 event payload.
 
     Mem0 v3 get_events returns event wrappers that may nest the resolved
@@ -1241,28 +1250,28 @@ def _extract_memories_from_event(evt: dict) -> list[dict]:
     # Path 1: event.memory — most common, event nests one memory dict
     mem = evt.get("memory")
     if isinstance(mem, dict):
-        memories.append(mem)
+        memories.append(_attach_event_id_if_needed(mem, event_id))
 
     # Path 2: event.data.memory — some SDK versions nest deeper
     data = evt.get("data")
     if isinstance(data, dict):
         mem = data.get("memory")
         if isinstance(mem, dict):
-            memories.append(mem)
+            memories.append(_attach_event_id_if_needed(mem, event_id))
 
     # Path 3: event.result — alternative SDK naming
     mem = evt.get("result")
     if isinstance(mem, dict):
-        memories.append(mem)
+        memories.append(_attach_event_id_if_needed(mem, event_id))
 
     # Path 4: event.results — v3 may return multiple memory outputs here
     results = evt.get("results")
     if isinstance(results, list):
         for item in results:
             if isinstance(item, dict):
-                memories.append(item)
+                memories.append(_attach_event_id_if_needed(item, event_id))
     elif isinstance(results, dict):
-        memories.append(results)
+        memories.append(_attach_event_id_if_needed(results, event_id))
 
     if memories:
         return memories
@@ -1270,7 +1279,7 @@ def _extract_memories_from_event(evt: dict) -> list[dict]:
     # Path 5: the event itself is the memory record — NOT a raw wrapper.
     # Memory records have memory/content fields; event wrappers have status.
     if ("memory" in evt or "content" in evt) and "status" not in evt:
-        return [evt]
+        return [_attach_event_id_if_needed(evt, event_id)]
 
     return []
 

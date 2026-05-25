@@ -814,7 +814,7 @@ requires-dist = [
     { name = "markdown", specifier = ">=3.7" },
     { name = "markdown-to-mrkdwn", specifier = ">=0.3.1" },
     { name = "matplotlib", specifier = ">=3.9.2" },
-    { name = "mem0ai", specifier = ">=1.0.9" },
+    { name = "mem0ai", specifier = ">=2.0.2" },
     { name = "numpy", specifier = ">=2.1.0" },
     { name = "openpyxl", specifier = ">=3.1.5" },
     { name = "pandas", specifier = ">=2.2.3" },
@@ -899,7 +899,7 @@ requires-dist = [
     { name = "langgraph-sdk", specifier = ">=0.3.0" },
     { name = "markdownify", specifier = ">=1.2.2" },
     { name = "markitdown", extras = ["all", "xlsx"], specifier = ">=0.0.1a2" },
-    { name = "mem0ai", specifier = ">=1.0.0" },
+    { name = "mem0ai", specifier = ">=2.0.2" },
     { name = "pydantic", specifier = ">=2.12.5" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "readabilipy", specifier = ">=0.3.0" },
@@ -2377,7 +2377,7 @@ wheels = [
 
 [[package]]
 name = "mem0ai"
-version = "1.0.9"
+version = "2.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "openai" },
@@ -2388,9 +2388,9 @@ dependencies = [
     { name = "qdrant-client" },
     { name = "sqlalchemy" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e2/78/9688a8c7046bbe5a9f5932eceb1dd953b40b80831cba7aa9fdec0a65370b/mem0ai-1.0.9.tar.gz", hash = "sha256:925953b88374c3dce0f07a93c0585ef7ad5acd6bcdd2e4015ecaf5a7eab476c2", size = 199752, upload-time = "2026-03-28T17:15:33.473Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/8f/86975bdf11a0aece78b6f4d5551b8b92c38b9bdf5f5764fc879e6cb1227b/mem0ai-2.0.2.tar.gz", hash = "sha256:482d11a55c8aa00dce29a66eeecbba2fd5f5c7501c054ce8ba606baee3755f99", size = 214627, upload-time = "2026-05-07T20:03:47.812Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fd/31/5c66b0c01000cf3b0f61c0801ab9af7feadf7a9e4a0b5668cf5962263124/mem0ai-1.0.9-py3-none-any.whl", hash = "sha256:5153883da8f49296de763f4f92876ce3d4ee7daf7f596e3d4feb3a1709d3c4b0", size = 294561, upload-time = "2026-03-28T17:15:31.722Z" },
+    { url = "https://files.pythonhosted.org/packages/01/f8/59902456c1950e63b6b226634463bc8b24d81697e7114f0740059fd0a270/mem0ai-2.0.2-py3-none-any.whl", hash = "sha256:6fda32549c213fb63b393f4b1920f54961ea75c51d95b6492096108609accf3b", size = 302276, upload-time = "2026-05-07T20:03:45.706Z" },
 ]
 
 [[package]]
