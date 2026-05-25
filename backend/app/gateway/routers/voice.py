@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from dotenv import dotenv_values
@@ -646,7 +646,7 @@ async def _build_gemini_realtime_context_payload(
             user_id=user_id,
             session_id=session_id,
         )
-        base_url = request_base_url.rstrip("/")
+        base_url = _canonicalize_gemini_callback_base_url(request_base_url)
         payload["dynamic_memory_retrieval"] = {
             "schema": REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA,
             "endpoint_url": f"{base_url}/internal/sophia-realtime/memories/retrieve",
@@ -660,6 +660,19 @@ async def _build_gemini_realtime_context_payload(
             diagnostics["dynamic_retrieve_source"] = "gateway"
             diagnostics["dynamic_retrieve_token_excluded"] = True
     return payload
+
+
+def _canonicalize_gemini_callback_base_url(base_url: str) -> str:
+    cleaned = base_url.strip().rstrip("/")
+    if not cleaned:
+        return cleaned
+    if "://" not in cleaned:
+        cleaned = f"https://{cleaned}"
+
+    parsed = urlsplit(cleaned)
+    if parsed.hostname and parsed.hostname.lower().endswith(".onrender.com"):
+        parsed = parsed._replace(scheme="https")
+    return urlunsplit(parsed).rstrip("/")
 
 
 @router.post(

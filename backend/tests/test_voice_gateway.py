@@ -453,6 +453,42 @@ class TestVoiceConnect:
         assert diagnostics["mem0_status"] == "error"
         assert diagnostics["memory_count"] == 0
 
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("request_base_url", "expected_base_url"),
+        [
+            ("https://sophia-gateway.onrender.com", "https://sophia-gateway.onrender.com"),
+            ("http://sophia-gateway.onrender.com", "https://sophia-gateway.onrender.com"),
+            ("sophia-gateway.onrender.com", "https://sophia-gateway.onrender.com"),
+            ("http://localhost", "http://localhost"),
+        ],
+    )
+    async def test_gemini_realtime_context_canonicalizes_render_callback_url(
+        self,
+        monkeypatch,
+        request_base_url,
+        expected_base_url,
+    ):
+        from app.gateway.routers import voice as voice_router
+
+        monkeypatch.setattr(
+            voice_router,
+            "build_sophia_realtime_context",
+            lambda **_kwargs: voice_router.build_degraded_realtime_context_response(reason="test"),
+        )
+
+        payload = await voice_router._build_gemini_realtime_context_payload(
+            user_id="user_123",
+            body=voice_router.VoiceConnectRequest(platform="voice"),
+            session_id="gemini-prod-test",
+            request_base_url=request_base_url,
+        )
+
+        assert (
+            payload["dynamic_memory_retrieval"]["endpoint_url"]
+            == f"{expected_base_url}/internal/sophia-realtime/memories/retrieve"
+        )
+
     def test_gemini_production_flag_routes_to_realtime_when_gateway_runtime_unset(self, monkeypatch):
         monkeypatch.delenv("SOPHIA_VOICE_RUNTIME_MODE", raising=False)
         monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
