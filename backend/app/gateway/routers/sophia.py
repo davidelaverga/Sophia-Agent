@@ -10,14 +10,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.sophia_realtime_context import (
+    REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
     RealtimeContextRequest,
     RealtimeContextResponse,
+    RealtimeMemoryRetrieveRequest,
     build_sophia_realtime_context,
+    retrieve_sophia_realtime_memories,
+    retrieve_sophia_realtime_memories_for_grant,
 )
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
@@ -35,6 +39,7 @@ router = APIRouter(
     tags=["sophia"],
     dependencies=[Depends(require_authorized_user_scope)],
 )
+internal_router = APIRouter(prefix="/internal/sophia-realtime", tags=["sophia-realtime-internal"])
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
@@ -619,6 +624,42 @@ async def get_realtime_context(
         user_id=user_id,
         request=body or RealtimeContextRequest(),
     )
+
+
+@router.post(
+    "/{user_id}/realtime/memories/retrieve",
+    summary="Retrieve bounded realtime memories for Sophia voice",
+    description="Executes query-only realtime memory retrieval using backend-owned Mem0 access.",
+)
+async def retrieve_realtime_memories(
+    user_id: str,
+    body: RealtimeMemoryRetrieveRequest,
+) -> dict[str, Any]:
+    _validate_user(user_id)
+    return await asyncio.to_thread(
+        retrieve_sophia_realtime_memories,
+        user_id=user_id,
+        request=body,
+    )
+
+
+@internal_router.post(
+    "/memories/retrieve",
+    summary="Internal Gemini realtime memory retrieval callback",
+    description="Protected by a gateway-minted session grant; used by sophia-voice only.",
+)
+async def retrieve_realtime_memories_internal(
+    body: RealtimeMemoryRetrieveRequest,
+    token: str | None = Header(default=None, alias=REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER),
+) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(
+            retrieve_sophia_realtime_memories_for_grant,
+            token=token or "",
+            request=body,
+        )
+    except PermissionError:
+        raise HTTPException(status_code=401, detail="Invalid realtime memory retrieval grant")
 
 
 # ---------------------------------------------------------------------------

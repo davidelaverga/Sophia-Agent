@@ -15,15 +15,18 @@ from urllib.parse import quote
 
 import httpx
 from dotenv import dotenv_values
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.sophia_realtime_context import (
+    REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA,
+    REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
     RealtimeContextRequest,
     build_degraded_realtime_context_response,
     build_sophia_realtime_context,
+    create_realtime_memory_retrieval_grant,
 )
 
 logger = logging.getLogger(__name__)
@@ -556,6 +559,7 @@ def _is_gemini_production_runtime_selected() -> bool:
 async def _start_gemini_production_voice_session(
     user_id: str,
     body: VoiceConnectRequest,
+    request_base_url: str | None = None,
 ) -> GeminiVoiceConnectResponse:
     if not _gemini_production_route_enabled():
         raise HTTPException(
@@ -573,6 +577,7 @@ async def _start_gemini_production_voice_session(
         user_id=user_id,
         body=body,
         session_id=session_id,
+        request_base_url=request_base_url,
     )
     payload = await _proxy_voice_runtime_json(
         "POST",
@@ -611,6 +616,7 @@ async def _build_gemini_realtime_context_payload(
     user_id: str,
     body: VoiceConnectRequest,
     session_id: str,
+    request_base_url: str | None = None,
 ) -> dict[str, Any]:
     request = RealtimeContextRequest(
         thread_id=body.thread_id,
@@ -631,7 +637,29 @@ async def _build_gemini_realtime_context_payload(
             reason="gateway_context_fetch_failed",
             limit=request.limit,
         )
-    return context.model_dump(mode="json")
+    payload = context.model_dump(mode="json")
+    diagnostics = payload.setdefault("diagnostics", {})
+    if isinstance(diagnostics, dict):
+        diagnostics["dynamic_retrieve_configured"] = False
+    if request_base_url:
+        grant = create_realtime_memory_retrieval_grant(
+            user_id=user_id,
+            session_id=session_id,
+        )
+        base_url = request_base_url.rstrip("/")
+        payload["dynamic_memory_retrieval"] = {
+            "schema": REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA,
+            "endpoint_url": f"{base_url}/internal/sophia-realtime/memories/retrieve",
+            "token": grant.token,
+            "token_header": REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
+            "expires_at": grant.expires_at_iso,
+            "source": "gateway",
+        }
+        if isinstance(diagnostics, dict):
+            diagnostics["dynamic_retrieve_configured"] = True
+            diagnostics["dynamic_retrieve_source"] = "gateway"
+            diagnostics["dynamic_retrieve_token_excluded"] = True
+    return payload
 
 
 @router.post(
@@ -640,7 +668,11 @@ async def _build_gemini_realtime_context_payload(
     summary="Start a voice session",
     description="Generate Stream credentials for the frontend and signal the Voice Agent to join.",
 )
-async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnectResponse | GeminiVoiceConnectResponse:
+async def voice_connect(
+    user_id: str,
+    body: VoiceConnectRequest,
+    request: Request,
+) -> VoiceConnectResponse | GeminiVoiceConnectResponse:
     """Create a Stream call, dispatch the voice agent, and return credentials."""
 
     if body.platform not in SUPPORTED_PLATFORMS:
@@ -661,7 +693,11 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
                 status_code=409,
                 detail="Gemini production voice route does not support automatic preconnect.",
             )
-        gemini_response = await _start_gemini_production_voice_session(user_id, body)
+        gemini_response = await _start_gemini_production_voice_session(
+            user_id,
+            body,
+            request_base_url=str(request.base_url),
+        )
         lock = await _get_active_voice_session_lock(user_id)
         async with lock:
             previous_session = _active_voice_sessions.get(user_id)

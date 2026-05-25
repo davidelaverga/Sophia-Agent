@@ -20,10 +20,11 @@ from deerflow.sophia.session_store import SessionRecord, SessionStore
 def client():
     """Create a test client with the Sophia router."""
     from app.gateway.auth import require_authorized_user_scope
-    from app.gateway.routers.sophia import router
+    from app.gateway.routers.sophia import internal_router, router
 
     app = FastAPI()
     app.include_router(router)
+    app.include_router(internal_router)
     app.dependency_overrides[require_authorized_user_scope] = lambda: "test_user"
     return TestClient(app)
 
@@ -31,10 +32,11 @@ def client():
 @pytest.fixture
 def secure_client():
     """Create a test client with the real auth dependency enabled."""
-    from app.gateway.routers.sophia import router
+    from app.gateway.routers.sophia import internal_router, router
 
     app = FastAPI()
     app.include_router(router)
+    app.include_router(internal_router)
     return TestClient(app)
 
 
@@ -305,6 +307,203 @@ class TestRealtimeContext:
         assert calls[0]["limit"] == 10
         assert len(data["memories"]) == 10
         assert data["diagnostics"]["memory_limit"] == 10
+
+    def test_dynamic_memory_retrieve_returns_bounded_success(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [
+                    {"id": f"m{i}", "content": f"Memory {i}", "category": "preference"}
+                    for i in range(8)
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+                "provider_transport": "mem0_sdk",
+                "cache_status": "miss",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={
+                "query": "gaming focus cue",
+                "context_mode": "gaming",
+                "limit": 99,
+                "user_id": "model_supplied_user",
+                "categories": ["relationship"],
+            },
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["count"] == 5
+        assert [memory["rank"] for memory in data["memories"]] == [1, 2, 3, 4, 5]
+        assert data["trusted_user_id_source"] == "authenticated_realtime_session"
+        assert data["diagnostics"]["dynamic_retrieval_source"] == "gateway"
+        assert data["diagnostics"]["raw_memory_text_excluded"] is True
+        assert data["diagnostics"]["memory_limit"] == 5
+        assert calls[0]["user_id"] == "test_user"
+        assert calls[0]["limit"] == 5
+        assert "preference" in calls[0]["categories"]
+        assert "strategy" in calls[0]["categories"]
+
+    def test_dynamic_memory_retrieve_returns_no_results_when_provider_empty(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: {
+                "memories": [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={"query": "childhood movie"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["status"] == "no_results"
+        assert data["memories"] == []
+        assert data["diagnostics"]["provider_status"] == "available"
+
+    def test_dynamic_memory_retrieve_degrades_when_provider_unavailable(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": False,
+                "provider_status": "unavailable",
+                "provider_reason": "missing_api_key",
+            },
+        )
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={"query": "what do you remember about gaming"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["status"] == "unavailable"
+        assert data["provider_reason"] == "missing_api_key"
+        assert data["diagnostics"]["raw_memory_text_excluded"] is True
+
+    def test_dynamic_memory_retrieve_internal_grant_binds_trusted_user(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        grant = context_module.create_realtime_memory_retrieval_grant(
+            user_id="test_user",
+            session_id="gemini-prod-session",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            return {
+                "memories": [{"id": "m1", "content": "Trusted user memory.", "category": "fact"}],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers={context_module.REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER: grant.token},
+            json={"query": "trusted memory", "user_id": "model_supplied_user"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "success"
+        assert data["session_id"] == "gemini-prod-session"
+        assert calls[0]["user_id"] == "test_user"
+
+    def test_dynamic_memory_retrieve_search_error_returns_error_without_500(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json={"query": "stored context"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "error"
+        assert data["provider_status"] == "error"
+        assert data["diagnostics"]["raw_memory_text_excluded"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -80,6 +80,8 @@ class GeminiProductionBrowserSessionManager:
             session_id=session_id,
             instructions=instructions,
             memory_context_diagnostics=memory_context.diagnostics,
+            context_mode=context_mode,
+            memory_retrieval_config=_dynamic_memory_retrieval_config(realtime_context),
         )
         return GeminiProductionBrowserSession(browser_session=browser_session)
 
@@ -117,3 +119,14 @@ def validate_gemini_production_route_settings(settings: object) -> None:
         )
 
     validate_gemini_browser_dogfood_settings(settings)
+
+
+def _dynamic_memory_retrieval_config(
+    realtime_context: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(realtime_context, Mapping):
+        return None
+    config = realtime_context.get("dynamic_memory_retrieval")
+    if not isinstance(config, Mapping):
+        return None
+    return dict(config)

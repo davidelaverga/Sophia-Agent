@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import logging
 import re
+import secrets
+import threading
+import time
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -13,15 +18,24 @@ from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path, validate_user_id
 from deerflow.sophia import review_metadata_store
 from deerflow.sophia.mem0_client import memory_provider_status, search_memories_with_diagnostics
+from deerflow.sophia.tools.retrieve_memories_contract import (
+    REALTIME_RETRIEVE_MEMORIES_LIMIT,
+    retrieve_memories_for_realtime,
+)
 
 logger = logging.getLogger(__name__)
 
 REALTIME_CONTEXT_SCHEMA = "sophia_realtime_context_v1"
+REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA = "sophia_realtime_dynamic_memory_retrieval_v1"
+REALTIME_MEMORY_RETRIEVE_DIAGNOSTIC_SCHEMA = "sophia_realtime_memory_retrieve_v1"
+REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER = "X-Sophia-Realtime-Memory-Token"
 DEFAULT_REALTIME_MEMORY_LIMIT = 4
 MAX_REALTIME_MEMORY_LIMIT = 10
+MAX_REALTIME_DYNAMIC_MEMORY_LIMIT = REALTIME_RETRIEVE_MEMORIES_LIMIT
 IDENTITY_EXCERPT_MAX_CHARS = 1200
 HANDOFF_EXCERPT_MAX_CHARS = 900
 MEMORY_SNIPPET_MAX_CHARS = 240
+DEFAULT_REALTIME_MEMORY_GRANT_TTL_SECONDS = 2 * 60 * 60
 
 Mem0Status = Literal["available", "missing_api_key", "unavailable", "error"]
 
@@ -52,6 +66,32 @@ class RealtimeContextResponse(BaseModel):
     handoff_excerpt: str | None = None
     memories: list[RealtimeContextMemory] = Field(default_factory=list)
     diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class RealtimeMemoryRetrieveRequest(BaseModel):
+    query: str | None = Field(default=None, description="Model-supplied natural language memory query")
+    context_mode: str | None = Field(default="life", description="Trusted runtime context mode")
+    ritual: str | None = Field(default=None, description="Trusted runtime ritual")
+    limit: int | None = Field(
+        default=MAX_REALTIME_DYNAMIC_MEMORY_LIMIT,
+        description="Requested dynamic memory limit; capped server-side",
+    )
+
+
+@dataclass(frozen=True)
+class RealtimeMemoryRetrievalGrant:
+    token: str
+    user_id: str
+    session_id: str
+    expires_at: float
+
+    @property
+    def expires_at_iso(self) -> str:
+        return datetime.fromtimestamp(self.expires_at, UTC).isoformat().replace("+00:00", "Z")
+
+
+_memory_retrieval_grants: dict[str, RealtimeMemoryRetrievalGrant] = {}
+_memory_retrieval_grants_lock = threading.Lock()
 
 
 def build_sophia_realtime_context(
@@ -114,6 +154,109 @@ def build_sophia_realtime_context(
         memories=memories,
         diagnostics=diagnostics,
     )
+
+
+def retrieve_sophia_realtime_memories(
+    *,
+    user_id: str,
+    request: RealtimeMemoryRetrieveRequest | None = None,
+) -> dict[str, Any]:
+    """Execute the dynamic realtime memory lookup from backend-owned Mem0 access."""
+    safe_user_id = validate_user_id(user_id)
+    request = request or RealtimeMemoryRetrieveRequest()
+    limit = _coerce_dynamic_memory_limit(request.limit)
+    context_mode = _normalize_context_mode(request.context_mode)
+    ritual = _clean_optional_text(request.ritual)
+
+    def search_func(**kwargs: Any) -> dict[str, Any]:
+        search_result = search_memories_with_diagnostics(
+            user_id=safe_user_id,
+            query=str(kwargs.get("query") or ""),
+            categories=_memory_categories(context_mode=context_mode, ritual=ritual),
+            context_mode=context_mode,
+            limit=limit,
+            log_content_previews=False,
+            raise_on_error=True,
+        )
+        raw_memories = search_result.get("memories", []) if isinstance(search_result, Mapping) else []
+        if not isinstance(raw_memories, list):
+            raw_memories = []
+        overlaid_memories = _apply_review_metadata_overlays_readonly(safe_user_id, raw_memories)
+        return {
+            **dict(search_result),
+            "memories": [
+                memory
+                for memory in overlaid_memories
+                if _memory_visible_for_realtime(memory)
+            ],
+        }
+
+    result = retrieve_memories_for_realtime(
+        user_id=safe_user_id,
+        query=request.query,
+        limit=limit,
+        context_mode=context_mode,
+        categories=_memory_categories(context_mode=context_mode, ritual=ritual),
+        search_func=search_func,
+        provider_available_func=memory_provider_status,
+    )
+    result["trusted_user_id_source"] = "authenticated_realtime_session"
+    result["dynamic_retrieval_source"] = "gateway"
+    result["raw_memory_text_bounded"] = True
+
+    diagnostics = result.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        diagnostics.update(
+            {
+                "schema": REALTIME_MEMORY_RETRIEVE_DIAGNOSTIC_SCHEMA,
+                "context_source": "gateway_dynamic_retrieve",
+                "context_mode": context_mode,
+                "ritual": ritual,
+                "trusted_user_id_source": "authenticated_realtime_session",
+                "dynamic_retrieval_source": "gateway",
+                "raw_memory_text_excluded": True,
+                "memory_limit": limit,
+            }
+        )
+    return result
+
+
+def create_realtime_memory_retrieval_grant(
+    *,
+    user_id: str,
+    session_id: str,
+    ttl_seconds: int = DEFAULT_REALTIME_MEMORY_GRANT_TTL_SECONDS,
+) -> RealtimeMemoryRetrievalGrant:
+    safe_user_id = validate_user_id(user_id)
+    safe_session_id = _safe_session_id(session_id)
+    token = secrets.token_urlsafe(32)
+    expires_at = time.time() + max(60, int(ttl_seconds))
+    grant = RealtimeMemoryRetrievalGrant(
+        token=token,
+        user_id=safe_user_id,
+        session_id=safe_session_id,
+        expires_at=expires_at,
+    )
+    with _memory_retrieval_grants_lock:
+        _purge_expired_memory_retrieval_grants_locked()
+        _memory_retrieval_grants[token] = grant
+    return grant
+
+
+def retrieve_sophia_realtime_memories_for_grant(
+    *,
+    token: str,
+    request: RealtimeMemoryRetrieveRequest | None = None,
+) -> dict[str, Any]:
+    grant = _resolve_realtime_memory_retrieval_grant(token)
+    if grant is None:
+        raise PermissionError("invalid_or_expired_realtime_memory_grant")
+    result = retrieve_sophia_realtime_memories(user_id=grant.user_id, request=request)
+    result["session_id"] = grant.session_id
+    diagnostics = result.get("diagnostics")
+    if isinstance(diagnostics, dict):
+        diagnostics["session_id_present"] = bool(grant.session_id)
+    return result
 
 
 def build_degraded_realtime_context_response(
@@ -253,6 +396,14 @@ def _normalize_memory(memory: dict) -> RealtimeContextMemory | None:
     )
 
 
+def _memory_visible_for_realtime(memory: object) -> bool:
+    if not isinstance(memory, Mapping):
+        return False
+    metadata = memory.get("metadata") if isinstance(memory.get("metadata"), Mapping) else {}
+    status = _clean_optional_text(metadata.get("status")) if isinstance(metadata, Mapping) else None
+    return not status or status.lower() not in {"discarded", "rejected"}
+
+
 def _primary_category(memory: Mapping[str, Any]) -> str | None:
     categories = memory.get("categories")
     if isinstance(categories, list):
@@ -319,6 +470,33 @@ def _coerce_memory_limit(value: int | None) -> int:
     if not isinstance(value, int):
         return DEFAULT_REALTIME_MEMORY_LIMIT
     return min(max(value, 1), MAX_REALTIME_MEMORY_LIMIT)
+
+
+def _coerce_dynamic_memory_limit(value: int | None) -> int:
+    if not isinstance(value, int):
+        return MAX_REALTIME_DYNAMIC_MEMORY_LIMIT
+    return min(max(value, 1), MAX_REALTIME_DYNAMIC_MEMORY_LIMIT)
+
+
+def _resolve_realtime_memory_retrieval_grant(token: str) -> RealtimeMemoryRetrievalGrant | None:
+    cleaned = _clean_optional_text(token)
+    if cleaned is None:
+        return None
+    with _memory_retrieval_grants_lock:
+        _purge_expired_memory_retrieval_grants_locked()
+        return _memory_retrieval_grants.get(cleaned)
+
+
+def _purge_expired_memory_retrieval_grants_locked() -> None:
+    now = time.time()
+    expired = [token for token, grant in _memory_retrieval_grants.items() if grant.expires_at <= now]
+    for token in expired:
+        _memory_retrieval_grants.pop(token, None)
+
+
+def _safe_session_id(value: str) -> str:
+    cleaned = _clean_optional_text(value) or "unknown-session"
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", cleaned)[:160] or "unknown-session"
 
 
 def _extract_preferred_name(text: str | None) -> str | None:

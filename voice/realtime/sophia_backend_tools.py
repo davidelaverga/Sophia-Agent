@@ -125,17 +125,47 @@ def execute_realtime_retrieve_memories(
 ) -> dict[str, Any]:
     """Execute the query-only realtime memory tool with trusted user context."""
     contract = _retrieve_memories_contract_module()
-    try:
-        validated_args = contract.validate_realtime_retrieve_memories_args(args)
-        query = validated_args["query"]
-    except Exception:
-        query = args.get("query", "") if isinstance(args, Mapping) else ""
+    query = _realtime_memory_query_from_args(args)
 
     result = contract.retrieve_memories_for_realtime(
         user_id=user_id,
         query=query,
         context_mode=context_mode,
     )
+    return decorate_realtime_retrieve_memories_result(result, args=args)
+
+
+def execute_realtime_retrieve_memories_unavailable(
+    args: Mapping[str, Any],
+    *,
+    user_id: str,
+    context_mode: str | None = None,
+    provider_reason: str = "gateway_retrieval_not_configured",
+) -> dict[str, Any]:
+    """Return the standard graceful unavailable shape without touching Mem0."""
+    contract = _retrieve_memories_contract_module()
+    query = _realtime_memory_query_from_args(args)
+    result = contract.retrieve_memories_for_realtime(
+        user_id=user_id,
+        query=query,
+        context_mode=context_mode,
+        provider_available_func=lambda: {
+            "available": False,
+            "provider_status": "unavailable",
+            "provider_reason": provider_reason,
+            "provider_transport": "gateway",
+        },
+        search_func=lambda **_kwargs: [],
+    )
+    return decorate_realtime_retrieve_memories_result(result, args=args)
+
+
+def decorate_realtime_retrieve_memories_result(
+    result: dict[str, Any],
+    *,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add voice-runtime trust/ignored-argument diagnostics to a backend result."""
     ignored_arg_names = [
         name
         for name in ("user_id", "categories", "category", "filters", "memory_provider")
@@ -150,6 +180,19 @@ def execute_realtime_retrieve_memories(
         diagnostics["ignored_model_arg_names"] = sorted(ignored_arg_names)
         diagnostics["raw_memory_text_excluded"] = True
     return result
+
+
+def realtime_memory_query_from_args(args: Mapping[str, Any]) -> str:
+    return _realtime_memory_query_from_args(args)
+
+
+def _realtime_memory_query_from_args(args: Mapping[str, Any]) -> str:
+    contract = _retrieve_memories_contract_module()
+    try:
+        validated_args = contract.validate_realtime_retrieve_memories_args(args)
+        return validated_args["query"]
+    except Exception:
+        return args.get("query", "") if isinstance(args, Mapping) else ""
 
 
 def redacted_retrieve_memories_diagnostic(response: Mapping[str, Any]) -> dict[str, Any]:

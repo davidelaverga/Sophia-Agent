@@ -186,9 +186,26 @@ The follow-up fix implements Option C with a backend-owned realtime context path
 
 Remaining limitations:
 
-- The setup context is still session-start-only for Gemini Live; deeper explicit recall remains the job of the existing `retrieve_memories(query)` tool.
+- The setup context is session-start-only for Gemini Live; deeper explicit recall remains the job of the existing `retrieve_memories(query)` tool.
 - Direct dogfood/session-manager use without a gateway-provided payload intentionally degrades to empty setup context.
 - The endpoint and helper are read-only. Mem0 writes, recap, handoff updates, and identity updates remain offline/backend responsibilities.
+
+## Dynamic Retrieve Memories Hotfix Follow-up
+
+The production follow-up keeps setup context and dynamic retrieval distinct:
+
+- Setup context is assembled by the gateway before `POST /production/realtime/gemini/browser-sessions` and passed to `sophia-voice` as `realtime_context`.
+- Dynamic Gemini Live `retrieve_memories(query)` now uses a gateway-owned callback when that setup payload includes `dynamic_memory_retrieval`.
+- The model still sees only `query`; `user_id`, categories, filters, and provider details remain trusted runtime/backend inputs.
+- The gateway callback is protected by a short-lived session grant minted during authenticated voice connect. The token is not rendered into the Gemini prompt or public memory diagnostics.
+- `sophia-voice` no longer needs Mem0 credentials for production dynamic retrieval. If the callback is missing, rejected, unreachable, or invalid, the tool returns a bounded `unavailable` response with safe diagnostics instead of throwing.
+
+Operational diagnostics to distinguish:
+
+- Setup context available: `memory_context.mem0_status=available`, `memory_context.memory_count>0`, and `dynamic_retrieve_configured=true` in gateway setup diagnostics.
+- Dynamic retrieval success: `retrieve_memories.status=success`, `provider_status=available`, `dynamic_retrieval_source=gateway`, and `dynamic_retrieval_transport=gateway_http`.
+- Dynamic retrieval no results: `status=no_results` with `provider_status=available`.
+- Dynamic retrieval unavailable: `status=unavailable` with `provider_reason` such as `gateway_retrieval_not_configured`, `gateway_retrieval_rejected`, or `missing_api_key`.
 
 ## Files Implicated
 

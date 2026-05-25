@@ -14,10 +14,13 @@ from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.realtime.sophia_backend_tools import (
     SophiaBackendToolConfigurationError,
     builder_lifecycle_contract,
+    decorate_realtime_retrieve_memories_result,
     execute_existing_emit_artifact,
     execute_realtime_retrieve_memories,
+    execute_realtime_retrieve_memories_unavailable,
     gemini_sophia_function_declarations,
     redacted_retrieve_memories_diagnostic,
+    realtime_memory_query_from_args,
     validate_builder_lifecycle_tool_args,
 )
 
@@ -42,6 +45,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
 )
 
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
+DEFAULT_REALTIME_MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 8.0
 _EXPLICIT_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}\"'"
 
@@ -470,11 +474,108 @@ class GeminiBuilderLifecycleHttpBackend:
         return dict(payload)
 
 
+class GeminiRealtimeMemoryHttpBackend:
+    """Call the gateway-owned dynamic realtime memory retrieval endpoint."""
+
+    def __init__(self, *, timeout_seconds: float = DEFAULT_REALTIME_MEMORY_RETRIEVAL_TIMEOUT_SECONDS) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    async def execute(
+        self,
+        args: Mapping[str, Any],
+        *,
+        user_id: str,
+        session_id: str,
+        context_mode: str | None,
+        config: Mapping[str, Any] | None,
+    ) -> dict[str, Any]:
+        endpoint_url = _string_value(config.get("endpoint_url")) if isinstance(config, Mapping) else None
+        token = _string_value(config.get("token")) if isinstance(config, Mapping) else None
+        token_header = (
+            _string_value(config.get("token_header"))
+            if isinstance(config, Mapping)
+            else None
+        ) or "X-Sophia-Realtime-Memory-Token"
+        if not endpoint_url or not token:
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason="gateway_retrieval_not_configured",
+            )
+
+        query = realtime_memory_query_from_args(args)
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                response = await client.post(
+                    endpoint_url,
+                    json={
+                        "query": query,
+                        "context_mode": context_mode,
+                    },
+                    headers={token_header: token},
+                )
+        except httpx.RequestError:
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason="gateway_retrieval_request_failed",
+            )
+
+        if response.status_code == 401:
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason="gateway_retrieval_rejected",
+            )
+        if response.status_code >= 400:
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason=f"gateway_retrieval_http_{response.status_code}",
+            )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason="gateway_retrieval_invalid_json",
+            )
+        if not isinstance(payload, Mapping):
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason="gateway_retrieval_non_object",
+            )
+
+        result = decorate_realtime_retrieve_memories_result(dict(payload), args=args)
+        result["dynamic_retrieval_transport"] = "gateway_http"
+        result["session_id"] = session_id
+        diagnostics = result.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            diagnostics["dynamic_retrieval_transport"] = "gateway_http"
+            diagnostics["raw_memory_text_excluded"] = True
+        return result
+
+
 class GeminiDogfoodToolExecutor:
     """Backend-owned Gemini Live execution for approved existing Sophia tools."""
 
-    def __init__(self, *, builder_lifecycle_backend: GeminiBuilderLifecycleHttpBackend | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        builder_lifecycle_backend: GeminiBuilderLifecycleHttpBackend | None = None,
+        memory_backend: GeminiRealtimeMemoryHttpBackend | None = None,
+    ) -> None:
         self._builder_lifecycle_backend = builder_lifecycle_backend or GeminiBuilderLifecycleHttpBackend()
+        self._memory_backend = memory_backend or GeminiRealtimeMemoryHttpBackend()
 
     async def execute(
         self,
@@ -485,6 +586,8 @@ class GeminiDogfoodToolExecutor:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: Mapping[str, dict[str, Any]] | None = None,
+        context_mode: str | None = None,
+        memory_retrieval_config: Mapping[str, Any] | None = None,
     ) -> GeminiDogfoodToolExecution:
         if call.name not in GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES:
             allowed = ", ".join(sorted(GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES))
@@ -521,7 +624,20 @@ class GeminiDogfoodToolExecutor:
             )
 
         if call.name == GEMINI_RETRIEVE_MEMORIES_TOOL_NAME:
-            response = execute_realtime_retrieve_memories(call.args, user_id=user_id)
+            if memory_retrieval_config:
+                response = await self._memory_backend.execute(
+                    call.args,
+                    user_id=user_id,
+                    session_id=session_id,
+                    context_mode=context_mode,
+                    config=memory_retrieval_config,
+                )
+            else:
+                response = execute_realtime_retrieve_memories(
+                    call.args,
+                    user_id=user_id,
+                    context_mode=context_mode,
+                )
             ignored_arg_names = sorted(
                 {
                     *[str(name) for name in response.get("ignored_model_arg_names") or []],

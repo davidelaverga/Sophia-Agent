@@ -458,6 +458,8 @@ class GeminiBrowserDogfoodSessionManager:
         self._public_artifact_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._async_tasks_by_session: dict[str, dict[str, dict[str, Any]]] = {}
         self._diagnostics_by_session: dict[str, GeminiReliabilityDiagnostics] = {}
+        self._context_mode_by_session: dict[str, str | None] = {}
+        self._memory_retrieval_config_by_session: dict[str, dict[str, Any]] = {}
         self._source_order_locks_by_session: dict[str, asyncio.Lock] = {}
         self._last_applied_source_sequence_by_session: dict[str, int] = {}
         self._source_order_buffers_by_session: dict[
@@ -473,13 +475,16 @@ class GeminiBrowserDogfoodSessionManager:
         session_id: str | None = None,
         instructions: str | None = None,
         memory_context_diagnostics: Mapping[str, Any] | None = None,
+        context_mode: str | None = None,
+        memory_retrieval_config: Mapping[str, Any] | None = None,
     ) -> GeminiBrowserDogfoodSession:
         gate = validate_gemini_browser_dogfood_settings(settings)
+        resolved_context_mode = context_mode or str(getattr(settings, "context_mode", "life"))
         if instructions is None:
             instructions, memory_context = build_gemini_live_realtime_instructions_with_memory_context(
                 user_id=user_id,
                 platform=str(getattr(settings, "platform", "voice")),
-                context_mode=str(getattr(settings, "context_mode", "life")),
+                context_mode=resolved_context_mode,
                 ritual=getattr(settings, "ritual", None),
             )
             memory_context_diagnostics = memory_context.diagnostics
@@ -505,6 +510,9 @@ class GeminiBrowserDogfoodSessionManager:
             memory_context=dict(memory_context_diagnostics or {}),
         )
         self._diagnostics_by_session[dogfood_session.session_id] = diagnostics
+        self._context_mode_by_session[dogfood_session.session_id] = resolved_context_mode
+        if isinstance(memory_retrieval_config, Mapping):
+            self._memory_retrieval_config_by_session[dogfood_session.session_id] = dict(memory_retrieval_config)
         dogfood_session.add_public_payload_observer(diagnostics.record_public_payload)
         mapping_observer = getattr(dogfood_session.bundle.provider_session, "set_mapping_observer", None)
         if callable(mapping_observer):
@@ -821,6 +829,10 @@ class GeminiBrowserDogfoodSessionManager:
                     runtime_mode=dogfood_session.runtime_mode,
                     provider=dogfood_session.provider_name,
                     async_tasks=async_tasks,
+                    context_mode=self._context_mode_by_session.get(dogfood_session.session_id),
+                    memory_retrieval_config=self._memory_retrieval_config_by_session.get(
+                        dogfood_session.session_id
+                    ),
                 )
             except GeminiDogfoodToolError as exc:
                 raise GeminiBrowserRelayError(str(exc)) from exc
@@ -900,6 +912,8 @@ class GeminiBrowserDogfoodSessionManager:
         self._public_artifact_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._async_tasks_by_session.pop(dogfood_session_id, None)
         self._diagnostics_by_session.pop(dogfood_session_id, None)
+        self._context_mode_by_session.pop(dogfood_session_id, None)
+        self._memory_retrieval_config_by_session.pop(dogfood_session_id, None)
         self._source_order_locks_by_session.pop(dogfood_session_id, None)
         self._last_applied_source_sequence_by_session.pop(dogfood_session_id, None)
         self._source_order_buffers_by_session.pop(dogfood_session_id, None)

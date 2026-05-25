@@ -261,6 +261,7 @@ class BlockingGeminiToolExecutor:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: dict[str, dict[str, Any]],
+        **_kwargs: Any,
     ) -> gemini_tool_loop.GeminiDogfoodToolExecution:
         self.started.set()
         await self.release.wait()
@@ -1047,6 +1048,135 @@ def test_execute_realtime_retrieve_memories_ignores_model_identity_args(
     assert set(result["ignored_model_arg_names"]) == {"categories", "filters", "memory_provider", "user_id"}
     assert result["trusted_user_id_source"] == "authenticated_session_context"
     assert result["diagnostics"]["raw_memory_text_excluded"] is True
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_uses_gateway_backend_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gemini_tool_loop,
+        "execute_realtime_retrieve_memories",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("voice-local memory path used")),
+    )
+    captured: dict[str, Any] = {}
+    raw_memory_text = "User prefers solo, tactical gaming."
+
+    class FakeMemoryBackend:
+        async def execute(self, args: Mapping[str, Any], **kwargs: Any) -> dict[str, Any]:
+            captured["args"] = dict(args)
+            captured.update(kwargs)
+            return {
+                "ok": True,
+                "status": "success",
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+                "query": str(args["query"]),
+                "count": 1,
+                "memories": [
+                    {
+                        "text": raw_memory_text,
+                        "category": "preference",
+                        "source": "long_term_memory",
+                        "rank": 1,
+                    }
+                ],
+                "trusted_user_id_source": "authenticated_realtime_session",
+                "dynamic_retrieval_source": "gateway",
+                "diagnostics": {
+                    "schema": "sophia_realtime_memory_retrieve_v1",
+                    "tool": "retrieve_memories",
+                    "status": "success",
+                    "count": 1,
+                    "provider_status": "available",
+                    "provider_reason": "sdk_client",
+                    "raw_query_excluded": True,
+                    "raw_memory_text_excluded": True,
+                    "result_categories": ["preference"],
+                    "result_text_lengths": [len(raw_memory_text)],
+                },
+            }
+
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+        tool_executor=gemini_tool_loop.GeminiDogfoodToolExecutor(
+            memory_backend=FakeMemoryBackend(),  # type: ignore[arg-type]
+        ),
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="trusted-user-1",
+        session_id="browser-gemini-gateway-memory-tool",
+        context_mode="gaming",
+        memory_retrieval_config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "redacted-test-token",
+        },
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "memory-call-gateway",
+                        "name": "retrieve_memories",
+                        "args": {
+                            "query": "gaming preferences",
+                            "user_id": "model-supplied-user",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    assert captured["user_id"] == "trusted-user-1"
+    assert captured["session_id"] == "browser-gemini-gateway-memory-tool"
+    assert captured["context_mode"] == "gaming"
+    assert captured["config"]["endpoint_url"].endswith("/internal/sophia-realtime/memories/retrieve")
+    assert captured["args"]["user_id"] == "model-supplied-user"
+    function_response = response["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]
+    assert function_response["response"]["status"] == "success"
+    assert function_response["response"]["memories"][0]["text"] == raw_memory_text
+    assert function_response["response"]["tool_arg_user_id_ignored"] is True
+    assert response["tool_diagnostics"][0]["success"] is True
+    assert "execution_rejected" not in response["tool_diagnostics"][0]
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_backend_missing_token_degrades_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gemini_tool_loop,
+        "execute_realtime_retrieve_memories",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("voice-local memory path used")),
+    )
+    executor = gemini_tool_loop.GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        gemini_tool_loop.GeminiLiveFunctionCall(
+            call_id="memory-call-gateway-unavailable",
+            name="retrieve_memories",
+            args={"query": "what do you remember about me"},
+        ),
+        session_id="session-1",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        context_mode="life",
+        memory_retrieval_config={"endpoint_url": "https://gateway.example/internal/retrieve"},
+    )
+
+    assert execution.success is True
+    assert execution.response["status"] == "unavailable"
+    assert execution.response["provider_reason"] == "gateway_retrieval_not_configured"
+    assert execution.response["diagnostics"]["trusted_user_id_source"] == "authenticated_session_context"
+    assert execution.response["diagnostics"]["raw_memory_text_excluded"] is True
 
 
 @pytest.mark.anyio
