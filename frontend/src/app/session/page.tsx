@@ -30,7 +30,6 @@ import {
   VoiceMetricsPanel,
   BuilderReadyPill,
   PresenceArtifactPanel,
-  ArtifactToggleIcon,
   WhisperIndicator,
   ReflectionOverlay,
   EmergenceOverlay,
@@ -459,6 +458,7 @@ function SessionPageContent() {
   const hasBuilderArtifactLibrary = builderArtifactLibrary.length > 0;
 
   const {
+    hasArtifactsContent,
     showArtifactsUi,
     isSophiaResponding,
     exitProtectionResponseMode,
@@ -1025,55 +1025,37 @@ function SessionPageContent() {
             />
           )}
 
-          {/* Artifact toggle pill — text mode: inline above composer */}
-          {focusMode === 'text' && !showArtifacts && showArtifactsUi && (
-            builderArtifact && !builderTask ? (
-              <div className="mb-2 flex justify-center">
-                <BuilderReadyPill
-                  title={builderArtifact.artifactTitle}
-                  onOpen={handleOpenArtifactsPanel}
-                  downloadHref={builderDownloadHref}
-                  onDownload={() => haptic('medium')}
-                  onDismiss={clearBuilderArtifact}
-                  itemCount={builderArtifactLibrary.length || undefined}
-                  isNew={hasNewArtifacts}
-                />
-              </div>
-            ) : (
-              <div className="flex justify-center mb-2">
-                <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                  onClick={handleOpenArtifactsPanel}
-                  isNew={hasNewArtifacts}
-                />
-              </div>
-            )
+          {/* Builder completion pill — text mode: inline above composer */}
+          {focusMode === 'text' && !showArtifacts && showArtifactsUi && builderArtifact && !builderTask && (
+            <div className="mb-2 flex justify-center">
+              <BuilderReadyPill
+                title={builderArtifact.artifactTitle}
+                onOpen={handleOpenArtifactsPanel}
+                downloadHref={builderDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={clearBuilderArtifact}
+                itemCount={builderArtifactLibrary.length || undefined}
+                isNew={hasNewArtifacts}
+              />
+            </div>
           )}
 
-          {/* Artifact toggle pill — voice mode: fixed above mode toggle */}
-          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && (
+          {/* Builder completion pill — voice mode: fixed above mode toggle */}
+          {focusMode !== 'text' && !showArtifacts && showArtifactsUi && !isVoiceCaptionVisible && !builderTask && builderArtifact && (
             <div
               className="fixed left-1/2 -translate-x-1/2 z-30 flex justify-center"
               style={{ bottom: voiceArtifactToggleBottom, opacity: voiceBuilderAccessoryOpacity, transition: 'opacity 0.6s ease' }}
             >
-              {builderArtifact && !builderTask ? (
-                <BuilderReadyPill
-                  title={builderArtifact.artifactTitle}
-                  onOpen={handleOpenArtifactsPanel}
-                  downloadHref={builderDownloadHref}
-                  onDownload={() => haptic('medium')}
-                  onDismiss={clearBuilderArtifact}
-                  itemCount={builderArtifactLibrary.length || undefined}
-                  isNew={hasNewArtifacts}
-                  compact={true}
-                />
-              ) : (
-                <ArtifactToggleIcon
-                  hasArtifacts={Boolean(builderArtifact || hasBuilderArtifactLibrary || artifacts?.takeaway || artifacts?.reflection_candidate?.prompt || artifacts?.memory_candidates?.length)}
-                  onClick={handleOpenArtifactsPanel}
-                  isNew={hasNewArtifacts}
-                />
-              )}
+              <BuilderReadyPill
+                title={builderArtifact.artifactTitle}
+                onOpen={handleOpenArtifactsPanel}
+                downloadHref={builderDownloadHref}
+                onDownload={() => haptic('medium')}
+                onDismiss={clearBuilderArtifact}
+                itemCount={builderArtifactLibrary.length || undefined}
+                isNew={hasNewArtifacts}
+                compact={true}
+              />
             </div>
           )}
 
@@ -1119,7 +1101,12 @@ function SessionPageContent() {
               className="mb-3 flex justify-center"
               style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
             >
-              <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+              <ModeToggle
+                opacity={chromeOpacity}
+                isBusy={isTyping}
+                showInsightIndicator={hasArtifactsContent || hasNewArtifacts}
+                hasNewInsight={hasNewArtifacts}
+              />
             </div>
           )}
           
@@ -1147,7 +1134,12 @@ function SessionPageContent() {
                       className="flex justify-center"
                       style={{ opacity: chromeOpacity, transition: 'opacity 0.6s ease' }}
                     >
-                      <ModeToggle opacity={chromeOpacity} isBusy={isTyping} />
+                      <ModeToggle
+                        opacity={chromeOpacity}
+                        isBusy={isTyping}
+                        showInsightIndicator={hasArtifactsContent || hasNewArtifacts}
+                        hasNewInsight={hasNewArtifacts}
+                      />
                     </div>
                   )
                 : undefined}
