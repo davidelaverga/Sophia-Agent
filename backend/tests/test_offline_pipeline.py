@@ -1606,3 +1606,82 @@ class TestCoerceTimestampUnix:
         from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
 
         assert _coerce_timestamp_unix(None) is None
+
+    def test_non_finite_float_inf_returns_none(self):
+        """Codex P1 R13: ``int(float('inf'))`` raises ``OverflowError`` —
+        and that exception used to propagate up through
+        ``_message_timestamp_unix`` and ``_build_session_metadata``,
+        aborting the entire ``run_offline_pipeline`` before any
+        per-step try/except could catch it. The defensive guard MUST
+        return ``None`` instead."""
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(float("inf")) is None
+        assert _coerce_timestamp_unix(float("-inf")) is None
+
+    def test_non_finite_float_nan_returns_none(self):
+        """``int(float('nan'))`` raises ``ValueError``. Same defensive
+        guard as inf — must return ``None``, not propagate."""
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(float("nan")) is None
+
+    def test_non_finite_string_inf_returns_none(self):
+        """The string-numeric branch also has to guard non-finite values:
+        ``float('inf')`` and ``float('nan')`` parse cleanly from strings
+        and would crash ``int()`` downstream."""
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix("inf") is None
+        assert _coerce_timestamp_unix("-inf") is None
+        assert _coerce_timestamp_unix("nan") is None
+        # Variants
+        assert _coerce_timestamp_unix("Infinity") is None
+        assert _coerce_timestamp_unix("NaN") is None
+
+    def test_bool_returns_none(self):
+        """``bool`` is a subclass of ``int`` in Python. ``True`` should
+        NOT be coerced to ``1`` unix seconds (year 1970 from a boolean
+        is clearly bogus data)."""
+        from deerflow.sophia.offline_pipeline import _coerce_timestamp_unix
+
+        assert _coerce_timestamp_unix(True) is None
+        assert _coerce_timestamp_unix(False) is None
+
+    def test_pipeline_survives_non_finite_message_timestamp(self, mock_steps):
+        """End-to-end regression for the Codex P1 R13 fix.
+
+        A message with ``timestamp=float('inf')`` in its metadata used to
+        crash ``_build_session_metadata`` → abort the pipeline before
+        step 1. After the fix, ``_message_timestamp_unix`` returns
+        ``None`` for that message, the build falls back to other valid
+        timestamps (or no anchor), and the pipeline runs to completion.
+        """
+        from deerflow.sophia.offline_pipeline import run_offline_pipeline
+
+        ts_now = 1779564975  # 2026-05-23
+        thread_state = {
+            "messages": [
+                {"role": "user", "content": "first", "timestamp": float("inf")},   # the bad apple
+                {"role": "assistant", "content": "ok", "timestamp": ts_now},
+                {"role": "user", "content": "second", "timestamp": float("nan")},  # another
+                {"role": "assistant", "content": "ok", "timestamp": ts_now + 30},
+            ],
+            "platform": "text",
+            "context_mode": "life",
+        }
+
+        result = run_offline_pipeline(
+            "u_p1_r13",
+            "sess_p1_r13_non_finite",
+            "t_p1_r13_non_finite",
+            thread_state,
+        )
+
+        # Pipeline completed — the non-finite timestamps did NOT abort
+        # before step 1.
+        assert result["status"] == "completed", (
+            f"Pipeline MUST survive non-finite message timestamps. Got: {result!r}"
+        )
+        # Extraction still ran on the good content.
+        assert mock_steps["extraction"].call_count >= 1

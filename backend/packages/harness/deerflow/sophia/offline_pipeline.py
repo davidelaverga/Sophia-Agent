@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import threading
 from datetime import UTC, datetime
@@ -796,14 +797,52 @@ def _message_metadata_containers(msg: Any) -> list[dict]:
 
 
 def _coerce_timestamp_unix(value: Any) -> int | None:
+    """Coerce a heterogeneous timestamp value to a unix-seconds int.
+
+    Accepts int / float (seconds, ms, µs, ns — auto-normalised via
+    ``_normalize_epoch_to_seconds``), numeric strings (same units), and
+    ISO-8601 strings. Returns ``None`` for anything unparseable, including
+    non-finite floats (``inf``, ``-inf``, ``nan``).
+
+    Codex P1 review on PR #130 R13: ``int(float('inf'))`` raises
+    ``OverflowError``, ``int(float('nan'))`` raises ``ValueError``, and
+    these used to propagate up through ``_message_timestamp_unix`` and
+    ``_build_session_metadata``, aborting the entire ``run_offline_pipeline``
+    BEFORE any per-step try/except could catch them. Since this function
+    consumes user-input-shaped data (message metadata, SessionStore records,
+    Mem0 payloads), it must defensively reject non-finite values rather
+    than let them crash the pipeline.
+    """
+    if isinstance(value, bool):
+        # ``bool`` is a subclass of ``int`` — exclude it explicitly so
+        # ``True``/``False`` don't get coerced to 1/0 unix seconds.
+        return None
     if isinstance(value, (int, float)):
-        return _normalize_epoch_to_seconds(int(value))
+        # Reject non-finite floats (inf, -inf, nan) before int() conversion.
+        # ``math.isfinite`` is False for those three; True for all real ints.
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        try:
+            return _normalize_epoch_to_seconds(int(value))
+        except (OverflowError, ValueError):
+            # Defense in depth — math.isfinite should already have caught
+            # everything that can crash int() on a numeric.
+            return None
     if not isinstance(value, str) or not value:
         return None
     try:
-        return _normalize_epoch_to_seconds(int(float(value)))
+        parsed_float = float(value)
     except ValueError:
-        pass
+        parsed_float = None
+    if parsed_float is not None:
+        # Same non-finite guard for string-numeric inputs — ``float("inf")``
+        # and ``float("nan")`` parse cleanly and would crash int() below.
+        if not math.isfinite(parsed_float):
+            return None
+        try:
+            return _normalize_epoch_to_seconds(int(parsed_float))
+        except (OverflowError, ValueError):
+            return None
     try:
         normalized = value.replace("Z", "+00:00")
         parsed = datetime.fromisoformat(normalized)
