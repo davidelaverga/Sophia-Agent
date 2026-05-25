@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { VoiceMetricsPanel } from '../../app/components/session/VoiceMetricsPanel';
 import type { SophiaCaptureBundle, SophiaCaptureSnapshot } from '../../app/lib/session-capture';
@@ -258,6 +258,10 @@ function buildVoiceState(runtimeTelemetry: VoiceRuntimeTelemetry): VoiceStatePro
 }
 
 describe('VoiceMetricsPanel', () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+  });
+
   it('labels the legacy runtime and keeps legacy latency cards visible', () => {
     render(
       <VoiceMetricsPanel
@@ -290,6 +294,53 @@ describe('VoiceMetricsPanel', () => {
     expect(screen.queryByText('Join latency')).not.toBeInTheDocument();
     expect(screen.queryByText('Raw backend done')).not.toBeInTheDocument();
     expect(screen.queryByText('Response pipeline')).not.toBeInTheDocument();
+  });
+
+  it('keeps floating telemetry hidden by default and opens it from the toggle', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded={false}
+        layout="floating"
+      />
+    );
+
+    expect(screen.queryByRole('heading', { name: /voice runtime telemetry/i })).not.toBeInTheDocument();
+
+    const toggle = screen.getByRole('button', { name: /telemetry/i });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('heading', { name: /voice runtime telemetry/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /copy json/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /export json/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /reset/i })).toBeInTheDocument();
+    expect(screen.getByText('Runtime: Gemini Live')).toBeInTheDocument();
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('heading', { name: /voice runtime telemetry/i })).not.toBeInTheDocument();
+  });
+
+  it('closes the floating telemetry drawer from the close control', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded={false}
+        layout="floating"
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /telemetry/i }));
+    expect(screen.getByRole('heading', { name: /voice runtime telemetry/i })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /close telemetry panel/i }));
+
+    expect(screen.queryByRole('heading', { name: /voice runtime telemetry/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /telemetry/i })).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('copies the clean scoped telemetry report by default', async () => {

@@ -16,8 +16,9 @@ import {
   Radio,
   RotateCcw,
   Sparkles,
+  X,
 } from "lucide-react"
-import { startTransition, useEffect, useMemo, useRef, useState } from "react"
+import { startTransition, useEffect, useId, useMemo, useRef, useState } from "react"
 
 import { registerSophiaCaptureBridge } from "../../lib/session-capture"
 import { cn } from "../../lib/utils"
@@ -61,26 +62,26 @@ type SummaryMetricCard = {
   emphasize?: boolean
 }
 
-const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v1"
+const FLOATING_PANEL_STORAGE_KEY = "sophia.voiceTelemetryPanel.layout.v2"
+const FLOATING_PANEL_MOBILE_BREAKPOINT = 768
 const FLOATING_PANEL_MIN_WIDTH = 320
 const FLOATING_PANEL_MAX_WIDTH = 720
 const FLOATING_PANEL_MIN_HEIGHT = 260
 const FLOATING_PANEL_MAX_HEIGHT = 760
 const FLOATING_PANEL_EDGE_PADDING = 12
 const FLOATING_PANEL_TOP_PADDING = 76
-const FLOATING_PANEL_HEADER_OFFSET = 164
 
 function getDefaultFloatingBounds(viewportWidth: number, viewportHeight: number): FloatingPanelBounds {
   const width = viewportWidth < 640
     ? Math.max(FLOATING_PANEL_MIN_WIDTH, viewportWidth - 24)
-    : Math.min(460, Math.max(360, Math.round(viewportWidth * 0.3)))
+    : Math.min(500, Math.max(390, Math.round(viewportWidth * 0.32)))
   const height = viewportHeight < 760
-    ? Math.max(FLOATING_PANEL_MIN_HEIGHT + 40, viewportHeight - 140)
-    : 560
+    ? Math.max(FLOATING_PANEL_MIN_HEIGHT + 56, Math.round(viewportHeight * 0.72))
+    : Math.min(720, Math.max(520, Math.round(viewportHeight * 0.76)))
 
   return clampFloatingBounds({
-    left: viewportWidth - width - 24,
-    top: viewportWidth < 640 ? FLOATING_PANEL_TOP_PADDING : 88,
+    left: viewportWidth - width - 20,
+    top: Math.max(FLOATING_PANEL_TOP_PADDING, Math.round(viewportHeight * 0.1)),
     width,
     height,
   }, viewportWidth, viewportHeight)
@@ -96,7 +97,7 @@ function clampFloatingBounds(
   const width = Math.min(Math.max(bounds.width, FLOATING_PANEL_MIN_WIDTH), maxWidth)
   const height = Math.min(Math.max(bounds.height, FLOATING_PANEL_MIN_HEIGHT), maxHeight)
   const maxLeft = Math.max(FLOATING_PANEL_EDGE_PADDING, viewportWidth - width - FLOATING_PANEL_EDGE_PADDING)
-  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - 120)
+  const maxTop = Math.max(FLOATING_PANEL_TOP_PADDING, viewportHeight - height - FLOATING_PANEL_EDGE_PADDING)
 
   return {
     left: Math.min(Math.max(bounds.left, FLOATING_PANEL_EDGE_PADDING), maxLeft),
@@ -142,8 +143,11 @@ export function VoiceMetricsPanel({
   defaultExpanded = true,
   layout = "inline",
 }: VoiceMetricsPanelProps) {
+  const panelId = useId()
+  const panelHeadingId = `${panelId}-heading`
   const showToast = useUiStore((state) => state.showToast)
   const [expanded, setExpanded] = useState(defaultExpanded)
+  const [isPanelOpen, setIsPanelOpen] = useState(layout !== "floating")
   const [floatingBounds, setFloatingBounds] = useState<FloatingPanelBounds>({
     left: 24,
     top: 88,
@@ -151,6 +155,7 @@ export function VoiceMetricsPanel({
     height: 560,
   })
   const [hasHydratedFloatingState, setHasHydratedFloatingState] = useState(layout !== "floating")
+  const [isCompactViewport, setIsCompactViewport] = useState(false)
   const [isDragging, setIsDragging] = useState(false)
   const [isResizing, setIsResizing] = useState(false)
   const dragRef = useRef<PointerInteraction | null>(null)
@@ -355,6 +360,25 @@ export function VoiceMetricsPanel({
 
   const displayedSummaryCards = layout === "floating" && !expanded ? compactSummaryCards : summaryCards
 
+  const closeFloatingPanel = () => {
+    dragRef.current = null
+    resizeRef.current = null
+    setIsDragging(false)
+    setIsResizing(false)
+    setIsPanelOpen(false)
+  }
+
+  const toggleFloatingPanel = () => {
+    if (layout !== "floating") return
+
+    if (isPanelOpen) {
+      closeFloatingPanel()
+      return
+    }
+
+    setIsPanelOpen(true)
+  }
+
   useEffect(() => {
     if (layout !== "floating" || typeof window === "undefined") return
 
@@ -367,6 +391,21 @@ export function VoiceMetricsPanel({
     setExpanded(persisted?.expanded ?? defaultExpanded)
     setHasHydratedFloatingState(true)
   }, [defaultExpanded, layout])
+
+  useEffect(() => {
+    if (layout !== "floating" || typeof window === "undefined") return
+
+    const mediaQuery = window.matchMedia(`(max-width: ${FLOATING_PANEL_MOBILE_BREAKPOINT - 1}px)`)
+    const syncViewport = (matches: boolean) => {
+      setIsCompactViewport(matches)
+    }
+
+    syncViewport(mediaQuery.matches)
+    const handleChange = (event: MediaQueryListEvent) => syncViewport(event.matches)
+
+    mediaQuery.addEventListener("change", handleChange)
+    return () => mediaQuery.removeEventListener("change", handleChange)
+  }, [layout])
 
   useEffect(() => {
     if (layout !== "floating" || typeof window === "undefined" || !hasHydratedFloatingState) return
@@ -389,7 +428,7 @@ export function VoiceMetricsPanel({
   }, [layout])
 
   useEffect(() => {
-    if (layout !== "floating") return
+    if (layout !== "floating" || isCompactViewport || !isPanelOpen) return
 
     const handlePointerMove = (event: PointerEvent) => {
       const dragState = dragRef.current
@@ -439,7 +478,21 @@ export function VoiceMetricsPanel({
       window.removeEventListener("pointerup", stopInteraction)
       window.removeEventListener("pointercancel", stopInteraction)
     }
-  }, [layout])
+  }, [isCompactViewport, isPanelOpen, layout])
+
+  useEffect(() => {
+    if (layout !== "floating" || !isPanelOpen || typeof window === "undefined") return
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return
+
+      event.preventDefault()
+      closeFloatingPanel()
+    }
+
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [isPanelOpen, layout])
 
   const serializeSessionJson = () => {
     if (typeof window === "undefined") {
@@ -502,7 +555,7 @@ export function VoiceMetricsPanel({
   }
 
   const beginDrag = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (layout !== "floating") return
+    if (layout !== "floating" || isCompactViewport || !isPanelOpen) return
 
     event.preventDefault()
     dragRef.current = {
@@ -515,7 +568,7 @@ export function VoiceMetricsPanel({
   }
 
   const beginResize = (event: React.PointerEvent<HTMLButtonElement>) => {
-    if (layout !== "floating") return
+    if (layout !== "floating" || isCompactViewport || !isPanelOpen) return
 
     event.preventDefault()
     resizeRef.current = {
@@ -535,6 +588,7 @@ export function VoiceMetricsPanel({
   }
 
   const floatingContainerStyle = layout === "floating"
+    && !isCompactViewport
     ? {
         left: floatingBounds.left,
         top: floatingBounds.top,
@@ -542,8 +596,14 @@ export function VoiceMetricsPanel({
       }
     : undefined
 
-  const panelStyle = layout === "floating" && expanded
-    ? { height: floatingBounds.height }
+  const panelStyle = layout === "floating"
+    ? isCompactViewport
+      ? expanded
+        ? { maxHeight: "78vh" }
+        : undefined
+      : expanded
+        ? { height: floatingBounds.height }
+        : undefined
     : undefined
 
   const latestFalseEndsDisplay = Math.max((metrics.lastTurn.falseUserEndedCount ?? 1) - 1, 0)
@@ -556,24 +616,30 @@ export function VoiceMetricsPanel({
         : metrics.builder.phase === "running"
           ? "neutral"
           : "neutral"
+  const showFloatingControls = layout === "inline" || isPanelOpen
+  const floatingActionButtonClass = "inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.06] px-3 py-2 text-[11px] font-medium tracking-[0.02em] text-sophia-text2 transition-all duration-200 hover:border-sophia-purple/25 hover:bg-white/[0.1] hover:text-sophia-text motion-reduce:transition-none"
+  const floatingIconButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-sophia-text2 transition-all duration-200 hover:border-sophia-purple/25 hover:bg-white/[0.1] hover:text-sophia-text motion-reduce:transition-none"
 
   const panel = (
-    <section className={cn(
-      "relative overflow-hidden rounded-[28px] border text-sophia-text shadow-soft transition-colors duration-300",
+    <section
+      id={panelId}
+      aria-labelledby={panelHeadingId}
+      className={cn(
+      "relative overflow-hidden rounded-[30px] border text-sophia-text shadow-[0_26px_80px_rgba(10,7,25,0.52)] transition-colors duration-300 motion-reduce:transition-none",
       panelToneClass(panelTone),
-      layout === "floating" && "flex max-h-[calc(100vh-88px)] flex-col backdrop-blur-md",
+      layout === "floating" && "flex w-full flex-col backdrop-blur-2xl",
       isDragging && "select-none",
       isResizing && "select-none",
     )} style={panelStyle}>
       <div className="flex flex-col gap-4 border-b border-white/8 px-5 py-5 sm:flex-row sm:items-start sm:justify-between">
         <div className="flex min-w-0 flex-1 gap-3">
-          {layout === "floating" && (
+          {layout === "floating" && !isCompactViewport && (
             <button
               type="button"
               onPointerDown={beginDrag}
               title="Drag telemetry panel"
               className={cn(
-                "mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/5 text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text",
+                "mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.06] text-sophia-text2 transition-all duration-200 hover:border-sophia-purple/25 hover:bg-white/[0.1] hover:text-sophia-text motion-reduce:transition-none",
                 isDragging && "cursor-grabbing bg-white/10 text-sophia-text",
                 !isDragging && "cursor-grab",
               )}
@@ -586,7 +652,7 @@ export function VoiceMetricsPanel({
           <div className="min-w-0 space-y-3">
             <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.32em] text-sophia-text2/70">
               <Activity className="h-3.5 w-3.5" />
-              Voice runtime telemetry
+              <h2 id={panelHeadingId}>Voice Runtime Telemetry</h2>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <ToneBadge label={`Runtime: ${metrics.sessionTelemetry.runtimeLabel}`} tone={isGeminiRuntime ? "good" : "neutral"} />
@@ -636,14 +702,14 @@ export function VoiceMetricsPanel({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-start">
-          {(layout === "inline" || expanded) && (
+          {showFloatingControls && (
             <>
               <button
                 type="button"
                 onClick={() => {
                   void copySessionJson()
                 }}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+                className={floatingActionButtonClass}
               >
                 <Clipboard className="h-3.5 w-3.5" />
                 Copy JSON
@@ -651,7 +717,7 @@ export function VoiceMetricsPanel({
               <button
                 type="button"
                 onClick={exportSessionJson}
-                className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+                className={floatingActionButtonClass}
               >
                 <Download className="h-3.5 w-3.5" />
                 Export JSON
@@ -663,7 +729,7 @@ export function VoiceMetricsPanel({
               type="button"
               onClick={resetFloatingPanel}
               title="Reset panel position and size"
-              className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+              className={floatingActionButtonClass}
             >
               <RotateCcw className="h-3.5 w-3.5" />
               Reset
@@ -672,19 +738,28 @@ export function VoiceMetricsPanel({
           <button
             type="button"
             onClick={() => setExpanded((value) => !value)}
-            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-sophia-text2 transition-colors hover:bg-white/10 hover:text-sophia-text"
+            className={floatingActionButtonClass}
           >
             {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            {expanded ? "Collapse metrics" : layout === "floating" ? "Expand panel" : "Expand metrics"}
+            {expanded ? "Collapse metrics" : "Expand metrics"}
           </button>
+          {layout === "floating" && (
+            <button
+              type="button"
+              aria-label="Close telemetry panel"
+              onClick={closeFloatingPanel}
+              className={floatingIconButtonClass}
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
       </div>
 
       <div
         className={cn(
-          layout === "floating" && expanded && "min-h-0 overflow-y-auto pr-1",
+          layout === "floating" && expanded && "min-h-0 flex-1 overflow-y-auto pr-1",
         )}
-        style={layout === "floating" && expanded ? { maxHeight: floatingBounds.height - FLOATING_PANEL_HEADER_OFFSET } : undefined}
       >
         <div className={cn(
           "grid gap-3 px-5 py-5",
@@ -938,7 +1013,7 @@ export function VoiceMetricsPanel({
         ))}
       </div>
 
-      {layout === "floating" && expanded && (
+      {layout === "floating" && expanded && !isCompactViewport && (
         <button
           type="button"
           aria-label="Resize telemetry panel"
@@ -954,14 +1029,52 @@ export function VoiceMetricsPanel({
   )
 
   if (layout === "floating") {
-    if (!hasHydratedFloatingState) {
-      return null
-    }
-
     return (
-      <div className="pointer-events-auto fixed z-40" style={floatingContainerStyle}>
-        {panel}
-      </div>
+      <>
+        <button
+          type="button"
+          title={isPanelOpen ? "Hide telemetry panel" : "Show telemetry panel"}
+          aria-expanded={isPanelOpen}
+          aria-controls={panelId}
+          onClick={toggleFloatingPanel}
+          className={cn(
+            "fixed right-4 z-[60] inline-flex items-center gap-2 rounded-full border px-3.5 py-2.5 text-sm font-medium shadow-[0_18px_56px_rgba(12,7,30,0.45)] backdrop-blur-xl transition-all duration-200 motion-reduce:transition-none",
+            "border-white/10 bg-[linear-gradient(135deg,rgba(22,18,40,0.9),rgba(11,13,24,0.82))] text-sophia-text2",
+            "hover:-translate-y-0.5 hover:border-sophia-purple/30 hover:text-sophia-text motion-reduce:transform-none",
+            isPanelOpen && "border-sophia-purple/30 bg-[linear-gradient(135deg,rgba(35,26,58,0.94),rgba(13,15,28,0.9))] text-sophia-text",
+          )}
+          style={{ top: "calc(env(safe-area-inset-top, 0px) + 1rem)" }}
+        >
+          <span className="relative flex h-8 w-8 items-center justify-center rounded-full bg-white/[0.08]">
+            <Activity className="h-4 w-4" />
+            <span className={toggleIndicatorClass(panelTone)} />
+          </span>
+          <span>Telemetry</span>
+          {isPanelOpen ? <ChevronUp className="h-4 w-4 text-sophia-text2/80" /> : <ChevronDown className="h-4 w-4 text-sophia-text2/80" />}
+        </button>
+
+        {isPanelOpen && isCompactViewport && (
+          <div
+            aria-hidden="true"
+            className="fixed inset-0 z-[50] bg-[radial-gradient(circle_at_top,rgba(124,58,237,0.14),transparent_55%),rgba(7,8,14,0.46)] backdrop-blur-sm motion-reduce:backdrop-blur-none"
+            onClick={closeFloatingPanel}
+          />
+        )}
+
+        {isPanelOpen && (
+          <div
+            className={cn(
+              "pointer-events-none fixed z-[55] motion-safe:animate-fadeIn",
+              isCompactViewport && "inset-x-3 bottom-[calc(env(safe-area-inset-bottom,0px)+1rem)] sm:inset-x-4",
+            )}
+            style={floatingContainerStyle}
+          >
+            <div className={cn("pointer-events-auto", isCompactViewport && "w-full")}>
+              {panel}
+            </div>
+          </div>
+        )}
+      </>
     )
   }
 
@@ -1526,13 +1639,24 @@ function metricCardToneClass(
 function panelToneClass(tone: "good" | "warn" | "bad" | "neutral"): string {
   switch (tone) {
     case "good":
-      return "border-emerald-300/20 bg-[radial-gradient(circle_at_top_left,rgba(16,185,129,0.18),transparent_35%),linear-gradient(135deg,rgba(17,24,24,0.98),rgba(10,15,20,0.92))]"
+      return "border-[rgba(196,181,253,0.22)] bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_bottom_left,rgba(110,231,183,0.08),transparent_32%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
     case "warn":
-      return "border-amber-300/20 bg-[radial-gradient(circle_at_top_left,rgba(251,191,36,0.18),transparent_35%),linear-gradient(135deg,rgba(26,21,17,0.98),rgba(16,13,10,0.92))]"
+      return "border-[rgba(196,181,253,0.2)] bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_top_left,rgba(251,191,36,0.1),transparent_30%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
     case "bad":
-      return "border-rose-300/20 bg-[radial-gradient(circle_at_top_left,rgba(251,113,133,0.18),transparent_35%),linear-gradient(135deg,rgba(28,18,20,0.98),rgba(18,12,14,0.92))]"
+      return "border-[rgba(196,181,253,0.2)] bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_top_left,rgba(251,113,133,0.12),transparent_30%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
     default:
-      return "border-sophia-surface-border/70 bg-[radial-gradient(circle_at_top_left,rgba(151,118,255,0.14),transparent_35%),linear-gradient(135deg,rgba(21,24,34,0.98),rgba(13,15,24,0.92))]"
+      return "border-sophia-surface-border/70 bg-[radial-gradient(circle_at_top_right,rgba(196,181,253,0.16),transparent_38%),radial-gradient(circle_at_bottom_left,rgba(124,58,237,0.09),transparent_34%),linear-gradient(145deg,rgba(18,20,34,0.96),rgba(11,13,24,0.88))]"
+  }
+}
+
+function toggleIndicatorClass(tone: "good" | "warn" | "bad" | "neutral"): string {
+  switch (tone) {
+    case "warn":
+      return "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-[#100d1b] bg-amber-300 shadow-[0_0_14px_rgba(252,211,77,0.75)]"
+    case "bad":
+      return "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-[#100d1b] bg-rose-300 shadow-[0_0_14px_rgba(253,164,175,0.75)]"
+    default:
+      return "absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full border border-[#100d1b] bg-sophia-purple/85 shadow-[0_0_14px_rgba(167,139,250,0.7)]"
   }
 }
 
