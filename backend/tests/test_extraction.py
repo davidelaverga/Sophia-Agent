@@ -674,6 +674,43 @@ class TestReviewMetadataOverlayWrite:
     @patch("deerflow.sophia.extraction.upsert_review_metadata")
     @patch("deerflow.sophia.extraction.add_memories")
     @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_overlay_for_dedupe_only_event_result(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Mem0 v3 may resolve an ADD by linking older memories only.
+
+        In that shape there is no new memory id, but the provider normalizer
+        must preserve event_id so recap still gets a review overlay for this
+        session's extracted candidate.
+        """
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[1]])
+        )
+        mock_add_memories.return_value = [
+            {"event_id": "evt_dedupe_123", "linked_memory_ids": ["mem_existing"]}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_dedupe",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 1
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] is None
+        assert call_kwargs["sync_state"] == "pending"
+        assert call_kwargs["metadata"]["mem0_event_id"] == "evt_dedupe_123"
+        assert call_kwargs["metadata"]["status"] == "pending_review"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
     def test_extraction_overlay_failure_does_not_block_subsequent_writes(
         self, mock_anthropic_mod, mock_add_memories, mock_upsert
     ):

@@ -1031,6 +1031,38 @@ class TestWaitForPendingEvents:
             assert result[0]["id"] == "mem_1"
             assert result[0]["memory"] == "resolved"
 
+    def test_preserves_event_id_for_dedupe_only_results(self):
+        """Mem0 v3 can report success with only linked existing memory ids.
+
+        Recap extraction still needs the source event_id so it can write the
+        local review overlay and surface the session candidate even when Mem0
+        dedupes the write into older memories.
+        """
+        from deerflow.sophia.mem0_client import wait_for_pending_events
+
+        mock_client = MagicMock(spec=["get_events"])
+        mock_client.get_events.return_value = {
+            "count": 1,
+            "results": [
+                {
+                    "id": "evt_1",
+                    "status": "SUCCEEDED",
+                    "results": [{"linked_memory_ids": ["mem_existing"]}],
+                }
+            ],
+        }
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            result, pending = wait_for_pending_events(
+                "user1", ["evt_1"], timeout_seconds=0.5, poll_interval=0.1
+            )
+
+        assert pending == set()
+        assert result == [
+            {"linked_memory_ids": ["mem_existing"], "event_id": "evt_1"}
+        ]
+
     def test_event_wrapper_with_metadata_is_not_returned_as_memory(self):
         """Events always have metadata; we must not return the wrapper as a memory."""
         from deerflow.sophia.mem0_client import wait_for_pending_events
