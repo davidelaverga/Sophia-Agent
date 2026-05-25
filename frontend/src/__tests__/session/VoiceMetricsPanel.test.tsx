@@ -257,9 +257,34 @@ function buildVoiceState(runtimeTelemetry: VoiceRuntimeTelemetry): VoiceStatePro
   };
 }
 
+function setViewport(width: number, height = 900) {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: width,
+  });
+  Object.defineProperty(window, 'innerHeight', {
+    configurable: true,
+    writable: true,
+    value: height,
+  });
+
+  window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+    matches: query === '(max-width: 767px)' ? width < 768 : false,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  })) as unknown as typeof window.matchMedia;
+}
+
 describe('VoiceMetricsPanel', () => {
   beforeEach(() => {
     window.localStorage.clear();
+    setViewport(1440, 960);
   });
 
   it('labels the legacy runtime and keeps legacy latency cards visible', () => {
@@ -296,7 +321,7 @@ describe('VoiceMetricsPanel', () => {
     expect(screen.queryByText('Response pipeline')).not.toBeInTheDocument();
   });
 
-  it('keeps floating telemetry hidden by default and opens it from the toggle', () => {
+  it('keeps floating telemetry hidden by default', () => {
     render(
       <VoiceMetricsPanel
         voiceState={buildVoiceState(geminiTelemetry)}
@@ -309,6 +334,33 @@ describe('VoiceMetricsPanel', () => {
 
     const toggle = screen.getByRole('button', { name: /telemetry/i });
     expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('positions the telemetry toggle away from the top-right session controls', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded={false}
+        layout="floating"
+      />
+    );
+
+    const toggle = screen.getByTestId('voice-metrics-toggle');
+    expect(toggle.className).toContain('bottom-[calc(env(safe-area-inset-bottom,0px)+7rem)]');
+    expect(toggle.className).toContain('md:top-24');
+    expect(toggle.className).toContain('md:right-6');
+  });
+
+  it('opens the floating telemetry drawer from the toggle and keeps controls visible', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="floating"
+      />
+    );
+
+    const toggle = screen.getByRole('button', { name: /telemetry/i });
 
     fireEvent.click(toggle);
 
@@ -318,18 +370,53 @@ describe('VoiceMetricsPanel', () => {
     expect(screen.getByRole('button', { name: /export json/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /reset/i })).toBeInTheDocument();
     expect(screen.getByText('Runtime: Gemini Live')).toBeInTheDocument();
+  });
 
-    fireEvent.keyDown(window, { key: 'Escape' });
+  it('uses a responsive desktop drawer shell when opened on wider layouts', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="floating"
+      />
+    );
 
-    expect(toggle).toHaveAttribute('aria-expanded', 'false');
-    expect(screen.queryByRole('heading', { name: /voice runtime telemetry/i })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /telemetry/i }));
+
+    const drawer = screen.getByTestId('voice-metrics-floating-container');
+    const panel = screen.getByTestId('voice-metrics-panel');
+
+    expect(drawer.className).toContain('md:right-4');
+    expect(drawer.className).toContain('md:top-[calc(env(safe-area-inset-top,0px)+6rem)]');
+    expect(panel.className).toContain('max-w-[calc(100vw-2rem)]');
+  });
+
+  it('switches to a bottom-sheet style drawer on smaller layouts', () => {
+    setViewport(390, 844);
+
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="floating"
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /telemetry/i }));
+
+    const drawer = screen.getByTestId('voice-metrics-floating-container');
+    const panel = screen.getByTestId('voice-metrics-panel');
+
+    expect(drawer.className).toContain('bottom-[calc(env(safe-area-inset-bottom,0px)+0.75rem)]');
+    expect(panel.className).toContain('w-[calc(100vw-1rem)]');
+    expect(screen.queryByTestId('voice-metrics-resize-handle')).not.toBeInTheDocument();
   });
 
   it('closes the floating telemetry drawer from the close control', () => {
     render(
       <VoiceMetricsPanel
         voiceState={buildVoiceState(geminiTelemetry)}
-        defaultExpanded={false}
+        defaultExpanded
         layout="floating"
       />
     );
@@ -341,6 +428,38 @@ describe('VoiceMetricsPanel', () => {
 
     expect(screen.queryByRole('heading', { name: /voice runtime telemetry/i })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /telemetry/i })).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('closes the floating telemetry drawer with Escape', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="floating"
+      />
+    );
+
+    const toggle = screen.getByRole('button', { name: /telemetry/i });
+
+    fireEvent.click(toggle);
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('heading', { name: /voice runtime telemetry/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the desktop resize handle when the telemetry drawer is open and expanded', () => {
+    render(
+      <VoiceMetricsPanel
+        voiceState={buildVoiceState(geminiTelemetry)}
+        defaultExpanded
+        layout="floating"
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /telemetry/i }));
+
+    expect(screen.getByTestId('voice-metrics-resize-handle')).toBeInTheDocument();
   });
 
   it('copies the clean scoped telemetry report by default', async () => {
