@@ -1925,7 +1925,7 @@ class TestSessionEnd:
         assert queued_state is not None
         assert queued_state["messages"][0]["content"] == "I needed to talk this through."
 
-    def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
+    def test_duplicate_end_session_reuses_authoritative_recap_and_queues_once(self, client, tmp_path):
         store = SessionStore(tmp_path)
         store.create(
             SessionRecord(
@@ -1948,6 +1948,9 @@ class TestSessionEnd:
                 {"role": "user", "content": "Let's close this cleanly."},
                 {"role": "assistant", "content": "Closed with care."},
             ],
+            "recap_artifacts": {
+                "takeaway": "Closed with care.",
+            },
         }
 
         with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
@@ -1966,10 +1969,113 @@ class TestSessionEnd:
 
         saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-dupe.json").read_text(encoding="utf-8"))
         assert saved["ended_at"] == "2026-04-05T10:00:00+00:00"
+        assert saved["status"] == "ready"
+        assert saved["recap_artifacts"]["takeaway"] == "Closed with care."
         record = store.get("test_user", "sess-dupe")
         assert record is not None
         assert record.status == "ended"
         assert record.ended_at == "2026-04-05T10:00:00+00:00"
+
+    def test_end_session_repairs_thread_id_when_proxy_falls_back_to_session_id(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-thin",
+                thread_id="thread-real",
+                user_id="test_user",
+                status="open",
+            )
+        )
+
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
+            resp = client.post(
+                "/api/sophia/test_user/end-session",
+                json={
+                    "session_id": "sess-thin",
+                    "thread_id": "sess-thin",
+                    "offer_debrief": False,
+                },
+            )
+
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "pipeline_queued"
+        mock_queue.assert_called_once()
+        assert mock_queue.call_args.args[2] == "thread-real"
+
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-thin.json").read_text(encoding="utf-8"))
+        assert saved["thread_id"] == "thread-real"
+        assert saved["status"] == "processing"
+
+    def test_duplicate_end_session_replaces_processing_recap_and_requeues(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-upgrade",
+                thread_id="thread-upgrade",
+                user_id="test_user",
+                status="open",
+            )
+        )
+        recap_dir = tmp_path / "test_user" / "recaps"
+        recap_dir.mkdir(parents=True, exist_ok=True)
+        (recap_dir / "sess-upgrade.json").write_text(
+            json.dumps(
+                {
+                    "session_id": "sess-upgrade",
+                    "thread_id": "sess-upgrade",
+                    "session_type": None,
+                    "context_mode": None,
+                    "started_at": None,
+                    "ended_at": "2026-04-05T10:00:00+00:00",
+                    "turn_count": 0,
+                    "status": "processing",
+                    "recap_artifacts": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        payload = {
+            "session_id": "sess-upgrade",
+            "thread_id": "thread-upgrade",
+            "started_at": "2026-04-05T09:52:00+00:00",
+            "ended_at": "2026-04-05T10:05:00+00:00",
+            "offer_debrief": False,
+            "session_type": "open",
+            "context_mode": "life",
+            "turn_count": 2,
+            "messages": [
+                {"role": "user", "content": "Let's close this cleanly."},
+                {"role": "assistant", "content": "Closed with care."},
+            ],
+            "recap_artifacts": {
+                "takeaway": "Closed with care.",
+            },
+        }
+
+        with patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue, \
+             patch("app.gateway.routers.sophia.USERS_DIR", tmp_path), \
+             patch("app.gateway.routers.sophia._session_store", store):
+            resp = client.post("/api/sophia/test_user/end-session", json=payload)
+
+        assert resp.status_code == 202
+        data = resp.json()
+        assert data["status"] == "pipeline_queued"
+        assert data["ended_at"] == "2026-04-05T10:05:00+00:00"
+        assert data["recap_artifacts"]["takeaway"] == "Closed with care."
+        mock_queue.assert_called_once()
+        assert mock_queue.call_args.args[2] == "thread-upgrade"
+        queued_state = mock_queue.call_args.args[3]
+        assert queued_state is not None
+        assert queued_state["messages"][0]["content"] == "Let's close this cleanly."
+
+        saved = json.loads((tmp_path / "test_user" / "recaps" / "sess-upgrade.json").read_text(encoding="utf-8"))
+        assert saved["thread_id"] == "thread-upgrade"
+        assert saved["ended_at"] == "2026-04-05T10:05:00+00:00"
+        assert saved["status"] == "ready"
+        assert saved["recap_artifacts"]["takeaway"] == "Closed with care."
 
     def test_missing_session_id_returns_422(self, client):
         resp = client.post(

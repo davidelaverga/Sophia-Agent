@@ -746,6 +746,32 @@ def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> i
     return max(0, int((end_dt - start_dt).total_seconds() // 60))
 
 
+def _resolve_end_session_thread_id(user_id: str, session_id: str, requested_thread_id: str | None) -> str:
+    normalized_thread_id = requested_thread_id.strip() if isinstance(requested_thread_id, str) else ""
+    if normalized_thread_id and normalized_thread_id != session_id:
+        return normalized_thread_id
+
+    _owner_user_id, record = _resolve_session_record_owner(user_id, session_id)
+    record_thread_id = getattr(record, "thread_id", None)
+    if isinstance(record_thread_id, str) and record_thread_id.strip():
+        return record_thread_id.strip()
+
+    return normalized_thread_id or session_id
+
+
+def _existing_recap_is_authoritative(recap_payload: dict) -> bool:
+    status = recap_payload.get("status")
+    normalized_status = status.strip().lower() if isinstance(status, str) else None
+    if normalized_status == "processing":
+        return False
+
+    recap_artifacts = recap_payload.get("recap_artifacts")
+    if isinstance(recap_artifacts, dict):
+        return True
+
+    return normalized_status in {"ready", "reviewed", "completed", "no_results", "error", "failed", "unavailable"}
+
+
 def _build_session_recap_payload(body: SessionEndRequest, ended_at: str) -> dict:
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
     turn_count = body.turn_count if body.turn_count is not None else len(body.messages)
@@ -2038,12 +2064,13 @@ async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
 async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
     _validate_user(user_id)
     ended_at = body.ended_at or datetime.now(UTC).isoformat()
+    effective_thread_id = _resolve_end_session_thread_id(user_id, body.session_id, body.thread_id)
 
     logger.info(
         "session.finalization end_session_request user_id=%s session_id=%s thread_id=%s message_count=%s has_recap_artifacts=%s",
         user_id,
         body.session_id,
-        body.thread_id,
+        effective_thread_id,
         len(body.messages or []),
         body.recap_artifacts is not None,
     )
@@ -2059,12 +2086,12 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         )
         existing_recap = None
 
-    if isinstance(existing_recap, dict):
+    if isinstance(existing_recap, dict) and _existing_recap_is_authoritative(existing_recap):
         existing_ended_at = existing_recap.get("ended_at") if isinstance(existing_recap.get("ended_at"), str) else ended_at
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
         try:
             from app.gateway.inactivity_watcher import unregister_thread
-            unregister_thread(body.thread_id)
+            unregister_thread(effective_thread_id)
         except ImportError:
             pass
 
@@ -2072,7 +2099,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             "session.finalization duplicate_suppressed user_id=%s session_id=%s thread_id=%s duplicateFinalizationSuppressed=%s recapPipelineQueued=%s",
             user_id,
             body.session_id,
-            body.thread_id,
+            effective_thread_id,
             True,
             False,
         )
@@ -2081,8 +2108,18 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             existing_recap,
             status="pipeline_queued",
         )
+    if isinstance(existing_recap, dict):
+        logger.info(
+            "session.finalization replacing_non_authoritative_recap user_id=%s session_id=%s thread_id=%s existing_status=%s has_recap_artifacts=%s",
+            user_id,
+            body.session_id,
+            effective_thread_id,
+            existing_recap.get("status"),
+            isinstance(existing_recap.get("recap_artifacts"), dict),
+        )
 
     recap_payload = _build_session_recap_payload(body, ended_at)
+    recap_payload["thread_id"] = effective_thread_id
     duration_minutes = _compute_duration_minutes(body.started_at, ended_at)
     turn_count = recap_payload.get("turn_count", 0)
     recap_artifacts = recap_payload.get("recap_artifacts")
@@ -2104,7 +2141,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
     # Remove from inactivity tracking — session explicitly ended
     try:
         from app.gateway.inactivity_watcher import unregister_thread
-        unregister_thread(body.thread_id)
+        unregister_thread(effective_thread_id)
     except ImportError:
         pass
 
@@ -2117,7 +2154,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         _queue_offline_pipeline(
             user_id,
             body.session_id,
-            body.thread_id,
+            effective_thread_id,
             _build_thread_state_from_end_request(body),
             force_reprocess=True,
         )
@@ -2125,7 +2162,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s recapPipelineQueued=%s",
             user_id,
             body.session_id,
-            body.thread_id,
+            effective_thread_id,
             True,
         )
         return SessionEndResponse(
