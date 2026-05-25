@@ -434,6 +434,30 @@ class TestAddMemories:
                 assert len(result) == 2
                 mock_wait.assert_called_once_with("user1", ["evt_v3_1", "evt_v3_2"])
 
+    def test_add_can_return_event_wrappers_without_waiting(self):
+        """Offline extraction can opt out of polling so recap overlays surface
+        immediately using the returned event_id tracking handle."""
+        from deerflow.sophia.mem0_client import add_memories_with_outcome
+
+        mock_client = MagicMock()
+        mock_client.add.return_value = [
+            {"event_id": "evt_no_wait", "memory": None},
+        ]
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=mock_client
+        ):
+            with patch("deerflow.sophia.mem0_client.wait_for_pending_events") as mock_wait:
+                result, outcome = add_memories_with_outcome(
+                    user_id="user1",
+                    messages=[{"role": "user", "content": "remember this"}],
+                    session_id="sess_123",
+                    wait_for_events=False,
+                )
+
+        assert outcome == "queued"
+        assert result == [{"event_id": "evt_no_wait", "memory": None}]
+        mock_wait.assert_not_called()
+
     def test_add_does_not_poll_plain_memory_ids_from_sync_add(self):
         """Synchronous add() responses return memory IDs under id, not event IDs."""
         from deerflow.sophia.mem0_client import add_memories

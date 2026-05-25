@@ -290,6 +290,7 @@ def extract_session_memories(
             session_id=session_id,
             metadata=mem0_metadata,
             timestamp=session_start_unix,
+            wait_for_events=False,
         )
 
         # --- Local review_metadata overlay write (recap pipeline fix, PR #130 §I.1) ---
