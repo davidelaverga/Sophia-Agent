@@ -187,7 +187,169 @@ class TestRealtimeContext:
         assert data["memories"] == []
         assert data["diagnostics"]["identity_available"] is True
         assert data["diagnostics"]["handoff_available"] is True
+        assert data["diagnostics"]["identity_file_status"] == "present"
+        assert data["diagnostics"]["handoff_file_status"] == "present"
+        assert data["diagnostics"]["preferred_name_source"] == "identity_file"
+        assert data["diagnostics"]["preferred_name_conflict"] is False
         assert data["diagnostics"]["mem0_status"] == "missing_api_key"
+
+    def test_realtime_context_promotes_mem0_preferred_name_when_identity_missing(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+
+        def fake_search(**kwargs):  # noqa: ANN202
+            calls.append(dict(kwargs))
+            query = str(kwargs.get("query", ""))
+            if "what the user wants to be called" in query:
+                return {
+                    "memories": [
+                        {
+                            "id": "m-name",
+                            "content": "Preferred name: Mira. Explicit user statement.",
+                            "category": "fact",
+                            "score": 0.99,
+                        }
+                    ],
+                    "provider_status": "available",
+                    "provider_reason": "sdk_client",
+                }
+            return {
+                "memories": [
+                    {
+                        "id": "m-other",
+                        "content": "User prefers concise context.",
+                        "category": "preference",
+                        "score": 0.8,
+                    }
+                ],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            }
+
+        monkeypatch.setattr(context_module, "search_memories_with_diagnostics", fake_search)
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={"platform": "voice"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Mira"
+        assert data["diagnostics"]["identity_file_status"] == "missing"
+        assert data["diagnostics"]["handoff_file_status"] == "missing"
+        assert data["diagnostics"]["preferred_name_source"] == "mem0"
+        assert data["diagnostics"]["preferred_name_available"] is True
+        assert data["diagnostics"]["preferred_name_conflict"] is False
+        assert data["diagnostics"]["mem0_preferred_name_status"] == "available"
+        assert "Mira" not in json.dumps(data["diagnostics"])
+        assert calls[-1]["categories"] == ["fact", "preference"]
+        assert calls[-1]["log_content_previews"] is False
+
+    def test_realtime_context_prefers_mem0_correction_over_handoff_inference(self, client, tmp_path, monkeypatch):
+        from app.gateway import sophia_realtime_context as context_module
+
+        user_dir = tmp_path / "test_user" / "handoffs"
+        user_dir.mkdir(parents=True)
+        (user_dir / "latest.md").write_text(
+            "Session initiated with Daniel. Keep the opener grounded.",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "_apply_review_metadata_overlays_readonly",
+            lambda _user_id, memories: memories,
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **kwargs: {
+                "memories": [
+                    {
+                        "id": "m-name",
+                        "content": "Preferred name: Mira. Explicit user statement.",
+                        "category": "fact",
+                        "score": 0.99,
+                    }
+                ]
+                if "what the user wants to be called" in str(kwargs.get("query", ""))
+                else [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] == "Mira"
+        assert data["diagnostics"]["preferred_name_source"] == "mem0"
+        assert data["diagnostics"]["preferred_name_conflict"] is True
+        assert data["diagnostics"]["handoff_file_status"] == "present"
+        assert "Mira" not in json.dumps(data["diagnostics"])
+        assert "Daniel" not in json.dumps(data["diagnostics"])
+
+    def test_realtime_context_missing_identity_and_mem0_no_results_does_not_invent_name(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        from app.gateway import sophia_realtime_context as context_module
+
+        monkeypatch.setattr(context_module, "USERS_DIR", tmp_path)
+        monkeypatch.setattr(
+            context_module,
+            "memory_provider_status",
+            lambda: {
+                "available": True,
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+        monkeypatch.setattr(
+            context_module,
+            "search_memories_with_diagnostics",
+            lambda **_kwargs: {
+                "memories": [],
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+            },
+        )
+
+        resp = client.post("/api/sophia/test_user/realtime/context", json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["preferred_name"] is None
+        assert data["diagnostics"]["preferred_name_source"] == "unavailable"
+        assert data["diagnostics"]["preferred_name_available"] is False
+        assert data["diagnostics"]["identity_file_status"] == "missing"
+        assert data["diagnostics"]["mem0_preferred_name_status"] == "available"
 
     def test_returns_bounded_mem0_snippets_when_provider_available(self, client, tmp_path, monkeypatch):
         from app.gateway import sophia_realtime_context as context_module

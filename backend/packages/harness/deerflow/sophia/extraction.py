@@ -7,6 +7,7 @@ via add_memories() with full metadata and status="pending_review".
 
 import json
 import logging
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -58,6 +59,219 @@ def _strip_markdown_fences(text: str) -> str:
     return stripped.strip()
 
 
+def _extract_explicit_preferred_name_entries(messages: list[dict]) -> list[dict]:
+    """Create deterministic preferred-name candidates from explicit user statements."""
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "user":
+            continue
+        name = _extract_explicit_preferred_name_from_text(str(msg.get("content") or ""))
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(
+            {
+                "content": f"Preferred name: {name}. Explicit user statement.",
+                "category": "fact",
+                "importance": 0.95,
+                "confidence": 0.98,
+                "target_date": None,
+                "metadata": {
+                    "tags": ["preferred_name", "explicit_user_statement"],
+                    "preferred_name_source": "explicit_user_statement",
+                },
+            }
+        )
+    return entries
+
+
+def _extract_explicit_preferred_name_from_text(text: str) -> str | None:
+    if not text:
+        return None
+    patterns = [
+        r"(?i)\bmy\s+name\s+is\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+        r"(?i)\bcall\s+me\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+        r"(?i)\brefer\s+to\s+me\s+as\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+        r"(?i)\bi\s+go\s+by\s+([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        cleaned = _clean_explicit_preferred_name(match.group(1))
+        if cleaned:
+            return cleaned
+    return None
+
+
+def _clean_explicit_preferred_name(value: str) -> str | None:
+    name = value.strip().strip("-:.,;()[]{}\"'")
+    name = re.split(r"[.,;:!?]\s+", name, maxsplit=1)[0]
+    name = re.split(
+        r"\s+(?:no|not|please|from|instead|because|when|if|but|could|can|remember|going|for)\b",
+        name,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip()
+    if not name or len(name) > 60:
+        return None
+    if any(ch in name for ch in ("/", "\\", "\x00", "<", ">", "{", "}")):
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z'_-]*(?:\s+[A-Za-z][A-Za-z'_-]*){0,2}", name):
+        return None
+    lowered = name.lower()
+    stop_words = {
+        "user",
+        "unknown",
+        "anonymous",
+        "none",
+        "null",
+        "n/a",
+        "na",
+        "me",
+        "you",
+        "on",
+        "the",
+        "a",
+        "an",
+        "this",
+        "that",
+        "it",
+        "important",
+        "tomorrow",
+        "today",
+        "later",
+        "thing",
+        "one",
+        "someone",
+        "list",
+        "about",
+        "launch",
+    }
+    if lowered in stop_words or any(part in stop_words for part in lowered.split()):
+        return None
+    if name.islower():
+        return " ".join(part[:1].upper() + part[1:] for part in name.split())
+    return name
+
+
+def _merge_preferred_name_entries(extracted: list, deterministic_entries: list[dict]) -> list[dict]:
+    normalized = [entry for entry in extracted if isinstance(entry, dict)]
+    if not deterministic_entries:
+        return normalized
+
+    existing_names = {
+        name.casefold()
+        for entry in normalized
+        if (name := _preferred_name_from_memory_content(str(entry.get("content") or "")))
+    }
+    for entry in deterministic_entries:
+        name = _preferred_name_from_memory_content(str(entry.get("content") or ""))
+        if not name:
+            continue
+        key = name.casefold()
+        if key in existing_names:
+            continue
+        existing_names.add(key)
+        normalized.append(entry)
+    return normalized
+
+
+def _preferred_name_from_memory_content(text: str) -> str | None:
+    explicit = re.search(r"(?i)\bpreferred\s+name\s*:\s*([A-Z][A-Za-z'_-]{1,40}(?:\s+[A-Z][A-Za-z'_-]{1,40}){0,2})\b", text)
+    if explicit:
+        return _clean_explicit_preferred_name(explicit.group(1))
+    return _extract_explicit_preferred_name_from_text(text)
+
+
+def _write_extracted_memories(
+    *,
+    user_id: str,
+    session_id: str,
+    extracted: list,
+    metadata: dict,
+) -> list[dict]:
+    """Write vetted extraction candidates to Mem0 with standard review metadata."""
+    written_memories: list[dict] = []
+    platform = metadata.get("platform", "text")
+    context_mode = metadata.get("context_mode", "life")
+
+    for entry in extracted:
+        if not isinstance(entry, dict) or not entry.get("content"):
+            continue
+
+        importance_score = entry.get("importance", 0.5)
+        if importance_score >= 0.8:
+            importance_label = "structural"
+        elif importance_score >= 0.4:
+            importance_label = "potential"
+        else:
+            importance_label = "contextual"
+
+        mem0_metadata = {
+            "category": entry.get("category", "fact"),
+            "importance": importance_label,
+            "importance_score": importance_score,
+            "confidence": entry.get("confidence", 0.5),
+            "status": "pending_review",
+            "platform": platform,
+            "context_mode": context_mode,
+        }
+
+        entry_meta = entry.get("metadata", {})
+        if not isinstance(entry_meta, dict):
+            entry_meta = {}
+
+        # Include tone_estimate if present in the entry metadata
+        if entry_meta.get("tone_estimate") is not None:
+            mem0_metadata["tone_estimate"] = entry_meta["tone_estimate"]
+
+        # Include ritual_phase if present
+        if entry_meta.get("ritual_phase"):
+            mem0_metadata["ritual_phase"] = entry_meta["ritual_phase"]
+
+        # Include target_date if present
+        if entry.get("target_date"):
+            mem0_metadata["target_date"] = entry["target_date"]
+
+        # Include tags if present
+        if entry_meta.get("tags"):
+            mem0_metadata["tags"] = entry_meta["tags"]
+
+        # Include safe source marker for deterministic preferred-name candidates.
+        if entry_meta.get("preferred_name_source"):
+            mem0_metadata["preferred_name_source"] = entry_meta["preferred_name_source"]
+
+        result = add_memories(
+            user_id=user_id,
+            messages=[{"role": "user", "content": entry["content"]}],
+            session_id=session_id,
+            metadata=mem0_metadata,
+        )
+
+        written_memories.append({
+            "content": entry["content"],
+            "category": entry.get("category", "fact"),
+            "importance": importance_label,
+            "importance_score": importance_score,
+            "mem0_result": result,
+        })
+
+        logger.info(
+            "session.finalization extraction_memory_written user_id=%s session_id=%s category=%s importance=%s",
+            user_id,
+            session_id,
+            entry.get("category", "fact"),
+            importance_label,
+        )
+
+    return written_memories
+
+
 def extract_session_memories(
     user_id: str,
     session_id: str,
@@ -100,13 +314,21 @@ def extract_session_memories(
     if not transcript.strip():
         logger.info("No user/assistant content in session %s — skipping extraction", session_id)
         return []
+    deterministic_entries = _extract_explicit_preferred_name_entries(messages)
 
     # Load and fill the template
     try:
         template = _load_template()
     except FileNotFoundError:
         logger.error("Extraction template not found at %s", _EXTRACTION_TEMPLATE_PATH)
-        return []
+        if not deterministic_entries:
+            return []
+        return _write_extracted_memories(
+            user_id=user_id,
+            session_id=session_id,
+            extracted=deterministic_entries,
+            metadata=metadata,
+        )
 
     # Use manual replacement instead of str.format() because the template
     # contains literal JSON curly braces that would conflict with format().
@@ -136,7 +358,14 @@ def extract_session_memories(
         response_text = response.content[0].text
     except Exception:
         logger.error("Anthropic API call failed for session %s", session_id, exc_info=True)
-        return []
+        if not deterministic_entries:
+            return []
+        return _write_extracted_memories(
+            user_id=user_id,
+            session_id=session_id,
+            extracted=deterministic_entries,
+            metadata=metadata,
+        )
 
     # Parse JSON response
     try:
@@ -148,11 +377,17 @@ def extract_session_memories(
             session_id,
             response_text[:200] if response_text else "(empty)",
         )
-        return []
+        if not deterministic_entries:
+            return []
+        extracted = deterministic_entries
 
     if not isinstance(extracted, list):
         logger.error("Extraction response is not a list for session %s", session_id)
-        return []
+        if not deterministic_entries:
+            return []
+        extracted = deterministic_entries
+
+    extracted = _merge_preferred_name_entries(extracted, deterministic_entries)
 
     logger.info(
         "session.finalization extraction_candidates user_id=%s session_id=%s candidate_count=%s",
@@ -162,71 +397,12 @@ def extract_session_memories(
     )
 
     # Write each extracted memory to Mem0
-    written_memories: list[dict] = []
-    platform = metadata.get("platform", "text")
-    context_mode = metadata.get("context_mode", "life")
-
-    for entry in extracted:
-        if not isinstance(entry, dict) or not entry.get("content"):
-            continue
-
-        importance_score = entry.get("importance", 0.5)
-        if importance_score >= 0.8:
-            importance_label = "structural"
-        elif importance_score >= 0.4:
-            importance_label = "potential"
-        else:
-            importance_label = "contextual"
-
-        mem0_metadata = {
-            "category": entry.get("category", "fact"),
-            "importance": importance_label,
-            "importance_score": importance_score,
-            "confidence": entry.get("confidence", 0.5),
-            "status": "pending_review",
-            "platform": platform,
-            "context_mode": context_mode,
-        }
-
-        # Include tone_estimate if present in the entry metadata
-        entry_meta = entry.get("metadata", {})
-        if entry_meta.get("tone_estimate") is not None:
-            mem0_metadata["tone_estimate"] = entry_meta["tone_estimate"]
-
-        # Include ritual_phase if present
-        if entry_meta.get("ritual_phase"):
-            mem0_metadata["ritual_phase"] = entry_meta["ritual_phase"]
-
-        # Include target_date if present
-        if entry.get("target_date"):
-            mem0_metadata["target_date"] = entry["target_date"]
-
-        # Include tags if present
-        if entry_meta.get("tags"):
-            mem0_metadata["tags"] = entry_meta["tags"]
-
-        result = add_memories(
-            user_id=user_id,
-            messages=[{"role": "user", "content": entry["content"]}],
-            session_id=session_id,
-            metadata=mem0_metadata,
-        )
-
-        written_memories.append({
-            "content": entry["content"],
-            "category": entry.get("category", "fact"),
-            "importance": importance_label,
-            "importance_score": importance_score,
-            "mem0_result": result,
-        })
-
-        logger.info(
-            "session.finalization extraction_memory_written user_id=%s session_id=%s category=%s importance=%s",
-            user_id,
-            session_id,
-            entry.get("category", "fact"),
-            importance_label,
-        )
+    written_memories = _write_extracted_memories(
+        user_id=user_id,
+        session_id=session_id,
+        extracted=extracted,
+        metadata=metadata,
+    )
 
     logger.info(
         "session.finalization extraction_complete user_id=%s session_id=%s written_count=%s candidate_count=%s",
