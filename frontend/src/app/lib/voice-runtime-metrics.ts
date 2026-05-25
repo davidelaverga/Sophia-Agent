@@ -53,6 +53,10 @@ export type VoiceRegressionMarker = {
   level: "warn" | "bad"
 }
 
+export type VoicePreconnectStatus = "hit" | "miss" | "expired" | "failed" | "unsupported" | "disabled" | "skipped"
+
+export type VoicePreconnectSkippedReason = "already_active" | "voice_mode_false" | "runtime_mismatch" | "expired" | "failed"
+
 export type VoiceStartupMetrics = {
   requestToCredentialsMs: number | null
   credentialsToJoinMs: number | null
@@ -60,6 +64,12 @@ export type VoiceStartupMetrics = {
   joinToRemoteAudioMs: number | null
   startToMicAudioMs: number | null
   startToFirstUserTranscriptMs: number | null
+  preconnectAttempted: boolean
+  preconnectStatus: VoicePreconnectStatus | null
+  preconnectSkippedReason: VoicePreconnectSkippedReason | null
+  activeVoiceSessionExists: boolean | null
+  preconnectAgeMs: number | null
+  preconnectSavedMs: number | null
 }
 
 export type VoicePipelineMetrics = {
@@ -204,6 +214,10 @@ export type GeminiSessionTelemetry = {
     providerCategoryCounts: Record<string, { count: number; lastAt: string | null }>
     outputAudioEventCount: number
     lastOutputAudioAt: string | null
+    assistantTranscriptSource: string | null
+    assistantTranscriptFinalSeen: boolean
+    assistantTranscriptApproximate: boolean | null
+    assistantTranscriptSessionId: string | null
     staleAssistantAudioDroppedCount: number
     staleAssistantTranscriptDroppedCount: number
     staleAssistantOutputSuppressionCount: number
@@ -758,6 +772,34 @@ function asSessionRuntime(value: string | null): SessionRuntime | null {
   }
 }
 
+function asPreconnectStatus(value: string | null): VoicePreconnectStatus | null {
+  switch (value) {
+    case "hit":
+    case "miss":
+    case "expired":
+    case "failed":
+    case "unsupported":
+    case "disabled":
+    case "skipped":
+      return value
+    default:
+      return null
+  }
+}
+
+function asPreconnectSkippedReason(value: string | null): VoicePreconnectSkippedReason | null {
+  switch (value) {
+    case "already_active":
+    case "voice_mode_false":
+    case "runtime_mismatch":
+    case "expired":
+    case "failed":
+      return value
+    default:
+      return null
+  }
+}
+
 function latestPayloadForEvent(events: NormalizedVoiceCaptureEvent[], name: string): Record<string, unknown> | null {
   const event = findLast(events, (entry) => entry.name === name)
   return event ? eventData(event) : null
@@ -937,12 +979,24 @@ function buildSessionTelemetry(params: {
 }): VoiceSessionTelemetry {
   const { runtimeTelemetry, activeEvents, sessionIds, transport, timings, counts, lastTurn, nowMs } = params
   const captureRuntime = latestRuntimeFromCapture(activeEvents)
-  const runtime = runtimeTelemetry?.runtime ?? captureRuntime ?? "legacy_cascade"
-  const source = runtimeTelemetry?.runtime === runtime
-    ? runtimeTelemetry.source
-    : captureRuntime === runtime
-      ? "capture"
-      : "default"
+  const preferCaptureRuntime = Boolean(
+    captureRuntime
+    && (
+      !runtimeTelemetry
+      || runtimeTelemetry.source === "default"
+      || (runtimeTelemetry.runtime === "legacy_cascade" && captureRuntime === "gemini_live")
+    ),
+  )
+  const runtime = preferCaptureRuntime
+    ? captureRuntime
+    : runtimeTelemetry?.runtime ?? captureRuntime ?? "legacy_cascade"
+  const source = preferCaptureRuntime
+    ? "capture"
+    : runtimeTelemetry?.runtime === runtime
+      ? runtimeTelemetry.source
+      : captureRuntime === runtime
+        ? "capture"
+        : "default"
 
   if (runtime === "gemini_live") {
     const hookTelemetry = runtimeTelemetry?.runtime === "gemini_live" ? runtimeTelemetry : null
@@ -970,6 +1024,8 @@ function buildSessionTelemetry(params: {
     const providerPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event")
     const providerCorrelationPayload = latestPayloadForEvent(activeEvents, "gemini-provider-event-correlation")
     const providerTelemetry = asRecord(providerCorrelationPayload?.telemetry)
+    const latestAssistantTranscriptEvent = findLast(activeEvents, (event) => event.name === "sophia.transcript")
+    const latestAssistantTranscriptData = latestAssistantTranscriptEvent ? eventData(latestAssistantTranscriptEvent) : null
     const relayTraces = activeEvents
       .filter((event) => event.name === "gemini-relay-trace")
       .map((event) => asRecord(asRecord(event.payload)?.trace))
@@ -1219,6 +1275,22 @@ function buildSessionTelemetry(params: {
         providerCategoryCounts: hookTelemetry?.providerCategoryCounts ?? asGeminiCategoryCounts(providerTelemetry?.categoryCounts),
         outputAudioEventCount,
         lastOutputAudioAt: hookTelemetry?.lastOutputAudioAt ?? latestEventAt(activeEvents, "gemini-output-audio-started"),
+        assistantTranscriptSource: hookTelemetry?.assistantTranscriptSource
+          ?? asString(latestAssistantTranscriptData?.assistant_transcript_source)
+          ?? asString(latestAssistantTranscriptData?.assistantTranscriptSource)
+          ?? asString(latestAssistantTranscriptData?.source),
+        assistantTranscriptFinalSeen: hookTelemetry?.assistantTranscriptFinalSeen
+          ?? Boolean(
+            latestAssistantTranscriptData
+            && (latestAssistantTranscriptData.is_final === true || latestAssistantTranscriptData.final === true),
+          ),
+        assistantTranscriptApproximate: hookTelemetry?.assistantTranscriptApproximate
+          ?? asBoolean(latestAssistantTranscriptData?.assistant_transcript_approximate)
+          ?? asBoolean(latestAssistantTranscriptData?.assistantTranscriptApproximate),
+        assistantTranscriptSessionId: hookTelemetry?.assistantTranscriptSessionId
+          ?? asString(latestAssistantTranscriptData?.assistant_transcript_session_id)
+          ?? asString(latestAssistantTranscriptData?.assistantTranscriptSessionId)
+          ?? sessionIds.sessionId,
         staleAssistantAudioDroppedCount,
         staleAssistantTranscriptDroppedCount,
         staleAssistantOutputSuppressionCount: staleSuppressionCount,
@@ -2506,6 +2578,48 @@ function buildTimeline(
             detail: asString(event.payloadRecord?.callId) ?? "Gateway responded",
             tone: "neutral" as const,
           }
+        case "preconnect-started":
+          return {
+            label: "Preconnect started",
+            detail: asString(event.payloadRecord?.runtime) ?? "Preparing voice session",
+            tone: "neutral" as const,
+          }
+        case "preconnect-ready":
+          return {
+            label: "Preconnect ready",
+            detail: asString(event.payloadRecord?.runtime) ?? asString(event.payloadRecord?.callId) ?? "Warm session ready",
+            tone: "good" as const,
+          }
+        case "preconnect-reused":
+          return {
+            label: "Preconnect reused",
+            detail: formatEvidenceMs("age", asFiniteNumber(event.payloadRecord?.preconnectAgeMs)) ?? "Warm session hit",
+            tone: "good" as const,
+          }
+        case "preconnect-expired":
+          return {
+            label: "Preconnect expired",
+            detail: formatEvidenceMs("age", asFiniteNumber(event.payloadRecord?.preconnectAgeMs)) ?? "Warm session expired",
+            tone: "warn" as const,
+          }
+        case "preconnect-failed":
+          return {
+            label: "Preconnect failed",
+            detail: asString(event.payloadRecord?.error) ?? "Warm session unavailable",
+            tone: "warn" as const,
+          }
+        case "preconnect-skipped":
+          return {
+            label: "Preconnect skipped",
+            detail: asString(event.payloadRecord?.preconnectSkippedReason) ?? "Warm session skipped",
+            tone: "neutral" as const,
+          }
+        case "preconnect-miss":
+          return {
+            label: "Preconnect miss",
+            detail: "Falling back to normal connect",
+            tone: "neutral" as const,
+          }
         case "call-join-requested":
           return {
             label: "Joining call",
@@ -2809,6 +2923,40 @@ export function buildVoiceDeveloperMetrics({
     userEndedToFirstTextMs: committedFirstTextMs,
     userEndedToAgentStartMs: diffMs(lastUserEndedEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null),
   })
+  const latestPreconnectEvent = findLast(activeEvents, (event) => [
+    "preconnect-reused",
+    "preconnect-expired",
+    "preconnect-failed",
+    "preconnect-skipped",
+    "preconnect-unsupported",
+    "preconnect-miss",
+    "preconnect-disabled",
+    "preconnect-ready",
+    "preconnect-started",
+  ].includes(event.name))
+  const latestPreconnectData = latestPreconnectEvent ? eventData(latestPreconnectEvent) : null
+  const latestPreconnectStatus = asPreconnectStatus(asString(latestPreconnectData?.preconnectStatus))
+    ?? (
+      latestPreconnectEvent?.name === "preconnect-reused"
+        ? "hit"
+        : latestPreconnectEvent?.name === "preconnect-expired"
+          ? "expired"
+          : latestPreconnectEvent?.name === "preconnect-failed"
+            ? "failed"
+            : latestPreconnectEvent?.name === "preconnect-skipped"
+              ? "skipped"
+              : latestPreconnectEvent?.name === "preconnect-unsupported"
+                ? "unsupported"
+                : latestPreconnectEvent?.name === "preconnect-disabled"
+                  ? "disabled"
+                  : latestPreconnectEvent?.name === "preconnect-miss"
+                    ? "miss"
+                    : null
+    )
+  const latestPreconnectSkippedReason = asPreconnectSkippedReason(
+    asString(latestPreconnectData?.preconnectSkippedReason)
+    ?? asString(latestPreconnectData?.preconnect_skipped_reason),
+  )
   const startup: VoiceStartupMetrics = {
     requestToCredentialsMs: diffMs(lastStartEvent?.atMs ?? null, credentialsReceivedEvent?.atMs ?? null),
     credentialsToJoinMs: diffMs(credentialsReceivedEvent?.atMs ?? null, joinRequestedEvent?.atMs ?? null),
@@ -2816,6 +2964,17 @@ export function buildVoiceDeveloperMetrics({
     joinToRemoteAudioMs: diffMs(joinedEvent?.atMs ?? null, remoteAudioBoundEvent?.atMs ?? null),
     startToMicAudioMs: diffMs(lastStartEvent?.atMs ?? null, firstMicAudioEvent?.atMs ?? null),
     startToFirstUserTranscriptMs: diffMs(lastStartEvent?.atMs ?? null, firstUserTranscriptEvent?.atMs ?? null),
+    preconnectAttempted: Boolean(
+      latestPreconnectEvent
+        && latestPreconnectEvent.name !== "preconnect-miss"
+        && latestPreconnectEvent.name !== "preconnect-disabled",
+    ) && latestPreconnectSkippedReason !== "voice_mode_false",
+    preconnectStatus: latestPreconnectStatus,
+    preconnectSkippedReason: latestPreconnectSkippedReason,
+    activeVoiceSessionExists: asBoolean(latestPreconnectData?.activeVoiceSessionExists)
+      ?? asBoolean(latestPreconnectData?.active_voice_session_exists),
+    preconnectAgeMs: asFiniteNumber(latestPreconnectData?.preconnectAgeMs),
+    preconnectSavedMs: asFiniteNumber(latestPreconnectData?.preconnectSavedMs),
   }
   const pipeline: VoicePipelineMetrics = {
     micToUserTranscriptMs: diffMs(firstMicAudioEvent?.atMs ?? null, firstUserTranscriptEvent?.atMs ?? null),

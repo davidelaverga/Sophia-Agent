@@ -125,17 +125,54 @@ def execute_realtime_retrieve_memories(
 ) -> dict[str, Any]:
     """Execute the query-only realtime memory tool with trusted user context."""
     contract = _retrieve_memories_contract_module()
-    try:
-        validated_args = contract.validate_realtime_retrieve_memories_args(args)
-        query = validated_args["query"]
-    except Exception:
-        query = args.get("query", "") if isinstance(args, Mapping) else ""
+    query = _realtime_memory_query_from_args(args)
 
     result = contract.retrieve_memories_for_realtime(
         user_id=user_id,
         query=query,
         context_mode=context_mode,
     )
+    return decorate_realtime_retrieve_memories_result(result, args=args)
+
+
+def execute_realtime_retrieve_memories_unavailable(
+    args: Mapping[str, Any],
+    *,
+    user_id: str,
+    context_mode: str | None = None,
+    provider_reason: str = "gateway_retrieval_not_configured",
+    provider_status: str = "unavailable",
+    diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the standard graceful unavailable shape without touching Mem0."""
+    contract = _retrieve_memories_contract_module()
+    query = _realtime_memory_query_from_args(args)
+    result = contract.retrieve_memories_for_realtime(
+        user_id=user_id,
+        query=query,
+        context_mode=context_mode,
+        provider_available_func=lambda: {
+            "available": False,
+            "provider_status": provider_status,
+            "provider_reason": provider_reason,
+            "provider_transport": "gateway",
+        },
+        search_func=lambda **_kwargs: [],
+    )
+    result["provider_status"] = provider_status
+    result["provider_reason"] = provider_reason
+    result_diagnostics = result.get("diagnostics")
+    if isinstance(result_diagnostics, dict) and diagnostics:
+        result_diagnostics.update(dict(diagnostics))
+    return decorate_realtime_retrieve_memories_result(result, args=args)
+
+
+def decorate_realtime_retrieve_memories_result(
+    result: dict[str, Any],
+    *,
+    args: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Add voice-runtime trust/ignored-argument diagnostics to a backend result."""
     ignored_arg_names = [
         name
         for name in ("user_id", "categories", "category", "filters", "memory_provider")
@@ -150,6 +187,19 @@ def execute_realtime_retrieve_memories(
         diagnostics["ignored_model_arg_names"] = sorted(ignored_arg_names)
         diagnostics["raw_memory_text_excluded"] = True
     return result
+
+
+def realtime_memory_query_from_args(args: Mapping[str, Any]) -> str:
+    return _realtime_memory_query_from_args(args)
+
+
+def _realtime_memory_query_from_args(args: Mapping[str, Any]) -> str:
+    contract = _retrieve_memories_contract_module()
+    try:
+        validated_args = contract.validate_realtime_retrieve_memories_args(args)
+        return validated_args["query"]
+    except Exception:
+        return args.get("query", "") if isinstance(args, Mapping) else ""
 
 
 def redacted_retrieve_memories_diagnostic(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -205,6 +255,8 @@ def _gemini_property_schema(schema: Mapping[str, Any]) -> dict[str, object]:
     json_type = normalized.get("type")
     if isinstance(json_type, str):
         gemini_schema["type"] = _JSON_SCHEMA_TO_GEMINI_TYPE.get(json_type, json_type.upper())
+    if _schema_allows_null(schema):
+        gemini_schema["nullable"] = True
 
     description = normalized.get("description") or schema.get("description")
     if isinstance(description, str) and description.strip():
@@ -245,6 +297,13 @@ def _first_non_null_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
             if isinstance(variant, Mapping) and variant.get("type") != "null":
                 return {**schema, **variant}
     return schema
+
+
+def _schema_allows_null(schema: Mapping[str, Any]) -> bool:
+    variants = schema.get("anyOf")
+    if not isinstance(variants, list):
+        return schema.get("type") == "null"
+    return any(isinstance(variant, Mapping) and variant.get("type") == "null" for variant in variants)
 
 
 def _normalize_description(value: object) -> str:

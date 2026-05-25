@@ -86,7 +86,6 @@ export function useDashboardEntryState() {
   const { containerRef: freshStartModalRef } = useFocusTrap(showFreshStartPrompt);
   const [pendingStart, setPendingStart] = useState<PendingStart | null>(null);
   const [isLaunchingSession, setIsLaunchingSession] = useState(false);
-  const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
   const [showResumeBanner, setShowResumeBanner] = useState(false);
   const [backendActiveSession, setBackendActiveSession] = useState<SessionInfo | null>(null);
   const [bootstrapOpener, setBootstrapOpener] = useState<BootstrapOpenerResponse | null>(null);
@@ -360,6 +359,10 @@ export function useDashboardEntryState() {
     router.push('/session');
   }, [router]);
 
+  const handleOpenSettings = useCallback(() => {
+    router.push('/settings');
+  }, [router]);
+
   const handleDismissResumeBanner = useCallback(() => {
     haptic('light');
     setShowResumeBanner(false);
@@ -550,8 +553,6 @@ export function useDashboardEntryState() {
     sessionSummary,
     isLaunchingSession,
     isStartingSession,
-    showSettingsDrawer,
-    setShowSettingsDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     showFreshStartPrompt,
@@ -560,6 +561,7 @@ export function useDashboardEntryState() {
     handleCancelReplaceSession,
     handleCallSophia,
     handleContinueSession,
+    handleOpenSettings,
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,

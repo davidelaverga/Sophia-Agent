@@ -46,6 +46,7 @@ export type UseCompanionVoiceRuntimeOptions = {
   userId?: string;
   sessionId?: string;
   threadId?: string;
+  voiceMode?: boolean;
   onUserTranscriptFallback: (text: string) => void;
   appendAssistantMessage: (text: string, suppressAssistantResponse: boolean) => void;
   ingestArtifacts: (artifacts: StreamArtifactsPayload, source: 'voice' | 'interrupt') => void;

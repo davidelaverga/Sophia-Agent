@@ -65,6 +65,7 @@ import {
 type UseStreamVoiceSessionOptions = {
   sessionId?: string
   threadId?: string
+  preconnectEnabled?: boolean
   onUserTranscript?: (text: string) => void
   onAssistantResponse?: (text: string) => void
   onArtifacts?: (artifacts: Record<string, unknown>) => void
@@ -79,9 +80,41 @@ type GeminiProductionVoiceCredentials = GeminiBrowserLiveSessionBootstrap & {
   production_route: true
   session_id: string
   stream_url: string
+  preconnect?: boolean
+  preconnect_ttl_ms?: number | null
+  preconnect_expires_at?: string | null
 }
 
 type VoiceConnectCredentials = StreamVoiceCredentials | GeminiProductionVoiceCredentials
+
+type VoicePreconnectSkippedReason =
+  | "already_active"
+  | "voice_mode_false"
+  | "runtime_mismatch"
+  | "expired"
+  | "failed"
+
+class VoicePreconnectSkippedError extends Error {
+  reason: VoicePreconnectSkippedReason
+  activeVoiceSessionExists: boolean
+  runtime: SessionRuntime | null
+  voiceAgentSessionId: string | null
+
+  constructor(params: {
+    reason: VoicePreconnectSkippedReason
+    activeVoiceSessionExists?: boolean
+    runtime?: SessionRuntime | null
+    voiceAgentSessionId?: string | null
+    message?: string
+  }) {
+    super(params.message ?? `Voice preconnect skipped: ${params.reason}`)
+    this.name = "VoicePreconnectSkippedError"
+    this.reason = params.reason
+    this.activeVoiceSessionExists = params.activeVoiceSessionExists ?? false
+    this.runtime = params.runtime ?? null
+    this.voiceAgentSessionId = params.voiceAgentSessionId ?? null
+  }
+}
 
 export type StreamVoiceSessionReturn = {
   stage: VoiceStage
@@ -183,6 +216,10 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     providerCategoryCounts: params.providerCategoryCounts ?? {},
     outputAudioEventCount: params.outputAudioEventCount ?? 0,
     lastOutputAudioAt: params.lastOutputAudioAt ?? null,
+    assistantTranscriptSource: params.assistantTranscriptSource ?? null,
+    assistantTranscriptFinalSeen: params.assistantTranscriptFinalSeen ?? false,
+    assistantTranscriptApproximate: params.assistantTranscriptApproximate ?? null,
+    assistantTranscriptSessionId: params.assistantTranscriptSessionId ?? null,
     staleAssistantAudioDroppedCount: params.staleAssistantAudioDroppedCount ?? 0,
     staleAssistantTranscriptDroppedCount: params.staleAssistantTranscriptDroppedCount ?? 0,
     staleAssistantOutputSuppressionCount: params.staleAssistantOutputSuppressionCount ?? 0,
@@ -410,6 +447,56 @@ function isGeminiProductionCredentials(credentials: VoiceConnectCredentials | nu
   return Boolean(credentials && "runtime" in credentials && credentials.runtime === "gemini_live")
 }
 
+function voiceCredentialsRuntime(credentials: VoiceConnectCredentials): SessionRuntime {
+  return isGeminiProductionCredentials(credentials) ? "gemini_live" : "legacy_cascade"
+}
+
+function voiceCredentialsCallId(credentials: VoiceConnectCredentials): string {
+  return isGeminiProductionCredentials(credentials) ? credentials.session_id : credentials.callId
+}
+
+function voiceCredentialsSessionId(credentials: VoiceConnectCredentials): string | null {
+  return isGeminiProductionCredentials(credentials) ? credentials.session_id : credentials.sessionId ?? null
+}
+
+function voiceCredentialsPreparedTtlMs(credentials: VoiceConnectCredentials): number {
+  if (!isGeminiProductionCredentials(credentials)) {
+    return PREPARED_VOICE_CONNECT_TTL_MS
+  }
+
+  const serverTtlMs = credentials.preconnect_ttl_ms
+  if (typeof serverTtlMs === "number" && Number.isFinite(serverTtlMs) && serverTtlMs > 0) {
+    return Math.min(serverTtlMs, PREPARED_VOICE_CONNECT_TTL_MS)
+  }
+
+  return PREPARED_VOICE_CONNECT_TTL_MS
+}
+
+function isVoicePreconnectSkippedError(error: unknown): error is VoicePreconnectSkippedError {
+  return error instanceof VoicePreconnectSkippedError
+}
+
+function readVoicePreconnectSkippedReason(value: unknown): VoicePreconnectSkippedReason {
+  switch (value) {
+    case "already_active":
+    case "voice_mode_false":
+    case "runtime_mismatch":
+    case "expired":
+    case "failed":
+      return value
+    default:
+      return "failed"
+  }
+}
+
+function isActiveSessionPreconnectConflict(status: number, body: string): boolean {
+  return status === 409 && /active voice session already exists/i.test(body)
+}
+
+function assistantTranscriptFingerprint(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, " ").trim()
+}
+
 async function fetchStreamCredentials(
   userId: string,
   platform: string,
@@ -435,9 +522,30 @@ async function fetchStreamCredentials(
   })
   if (!res.ok) {
     const body = await res.text().catch(() => "")
+    if (preconnect && isActiveSessionPreconnectConflict(res.status, body)) {
+      throw new VoicePreconnectSkippedError({
+        reason: "already_active",
+        activeVoiceSessionExists: true,
+        runtime: "gemini_live",
+        message: "Voice preconnect skipped because an active voice session already exists.",
+      })
+    }
     throw new Error(`Voice connect failed (${res.status}): ${body}`)
   }
   const data = await res.json()
+
+  if (preconnect && data?.preconnect_skipped === true) {
+    throw new VoicePreconnectSkippedError({
+      reason: readVoicePreconnectSkippedReason(data.preconnect_skipped_reason),
+      activeVoiceSessionExists: data.active_voice_session_exists === true,
+      runtime: data.runtime === "gemini_live" || data.voice_runtime === "gemini_live"
+        ? "gemini_live"
+        : data.runtime === "legacy_cascade" || data.voice_runtime === "legacy_cascade"
+          ? "legacy_cascade"
+          : null,
+      voiceAgentSessionId: typeof data.session_id === "string" ? data.session_id : null,
+    })
+  }
 
   if (data?.runtime === "gemini_live" || data?.voice_runtime === "gemini_live") {
     return data as GeminiProductionVoiceCredentials
@@ -556,6 +664,7 @@ export function useStreamVoiceSession(
   const {
     sessionId,
     threadId,
+    preconnectEnabled = true,
     onUserTranscript,
     onAssistantResponse,
     onArtifacts,
@@ -608,13 +717,24 @@ export function useStreamVoiceSession(
   const connectPrewarmAttemptedUserIdRef = useRef<string | null>(null)
   const autoPreconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const preparedVoiceConnectKeyRef = useRef<string | null>(null)
-  const preparedVoiceConnectPromiseRef = useRef<Promise<StreamVoiceCredentials | null> | null>(null)
+  const preparedVoiceConnectPromiseRef = useRef<Promise<VoiceConnectCredentials | null> | null>(null)
   const preparedVoiceConnectControllerRef = useRef<AbortController | null>(null)
-  const preparedVoiceCredentialsRef = useRef<StreamVoiceCredentials | null>(null)
+  const preparedVoiceCredentialsRef = useRef<VoiceConnectCredentials | null>(null)
   const preparedVoiceCredentialsAtRef = useRef<number>(0)
   const backendWarmupKeyRef = useRef<string | null>(null)
   const backendWarmupControllerRef = useRef<AbortController | null>(null)
   const autoPreconnectEnabledRef = useRef(true)
+  const geminiOpeningGreetingLatchRef = useRef<{
+    sessionId: string | null
+    userTranscriptSeen: boolean
+    emitted: boolean
+    fingerprint: string | null
+  }>({
+    sessionId: null,
+    userTranscriptSeen: false,
+    emitted: false,
+    fingerprint: null,
+  })
 
   // Keep refs current without re-binding effects
   useEffect(() => { credentialsRef.current = credentials }, [credentials])
@@ -726,6 +846,85 @@ export function useStreamVoiceSession(
     currentTurnUserTranscriptRef.current = null
   }, [])
 
+  const resetGeminiOpeningGreetingLatch = useCallback((voiceAgentSessionId: string | null = null) => {
+    geminiOpeningGreetingLatchRef.current = {
+      sessionId: voiceAgentSessionId,
+      userTranscriptSeen: false,
+      emitted: false,
+      fingerprint: null,
+    }
+  }, [])
+
+  const recordPreconnectSkipped = useCallback((
+    reason: VoicePreconnectSkippedReason,
+    metadata: Record<string, unknown> = {},
+  ) => {
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "preconnect-skipped",
+      payload: {
+        preconnectStatus: "skipped",
+        preconnectSkippedReason: reason,
+        activeVoiceSessionExists: Boolean(
+          metadata.activeVoiceSessionExists
+          ?? geminiConnectionRef.current
+          ?? credentialsRef.current,
+        ),
+        platform,
+        sessionId: sessionIdRef.current ?? null,
+        threadId: threadId ?? null,
+        ...metadata,
+      },
+    })
+  }, [platform, threadId])
+
+  const shouldApplyGeminiOpeningGreetingUpdate = useCallback((update: { text: string; isFinal: boolean }) => {
+    const activeSessionId = geminiConnectionRef.current?.sessionId ?? null
+    if (!activeSessionId) return true
+
+    const latch = geminiOpeningGreetingLatchRef.current
+    if (latch.sessionId !== activeSessionId) {
+      resetGeminiOpeningGreetingLatch(activeSessionId)
+    }
+    const currentLatch = geminiOpeningGreetingLatchRef.current
+    if (currentLatch.userTranscriptSeen) {
+      return true
+    }
+
+    if (currentLatch.emitted) {
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "opening-greeting-duplicate-suppressed",
+        payload: {
+          runtime: "gemini_live",
+          openingGreetingDuplicateSuppressed: true,
+          openingGreetingSource: "gemini_live_assistant_transcript",
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: activeSessionId,
+        },
+      })
+      return false
+    }
+
+    if (update.isFinal) {
+      currentLatch.emitted = true
+      currentLatch.fingerprint = assistantTranscriptFingerprint(update.text)
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "opening-greeting-emitted",
+        payload: {
+          runtime: "gemini_live",
+          openingGreetingEmitted: true,
+          openingGreetingSource: "gemini_live_assistant_transcript",
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: activeSessionId,
+        },
+      })
+    }
+
+    return true
+  }, [resetGeminiOpeningGreetingLatch])
+
   const applyUserTranscriptData = useCallback((
     data: Record<string, unknown> | undefined,
     source: "public_user_transcript" | "barge_in_transcript_handoff",
@@ -791,6 +990,7 @@ export function useStreamVoiceSession(
     }
 
     currentTurnUserTranscriptRef.current = reconciledTranscript.text
+    geminiOpeningGreetingLatchRef.current.userTranscriptSeen = true
     if (source === "barge_in_transcript_handoff") {
       rememberBargeInTranscriptFingerprint(userTranscriptFingerprint(reconciledTranscript.text))
     }
@@ -910,10 +1110,24 @@ export function useStreamVoiceSession(
   const releasePreparedVoiceConnect = useCallback(async (options: { keepalive?: boolean } = {}) => {
     const preparedCredentials = preparedVoiceCredentialsRef.current
     const activeCredentials = credentialsRef.current
+    const activeGeminiSessionId = geminiConnectionRef.current?.sessionId ?? null
 
     clearPreparedVoiceConnectRefs()
 
-    if (!userId || !preparedCredentials?.sessionId) {
+    if (!userId || !preparedCredentials) {
+      return
+    }
+
+    if (isGeminiProductionCredentials(preparedCredentials)) {
+      if (activeGeminiSessionId === preparedCredentials.session_id) {
+        return
+      }
+
+      await requestGeminiBootstrapDisconnect(preparedCredentials, options)
+      return
+    }
+
+    if (!preparedCredentials.sessionId) {
       return
     }
 
@@ -976,6 +1190,22 @@ export function useStreamVoiceSession(
       return null
     }
 
+    if (!preconnectEnabled || platform === "text") {
+      autoPreconnectEnabledRef.current = false
+      recordPreconnectSkipped("voice_mode_false", {
+        activeVoiceSessionExists: false,
+      })
+      return Promise.resolve(null)
+    }
+
+    if (credentialsRef.current || geminiConnectionRef.current || startInFlightRef.current || callingState !== CallingState.IDLE) {
+      autoPreconnectEnabledRef.current = false
+      recordPreconnectSkipped("already_active", {
+        activeVoiceSessionExists: true,
+      })
+      return Promise.resolve(null)
+    }
+
     const connectKey = buildVoiceConnectKey(
       userId,
       platform,
@@ -988,7 +1218,7 @@ export function useStreamVoiceSession(
     if (
       preparedVoiceConnectKeyRef.current === connectKey
       && preparedVoiceCredentialsRef.current
-      && Date.now() - preparedVoiceCredentialsAtRef.current < PREPARED_VOICE_CONNECT_TTL_MS
+      && Date.now() - preparedVoiceCredentialsAtRef.current < voiceCredentialsPreparedTtlMs(preparedVoiceCredentialsRef.current)
     ) {
       return Promise.resolve(preparedVoiceCredentialsRef.current)
     }
@@ -1032,17 +1262,15 @@ export function useStreamVoiceSession(
         true,
       )
 
-      if (isGeminiProductionCredentials(creds)) {
-        return null
-      }
-
       if (
         controller.signal.aborted
         || destroyedRef.current
         || preparedVoiceConnectControllerRef.current !== controller
         || preparedVoiceConnectKeyRef.current !== connectKey
       ) {
-        if (creds.sessionId) {
+        if (isGeminiProductionCredentials(creds)) {
+          await requestGeminiBootstrapDisconnect(creds)
+        } else if (creds.sessionId) {
           try {
             await requestVoiceDisconnect(userId, creds)
           } catch {
@@ -1054,20 +1282,37 @@ export function useStreamVoiceSession(
 
       preparedVoiceCredentialsRef.current = creds
       preparedVoiceCredentialsAtRef.current = Date.now()
-      scheduleBackendWarmup(creds)
+      if (!isGeminiProductionCredentials(creds)) {
+        scheduleBackendWarmup(creds)
+      }
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "preconnect-ready",
         payload: {
-          callId: creds.callId,
+          callId: voiceCredentialsCallId(creds),
+          preconnectTtlMs: voiceCredentialsPreparedTtlMs(creds),
+          runtime: voiceCredentialsRuntime(creds),
           sessionId: sessionIdRef.current ?? null,
-          voiceAgentSessionId: creds.sessionId ?? null,
+          voiceAgentSessionId: voiceCredentialsSessionId(creds),
         },
       })
       return creds
     })()
       .catch((err) => {
         if (!controller.signal.aborted) {
+          if (isVoicePreconnectSkippedError(err)) {
+            autoPreconnectEnabledRef.current = false
+            logger.debug("StreamVoiceSession", "Voice session preconnect skipped", {
+              userId,
+              reason: err.reason,
+            })
+            recordPreconnectSkipped(err.reason, {
+              activeVoiceSessionExists: err.activeVoiceSessionExists,
+              runtime: err.runtime,
+              voiceAgentSessionId: err.voiceAgentSessionId,
+            })
+            return null
+          }
           logger.debug("StreamVoiceSession", "Voice session preconnect failed", {
             userId,
             error: err instanceof Error ? err.message : String(err),
@@ -1077,6 +1322,7 @@ export function useStreamVoiceSession(
             name: "preconnect-failed",
             payload: {
               error: err instanceof Error ? err.message : String(err),
+              preconnectStatus: "failed",
               sessionId: sessionIdRef.current ?? null,
             },
           })
@@ -1095,9 +1341,12 @@ export function useStreamVoiceSession(
     preparedVoiceConnectPromiseRef.current = promise
     return promise
   }, [
+    callingState,
     connectPrewarmPromiseRef,
     contextMode,
     platform,
+    preconnectEnabled,
+    recordPreconnectSkipped,
     releasePreparedVoiceConnect,
     scheduleBackendWarmup,
     sessionId,
@@ -1121,19 +1370,26 @@ export function useStreamVoiceSession(
     )
 
     const preparedCredentials = preparedVoiceCredentialsRef.current
+    const preparedAgeMs = preparedCredentials
+      ? Date.now() - preparedVoiceCredentialsAtRef.current
+      : null
     if (
       preparedVoiceConnectKeyRef.current === connectKey
       && preparedCredentials
-      && Date.now() - preparedVoiceCredentialsAtRef.current < PREPARED_VOICE_CONNECT_TTL_MS
+      && preparedAgeMs !== null
+      && preparedAgeMs < voiceCredentialsPreparedTtlMs(preparedCredentials)
     ) {
       clearPreparedVoiceConnectRefs()
       recordSophiaCaptureEvent({
         category: "voice-session",
         name: "preconnect-reused",
         payload: {
-          callId: preparedCredentials.callId,
+          callId: voiceCredentialsCallId(preparedCredentials),
+          preconnectAgeMs: preparedAgeMs,
+          preconnectStatus: "hit",
+          runtime: voiceCredentialsRuntime(preparedCredentials),
           sessionId: sessionIdRef.current ?? null,
-          voiceAgentSessionId: preparedCredentials.sessionId ?? null,
+          voiceAgentSessionId: voiceCredentialsSessionId(preparedCredentials),
         },
       })
       return preparedCredentials
@@ -1148,30 +1404,49 @@ export function useStreamVoiceSession(
         return null
       }
 
+      const prefetchedAgeMs = Date.now() - preparedVoiceCredentialsAtRef.current
       if (
         preparedVoiceConnectKeyRef.current === connectKey
-        && preparedVoiceCredentialsRef.current?.callId === prefetchedCredentials.callId
-        && preparedVoiceCredentialsRef.current?.sessionId === prefetchedCredentials.sessionId
+        && voiceCredentialsCallId(preparedVoiceCredentialsRef.current ?? prefetchedCredentials) === voiceCredentialsCallId(prefetchedCredentials)
+        && voiceCredentialsSessionId(preparedVoiceCredentialsRef.current ?? prefetchedCredentials) === voiceCredentialsSessionId(prefetchedCredentials)
+        && prefetchedAgeMs < voiceCredentialsPreparedTtlMs(prefetchedCredentials)
       ) {
         clearPreparedVoiceConnectRefs()
         recordSophiaCaptureEvent({
           category: "voice-session",
           name: "preconnect-reused",
           payload: {
-            callId: prefetchedCredentials.callId,
+            callId: voiceCredentialsCallId(prefetchedCredentials),
+            preconnectAgeMs: prefetchedAgeMs,
+            preconnectStatus: "hit",
+            runtime: voiceCredentialsRuntime(prefetchedCredentials),
             sessionId: sessionIdRef.current ?? null,
-            voiceAgentSessionId: prefetchedCredentials.sessionId ?? null,
+            voiceAgentSessionId: voiceCredentialsSessionId(prefetchedCredentials),
           },
         })
+        return prefetchedCredentials
       }
 
-      return prefetchedCredentials
+      await releasePreparedVoiceConnect()
+      return null
     }
 
     if (
       preparedVoiceConnectKeyRef.current === connectKey
       && preparedCredentials
     ) {
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: "preconnect-expired",
+        payload: {
+          callId: voiceCredentialsCallId(preparedCredentials),
+          preconnectAgeMs: preparedAgeMs,
+          preconnectStatus: "expired",
+          runtime: voiceCredentialsRuntime(preparedCredentials),
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: voiceCredentialsSessionId(preparedCredentials),
+        },
+      })
       await releasePreparedVoiceConnect()
     }
 
@@ -1339,6 +1614,22 @@ export function useStreamVoiceSession(
         return
       }
 
+      if (geminiConnectionRef.current) {
+        setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+          ? {
+              ...current,
+              assistantTranscriptSource: update.assistantTranscriptSource ?? current.assistantTranscriptSource ?? null,
+              assistantTranscriptFinalSeen: current.assistantTranscriptFinalSeen === true || update.isFinal,
+              assistantTranscriptApproximate: update.assistantTranscriptApproximate ?? current.assistantTranscriptApproximate ?? null,
+              assistantTranscriptSessionId: sessionIdRef.current ?? current.assistantTranscriptSessionId ?? null,
+            }
+          : current)
+        if (!shouldApplyGeminiOpeningGreetingUpdate(update)) {
+          setPartialReply("")
+          return
+        }
+      }
+
       const handlers = {
         setFinalReply,
         setPartialReply,
@@ -1406,7 +1697,7 @@ export function useStreamVoiceSession(
         startThinkingTimeout()
       }
     }
-  }, [addVoiceMessage, applyUserTranscriptData, clearCurrentTurnUserTranscript, clearThinking, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
+  }, [addVoiceMessage, applyUserTranscriptData, clearCurrentTurnUserTranscript, clearThinking, shouldApplyGeminiOpeningGreetingUpdate, startThinkingTimeout, setListeningPresence, setSpeakingPresence, setMetaPresence])
 
   // --- Map CallingState → VoiceStage (only on actual changes) -------------
   useEffect(() => {
@@ -1775,7 +2066,7 @@ export function useStreamVoiceSession(
     return () => {
       clearAutoPreconnectTimer()
     }
-  }, [callingState, clearAutoPreconnectTimer, credentials, preconnectVoiceSession, userId])
+  }, [callingState, clearAutoPreconnectTimer, credentials, platform, preconnectEnabled, preconnectVoiceSession, userId])
 
   // --- Actions -------------------------------------------------------------
 
@@ -1849,6 +2140,14 @@ export function useStreamVoiceSession(
       }
 
       if (!creds) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "preconnect-miss",
+          payload: {
+            preconnectStatus: "miss",
+            sessionId: sessionIdRef.current ?? null,
+          },
+        })
         logger.debug("StreamVoiceSession", "Fetching credentials", {
           userId,
           platform,
@@ -1867,8 +2166,8 @@ export function useStreamVoiceSession(
       } else {
         logger.debug("StreamVoiceSession", "Using prefetched voice credentials", {
           userId,
-          callId: creds.callId,
-          voiceAgentSessionId: creds.sessionId,
+          callId: voiceCredentialsCallId(creds),
+          voiceAgentSessionId: voiceCredentialsSessionId(creds),
         })
       }
 
@@ -1915,6 +2214,7 @@ export function useStreamVoiceSession(
         })
         resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
         resetAssistantTranscriptStaleGuardState(assistantTranscriptStaleGuardRef.current)
+        resetGeminiOpeningGreetingLatch(creds.session_id)
 
         setRuntimeTelemetry(createGeminiRuntimeTelemetry({
           source: "voice-connect",
@@ -2542,6 +2842,7 @@ export function useStreamVoiceSession(
     failVoiceStartup,
     markSophiaReady,
     platform,
+    resetGeminiOpeningGreetingLatch,
     scheduleBackendWarmup,
     sessionId,
     setListeningPresence,
@@ -2581,6 +2882,7 @@ export function useStreamVoiceSession(
     recentUserTranscriptIdsRef.current = []
     recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
+    resetGeminiOpeningGreetingLatch()
     setIsSophiaReady(false)
     setCredentials(null)
     setRuntimeTelemetry(createLegacyRuntimeTelemetry({ sessionId: sessionIdRef.current ?? null, threadId: threadId ?? null }))
@@ -2597,6 +2899,7 @@ export function useStreamVoiceSession(
     leave,
     clearThinking,
     requestCurrentVoiceDisconnect,
+    resetGeminiOpeningGreetingLatch,
     releasePreparedVoiceConnect,
     setListeningPresence,
     setSpeakingPresence,
@@ -2663,6 +2966,7 @@ export function useStreamVoiceSession(
     recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
     userMicMutedRef.current = false
+    resetGeminiOpeningGreetingLatch()
     resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
     resetAssistantTranscriptStaleGuardState(assistantTranscriptStaleGuardRef.current)
     setIsSophiaReady(false)
@@ -2681,6 +2985,7 @@ export function useStreamVoiceSession(
     leave,
     clearThinking,
     requestCurrentVoiceDisconnect,
+    resetGeminiOpeningGreetingLatch,
     releasePreparedVoiceConnect,
     setListeningPresence,
     setSpeakingPresence,
@@ -2713,6 +3018,7 @@ export function useStreamVoiceSession(
     recentBargeInTranscriptFingerprintsRef.current = []
     currentTurnUserTranscriptRef.current = null
     userMicMutedRef.current = false
+    resetGeminiOpeningGreetingLatch()
     resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
     resetAssistantTranscriptStaleGuardState(assistantTranscriptStaleGuardRef.current)
     setIsSophiaReady(false)
@@ -2724,7 +3030,7 @@ export function useStreamVoiceSession(
     setError(undefined)
     setIsMuted(false)
     resetPresence()
-  }, [cancelPendingStartRequest, clearAutoPreconnectTimer, closeEventSource, clearStartupReadyTimeout, leave, clearThinking, releasePreparedVoiceConnect, requestCurrentVoiceDisconnect, resetPresence, threadId])
+  }, [cancelPendingStartRequest, clearAutoPreconnectTimer, closeEventSource, clearStartupReadyTimeout, leave, clearThinking, releasePreparedVoiceConnect, requestCurrentVoiceDisconnect, resetGeminiOpeningGreetingLatch, resetPresence, threadId])
 
   /**
    * Mute the microphone without tearing down the call/agent session.

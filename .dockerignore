@@ -74,4 +74,7 @@ backend/.coverage
 !config.yaml
 !config.example.yaml
 !skills/
+!skills/public/
+!skills/public/sophia/
+!skills/public/sophia/**
 !voice/

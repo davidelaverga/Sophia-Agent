@@ -83,6 +83,24 @@ The existing text companion `make_retrieve_memories_tool(user_id)` remains a Lan
 
 Gemini Live declares the tool through `voice/realtime/sophia_backend_tools.py` and executes it in `voice/realtime/gemini_tool_loop.py` through the existing backend relay. Model-supplied `user_id` or category/filter arguments are ignored and recorded only as redacted ignored-argument names. Gemini tool diagnostics include status, count, latency, query length, categories, and text lengths, but do not duplicate raw memory text.
 
+Production Gemini Live dynamic retrieval uses the same backend ownership boundary as setup context. During authenticated gateway voice connect, the gateway mints a short-lived session grant and passes `dynamic_memory_retrieval` inside the backend-owned `realtime_context` sent to `sophia-voice`. When Gemini later calls `retrieve_memories(query)`, the voice runtime calls the gateway callback with the model query and the session grant; the gateway binds the trusted user id from the grant, applies server-side category/context policy, caps results to five snippets, and returns privacy-safe diagnostics. If the callback is absent or unavailable, the tool degrades with `status="unavailable"` and a provider reason that is separate from setup-context availability.
+
+The dynamic retrieval callback must return a JSON envelope for every handled condition:
+
+```json
+{
+  "ok": false,
+  "status": "unavailable",
+  "memories": [],
+  "count": 0,
+  "provider_status": "unavailable",
+  "provider_reason": "missing_api_key",
+  "diagnostics": {}
+}
+```
+
+Handled statuses are `success`, `no_results`, `unavailable`, `error`, `unauthorized`, `expired_grant`, and `invalid_request`. Voice treats transport and contract failures separately: non-2xx callback responses become `gateway_retrieval_http_error`, 2xx non-JSON bodies become `gateway_retrieval_invalid_json`, and parsed responses missing the required envelope fields become `gateway_retrieval_schema_mismatch`. Callback diagnostics may include host/path, status code, content type, body hash, and redacted body shape, but must not include raw memory text, grant tokens, or credentials.
+
 GPT Realtime is prepared but not wired: `openai_retrieve_memories_function_declaration()` converts the same contract to OpenAI function format for the next phase. OpenAI production/dogfood routes do not advertise the tool until trusted sideband execution is implemented.
 
 Phase 12.5B-B did not change prompts, rituals, `consult_skill`, web tools, sideband writeback, artifact schemas, builder trace storage, VAD, turn detection, provider defaults, or Gemini/GPT routing.
@@ -230,6 +248,14 @@ Gateway Gemini relay routes now preserve browser source metadata through to the 
 Diagnostics now include barge-in transcript captured/promoted/ignored/duplicate counts, promotion latency, last transcript preview, new-turn dispatch count, and dispatch blocked reason. Turn capture separates interrupted-without-transcript from transcript-promoted-and-dispatched cases.
 
 This phase did not change prompts, skills, crisis behavior, memory behavior, Builder behavior, artifact schema, VAD/activity settings, provider routing defaults, `voice/sophia_llm.py`, `users/**`, `backend/users/**`, or the legacy Stream/Vision Agents cascade.
+
+## Gemini Live Internal Output Guard
+
+Gemini Live public assistant transcript must never include hidden reasoning, scratchpad text, tool-repair narration, validation details, or marker labels such as `Thought:`, `Spoken:`, `Tool call:`, `ValidationError`, or `Emit Artifact Correction attempt`. Provider `outputTranscription` and model-turn text are treated as assistant output only after the public-output guard. Suppressed text is not emitted as `sophia.transcript`; the runtime may emit a safe `sophia.turn_diagnostic` counter with marker name and text length, but not the raw text.
+
+Tool validation failures sent back to Gemini must be concise and repairable. They must not include Pydantic stack traces, raw `ValidationError` text, JSON-schema internals, or field-by-field exception dumps. For invalid `emit_artifact` arguments, the model-visible tool response should say only that the arguments were invalid and that required fields should be provided before retrying.
+
+Artifact schema nullability must match runtime validation and provider declarations. If `reflection` accepts `null` at runtime, the Gemini function declaration must mark it nullable rather than relying on contradictory prose. If a future provider cannot represent nullable fields, the runtime contract must choose a single safe representation and update the declaration, docs, and validators together.
 
 ## Why BackendAdapter Is Not Reused
 
@@ -572,8 +598,8 @@ Interruption behavior:
 
 Transcript behavior:
 
-- Gemini `outputTranscription` remains the source of assistant text, but it is not assumed to be audio-synchronous.
-- Gemini production partial assistant transcripts are paced before entering the Session assistant-message path, so delayed word-by-word fragments do not churn the visible transcript.
+- Gemini `modelTurn.parts.text` is treated as canonical assistant text when it is the selected response surface. If no model text surface is available, Gemini `serverContent.outputTranscription` remains the public assistant transcript source, but it is marked as provider-output approximate transcript metadata and is not assumed to be canonical or audio-synchronous.
+- Gemini production partial assistant transcripts are paced as ephemeral captions only; they do not enter the Session assistant-message path until a final public transcript arrives.
 - Final `sophia.transcript` events still flush exact final text, clear the local partial, append to voice history once, and update the Session message path.
 - Legacy cascade transcript handling keeps immediate partial behavior.
 
@@ -770,6 +796,16 @@ Official Google Live API semantics confirmed the minimal behavior fixes. `toolCa
 
 This phase does not rewrite Sophia prompts, replace the runtime, add SSE replay, or fake public continuity counts. Missing public transcripts, artifacts, or builder events must be investigated by comparing provider category counts, mapper outputs, and public `sophia.*` emissions rather than treating healthy WSS/audio as sufficient proof.
 
+## Configurable Gemini Live Voice
+
+Sophia's Gemini Live prebuilt voice is configured in the `sophia-voice` service with `SOPHIA_GEMINI_LIVE_VOICE_NAME`. The setting applies only when the Gemini production route is selected and only to new Gemini Live sessions, because Gemini setup is sent once before browser audio streaming begins.
+
+Unset preserves the current explicit runtime default, `Kore`. Valid configured values are canonicalized and placed in `generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`. Invalid values do not fail session startup; the voice service falls back to `Kore` and returns safe bootstrap diagnostics: `gemini_voice_name`, `gemini_voice_source`, `gemini_voice_configured`, `gemini_voice_configured_value_valid`, and, for invalid values, `gemini_voice_diagnostic=invalid_configured_voice`. The raw invalid value is not exposed in telemetry.
+
+Allowed Gemini prebuilt voices: `Zephyr`, `Puck`, `Charon`, `Kore`, `Fenrir`, `Leda`, `Orus`, `Aoede`, `Callirrhoe`, `Autonoe`, `Enceladus`, `Iapetus`, `Umbriel`, `Algieba`, `Despina`, `Erinome`, `Algenib`, `Rasalgethi`, `Laomedeia`, `Achernar`, `Alnilam`, `Schedar`, `Gacrux`, `Pulcherrima`, `Achird`, `Zubenelgenubi`, `Vindemiatrix`, `Sadachbia`, `Sadaltager`, and `Sulafat`.
+
+Normal mic-click connect and frontend preconnect/warm bootstrap both resolve the voice through the same voice-service setup path. Changing `SOPHIA_GEMINI_LIVE_VOICE_NAME` on Render requires redeploying `sophia-voice`; gateway/frontend redeploy is not required unless their code changes.
+
 ## Phase 12.4C Voice Telemetry Export Scoping
 
 Phase 12.4C narrows the default Session voice telemetry download to a current-run diagnostic report. The export remains available from the Session telemetry panel as `reportType: "voice-telemetry-report"`, but schema version `2` intentionally excludes broad persisted app state.
@@ -944,7 +980,25 @@ Phase 12.4M closes two product-parity gaps in the default-off Gemini Live produc
 
 Legacy cascade voice turns already call DeerFlow `sophia_agent` through `runs/stream` with trusted `configurable.user_id`, `platform`, `context_mode`, and `ritual`. That path receives stored context through `UserIdentityMiddleware`, `SessionStateMiddleware`, and `Mem0MemoryMiddleware`. Gemini Live does not run the full LangGraph companion middleware chain inside the native audio session, and Gemini setup is first-message-only, so profile and memory context must be assembled before the Live setup payload is minted.
 
-The Gemini production and browser dogfood session managers now build a setup-time `<gemini_live_user_context>` block from the authenticated session user id. The block may include a preferred name inferred from the stored user identity/handoff files, a bounded `identity.md` excerpt, a bounded latest handoff excerpt, and up to four bounded Mem0 memory snippets from the same `deerflow.sophia.mem0_client.search_memories()` path used by the companion middleware. The prompt block never uses a model-supplied user id, and diagnostics expose only compact presence/count/category/length/status metadata, not raw memory text.
+The Gemini production and browser dogfood session managers build a setup-time `<gemini_live_user_context>` block from trusted session context. The block may include a preferred name, a bounded identity excerpt, a bounded latest handoff excerpt, and bounded Mem0 memory snippets. The prompt block never uses a model-supplied user id, and diagnostics expose only compact presence/count/category/length/status metadata, not raw memory text.
+
+Production Gemini voice now receives that setup context from a backend/gateway-owned bounded payload. The gateway assembles `sophia_realtime_context_v1` from backend-owned identity, latest handoff, review-metadata-filtered Mem0 snippets, and diagnostics, then passes it to the voice runtime as `realtime_context` during `POST /production/realtime/gemini/browser-sessions`. The voice runtime consumes this safe payload only; it does not import the backend Mem0 client or read local `users/**` files for production setup context. Direct dogfood use without a provided payload degrades to empty setup context.
+
+## Gemini Live Startup Preconnect
+
+Gemini production voice supports a safe bootstrap preconnect, not a provider-audio preconnect. When the Session UI is idle on the voice page, the frontend may call `POST /api/sophia/{user_id}/voice/connect` with `preconnect: true`. The gateway builds the same authenticated realtime context, asks the voice service to create a production Gemini browser session, mints a single-use ephemeral token, and returns the normal Gemini bootstrap envelope plus `preconnect: true`, `preconnect_ttl_ms`, and `preconnect_expires_at`.
+
+The browser stores that bootstrap in memory only and may reuse it for about 30 seconds on mic click. The actual user microphone permission request, Gemini WebSocket open, setup send, and provider audio streaming still happen only after the user clicks the mic. This differs from the legacy cascade warm cache, which prepares a Stream/Vision Agents call and can also warm the backend/TTS path for an active voice-agent session.
+
+If a prepared Gemini bootstrap is missing, expired, failed, for the wrong session/thread/runtime, or skipped because another active session exists, the frontend silently falls back to the normal connect path. Active-session preconnect skips return a safe `preconnect_skipped=true` envelope rather than a user-visible failure. Stale prepared Gemini sessions are closed through the existing Gemini production disconnect endpoint. The voice service also schedules best-effort cleanup for unused preconnect bootstraps and cancels that cleanup as soon as the browser relays the first provider event, which means an adopted session is not torn down mid-call.
+
+The TTL is intentionally shorter than Gemini's provider-side new-session window. Google documents ephemeral Live API tokens as single-session by default, with about one minute to start a new Live session (`newSessionExpireTime`) and about 30 minutes for messages on an established connection (`expireTime`). Sophia uses a 30-second frontend reuse TTL and a slightly longer server-side orphan cleanup window, so a stale background bootstrap never blocks mic-click fallback.
+
+Startup telemetry must preserve the existing clocks (`requestToCredentialsMs`, `sessionReadyMs`) and additionally report preconnect evidence where available: `preconnectAttempted`, `preconnectStatus` (`hit`, `miss`, `expired`, `failed`, `unsupported`, `disabled`, `skipped`), `preconnectSkippedReason`, `activeVoiceSessionExists`, `preconnectAgeMs`, and optional `preconnectSavedMs` if a future path can measure it directly. Preconnect failures and skips are diagnostic only and must not show user-visible errors.
+
+Opening greeting lifecycle: preconnect/warm only mints a bootstrap and must not open the provider WebSocket, microphone, public audio, or public greeting transcript. The mic-click/adopted Gemini session owns the first spoken assistant output. The frontend keeps a per-Gemini-session opening-greeting latch so a duplicate assistant transcript before the first user transcript is suppressed rather than rendered as a second greeting. The latch resets on a new Gemini voice-agent session.
+
+Telemetry export/runtime scoping: when current hook state has returned to idle/default legacy but the active capture window contains Gemini runtime events, export/runtime metrics prefer the capture runtime and keep the Gemini object populated. If there are no Gemini events in the active capture window, the export may report legacy/default, but it must not use default legacy state to mask captured Gemini provider, public transcript, or audio evidence.
 
 The context block is inserted after the canonical Sophia realtime instructions and before the Gemini Live spoken-turn policy overlay. The overlay remains the final Gemini-specific policy layer, while the context block gives Live enough continuity to avoid generic `User` phrasing and answer direct memory questions from concrete stored context when available.
 

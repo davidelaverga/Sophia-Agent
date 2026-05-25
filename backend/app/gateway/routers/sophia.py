@@ -12,10 +12,20 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response
+from pydantic import BaseModel, Field, ValidationError
 
 from app.gateway.auth import require_authorized_user_scope
+from app.gateway.sophia_realtime_context import (
+    REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
+    RealtimeContextRequest,
+    RealtimeContextResponse,
+    RealtimeMemoryRetrieveRequest,
+    build_realtime_memory_retrieve_error_envelope,
+    build_sophia_realtime_context,
+    retrieve_sophia_realtime_memories,
+    retrieve_sophia_realtime_memories_for_grant,
+)
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.review_metadata_store import (
@@ -32,6 +42,7 @@ router = APIRouter(
     tags=["sophia"],
     dependencies=[Depends(require_authorized_user_scope)],
 )
+internal_router = APIRouter(prefix="/internal/sophia-realtime", tags=["sophia-realtime-internal"])
 
 # Strong references to background tasks to prevent GC cancellation
 _background_tasks: set = set()
@@ -51,6 +62,43 @@ def _validate_user(user_id: str) -> str:
         return validate_user_id(user_id)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid user_id format")
+
+
+async def _parse_realtime_memory_retrieve_request(
+    request: Request,
+) -> tuple[RealtimeMemoryRetrieveRequest | None, dict[str, Any] | None]:
+    raw_body = await request.body()
+    if raw_body.strip():
+        try:
+            payload = json.loads(raw_body)
+        except json.JSONDecodeError:
+            return None, build_realtime_memory_retrieve_error_envelope(
+                status="invalid_request",
+                provider_status="error",
+                provider_reason="invalid_json_request",
+                diagnostics={"validation_error": "invalid_json_body"},
+            )
+    else:
+        payload = {}
+    try:
+        return RealtimeMemoryRetrieveRequest.model_validate(payload), None
+    except ValidationError as exc:
+        return None, build_realtime_memory_retrieve_error_envelope(
+            status="invalid_request",
+            provider_status="error",
+            provider_reason="request_validation_error",
+            diagnostics={
+                "validation_error": "schema",
+                "validation_error_count": len(exc.errors()),
+                "validation_errors": [
+                    {
+                        "loc": [str(part) for part in error.get("loc", [])],
+                        "type": str(error.get("type") or "unknown")[:80],
+                    }
+                    for error in exc.errors()[:5]
+                ],
+            },
+        )
 
 
 def _get_mem0_client():
@@ -785,7 +833,88 @@ def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> 
 
 
 # ---------------------------------------------------------------------------
-# 1. Memory List
+# 1. Realtime Context
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/{user_id}/realtime/context",
+    response_model=RealtimeContextResponse,
+    summary="Get bounded realtime context for Sophia voice",
+    description="Returns backend-owned setup context for realtime voice sessions.",
+)
+async def get_realtime_context(
+    user_id: str,
+    body: RealtimeContextRequest | None = None,
+) -> RealtimeContextResponse:
+    _validate_user(user_id)
+    return await asyncio.to_thread(
+        build_sophia_realtime_context,
+        user_id=user_id,
+        request=body or RealtimeContextRequest(),
+    )
+
+
+@router.post(
+    "/{user_id}/realtime/memories/retrieve",
+    summary="Retrieve bounded realtime memories for Sophia voice",
+    description="Executes query-only realtime memory retrieval using backend-owned Mem0 access.",
+)
+async def retrieve_realtime_memories(
+    user_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    _validate_user(user_id)
+    body, error_envelope = await _parse_realtime_memory_retrieve_request(request)
+    if error_envelope is not None:
+        return error_envelope
+    try:
+        return await asyncio.to_thread(
+            retrieve_sophia_realtime_memories,
+            user_id=user_id,
+            request=body,
+        )
+    except Exception:
+        logger.warning("sophia.realtime_memory_retrieve public callback failed", exc_info=True)
+        return build_realtime_memory_retrieve_error_envelope(
+            status="error",
+            provider_status="error",
+            provider_reason="gateway_retrieval_exception",
+            request=body,
+            diagnostics={"callback_scope": "public"},
+        )
+
+
+@internal_router.post(
+    "/memories/retrieve",
+    summary="Internal Gemini realtime memory retrieval callback",
+    description="Protected by a gateway-minted session grant; used by sophia-voice only.",
+)
+async def retrieve_realtime_memories_internal(
+    request: Request,
+    token: str | None = Header(default=None, alias=REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER),
+) -> dict[str, Any]:
+    body, error_envelope = await _parse_realtime_memory_retrieve_request(request)
+    if error_envelope is not None:
+        return error_envelope
+    try:
+        return await asyncio.to_thread(
+            retrieve_sophia_realtime_memories_for_grant,
+            token=token or "",
+            request=body,
+        )
+    except Exception:
+        logger.warning("sophia.realtime_memory_retrieve internal callback failed", exc_info=True)
+        return build_realtime_memory_retrieve_error_envelope(
+            status="error",
+            provider_status="error",
+            provider_reason="gateway_retrieval_exception",
+            request=body,
+            diagnostics={"callback_scope": "internal"},
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2. Memory List
 # ---------------------------------------------------------------------------
 
 @router.get(
@@ -823,7 +952,7 @@ async def list_memories(
 
 
 # ---------------------------------------------------------------------------
-# 2. Memory CRUD
+# 3. Memory CRUD
 # ---------------------------------------------------------------------------
 
 @router.post(

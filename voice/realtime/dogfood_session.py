@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass, field
@@ -8,7 +9,11 @@ from typing import Any
 from uuid import uuid4
 
 from voice.realtime.events import ProviderEvent, ProviderEventType
-from voice.realtime.gemini_live import build_gemini_live_setup_config
+from voice.realtime.gemini_live import (
+    ResolvedGeminiLiveVoiceConfig,
+    build_gemini_live_setup_config,
+    resolve_gemini_live_voice_name,
+)
 from voice.realtime.gemini_tool_loop import GeminiDogfoodToolError, gemini_dogfood_tool_declarations
 from voice.realtime.openai_realtime import build_openai_realtime_session_config
 from voice.realtime.runtime_factory import (
@@ -23,6 +28,7 @@ from voice.realtime.sophia_prompt import (
 )
 
 DURABLE_PUBLIC_REPLAY_TYPES = frozenset({"sophia.user_transcript", "sophia.builder_task"})
+logger = logging.getLogger(__name__)
 
 
 class RealtimeDogfoodConfigurationError(RuntimeError):
@@ -77,6 +83,7 @@ class RealtimeDogfoodSession:
     bundle: RealtimeRuntimeBundle
     raw_events: DogfoodRawEventStream
     sent_client_events: list[dict[str, Any]]
+    gemini_voice_config: ResolvedGeminiLiveVoiceConfig | None = None
     _public_payloads: list[dict[str, object]] = field(default_factory=list)
     _public_payload_observers: list[Callable[[dict[str, object]], None]] = field(default_factory=list)
     _subscribers: set[asyncio.Queue[dict[str, object] | None]] = field(default_factory=set)
@@ -105,7 +112,13 @@ class RealtimeDogfoodSession:
             return
         self._pump_task = asyncio.create_task(self._pump_public_events())
 
-    async def configure(self, instructions: str, *, model: str) -> None:
+    async def configure(
+        self,
+        instructions: str,
+        *,
+        model: str,
+        gemini_live_voice_name: str | None = None,
+    ) -> None:
         if self.runtime_mode == VoiceRuntimeMode.OPENAI_REALTIME:
             config = build_openai_realtime_session_config(
                 instructions=instructions,
@@ -113,10 +126,18 @@ class RealtimeDogfoodSession:
                 tools=_dogfood_tool_declarations(self.runtime_mode),
             )
         elif self.runtime_mode == VoiceRuntimeMode.GEMINI_LIVE:
+            resolved_voice = resolve_gemini_live_voice_name(gemini_live_voice_name)
+            self.gemini_voice_config = resolved_voice
+            if not resolved_voice.configured_value_valid:
+                logger.warning(
+                    "gemini_live.voice_config invalid_configured_voice fallback_voice=%s",
+                    resolved_voice.voice_name,
+                )
             config = build_gemini_live_setup_config(
                 instructions=instructions,
                 model=model,
                 tools=_dogfood_tool_declarations(self.runtime_mode),
+                voice_name=resolved_voice.voice_name,
             )
         else:
             raise RealtimeDogfoodConfigurationError(
@@ -263,7 +284,7 @@ class RealtimeDogfoodSession:
         self._subscribers.clear()
 
     def metadata(self) -> dict[str, object]:
-        return {
+        metadata = {
             "session_id": self.session_id,
             "user_id": self.user_id,
             "runtime": self.runtime_mode.value,
@@ -273,6 +294,9 @@ class RealtimeDogfoodSession:
             "browser_audio": "not_implemented",
             "transport": "internal_provider_event_pump",
         }
+        if self.gemini_voice_config is not None:
+            metadata.update(self.gemini_voice_config.as_public_payload())
+        return metadata
 
 
 class RealtimeDogfoodSessionManager:
@@ -320,6 +344,10 @@ class RealtimeDogfoodSessionManager:
         await session.configure(
             _instructions_for_selection(settings, selection.mode, instructions),
             model=_model_for_selection(settings, selection.mode),
+            gemini_live_voice_name=_gemini_voice_name_for_selection(
+                settings,
+                selection.mode,
+            ),
         )
         session.start_event_pump()
         self._sessions[resolved_session_id] = session
@@ -359,6 +387,16 @@ def _model_for_selection(settings: object, mode: VoiceRuntimeMode) -> str:
     if mode == VoiceRuntimeMode.GEMINI_LIVE:
         return str(getattr(settings, "gemini_live_model", "gemini-3.1-flash-live-preview"))
     return "legacy_cascade"
+
+
+def _gemini_voice_name_for_selection(
+    settings: object,
+    mode: VoiceRuntimeMode,
+) -> str | None:
+    if mode == VoiceRuntimeMode.GEMINI_LIVE:
+        value = getattr(settings, "gemini_live_voice_name", None)
+        return str(value) if value is not None else None
+    return None
 
 
 def _instructions_for_selection(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 from types import SimpleNamespace
 
 import pytest
@@ -66,6 +67,62 @@ def test_vision_agents_route_rejects_experimental_runtime_without_silent_fallbac
 
     with pytest.raises(RuntimeError, match="dogfood path"):
         validate_vision_agents_session_runtime(settings)
+
+
+def test_server_import_succeeds_when_turn_detection_events_module_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import_module = importlib.import_module
+
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.turn_detection.events":
+            raise ModuleNotFoundError("missing", name=name)
+        return original_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", import_hook)
+
+    import voice.vision_agents_compat as compat
+
+    importlib.reload(compat)
+    reloaded_server = importlib.reload(server)
+
+    assert reloaded_server.TurnEndedEvent.__name__ == "TurnEndedEvent"
+
+
+def test_tts_and_server_import_succeed_when_tts_event_symbols_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import_module = importlib.import_module
+
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.tts.events":
+            return SimpleNamespace()
+        return original_import_module(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", import_hook)
+
+    import voice.sophia_tts as sophia_tts
+    import voice.vision_agents_compat as compat
+
+    importlib.reload(compat)
+    reloaded_tts = importlib.reload(sophia_tts)
+    reloaded_server = importlib.reload(server)
+
+    assert reloaded_tts.TTSAudioEvent.__name__ == "TTSAudioEvent"
+    assert reloaded_tts.TTSErrorEvent.__name__ == "TTSErrorEvent"
+    assert reloaded_server.TTSSynthesisStartEvent.__name__ == "TTSSynthesisStartEvent"
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "voice.sophia_tts",
+        "voice.sophia_turn",
+        "voice.server",
+    ],
+)
+def test_voice_startup_modules_import(module_name: str) -> None:
+    importlib.import_module(module_name)
 
 
 @pytest.mark.anyio
@@ -138,10 +195,23 @@ async def test_create_agent_allows_experimental_runtime_startup_for_dogfood(monk
             return None
 
     class FakeAgent:
-        def __init__(self, **kwargs) -> None:  # noqa: ANN003
-            self.turn_detection = kwargs["turn_detection"]
-            self.stt = kwargs["stt"]
-            self.tts = kwargs["tts"]
+        def __init__(
+            self,
+            edge: object,
+            llm: object,
+            agent_user: object,
+            instructions: str,
+            stt: object,
+            tts: object,
+            turn_detection: object,
+        ) -> None:
+            self.edge = edge
+            self.llm = llm
+            self.agent_user = agent_user
+            self.instructions = instructions
+            self.turn_detection = turn_detection
+            self.stt = stt
+            self.tts = tts
             created["agent"] = self
 
         async def send_custom_event(self, data: dict) -> None:

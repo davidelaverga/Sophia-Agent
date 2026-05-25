@@ -17,7 +17,6 @@ import { NavRail, MobileNavBar } from './dashboard/NavRail';
 import { OnboardingSpotlight } from './dashboard/OnboardingSpotlight';
 import { RitualOrbit } from './dashboard/RitualOrbit';
 import { RitualThread } from './dashboard/RitualThread';
-import { SettingsDrawer } from './dashboard/SettingsDrawer';
 import { useSweepGlow } from './dashboard/sweepLight';
 import { CONTEXTS } from './dashboard/types';
 import { useDashboardEntryState } from './dashboard/useDashboardEntryState';
@@ -50,8 +49,6 @@ export function EnhancedFieldDashboard() {
     activeSession,
     sessionSummary,
     isStartingSession,
-    showSettingsDrawer,
-    setShowSettingsDrawer,
     showReplaceSessionConfirm,
     replaceModalRef,
     showFreshStartPrompt,
@@ -60,6 +57,7 @@ export function EnhancedFieldDashboard() {
     handleCancelReplaceSession,
     handleCallSophia,
     handleContinueSession,
+    handleOpenSettings,
     handleDismissResumeBanner,
     handleResumeBanner,
     handleStartFresh,
@@ -168,14 +166,14 @@ export function EnhancedFieldDashboard() {
         onToggleSessions={() => setSidebarExpanded((v) => !v)}
         sessionsExpanded={sidebarExpanded}
         sessionCount={openSessionCount}
-        onOpenSettings={() => setShowSettingsDrawer(true)}
+        onOpenSettings={handleOpenSettings}
       />
 
       {/* Mobile nav bar — bottom edge */}
       <MobileNavBar
         onOpenSessions={() => setShowMobileSessions(true)}
         sessionCount={openSessionCount}
-        onOpenSettings={() => setShowSettingsDrawer(true)}
+        onOpenSettings={handleOpenSettings}
       />
 
       {showReplaceSessionConfirm && (
@@ -396,11 +394,6 @@ export function EnhancedFieldDashboard() {
           <ContextTabs selected={contextMode} onSelect={handleContextSwitch} />
         </div>
       </div>
-
-      <SettingsDrawer
-        isOpen={showSettingsDrawer}
-        onClose={() => setShowSettingsDrawer(false)}
-      />
 
       {/* Mobile sessions bottom sheet */}
       <MobileBottomSheet

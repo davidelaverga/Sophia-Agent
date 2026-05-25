@@ -68,6 +68,10 @@ export type GeminiRuntimeTelemetry = {
   providerCategoryCounts: Record<string, GeminiRuntimeCategoryCounter>
   outputAudioEventCount: number
   lastOutputAudioAt: string | null
+  assistantTranscriptSource?: string | null
+  assistantTranscriptFinalSeen?: boolean
+  assistantTranscriptApproximate?: boolean | null
+  assistantTranscriptSessionId?: string | null
   staleAssistantAudioDroppedCount: number
   staleAssistantTranscriptDroppedCount: number
   staleAssistantOutputSuppressionCount: number

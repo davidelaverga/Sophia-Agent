@@ -3,7 +3,10 @@ from __future__ import annotations
 import pytest
 
 from voice.config import get_settings
-from voice.realtime.gemini_live import DEFAULT_GEMINI_LIVE_MODEL
+from voice.realtime.gemini_live import (
+    DEFAULT_GEMINI_LIVE_MODEL,
+    GEMINI_LIVE_VOICE_NAME_ENV,
+)
 from voice.realtime.openai_realtime import DEFAULT_OPENAI_REALTIME_MODEL
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 
@@ -25,6 +28,7 @@ def _set_required_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED",
         "SOPHIA_OPENAI_REALTIME_MODEL",
         "SOPHIA_GEMINI_LIVE_MODEL",
+        GEMINI_LIVE_VOICE_NAME_ENV,
     ]:
         monkeypatch.delenv(name, raising=False)
 
@@ -63,6 +67,7 @@ def test_voice_runtime_defaults_to_legacy_cascade(
     assert settings.gemini_live_adapter_enabled is False
     assert settings.gemini_production_route_enabled is False
     assert settings.gemini_live_model == DEFAULT_GEMINI_LIVE_MODEL
+    assert settings.gemini_live_voice_name is None
 
 
 def test_shadow_parity_flag_is_separate_from_backend_mode(
@@ -104,6 +109,18 @@ def test_gemini_live_adapter_flag_does_not_promote_active_runtime(
 
     assert settings.gemini_live_adapter_enabled is True
     assert settings.gemini_live_model == "gemini-3.1-flash-live-preview"
+
+
+def test_gemini_live_voice_name_is_read_without_promoting_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_required_env(monkeypatch)
+    monkeypatch.setenv(GEMINI_LIVE_VOICE_NAME_ENV, "Sulafat")
+
+    settings = get_settings()
+
+    assert settings.voice_runtime_selection.mode == VoiceRuntimeMode.LEGACY_CASCADE
+    assert settings.gemini_live_voice_name == "Sulafat"
     assert settings.selected_voice_runtime_mode == VoiceRuntimeMode.LEGACY_CASCADE
 
 

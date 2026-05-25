@@ -54,6 +54,7 @@ type UseSessionRouteExperienceParams = {
   setCurrentContext: (threadId: string, sessionId: string, runId?: string) => void;
   setMessageMetadata: (messageId: string, metadata: Partial<SophiaMessageMetadata>) => void;
   greetingAnchorId: string | null;
+  sessionVoiceMode?: boolean;
   markOffline: () => void;
   debugEnabled?: boolean;
   memoryHighlightsCount?: number;
@@ -78,6 +79,7 @@ export function useSessionRouteExperience({
   setCurrentContext,
   setMessageMetadata,
   greetingAnchorId,
+  sessionVoiceMode,
   markOffline,
   debugEnabled = false,
   memoryHighlightsCount = 0,
@@ -445,6 +447,7 @@ export function useSessionRouteExperience({
     userId,
     sessionId: hasValidBackendSessionId ? backendSessionId : undefined,
     threadId: activeThreadId,
+    voiceMode: sessionVoiceMode,
     onUserTranscriptFallback: appendVoiceUserMessage,
     appendAssistantMessage: appendVoiceAssistantMessage,
     ingestArtifacts,

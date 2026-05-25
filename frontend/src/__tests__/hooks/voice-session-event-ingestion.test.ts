@@ -20,6 +20,8 @@ describe('voice-session-event-ingestion', () => {
       responseId: null,
       segmentId: null,
       providerReceivedAt: null,
+      assistantTranscriptSource: null,
+      assistantTranscriptApproximate: null,
     });
     expect(parseAssistantTranscriptUpdate({
       text: 'Hello',
@@ -28,6 +30,8 @@ describe('voice-session-event-ingestion', () => {
       response_id: 'response-1',
       segment_id: 'gemini-segment-0',
       provider_received_at: '2026-05-24T12:00:00.000Z',
+      assistant_transcript_source: 'provider_output_transcription',
+      assistant_transcript_approximate: true,
     })).toEqual({
       text: 'Hello',
       isFinal: true,
@@ -35,6 +39,8 @@ describe('voice-session-event-ingestion', () => {
       responseId: 'response-1',
       segmentId: 'gemini-segment-0',
       providerReceivedAt: '2026-05-24T12:00:00.000Z',
+      assistantTranscriptSource: 'provider_output_transcription',
+      assistantTranscriptApproximate: true,
     });
     expect(parseAssistantTranscriptUpdate({ text: 123 })).toBeNull();
   });
@@ -153,7 +159,7 @@ describe('voice-session-event-ingestion', () => {
     }, guard)).toBe(true);
   });
 
-  it('forwards partial assistant transcripts into the Session message path', () => {
+  it('keeps partial assistant transcripts out of the Session message path', () => {
     const handlers = {
       setFinalReply: vi.fn(),
       setPartialReply: vi.fn(),
@@ -167,7 +173,7 @@ describe('voice-session-event-ingestion', () => {
     );
 
     expect(handlers.setPartialReply).toHaveBeenCalledWith('That sounds heavy.');
-    expect(handlers.onAssistantResponse).toHaveBeenCalledWith('That sounds heavy.');
+    expect(handlers.onAssistantResponse).not.toHaveBeenCalled();
     expect(handlers.setFinalReply).not.toHaveBeenCalled();
     expect(handlers.addVoiceMessage).not.toHaveBeenCalled();
   });
@@ -215,7 +221,7 @@ describe('voice-session-event-ingestion', () => {
     expect(handlers.setPartialReply).toHaveBeenNthCalledWith(1, 'Yeah, I hear');
     expect(handlers.setPartialReply).toHaveBeenNthCalledWith(2, 'Yeah, I hear you.');
     expect(handlers.setPartialReply).toHaveBeenNthCalledWith(3, 'Yeah, I can hear you fine.');
-    expect(handlers.onAssistantResponse).toHaveBeenNthCalledWith(3, 'Yeah, I can hear you fine.');
+    expect(handlers.onAssistantResponse).not.toHaveBeenCalled();
     expect(handlers.addVoiceMessage).not.toHaveBeenCalled();
   });
 
@@ -249,7 +255,7 @@ describe('voice-session-event-ingestion', () => {
 
     expect(handlers.setPartialReply).toHaveBeenCalledTimes(1);
     expect(handlers.setPartialReply).toHaveBeenCalledWith('That sounds like a lot to carry today.');
-    expect(handlers.onAssistantResponse).toHaveBeenCalledTimes(1);
+    expect(handlers.onAssistantResponse).not.toHaveBeenCalled();
 
     applyPacedAssistantTranscriptUpdate(
       { text: 'That sounds like a lot to carry today. I am here.', isFinal: true },
@@ -261,6 +267,7 @@ describe('voice-session-event-ingestion', () => {
     expect(handlers.setFinalReply).toHaveBeenCalledWith('That sounds like a lot to carry today. I am here.');
     expect(handlers.setPartialReply).toHaveBeenLastCalledWith('');
     expect(handlers.addVoiceMessage).toHaveBeenCalledWith('That sounds like a lot to carry today. I am here.');
+    expect(handlers.onAssistantResponse).toHaveBeenCalledTimes(1);
     expect(handlers.onAssistantResponse).toHaveBeenLastCalledWith('That sounds like a lot to carry today. I am here.');
   });
 });

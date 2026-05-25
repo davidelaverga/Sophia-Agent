@@ -14,11 +14,6 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from vision_agents.core import Agent, AgentLauncher, Runner, User
 from vision_agents.core.llm.llm import LLMResponseEvent
-from vision_agents.core.agents.exceptions import (
-    InvalidCallId,
-    MaxConcurrentSessionsExceeded,
-    MaxSessionsPerCallExceeded,
-)
 from vision_agents.core.runner.http.api import lifespan as runner_http_lifespan
 from vision_agents.core.runner.http.api import router as runner_http_router
 from vision_agents.core.runner.http.dependencies import (
@@ -30,13 +25,6 @@ from vision_agents.core.runner.http.dependencies import (
 )
 from vision_agents.core.runner.http.models import StartSessionResponse
 from vision_agents.core.runner.http.options import ServeOptions
-from vision_agents.core.stt.events import (
-    STTErrorEvent,
-    STTPartialTranscriptEvent,
-    STTTranscriptEvent,
-)
-from vision_agents.core.tts.events import TTSSynthesisStartEvent
-from vision_agents.core.turn_detection.events import TurnEndedEvent
 from vision_agents.plugins.deepgram import STT as DeepgramSTT
 from vision_agents.plugins.getstream import Edge as StreamEdge
 from voice.config import get_settings
@@ -66,6 +54,17 @@ from voice.sophia_llm import SophiaLLM
 from voice.sophia_turn import SophiaTurnDetection
 from voice.sophia_tts import SophiaTTS
 from voice.sse_broker import VoiceEventBroker, format_sse_event
+from voice.vision_agents_compat import (
+    InvalidCallId,
+    MaxConcurrentSessionsExceeded,
+    MaxSessionsPerCallExceeded,
+    STTErrorEvent,
+    STTPartialTranscriptEvent,
+    STTTranscriptEvent,
+    TTSSynthesisStartEvent,
+    TurnEndedEvent,
+    resolve_agent_constructor_kwargs,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -217,6 +216,18 @@ class SophiaGeminiProductionStartRequest(BaseModel):
     platform: str = Field(default="voice", description="Platform signal: voice | text | ios_voice")
     context_mode: str = Field(default="life", description="Context adaptation: work | gaming | life")
     ritual: str | None = Field(default=None, description="Active ritual: prepare | debrief | vent | reset | None")
+    realtime_context: dict[str, Any] | None = Field(
+        default=None,
+        description="Backend-owned bounded realtime context payload for setup-time continuity",
+    )
+    preconnect: bool = Field(
+        default=False,
+        description="True when this bootstrap was prepared before the user clicked the microphone",
+    )
+    preconnect_ttl_seconds: float | None = Field(
+        default=None,
+        description="Best-effort cleanup TTL for an unused preconnect bootstrap",
+    )
 
 
 session_router = APIRouter()
@@ -797,6 +808,10 @@ async def start_gemini_production_browser_session(
             platform=request.platform,
             context_mode=request.context_mode,
             ritual=request.ritual,
+            realtime_context=request.realtime_context,
+            preconnect_ttl_seconds=(
+                request.preconnect_ttl_seconds if request.preconnect else None
+            ),
         )
     except RealtimeDogfoodConfigurationError as exc:
         raise HTTPException(
@@ -1220,16 +1235,27 @@ async def create_agent(**kwargs) -> Agent:
         if offset:
             turn_detection.set_rhythm_offset(offset)
 
-    agent = Agent(
-        edge=StreamEdge(),
-        llm=llm,
-        agent_user=User(id=settings.agent_user_id, name=settings.agent_user_name),
-        instructions=settings.instructions,
-        stt=stt,
-        tts=tts,
-        turn_detection=turn_detection,
-        streaming_tts=True,
+    agent_kwargs, omitted_agent_kwargs = resolve_agent_constructor_kwargs(
+        Agent,
+        {
+            "edge": StreamEdge(),
+            "llm": llm,
+            "agent_user": User(id=settings.agent_user_id, name=settings.agent_user_name),
+            "instructions": settings.instructions,
+            "stt": stt,
+            "tts": tts,
+            "turn_detection": turn_detection,
+        },
+        {
+            "streaming_tts": True,
+        },
     )
+    if omitted_agent_kwargs:
+        logger.info(
+            "[VOICE:AGENT] Omitting unsupported Agent kwargs | kwargs=%s",
+            ",".join(omitted_agent_kwargs),
+        )
+    agent = Agent(**agent_kwargs)
     llm.attach_call_emitter(agent.send_custom_event)
 
     def _resolve_turn_transcript(participant: object, fallback: str) -> str:

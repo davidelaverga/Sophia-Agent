@@ -1,12 +1,9 @@
 from __future__ import annotations
 
-import importlib
 import logging
 import re
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from voice.realtime.sophia_prompt import (
@@ -19,10 +16,6 @@ from voice.realtime.skill_slow_state import (
     voice_skill_slow_state_seed_diagnostics,
     voice_skill_slow_state_seed_from_setup_context,
 )
-
-REPO_ROOT = Path(__file__).resolve().parents[2]
-HARNESS_PACKAGE_PATH = REPO_ROOT / "backend" / "packages" / "harness"
-USERS_DIR = REPO_ROOT / "users"
 
 IDENTITY_EXCERPT_MAX_CHARS = 1200
 HANDOFF_EXCERPT_MAX_CHARS = 900
@@ -53,12 +46,14 @@ def build_gemini_live_realtime_instructions_with_memory_context(
     platform: str = "voice",
     context_mode: str = "life",
     ritual: str | None = None,
+    backend_context: Mapping[str, Any] | None = None,
 ) -> tuple[str, GeminiLiveMemoryContext]:
     """Build Gemini Live setup instructions with trusted user context before setup minting."""
     memory_context = build_gemini_live_memory_context(
         user_id=user_id,
         context_mode=context_mode,
         ritual=ritual,
+        backend_context=backend_context,
     )
     skill_state_prompt_block = memory_context.skill_state_prompt_block or build_voice_skill_state_seed_block()
     blocks = [
@@ -80,24 +75,30 @@ def build_gemini_live_memory_context(
     user_id: str,
     context_mode: str = "life",
     ritual: str | None = None,
+    backend_context: Mapping[str, Any] | None = None,
     memory_limit: int = GEMINI_LIVE_MEMORY_LIMIT,
 ) -> GeminiLiveMemoryContext:
     diagnostics: dict[str, Any] = {
         "schema": _MEMORY_CONTEXT_SCHEMA,
         "trusted_user_context": True,
+        "backend_context_status": "missing" if backend_context is None else "provided",
+        "backend_context_schema": None,
         "injected": False,
         "preferred_name_present": False,
         "identity_excerpt_present": False,
         "handoff_excerpt_present": False,
+        "identity_available": False,
+        "handoff_available": False,
         "memory_count": 0,
         "memory_limit": memory_limit,
         "memory_categories": [],
-        "mem0_attempted": False,
-        "mem0_status": "not_attempted",
+        "mem0_attempted": backend_context is not None,
+        "mem0_status": "unavailable",
+        "mem0_provider_reason": "no_backend_context" if backend_context is None else None,
     }
 
     try:
-        safe_user_id = _validate_user_id(user_id)
+        _validate_user_id(user_id)
     except ValueError:
         diagnostics["status"] = "invalid_user_id"
         seed = VoiceSkillSlowStateSeed()
@@ -108,32 +109,35 @@ def build_gemini_live_memory_context(
             diagnostics=diagnostics,
         )
 
-    identity_text = _read_user_text_file(safe_user_id, "identity.md")
-    handoff_text = _read_user_text_file(safe_user_id, "handoffs", "latest.md")
-    preferred_name = _extract_preferred_name(identity_text) or _extract_preferred_name(handoff_text)
-    identity_excerpt = _bounded_text(identity_text, IDENTITY_EXCERPT_MAX_CHARS)
-    handoff_excerpt = _bounded_text(handoff_text, HANDOFF_EXCERPT_MAX_CHARS)
-    memories, mem0_status, mem0_provider_reason = _search_mem0_memories(
-        user_id=safe_user_id,
-        context_mode=context_mode,
-        ritual=ritual,
-        limit=memory_limit,
+    preferred_name, identity_excerpt, handoff_excerpt, memories, backend_diagnostics = (
+        _normalize_backend_context_payload(backend_context, memory_limit=memory_limit)
+    )
+    preferred_name = preferred_name or _extract_preferred_name(identity_excerpt) or _extract_preferred_name(handoff_excerpt)
+    mem0_status = _normalize_mem0_status(backend_diagnostics.get("mem0_status"))
+    mem0_provider_reason = (
+        _clean_optional_text(backend_diagnostics.get("mem0_provider_reason"))
+        or diagnostics["mem0_provider_reason"]
     )
     skill_state_seed = voice_skill_slow_state_seed_from_setup_context(
-        identity_text=identity_text,
-        handoff_text=handoff_text,
+        identity_text=identity_excerpt,
+        handoff_text=handoff_excerpt,
         memory_snippets=memories,
-        recurring_patterns_known=mem0_status == "ok",
+        recurring_patterns_known=mem0_status == "available",
     )
 
     diagnostics.update(
         {
+            "backend_context_status": _clean_optional_text(backend_diagnostics.get("context_fetch_status"))
+            or diagnostics["backend_context_status"],
+            "backend_context_schema": _clean_optional_text(backend_diagnostics.get("schema")),
             "preferred_name_present": preferred_name is not None,
             "identity_excerpt_present": identity_excerpt is not None,
             "handoff_excerpt_present": handoff_excerpt is not None,
+            "identity_available": bool(backend_diagnostics.get("identity_available", identity_excerpt is not None)),
+            "handoff_available": bool(backend_diagnostics.get("handoff_available", handoff_excerpt is not None)),
             "memory_count": len(memories),
             "memory_categories": sorted({memory.category for memory in memories if memory.category}),
-            "mem0_attempted": mem0_status != "not_configured",
+            "mem0_attempted": backend_context is not None,
             "mem0_status": mem0_status,
             "mem0_provider_reason": mem0_provider_reason,
             "identity_excerpt_chars": len(identity_excerpt or ""),
@@ -200,53 +204,27 @@ def _render_memory_context_block(
     return "\n".join(lines)
 
 
-def _search_mem0_memories(
+def _normalize_backend_context_payload(
+    payload: Mapping[str, Any] | None,
     *,
-    user_id: str,
-    context_mode: str,
-    ritual: str | None,
-    limit: int,
-) -> tuple[list[_MemorySnippet], str, str | None]:
-    try:
-        mem0_client = _mem0_client_module()
-    except Exception:
-        logger.warning("gemini_live.memory_context Mem0 search function unavailable", exc_info=True)
-        return [], "unavailable", "import_error"
+    memory_limit: int,
+) -> tuple[str | None, str | None, str | None, list[_MemorySnippet], dict[str, Any]]:
+    if not isinstance(payload, Mapping):
+        return None, None, None, [], {}
 
-    provider_status = mem0_client.memory_provider_status()
-    provider_reason = str(provider_status.get("provider_reason") or "client_unavailable")
-    if not provider_status.get("available"):
-        if provider_reason == "missing_api_key":
-            return [], "not_configured", provider_reason
-        return [], "unavailable", provider_reason
+    diagnostics = payload.get("diagnostics")
+    if not isinstance(diagnostics, Mapping):
+        diagnostics = {}
 
-    query = _memory_context_query(context_mode=context_mode, ritual=ritual)
-    try:
-        search_result = mem0_client.search_memories_with_diagnostics(
-            user_id=user_id,
-            query=query,
-            categories=_memory_categories(context_mode=context_mode, ritual=ritual),
-            context_mode=context_mode,
-            limit=limit,
-            log_content_previews=False,
-            raise_on_error=True,
-        )
-    except Exception:
-        logger.warning("gemini_live.memory_context Mem0 search failed", exc_info=True)
-        return [], "failed", "provider_exception"
-
-    raw_memories = search_result.get("memories", []) if isinstance(search_result, Mapping) else []
-    snippets = [_normalize_memory_snippet(memory) for memory in raw_memories]
-    snippets = [snippet for snippet in snippets if snippet is not None]
-    status = str(search_result.get("provider_reason") or "ok") if isinstance(search_result, Mapping) else "ok"
-    return snippets[:limit], "ok" if snippets or status in {"sdk_client", "rest_fallback", "cache_hit"} else status, status
-
-
-def _mem0_client_module() -> Any:
-    harness_path = str(HARNESS_PACKAGE_PATH)
-    if harness_path not in sys.path:
-        sys.path.insert(0, harness_path)
-    return importlib.import_module("deerflow.sophia.mem0_client")
+    preferred_name = _clean_preferred_name(_clean_optional_text(payload.get("preferred_name")) or "")
+    identity_excerpt = _bounded_text(_clean_optional_text(payload.get("identity_excerpt")), IDENTITY_EXCERPT_MAX_CHARS)
+    handoff_excerpt = _bounded_text(_clean_optional_text(payload.get("handoff_excerpt")), HANDOFF_EXCERPT_MAX_CHARS)
+    raw_memories = payload.get("memories")
+    if not isinstance(raw_memories, list):
+        raw_memories = []
+    memories = [_normalize_memory_snippet(memory) for memory in raw_memories]
+    memories = [memory for memory in memories if memory is not None]
+    return preferred_name, identity_excerpt, handoff_excerpt, memories[:memory_limit], dict(diagnostics)
 
 
 def _normalize_memory_snippet(memory: object) -> _MemorySnippet | None:
@@ -255,59 +233,21 @@ def _normalize_memory_snippet(memory: object) -> _MemorySnippet | None:
     raw_content = memory.get("content") or memory.get("memory")
     if not isinstance(raw_content, str) or not raw_content.strip():
         return None
-    category = memory.get("category")
+    category = _clean_optional_text(memory.get("category"))
     content = _collapse_whitespace(raw_content)
     if len(content) > MEMORY_SNIPPET_MAX_CHARS:
         content = content[: MEMORY_SNIPPET_MAX_CHARS - 1].rstrip() + "..."
     return _MemorySnippet(
         content=content,
-        category=category.strip() if isinstance(category, str) and category.strip() else None,
+        category=category,
     )
 
 
-def _memory_context_query(*, context_mode: str, ritual: str | None) -> str:
-    parts = [
-        "stable facts, preferred name, communication preferences, relationships, commitments, emotional patterns, and useful context about this user",
-    ]
-    normalized_context = context_mode if context_mode in {"work", "gaming", "life"} else "life"
-    parts.append(f"current context mode: {normalized_context}")
-    if ritual:
-        parts.append(f"active ritual: {ritual}")
-    return ". ".join(parts)
-
-
-def _memory_categories(*, context_mode: str, ritual: str | None) -> list[str]:
-    categories = ["fact", "preference", "relationship", "feeling", "commitment", "decision", "lesson", "pattern"]
-    if ritual:
-        categories.append("ritual_context")
-    if context_mode == "work":
-        categories.extend(["project", "colleague", "career", "deadline"])
-    elif context_mode == "gaming":
-        categories.extend(["game", "achievement", "gaming_team", "strategy"])
-    elif context_mode == "life":
-        categories.extend(["family", "health", "personal_goal", "life_event"])
-    return categories
-
-
-def _read_user_text_file(user_id: str, *segments: str) -> str | None:
-    path = _safe_user_path(user_id, *segments)
-    if not path.exists() or not path.is_file():
-        return None
-    try:
-        return path.read_text(encoding="utf-8")
-    except OSError:
-        logger.warning("gemini_live.memory_context could not read user context file %s", "/".join(segments), exc_info=True)
-        return None
-
-
-def _safe_user_path(user_id: str, *segments: str) -> Path:
-    safe_user_id = _validate_user_id(user_id)
-    target = USERS_DIR / safe_user_id / Path(*segments)
-    resolved = target.resolve()
-    base_resolved = USERS_DIR.resolve()
-    if not resolved.is_relative_to(base_resolved):
-        raise ValueError("Path traversal detected")
-    return target
+def _normalize_mem0_status(value: object) -> str:
+    status = _clean_optional_text(value)
+    if status in {"available", "missing_api_key", "unavailable", "error"}:
+        return status
+    return "unavailable"
 
 
 def _validate_user_id(user_id: str) -> str:
@@ -367,6 +307,13 @@ def _bounded_text(text: str | None, limit: int) -> str | None:
     if len(normalized) <= limit:
         return normalized
     return normalized[: limit - 1].rstrip() + "..."
+
+
+def _clean_optional_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _collapse_whitespace(value: str) -> str:

@@ -9,12 +9,14 @@ from unittest.mock import AsyncMock
 import pytest
 import voice.server as server
 from fastapi.testclient import TestClient
-from vision_agents.core.stt.events import STTTranscriptEvent
-from vision_agents.core.turn_detection.events import TurnEndedEvent
-from vision_agents.core.tts.events import TTSSynthesisStartEvent
 
 from voice.server import attach_runtime_observers
 from voice.tests.conftest import make_settings
+from voice.vision_agents_compat import (
+    STTTranscriptEvent,
+    TTSSynthesisStartEvent,
+    TurnEndedEvent,
+)
 
 
 class FakeEventBus:

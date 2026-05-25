@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+import httpx
 import pytest
 import voice.realtime.gemini_tool_loop as gemini_tool_loop
 import voice.realtime.sophia_backend_tools as sophia_backend_tools
@@ -58,20 +59,22 @@ EXPECTED_GEMINI_TOOL_NAMES = [
 ]
 
 
-def _gemini_settings():  # noqa: ANN202
+def _gemini_settings(**overrides: object):  # noqa: ANN202
     return make_settings(
         voice_runtime_mode=VoiceRuntimeMode.GEMINI_LIVE.value,
         experimental_realtime_runtime_enabled=True,
         gemini_live_adapter_enabled=True,
+        **overrides,
     )
 
 
-def _gemini_production_settings():  # noqa: ANN202
+def _gemini_production_settings(**overrides: object):  # noqa: ANN202
     return make_settings(
         voice_runtime_mode=VoiceRuntimeMode.GEMINI_LIVE.value,
         experimental_realtime_runtime_enabled=True,
         gemini_live_adapter_enabled=True,
         gemini_production_route_enabled=True,
+        **overrides,
     )
 
 
@@ -247,6 +250,43 @@ class FakeBuilderLifecycleBackend:
         raise AssertionError(f"Unexpected fake tool {tool_name}")
 
 
+def _patch_gateway_memory_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: Mapping[str, Any],
+            headers: Mapping[str, str],
+        ) -> httpx.Response:
+            requests.append(
+                {
+                    "url": url,
+                    "json": dict(json),
+                    "headers": dict(headers),
+                    "timeout": self.timeout,
+                }
+            )
+            return response
+
+    monkeypatch.setattr(gemini_tool_loop.httpx, "AsyncClient", FakeAsyncClient)
+    return requests
+
+
 class BlockingGeminiToolExecutor:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -261,6 +301,7 @@ class BlockingGeminiToolExecutor:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: dict[str, dict[str, Any]],
+        **_kwargs: Any,
     ) -> gemini_tool_loop.GeminiDogfoodToolExecution:
         self.started.set()
         await self.release.wait()
@@ -435,6 +476,16 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert fake_minter.requests[0]["setup"]["model"] == "models/gemini-3.1-flash-live-preview"
     assert fake_minter.requests[0]["setup"]["inputAudioTranscription"] == {}
     assert fake_minter.requests[0]["setup"]["outputAudioTranscription"] == {}
+    assert (
+        fake_minter.requests[0]["setup"]["generationConfig"]["speechConfig"]["voiceConfig"][
+            "prebuiltVoiceConfig"
+        ]["voiceName"]
+        == "Kore"
+    )
+    assert payload["gemini_voice_name"] == "Kore"
+    assert payload["gemini_voice_source"] == "default"
+    assert payload["gemini_voice_configured"] is False
+    assert payload["gemini_voice_configured_value_valid"] is True
     tool_declarations = fake_minter.requests[0]["setup"]["tools"][0]["functionDeclarations"]
     assert [tool["name"] for tool in tool_declarations] == EXPECTED_GEMINI_TOOL_NAMES
     assert "consult_skill" not in [tool["name"] for tool in tool_declarations]
@@ -508,6 +559,116 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     await manager.close_session("browser-gemini-1")
 
 
+@pytest.mark.anyio
+async def test_browser_session_uses_configured_gemini_live_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(gemini_live_voice_name="Sulafat"),
+        user_id="user-1",
+        session_id="browser-gemini-sulafat",
+    )
+
+    setup = fake_minter.requests[0]["setup"]
+    assert (
+        setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"][
+            "voiceName"
+        ]
+        == "Sulafat"
+    )
+    payload = browser_session.as_public_payload()
+    assert payload["gemini_voice_name"] == "Sulafat"
+    assert payload["gemini_voice_source"] == "env"
+    assert payload["gemini_voice_configured"] is True
+    assert payload["gemini_voice_configured_value_valid"] is True
+
+    await manager.close_session("browser-gemini-sulafat")
+
+
+@pytest.mark.anyio
+async def test_browser_session_invalid_gemini_live_voice_falls_back_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(gemini_live_voice_name="not-a-real-voice-secret"),
+        user_id="user-1",
+        session_id="browser-gemini-invalid-voice",
+    )
+
+    setup = fake_minter.requests[0]["setup"]
+    assert (
+        setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"][
+            "voiceName"
+        ]
+        == "Kore"
+    )
+    payload = browser_session.as_public_payload()
+    assert payload["gemini_voice_name"] == "Kore"
+    assert payload["gemini_voice_source"] == "fallback_invalid"
+    assert payload["gemini_voice_configured"] is True
+    assert payload["gemini_voice_configured_value_valid"] is False
+    assert payload["gemini_voice_diagnostic"] == "invalid_configured_voice"
+    assert "not-a-real-voice-secret" not in json.dumps(payload)
+
+    await manager.close_session("browser-gemini-invalid-voice")
+
+
+@pytest.mark.anyio
+async def test_browser_session_preconnect_uses_same_configured_gemini_live_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+    settings = _gemini_settings(gemini_live_voice_name="Aoede")
+
+    normal_session = await manager.start_browser_session(
+        settings,
+        user_id="user-1",
+        session_id="browser-gemini-normal-voice",
+    )
+    preconnect_session = await manager.start_browser_session(
+        settings,
+        user_id="user-1",
+        session_id="browser-gemini-preconnect-voice",
+        preconnect_ttl_seconds=1.0,
+    )
+
+    voice_names = [
+        request["setup"]["generationConfig"]["speechConfig"]["voiceConfig"][
+            "prebuiltVoiceConfig"
+        ]["voiceName"]
+        for request in fake_minter.requests
+    ]
+    assert voice_names == ["Aoede", "Aoede"]
+    assert normal_session.as_public_payload()["gemini_voice_name"] == "Aoede"
+    assert preconnect_session.as_public_payload()["gemini_voice_name"] == "Aoede"
+    assert preconnect_session.dogfood_session.public_payloads == ()
+
+    await manager.close_session("browser-gemini-normal-voice")
+    await manager.close_session("browser-gemini-preconnect-voice")
+
+
 def test_production_gemini_route_requires_promotion_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_gemini_env(monkeypatch)
 
@@ -528,6 +689,24 @@ async def test_production_browser_session_uses_production_public_payload(
         token_minter=fake_minter,  # type: ignore[arg-type]
     )
     manager = GeminiProductionBrowserSessionManager(dogfood_manager)
+    realtime_context = {
+        "preferred_name": "Luis",
+        "identity_excerpt": "Name: Luis\nLuis likes direct continuity cues.",
+        "handoff_excerpt": "Session initiated with Luis. Keep the opener grounded.",
+        "memories": [
+            {"id": "m1", "content": "Luis prefers crisp context.", "category": "preference"},
+        ],
+        "diagnostics": {
+            "schema": "sophia_realtime_context_v1",
+            "context_fetch_status": "ok",
+            "mem0_status": "available",
+            "mem0_provider_reason": "sdk_client",
+            "identity_available": True,
+            "handoff_available": True,
+            "memory_count": 1,
+            "memory_limit": 4,
+        },
+    }
 
     browser_session = await manager.start_browser_session(
         _gemini_production_settings(),
@@ -536,6 +715,7 @@ async def test_production_browser_session_uses_production_public_payload(
         platform="ios_voice",
         context_mode="work",
         ritual="debrief",
+        realtime_context=realtime_context,
     )
 
     payload = browser_session.as_public_payload()
@@ -550,12 +730,20 @@ async def test_production_browser_session_uses_production_public_payload(
     assert payload["disconnect_url"] == "/production/realtime/gemini/browser-sessions/gemini-prod-1"
     assert payload["memory_context"]["schema"] == "gemini_live_memory_context_v1"
     assert payload["memory_context"]["trusted_user_context"] is True
-    assert payload["memory_context"]["status"] in {"empty", "injected"}
+    assert payload["memory_context"]["status"] == "injected"
+    assert payload["memory_context"]["backend_context_schema"] == "sophia_realtime_context_v1"
+    assert payload["memory_context"]["mem0_status"] == "available"
+    assert payload["memory_context"]["identity_available"] is True
+    assert payload["memory_context"]["handoff_available"] is True
+    assert payload["memory_context"]["memory_count"] == 1
     system_instruction = fake_minter.requests[0]["setup"]["systemInstruction"]["parts"][0]["text"]
     assert "Platform: iOS voice. Respond in 1-3 sentences." in system_instruction
     assert "# Context: Work" in system_instruction
     assert "<realtime_memory_recall_guidance>" in system_instruction
     assert "New facts from this live conversation are not durable memory" in system_instruction
+    assert "<gemini_live_user_context>" in system_instruction
+    assert "Preferred name: Luis" in system_instruction
+    assert "Luis prefers crisp context." in system_instruction
     assert "### Voice Skill State" in system_instruction
     assert "challenging_growth_allowed: false" in system_instruction
     assert "<gemini_live_spoken_turn_policy>" in system_instruction
@@ -563,6 +751,58 @@ async def test_production_browser_session_uses_production_public_payload(
     assert "latest complete user utterance" in system_instruction
 
     await manager.close_session("gemini-prod-1")
+
+
+@pytest.mark.anyio
+async def test_browser_session_preconnect_cleanup_closes_unused_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-preconnect-cleanup",
+        preconnect_ttl_seconds=0.01,
+    )
+
+    assert realtime_sessions.get_session(browser_session.dogfood_session.session_id) is not None
+    await asyncio.sleep(0.05)
+    assert realtime_sessions.get_session(browser_session.dogfood_session.session_id) is None
+
+
+@pytest.mark.anyio
+async def test_browser_session_preconnect_cleanup_is_cancelled_when_adopted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-preconnect-adopted",
+        preconnect_ttl_seconds=0.01,
+    )
+
+    await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={"setupComplete": {}},
+    )
+    await asyncio.sleep(0.05)
+
+    assert realtime_sessions.get_session(browser_session.dogfood_session.session_id) is not None
+    await manager.close_session(browser_session.dogfood_session.session_id)
 
 
 @pytest.mark.anyio
@@ -613,8 +853,18 @@ async def test_browser_relay_messages_enter_existing_gemini_adapter_and_normaliz
         "sophia.turn",
     ]
     assert payloads[0]["data"] == {"text": "I had a rough day.", "utterance_id": "user-item-1"}
-    assert payloads[3]["data"] == {"text": "That sounds heavy.", "is_final": False}
-    assert payloads[4]["data"] == {"text": "That sounds heavy.", "is_final": True}
+    assert payloads[3]["data"] == {
+        "text": "That sounds heavy.",
+        "is_final": False,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
+    }
+    assert payloads[4]["data"] == {
+        "text": "That sounds heavy.",
+        "is_final": True,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
+    }
     assert all(str(payload["type"]).startswith("sophia.") for payload in payloads)
     assert "serverContent" not in json.dumps(payloads)
 
@@ -696,6 +946,69 @@ async def test_browser_relay_tool_call_executes_existing_emit_artifact_and_retur
     assert fake_builder_backend.calls == []
 
     await manager.close_session("browser-gemini-tool-loop")
+
+
+@pytest.mark.anyio
+async def test_browser_relay_emit_artifact_invalid_args_returns_concise_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-artifact-invalid",
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "artifact-call-invalid",
+                        "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+                        "args": {
+                            "session_goal": "Stay grounded.",
+                            "active_goal": "Acknowledge the user.",
+                            "next_step": "Listen for the next turn.",
+                            "takeaway": "Name was confirmed.",
+                            "reflection": None,
+                            "tone_estimate": 2.0,
+                            "tone_target": 2.5,
+                            "active_tone_band": "engagement",
+                            "skill_loaded": "active_listening",
+                            "ritual_phase": "freeform.memory_check",
+                            "voice_emotion_primary": "calm",
+                            "voice_emotion_secondary": "warm",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    function_response = response["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]
+    tool_response_text = json.dumps(function_response["response"])
+    assert function_response["response"]["ok"] is False
+    assert function_response["response"]["error_type"] == "invalid_tool_arguments"
+    assert (
+        function_response["response"]["result_summary"]
+        == "Invalid emit_artifact arguments. Provide required string fields and retry."
+    )
+    assert "ValidationError" not in tool_response_text
+    assert "Field required" not in tool_response_text
+    assert "schema" not in tool_response_text.lower()
+    assert response["tool_diagnostics"][0]["success"] is False
+    assert response["tool_diagnostics"][0]["rejection_reason"] == "invalid_tool_arguments"
+    payloads = await browser_session.dogfood_session.wait_for_public_payloads(1)
+    assert not [payload for payload in payloads if payload["type"] == "sophia.artifact"]
+
+    await manager.close_session("browser-gemini-artifact-invalid")
 
 
 @pytest.mark.anyio
@@ -1020,6 +1333,305 @@ def test_execute_realtime_retrieve_memories_ignores_model_identity_args(
     assert set(result["ignored_model_arg_names"]) == {"categories", "filters", "memory_provider", "user_id"}
     assert result["trusted_user_id_source"] == "authenticated_session_context"
     assert result["diagnostics"]["raw_memory_text_excluded"] is True
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_uses_gateway_backend_when_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gemini_tool_loop,
+        "execute_realtime_retrieve_memories",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("voice-local memory path used")),
+    )
+    captured: dict[str, Any] = {}
+    raw_memory_text = "User prefers solo, tactical gaming."
+
+    class FakeMemoryBackend:
+        async def execute(self, args: Mapping[str, Any], **kwargs: Any) -> dict[str, Any]:
+            captured["args"] = dict(args)
+            captured.update(kwargs)
+            return {
+                "ok": True,
+                "status": "success",
+                "provider_status": "available",
+                "provider_reason": "sdk_client",
+                "query": str(args["query"]),
+                "count": 1,
+                "memories": [
+                    {
+                        "text": raw_memory_text,
+                        "category": "preference",
+                        "source": "long_term_memory",
+                        "rank": 1,
+                    }
+                ],
+                "trusted_user_id_source": "authenticated_realtime_session",
+                "dynamic_retrieval_source": "gateway",
+                "diagnostics": {
+                    "schema": "sophia_realtime_memory_retrieve_v1",
+                    "tool": "retrieve_memories",
+                    "status": "success",
+                    "count": 1,
+                    "provider_status": "available",
+                    "provider_reason": "sdk_client",
+                    "raw_query_excluded": True,
+                    "raw_memory_text_excluded": True,
+                    "result_categories": ["preference"],
+                    "result_text_lengths": [len(raw_memory_text)],
+                },
+            }
+
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+        tool_executor=gemini_tool_loop.GeminiDogfoodToolExecutor(
+            memory_backend=FakeMemoryBackend(),  # type: ignore[arg-type]
+        ),
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="trusted-user-1",
+        session_id="browser-gemini-gateway-memory-tool",
+        context_mode="gaming",
+        memory_retrieval_config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "redacted-test-token",
+        },
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "memory-call-gateway",
+                        "name": "retrieve_memories",
+                        "args": {
+                            "query": "gaming preferences",
+                            "user_id": "model-supplied-user",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    assert captured["user_id"] == "trusted-user-1"
+    assert captured["session_id"] == "browser-gemini-gateway-memory-tool"
+    assert captured["context_mode"] == "gaming"
+    assert captured["config"]["endpoint_url"].endswith("/internal/sophia-realtime/memories/retrieve")
+    assert captured["args"]["user_id"] == "model-supplied-user"
+    function_response = response["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]
+    assert function_response["response"]["status"] == "success"
+    assert function_response["response"]["memories"][0]["text"] == raw_memory_text
+    assert function_response["response"]["tool_arg_user_id_ignored"] is True
+    assert response["tool_diagnostics"][0]["success"] is True
+    assert "execution_rejected" not in response["tool_diagnostics"][0]
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_backend_missing_token_degrades_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gemini_tool_loop,
+        "execute_realtime_retrieve_memories",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("voice-local memory path used")),
+    )
+    executor = gemini_tool_loop.GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        gemini_tool_loop.GeminiLiveFunctionCall(
+            call_id="memory-call-gateway-unavailable",
+            name="retrieve_memories",
+            args={"query": "what do you remember about me"},
+        ),
+        session_id="session-1",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        context_mode="life",
+        memory_retrieval_config={"endpoint_url": "https://gateway.example/internal/retrieve"},
+    )
+
+    assert execution.success is True
+    assert execution.response["status"] == "unavailable"
+    assert execution.response["provider_reason"] == "gateway_retrieval_not_configured"
+    assert execution.response["diagnostics"]["trusted_user_id_source"] == "authenticated_session_context"
+    assert execution.response["diagnostics"]["raw_memory_text_excluded"] is True
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_http_success_json_returns_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_memory_text = "User prefers solo, tactical gaming."
+    payload = {
+        "schema": "sophia_realtime_memory_retrieve_response_v1",
+        "ok": True,
+        "status": "success",
+        "query": "gaming preferences",
+        "count": 1,
+        "memories": [
+            {
+                "text": raw_memory_text,
+                "category": "preference",
+                "source": "long_term_memory",
+                "rank": 1,
+            }
+        ],
+        "provider_status": "available",
+        "provider_reason": "sdk_client",
+        "diagnostics": {
+            "schema": "sophia_realtime_memory_retrieve_v1",
+            "status": "success",
+            "count": 1,
+            "provider_status": "available",
+            "provider_reason": "sdk_client",
+            "raw_memory_text_excluded": True,
+            "result_categories": ["preference"],
+            "result_text_lengths": [len(raw_memory_text)],
+        },
+    }
+    requests = _patch_gateway_memory_response(monkeypatch, httpx.Response(200, json=payload))
+    executor = gemini_tool_loop.GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        gemini_tool_loop.GeminiLiveFunctionCall(
+            call_id="memory-call-gateway-http-success",
+            name="retrieve_memories",
+            args={"query": "gaming preferences", "user_id": "model-supplied-user"},
+        ),
+        session_id="session-1",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        context_mode="gaming",
+        memory_retrieval_config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "secret-callback-token",
+        },
+    )
+
+    assert requests[0]["url"] == "https://gateway.example/internal/sophia-realtime/memories/retrieve"
+    assert requests[0]["headers"]["X-Sophia-Realtime-Memory-Token"] == "secret-callback-token"
+    assert execution.success is True
+    assert execution.response["status"] == "success"
+    assert execution.response["memories"][0]["text"] == raw_memory_text
+    assert execution.response["dynamic_retrieval_transport"] == "gateway_http"
+    assert execution.diagnostic()["success"] is True
+    assert "execution_rejected" not in execution.diagnostic()
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_invalid_json_reports_safe_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_token = "secret-callback-token"
+    raw_memory_text = "User prefers tactical gaming."
+    body = f"<html>{secret_token} {raw_memory_text}</html>".encode()
+    response = httpx.Response(200, content=body, headers={"content-type": "text/html"})
+    _patch_gateway_memory_response(monkeypatch, response)
+    caplog.set_level("WARNING", logger=gemini_tool_loop.__name__)
+    backend = gemini_tool_loop.GeminiRealtimeMemoryHttpBackend()
+
+    result = await backend.execute(
+        {"query": "gaming preferences"},
+        user_id="trusted-user-1",
+        session_id="session-1",
+        context_mode="gaming",
+        config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve?debug_secret=1",
+            "token": secret_token,
+        },
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["provider_reason"] == "gateway_retrieval_invalid_json"
+    diagnostics = result["diagnostics"]
+    assert diagnostics["gateway_status_code"] == 200
+    assert diagnostics["gateway_content_type"] == "text/html"
+    assert diagnostics["gateway_callback_host"] == "gateway.example"
+    assert diagnostics["gateway_callback_path"] == "/internal/sophia-realtime/memories/retrieve"
+    assert diagnostics["gateway_body_preview_hash"].startswith("sha256:")
+    serialized_diagnostics = json.dumps(diagnostics)
+    assert secret_token not in serialized_diagnostics
+    assert raw_memory_text not in serialized_diagnostics
+    execution_diagnostic = gemini_tool_loop.GeminiDogfoodToolExecution(
+        call=gemini_tool_loop.GeminiLiveFunctionCall(
+            call_id="memory-call-invalid-json",
+            name="retrieve_memories",
+            args={"query": "gaming preferences"},
+        ),
+        response=result,
+        result_summary="retrieve_memories returned unavailable with 0 snippet(s).",
+    ).diagnostic()
+    assert execution_diagnostic["gateway_status_code"] == 200
+    assert execution_diagnostic["gateway_body_preview_hash"].startswith("sha256:")
+    assert secret_token not in json.dumps(execution_diagnostic)
+    assert raw_memory_text not in json.dumps(execution_diagnostic)
+    assert secret_token not in caplog.text
+    assert raw_memory_text not in caplog.text
+    assert "debug_secret" not in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [307, 404, 500])
+async def test_retrieve_memories_gateway_non_2xx_reports_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    response = httpx.Response(
+        status_code,
+        content=b"<html>not the callback json</html>",
+        headers={"content-type": "text/html"},
+    )
+    _patch_gateway_memory_response(monkeypatch, response)
+    backend = gemini_tool_loop.GeminiRealtimeMemoryHttpBackend()
+
+    result = await backend.execute(
+        {"query": "gaming preferences"},
+        user_id="trusted-user-1",
+        session_id="session-1",
+        context_mode="gaming",
+        config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "secret-callback-token",
+        },
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["provider_reason"] == "gateway_retrieval_http_error"
+    assert result["diagnostics"]["gateway_status_code"] == status_code
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_schema_mismatch_reports_distinct_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(200, json={"ok": True, "status": "success", "memories": []})
+    _patch_gateway_memory_response(monkeypatch, response)
+    backend = gemini_tool_loop.GeminiRealtimeMemoryHttpBackend()
+
+    result = await backend.execute(
+        {"query": "gaming preferences"},
+        user_id="trusted-user-1",
+        session_id="session-1",
+        context_mode="gaming",
+        config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "secret-callback-token",
+        },
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["provider_reason"] == "gateway_retrieval_schema_mismatch"
+    assert "missing:" in result["diagnostics"]["gateway_schema_mismatch"]
+    assert result["diagnostics"]["gateway_response_status"] == "success"
 
 
 @pytest.mark.anyio

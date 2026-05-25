@@ -10,6 +10,7 @@ from voice.realtime import SophiaEventNormalizer
 from voice.realtime.events import ProviderEventType
 from voice.realtime.gemini_live import (
     DEFAULT_GEMINI_LIVE_MODEL,
+    DEFAULT_GEMINI_LIVE_VOICE_NAME,
     GEMINI_LIVE_ADAPTER_FEATURE_FLAG,
     GEMINI_LIVE_CAPABILITIES,
     GEMINI_LIVE_PROVIDER_NAME,
@@ -17,6 +18,7 @@ from voice.realtime.gemini_live import (
     GeminiLiveEventMapper,
     GeminiLiveProviderSession,
     build_gemini_live_setup_config,
+    resolve_gemini_live_voice_name,
 )
 
 
@@ -38,6 +40,36 @@ def _artifact(**overrides: object) -> dict[str, object]:
     }
     artifact.update(overrides)
     return artifact
+
+
+def test_resolve_gemini_live_voice_name_preserves_current_default() -> None:
+    resolved = resolve_gemini_live_voice_name(None)
+
+    assert resolved.voice_name == DEFAULT_GEMINI_LIVE_VOICE_NAME
+    assert resolved.source == "default"
+    assert resolved.configured is False
+    assert resolved.configured_value_valid is True
+
+
+def test_resolve_gemini_live_voice_name_accepts_valid_configured_voice() -> None:
+    resolved = resolve_gemini_live_voice_name(" sulafat ")
+
+    assert resolved.voice_name == "Sulafat"
+    assert resolved.source == "env"
+    assert resolved.configured is True
+    assert resolved.configured_value_valid is True
+
+
+def test_resolve_gemini_live_voice_name_falls_back_without_raw_invalid_value() -> None:
+    resolved = resolve_gemini_live_voice_name("not-a-real-voice-secret")
+    public_payload = resolved.as_public_payload()
+
+    assert resolved.voice_name == DEFAULT_GEMINI_LIVE_VOICE_NAME
+    assert resolved.source == "fallback_invalid"
+    assert resolved.configured is True
+    assert resolved.configured_value_valid is False
+    assert resolved.diagnostic == "invalid_configured_voice"
+    assert "not-a-real-voice-secret" not in json.dumps(public_payload)
 
 
 def _payloads(provider_events: list[Any]) -> list[dict[str, Any]]:
@@ -152,15 +184,21 @@ async def test_raw_gemini_live_flow_normalizes_to_existing_sophia_events() -> No
     assert payloads[3]["data"] == {
         "text": "That sounds heavy.",
         "is_final": False,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
     }
     assert payloads[4]["data"] == {
         "text": "That sounds heavy. I'm here with you.",
         "is_final": False,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
     }
     assert payloads[5] == {"type": "sophia.artifact", "data": _artifact()}
     assert payloads[6]["data"] == {
         "text": "That sounds heavy. I'm here with you.",
         "is_final": True,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
     }
     assert all(payload["type"].startswith("sophia.") for payload in payloads)
     assert all("serverContent" not in payload["type"] for payload in payloads)
@@ -235,6 +273,8 @@ def test_output_transcription_preserves_browser_relay_source_metadata() -> None:
     assert transcript_event.data["provider_relay_sequence"] == 7
     assert transcript_event.data["provider_received_at"] == "2026-05-20T00:00:00.000Z"
     assert transcript_event.data["relay_correlation_id"] == "gemini-relay-41-outputTranscription"
+    assert transcript_event.data["assistant_transcript_source"] == "provider_output_transcription"
+    assert transcript_event.data["assistant_transcript_approximate"] is True
 
 
 def test_input_transcription_preserves_browser_relay_source_metadata() -> None:
@@ -363,6 +403,8 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
             "data": {
                 "text": "Model text. ",
                 "is_final": False,
+                "assistant_transcript_source": "model_turn_text",
+                "assistant_transcript_approximate": False,
             },
         },
         {
@@ -370,6 +412,8 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
             "data": {
                 "text": "Model text. ",
                 "is_final": True,
+                "assistant_transcript_source": "model_turn_text",
+                "assistant_transcript_approximate": False,
             },
         },
         {"type": "sophia.turn", "data": {"phase": "agent_ended"}},
@@ -527,9 +571,24 @@ def test_tool_call_continuation_uses_new_transcript_segment() -> None:
     ]
 
     assert transcript_payloads == [
-        {"text": "Let me check that.", "is_final": False},
-        {"text": "Here's what I found.", "is_final": False},
-        {"text": "Here's what I found.", "is_final": True},
+        {
+            "text": "Let me check that.",
+            "is_final": False,
+            "assistant_transcript_source": "provider_output_transcription",
+            "assistant_transcript_approximate": True,
+        },
+        {
+            "text": "Here's what I found.",
+            "is_final": False,
+            "assistant_transcript_source": "provider_output_transcription",
+            "assistant_transcript_approximate": True,
+        },
+        {
+            "text": "Here's what I found.",
+            "is_final": True,
+            "assistant_transcript_source": "provider_output_transcription",
+            "assistant_transcript_approximate": True,
+        },
     ]
 
 

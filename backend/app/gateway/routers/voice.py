@@ -8,18 +8,27 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 from dotenv import dotenv_values
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.gateway.auth import require_authorized_user_scope
+from app.gateway.sophia_realtime_context import (
+    REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA,
+    REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
+    RealtimeContextRequest,
+    build_degraded_realtime_context_response,
+    build_sophia_realtime_context,
+    create_realtime_memory_retrieval_grant,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(
@@ -35,6 +44,8 @@ VOICE_SERVER_WARMUP_TIMEOUT = 5.0
 VOICE_SERVER_DOGFOOD_TIMEOUT = 15.0
 VOICE_SERVER_DOGFOOD_SIDEBAND_TIMEOUT = 30.0
 VOICE_SERVER_PRODUCTION_RUNTIME_TIMEOUT = 15.0
+GEMINI_PRECONNECT_CLIENT_TTL_MS = 30_000
+GEMINI_PRECONNECT_SERVER_CLEANUP_SECONDS = 65.0
 GEMINI_PRODUCTION_ROUTE_FEATURE_FLAG = "SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED"
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 REPO_ROOT = BACKEND_DIR.parent
@@ -119,7 +130,11 @@ class VoiceConnectRequest(BaseModel):
     )
     preconnect: bool = Field(
         default=False,
-        description="Best-effort frontend warmup request; Gemini production ignores this to avoid opening mic sessions before user intent.",
+        description=(
+            "Best-effort frontend warmup request. Legacy returns a Stream session; "
+            "Gemini production returns a short-lived browser bootstrap without opening "
+            "the user's microphone or provider WebSocket."
+        ),
     )
 
 
@@ -165,6 +180,28 @@ class GeminiVoiceConnectResponse(BaseModel):
     ephemeral_token: dict[str, Any]
     setup: dict[str, Any]
     public_event_boundary: str | None = None
+    gemini_voice_name: str | None = None
+    gemini_voice_source: str | None = None
+    gemini_voice_configured: bool | None = None
+    gemini_voice_configured_value_valid: bool | None = None
+    gemini_voice_diagnostic: str | None = None
+    preconnect: bool = False
+    preconnect_ttl_ms: int | None = None
+    preconnect_expires_at: str | None = None
+
+
+class GeminiVoicePreconnectSkippedResponse(BaseModel):
+    """Safe no-op response for background Gemini preconnect attempts."""
+
+    runtime: Literal["gemini_live"] = "gemini_live"
+    voice_runtime: Literal["gemini_live"] = "gemini_live"
+    production_route: Literal[True] = True
+    preconnect: Literal[True] = True
+    preconnect_skipped: Literal[True] = True
+    preconnect_skipped_reason: Literal["already_active"] = "already_active"
+    active_voice_session_exists: Literal[True] = True
+    session_id: str | None = None
+    thread_id: str | None = None
 
 
 class VoiceDisconnectRequest(BaseModel):
@@ -305,7 +342,14 @@ def _get_configured_bool(name: str, default: bool = False) -> bool:
 
 
 def _get_configured_voice_runtime_mode() -> str:
-    return (_get_configured_env("SOPHIA_VOICE_RUNTIME_MODE") or "legacy_cascade").strip().lower().replace("-", "_")
+    configured_mode = _get_configured_env("SOPHIA_VOICE_RUNTIME_MODE")
+    if configured_mode:
+        return configured_mode.strip().lower().replace("-", "_")
+
+    if _gemini_production_route_enabled():
+        return "gemini_live"
+
+    return "legacy_cascade"
 
 
 def _gemini_production_route_enabled() -> bool:
@@ -541,9 +585,14 @@ def _is_gemini_production_runtime_selected() -> bool:
     return _get_configured_voice_runtime_mode() == "gemini_live"
 
 
+def _utc_iso_from_epoch(epoch_seconds: float) -> str:
+    return datetime.fromtimestamp(epoch_seconds, timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 async def _start_gemini_production_voice_session(
     user_id: str,
     body: VoiceConnectRequest,
+    request_base_url: str | None = None,
 ) -> GeminiVoiceConnectResponse:
     if not _gemini_production_route_enabled():
         raise HTTPException(
@@ -557,6 +606,12 @@ async def _start_gemini_production_voice_session(
         )
 
     session_id = f"gemini-prod-{uuid.uuid4().hex}"
+    realtime_context = await _build_gemini_realtime_context_payload(
+        user_id=user_id,
+        body=body,
+        session_id=session_id,
+        request_base_url=request_base_url,
+    )
     payload = await _proxy_voice_runtime_json(
         "POST",
         "/production/realtime/gemini/browser-sessions",
@@ -566,6 +621,15 @@ async def _start_gemini_production_voice_session(
             "platform": body.platform,
             "context_mode": body.context_mode,
             "ritual": body.ritual,
+            "realtime_context": realtime_context,
+            **(
+                {
+                    "preconnect": True,
+                    "preconnect_ttl_seconds": GEMINI_PRECONNECT_SERVER_CLEANUP_SECONDS,
+                }
+                if body.preconnect
+                else {}
+            ),
         },
     )
 
@@ -585,16 +649,90 @@ async def _start_gemini_production_voice_session(
     payload["event_stream_url"] = stream_url
     payload["provider_event_relay_url"] = _build_gemini_production_relay_url()
     payload["disconnect_url"] = _build_gemini_production_disconnect_url()
+    payload["preconnect"] = body.preconnect
+    if body.preconnect:
+        payload["preconnect_ttl_ms"] = GEMINI_PRECONNECT_CLIENT_TTL_MS
+        payload["preconnect_expires_at"] = _utc_iso_from_epoch(
+            time.time() + (GEMINI_PRECONNECT_CLIENT_TTL_MS / 1000),
+        )
     return GeminiVoiceConnectResponse.model_validate(payload)
+
+
+async def _build_gemini_realtime_context_payload(
+    *,
+    user_id: str,
+    body: VoiceConnectRequest,
+    session_id: str,
+    request_base_url: str | None = None,
+) -> dict[str, Any]:
+    request = RealtimeContextRequest(
+        thread_id=body.thread_id,
+        session_id=session_id,
+        platform=body.platform,
+        context_mode=body.context_mode,
+        ritual=body.ritual,
+    )
+    try:
+        context = await asyncio.to_thread(
+            build_sophia_realtime_context,
+            user_id=user_id,
+            request=request,
+        )
+    except Exception:
+        logger.warning("voice.gemini.context_fetch_failed user_id=%s", user_id, exc_info=True)
+        context = build_degraded_realtime_context_response(
+            reason="gateway_context_fetch_failed",
+            limit=request.limit,
+        )
+    payload = context.model_dump(mode="json")
+    diagnostics = payload.setdefault("diagnostics", {})
+    if isinstance(diagnostics, dict):
+        diagnostics["dynamic_retrieve_configured"] = False
+    if request_base_url:
+        grant = create_realtime_memory_retrieval_grant(
+            user_id=user_id,
+            session_id=session_id,
+        )
+        base_url = _canonicalize_gemini_callback_base_url(request_base_url)
+        payload["dynamic_memory_retrieval"] = {
+            "schema": REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA,
+            "endpoint_url": f"{base_url}/internal/sophia-realtime/memories/retrieve",
+            "token": grant.token,
+            "token_header": REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER,
+            "expires_at": grant.expires_at_iso,
+            "source": "gateway",
+        }
+        if isinstance(diagnostics, dict):
+            diagnostics["dynamic_retrieve_configured"] = True
+            diagnostics["dynamic_retrieve_source"] = "gateway"
+            diagnostics["dynamic_retrieve_token_excluded"] = True
+    return payload
+
+
+def _canonicalize_gemini_callback_base_url(base_url: str) -> str:
+    cleaned = base_url.strip().rstrip("/")
+    if not cleaned:
+        return cleaned
+    if "://" not in cleaned:
+        cleaned = f"https://{cleaned}"
+
+    parsed = urlsplit(cleaned)
+    if parsed.hostname and parsed.hostname.lower().endswith(".onrender.com"):
+        parsed = parsed._replace(scheme="https")
+    return urlunsplit(parsed).rstrip("/")
 
 
 @router.post(
     "/{user_id}/voice/connect",
-    response_model=VoiceConnectResponse | GeminiVoiceConnectResponse,
+    response_model=VoiceConnectResponse | GeminiVoiceConnectResponse | GeminiVoicePreconnectSkippedResponse,
     summary="Start a voice session",
     description="Generate Stream credentials for the frontend and signal the Voice Agent to join.",
 )
-async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnectResponse | GeminiVoiceConnectResponse:
+async def voice_connect(
+    user_id: str,
+    body: VoiceConnectRequest,
+    request: Request,
+) -> VoiceConnectResponse | GeminiVoiceConnectResponse | GeminiVoicePreconnectSkippedResponse:
     """Create a Stream call, dispatch the voice agent, and return credentials."""
 
     if body.platform not in SUPPORTED_PLATFORMS:
@@ -610,14 +748,26 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
         )
 
     if _is_gemini_production_runtime_selected():
-        if body.preconnect:
-            raise HTTPException(
-                status_code=409,
-                detail="Gemini production voice route does not support automatic preconnect.",
-            )
-        gemini_response = await _start_gemini_production_voice_session(user_id, body)
         lock = await _get_active_voice_session_lock(user_id)
         async with lock:
+            previous_session = _active_voice_sessions.get(user_id)
+            if body.preconnect and previous_session is not None:
+                logger.info(
+                    "voice.connect preconnect skipped because active session exists user_id=%s runtime=%s session_id=%s",
+                    user_id,
+                    previous_session.runtime,
+                    previous_session.session_id,
+                )
+                return GeminiVoicePreconnectSkippedResponse(
+                    session_id=previous_session.session_id,
+                    thread_id=body.thread_id,
+                )
+
+            gemini_response = await _start_gemini_production_voice_session(
+                user_id,
+                body,
+                request_base_url=str(request.base_url),
+            )
             previous_session = _active_voice_sessions.get(user_id)
             if previous_session is not None:
                 logger.info(
@@ -635,8 +785,9 @@ async def voice_connect(user_id: str, body: VoiceConnectRequest) -> VoiceConnect
             )
 
         logger.info(
-            "voice.connect user_id=%s runtime=gemini_live platform=%s context_mode=%s ritual=%s session_id=%s",
+            "voice.connect user_id=%s runtime=gemini_live preconnect=%s platform=%s context_mode=%s ritual=%s session_id=%s",
             user_id,
+            body.preconnect,
             body.platform,
             body.context_mode,
             body.ritual,

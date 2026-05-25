@@ -16,7 +16,45 @@ from voice.realtime.events import ProviderEvent, ProviderEventType
 
 GEMINI_LIVE_PROVIDER_NAME = "google-gemini-live"
 DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
+DEFAULT_GEMINI_LIVE_VOICE_NAME = "Kore"
+GEMINI_LIVE_VOICE_NAME_ENV = "SOPHIA_GEMINI_LIVE_VOICE_NAME"
 GEMINI_LIVE_ADAPTER_FEATURE_FLAG = "SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED"
+ALLOWED_GEMINI_LIVE_VOICE_NAMES = (
+    "Zephyr",
+    "Puck",
+    "Charon",
+    "Kore",
+    "Fenrir",
+    "Leda",
+    "Orus",
+    "Aoede",
+    "Callirrhoe",
+    "Autonoe",
+    "Enceladus",
+    "Iapetus",
+    "Umbriel",
+    "Algieba",
+    "Despina",
+    "Erinome",
+    "Algenib",
+    "Rasalgethi",
+    "Laomedeia",
+    "Achernar",
+    "Alnilam",
+    "Schedar",
+    "Gacrux",
+    "Pulcherrima",
+    "Achird",
+    "Zubenelgenubi",
+    "Vindemiatrix",
+    "Sadachbia",
+    "Sadaltager",
+    "Sulafat",
+)
+_GEMINI_LIVE_VOICE_NAMES_BY_CASEFOLD = {
+    voice_name.casefold(): voice_name
+    for voice_name in ALLOWED_GEMINI_LIVE_VOICE_NAMES
+}
 
 GEMINI_LIVE_CAPABILITIES = ProviderCapabilities(
     native_audio_input=True,
@@ -79,6 +117,58 @@ GeminiLiveMappingObserver = Callable[[Mapping[str, Any], list[ProviderEvent]], N
 RawGeminiLiveEvents = AsyncIterable[Mapping[str, Any]] | Iterable[Mapping[str, Any]]
 
 
+@dataclass(frozen=True)
+class ResolvedGeminiLiveVoiceConfig:
+    voice_name: str
+    source: str
+    configured: bool
+    configured_value_valid: bool
+    diagnostic: str | None = None
+
+    def as_public_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "gemini_voice_name": self.voice_name,
+            "gemini_voice_source": self.source,
+            "gemini_voice_configured": self.configured,
+            "gemini_voice_configured_value_valid": self.configured_value_valid,
+        }
+        if self.diagnostic:
+            payload["gemini_voice_diagnostic"] = self.diagnostic
+        return payload
+
+
+def resolve_gemini_live_voice_name(
+    configured_value: str | None,
+) -> ResolvedGeminiLiveVoiceConfig:
+    configured = (configured_value or "").strip()
+    if not configured:
+        return ResolvedGeminiLiveVoiceConfig(
+            voice_name=DEFAULT_GEMINI_LIVE_VOICE_NAME,
+            source="default",
+            configured=False,
+            configured_value_valid=True,
+        )
+
+    canonical_voice_name = _GEMINI_LIVE_VOICE_NAMES_BY_CASEFOLD.get(
+        configured.casefold()
+    )
+    if canonical_voice_name is not None:
+        return ResolvedGeminiLiveVoiceConfig(
+            voice_name=canonical_voice_name,
+            source="env",
+            configured=True,
+            configured_value_valid=True,
+        )
+
+    return ResolvedGeminiLiveVoiceConfig(
+        voice_name=DEFAULT_GEMINI_LIVE_VOICE_NAME,
+        source="fallback_invalid",
+        configured=True,
+        configured_value_valid=False,
+        diagnostic="invalid_configured_voice",
+    )
+
+
 class GeminiLiveAdapterDisabledError(RuntimeError):
     """Raised when code tries to construct the inactive adapter without its flag."""
 
@@ -110,6 +200,7 @@ class GeminiLiveEventMapper:
     _audio_started_response_ids: set[str] = field(default_factory=set)
     _audio_ended_response_ids: set[str] = field(default_factory=set)
     _assistant_text_source_by_response: dict[str, str] = field(default_factory=dict)
+    _assistant_last_text_source_by_response: dict[str, str] = field(default_factory=dict)
     _assistant_text_seen_response_ids: set[str] = field(default_factory=set)
     _transcript_segment_index_by_response: dict[str, int] = field(default_factory=dict)
     _assistant_final_response_ids: set[str] = field(default_factory=set)
@@ -387,7 +478,10 @@ class GeminiLiveEventMapper:
             events.append(
                 self._event(
                     ProviderEventType.ASSISTANT_TEXT_FINAL,
-                    {"provider_event_name": "serverContent.generationComplete"},
+                    {
+                        "provider_event_name": "serverContent.generationComplete",
+                        **self._assistant_transcript_response_metadata(response_id),
+                    },
                     response_id=response_id,
                     turn_id=response_id,
                     raw=raw,
@@ -416,7 +510,10 @@ class GeminiLiveEventMapper:
             events.append(
                 self._event(
                     ProviderEventType.ASSISTANT_TEXT_FINAL,
-                    {"provider_event_name": "serverContent.turnComplete"},
+                    {
+                        "provider_event_name": "serverContent.turnComplete",
+                        **self._assistant_transcript_response_metadata(response_id),
+                    },
                     response_id=response_id,
                     turn_id=response_id,
                     raw=raw,
@@ -637,11 +734,13 @@ class GeminiLiveEventMapper:
             ]
         if not self._accept_assistant_text_source(response_id, source):
             return []
+        self._assistant_last_text_source_by_response[response_id] = source
         data = {
             "text": text,
             "is_delta": True,
             "source": source,
             "provider_event_name": provider_event_name,
+            **self._assistant_transcript_source_metadata(source),
         }
         if source == "output_transcription":
             self._assistant_text_seen_response_ids.add(response_id)
@@ -668,6 +767,25 @@ class GeminiLiveEventMapper:
             self._assistant_text_source_by_response[response_id] = source
             return True
         return selected_source == source
+
+    def _assistant_transcript_source_metadata(self, source: str | None) -> dict[str, Any]:
+        if source == "output_transcription":
+            return {
+                "assistant_transcript_source": "provider_output_transcription",
+                "assistant_transcript_approximate": True,
+            }
+        if source == "model_turn_text":
+            return {
+                "assistant_transcript_source": "model_turn_text",
+                "assistant_transcript_approximate": False,
+            }
+        return {}
+
+    def _assistant_transcript_response_metadata(self, response_id: str) -> dict[str, Any]:
+        return self._assistant_transcript_source_metadata(
+            self._assistant_text_source_by_response.get(response_id)
+            or self._assistant_last_text_source_by_response.get(response_id)
+        )
 
     def _transcript_segment_id(self, response_id: str) -> str:
         segment_index = self._transcript_segment_index_by_response.get(response_id, 0)
@@ -882,7 +1000,7 @@ def build_gemini_live_setup_config(
     model: str = DEFAULT_GEMINI_LIVE_MODEL,
     response_modalities: Iterable[str] = ("AUDIO",),
     tools: Iterable[Mapping[str, Any]] | None = None,
-    voice_name: str | None = "Kore",
+    voice_name: str | None = DEFAULT_GEMINI_LIVE_VOICE_NAME,
     input_audio_transcription: bool = True,
     output_audio_transcription: bool = True,
 ) -> dict[str, object]:

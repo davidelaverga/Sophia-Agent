@@ -3,16 +3,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import voice.realtime.gemini_memory_context as gemini_memory_context
 from voice.realtime.gemini_live import build_gemini_live_setup_config
 from voice.realtime.gemini_memory_context import (
     build_gemini_live_memory_context,
     build_gemini_live_realtime_instructions_with_memory_context,
 )
 from voice.realtime.sophia_prompt import (
+    CORE_SKILL_FILES,
     EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
     GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
+    REPO_ROOT,
     REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE,
+    SOPHIA_AGENT_MIDDLEWARE_PATH,
     build_gemini_live_realtime_instructions,
     build_gemini_live_realtime_setup_instructions,
     build_gemini_live_spoken_turn_policy_overlay,
@@ -40,6 +42,54 @@ EMOTIONAL_SKILL_NAMES = [
     "identity_fluidity_support",
     "celebrating_breakthrough",
 ]
+
+
+def test_realtime_prompt_source_files_exist_for_voice_runtime() -> None:
+    assert {path.name for path in CORE_SKILL_FILES} == {
+        "soul.md",
+        "voice.md",
+        "techniques.md",
+        "AGENTS.md",
+    }
+
+    for path in CORE_SKILL_FILES:
+        assert path.is_file(), f"Missing realtime prompt source: {path}"
+
+    assert (SOPHIA_AGENT_MIDDLEWARE_PATH / "platform_context.py").is_file()
+    assert (SOPHIA_AGENT_MIDDLEWARE_PATH / "artifact.py").is_file()
+    assert build_sophia_realtime_instructions()
+
+
+def test_voice_dockerfile_copies_realtime_prompt_sources() -> None:
+    dockerfile = (REPO_ROOT / "voice" / "Dockerfile").read_text(encoding="utf-8")
+    dockerignore = (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+    assert "COPY skills/public/sophia/ ./skills/public/sophia/" in dockerfile
+    assert (
+        "COPY backend/packages/harness/deerflow/agents/sophia_agent/middlewares/"
+        "platform_context.py"
+    ) in dockerfile
+    assert (
+        "COPY backend/packages/harness/deerflow/agents/sophia_agent/middlewares/"
+        "artifact.py"
+    ) in dockerfile
+    assert "!skills/public/sophia/**" in dockerignore
+
+
+def test_voice_dockerfile_copies_dependency_safe_tool_contracts() -> None:
+    dockerfile = (REPO_ROOT / "voice" / "Dockerfile").read_text(encoding="utf-8")
+
+    for contract_path in [
+        "backend/packages/harness/deerflow/__init__.py",
+        "backend/packages/harness/deerflow/sophia/__init__.py",
+        "backend/packages/harness/deerflow/sophia/tools/__init__.py",
+        "backend/packages/harness/deerflow/sophia/tools/emit_artifact_contract.py",
+        "backend/packages/harness/deerflow/sophia/tools/builder_lifecycle_contract.py",
+        "backend/packages/harness/deerflow/sophia/tools/retrieve_memories_contract.py",
+    ]:
+        assert f"COPY {contract_path}" in dockerfile
+
+    assert 'ENV PYTHONPATH="/app/backend/packages/harness:${PYTHONPATH}"' in dockerfile
 
 
 def _system_instruction_text(setup: dict[str, Any]) -> str:
@@ -216,6 +266,12 @@ def test_gemini_live_spoken_turn_policy_contains_required_rules() -> None:
         "artifact/tool obligations",
         "do not mention artifact bookkeeping aloud",
         "internal bookkeeping",
+        "hidden reasoning",
+        "tool-repair attempts",
+        "validation errors",
+        "thought:",
+        "emit artifact correction attempt",
+        "repair silently through the structured tool path",
     ]:
         assert expected in overlay
 
@@ -340,33 +396,28 @@ def test_gemini_live_instruction_sources_append_overlay_source() -> None:
     assert "skills/public/sophia/rituals/debrief.md" in sources
 
 
-def test_gemini_live_memory_context_uses_trusted_user_files_before_overlay(tmp_path, monkeypatch) -> None:
-    user_dir = tmp_path / "user-1"
-    (user_dir / "handoffs").mkdir(parents=True)
-    (user_dir / "identity.md").write_text(
-        "Name: Luis\nLuis responds well to direct acknowledgment before emotional probes.",
-        encoding="utf-8",
-    )
-    (user_dir / "handoffs" / "latest.md").write_text(
-        "Session initiated with Luis. Wait for him to name what matters.",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(gemini_memory_context, "USERS_DIR", tmp_path)
-
-    class MissingMem0Client:
-        @staticmethod
-        def memory_provider_status() -> dict[str, object]:
-            return {
-                "available": False,
-                "provider_status": "unavailable",
-                "provider_reason": "missing_api_key",
-            }
-
-    monkeypatch.setattr(gemini_memory_context, "_mem0_client_module", lambda: MissingMem0Client)
-
+def test_gemini_live_memory_context_uses_backend_payload_before_overlay() -> None:
     prompt, context = build_gemini_live_realtime_instructions_with_memory_context(
         user_id="user-1",
         context_mode="life",
+        backend_context={
+            "preferred_name": "Luis",
+            "identity_excerpt": (
+                "Name: Luis\nLuis responds well to direct acknowledgment before emotional probes."
+            ),
+            "handoff_excerpt": "Session initiated with Luis. Wait for him to name what matters.",
+            "memories": [],
+            "diagnostics": {
+                "schema": "sophia_realtime_context_v1",
+                "context_fetch_status": "ok",
+                "mem0_status": "missing_api_key",
+                "mem0_provider_reason": "missing_api_key",
+                "identity_available": True,
+                "handoff_available": True,
+                "memory_count": 0,
+                "memory_limit": 4,
+            },
+        },
     )
 
     assert "<gemini_live_user_context>" in prompt
@@ -382,54 +433,43 @@ def test_gemini_live_memory_context_uses_trusted_user_files_before_overlay(tmp_p
     assert prompt.index("### Voice Skill State") < prompt.index("<gemini_live_spoken_turn_policy>")
     assert context.diagnostics["trusted_user_context"] is True
     assert context.diagnostics["injected"] is True
+    assert context.diagnostics["backend_context_status"] == "ok"
+    assert context.diagnostics["backend_context_schema"] == "sophia_realtime_context_v1"
     assert context.diagnostics["preferred_name_present"] is True
-    assert context.diagnostics["mem0_status"] == "not_configured"
+    assert context.diagnostics["identity_available"] is True
+    assert context.diagnostics["handoff_available"] is True
+    assert context.diagnostics["mem0_status"] == "missing_api_key"
     assert context.diagnostics["mem0_provider_reason"] == "missing_api_key"
     assert context.diagnostics["skill_state"]["schema"] == "voice_skill_state_seed_v1"
     assert context.diagnostics["skill_state"]["challenging_growth_allowed"] is False
 
 
-def test_gemini_live_memory_context_fetches_bounded_mem0_memories(monkeypatch) -> None:
-    calls: list[dict[str, object]] = []
-
-    class FakeMem0Client:
-        @staticmethod
-        def memory_provider_status() -> dict[str, object]:
-            return {
-                "available": True,
-                "provider_status": "available",
-                "provider_reason": "sdk_client",
-            }
-
-        @staticmethod
-        def search_memories_with_diagnostics(**kwargs):  # noqa: ANN202
-            calls.append(dict(kwargs))
-            return {
-                "memories": [
-                    {"content": "Luis prefers direct, concrete acknowledgments.", "category": "preference"},
-                    {"content": "Luis is working through a difficult career decision.", "category": "decision"},
-                    {"content": "Luis uses technical detail as a processing tool.", "category": "pattern"},
-                    {"content": "Short pauses land better than stacked questions.", "category": "preference"},
-                    {"content": "This fifth memory should be outside the configured limit.", "category": "fact"},
-                ],
-                "provider_status": "available",
-                "provider_reason": "sdk_client",
-                "cache_status": "miss",
-            }
-
-    monkeypatch.setattr(gemini_memory_context, "_mem0_client_module", lambda: FakeMem0Client)
+def test_gemini_live_memory_context_uses_bounded_backend_mem0_memories() -> None:
     context = build_gemini_live_memory_context(
         user_id="user-1",
         context_mode="work",
         ritual="debrief",
+        backend_context={
+            "memories": [
+                {"content": "Luis prefers direct, concrete acknowledgments.", "category": "preference"},
+                {"content": "Luis is working through a difficult career decision.", "category": "decision"},
+                {"content": "Luis uses technical detail as a processing tool.", "category": "pattern"},
+                {"content": "Short pauses land better than stacked questions.", "category": "preference"},
+                {"content": "This fifth memory should be outside the configured limit.", "category": "fact"},
+            ],
+            "diagnostics": {
+                "schema": "sophia_realtime_context_v1",
+                "context_fetch_status": "ok",
+                "mem0_status": "available",
+                "mem0_provider_reason": "sdk_client",
+                "identity_available": False,
+                "handoff_available": False,
+                "memory_count": 5,
+                "memory_limit": 4,
+            },
+        },
     )
 
-    assert calls[0]["user_id"] == "user-1"
-    assert calls[0]["limit"] == 4
-    assert calls[0]["log_content_previews"] is False
-    assert calls[0]["raise_on_error"] is True
-    assert "preference" in calls[0]["categories"]
-    assert "ritual_context" in calls[0]["categories"]
     assert context.prompt_block is not None
     assert context.skill_state_prompt_block is not None
     assert context.prompt_block.count("- [") == 4
@@ -443,6 +483,32 @@ def test_gemini_live_memory_context_fetches_bounded_mem0_memories(monkeypatch) -
     assert context.diagnostics["skill_state"]["recurring_pattern_count"] == 1
     assert context.diagnostics["skill_state"]["raw_unbounded_memory_text_included"] is False
     assert "Luis prefers" not in str(context.diagnostics)
+
+
+def test_gemini_live_memory_context_degrades_without_backend_payload() -> None:
+    context = build_gemini_live_memory_context(user_id="user-1")
+
+    assert context.prompt_block is None
+    assert context.skill_state_prompt_block is not None
+    assert context.diagnostics["status"] == "empty"
+    assert context.diagnostics["backend_context_status"] == "missing"
+    assert context.diagnostics["mem0_status"] == "unavailable"
+    assert context.diagnostics["mem0_provider_reason"] == "no_backend_context"
+    assert context.diagnostics["memory_count"] == 0
+    assert context.diagnostics["skill_state"]["challenging_growth_allowed"] is False
+
+
+def test_gemini_live_memory_context_no_longer_imports_backend_mem0_client() -> None:
+    source = (
+        Path(__file__).resolve().parents[1]
+        / "realtime"
+        / "gemini_memory_context.py"
+    ).read_text(encoding="utf-8")
+
+    assert "deerflow.sophia.mem0_client" not in source
+    assert "_mem0_client_module" not in source
+    assert "_search_mem0_memories" not in source
+    assert "USERS_DIR" not in source
 
 
 def test_debug_rendered_gemini_prompt_includes_strengthened_overlay() -> None:
