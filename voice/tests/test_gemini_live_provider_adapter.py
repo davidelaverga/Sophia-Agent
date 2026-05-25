@@ -10,6 +10,7 @@ from voice.realtime import SophiaEventNormalizer
 from voice.realtime.events import ProviderEventType
 from voice.realtime.gemini_live import (
     DEFAULT_GEMINI_LIVE_MODEL,
+    DEFAULT_GEMINI_LIVE_VOICE_NAME,
     GEMINI_LIVE_ADAPTER_FEATURE_FLAG,
     GEMINI_LIVE_CAPABILITIES,
     GEMINI_LIVE_PROVIDER_NAME,
@@ -17,6 +18,7 @@ from voice.realtime.gemini_live import (
     GeminiLiveEventMapper,
     GeminiLiveProviderSession,
     build_gemini_live_setup_config,
+    resolve_gemini_live_voice_name,
 )
 
 
@@ -38,6 +40,36 @@ def _artifact(**overrides: object) -> dict[str, object]:
     }
     artifact.update(overrides)
     return artifact
+
+
+def test_resolve_gemini_live_voice_name_preserves_current_default() -> None:
+    resolved = resolve_gemini_live_voice_name(None)
+
+    assert resolved.voice_name == DEFAULT_GEMINI_LIVE_VOICE_NAME
+    assert resolved.source == "default"
+    assert resolved.configured is False
+    assert resolved.configured_value_valid is True
+
+
+def test_resolve_gemini_live_voice_name_accepts_valid_configured_voice() -> None:
+    resolved = resolve_gemini_live_voice_name(" sulafat ")
+
+    assert resolved.voice_name == "Sulafat"
+    assert resolved.source == "env"
+    assert resolved.configured is True
+    assert resolved.configured_value_valid is True
+
+
+def test_resolve_gemini_live_voice_name_falls_back_without_raw_invalid_value() -> None:
+    resolved = resolve_gemini_live_voice_name("not-a-real-voice-secret")
+    public_payload = resolved.as_public_payload()
+
+    assert resolved.voice_name == DEFAULT_GEMINI_LIVE_VOICE_NAME
+    assert resolved.source == "fallback_invalid"
+    assert resolved.configured is True
+    assert resolved.configured_value_valid is False
+    assert resolved.diagnostic == "invalid_configured_voice"
+    assert "not-a-real-voice-secret" not in json.dumps(public_payload)
 
 
 def _payloads(provider_events: list[Any]) -> list[dict[str, Any]]:

@@ -796,6 +796,16 @@ Official Google Live API semantics confirmed the minimal behavior fixes. `toolCa
 
 This phase does not rewrite Sophia prompts, replace the runtime, add SSE replay, or fake public continuity counts. Missing public transcripts, artifacts, or builder events must be investigated by comparing provider category counts, mapper outputs, and public `sophia.*` emissions rather than treating healthy WSS/audio as sufficient proof.
 
+## Configurable Gemini Live Voice
+
+Sophia's Gemini Live prebuilt voice is configured in the `sophia-voice` service with `SOPHIA_GEMINI_LIVE_VOICE_NAME`. The setting applies only when the Gemini production route is selected and only to new Gemini Live sessions, because Gemini setup is sent once before browser audio streaming begins.
+
+Unset preserves the current explicit runtime default, `Kore`. Valid configured values are canonicalized and placed in `generationConfig.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName`. Invalid values do not fail session startup; the voice service falls back to `Kore` and returns safe bootstrap diagnostics: `gemini_voice_name`, `gemini_voice_source`, `gemini_voice_configured`, `gemini_voice_configured_value_valid`, and, for invalid values, `gemini_voice_diagnostic=invalid_configured_voice`. The raw invalid value is not exposed in telemetry.
+
+Allowed Gemini prebuilt voices: `Zephyr`, `Puck`, `Charon`, `Kore`, `Fenrir`, `Leda`, `Orus`, `Aoede`, `Callirrhoe`, `Autonoe`, `Enceladus`, `Iapetus`, `Umbriel`, `Algieba`, `Despina`, `Erinome`, `Algenib`, `Rasalgethi`, `Laomedeia`, `Achernar`, `Alnilam`, `Schedar`, `Gacrux`, `Pulcherrima`, `Achird`, `Zubenelgenubi`, `Vindemiatrix`, `Sadachbia`, `Sadaltager`, and `Sulafat`.
+
+Normal mic-click connect and frontend preconnect/warm bootstrap both resolve the voice through the same voice-service setup path. Changing `SOPHIA_GEMINI_LIVE_VOICE_NAME` on Render requires redeploying `sophia-voice`; gateway/frontend redeploy is not required unless their code changes.
+
 ## Phase 12.4C Voice Telemetry Export Scoping
 
 Phase 12.4C narrows the default Session voice telemetry download to a current-run diagnostic report. The export remains available from the Session telemetry panel as `reportType: "voice-telemetry-report"`, but schema version `2` intentionally excludes broad persisted app state.

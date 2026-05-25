@@ -16,7 +16,45 @@ from voice.realtime.events import ProviderEvent, ProviderEventType
 
 GEMINI_LIVE_PROVIDER_NAME = "google-gemini-live"
 DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
+DEFAULT_GEMINI_LIVE_VOICE_NAME = "Kore"
+GEMINI_LIVE_VOICE_NAME_ENV = "SOPHIA_GEMINI_LIVE_VOICE_NAME"
 GEMINI_LIVE_ADAPTER_FEATURE_FLAG = "SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED"
+ALLOWED_GEMINI_LIVE_VOICE_NAMES = (
+    "Zephyr",
+    "Puck",
+    "Charon",
+    "Kore",
+    "Fenrir",
+    "Leda",
+    "Orus",
+    "Aoede",
+    "Callirrhoe",
+    "Autonoe",
+    "Enceladus",
+    "Iapetus",
+    "Umbriel",
+    "Algieba",
+    "Despina",
+    "Erinome",
+    "Algenib",
+    "Rasalgethi",
+    "Laomedeia",
+    "Achernar",
+    "Alnilam",
+    "Schedar",
+    "Gacrux",
+    "Pulcherrima",
+    "Achird",
+    "Zubenelgenubi",
+    "Vindemiatrix",
+    "Sadachbia",
+    "Sadaltager",
+    "Sulafat",
+)
+_GEMINI_LIVE_VOICE_NAMES_BY_CASEFOLD = {
+    voice_name.casefold(): voice_name
+    for voice_name in ALLOWED_GEMINI_LIVE_VOICE_NAMES
+}
 
 GEMINI_LIVE_CAPABILITIES = ProviderCapabilities(
     native_audio_input=True,
@@ -77,6 +115,58 @@ _JSONISH_TOOL_SYNTAX_LEAK_RE = re.compile(
 GeminiLiveSender = Callable[[dict[str, Any]], Awaitable[None]]
 GeminiLiveMappingObserver = Callable[[Mapping[str, Any], list[ProviderEvent]], None]
 RawGeminiLiveEvents = AsyncIterable[Mapping[str, Any]] | Iterable[Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
+class ResolvedGeminiLiveVoiceConfig:
+    voice_name: str
+    source: str
+    configured: bool
+    configured_value_valid: bool
+    diagnostic: str | None = None
+
+    def as_public_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "gemini_voice_name": self.voice_name,
+            "gemini_voice_source": self.source,
+            "gemini_voice_configured": self.configured,
+            "gemini_voice_configured_value_valid": self.configured_value_valid,
+        }
+        if self.diagnostic:
+            payload["gemini_voice_diagnostic"] = self.diagnostic
+        return payload
+
+
+def resolve_gemini_live_voice_name(
+    configured_value: str | None,
+) -> ResolvedGeminiLiveVoiceConfig:
+    configured = (configured_value or "").strip()
+    if not configured:
+        return ResolvedGeminiLiveVoiceConfig(
+            voice_name=DEFAULT_GEMINI_LIVE_VOICE_NAME,
+            source="default",
+            configured=False,
+            configured_value_valid=True,
+        )
+
+    canonical_voice_name = _GEMINI_LIVE_VOICE_NAMES_BY_CASEFOLD.get(
+        configured.casefold()
+    )
+    if canonical_voice_name is not None:
+        return ResolvedGeminiLiveVoiceConfig(
+            voice_name=canonical_voice_name,
+            source="env",
+            configured=True,
+            configured_value_valid=True,
+        )
+
+    return ResolvedGeminiLiveVoiceConfig(
+        voice_name=DEFAULT_GEMINI_LIVE_VOICE_NAME,
+        source="fallback_invalid",
+        configured=True,
+        configured_value_valid=False,
+        diagnostic="invalid_configured_voice",
+    )
 
 
 class GeminiLiveAdapterDisabledError(RuntimeError):
@@ -882,7 +972,7 @@ def build_gemini_live_setup_config(
     model: str = DEFAULT_GEMINI_LIVE_MODEL,
     response_modalities: Iterable[str] = ("AUDIO",),
     tools: Iterable[Mapping[str, Any]] | None = None,
-    voice_name: str | None = "Kore",
+    voice_name: str | None = DEFAULT_GEMINI_LIVE_VOICE_NAME,
     input_audio_transcription: bool = True,
     output_audio_transcription: bool = True,
 ) -> dict[str, object]:

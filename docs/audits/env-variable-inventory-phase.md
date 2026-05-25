@@ -120,6 +120,7 @@ Local env files were parsed for variable names only. No values are included in t
 | `SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED` | voice | Required for Gemini Live runtime | `voice/config.py`, `voice/realtime/gemini_live.py` | ACTIVE_OPTIONAL | high | Gate separate from runtime mode. |
 | `SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED` | voice, gateway voice route | Required only to promote Gemini on production route | `voice/config.py`, `backend/app/gateway/routers/voice.py` | ACTIVE_OPTIONAL | high | Separate promotion gate. |
 | `SOPHIA_GEMINI_LIVE_MODEL` | voice | Optional | `voice/config.py`, `.env.example` | ACTIVE_OPTIONAL | high | Gemini Live model override. |
+| `SOPHIA_GEMINI_LIVE_VOICE_NAME` | voice | Optional | `voice/config.py`, `voice/realtime/gemini_live.py`, `.env.example` | ACTIVE_OPTIONAL | medium | Gemini Live prebuilt voice override for new sessions. Unset preserves `Kore`; invalid values fall back safely and are reported through `gemini_voice_*` diagnostics. |
 | `SOPHIA_VOICE_REALTIME_SHADOW_PARITY_ENABLED` | voice | Optional/local validation | `voice/config.py`, `voice/realtime/runtime_selection.py` | ACTIVE_OPTIONAL | high | Only valid with legacy cascade. |
 | `CORS_ORIGINS` | gateway | Optional | `backend/app/gateway/app.py`, `backend/app/gateway/config.py` | ACTIVE_OPTIONAL | high | Gateway CORS list. |
 | `GATEWAY_HOST` | gateway | Optional | `backend/app/gateway/config.py` | ACTIVE_OPTIONAL | high | Local gateway bind override. |

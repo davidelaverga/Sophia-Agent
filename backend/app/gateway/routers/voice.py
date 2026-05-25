@@ -180,6 +180,11 @@ class GeminiVoiceConnectResponse(BaseModel):
     ephemeral_token: dict[str, Any]
     setup: dict[str, Any]
     public_event_boundary: str | None = None
+    gemini_voice_name: str | None = None
+    gemini_voice_source: str | None = None
+    gemini_voice_configured: bool | None = None
+    gemini_voice_configured_value_valid: bool | None = None
+    gemini_voice_diagnostic: str | None = None
     preconnect: bool = False
     preconnect_ttl_ms: int | None = None
     preconnect_expires_at: str | None = None

@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 from voice.realtime.gemini_live import (
     DEFAULT_GEMINI_LIVE_MODEL,
     GEMINI_LIVE_ADAPTER_FEATURE_FLAG,
+    GEMINI_LIVE_VOICE_NAME_ENV,
 )
 from voice.realtime.openai_realtime import (
     DEFAULT_OPENAI_REALTIME_MODEL,
@@ -131,6 +132,7 @@ class VoiceSettings:
     gemini_live_adapter_enabled: bool = False
     gemini_production_route_enabled: bool = False
     gemini_live_model: str = DEFAULT_GEMINI_LIVE_MODEL
+    gemini_live_voice_name: str | None = None
 
     @property
     def llm_label(self) -> str:
@@ -332,6 +334,7 @@ def get_settings() -> VoiceSettings:
             "SOPHIA_GEMINI_LIVE_MODEL",
             DEFAULT_GEMINI_LIVE_MODEL,
         ).strip(),
+        gemini_live_voice_name=_env_optional(GEMINI_LIVE_VOICE_NAME_ENV),
     )
     settings.validate()
     return settings

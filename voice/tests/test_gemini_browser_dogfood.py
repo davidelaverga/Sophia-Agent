@@ -59,20 +59,22 @@ EXPECTED_GEMINI_TOOL_NAMES = [
 ]
 
 
-def _gemini_settings():  # noqa: ANN202
+def _gemini_settings(**overrides: object):  # noqa: ANN202
     return make_settings(
         voice_runtime_mode=VoiceRuntimeMode.GEMINI_LIVE.value,
         experimental_realtime_runtime_enabled=True,
         gemini_live_adapter_enabled=True,
+        **overrides,
     )
 
 
-def _gemini_production_settings():  # noqa: ANN202
+def _gemini_production_settings(**overrides: object):  # noqa: ANN202
     return make_settings(
         voice_runtime_mode=VoiceRuntimeMode.GEMINI_LIVE.value,
         experimental_realtime_runtime_enabled=True,
         gemini_live_adapter_enabled=True,
         gemini_production_route_enabled=True,
+        **overrides,
     )
 
 
@@ -474,6 +476,16 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert fake_minter.requests[0]["setup"]["model"] == "models/gemini-3.1-flash-live-preview"
     assert fake_minter.requests[0]["setup"]["inputAudioTranscription"] == {}
     assert fake_minter.requests[0]["setup"]["outputAudioTranscription"] == {}
+    assert (
+        fake_minter.requests[0]["setup"]["generationConfig"]["speechConfig"]["voiceConfig"][
+            "prebuiltVoiceConfig"
+        ]["voiceName"]
+        == "Kore"
+    )
+    assert payload["gemini_voice_name"] == "Kore"
+    assert payload["gemini_voice_source"] == "default"
+    assert payload["gemini_voice_configured"] is False
+    assert payload["gemini_voice_configured_value_valid"] is True
     tool_declarations = fake_minter.requests[0]["setup"]["tools"][0]["functionDeclarations"]
     assert [tool["name"] for tool in tool_declarations] == EXPECTED_GEMINI_TOOL_NAMES
     assert "consult_skill" not in [tool["name"] for tool in tool_declarations]
@@ -545,6 +557,115 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
         await legacy_manager.start_browser_session(make_settings(), user_id="user-1")
 
     await manager.close_session("browser-gemini-1")
+
+
+@pytest.mark.anyio
+async def test_browser_session_uses_configured_gemini_live_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(gemini_live_voice_name="Sulafat"),
+        user_id="user-1",
+        session_id="browser-gemini-sulafat",
+    )
+
+    setup = fake_minter.requests[0]["setup"]
+    assert (
+        setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"][
+            "voiceName"
+        ]
+        == "Sulafat"
+    )
+    payload = browser_session.as_public_payload()
+    assert payload["gemini_voice_name"] == "Sulafat"
+    assert payload["gemini_voice_source"] == "env"
+    assert payload["gemini_voice_configured"] is True
+    assert payload["gemini_voice_configured_value_valid"] is True
+
+    await manager.close_session("browser-gemini-sulafat")
+
+
+@pytest.mark.anyio
+async def test_browser_session_invalid_gemini_live_voice_falls_back_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(gemini_live_voice_name="not-a-real-voice-secret"),
+        user_id="user-1",
+        session_id="browser-gemini-invalid-voice",
+    )
+
+    setup = fake_minter.requests[0]["setup"]
+    assert (
+        setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"][
+            "voiceName"
+        ]
+        == "Kore"
+    )
+    payload = browser_session.as_public_payload()
+    assert payload["gemini_voice_name"] == "Kore"
+    assert payload["gemini_voice_source"] == "fallback_invalid"
+    assert payload["gemini_voice_configured"] is True
+    assert payload["gemini_voice_configured_value_valid"] is False
+    assert payload["gemini_voice_diagnostic"] == "invalid_configured_voice"
+    assert "not-a-real-voice-secret" not in json.dumps(payload)
+
+    await manager.close_session("browser-gemini-invalid-voice")
+
+
+@pytest.mark.anyio
+async def test_browser_session_preconnect_uses_same_configured_gemini_live_voice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+    settings = _gemini_settings(gemini_live_voice_name="Aoede")
+
+    normal_session = await manager.start_browser_session(
+        settings,
+        user_id="user-1",
+        session_id="browser-gemini-normal-voice",
+    )
+    preconnect_session = await manager.start_browser_session(
+        settings,
+        user_id="user-1",
+        session_id="browser-gemini-preconnect-voice",
+        preconnect_ttl_seconds=1.0,
+    )
+
+    voice_names = [
+        request["setup"]["generationConfig"]["speechConfig"]["voiceConfig"][
+            "prebuiltVoiceConfig"
+        ]["voiceName"]
+        for request in fake_minter.requests
+    ]
+    assert voice_names == ["Aoede", "Aoede"]
+    assert normal_session.as_public_payload()["gemini_voice_name"] == "Aoede"
+    assert preconnect_session.as_public_payload()["gemini_voice_name"] == "Aoede"
+
+    await manager.close_session("browser-gemini-normal-voice")
+    await manager.close_session("browser-gemini-preconnect-voice")
 
 
 def test_production_gemini_route_requires_promotion_flag(monkeypatch: pytest.MonkeyPatch) -> None:

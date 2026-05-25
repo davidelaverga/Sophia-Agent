@@ -362,6 +362,10 @@ class TestVoiceConnect:
             "ephemeral_token": {"value": "auth_tokens/test"},
             "setup": {"model": "models/gemini-live"},
             "public_event_boundary": "SophiaEventNormalizer",
+            "gemini_voice_name": "Sulafat",
+            "gemini_voice_source": "env",
+            "gemini_voice_configured": True,
+            "gemini_voice_configured_value_valid": True,
         }
 
         with patch(
@@ -385,6 +389,8 @@ class TestVoiceConnect:
         assert data["preconnect_ttl_ms"] == 30000
         assert data["preconnect_expires_at"].endswith("Z")
         assert data["session_id"] == "gemini-prod-preconnect-1"
+        assert data["gemini_voice_name"] == "Sulafat"
+        assert data["gemini_voice_source"] == "env"
         proxy_runtime.assert_awaited_once_with(
             "POST",
             "/production/realtime/gemini/browser-sessions",
@@ -450,6 +456,10 @@ class TestVoiceConnect:
             "ephemeral_token": {"value": "auth_tokens/test"},
             "setup": {"model": "models/gemini-live"},
             "public_event_boundary": "SophiaEventNormalizer",
+            "gemini_voice_name": "Sulafat",
+            "gemini_voice_source": "env",
+            "gemini_voice_configured": True,
+            "gemini_voice_configured_value_valid": True,
         }
 
         with patch(
@@ -480,6 +490,10 @@ class TestVoiceConnect:
         assert data["event_stream_url"] == "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1"
         assert data["provider_event_relay_url"] == "/api/sophia/voice/gemini/relay"
         assert data["disconnect_url"] == "/api/sophia/voice/gemini/disconnect"
+        assert data["gemini_voice_name"] == "Sulafat"
+        assert data["gemini_voice_source"] == "env"
+        assert data["gemini_voice_configured"] is True
+        assert data["gemini_voice_configured_value_valid"] is True
         dispatch.assert_not_awaited()
         proxy_runtime.assert_awaited_once_with(
             "POST",
