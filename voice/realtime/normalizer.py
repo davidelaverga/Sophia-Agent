@@ -279,6 +279,14 @@ class SophiaEventNormalizer:
             payload["provider_received_at"] = provider_received_at
         if relay_correlation_id:
             payload["relay_correlation_id"] = relay_correlation_id
+        assistant_transcript_source = _string_value(
+            event.data.get("assistant_transcript_source")
+        ) or _string_value(event.data.get("source"))
+        if assistant_transcript_source:
+            payload["assistant_transcript_source"] = assistant_transcript_source
+        assistant_transcript_approximate = event.data.get("assistant_transcript_approximate")
+        if isinstance(assistant_transcript_approximate, bool):
+            payload["assistant_transcript_approximate"] = assistant_transcript_approximate
         return payload
 
     def _user_transcript_payload(

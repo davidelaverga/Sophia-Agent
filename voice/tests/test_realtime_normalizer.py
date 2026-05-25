@@ -224,6 +224,8 @@ def test_assistant_transcript_public_event_preserves_source_response_segment_met
                     "source_sequence": 42,
                     "provider_received_at": "2026-05-20T12:00:01.000Z",
                     "relay_correlation_id": "relay-42",
+                    "assistant_transcript_source": "provider_output_transcription",
+                    "assistant_transcript_approximate": True,
                 },
                 provider="google-gemini-live",
                 response_id="gemini-response-42",
@@ -242,6 +244,8 @@ def test_assistant_transcript_public_event_preserves_source_response_segment_met
                 "source_sequence": 42,
                 "provider_received_at": "2026-05-20T12:00:01.000Z",
                 "relay_correlation_id": "relay-42",
+                "assistant_transcript_source": "provider_output_transcription",
+                "assistant_transcript_approximate": True,
             },
         }
     ]

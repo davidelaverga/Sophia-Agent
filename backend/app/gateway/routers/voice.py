@@ -190,6 +190,20 @@ class GeminiVoiceConnectResponse(BaseModel):
     preconnect_expires_at: str | None = None
 
 
+class GeminiVoicePreconnectSkippedResponse(BaseModel):
+    """Safe no-op response for background Gemini preconnect attempts."""
+
+    runtime: Literal["gemini_live"] = "gemini_live"
+    voice_runtime: Literal["gemini_live"] = "gemini_live"
+    production_route: Literal[True] = True
+    preconnect: Literal[True] = True
+    preconnect_skipped: Literal[True] = True
+    preconnect_skipped_reason: Literal["already_active"] = "already_active"
+    active_voice_session_exists: Literal[True] = True
+    session_id: str | None = None
+    thread_id: str | None = None
+
+
 class VoiceDisconnectRequest(BaseModel):
     """Request body for ending a voice session."""
 
@@ -710,7 +724,7 @@ def _canonicalize_gemini_callback_base_url(base_url: str) -> str:
 
 @router.post(
     "/{user_id}/voice/connect",
-    response_model=VoiceConnectResponse | GeminiVoiceConnectResponse,
+    response_model=VoiceConnectResponse | GeminiVoiceConnectResponse | GeminiVoicePreconnectSkippedResponse,
     summary="Start a voice session",
     description="Generate Stream credentials for the frontend and signal the Voice Agent to join.",
 )
@@ -718,7 +732,7 @@ async def voice_connect(
     user_id: str,
     body: VoiceConnectRequest,
     request: Request,
-) -> VoiceConnectResponse | GeminiVoiceConnectResponse:
+) -> VoiceConnectResponse | GeminiVoiceConnectResponse | GeminiVoicePreconnectSkippedResponse:
     """Create a Stream call, dispatch the voice agent, and return credentials."""
 
     if body.platform not in SUPPORTED_PLATFORMS:
@@ -744,9 +758,9 @@ async def voice_connect(
                     previous_session.runtime,
                     previous_session.session_id,
                 )
-                raise HTTPException(
-                    status_code=409,
-                    detail="Voice preconnect skipped because an active voice session already exists.",
+                return GeminiVoicePreconnectSkippedResponse(
+                    session_id=previous_session.session_id,
+                    thread_id=body.thread_id,
                 )
 
             gemini_response = await _start_gemini_production_voice_session(

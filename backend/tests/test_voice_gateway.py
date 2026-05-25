@@ -426,8 +426,15 @@ class TestVoiceConnect:
                 json={"platform": "voice", "preconnect": True},
             )
 
-        assert resp.status_code == 409
-        assert "active voice session" in resp.json()["detail"]
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime"] == "gemini_live"
+        assert data["voice_runtime"] == "gemini_live"
+        assert data["preconnect"] is True
+        assert data["preconnect_skipped"] is True
+        assert data["preconnect_skipped_reason"] == "already_active"
+        assert data["active_voice_session_exists"] is True
+        assert data["session_id"] == "gemini-prod-active"
         proxy_runtime.assert_not_awaited()
 
     def test_gemini_runtime_returns_browser_bootstrap_when_promoted(self, monkeypatch):

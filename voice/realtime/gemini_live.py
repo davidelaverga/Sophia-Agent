@@ -200,6 +200,7 @@ class GeminiLiveEventMapper:
     _audio_started_response_ids: set[str] = field(default_factory=set)
     _audio_ended_response_ids: set[str] = field(default_factory=set)
     _assistant_text_source_by_response: dict[str, str] = field(default_factory=dict)
+    _assistant_last_text_source_by_response: dict[str, str] = field(default_factory=dict)
     _assistant_text_seen_response_ids: set[str] = field(default_factory=set)
     _transcript_segment_index_by_response: dict[str, int] = field(default_factory=dict)
     _assistant_final_response_ids: set[str] = field(default_factory=set)
@@ -477,7 +478,10 @@ class GeminiLiveEventMapper:
             events.append(
                 self._event(
                     ProviderEventType.ASSISTANT_TEXT_FINAL,
-                    {"provider_event_name": "serverContent.generationComplete"},
+                    {
+                        "provider_event_name": "serverContent.generationComplete",
+                        **self._assistant_transcript_response_metadata(response_id),
+                    },
                     response_id=response_id,
                     turn_id=response_id,
                     raw=raw,
@@ -506,7 +510,10 @@ class GeminiLiveEventMapper:
             events.append(
                 self._event(
                     ProviderEventType.ASSISTANT_TEXT_FINAL,
-                    {"provider_event_name": "serverContent.turnComplete"},
+                    {
+                        "provider_event_name": "serverContent.turnComplete",
+                        **self._assistant_transcript_response_metadata(response_id),
+                    },
                     response_id=response_id,
                     turn_id=response_id,
                     raw=raw,
@@ -727,11 +734,13 @@ class GeminiLiveEventMapper:
             ]
         if not self._accept_assistant_text_source(response_id, source):
             return []
+        self._assistant_last_text_source_by_response[response_id] = source
         data = {
             "text": text,
             "is_delta": True,
             "source": source,
             "provider_event_name": provider_event_name,
+            **self._assistant_transcript_source_metadata(source),
         }
         if source == "output_transcription":
             self._assistant_text_seen_response_ids.add(response_id)
@@ -758,6 +767,25 @@ class GeminiLiveEventMapper:
             self._assistant_text_source_by_response[response_id] = source
             return True
         return selected_source == source
+
+    def _assistant_transcript_source_metadata(self, source: str | None) -> dict[str, Any]:
+        if source == "output_transcription":
+            return {
+                "assistant_transcript_source": "provider_output_transcription",
+                "assistant_transcript_approximate": True,
+            }
+        if source == "model_turn_text":
+            return {
+                "assistant_transcript_source": "model_turn_text",
+                "assistant_transcript_approximate": False,
+            }
+        return {}
+
+    def _assistant_transcript_response_metadata(self, response_id: str) -> dict[str, Any]:
+        return self._assistant_transcript_source_metadata(
+            self._assistant_text_source_by_response.get(response_id)
+            or self._assistant_last_text_source_by_response.get(response_id)
+        )
 
     def _transcript_segment_id(self, response_id: str) -> str:
         segment_index = self._transcript_segment_index_by_response.get(response_id, 0)

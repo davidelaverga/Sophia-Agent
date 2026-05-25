@@ -15,6 +15,7 @@ export function useCompanionVoiceRuntime({
   userId,
   sessionId,
   threadId,
+  voiceMode,
   onUserTranscriptFallback,
   appendAssistantMessage,
   ingestArtifacts,
@@ -85,6 +86,7 @@ export function useCompanionVoiceRuntime({
   const voiceState = useStreamVoiceSession(userId, {
     sessionId,
     threadId,
+    preconnectEnabled: voiceMode !== false,
     onUserTranscript: handleUserTranscript,
     onAssistantResponse: handleAssistantResponse,
     onArtifacts: handleVoiceArtifacts,

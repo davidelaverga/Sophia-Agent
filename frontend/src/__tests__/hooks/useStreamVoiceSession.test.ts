@@ -808,6 +808,18 @@ describe("useStreamVoiceSession", () => {
     expect(getFetchCalls("/api/sophia/user-1/voice/warmup", "POST")).toHaveLength(0)
   })
 
+  it("skips background preconnect when voice mode is disabled", async () => {
+    vi.useFakeTimers()
+
+    renderHook(() => useStreamVoiceSession("user-1", { preconnectEnabled: false }))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(0)
+  })
+
   it("uses a valid Gemini preconnect bootstrap on startTalking", async () => {
     vi.useFakeTimers()
     mockFetch.mockImplementation(async (url, _init) => {
@@ -902,6 +914,123 @@ describe("useStreamVoiceSession", () => {
         sessionId: "gemini-prod-normal-1",
       }),
     )
+  })
+
+  it("treats active-session Gemini preconnect responses as skipped warmups", async () => {
+    vi.useFakeTimers()
+    mockFetch.mockImplementation(async (url, init) => {
+      if (url === "/api/sophia/user-1/voice/connect") {
+        const body = JSON.parse(String((init as { body?: string }).body ?? "{}")) as { preconnect?: boolean }
+        if (body.preconnect) {
+          return {
+            ok: true,
+            json: () => Promise.resolve({
+              runtime: "gemini_live",
+              voice_runtime: "gemini_live",
+              production_route: true,
+              preconnect: true,
+              preconnect_skipped: true,
+              preconnect_skipped_reason: "already_active",
+              active_voice_session_exists: true,
+              session_id: "gemini-prod-active-1",
+            }),
+            text: () => Promise.resolve(""),
+          }
+        }
+
+        return {
+          ok: true,
+          json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-normal-after-skip")),
+          text: () => Promise.resolve(""),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    expect(result.current.stage).toBe("idle")
+    expect(result.current.error).toBeUndefined()
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    const connectCalls = getFetchCalls("/api/sophia/user-1/voice/connect", "POST")
+    expect(connectCalls).toHaveLength(2)
+    expect(JSON.parse(String((connectCalls[1]?.[1] as { body?: string })?.body))).toEqual({
+      platform: "voice",
+      context_mode: "gaming",
+      ritual: "vent",
+    })
+    expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "gemini-prod-normal-after-skip",
+      }),
+    )
+  })
+
+  it("suppresses duplicate Gemini opening greeting transcripts before user input", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-greeting-1")),
+      text: () => Promise.resolve(""),
+    })
+    const onAssistantResponse = vi.fn()
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce({
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-greeting-1",
+      streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-greeting-1",
+    })
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", { onAssistantResponse }))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    await waitFor(() => {
+      expect(MockEventSource.latest?.url).toBe(
+        "/api/sophia/voice/gemini/events?session_id=gemini-prod-greeting-1",
+      )
+    })
+
+    act(() => {
+      MockEventSource.latest?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: {
+          text: "Hey Luis, I'm here.",
+          is_final: true,
+          response_id: "opening-1",
+          source_sequence: 1,
+          assistant_transcript_source: "provider_output_transcription",
+          assistant_transcript_approximate: true,
+        },
+      })
+      MockEventSource.latest?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: {
+          text: "Hey Luis, I'm here again.",
+          is_final: true,
+          response_id: "opening-2",
+          source_sequence: 2,
+          assistant_transcript_source: "provider_output_transcription",
+          assistant_transcript_approximate: true,
+        },
+      })
+    })
+
+    expect(onAssistantResponse).toHaveBeenCalledTimes(1)
+    expect(onAssistantResponse).toHaveBeenCalledWith("Hey Luis, I'm here.")
+    expect(result.current.finalReply).toBe("Hey Luis, I'm here.")
   })
 
   it("disconnects expired Gemini preconnect and falls back to normal connect", async () => {

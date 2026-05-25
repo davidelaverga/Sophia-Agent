@@ -663,6 +663,7 @@ async def test_browser_session_preconnect_uses_same_configured_gemini_live_voice
     assert voice_names == ["Aoede", "Aoede"]
     assert normal_session.as_public_payload()["gemini_voice_name"] == "Aoede"
     assert preconnect_session.as_public_payload()["gemini_voice_name"] == "Aoede"
+    assert preconnect_session.dogfood_session.public_payloads == ()
 
     await manager.close_session("browser-gemini-normal-voice")
     await manager.close_session("browser-gemini-preconnect-voice")
@@ -852,8 +853,18 @@ async def test_browser_relay_messages_enter_existing_gemini_adapter_and_normaliz
         "sophia.turn",
     ]
     assert payloads[0]["data"] == {"text": "I had a rough day.", "utterance_id": "user-item-1"}
-    assert payloads[3]["data"] == {"text": "That sounds heavy.", "is_final": False}
-    assert payloads[4]["data"] == {"text": "That sounds heavy.", "is_final": True}
+    assert payloads[3]["data"] == {
+        "text": "That sounds heavy.",
+        "is_final": False,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
+    }
+    assert payloads[4]["data"] == {
+        "text": "That sounds heavy.",
+        "is_final": True,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
+    }
     assert all(str(payload["type"]).startswith("sophia.") for payload in payloads)
     assert "serverContent" not in json.dumps(payloads)
 

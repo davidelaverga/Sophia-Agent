@@ -285,6 +285,7 @@ function SessionPageContent() {
     setCurrentContext,
     setMessageMetadata,
     greetingAnchorId,
+    sessionVoiceMode: session?.voiceMode,
     markOffline,
     debugEnabled,
     memoryHighlightsCount: memoryHighlights?.length ?? 0,

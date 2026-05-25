@@ -184,15 +184,21 @@ async def test_raw_gemini_live_flow_normalizes_to_existing_sophia_events() -> No
     assert payloads[3]["data"] == {
         "text": "That sounds heavy.",
         "is_final": False,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
     }
     assert payloads[4]["data"] == {
         "text": "That sounds heavy. I'm here with you.",
         "is_final": False,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
     }
     assert payloads[5] == {"type": "sophia.artifact", "data": _artifact()}
     assert payloads[6]["data"] == {
         "text": "That sounds heavy. I'm here with you.",
         "is_final": True,
+        "assistant_transcript_source": "provider_output_transcription",
+        "assistant_transcript_approximate": True,
     }
     assert all(payload["type"].startswith("sophia.") for payload in payloads)
     assert all("serverContent" not in payload["type"] for payload in payloads)
@@ -267,6 +273,8 @@ def test_output_transcription_preserves_browser_relay_source_metadata() -> None:
     assert transcript_event.data["provider_relay_sequence"] == 7
     assert transcript_event.data["provider_received_at"] == "2026-05-20T00:00:00.000Z"
     assert transcript_event.data["relay_correlation_id"] == "gemini-relay-41-outputTranscription"
+    assert transcript_event.data["assistant_transcript_source"] == "provider_output_transcription"
+    assert transcript_event.data["assistant_transcript_approximate"] is True
 
 
 def test_input_transcription_preserves_browser_relay_source_metadata() -> None:
@@ -395,6 +403,8 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
             "data": {
                 "text": "Model text. ",
                 "is_final": False,
+                "assistant_transcript_source": "model_turn_text",
+                "assistant_transcript_approximate": False,
             },
         },
         {
@@ -402,6 +412,8 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
             "data": {
                 "text": "Model text. ",
                 "is_final": True,
+                "assistant_transcript_source": "model_turn_text",
+                "assistant_transcript_approximate": False,
             },
         },
         {"type": "sophia.turn", "data": {"phase": "agent_ended"}},
@@ -559,9 +571,24 @@ def test_tool_call_continuation_uses_new_transcript_segment() -> None:
     ]
 
     assert transcript_payloads == [
-        {"text": "Let me check that.", "is_final": False},
-        {"text": "Here's what I found.", "is_final": False},
-        {"text": "Here's what I found.", "is_final": True},
+        {
+            "text": "Let me check that.",
+            "is_final": False,
+            "assistant_transcript_source": "provider_output_transcription",
+            "assistant_transcript_approximate": True,
+        },
+        {
+            "text": "Here's what I found.",
+            "is_final": False,
+            "assistant_transcript_source": "provider_output_transcription",
+            "assistant_transcript_approximate": True,
+        },
+        {
+            "text": "Here's what I found.",
+            "is_final": True,
+            "assistant_transcript_source": "provider_output_transcription",
+            "assistant_transcript_approximate": True,
+        },
     ]
 
 

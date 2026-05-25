@@ -598,8 +598,8 @@ Interruption behavior:
 
 Transcript behavior:
 
-- Gemini `outputTranscription` remains the source of assistant text, but it is not assumed to be audio-synchronous.
-- Gemini production partial assistant transcripts are paced before entering the Session assistant-message path, so delayed word-by-word fragments do not churn the visible transcript.
+- Gemini `modelTurn.parts.text` is treated as canonical assistant text when it is the selected response surface. If no model text surface is available, Gemini `serverContent.outputTranscription` remains the public assistant transcript source, but it is marked as provider-output approximate transcript metadata and is not assumed to be canonical or audio-synchronous.
+- Gemini production partial assistant transcripts are paced as ephemeral captions only; they do not enter the Session assistant-message path until a final public transcript arrives.
 - Final `sophia.transcript` events still flush exact final text, clear the local partial, append to voice history once, and update the Session message path.
 - Legacy cascade transcript handling keeps immediate partial behavior.
 
@@ -990,11 +990,15 @@ Gemini production voice supports a safe bootstrap preconnect, not a provider-aud
 
 The browser stores that bootstrap in memory only and may reuse it for about 30 seconds on mic click. The actual user microphone permission request, Gemini WebSocket open, setup send, and provider audio streaming still happen only after the user clicks the mic. This differs from the legacy cascade warm cache, which prepares a Stream/Vision Agents call and can also warm the backend/TTS path for an active voice-agent session.
 
-If a prepared Gemini bootstrap is missing, expired, failed, for the wrong session/thread/runtime, or rejected because another active session exists, the frontend silently falls back to the normal connect path. Stale prepared Gemini sessions are closed through the existing Gemini production disconnect endpoint. The voice service also schedules best-effort cleanup for unused preconnect bootstraps and cancels that cleanup as soon as the browser relays the first provider event, which means an adopted session is not torn down mid-call.
+If a prepared Gemini bootstrap is missing, expired, failed, for the wrong session/thread/runtime, or skipped because another active session exists, the frontend silently falls back to the normal connect path. Active-session preconnect skips return a safe `preconnect_skipped=true` envelope rather than a user-visible failure. Stale prepared Gemini sessions are closed through the existing Gemini production disconnect endpoint. The voice service also schedules best-effort cleanup for unused preconnect bootstraps and cancels that cleanup as soon as the browser relays the first provider event, which means an adopted session is not torn down mid-call.
 
 The TTL is intentionally shorter than Gemini's provider-side new-session window. Google documents ephemeral Live API tokens as single-session by default, with about one minute to start a new Live session (`newSessionExpireTime`) and about 30 minutes for messages on an established connection (`expireTime`). Sophia uses a 30-second frontend reuse TTL and a slightly longer server-side orphan cleanup window, so a stale background bootstrap never blocks mic-click fallback.
 
-Startup telemetry must preserve the existing clocks (`requestToCredentialsMs`, `sessionReadyMs`) and additionally report preconnect evidence where available: `preconnectAttempted`, `preconnectStatus` (`hit`, `miss`, `expired`, `failed`, `unsupported`, `disabled`), `preconnectAgeMs`, and optional `preconnectSavedMs` if a future path can measure it directly. Preconnect failures are diagnostic only and must not show user-visible errors.
+Startup telemetry must preserve the existing clocks (`requestToCredentialsMs`, `sessionReadyMs`) and additionally report preconnect evidence where available: `preconnectAttempted`, `preconnectStatus` (`hit`, `miss`, `expired`, `failed`, `unsupported`, `disabled`, `skipped`), `preconnectSkippedReason`, `activeVoiceSessionExists`, `preconnectAgeMs`, and optional `preconnectSavedMs` if a future path can measure it directly. Preconnect failures and skips are diagnostic only and must not show user-visible errors.
+
+Opening greeting lifecycle: preconnect/warm only mints a bootstrap and must not open the provider WebSocket, microphone, public audio, or public greeting transcript. The mic-click/adopted Gemini session owns the first spoken assistant output. The frontend keeps a per-Gemini-session opening-greeting latch so a duplicate assistant transcript before the first user transcript is suppressed rather than rendered as a second greeting. The latch resets on a new Gemini voice-agent session.
+
+Telemetry export/runtime scoping: when current hook state has returned to idle/default legacy but the active capture window contains Gemini runtime events, export/runtime metrics prefer the capture runtime and keep the Gemini object populated. If there are no Gemini events in the active capture window, the export may report legacy/default, but it must not use default legacy state to mask captured Gemini provider, public transcript, or audio evidence.
 
 The context block is inserted after the canonical Sophia realtime instructions and before the Gemini Live spoken-turn policy overlay. The overlay remains the final Gemini-specific policy layer, while the context block gives Live enough continuity to avoid generic `User` phrasing and answer direct memory questions from concrete stored context when available.
 

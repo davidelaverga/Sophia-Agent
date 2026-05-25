@@ -12,6 +12,8 @@ export type AssistantTranscriptUpdate = {
   responseId?: string | null;
   segmentId?: string | null;
   providerReceivedAt?: string | null;
+  assistantTranscriptSource?: string | null;
+  assistantTranscriptApproximate?: boolean | null;
 };
 
 export type AssistantTranscriptStaleGuardState = {
@@ -50,6 +52,15 @@ export function parseAssistantTranscriptUpdate(data: Record<string, unknown> | u
     responseId: readOptionalString(data?.response_id ?? data?.responseId),
     segmentId: readOptionalString(data?.segment_id ?? data?.segmentId),
     providerReceivedAt: readOptionalString(data?.provider_received_at ?? data?.providerReceivedAt),
+    assistantTranscriptSource: readOptionalString(
+      data?.assistant_transcript_source
+      ?? data?.assistantTranscriptSource
+      ?? data?.source,
+    ),
+    assistantTranscriptApproximate: readOptionalBoolean(
+      data?.assistant_transcript_approximate
+      ?? data?.assistantTranscriptApproximate,
+    ),
   };
 }
 
@@ -140,7 +151,6 @@ export function applyAssistantTranscriptUpdate(
   }
 
   handlers.setPartialReply(update.text);
-  handlers.onAssistantResponse?.(update.text);
 }
 
 export function createAssistantTranscriptPacingState(): AssistantTranscriptPacingState {
@@ -211,7 +221,6 @@ export function applyPacedAssistantTranscriptUpdate(
 
   const emittedText = update.text.trim();
   handlers.setPartialReply(emittedText);
-  handlers.onAssistantResponse?.(emittedText);
   state.lastPartialText = emittedText;
   state.lastPartialAtMs = options.nowMs ?? Date.now();
   return true;
@@ -230,6 +239,10 @@ function readPositiveInteger(value: unknown): number | null {
     return null;
   }
   return value;
+}
+
+function readOptionalBoolean(value: unknown): boolean | null {
+  return typeof value === 'boolean' ? value : null;
 }
 
 function parseTimestampMs(value: string | null | undefined): number | null {
