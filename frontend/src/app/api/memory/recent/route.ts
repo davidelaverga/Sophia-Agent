@@ -118,10 +118,17 @@ function normalizeGatewayMemory(memory: GatewayMemory): NormalizedMemory | null 
   };
 }
 
-async function fetchMemoryList(userId: string, status?: string | null): Promise<Response> {
+async function fetchMemoryList(
+  userId: string,
+  status?: string | null,
+  sessionId?: string | null,
+): Promise<Response> {
   const params = new URLSearchParams();
   if (status) {
     params.set('status', status);
+  }
+  if (sessionId) {
+    params.set('session_id', sessionId);
   }
 
   const query = params.toString();
@@ -189,7 +196,7 @@ export async function GET(request: NextRequest) {
     const endedAt = request.nextUrl.searchParams.get('ended_at');
     const shouldApplyScopedFilter = Boolean(status && (sessionId || startedAt || endedAt));
 
-    const filteredResponse = await fetchMemoryList(userId, status);
+    const filteredResponse = await fetchMemoryList(userId, status, sessionId);
     const filteredText = await filteredResponse.text();
 
     if (!filteredResponse.ok) {
@@ -232,7 +239,7 @@ export async function GET(request: NextRequest) {
       });
     }
 
-    const unfilteredResponse = await fetchMemoryList(userId);
+    const unfilteredResponse = await fetchMemoryList(userId, null, sessionId);
     const unfilteredText = await unfilteredResponse.text();
 
     if (!unfilteredResponse.ok) {

@@ -442,7 +442,55 @@ def _has_memory_status(mem: dict) -> bool:
     return isinstance(metadata, dict) and isinstance(metadata.get("status"), str)
 
 
-def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], status: str | None) -> list[dict]:
+def _memory_session_id(memory: dict) -> str | None:
+    if not isinstance(memory, dict):
+        return None
+
+    session_id = memory.get("session_id")
+    if isinstance(session_id, str) and session_id:
+        return session_id
+
+    metadata = memory.get("metadata")
+    if isinstance(metadata, dict):
+        for key in ("session_id", "source_session_id"):
+            metadata_session_id = metadata.get(key)
+            if isinstance(metadata_session_id, str) and metadata_session_id:
+                return metadata_session_id
+
+    return None
+
+
+def _filter_memories_for_review(
+    memories: list[dict],
+    *,
+    status: str | None = None,
+    session_id: str | None = None,
+) -> list[dict]:
+    return [
+        memory
+        for memory in memories
+        if (
+            (
+                not status
+                or (
+                    isinstance(memory.get("metadata"), dict)
+                    and memory["metadata"].get("status") == status
+                )
+            )
+            and (not session_id or _memory_session_id(memory) == session_id)
+        )
+    ]
+
+
+def _hydrate_memories_for_review(
+    user_id: str,
+    client,
+    memories: list[dict],
+    status: str | None,
+    *,
+    hydrate_missing_status: bool = True,
+    hydrate_missing_detail: bool = True,
+) -> list[dict]:
     memories = apply_review_metadata_overlays(user_id, memories)
     hydrated: list[dict] = []
 
@@ -452,8 +500,8 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
         has_status = status is not None and _has_memory_status(memory)
 
         needs_hydration = memory_id and (
-            (status is not None and not has_status)
-            or (_should_hydrate_memory_detail(memory) and not has_status)
+            (hydrate_missing_status and status is not None and not has_status)
+            or (hydrate_missing_detail and _should_hydrate_memory_detail(memory) and not has_status)
         )
 
         if needs_hydration:
@@ -466,14 +514,7 @@ def _hydrate_memories_for_review(user_id: str, client, memories: list[dict], sta
 
     hydrated = apply_review_metadata_overlays(user_id, hydrated)
 
-    if not status:
-        return hydrated
-
-    return [
-        memory
-        for memory in hydrated
-        if isinstance(memory.get("metadata"), dict) and memory["metadata"].get("status") == status
-    ]
+    return _filter_memories_for_review(hydrated, status=status)
 
 
 def _is_memory_record(item: dict) -> bool:
@@ -946,23 +987,53 @@ async def retrieve_realtime_memories_internal(
 async def list_memories(
     user_id: str,
     status: str | None = Query(default=None, description="Filter by status (e.g. pending_review)"),
+    session_id: str | None = Query(default=None, description="Filter by source session identifier"),
 ) -> MemoryListResponse:
     _validate_user(user_id)
-    client = _get_mem0_client()
     try:
         logger.info(
-            "session.finalization list_memories_request user_id=%s status=%s",
+            "session.finalization list_memories_request user_id=%s status=%s session_id=%s",
             user_id,
             status or "<none>",
+            session_id or "<none>",
         )
+        if session_id and status:
+            local_review_memories = _filter_memories_for_review(
+                apply_review_metadata_overlays(user_id, []),
+                status=status,
+                session_id=session_id,
+            )
+            if local_review_memories:
+                local_review_memories = _dedupe_memories_by_id(local_review_memories)
+                items = [_to_memory_item(m) for m in local_review_memories]
+                logger.info(
+                    "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s source=local_review_overlay",
+                    user_id,
+                    status,
+                    session_id,
+                    len(items),
+                )
+                return MemoryListResponse(memories=items, count=len(items))
+
+        client = _get_mem0_client()
         memories_raw = _get_all_paginated(client, {"user_id": user_id})
-        memories_raw = _hydrate_memories_for_review(user_id, client, memories_raw, status)
+        memories_raw = _hydrate_memories_for_review(
+            user_id,
+            client,
+            memories_raw,
+            status,
+            hydrate_missing_status=session_id is None,
+            hydrate_missing_detail=session_id is None,
+        )
+        if session_id:
+            memories_raw = _filter_memories_for_review(memories_raw, session_id=session_id)
         memories_raw = _dedupe_memories_by_id(memories_raw)
         items = [_to_memory_item(m) for m in memories_raw]
         logger.info(
-            "session.finalization list_memories_result user_id=%s status=%s count=%s",
+            "session.finalization list_memories_result user_id=%s status=%s session_id=%s count=%s",
             user_id,
             status or "<none>",
+            session_id or "<none>",
             len(items),
         )
         return MemoryListResponse(memories=items, count=len(items))

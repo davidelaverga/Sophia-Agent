@@ -73,6 +73,16 @@ describe('memory recent route', () => {
     expect(payload.fallbackApplied).toBe(true);
     expect(payload.memories).toHaveLength(2);
     expect(payload.memories.map((memory: { id: string }) => memory.id)).toEqual(['pending-1', 'legacy-1']);
+    expect(fetchSophiaApiMock).toHaveBeenNthCalledWith(
+      1,
+      '/api/sophia/user-123/memories/recent?status=pending_review&session_id=sess-1',
+      { method: 'GET' },
+    );
+    expect(fetchSophiaApiMock).toHaveBeenNthCalledWith(
+      2,
+      '/api/sophia/user-123/memories/recent?session_id=sess-1',
+      { method: 'GET' },
+    );
   });
 
   it('does not leak pending-review memories from a different session into recap fallback', async () => {

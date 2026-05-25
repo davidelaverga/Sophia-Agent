@@ -866,6 +866,40 @@ class TestListMemories:
         assert resp.json()["count"] == 1
         mock_mem0.get.assert_not_called()
 
+    def test_session_scoped_status_filter_uses_local_overlay_without_mem0_scan(self, client, mock_mem0, mock_review_store):
+        mock_review_store["apply"].side_effect = None
+        mock_review_store["apply"].return_value = [
+            {
+                "id": "local:target",
+                "memory": "Session-scoped pending memory",
+                "session_id": "sess-target",
+                "metadata": {"status": "pending_review", "category": "preference"},
+                "category": "preference",
+                "updated_at": "2026-05-25T18:36:21+00:00",
+            },
+            {
+                "id": "local:other",
+                "memory": "Other session pending memory",
+                "session_id": "sess-other",
+                "metadata": {"status": "pending_review", "category": "fact"},
+                "category": "fact",
+                "updated_at": "2026-05-25T18:36:21+00:00",
+            },
+        ]
+
+        resp = client.get(
+            "/api/sophia/test_user/memories/recent"
+            "?status=pending_review&session_id=sess-target"
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["count"] == 1
+        assert data["memories"][0]["id"] == "local:target"
+        assert data["memories"][0]["session_id"] == "sess-target"
+        mock_mem0.get_all.assert_not_called()
+        mock_mem0.get.assert_not_called()
+
     def test_hydrates_missing_metadata_without_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [
             {"id": "m1", "memory": "Likes pizza", "metadata": None, "categories": []},
