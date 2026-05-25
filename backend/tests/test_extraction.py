@@ -195,6 +195,7 @@ class TestExtractSessionMemories:
 
         assert call_kwargs["user_id"] == "user1"
         assert call_kwargs["session_id"] == "sess_005"
+        assert call_kwargs["wait_for_events"] is False
 
         meta = call_kwargs["metadata"]
         assert meta["review_status"] == "pending_review"
@@ -669,6 +670,41 @@ class TestReviewMetadataOverlayWrite:
             "event_id MUST be stashed in metadata so a future reconciler "
             "can match the timed-out event to its eventual memory_id"
         )
+        assert call_kwargs["metadata"]["status"] == "pending_review"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_event_overlay_without_waiting_for_mem0_polling(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Offline extraction must surface recap candidates from event handles
+        immediately instead of blocking the UI on serial Mem0 event polling."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[1]])
+        )
+        mock_add_memories.return_value = [
+            {"event_id": "evt_no_wait_123", "memory": None}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_no_wait",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_add_memories.call_args.kwargs["wait_for_events"] is False
+        assert mock_upsert.call_count == 1
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] is None
+        assert call_kwargs["session_id"] == "sess_overlay_no_wait"
+        assert call_kwargs["sync_state"] == "pending"
+        assert call_kwargs["metadata"]["mem0_event_id"] == "evt_no_wait_123"
         assert call_kwargs["metadata"]["status"] == "pending_review"
 
     @patch("deerflow.sophia.extraction.upsert_review_metadata")

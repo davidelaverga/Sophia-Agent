@@ -657,6 +657,7 @@ def add_memories(
     *,
     metadata: dict | None = None,
     timestamp: int | None = None,
+    wait_for_events: bool = True,
 ) -> list[dict]:
     """Write memories to Mem0 for a user session using v3 SDK.
 
@@ -672,6 +673,7 @@ def add_memories(
         session_id,
         metadata=metadata,
         timestamp=timestamp,
+        wait_for_events=wait_for_events,
     )
     return memories
 
@@ -683,6 +685,7 @@ def add_memories_with_outcome(
     *,
     metadata: dict | None = None,
     timestamp: int | None = None,
+    wait_for_events: bool = True,
 ) -> tuple[list[dict], MemoryAddOutcome]:
     """Write memories to Mem0 and return BOTH the memories AND the outcome.
 
@@ -691,7 +694,7 @@ def add_memories_with_outcome(
     session_id is persisted as run_id so session-scoped recap retrieval
     remains exact.
 
-    v3 add() is async-by-default; this helper blocks until pending
+    v3 add() is async-by-default; by default this helper blocks until pending
     events resolve (up to a default timeout). The returned outcome
     string lets the caller distinguish:
 
@@ -707,6 +710,10 @@ def add_memories_with_outcome(
 
     Thread-safe: invalidates the user cache on terminal outcomes so
     subsequent searches reflect the new data.
+
+    Set ``wait_for_events=False`` for offline extraction paths that need the
+    event wrapper immediately so they can persist a local pending-review
+    overlay while Mem0 continues processing asynchronously.
     """
     client = _get_client()
     if client is None:
@@ -789,6 +796,16 @@ def add_memories_with_outcome(
         if isinstance(item, dict) and item.get("event_id")
     ]
     if event_ids:
+        if not wait_for_events:
+            logger.info(
+                "session.finalization mem0_add_queued_no_wait user_id=%s "
+                "session_id=%s event_ids=%s",
+                user_id,
+                session_id,
+                event_ids,
+            )
+            invalidate_user_cache(user_id)
+            return normalized, "queued"
         try:
             resolved, still_pending = wait_for_pending_events(user_id, event_ids)
         except Mem0EventFailedError:
