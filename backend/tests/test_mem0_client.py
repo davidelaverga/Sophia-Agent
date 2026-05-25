@@ -1852,3 +1852,110 @@ class TestWarmUp:
             # Second call must short-circuit (no second search call)
             warm_up()
             assert mock_client.search.call_count == 1
+
+
+# ======================================================================
+# Strategy-selection diagnostic logs (PR #130 §I.2 — Bug A diagnostics)
+# ======================================================================
+
+
+class TestSelectEventPollStrategyLogging:
+    """Pin the contract that ``_select_event_poll_strategy`` logs which
+    branch fired. Production has been silently picking a strategy that
+    can't resolve already-SUCCEEDED Mem0 v3 events — without these logs
+    we can't diagnose whether the SDK or REST path is at fault. These
+    tests assert each branch emits the expected ``[Mem0Poll] strategy=...``
+    log line.
+    """
+
+    def test_strategy_log_sdk_per_id(self, caplog):
+        """When the client exposes ``get_event`` (per-ID lookup), log
+        ``strategy=sdk_per_id``."""
+        import logging
+
+        from deerflow.sophia.mem0_client import _select_event_poll_strategy
+
+        fake_client = MagicMock(spec=["get_event", "add", "search"])
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=fake_client
+        ):
+            with caplog.at_level(logging.INFO, logger="deerflow.sophia.mem0_client"):
+                strategy = _select_event_poll_strategy("user1", deadline=1.0)
+
+        assert strategy is not None
+        assert any(
+            "[Mem0Poll] strategy=sdk_per_id" in record.getMessage()
+            for record in caplog.records
+        ), (
+            f"Expected '[Mem0Poll] strategy=sdk_per_id' log line; "
+            f"got messages: {[r.getMessage() for r in caplog.records]}"
+        )
+
+    def test_strategy_log_sdk_paginated(self, caplog):
+        """When the client exposes ``get_events`` (paginated list) but NOT
+        ``get_event``, log ``strategy=sdk_paginated``."""
+        import logging
+
+        from deerflow.sophia.mem0_client import _select_event_poll_strategy
+
+        fake_client = MagicMock(spec=["get_events", "add", "search"])
+        with patch(
+            "deerflow.sophia.mem0_client._get_client", return_value=fake_client
+        ):
+            with caplog.at_level(logging.INFO, logger="deerflow.sophia.mem0_client"):
+                strategy = _select_event_poll_strategy("user1", deadline=1.0)
+
+        assert strategy is not None
+        assert any(
+            "[Mem0Poll] strategy=sdk_paginated" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_strategy_log_rest(self, caplog):
+        """When the client exposes neither SDK method AND REST is available
+        (MEM0_API_KEY set + httpx importable), log ``strategy=rest``."""
+        import logging
+        from types import SimpleNamespace
+
+        from deerflow.sophia.mem0_client import _select_event_poll_strategy
+
+        fake_client = MagicMock(spec=["add", "search"])
+        fake_httpx = SimpleNamespace(Client=lambda **_k: None)
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=fake_client),
+            patch("deerflow.sophia.mem0_client._httpx_module", return_value=fake_httpx),
+            patch.dict("os.environ", {"MEM0_API_KEY": "test-key"}),
+        ):
+            with caplog.at_level(logging.INFO, logger="deerflow.sophia.mem0_client"):
+                strategy = _select_event_poll_strategy("user1", deadline=1.0)
+
+        assert strategy is not None
+        assert any(
+            "[Mem0Poll] strategy=rest" in record.getMessage()
+            for record in caplog.records
+        )
+
+    def test_strategy_log_none(self, caplog):
+        """When no client AND no REST fallback, log ``strategy=none`` at
+        WARNING (operator-visible) so the silent unavailability surfaces."""
+        import logging
+
+        from deerflow.sophia.mem0_client import _select_event_poll_strategy
+
+        with (
+            patch("deerflow.sophia.mem0_client._get_client", return_value=None),
+            patch("deerflow.sophia.mem0_client._httpx_module", return_value=None),
+            patch.dict("os.environ", {}, clear=False),
+        ):
+            # Belt-and-suspenders: also clear the key in case the test env has one.
+            with patch.dict("os.environ", {"MEM0_API_KEY": ""}):
+                with caplog.at_level(
+                    logging.WARNING, logger="deerflow.sophia.mem0_client"
+                ):
+                    strategy = _select_event_poll_strategy("user1", deadline=1.0)
+
+        assert strategy is None
+        assert any(
+            "[Mem0Poll] strategy=none" in record.getMessage()
+            for record in caplog.records
+        )

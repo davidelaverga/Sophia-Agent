@@ -554,3 +554,161 @@ class TestSessionStartUnixAnchor:
             "Present session_start_unix MUST flow through unchanged "
             "(this is the Upgrade A anchor)"
         )
+
+
+# ======================================================================
+# Local review_metadata overlay write (PR #130 §I.1 — recap pipeline fix)
+# ======================================================================
+
+
+class TestReviewMetadataOverlayWrite:
+    """Pin the contract that ``extract_session_memories`` writes to the local
+    review_metadata overlay AFTER each successful Mem0 add.
+
+    Recap pipeline fix on PR #130 §I.1: Mem0 v3 does NOT propagate
+    event-level ``metadata.status`` onto the persisted memory record. Without
+    the local-overlay write, every newly-extracted candidate has
+    ``status=None`` when queried back via ``get_all``, so the gateway's
+    ``_hydrate_memories_for_review`` strict ``status==pending_review`` filter
+    drops them and the recap UI shows empty state.
+    """
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_review_overlay_with_resolved_memory_id(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Happy path: Mem0 returned a resolved memory_id (sync path or
+        successful event resolution). The overlay write MUST receive that
+        memory_id so subsequent ``apply_review_metadata_overlays`` joins
+        cleanly with the Mem0 record."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[0]])  # one "fact" candidate
+        )
+        # Mem0 returned a resolved memory_id — the wait_for_pending_events
+        # succeeded (or sync path with no event_id at all).
+        mock_add_memories.return_value = [
+            {"id": "mem_resolved_abc", "memory": "User works as a PM"}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_1",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 1, (
+            "Overlay MUST be written exactly once per successful candidate"
+        )
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] == "mem_resolved_abc", (
+            "Resolved memory_id MUST be passed through so the overlay joins "
+            "with the Mem0 record (review_metadata_store._select_entry "
+            "matches on memory_id first)"
+        )
+        assert call_kwargs["content"] == _SAMPLE_EXTRACTION[0]["content"]
+        assert call_kwargs["session_id"] == "sess_overlay_1"
+        assert call_kwargs["sync_state"] == "extraction"
+        assert call_kwargs["metadata"]["status"] == "pending_review", (
+            "status=pending_review MUST land in the overlay metadata so "
+            "_hydrate_memories_for_review's strict filter accepts it"
+        )
+        assert call_kwargs["metadata"]["review_status"] == "pending_review"
+        # No mem0_event_id when we have a real memory_id — only the timeout
+        # case needs the event_id for future reconciliation.
+        assert "mem0_event_id" not in call_kwargs["metadata"]
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_writes_overlay_with_event_id_when_memory_id_missing(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """Bug A (wait_for_pending_events timeout) shape: ``add_memories``
+        returns raw event-wrapper list ``[{"event_id": "evt_1", "memory": None}]``
+        when the wait timed out. The overlay MUST still be written with
+        ``memory_id=None`` (content_hash carries the entry) AND
+        ``mem0_event_id`` stashed in metadata so a future reconciliation
+        worker can backfill the real memory_id once events resolve."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps([_SAMPLE_EXTRACTION[1]])  # "feeling" candidate
+        )
+        mock_add_memories.return_value = [
+            {"event_id": "evt_pending_xyz", "memory": None}
+        ]
+
+        extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_timeout",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        assert mock_upsert.call_count == 1
+        call_kwargs = mock_upsert.call_args.kwargs
+        assert call_kwargs["memory_id"] is None, (
+            "Bug-A timeout case: memory_id is unknown — overlay relies on "
+            "content_hash keying (review_metadata_store handles None)"
+        )
+        assert call_kwargs["content"] == _SAMPLE_EXTRACTION[1]["content"]
+        assert call_kwargs["sync_state"] == "pending", (
+            "sync_state=pending signals reconcile_review_metadata_entries "
+            "should backfill memory_id when the event eventually resolves"
+        )
+        assert call_kwargs["metadata"]["mem0_event_id"] == "evt_pending_xyz", (
+            "event_id MUST be stashed in metadata so a future reconciler "
+            "can match the timed-out event to its eventual memory_id"
+        )
+        assert call_kwargs["metadata"]["status"] == "pending_review"
+
+    @patch("deerflow.sophia.extraction.upsert_review_metadata")
+    @patch("deerflow.sophia.extraction.add_memories")
+    @patch("deerflow.sophia.extraction.anthropic")
+    def test_extraction_overlay_failure_does_not_block_subsequent_writes(
+        self, mock_anthropic_mod, mock_add_memories, mock_upsert
+    ):
+        """A corrupted local store MUST NOT take down the extraction loop.
+        The Mem0 write is the durable record; the overlay is best-effort
+        UX scaffolding. If upsert_review_metadata raises on candidate 1,
+        candidate 2's Mem0 write must still happen."""
+        from deerflow.sophia.extraction import extract_session_memories
+
+        mock_client = MagicMock()
+        mock_anthropic_mod.Anthropic.return_value = mock_client
+        # Two candidates — make upsert raise on the FIRST one only.
+        mock_client.messages.create.return_value = _make_anthropic_response(
+            json.dumps(_SAMPLE_EXTRACTION[:2])
+        )
+        mock_add_memories.return_value = [{"id": "mem_x"}]
+        mock_upsert.side_effect = [
+            RuntimeError("local store IO error"),  # first candidate
+            None,                                    # second candidate
+        ]
+
+        result = extract_session_memories(
+            user_id="user1",
+            session_id="sess_overlay_resilient",
+            messages=_SAMPLE_MESSAGES,
+            session_metadata=_SESSION_METADATA,
+        )
+
+        # Both Mem0 writes happened — extraction loop continued past the
+        # overlay failure.
+        assert mock_add_memories.call_count == 2, (
+            f"Mem0 writes MUST continue past local-overlay failures; "
+            f"got {mock_add_memories.call_count} calls"
+        )
+        # Both candidates landed in the returned written_memories.
+        assert len(result) == 2
+        # Both overlay writes were attempted.
+        assert mock_upsert.call_count == 2

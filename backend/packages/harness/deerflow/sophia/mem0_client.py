@@ -929,10 +929,16 @@ def wait_for_pending_events(
             poll(pending, resolved)
         except Mem0EventFailedError:
             raise
-        except Exception:
+        except Exception as exc:
+            # Bug A diagnostic (PR #130 §I.2): include ``repr(exc)`` so a
+            # silent SDK exception (e.g. unexpected response shape, auth
+            # failure, transient 5xx) is grep-friendly. ``exc_info=True``
+            # still writes the full traceback for cases where the repr
+            # isn't enough.
             logger.warning(
-                "Mem0 poll for pending events failed for user %s",
+                "[Mem0Poll] poll_failed user_id=%s error=%s",
                 user_id,
+                repr(exc)[:200],
                 exc_info=True,
             )
         if pending:
@@ -969,19 +975,44 @@ def _select_event_poll_strategy(
     place. Returns ``None`` if no strategy is available (no SDK client, no
     httpx, no API key) — caller logs warning and short-circuits.
     """
+    # Bug A diagnostic (PR #130 §I.2): one INFO line per branch so production
+    # logs reveal WHICH polling strategy fires. Local venv has mem0ai 0.0.7
+    # (no SDK event methods → REST fallback), but production may have
+    # mem0ai>=2.0.2 which could expose ``get_events`` → SDK paginated path,
+    # whose response shape we may not parse correctly. Without this log we
+    # can't tell which path is dropping events on the floor.
     client = _get_client()
-    if client is not None and hasattr(client, "get_event"):
+    has_get_event = client is not None and hasattr(client, "get_event")
+    has_get_events = client is not None and hasattr(client, "get_events")
+    rest_available = _rest_fallback_available()
+    if has_get_event:
+        logger.info(
+            "[Mem0Poll] strategy=sdk_per_id user_id=%s has_get_event=True has_get_events=%s rest_available=%s",
+            user_id, has_get_events, rest_available,
+        )
         return lambda pending, resolved: _poll_events_via_sdk_per_id(
             client, pending, resolved, deadline=deadline
         )
-    if client is not None and hasattr(client, "get_events"):
+    if has_get_events:
+        logger.info(
+            "[Mem0Poll] strategy=sdk_paginated user_id=%s has_get_events=True rest_available=%s",
+            user_id, rest_available,
+        )
         return lambda pending, resolved: _poll_events_via_sdk_paginated(
             client, user_id, pending, resolved, deadline=deadline
         )
-    if _rest_fallback_available():
+    if rest_available:
+        logger.info(
+            "[Mem0Poll] strategy=rest user_id=%s",
+            user_id,
+        )
         return lambda pending, resolved: _poll_events_via_rest(
             pending, resolved, deadline=deadline
         )
+    logger.warning(
+        "[Mem0Poll] strategy=none user_id=%s client_present=%s rest_available=%s",
+        user_id, client is not None, rest_available,
+    )
     return None
 
 
@@ -1056,7 +1087,18 @@ def _poll_events_via_sdk_paginated(
             kwargs["cursor"] = cursor
         events_result = client.get_events(**kwargs)
         events, cursor = _normalize_paginated_result(events_result)
+        # Bug A diagnostic (PR #130 §I.2): expose the per-page count, cursor
+        # presence, and ``raw_result_type`` so we can tell whether the SDK
+        # is returning events at all and which envelope shape
+        # ``_normalize_paginated_result`` is collapsing.
+        pending_before = len(pending)
         _consume_events(events, pending, resolved)
+        logger.info(
+            "[Mem0Poll] sdk_paginated_page user_id=%s events=%d cursor_present=%s "
+            "pending_before=%d pending_after=%d raw_result_type=%s",
+            user_id, len(events), bool(cursor), pending_before, len(pending),
+            type(events_result).__name__,
+        )
         if not cursor or not pending:
             break
 
@@ -1109,6 +1151,7 @@ def _poll_events_via_rest(
     headers = {"Authorization": f"Token {api_key}"}
     url: str | None = f"{base_url}/v1/events/?limit={_REST_EVENTS_PAGE_SIZE}"
 
+    page_num = 0
     with httpx.Client(timeout=_REST_EVENTS_DEFAULT_REQUEST_TIMEOUT) as http:
         for _ in range(_REST_EVENTS_MAX_PAGES):
             if url is None or not pending:
@@ -1117,11 +1160,24 @@ def _poll_events_via_rest(
             if per_request_timeout is None:
                 # Outer deadline already elapsed — stop polling immediately.
                 break
+            page_num += 1
             resp = http.get(url, headers=headers, timeout=per_request_timeout)
             resp.raise_for_status()
             data = resp.json()
             events = _events_from_rest_payload(data)
+            # Bug A diagnostic (PR #130 §I.2): expose per-page event count and
+            # whether the response carried a ``next`` cursor. If ``events=0``
+            # repeatedly we know ``_events_from_rest_payload`` is misreading
+            # the envelope. If ``pending_after == pending_before`` after a
+            # non-empty page, ``_consume_events`` is dropping matches.
+            pending_before = len(pending)
             _consume_events(events, pending, resolved)
+            next_present = bool(_resolve_rest_next_url(data, base_url))
+            logger.info(
+                "[Mem0Poll] rest_page page=%d events=%d next_present=%s "
+                "pending_before=%d pending_after=%d",
+                page_num, len(events), next_present, pending_before, len(pending),
+            )
             url = _resolve_rest_next_url(data, base_url)
 
 

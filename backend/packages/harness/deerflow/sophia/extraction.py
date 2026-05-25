@@ -13,6 +13,7 @@ from pathlib import Path
 import anthropic
 
 from deerflow.sophia.mem0_client import add_memories
+from deerflow.sophia.review_metadata_store import upsert_review_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +291,58 @@ def extract_session_memories(
             metadata=mem0_metadata,
             timestamp=session_start_unix,
         )
+
+        # --- Local review_metadata overlay write (recap pipeline fix, PR #130 §I.1) ---
+        #
+        # Mem0 v3 does NOT propagate event-level ``metadata.status`` onto the
+        # persisted memory record. Without this overlay write, our newly-extracted
+        # candidates have ``status=None`` when queried back via ``get_all``, so the
+        # gateway's ``_hydrate_memories_for_review`` strict ``status==pending_review``
+        # filter drops them and the recap UI shows the empty state.
+        #
+        # ``apply_review_metadata_overlays`` (review_metadata_store.py:408-438) emits
+        # ``local:<hash>`` synthetic memories for any overlay entry not matched to a
+        # real Mem0 memory — so this write surfaces candidates correctly even when
+        # Mem0 v3 deduplicates our content into an existing memory (in which case
+        # ``linked_memory_ids`` points to a pre-existing record, and our overlay
+        # entry stands alone as the user-facing candidate).
+        resolved_memory_id: str | None = None
+        resolved_event_id: str | None = None
+        if isinstance(result, list) and result:
+            first = result[0] if isinstance(result[0], dict) else None
+            if first:
+                candidate_id = first.get("id")
+                if isinstance(candidate_id, str) and candidate_id and not candidate_id.startswith("local:"):
+                    resolved_memory_id = candidate_id
+                event_candidate = first.get("event_id")
+                if isinstance(event_candidate, str) and event_candidate:
+                    resolved_event_id = event_candidate
+
+        overlay_metadata = dict(mem0_metadata)
+        if resolved_event_id and not resolved_memory_id:
+            # Capture the event_id so ``reconcile_review_metadata_entries`` (a future
+            # backfill worker) can flip ``sync_state="pending"`` → ``"reconciled"``
+            # once Bug A is fixed and ``wait_for_pending_events`` actually resolves
+            # these to real memory_ids.
+            overlay_metadata["mem0_event_id"] = resolved_event_id
+
+        try:
+            upsert_review_metadata(
+                user_id,
+                memory_id=resolved_memory_id,
+                content=entry["content"],
+                metadata=overlay_metadata,
+                session_id=session_id,
+                sync_state="extraction" if resolved_memory_id else "pending",
+            )
+        except Exception:
+            # A corrupted local store must NEVER take down the extraction loop —
+            # we already wrote to Mem0, the data is durable, the overlay is
+            # best-effort UX scaffolding.
+            logger.warning(
+                "session.finalization extraction_overlay_write_failed user_id=%s session_id=%s",
+                user_id, session_id, exc_info=True,
+            )
 
         written_memories.append({
             "content": entry["content"],
