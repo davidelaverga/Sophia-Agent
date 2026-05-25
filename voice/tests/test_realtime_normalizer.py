@@ -247,6 +247,86 @@ def test_assistant_transcript_public_event_preserves_source_response_segment_met
     ]
 
 
+def test_gemini_internal_thought_transcript_is_suppressed_from_public_assistant_text() -> None:
+    payloads = _payloads(
+        [
+            _event(
+                ProviderEventType.ASSISTANT_TEXT_DELTA,
+                {
+                    "text": "Thought: The user confirmed their name is Luis. I need to acknowledge that.",
+                    "is_delta": False,
+                    "transcript_assembly": "auto",
+                    "segment_id": "gemini-segment-0",
+                    "source_sequence": 51,
+                },
+                provider="google-gemini-live",
+                response_id="gemini-response-internal-1",
+            )
+        ]
+    )
+
+    assert [payload["type"] for payload in payloads] == ["sophia.turn_diagnostic"]
+    assert payloads[0]["data"]["reason"] == "gemini_internal_output_suppressed"
+    assert payloads[0]["data"]["matched_marker"] == "thought_label"
+    assert "Thought:" not in str(payloads)
+
+
+def test_gemini_emit_artifact_correction_transcript_is_suppressed_from_public_assistant_text() -> None:
+    payloads = _payloads(
+        [
+            _event(
+                ProviderEventType.ASSISTANT_TEXT_DELTA,
+                {
+                    "text": "Emit Artifact Correction attempt: reflection must be a string.",
+                    "is_delta": False,
+                    "transcript_assembly": "auto",
+                    "segment_id": "gemini-segment-0",
+                    "source_sequence": 52,
+                },
+                provider="google-gemini-live",
+                response_id="gemini-response-internal-2",
+            )
+        ]
+    )
+
+    assert [payload["type"] for payload in payloads] == ["sophia.turn_diagnostic"]
+    assert payloads[0]["data"]["reason"] == "gemini_internal_output_suppressed"
+    assert payloads[0]["data"]["matched_marker"] == "emit_artifact_correction"
+    assert "Emit Artifact Correction attempt" not in str(payloads)
+
+
+def test_normal_gemini_assistant_text_still_emits_public_transcript() -> None:
+    payloads = _payloads(
+        [
+            _event(
+                ProviderEventType.ASSISTANT_TEXT_DELTA,
+                {
+                    "text": "Luis, always good to get that right.",
+                    "is_delta": False,
+                    "transcript_assembly": "auto",
+                    "segment_id": "gemini-segment-0",
+                    "source_sequence": 53,
+                },
+                provider="google-gemini-live",
+                response_id="gemini-response-normal-1",
+            )
+        ]
+    )
+
+    assert payloads == [
+        {
+            "type": "sophia.transcript",
+            "data": {
+                "text": "Luis, always good to get that right.",
+                "is_final": False,
+                "response_id": "gemini-response-normal-1",
+                "segment_id": "gemini-segment-0",
+                "source_sequence": 53,
+            },
+        }
+    ]
+
+
 def test_openai_style_realtime_fixture_normalizes_without_leaking_provider_names() -> None:
     payloads = _payloads(
         [

@@ -249,6 +249,14 @@ Diagnostics now include barge-in transcript captured/promoted/ignored/duplicate 
 
 This phase did not change prompts, skills, crisis behavior, memory behavior, Builder behavior, artifact schema, VAD/activity settings, provider routing defaults, `voice/sophia_llm.py`, `users/**`, `backend/users/**`, or the legacy Stream/Vision Agents cascade.
 
+## Gemini Live Internal Output Guard
+
+Gemini Live public assistant transcript must never include hidden reasoning, scratchpad text, tool-repair narration, validation details, or marker labels such as `Thought:`, `Spoken:`, `Tool call:`, `ValidationError`, or `Emit Artifact Correction attempt`. Provider `outputTranscription` and model-turn text are treated as assistant output only after the public-output guard. Suppressed text is not emitted as `sophia.transcript`; the runtime may emit a safe `sophia.turn_diagnostic` counter with marker name and text length, but not the raw text.
+
+Tool validation failures sent back to Gemini must be concise and repairable. They must not include Pydantic stack traces, raw `ValidationError` text, JSON-schema internals, or field-by-field exception dumps. For invalid `emit_artifact` arguments, the model-visible tool response should say only that the arguments were invalid and that required fields should be provided before retrying.
+
+Artifact schema nullability must match runtime validation and provider declarations. If `reflection` accepts `null` at runtime, the Gemini function declaration must mark it nullable rather than relying on contradictory prose. If a future provider cannot represent nullable fields, the runtime contract must choose a single safe representation and update the declaration, docs, and validators together.
+
 ## Why BackendAdapter Is Not Reused
 
 `voice/adapters/base.py` defines `BackendAdapter` for one finalized user text turn. It yields text chunks, an artifact, builder task events, or an error from a backend such as DeerFlow. That is still useful for the legacy cascade.

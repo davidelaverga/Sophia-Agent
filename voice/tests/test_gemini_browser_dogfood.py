@@ -765,6 +765,69 @@ async def test_browser_relay_tool_call_executes_existing_emit_artifact_and_retur
 
 
 @pytest.mark.anyio
+async def test_browser_relay_emit_artifact_invalid_args_returns_concise_tool_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-artifact-invalid",
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "artifact-call-invalid",
+                        "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+                        "args": {
+                            "session_goal": "Stay grounded.",
+                            "active_goal": "Acknowledge the user.",
+                            "next_step": "Listen for the next turn.",
+                            "takeaway": "Name was confirmed.",
+                            "reflection": None,
+                            "tone_estimate": 2.0,
+                            "tone_target": 2.5,
+                            "active_tone_band": "engagement",
+                            "skill_loaded": "active_listening",
+                            "ritual_phase": "freeform.memory_check",
+                            "voice_emotion_primary": "calm",
+                            "voice_emotion_secondary": "warm",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    function_response = response["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]
+    tool_response_text = json.dumps(function_response["response"])
+    assert function_response["response"]["ok"] is False
+    assert function_response["response"]["error_type"] == "invalid_tool_arguments"
+    assert (
+        function_response["response"]["result_summary"]
+        == "Invalid emit_artifact arguments. Provide required string fields and retry."
+    )
+    assert "ValidationError" not in tool_response_text
+    assert "Field required" not in tool_response_text
+    assert "schema" not in tool_response_text.lower()
+    assert response["tool_diagnostics"][0]["success"] is False
+    assert response["tool_diagnostics"][0]["rejection_reason"] == "invalid_tool_arguments"
+    payloads = await browser_session.dogfood_session.wait_for_public_payloads(1)
+    assert not [payload for payload in payloads if payload["type"] == "sophia.artifact"]
+
+    await manager.close_session("browser-gemini-artifact-invalid")
+
+
+@pytest.mark.anyio
 async def test_browser_relay_duplicate_emit_artifact_tool_call_id_is_single_shot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

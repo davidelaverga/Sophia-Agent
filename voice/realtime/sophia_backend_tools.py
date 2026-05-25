@@ -255,6 +255,8 @@ def _gemini_property_schema(schema: Mapping[str, Any]) -> dict[str, object]:
     json_type = normalized.get("type")
     if isinstance(json_type, str):
         gemini_schema["type"] = _JSON_SCHEMA_TO_GEMINI_TYPE.get(json_type, json_type.upper())
+    if _schema_allows_null(schema):
+        gemini_schema["nullable"] = True
 
     description = normalized.get("description") or schema.get("description")
     if isinstance(description, str) and description.strip():
@@ -295,6 +297,13 @@ def _first_non_null_schema(schema: Mapping[str, Any]) -> Mapping[str, Any]:
             if isinstance(variant, Mapping) and variant.get("type") != "null":
                 return {**schema, **variant}
     return schema
+
+
+def _schema_allows_null(schema: Mapping[str, Any]) -> bool:
+    variants = schema.get("anyOf")
+    if not isinstance(variants, list):
+        return schema.get("type") == "null"
+    return any(isinstance(variant, Mapping) and variant.get("type") == "null" for variant in variants)
 
 
 def _normalize_description(value: object) -> str:

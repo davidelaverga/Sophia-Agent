@@ -11,6 +11,21 @@ from voice.realtime.events import ProviderEvent, ProviderEventType, SophiaEvent
 
 ArtifactValidator = Callable[[dict[str, Any]], dict[str, Any]]
 
+_GEMINI_INTERNAL_OUTPUT_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("thought_label", re.compile(r"(^|\n)\s*thought\s*:", re.IGNORECASE)),
+    ("spoken_label", re.compile(r"(^|\n)\s*spoken\s*:", re.IGNORECASE)),
+    ("emit_artifact_correction", re.compile(r"emit\s+artifact\s+correction\s+attempt", re.IGNORECASE)),
+    ("tool_call_label", re.compile(r"(^|\n)\s*tool\s+call\s*:", re.IGNORECASE)),
+    ("validation_error", re.compile(r"\bvalidationerror\b", re.IGNORECASE)),
+    ("schema_requires", re.compile(r"\bschema\s+requires\b", re.IGNORECASE)),
+    ("repair_intent", re.compile(r"\bi\s+will\s+correct\s+this\s+by\b", re.IGNORECASE)),
+    ("previous_artifact_failed", re.compile(r"\bmy\s+previous\s+artifact\s+call\s+failed\b", re.IGNORECASE)),
+    (
+        "tool_definition_lookup",
+        re.compile(r"\blooking\s+at\s+the\s+emit_artifact\s+tool\s+definition\b", re.IGNORECASE),
+    ),
+)
+
 
 class SophiaEventNormalizer:
     """Convert normalized provider events into the public sophia.* contract.
@@ -75,6 +90,10 @@ class SophiaEventNormalizer:
             if not text:
                 return []
 
+            internal_marker = _gemini_internal_output_marker(event, text)
+            if internal_marker is not None:
+                return [self._internal_output_suppressed_diagnostic(event, internal_marker, text)]
+
             stale_reason = self._stale_transcript_reason(event, response_id=response_id, transcript_key=transcript_key)
             if stale_reason is not None:
                 return [
@@ -116,6 +135,10 @@ class SophiaEventNormalizer:
                 text = self._assistant_text_by_response.get(transcript_key, "")
             if not text:
                 return []
+
+            internal_marker = _gemini_internal_output_marker(event, text)
+            if internal_marker is not None:
+                return [self._internal_output_suppressed_diagnostic(event, internal_marker, text)]
 
             stale_reason = self._stale_transcript_reason(event, response_id=response_id, transcript_key=transcript_key)
             if stale_reason is not None:
@@ -433,6 +456,24 @@ class SophiaEventNormalizer:
             data.update(extra)
         return SophiaEvent("sophia.turn_diagnostic", data)
 
+    def _internal_output_suppressed_diagnostic(
+        self,
+        event: ProviderEvent,
+        marker: str,
+        text: str,
+    ) -> SophiaEvent:
+        return self._diagnostic_event(
+            event,
+            status="completed",
+            reason="gemini_internal_output_suppressed",
+            extra={
+                "provider_event_name": "gemini.internal_output_suppressed",
+                "internal_output_suppressed": True,
+                "matched_marker": marker,
+                "text_length": len(text),
+            },
+        )
+
     def _response_id(self, event: ProviderEvent) -> str:
         response_id = event.response_id or event.turn_id or "default"
         if event.response_id or event.turn_id:
@@ -459,6 +500,17 @@ def _int_value(value: Any) -> int | None:
         return None
     if isinstance(value, int):
         return value
+    return None
+
+
+def _gemini_internal_output_marker(event: ProviderEvent, text: str) -> str | None:
+    provider = (event.provider or "").lower()
+    if "gemini" not in provider:
+        return None
+
+    for marker, pattern in _GEMINI_INTERNAL_OUTPUT_MARKERS:
+        if pattern.search(text):
+            return marker
     return None
 
 

@@ -41,6 +41,36 @@ def test_gemini_emit_artifact_declaration_builds_from_contract() -> None:
     }
 
 
+def test_gemini_emit_artifact_reflection_nullability_matches_runtime_contract() -> None:
+    sophia_backend_tools._emit_artifact_contract_module.cache_clear()
+    contract = sophia_backend_tools._emit_artifact_contract_module()
+
+    declaration = sophia_backend_tools.gemini_emit_artifact_function_declaration()
+    reflection_schema = contract.ArtifactInput.model_json_schema()["properties"]["reflection"]
+    reflection_declaration = declaration["parameters"]["properties"]["reflection"]
+
+    assert {"type": "null"} in reflection_schema["anyOf"]
+    assert reflection_declaration["type"] == "STRING"
+    assert reflection_declaration["nullable"] is True
+
+    artifact = {
+        "session_goal": "Stay grounded.",
+        "active_goal": "Acknowledge the user.",
+        "next_step": "Listen for the next turn.",
+        "takeaway": "The user confirmed their preferred name.",
+        "reflection": None,
+        "tone_estimate": 2.0,
+        "tone_target": 2.5,
+        "active_tone_band": "engagement",
+        "skill_loaded": "active_listening",
+        "ritual_phase": "freeform.memory_check",
+        "voice_emotion_primary": "calm",
+        "voice_emotion_secondary": "warm",
+        "voice_speed": "normal",
+    }
+    assert contract.validate_emit_artifact_args(artifact)["reflection"] is None
+
+
 def test_gemini_sophia_declarations_include_emit_artifact_from_contract() -> None:
     sophia_backend_tools._emit_artifact_contract_module.cache_clear()
     sophia_backend_tools._builder_lifecycle_contract_module.cache_clear()

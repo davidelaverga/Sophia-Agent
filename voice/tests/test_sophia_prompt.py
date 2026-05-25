@@ -266,6 +266,12 @@ def test_gemini_live_spoken_turn_policy_contains_required_rules() -> None:
         "artifact/tool obligations",
         "do not mention artifact bookkeeping aloud",
         "internal bookkeeping",
+        "hidden reasoning",
+        "tool-repair attempts",
+        "validation errors",
+        "thought:",
+        "emit artifact correction attempt",
+        "repair silently through the structured tool path",
     ]:
         assert expected in overlay
 

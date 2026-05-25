@@ -35,6 +35,9 @@ GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME = "cancel_async_task"
 GEMINI_LIST_ASYNC_TASKS_TOOL_NAME = "list_async_tasks"
 GEMINI_RETRIEVE_MEMORIES_TOOL_NAME = "retrieve_memories"
 GEMINI_DOGFOOD_TOOL_RESPONSE_ACTION = "gemini_tool_response"
+GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS = (
+    "Invalid emit_artifact arguments. Provide required string fields and retry."
+)
 GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
     {
         GEMINI_EMIT_ARTIFACT_TOOL_NAME,
@@ -782,9 +785,19 @@ class GeminiDogfoodToolExecutor:
             try:
                 tool_result, artifact = execute_existing_emit_artifact(call.args)
             except Exception as exc:
-                raise GeminiDogfoodToolError(
-                    f"Existing Sophia tool {call.name!r} rejected the Gemini Live arguments: {exc}"
-                ) from exc
+                logger.warning(
+                    "gemini.emit_artifact.invalid_arguments call_id=%s error_type=%s arg_keys=%s",
+                    call.call_id,
+                    exc.__class__.__name__,
+                    sorted(str(key) for key in call.args.keys()),
+                )
+                return _invalid_emit_artifact_arguments_execution(
+                    call,
+                    session_id=session_id,
+                    user_id=user_id,
+                    runtime_mode=runtime_mode,
+                    provider=provider,
+                )
 
             response = {
                 "ok": True,
@@ -905,6 +918,36 @@ def gemini_dogfood_tool_declarations() -> list[dict[str, object]]:
             "functionDeclarations": declarations,
         }
     ]
+
+
+def _invalid_emit_artifact_arguments_execution(
+    call: GeminiLiveFunctionCall,
+    *,
+    session_id: str,
+    user_id: str,
+    runtime_mode: VoiceRuntimeMode,
+    provider: str,
+) -> GeminiDogfoodToolExecution:
+    response = {
+        "ok": False,
+        "tool": call.name,
+        "error_type": "invalid_tool_arguments",
+        "result_summary": GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS,
+        "recovery_guidance": GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS,
+        "artifact_recorded": False,
+        "session_id": session_id,
+        "user_id": user_id,
+        "runtime": runtime_mode.value,
+        "provider": provider,
+        "public_event_boundary": "SophiaEventNormalizer",
+    }
+    return GeminiDogfoodToolExecution(
+        call=call,
+        response=response,
+        result_summary=GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS,
+        success=False,
+        error_text=GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS,
+    )
 
 
 def extract_gemini_live_function_calls(event: Mapping[str, Any]) -> list[GeminiLiveFunctionCall]:
