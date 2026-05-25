@@ -78,6 +78,12 @@ _pending_reruns: dict[str, dict[str, Any] | None] = {}
 _NOT_PENDING: Any = object()
 _processed_lock = threading.Lock()
 
+# Safety cap on the deferred-rerun iterative loop (Codex P2 R15). 16 covers
+# any realistic concurrent /end_session burst — the typical race only queues
+# one deferred rerun per primary run. Beyond this we log + bail rather than
+# loop indefinitely under a misbehaving client.
+_MAX_DEFERRED_RERUN_ITERATIONS = 16
+
 _LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:2024")
 
 
@@ -151,151 +157,194 @@ def run_offline_pipeline(
         force_reprocess,
     )
 
-    # --- Two-stage idempotency check (see _acquire_pipeline_slot for full
-    # behavior; extracted to keep this function below sentrux CC threshold). ---
-    # Pass our own thread_state as ``pending_thread_state`` so that if THIS
-    # call is rejected with "in_flight" + force_reprocess, the in-flight run
-    # picks up OUR state for the deferred rerun (not the first run's stale
-    # snapshot). Codex P1 review on PR #130 — critical for the /end_session
-    # race where the explicit caller has newer messages/artifacts.
-    slot = _acquire_pipeline_slot(
-        user_id, session_id, thread_id,
-        force_reprocess=force_reprocess,
-        pending_thread_state=thread_state,
-    )
-    if slot != "proceed":
-        return {"status": slot, "session_id": session_id}
+    # Codex P2 review on PR #130 R15: the deferred-rerun dispatch used to
+    # recursively call ``run_offline_pipeline`` again. Sustained concurrent
+    # ``force_reprocess`` requests against the same session_id could build
+    # unbounded Python stack depth, eventually hitting the recursion limit
+    # and dropping pipeline work. The iterative loop below has identical
+    # semantics — body runs, finally pops the rerun queue, if a rerun was
+    # queued we loop with the new state — without growing the stack.
+    #
+    # The first iteration honors the caller's ``force_reprocess`` flag;
+    # subsequent iterations (deferred reruns) always run with
+    # ``force_reprocess=True`` since that's the explicit-end-session intent
+    # captured at the time the second caller landed.
+    #
+    # ``_MAX_DEFERRED_RERUN_ITERATIONS`` is a safety net against pathological
+    # queueing patterns (e.g. a misbehaving client looping force_reprocess
+    # at high frequency). 16 iterations covers any realistic burst — the
+    # /end_session race only ever queues one deferred rerun per primary run.
+    accumulated_exception: BaseException | None = None  # FIRST exception wins
+    final_result: dict[str, Any] | None = None
+    current_thread_state = thread_state
+    current_force_reprocess = force_reprocess
 
-    # `extraction_retryable` gates promotion to `_processed_sessions` at the
-    # bottom. Set to True on ExtractionParseError or any other extraction
-    # exception so the next pipeline trigger retries.
-    result: dict[str, Any] | None = None
-    # Codex P1 review on PR #130 R12: if the pipeline body raises, we MUST
-    # still honor any deferred force_reprocess queued by a second caller
-    # (typically /end_session landing while inactivity_watcher was already
-    # running). The naive try/finally pattern drops the rerun because the
-    # exception propagates BEFORE the post-finally rerun-dispatch branch.
-    # Capture the exception, let control fall through to the rerun, then
-    # re-raise it after the rerun is launched. The primary caller still
-    # sees the original exception; the second caller's intent is honored
-    # via the recursive rerun's side effects (memories, recap, handoff).
-    pending_exception: BaseException | None = None
-    try:
-        # --- Thread state: fetch from LangGraph if not provided ---
-        #
-        # Codex P1 review on PR #130: this block MUST NOT early-return.
-        # A bare ``return {"status": "error", ...}`` inside the try would
-        # bypass the post-finally ``if rerun_queued:`` branch below, silently
-        # dropping any explicit force_reprocess request queued while we were
-        # in flight. Instead we set ``result`` to the error envelope and let
-        # control fall through to the rerun check after finally.
-        thread_state = _ensure_thread_state(thread_state, thread_id, user_id, session_id)
-
-        if thread_state is None:
-            result = {"status": "error", "reason": "no_thread_state", "session_id": session_id}
-        else:
-            # Run the 7-step body in a helper to keep this orchestrator below
-            # the sentrux CC threshold. ``_run_pipeline_steps`` owns all the
-            # per-step try/except + extraction parse-error handling.
-            steps, extraction_retryable = _run_pipeline_steps(
-                user_id, session_id, thread_id, thread_state,
-            )
-
-            # --- PROMOTE to _processed_sessions ONLY if extraction was not retryable.
-            # On parse error / other extraction exception, leave the session
-            # unprocessed so the next trigger (inactivity, explicit end_session
-            # with force_reprocess=True, etc.) gets a chance to retry.
-            if not extraction_retryable:
-                with _processed_lock:
-                    _processed_sessions.add(session_id)
-
-            logger.info(
-                "session.finalization pipeline_complete user_id=%s session_id=%s extraction_retryable=%s steps=%s",
-                user_id,
-                session_id,
-                extraction_retryable,
-                steps,
-            )
-
-            result = {
-                "status": "completed",
-                "session_id": session_id,
-                "steps": steps,
-                "extraction_retryable": extraction_retryable,
+    for iteration in range(_MAX_DEFERRED_RERUN_ITERATIONS):
+        # --- Two-stage idempotency check (see _acquire_pipeline_slot for full
+        # behavior; extracted to keep this function below sentrux CC threshold). ---
+        # Pass our own thread_state as ``pending_thread_state`` so that if THIS
+        # call is rejected with "in_flight" + force_reprocess, the in-flight run
+        # picks up OUR state for the deferred rerun (not the first run's stale
+        # snapshot). Codex P1 review on PR #130 — critical for the /end_session
+        # race where the explicit caller has newer messages/artifacts.
+        slot = _acquire_pipeline_slot(
+            user_id, session_id, thread_id,
+            force_reprocess=current_force_reprocess,
+            pending_thread_state=current_thread_state,
+        )
+        if slot != "proceed":
+            # Only possible on the first iteration (subsequent iterations are
+            # deferred reruns that just released the in-flight slot). If we hit
+            # this on an iteration > 0 it's a race with a third concurrent
+            # caller — let them own the rerun and return the slot envelope.
+            iteration_result: dict[str, Any] | None = {
+                "status": slot, "session_id": session_id
             }
-    except Exception as exc:
-        # Capture for re-raise AFTER the deferred rerun (P1 R12). Do NOT
-        # catch BaseException — KeyboardInterrupt / SystemExit should
-        # propagate immediately without trying to run a rerun.
-        pending_exception = exc
-        logger.exception(
-            "Pipeline body raised for session %s — will still honor any "
-            "queued force_reprocess before re-raising",
-            session_id,
-        )
-        result = {
-            "status": "error",
-            "reason": "pipeline_exception",
-            "session_id": session_id,
-            "error_type": type(exc).__name__,
-        }
-    finally:
-        # Always release the in-flight guard, regardless of how this run
-        # exited (success, abort-on-no-thread-state, or unhandled exception).
-        # Atomically pop the deferred-rerun entry — if a force_reprocess
-        # caller landed while we were in flight, we use THEIR thread_state
-        # for the rerun, not ours. Codex P1: the explicit caller (typically
-        # /end_session) has the user's newest messages; reusing our first-run
-        # state would silently reprocess stale data.
-        with _processed_lock:
-            _in_flight_sessions.discard(session_id)
-            rerun_state = _pending_reruns.pop(session_id, _NOT_PENDING)
+            if final_result is None:
+                final_result = iteration_result
+            break
 
-    if rerun_state is not _NOT_PENDING:
-        logger.info(
-            "[Pipeline] honoring queued force_reprocess user_id=%s session_id=%s "
-            "has_pending_state=%s primary_exception=%s — running deferred "
-            "rerun with second caller's state",
-            user_id,
-            session_id,
-            rerun_state is not None,
-            type(pending_exception).__name__ if pending_exception else None,
-        )
-        # Tail-call with force_reprocess=True. The recursive call re-acquires
-        # the slot normally (the session was just removed from _in_flight,
-        # and force_reprocess clears _processed_sessions inside
-        # ``_acquire_pipeline_slot``). ``_pending_reruns`` is a dict keyed by
-        # session_id, so concurrent force_reprocess requests during the rerun
-        # collapse to at most one additional deferred rerun — no unbounded
-        # recursion under concurrent traffic.
+        # `extraction_retryable` gates promotion to `_processed_sessions` at
+        # the bottom. Set to True on ExtractionParseError or any other
+        # extraction exception so the next pipeline trigger retries.
+        iteration_result = None
+        # Codex P1 review on PR #130 R12: if the pipeline body raises, we MUST
+        # still honor any deferred force_reprocess queued by a second caller
+        # (typically /end_session landing while inactivity_watcher was already
+        # running). Capture the exception, let control fall through to the
+        # rerun queue, then re-raise after the loop. The primary caller still
+        # sees the original exception; the second caller's intent is honored
+        # via the next iteration's side effects (memories, recap, handoff).
+        iteration_exception: BaseException | None = None
+        try:
+            # --- Thread state: fetch from LangGraph if not provided ---
+            #
+            # Codex P1 review on PR #130: this block MUST NOT early-return.
+            # A bare ``return {"status": "error", ...}`` inside the try would
+            # bypass the post-finally rerun check below, silently dropping any
+            # explicit force_reprocess request queued while we were in flight.
+            # Instead we set ``iteration_result`` to the error envelope and let
+            # control fall through to the rerun check after finally.
+            resolved_thread_state = _ensure_thread_state(
+                current_thread_state, thread_id, user_id, session_id
+            )
+
+            if resolved_thread_state is None:
+                iteration_result = {
+                    "status": "error",
+                    "reason": "no_thread_state",
+                    "session_id": session_id,
+                }
+            else:
+                # Run the 7-step body in a helper to keep this orchestrator
+                # below the sentrux CC threshold. ``_run_pipeline_steps`` owns
+                # all the per-step try/except + extraction parse-error handling.
+                steps, extraction_retryable = _run_pipeline_steps(
+                    user_id, session_id, thread_id, resolved_thread_state,
+                )
+
+                # --- PROMOTE to _processed_sessions ONLY if extraction was not
+                # retryable. On parse error / other extraction exception, leave
+                # the session unprocessed so the next trigger (inactivity,
+                # explicit end_session with force_reprocess=True, etc.) gets a
+                # chance to retry.
+                if not extraction_retryable:
+                    with _processed_lock:
+                        _processed_sessions.add(session_id)
+
+                logger.info(
+                    "session.finalization pipeline_complete user_id=%s "
+                    "session_id=%s extraction_retryable=%s steps=%s",
+                    user_id, session_id, extraction_retryable, steps,
+                )
+
+                iteration_result = {
+                    "status": "completed",
+                    "session_id": session_id,
+                    "steps": steps,
+                    "extraction_retryable": extraction_retryable,
+                }
+        except Exception as exc:
+            # Capture for re-raise AFTER the loop (P1 R12). Do NOT catch
+            # BaseException — KeyboardInterrupt / SystemExit should propagate
+            # immediately without trying to run a rerun.
+            iteration_exception = exc
+            logger.exception(
+                "Pipeline body raised for session %s (iteration=%d) — will "
+                "still honor any queued force_reprocess before re-raising",
+                session_id, iteration,
+            )
+            iteration_result = {
+                "status": "error",
+                "reason": "pipeline_exception",
+                "session_id": session_id,
+                "error_type": type(exc).__name__,
+            }
+        finally:
+            # Always release the in-flight guard, regardless of how this
+            # iteration exited. Atomically pop the deferred-rerun entry — if
+            # a force_reprocess caller landed while we were in flight, we
+            # use THEIR thread_state for the next iteration (not this
+            # iteration's stale snapshot). Codex P1: the explicit caller
+            # (typically /end_session) has the user's newest messages;
+            # reusing the first-run state would silently reprocess stale data.
+            with _processed_lock:
+                _in_flight_sessions.discard(session_id)
+                rerun_state = _pending_reruns.pop(session_id, _NOT_PENDING)
+
+        # Preserve the FIRST exception so the primary caller sees their
+        # failure (matches the recursive-version semantics — intermediate
+        # exceptions are logged but not propagated).
+        if iteration_exception is not None and accumulated_exception is None:
+            accumulated_exception = iteration_exception
+
+        # Always update final_result so the LAST iteration's outcome is
+        # returned (matches recursive-version semantics — a successful
+        # deferred rerun replaces the primary's error result if the primary
+        # itself didn't raise).
+        final_result = iteration_result
+
+        if rerun_state is _NOT_PENDING:
+            # No more queued reruns — exit the loop normally.
+            break
+
+        # Queued rerun: loop again with the second caller's state +
+        # force_reprocess=True. ``_pending_reruns`` is a dict keyed by
+        # session_id, so concurrent force_reprocess requests during the
+        # rerun collapse to at most one additional deferred rerun per
+        # iteration — bounded growth, not unbounded.
         #
         # If ``rerun_state`` is None the second caller didn't pass one; the
-        # rerun's ``_ensure_thread_state`` will fetch fresh from LangGraph
-        # (which gives us the absolute newest state at rerun time — even
-        # better than reusing a snapshot).
-        try:
-            rerun_result = run_offline_pipeline(
-                user_id, session_id, thread_id, rerun_state, force_reprocess=True,
-            )
-        except Exception:
-            # Log but don't lose the primary exception (if any). The rerun
-            # is best-effort — the primary caller's failure mode is what
-            # matters to surface.
-            logger.exception(
-                "Deferred rerun failed for session %s — primary exception "
-                "(if any) will still be re-raised",
-                session_id,
-            )
-            rerun_result = None
-        # Primary exception still wins if there was one — caller MUST see
-        # that their call failed even though we honored the deferred rerun.
-        if pending_exception is not None:
-            raise pending_exception
-        return rerun_result if rerun_result is not None else result
+        # next iteration's ``_ensure_thread_state`` will fetch fresh from
+        # LangGraph (which gives us the absolute newest state at rerun
+        # time — even better than reusing a snapshot).
+        logger.info(
+            "[Pipeline] honoring queued force_reprocess user_id=%s "
+            "session_id=%s iteration=%d has_pending_state=%s "
+            "primary_exception=%s — looping with second caller's state",
+            user_id, session_id, iteration + 1,
+            rerun_state is not None,
+            type(accumulated_exception).__name__ if accumulated_exception else None,
+        )
+        current_thread_state = rerun_state
+        current_force_reprocess = True
+    else:
+        # Iteration cap exhausted — log + bail. Pathological queueing pattern
+        # (a misbehaving client looping force_reprocess at high frequency)
+        # is the only way to reach this branch.
+        logger.warning(
+            "[Pipeline] deferred rerun loop hit safety cap user_id=%s "
+            "session_id=%s iterations=%d — dropping further queued reruns",
+            user_id, session_id, _MAX_DEFERRED_RERUN_ITERATIONS,
+        )
+        # Clear any straggler rerun entry so it doesn't haunt the next
+        # primary trigger.
+        with _processed_lock:
+            _pending_reruns.pop(session_id, None)
 
-    if pending_exception is not None:
-        raise pending_exception
-    return result
+    if accumulated_exception is not None:
+        raise accumulated_exception
+    return final_result
 
 
 def _run_pipeline_steps(

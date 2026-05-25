@@ -49,6 +49,18 @@ _background_tasks: set = set()
 _session_store = SessionStore()
 _LEGACY_SESSION_USER_ID = "dev-user"
 _MEM0_GET_ALL_PAGE_SIZE = 100
+# Default upper bound on pages walked by ``_get_all_paginated``. At
+# ``page_size=100`` this caps a single request at 2000 memories.
+#
+# Codex P2 review on PR #130 R15: R20 removed the prior 5-page cap because
+# users with >500 memories had pending_review records hidden past page 5.
+# But ``max_pages=None`` made worst-case latency scale linearly with total
+# stored memories — a single UI request could walk the entire user history.
+# 20 pages (2000 memories) is the happy medium: 4x the prior cap (covers
+# heavy users), but bounded enough to keep request latency predictable.
+# Callers that genuinely need unbounded traversal (e.g. a future
+# reconciliation worker) can pass ``max_pages=None`` explicitly.
+_MEM0_GET_ALL_DEFAULT_MAX_PAGES = 20
 
 
 # ---------------------------------------------------------------------------
@@ -564,10 +576,18 @@ def _get_all_paginated(
     client,
     filters: dict,
     page_size: int = _MEM0_GET_ALL_PAGE_SIZE,
-    max_pages: int | None = None,
+    max_pages: int | None = _MEM0_GET_ALL_DEFAULT_MAX_PAGES,
     max_results: int | None = None,
 ) -> list[dict]:
-    """Fetch pages from Mem0 v3 get_all and return a flat list."""
+    """Fetch pages from Mem0 v3 get_all and return a flat list.
+
+    ``max_pages`` defaults to ``_MEM0_GET_ALL_DEFAULT_MAX_PAGES`` (=20)
+    so a single UI request can't walk an entire heavy user's history
+    unbounded — see Codex P2 review on PR #130 R15. Callers that need
+    unbounded traversal (e.g. a future reconciliation worker) can pass
+    ``max_pages=None`` explicitly; callers that need tighter caps for
+    specific endpoints can pass a smaller integer.
+    """
     all_results: list[dict] = []
     page_size = max(1, min(page_size, _MEM0_GET_ALL_PAGE_SIZE))
     if max_pages is not None:

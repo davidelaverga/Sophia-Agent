@@ -688,6 +688,10 @@ class TestListMemories:
         assert mock_client.get_all.call_count == 2
 
     def test_get_all_pagination_defaults_do_not_cap_at_five_pages(self):
+        """The default cap MUST be > 5 pages so users with >500 memories
+        don't have records hidden (the original R20 fix). The current
+        default is 20 pages — this test verifies traversal continues
+        well past the prior 5-page limit."""
         from app.gateway.routers.sophia import _get_all_paginated
 
         mock_client = MagicMock()
@@ -700,6 +704,56 @@ class TestListMemories:
 
         assert [item["id"] for item in result] == ["m1", "m2", "m3", "m4", "m5", "m6"]
         assert mock_client.get_all.call_count == 6
+
+    def test_get_all_pagination_default_caps_at_20_pages(self):
+        """Codex P2 review on PR #130 R15: the previous ``max_pages=None``
+        default let a single UI request walk an entire heavy user's
+        history (linear latency in total stored memories). The default
+        is now 20 pages — this test pins that bound by simulating a Mem0
+        store with 25 pages of memories and asserting we stop at 20.
+
+        Callers that genuinely need unbounded can still pass
+        ``max_pages=None`` explicitly (separate test below)."""
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        # 25 pages — exceeds the 20-page default cap. ``next`` is always
+        # set so without the cap we'd walk all 25.
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": f"m{page}"}], "next": f"page-{page + 1}"}
+            for page in range(1, 26)
+        ]
+
+        result = _get_all_paginated(mock_client, {"user_id": "test_user"})
+
+        assert len(result) == 20, (
+            f"Default cap MUST bound traversal at 20 pages; got {len(result)} "
+            f"items across {mock_client.get_all.call_count} pages"
+        )
+        assert mock_client.get_all.call_count == 20
+        # Confirms we stopped at the cap, not because results ran out.
+        assert result[-1]["id"] == "m20"
+
+    def test_get_all_pagination_explicit_none_max_pages_remains_unbounded(self):
+        """Escape hatch: callers that explicitly need unbounded traversal
+        (e.g. a reconciliation worker walking the full user history) can
+        still pass ``max_pages=None`` to opt out of the default cap."""
+        from app.gateway.routers.sophia import _get_all_paginated
+
+        mock_client = MagicMock()
+        mock_client.get_all.side_effect = [
+            {"results": [{"id": f"m{page}"}], "next": f"page-{page + 1}" if page < 25 else None}
+            for page in range(1, 26)
+        ]
+
+        result = _get_all_paginated(
+            mock_client, {"user_id": "test_user"}, max_pages=None
+        )
+
+        assert len(result) == 25, (
+            "Explicit max_pages=None MUST bypass the default cap"
+        )
+        assert mock_client.get_all.call_count == 25
 
     def test_with_status_filter(self, client, mock_mem0):
         mock_mem0.get_all.return_value = [

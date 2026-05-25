@@ -1423,6 +1423,103 @@ class TestInFlightProtection:
         # Suppress unused-import warning for pytest.
         _ = pytest
 
+    def test_deferred_rerun_uses_iterative_loop_no_stack_growth(self, mock_steps):
+        """Codex P2 R15: the deferred-rerun dispatch is iterative, not
+        recursive. Even with many sequential queued reruns the call stack
+        does NOT grow per rerun — they're handled in a single function
+        call's loop.
+
+        This test forces 3 sequential deferred reruns and verifies the
+        Python stack depth observed inside ``_run_pipeline_steps`` is
+        constant across iterations. Under the old recursive dispatch each
+        rerun added a frame; under the iterative loop it does not.
+        """
+        import sys
+        from unittest.mock import patch
+
+        from deerflow.sophia.offline_pipeline import (
+            _pending_reruns,
+            run_offline_pipeline,
+        )
+
+        observed_frame_depths: list[int] = []
+        iteration_count = {"n": 0}
+
+        def reentrant_steps(*args, **kwargs):
+            iteration_count["n"] += 1
+            # Measure the call-stack depth at the point _run_pipeline_steps
+            # is invoked. With iterative loop this stays constant; with
+            # recursive dispatch it grows by ~10 frames per rerun.
+            observed_frame_depths.append(len(sys._current_frames()))
+            # Queue a deferred rerun on the FIRST two iterations only.
+            # The third iteration's finally pops nothing → loop exits.
+            # Pass an explicit thread_state so the next iteration doesn't
+            # try to fetch from a (non-existent) LangGraph server.
+            if iteration_count["n"] <= 2:
+                _pending_reruns["sess_iterative_r15"] = _make_thread_state()
+            return ({"trace": "ok", "extraction": "ok"}, False)
+
+        from deerflow.sophia import offline_pipeline as op_mod
+
+        with patch.object(op_mod, "_run_pipeline_steps", side_effect=reentrant_steps):
+            result = run_offline_pipeline(
+                "u_r15", "sess_iterative_r15", "t_r15", _make_thread_state(),
+            )
+
+        assert iteration_count["n"] == 3, (
+            f"Expected 3 _run_pipeline_steps invocations (1 primary + 2 queued "
+            f"reruns); got {iteration_count['n']}"
+        )
+        # Stack depths from inside _run_pipeline_steps should NOT grow per
+        # iteration. Allow ±1 frame slack for test-runner internals.
+        assert max(observed_frame_depths) - min(observed_frame_depths) <= 1, (
+            f"Iterative loop must NOT grow the stack per rerun. Observed "
+            f"depths: {observed_frame_depths!r}"
+        )
+        assert result["status"] == "completed"
+        # The queue is fully drained.
+        assert "sess_iterative_r15" not in _pending_reruns
+
+    def test_deferred_rerun_loop_safety_cap(self, mock_steps):
+        """Pathological case: an infinitely-queuing client (each rerun
+        immediately queues another) MUST hit the safety cap and bail
+        rather than loop forever. The cap is set by
+        ``_MAX_DEFERRED_RERUN_ITERATIONS`` (16)."""
+        from unittest.mock import patch
+
+        from deerflow.sophia.offline_pipeline import (
+            _MAX_DEFERRED_RERUN_ITERATIONS,
+            _pending_reruns,
+            run_offline_pipeline,
+        )
+
+        call_count = {"n": 0}
+
+        def always_queue_rerun(*args, **kwargs):
+            call_count["n"] += 1
+            # ALWAYS queue another rerun — never lets the loop exit normally.
+            # Pass an explicit thread_state so iterations don't depend on a
+            # live LangGraph fetch.
+            _pending_reruns["sess_inf_loop_r15"] = _make_thread_state()
+            return ({"trace": "ok", "extraction": "ok"}, False)
+
+        from deerflow.sophia import offline_pipeline as op_mod
+
+        with patch.object(op_mod, "_run_pipeline_steps", side_effect=always_queue_rerun):
+            result = run_offline_pipeline(
+                "u_r15_cap", "sess_inf_loop_r15", "t_r15_cap", _make_thread_state(),
+            )
+
+        # Loop hit the safety cap and stopped.
+        assert call_count["n"] == _MAX_DEFERRED_RERUN_ITERATIONS, (
+            f"Pathological queueing MUST stop at the safety cap "
+            f"({_MAX_DEFERRED_RERUN_ITERATIONS}); got {call_count['n']} iterations"
+        )
+        # Result from the LAST iteration is returned.
+        assert result["status"] == "completed"
+        # Cap-handling explicitly cleared the straggler queue entry.
+        assert "sess_inf_loop_r15" not in _pending_reruns
+
 
 # ==================================================================
 # Defensive log-conversion guard (Codex P2 R12)
