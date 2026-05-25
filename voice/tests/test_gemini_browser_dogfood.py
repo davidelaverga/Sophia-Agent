@@ -5,6 +5,7 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+import httpx
 import pytest
 import voice.realtime.gemini_tool_loop as gemini_tool_loop
 import voice.realtime.sophia_backend_tools as sophia_backend_tools
@@ -245,6 +246,43 @@ class FakeBuilderLifecycleBackend:
                 result_summary=f"{len(async_tasks)} tracked builder task(s).",
             )
         raise AssertionError(f"Unexpected fake tool {tool_name}")
+
+
+def _patch_gateway_memory_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: Mapping[str, Any],
+            headers: Mapping[str, str],
+        ) -> httpx.Response:
+            requests.append(
+                {
+                    "url": url,
+                    "json": dict(json),
+                    "headers": dict(headers),
+                    "timeout": self.timeout,
+                }
+            )
+            return response
+
+    monkeypatch.setattr(gemini_tool_loop.httpx, "AsyncClient", FakeAsyncClient)
+    return requests
 
 
 class BlockingGeminiToolExecutor:
@@ -1177,6 +1215,176 @@ async def test_retrieve_memories_gateway_backend_missing_token_degrades_safely(
     assert execution.response["provider_reason"] == "gateway_retrieval_not_configured"
     assert execution.response["diagnostics"]["trusted_user_id_source"] == "authenticated_session_context"
     assert execution.response["diagnostics"]["raw_memory_text_excluded"] is True
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_http_success_json_returns_tool_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_memory_text = "User prefers solo, tactical gaming."
+    payload = {
+        "schema": "sophia_realtime_memory_retrieve_response_v1",
+        "ok": True,
+        "status": "success",
+        "query": "gaming preferences",
+        "count": 1,
+        "memories": [
+            {
+                "text": raw_memory_text,
+                "category": "preference",
+                "source": "long_term_memory",
+                "rank": 1,
+            }
+        ],
+        "provider_status": "available",
+        "provider_reason": "sdk_client",
+        "diagnostics": {
+            "schema": "sophia_realtime_memory_retrieve_v1",
+            "status": "success",
+            "count": 1,
+            "provider_status": "available",
+            "provider_reason": "sdk_client",
+            "raw_memory_text_excluded": True,
+            "result_categories": ["preference"],
+            "result_text_lengths": [len(raw_memory_text)],
+        },
+    }
+    requests = _patch_gateway_memory_response(monkeypatch, httpx.Response(200, json=payload))
+    executor = gemini_tool_loop.GeminiDogfoodToolExecutor()
+
+    execution = await executor.execute(
+        gemini_tool_loop.GeminiLiveFunctionCall(
+            call_id="memory-call-gateway-http-success",
+            name="retrieve_memories",
+            args={"query": "gaming preferences", "user_id": "model-supplied-user"},
+        ),
+        session_id="session-1",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        context_mode="gaming",
+        memory_retrieval_config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "secret-callback-token",
+        },
+    )
+
+    assert requests[0]["url"] == "https://gateway.example/internal/sophia-realtime/memories/retrieve"
+    assert requests[0]["headers"]["X-Sophia-Realtime-Memory-Token"] == "secret-callback-token"
+    assert execution.success is True
+    assert execution.response["status"] == "success"
+    assert execution.response["memories"][0]["text"] == raw_memory_text
+    assert execution.response["dynamic_retrieval_transport"] == "gateway_http"
+    assert execution.diagnostic()["success"] is True
+    assert "execution_rejected" not in execution.diagnostic()
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_invalid_json_reports_safe_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    secret_token = "secret-callback-token"
+    raw_memory_text = "User prefers tactical gaming."
+    body = f"<html>{secret_token} {raw_memory_text}</html>".encode()
+    response = httpx.Response(200, content=body, headers={"content-type": "text/html"})
+    _patch_gateway_memory_response(monkeypatch, response)
+    caplog.set_level("WARNING", logger=gemini_tool_loop.__name__)
+    backend = gemini_tool_loop.GeminiRealtimeMemoryHttpBackend()
+
+    result = await backend.execute(
+        {"query": "gaming preferences"},
+        user_id="trusted-user-1",
+        session_id="session-1",
+        context_mode="gaming",
+        config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve?debug_secret=1",
+            "token": secret_token,
+        },
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["provider_reason"] == "gateway_retrieval_invalid_json"
+    diagnostics = result["diagnostics"]
+    assert diagnostics["gateway_status_code"] == 200
+    assert diagnostics["gateway_content_type"] == "text/html"
+    assert diagnostics["gateway_callback_host"] == "gateway.example"
+    assert diagnostics["gateway_callback_path"] == "/internal/sophia-realtime/memories/retrieve"
+    assert diagnostics["gateway_body_preview_hash"].startswith("sha256:")
+    serialized_diagnostics = json.dumps(diagnostics)
+    assert secret_token not in serialized_diagnostics
+    assert raw_memory_text not in serialized_diagnostics
+    execution_diagnostic = gemini_tool_loop.GeminiDogfoodToolExecution(
+        call=gemini_tool_loop.GeminiLiveFunctionCall(
+            call_id="memory-call-invalid-json",
+            name="retrieve_memories",
+            args={"query": "gaming preferences"},
+        ),
+        response=result,
+        result_summary="retrieve_memories returned unavailable with 0 snippet(s).",
+    ).diagnostic()
+    assert execution_diagnostic["gateway_status_code"] == 200
+    assert execution_diagnostic["gateway_body_preview_hash"].startswith("sha256:")
+    assert secret_token not in json.dumps(execution_diagnostic)
+    assert raw_memory_text not in json.dumps(execution_diagnostic)
+    assert secret_token not in caplog.text
+    assert raw_memory_text not in caplog.text
+    assert "debug_secret" not in caplog.text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [307, 404, 500])
+async def test_retrieve_memories_gateway_non_2xx_reports_http_error(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    response = httpx.Response(
+        status_code,
+        content=b"<html>not the callback json</html>",
+        headers={"content-type": "text/html"},
+    )
+    _patch_gateway_memory_response(monkeypatch, response)
+    backend = gemini_tool_loop.GeminiRealtimeMemoryHttpBackend()
+
+    result = await backend.execute(
+        {"query": "gaming preferences"},
+        user_id="trusted-user-1",
+        session_id="session-1",
+        context_mode="gaming",
+        config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "secret-callback-token",
+        },
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["provider_reason"] == "gateway_retrieval_http_error"
+    assert result["diagnostics"]["gateway_status_code"] == status_code
+
+
+@pytest.mark.anyio
+async def test_retrieve_memories_gateway_schema_mismatch_reports_distinct_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = httpx.Response(200, json={"ok": True, "status": "success", "memories": []})
+    _patch_gateway_memory_response(monkeypatch, response)
+    backend = gemini_tool_loop.GeminiRealtimeMemoryHttpBackend()
+
+    result = await backend.execute(
+        {"query": "gaming preferences"},
+        user_id="trusted-user-1",
+        session_id="session-1",
+        context_mode="gaming",
+        config={
+            "endpoint_url": "https://gateway.example/internal/sophia-realtime/memories/retrieve",
+            "token": "secret-callback-token",
+        },
+    )
+
+    assert result["status"] == "unavailable"
+    assert result["provider_reason"] == "gateway_retrieval_schema_mismatch"
+    assert "missing:" in result["diagnostics"]["gateway_schema_mismatch"]
+    assert result["diagnostics"]["gateway_response_status"] == "success"
 
 
 @pytest.mark.anyio

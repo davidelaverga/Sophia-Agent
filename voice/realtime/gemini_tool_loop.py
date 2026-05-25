@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -46,8 +49,26 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
 
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 DEFAULT_REALTIME_MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 8.0
+REALTIME_MEMORY_GATEWAY_RESPONSE_SCHEMA = "sophia_realtime_memory_retrieve_response_v1"
+REALTIME_MEMORY_GATEWAY_ALLOWED_STATUSES = frozenset(
+    {
+        "success",
+        "no_results",
+        "unavailable",
+        "error",
+        "unauthorized",
+        "expired_grant",
+        "invalid_request",
+        "invalid_query",
+    }
+)
+REALTIME_MEMORY_GATEWAY_REQUIRED_FIELDS = frozenset(
+    {"ok", "status", "memories", "count", "provider_status", "provider_reason", "diagnostics"}
+)
 _EXPLICIT_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}\"'"
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiDogfoodToolError(ValueError):
@@ -496,12 +517,14 @@ class GeminiRealtimeMemoryHttpBackend:
             if isinstance(config, Mapping)
             else None
         ) or "X-Sophia-Realtime-Memory-Token"
+        callback_metadata = _gateway_callback_metadata(endpoint_url)
         if not endpoint_url or not token:
             return execute_realtime_retrieve_memories_unavailable(
                 args,
                 user_id=user_id,
                 context_mode=context_mode,
                 provider_reason="gateway_retrieval_not_configured",
+                diagnostics=callback_metadata,
             )
 
         query = realtime_memory_query_from_args(args)
@@ -515,47 +538,111 @@ class GeminiRealtimeMemoryHttpBackend:
                     },
                     headers={token_header: token},
                 )
-        except httpx.RequestError:
+        except httpx.RequestError as exc:
+            diagnostics = {
+                **callback_metadata,
+                "gateway_request_error_type": exc.__class__.__name__,
+            }
             return execute_realtime_retrieve_memories_unavailable(
                 args,
                 user_id=user_id,
                 context_mode=context_mode,
                 provider_reason="gateway_retrieval_request_failed",
+                diagnostics=diagnostics,
             )
 
-        if response.status_code == 401:
-            return execute_realtime_retrieve_memories_unavailable(
-                args,
-                user_id=user_id,
-                context_mode=context_mode,
-                provider_reason="gateway_retrieval_rejected",
+        if not 200 <= response.status_code < 300:
+            diagnostics = _gateway_response_diagnostics(
+                response,
+                endpoint_url=endpoint_url,
+                include_body_preview=True,
             )
-        if response.status_code >= 400:
+            parsed_error_payload = _try_parse_gateway_json(response)
+            if isinstance(parsed_error_payload, Mapping):
+                diagnostics.update(_gateway_payload_diagnostics(parsed_error_payload))
+            logger.warning(
+                "gemini.retrieve_memories.gateway_http_error callback=%s status_code=%s content_type=%s",
+                _gateway_callback_label(endpoint_url),
+                response.status_code,
+                diagnostics.get("gateway_content_type"),
+            )
             return execute_realtime_retrieve_memories_unavailable(
                 args,
                 user_id=user_id,
                 context_mode=context_mode,
-                provider_reason=f"gateway_retrieval_http_{response.status_code}",
+                provider_reason="gateway_retrieval_http_error",
+                diagnostics=diagnostics,
             )
 
         try:
             payload = response.json()
         except ValueError:
+            diagnostics = _gateway_response_diagnostics(
+                response,
+                endpoint_url=endpoint_url,
+                include_body_preview=True,
+            )
+            logger.warning(
+                "gemini.retrieve_memories.gateway_invalid_json callback=%s status_code=%s content_type=%s "
+                "body_preview_hash=%s body_preview=%s",
+                _gateway_callback_label(endpoint_url),
+                response.status_code,
+                diagnostics.get("gateway_content_type"),
+                diagnostics.get("gateway_body_preview_hash"),
+                diagnostics.get("gateway_body_preview"),
+            )
             return execute_realtime_retrieve_memories_unavailable(
                 args,
                 user_id=user_id,
                 context_mode=context_mode,
                 provider_reason="gateway_retrieval_invalid_json",
+                diagnostics=diagnostics,
             )
         if not isinstance(payload, Mapping):
+            diagnostics = _gateway_response_diagnostics(
+                response,
+                endpoint_url=endpoint_url,
+                include_body_preview=False,
+            )
+            diagnostics["gateway_schema_mismatch"] = "non_object"
+            logger.warning(
+                "gemini.retrieve_memories.gateway_schema_mismatch callback=%s reason=non_object",
+                _gateway_callback_label(endpoint_url),
+            )
             return execute_realtime_retrieve_memories_unavailable(
                 args,
                 user_id=user_id,
                 context_mode=context_mode,
-                provider_reason="gateway_retrieval_non_object",
+                provider_reason="gateway_retrieval_schema_mismatch",
+                diagnostics=diagnostics,
             )
 
-        result = decorate_realtime_retrieve_memories_result(dict(payload), args=args)
+        payload_dict = dict(payload)
+        schema_errors = _gateway_memory_payload_schema_errors(payload_dict)
+        if schema_errors:
+            diagnostics = _gateway_response_diagnostics(
+                response,
+                endpoint_url=endpoint_url,
+                include_body_preview=False,
+            )
+            diagnostics.update(_gateway_payload_diagnostics(payload_dict))
+            diagnostics["gateway_schema_mismatch"] = ",".join(schema_errors)
+            logger.warning(
+                "gemini.retrieve_memories.gateway_schema_mismatch callback=%s errors=%s status=%s schema=%s",
+                _gateway_callback_label(endpoint_url),
+                diagnostics["gateway_schema_mismatch"],
+                diagnostics.get("gateway_response_status"),
+                diagnostics.get("gateway_response_schema"),
+            )
+            return execute_realtime_retrieve_memories_unavailable(
+                args,
+                user_id=user_id,
+                context_mode=context_mode,
+                provider_reason="gateway_retrieval_schema_mismatch",
+                diagnostics=diagnostics,
+            )
+
+        result = decorate_realtime_retrieve_memories_result(payload_dict, args=args)
         result["dynamic_retrieval_transport"] = "gateway_http"
         result["session_id"] = session_id
         diagnostics = result.get("diagnostics")
@@ -563,6 +650,102 @@ class GeminiRealtimeMemoryHttpBackend:
             diagnostics["dynamic_retrieval_transport"] = "gateway_http"
             diagnostics["raw_memory_text_excluded"] = True
         return result
+
+
+def _gateway_callback_metadata(endpoint_url: str | None) -> dict[str, Any]:
+    if not endpoint_url:
+        return {
+            "gateway_callback_host": None,
+            "gateway_callback_path": None,
+        }
+    parsed = urlsplit(endpoint_url)
+    return {
+        "gateway_callback_host": parsed.netloc or None,
+        "gateway_callback_path": parsed.path or None,
+    }
+
+
+def _gateway_callback_label(endpoint_url: str | None) -> str:
+    metadata = _gateway_callback_metadata(endpoint_url)
+    host = metadata.get("gateway_callback_host") or "unknown-host"
+    path = metadata.get("gateway_callback_path") or "unknown-path"
+    return f"{host}{path}"
+
+
+def _gateway_response_diagnostics(
+    response: httpx.Response,
+    *,
+    endpoint_url: str,
+    include_body_preview: bool,
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        **_gateway_callback_metadata(endpoint_url),
+        "gateway_status_code": response.status_code,
+        "gateway_content_type": response.headers.get("content-type"),
+    }
+    if include_body_preview:
+        body = response.content or b""
+        diagnostics["gateway_body_preview_hash"] = f"sha256:{sha256(body).hexdigest()}"
+        diagnostics["gateway_body_preview"] = _redacted_body_preview(body)
+    return diagnostics
+
+
+def _try_parse_gateway_json(response: httpx.Response) -> Any:
+    try:
+        return response.json()
+    except ValueError:
+        return None
+
+
+def _gateway_payload_diagnostics(payload: Mapping[str, Any]) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {
+        "gateway_response_keys": sorted(str(key) for key in payload.keys())[:30],
+        "gateway_response_status": _string_value(payload.get("status")),
+        "gateway_response_schema": _string_value(payload.get("schema")),
+        "gateway_response_provider_status": _string_value(payload.get("provider_status")),
+        "gateway_response_provider_reason": _string_value(payload.get("provider_reason")),
+    }
+    nested_diagnostics = payload.get("diagnostics")
+    if isinstance(nested_diagnostics, Mapping):
+        diagnostics["gateway_response_diagnostics_schema"] = _string_value(
+            nested_diagnostics.get("schema")
+        )
+    return {key: value for key, value in diagnostics.items() if value is not None}
+
+
+def _gateway_memory_payload_schema_errors(payload: Mapping[str, Any]) -> list[str]:
+    errors: list[str] = []
+    missing = sorted(REALTIME_MEMORY_GATEWAY_REQUIRED_FIELDS.difference(payload.keys()))
+    if missing:
+        errors.append(f"missing:{'|'.join(missing)}")
+    if not isinstance(payload.get("ok"), bool):
+        errors.append("ok_not_bool")
+    status = _string_value(payload.get("status"))
+    if status not in REALTIME_MEMORY_GATEWAY_ALLOWED_STATUSES:
+        errors.append("status_invalid")
+    memories = payload.get("memories")
+    if not isinstance(memories, list):
+        errors.append("memories_not_list")
+    count = payload.get("count")
+    if type(count) is not int or count < 0:
+        errors.append("count_not_non_negative_int")
+    elif isinstance(memories, list) and count != len(memories):
+        errors.append("count_memory_length_mismatch")
+    if not _string_value(payload.get("provider_status")):
+        errors.append("provider_status_missing")
+    if not _string_value(payload.get("provider_reason")):
+        errors.append("provider_reason_missing")
+    if not isinstance(payload.get("diagnostics"), Mapping):
+        errors.append("diagnostics_not_object")
+    return errors
+
+
+def _redacted_body_preview(body: bytes, limit: int = 240) -> str:
+    if not body:
+        return ""
+    decoded = body[:limit].decode("utf-8", errors="replace")
+    collapsed = " ".join(decoded.split())
+    return re.sub(r"[A-Za-z0-9]", "x", collapsed)[:limit]
 
 
 class GeminiDogfoodToolExecutor:
@@ -989,6 +1172,16 @@ def _retrieve_memories_execution_diagnostic(
         "provider_status": diagnostics.get("provider_status"),
         "provider_reason": diagnostics.get("provider_reason"),
         "provider_transport": diagnostics.get("provider_transport"),
+        "gateway_status_code": diagnostics.get("gateway_status_code"),
+        "gateway_content_type": diagnostics.get("gateway_content_type"),
+        "gateway_callback_host": diagnostics.get("gateway_callback_host"),
+        "gateway_callback_path": diagnostics.get("gateway_callback_path"),
+        "gateway_body_preview_hash": diagnostics.get("gateway_body_preview_hash"),
+        "gateway_body_preview": diagnostics.get("gateway_body_preview"),
+        "gateway_response_status": diagnostics.get("gateway_response_status"),
+        "gateway_response_schema": diagnostics.get("gateway_response_schema"),
+        "gateway_response_diagnostics_schema": diagnostics.get("gateway_response_diagnostics_schema"),
+        "gateway_schema_mismatch": diagnostics.get("gateway_schema_mismatch"),
         "cache_status": diagnostics.get("cache_status"),
         "trusted_user_id_source": diagnostics.get("trusted_user_id_source") or response.get("trusted_user_id_source"),
         "tool_arg_user_id_ignored": bool(response.get("tool_arg_user_id_ignored")),

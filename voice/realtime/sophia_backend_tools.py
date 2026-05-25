@@ -141,6 +141,8 @@ def execute_realtime_retrieve_memories_unavailable(
     user_id: str,
     context_mode: str | None = None,
     provider_reason: str = "gateway_retrieval_not_configured",
+    provider_status: str = "unavailable",
+    diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return the standard graceful unavailable shape without touching Mem0."""
     contract = _retrieve_memories_contract_module()
@@ -151,12 +153,17 @@ def execute_realtime_retrieve_memories_unavailable(
         context_mode=context_mode,
         provider_available_func=lambda: {
             "available": False,
-            "provider_status": "unavailable",
+            "provider_status": provider_status,
             "provider_reason": provider_reason,
             "provider_transport": "gateway",
         },
         search_func=lambda **_kwargs: [],
     )
+    result["provider_status"] = provider_status
+    result["provider_reason"] = provider_reason
+    result_diagnostics = result.get("diagnostics")
+    if isinstance(result_diagnostics, dict) and diagnostics:
+        result_diagnostics.update(dict(diagnostics))
     return decorate_realtime_retrieve_memories_result(result, args=args)
 
 

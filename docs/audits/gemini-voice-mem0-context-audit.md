@@ -199,13 +199,16 @@ The production follow-up keeps setup context and dynamic retrieval distinct:
 - The model still sees only `query`; `user_id`, categories, filters, and provider details remain trusted runtime/backend inputs.
 - The gateway callback is protected by a short-lived session grant minted during authenticated voice connect. The token is not rendered into the Gemini prompt or public memory diagnostics.
 - `sophia-voice` no longer needs Mem0 credentials for production dynamic retrieval. If the callback is missing, rejected, unreachable, or invalid, the tool returns a bounded `unavailable` response with safe diagnostics instead of throwing.
+- The callback response contract is a stable JSON envelope for handled outcomes: `ok`, `status`, `memories`, `count`, `provider_status`, `provider_reason`, and `diagnostics`. Status may be `success`, `no_results`, `unavailable`, `error`, `unauthorized`, `expired_grant`, or `invalid_request`.
+- `gateway_retrieval_invalid_json` means the voice runtime received a 2xx callback response whose body was not valid JSON. Non-2xx responses are reported separately as `gateway_retrieval_http_error`, and parsed-but-wrong shapes are `gateway_retrieval_schema_mismatch`.
 
 Operational diagnostics to distinguish:
 
 - Setup context available: `memory_context.mem0_status=available`, `memory_context.memory_count>0`, and `dynamic_retrieve_configured=true` in gateway setup diagnostics.
 - Dynamic retrieval success: `retrieve_memories.status=success`, `provider_status=available`, `dynamic_retrieval_source=gateway`, and `dynamic_retrieval_transport=gateway_http`.
 - Dynamic retrieval no results: `status=no_results` with `provider_status=available`.
-- Dynamic retrieval unavailable: `status=unavailable` with `provider_reason` such as `gateway_retrieval_not_configured`, `gateway_retrieval_rejected`, or `missing_api_key`.
+- Dynamic retrieval unavailable: `status=unavailable` with `provider_reason` such as `gateway_retrieval_not_configured`, `gateway_retrieval_http_error`, `gateway_retrieval_invalid_json`, `gateway_retrieval_schema_mismatch`, or `missing_api_key`.
+- Production callback triage: confirm the gateway and voice images are both on the callback-contract commit, inspect `gateway_status_code`, `gateway_content_type`, `gateway_callback_host`, `gateway_callback_path`, `gateway_body_preview_hash`, and `gateway_response_status/schema` when present. These diagnostics intentionally exclude raw memory text and credentials.
 
 ## Files Implicated
 

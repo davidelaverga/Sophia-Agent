@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 REALTIME_CONTEXT_SCHEMA = "sophia_realtime_context_v1"
 REALTIME_DYNAMIC_MEMORY_RETRIEVAL_SCHEMA = "sophia_realtime_dynamic_memory_retrieval_v1"
+REALTIME_MEMORY_RETRIEVE_RESPONSE_SCHEMA = "sophia_realtime_memory_retrieve_response_v1"
 REALTIME_MEMORY_RETRIEVE_DIAGNOSTIC_SCHEMA = "sophia_realtime_memory_retrieve_v1"
 REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER = "X-Sophia-Realtime-Memory-Token"
 DEFAULT_REALTIME_MEMORY_LIMIT = 4
@@ -203,6 +204,12 @@ def retrieve_sophia_realtime_memories(
     result["trusted_user_id_source"] = "authenticated_realtime_session"
     result["dynamic_retrieval_source"] = "gateway"
     result["raw_memory_text_bounded"] = True
+    _finalize_realtime_memory_retrieve_envelope(
+        result,
+        context_mode=context_mode,
+        ritual=ritual,
+        limit=limit,
+    )
 
     diagnostics = result.get("diagnostics")
     if isinstance(diagnostics, dict):
@@ -218,6 +225,12 @@ def retrieve_sophia_realtime_memories(
                 "memory_limit": limit,
             }
         )
+    _finalize_realtime_memory_retrieve_envelope(
+        result,
+        context_mode=context_mode,
+        ritual=ritual,
+        limit=limit,
+    )
     return result
 
 
@@ -248,15 +261,94 @@ def retrieve_sophia_realtime_memories_for_grant(
     token: str,
     request: RealtimeMemoryRetrieveRequest | None = None,
 ) -> dict[str, Any]:
-    grant = _resolve_realtime_memory_retrieval_grant(token)
+    grant, grant_reason = _resolve_realtime_memory_retrieval_grant_with_reason(token)
     if grant is None:
-        raise PermissionError("invalid_or_expired_realtime_memory_grant")
+        status = "expired_grant" if grant_reason == "expired_grant" else "unauthorized"
+        return build_realtime_memory_retrieve_error_envelope(
+            status=status,
+            provider_reason=grant_reason or "invalid_grant",
+            request=request,
+            diagnostics={"grant_status": grant_reason or "invalid_grant"},
+        )
     result = retrieve_sophia_realtime_memories(user_id=grant.user_id, request=request)
     result["session_id"] = grant.session_id
     diagnostics = result.get("diagnostics")
     if isinstance(diagnostics, dict):
         diagnostics["session_id_present"] = bool(grant.session_id)
     return result
+
+
+def build_realtime_memory_retrieve_error_envelope(
+    *,
+    status: str,
+    provider_reason: str,
+    provider_status: str = "unavailable",
+    request: RealtimeMemoryRetrieveRequest | None = None,
+    diagnostics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return the stable gateway callback envelope for handled failures."""
+    context_mode = _normalize_context_mode(request.context_mode if request else None)
+    ritual = _clean_optional_text(request.ritual) if request else None
+    limit = _coerce_dynamic_memory_limit(request.limit if request else None)
+    query = _bounded_text(request.query, 500) if request else ""
+    safe_status = status if status in {
+        "success",
+        "no_results",
+        "unavailable",
+        "error",
+        "unauthorized",
+        "expired_grant",
+        "invalid_request",
+    } else "error"
+    safe_provider_status = _safe_reason(provider_status) or "unavailable"
+    safe_provider_reason = _safe_reason(provider_reason) or "unknown"
+    envelope: dict[str, Any] = {
+        "schema": REALTIME_MEMORY_RETRIEVE_RESPONSE_SCHEMA,
+        "ok": False,
+        "status": safe_status,
+        "query": query or "",
+        "count": 0,
+        "memories": [],
+        "provider_status": safe_provider_status,
+        "provider_reason": safe_provider_reason,
+        "message": "Memory retrieval is unavailable right now. Continue using the current conversation context.",
+        "guidance": (
+            "Memory retrieval is unavailable right now. Do not say the memory does not exist; "
+            "say you cannot check stored memory at the moment."
+        ),
+        "trusted_user_id_source": "authenticated_realtime_session",
+        "dynamic_retrieval_source": "gateway",
+        "raw_memory_text_bounded": True,
+    }
+    envelope["diagnostics"] = {
+        "schema": REALTIME_MEMORY_RETRIEVE_DIAGNOSTIC_SCHEMA,
+        "response_schema": REALTIME_MEMORY_RETRIEVE_RESPONSE_SCHEMA,
+        "tool": "retrieve_memories",
+        "status": safe_status,
+        "count": 0,
+        "has_results": False,
+        "provider_status": safe_provider_status,
+        "provider_reason": safe_provider_reason,
+        "context_source": "gateway_dynamic_retrieve",
+        "context_mode": context_mode,
+        "ritual": ritual,
+        "raw_query_excluded": True,
+        "raw_memory_text_excluded": True,
+        "result_categories": [],
+        "result_text_lengths": [],
+        "result_fingerprints": [],
+        "result_preview_included": False,
+        "memory_limit": limit,
+    }
+    if diagnostics:
+        envelope["diagnostics"].update(
+            {
+                str(key): _safe_diagnostic_value(value)
+                for key, value in diagnostics.items()
+                if value is not None
+            }
+        )
+    return envelope
 
 
 def build_degraded_realtime_context_response(
@@ -466,6 +558,51 @@ def _normalize_context_mode(value: str | None) -> str:
     return cleaned if cleaned in {"work", "gaming", "life"} else "life"
 
 
+def _finalize_realtime_memory_retrieve_envelope(
+    result: dict[str, Any],
+    *,
+    context_mode: str,
+    ritual: str | None,
+    limit: int,
+) -> None:
+    memories = result.get("memories")
+    if not isinstance(memories, list):
+        memories = []
+        result["memories"] = memories
+    status = _clean_optional_text(result.get("status")) or "error"
+    if status == "invalid_query":
+        status = "invalid_request"
+        result["status"] = status
+    result["schema"] = REALTIME_MEMORY_RETRIEVE_RESPONSE_SCHEMA
+    result["count"] = len(memories)
+    result["provider_status"] = _safe_reason(result.get("provider_status")) or (
+        "available" if bool(result.get("ok")) else "unavailable"
+    )
+    result["provider_reason"] = _safe_reason(result.get("provider_reason")) or "unknown"
+    result.setdefault("ok", False)
+    result.setdefault("trusted_user_id_source", "authenticated_realtime_session")
+    result.setdefault("dynamic_retrieval_source", "gateway")
+    result.setdefault("raw_memory_text_bounded", True)
+
+    diagnostics = result.get("diagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+        result["diagnostics"] = diagnostics
+    diagnostics["schema"] = REALTIME_MEMORY_RETRIEVE_DIAGNOSTIC_SCHEMA
+    diagnostics["response_schema"] = REALTIME_MEMORY_RETRIEVE_RESPONSE_SCHEMA
+    diagnostics["status"] = status
+    diagnostics["count"] = len(memories)
+    diagnostics["has_results"] = bool(memories)
+    diagnostics["provider_status"] = result["provider_status"]
+    diagnostics["provider_reason"] = result["provider_reason"]
+    diagnostics["context_source"] = "gateway_dynamic_retrieve"
+    diagnostics["context_mode"] = context_mode
+    diagnostics["ritual"] = ritual
+    diagnostics["raw_query_excluded"] = True
+    diagnostics["raw_memory_text_excluded"] = True
+    diagnostics["memory_limit"] = limit
+
+
 def _coerce_memory_limit(value: int | None) -> int:
     if not isinstance(value, int):
         return DEFAULT_REALTIME_MEMORY_LIMIT
@@ -485,6 +622,25 @@ def _resolve_realtime_memory_retrieval_grant(token: str) -> RealtimeMemoryRetrie
     with _memory_retrieval_grants_lock:
         _purge_expired_memory_retrieval_grants_locked()
         return _memory_retrieval_grants.get(cleaned)
+
+
+def _resolve_realtime_memory_retrieval_grant_with_reason(
+    token: str,
+) -> tuple[RealtimeMemoryRetrievalGrant | None, str | None]:
+    cleaned = _clean_optional_text(token)
+    if cleaned is None:
+        return None, "missing_grant"
+    now = time.time()
+    with _memory_retrieval_grants_lock:
+        grant = _memory_retrieval_grants.get(cleaned)
+        if grant is not None:
+            if grant.expires_at <= now:
+                _memory_retrieval_grants.pop(cleaned, None)
+                return None, "expired_grant"
+            _purge_expired_memory_retrieval_grants_locked()
+            return grant, None
+        _purge_expired_memory_retrieval_grants_locked()
+        return None, "invalid_grant"
 
 
 def _purge_expired_memory_retrieval_grants_locked() -> None:
@@ -559,6 +715,21 @@ def _safe_reason(value: object) -> str | None:
     if reason is None:
         return None
     return re.sub(r"[^A-Za-z0-9_.:-]+", "_", reason)[:80]
+
+
+def _safe_diagnostic_value(value: object) -> object:
+    if isinstance(value, str):
+        return _safe_reason(value) or "unknown"
+    if isinstance(value, bool | int | float) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_safe_diagnostic_value(item) for item in value[:20]]
+    if isinstance(value, Mapping):
+        return {
+            str(key)[:80]: _safe_diagnostic_value(item)
+            for key, item in list(value.items())[:20]
+        }
+    return str(type(value).__name__)
 
 
 def _collapse_whitespace(value: str) -> str:

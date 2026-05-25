@@ -356,6 +356,7 @@ class TestRealtimeContext:
 
         assert resp.status_code == 200
         data = resp.json()
+        assert data["schema"] == "sophia_realtime_memory_retrieve_response_v1"
         assert data["status"] == "success"
         assert data["count"] == 5
         assert [memory["rank"] for memory in data["memories"]] == [1, 2, 3, 4, 5]
@@ -428,6 +429,7 @@ class TestRealtimeContext:
         assert data["status"] == "unavailable"
         assert data["provider_reason"] == "missing_api_key"
         assert data["diagnostics"]["raw_memory_text_excluded"] is True
+        assert resp.headers["content-type"].startswith("application/json")
 
     def test_dynamic_memory_retrieve_internal_grant_binds_trusted_user(self, client, tmp_path, monkeypatch):
         from app.gateway import sophia_realtime_context as context_module
@@ -474,6 +476,99 @@ class TestRealtimeContext:
         assert data["status"] == "success"
         assert data["session_id"] == "gemini-prod-session"
         assert calls[0]["user_id"] == "test_user"
+
+    @pytest.mark.parametrize(
+        ("headers", "expected_status", "expected_reason"),
+        [
+            ({}, "unauthorized", "missing_grant"),
+            ({"X-Sophia-Realtime-Memory-Token": "not-a-real-grant"}, "unauthorized", "invalid_grant"),
+        ],
+    )
+    def test_dynamic_memory_retrieve_internal_grant_failures_return_json_envelope(
+        self,
+        client,
+        headers,
+        expected_status,
+        expected_reason,
+    ):
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers=headers,
+            json={"query": "trusted memory"},
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["schema"] == "sophia_realtime_memory_retrieve_response_v1"
+        assert data["ok"] is False
+        assert data["status"] == expected_status
+        assert data["provider_status"] == "unavailable"
+        assert data["provider_reason"] == expected_reason
+        assert data["memories"] == []
+        assert data["count"] == 0
+        assert data["diagnostics"]["grant_status"] == expected_reason
+
+    def test_dynamic_memory_retrieve_internal_expired_grant_returns_json_envelope(self, client):
+        from app.gateway import sophia_realtime_context as context_module
+
+        grant = context_module.create_realtime_memory_retrieval_grant(
+            user_id="test_user",
+            session_id="expired-session",
+        )
+        with context_module._memory_retrieval_grants_lock:
+            context_module._memory_retrieval_grants[grant.token] = context_module.RealtimeMemoryRetrievalGrant(
+                token=grant.token,
+                user_id=grant.user_id,
+                session_id=grant.session_id,
+                expires_at=0,
+            )
+
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers={context_module.REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER: grant.token},
+            json={"query": "trusted memory"},
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "expired_grant"
+        assert data["provider_reason"] == "expired_grant"
+        assert data["diagnostics"]["grant_status"] == "expired_grant"
+
+    def test_dynamic_memory_retrieve_internal_validation_error_returns_json_envelope(self, client):
+        from app.gateway import sophia_realtime_context as context_module
+
+        grant = context_module.create_realtime_memory_retrieval_grant(
+            user_id="test_user",
+            session_id="validation-session",
+        )
+
+        resp = client.post(
+            "/internal/sophia-realtime/memories/retrieve",
+            headers={context_module.REALTIME_MEMORY_RETRIEVAL_TOKEN_HEADER: grant.token},
+            json=["not", "an", "object"],
+        )
+
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("application/json")
+        data = resp.json()
+        assert data["status"] == "invalid_request"
+        assert data["provider_status"] == "error"
+        assert data["provider_reason"] == "request_validation_error"
+        assert data["memories"] == []
+
+    def test_dynamic_memory_retrieve_public_validation_error_returns_json_envelope(self, client):
+        resp = client.post(
+            "/api/sophia/test_user/realtime/memories/retrieve",
+            json=["not", "an", "object"],
+        )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "invalid_request"
+        assert data["provider_reason"] == "request_validation_error"
+        assert data["count"] == 0
 
     def test_dynamic_memory_retrieve_search_error_returns_error_without_500(self, client, tmp_path, monkeypatch):
         from app.gateway import sophia_realtime_context as context_module

@@ -85,6 +85,22 @@ Gemini Live declares the tool through `voice/realtime/sophia_backend_tools.py` a
 
 Production Gemini Live dynamic retrieval uses the same backend ownership boundary as setup context. During authenticated gateway voice connect, the gateway mints a short-lived session grant and passes `dynamic_memory_retrieval` inside the backend-owned `realtime_context` sent to `sophia-voice`. When Gemini later calls `retrieve_memories(query)`, the voice runtime calls the gateway callback with the model query and the session grant; the gateway binds the trusted user id from the grant, applies server-side category/context policy, caps results to five snippets, and returns privacy-safe diagnostics. If the callback is absent or unavailable, the tool degrades with `status="unavailable"` and a provider reason that is separate from setup-context availability.
 
+The dynamic retrieval callback must return a JSON envelope for every handled condition:
+
+```json
+{
+  "ok": false,
+  "status": "unavailable",
+  "memories": [],
+  "count": 0,
+  "provider_status": "unavailable",
+  "provider_reason": "missing_api_key",
+  "diagnostics": {}
+}
+```
+
+Handled statuses are `success`, `no_results`, `unavailable`, `error`, `unauthorized`, `expired_grant`, and `invalid_request`. Voice treats transport and contract failures separately: non-2xx callback responses become `gateway_retrieval_http_error`, 2xx non-JSON bodies become `gateway_retrieval_invalid_json`, and parsed responses missing the required envelope fields become `gateway_retrieval_schema_mismatch`. Callback diagnostics may include host/path, status code, content type, body hash, and redacted body shape, but must not include raw memory text, grant tokens, or credentials.
+
 GPT Realtime is prepared but not wired: `openai_retrieve_memories_function_declaration()` converts the same contract to OpenAI function format for the next phase. OpenAI production/dogfood routes do not advertise the tool until trusted sideband execution is implemented.
 
 Phase 12.5B-B did not change prompts, rituals, `consult_skill`, web tools, sideband writeback, artifact schemas, builder trace storage, VAD, turn detection, provider defaults, or Gemini/GPT routing.
