@@ -65,6 +65,7 @@ class GeminiProductionBrowserSessionManager:
         context_mode: str = "life",
         ritual: str | None = None,
         realtime_context: Mapping[str, Any] | None = None,
+        preconnect_ttl_seconds: float | None = None,
     ) -> GeminiProductionBrowserSession:
         validate_gemini_production_route_settings(settings)
         instructions, memory_context = build_gemini_live_realtime_instructions_with_memory_context(
@@ -82,6 +83,7 @@ class GeminiProductionBrowserSessionManager:
             memory_context_diagnostics=memory_context.diagnostics,
             context_mode=context_mode,
             memory_retrieval_config=_dynamic_memory_retrieval_config(realtime_context),
+            preconnect_ttl_seconds=preconnect_ttl_seconds,
         )
         return GeminiProductionBrowserSession(browser_session=browser_session)
 

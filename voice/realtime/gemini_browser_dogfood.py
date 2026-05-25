@@ -466,6 +466,7 @@ class GeminiBrowserDogfoodSessionManager:
             str,
             dict[int, tuple[dict[str, Any], GeminiRelaySourceMetadata, list[str]]],
         ] = {}
+        self._preconnect_cleanup_tasks_by_session: dict[str, asyncio.Task[None]] = {}
 
     async def start_browser_session(
         self,
@@ -477,6 +478,7 @@ class GeminiBrowserDogfoodSessionManager:
         memory_context_diagnostics: Mapping[str, Any] | None = None,
         context_mode: str | None = None,
         memory_retrieval_config: Mapping[str, Any] | None = None,
+        preconnect_ttl_seconds: float | None = None,
     ) -> GeminiBrowserDogfoodSession:
         gate = validate_gemini_browser_dogfood_settings(settings)
         resolved_context_mode = context_mode or str(getattr(settings, "context_mode", "life"))
@@ -517,6 +519,10 @@ class GeminiBrowserDogfoodSessionManager:
         mapping_observer = getattr(dogfood_session.bundle.provider_session, "set_mapping_observer", None)
         if callable(mapping_observer):
             mapping_observer(lambda _raw_event, provider_events: diagnostics.record_mapping_outputs(provider_events))
+        self._schedule_preconnect_cleanup(
+            dogfood_session.session_id,
+            preconnect_ttl_seconds,
+        )
 
         return GeminiBrowserDogfoodSession(
             dogfood_session=dogfood_session,
@@ -524,6 +530,39 @@ class GeminiBrowserDogfoodSessionManager:
             setup=setup,
             memory_context_diagnostics=dict(memory_context_diagnostics or {}),
         )
+
+    def _schedule_preconnect_cleanup(
+        self,
+        dogfood_session_id: str,
+        ttl_seconds: float | None,
+    ) -> None:
+        if ttl_seconds is None or ttl_seconds <= 0:
+            return
+
+        async def _cleanup() -> None:
+            try:
+                await asyncio.sleep(ttl_seconds)
+                if dogfood_session_id in self._preconnect_cleanup_tasks_by_session:
+                    await self.close_session(dogfood_session_id)
+            except asyncio.CancelledError:
+                raise
+
+        self._cancel_preconnect_cleanup(dogfood_session_id)
+        task = asyncio.create_task(_cleanup())
+        self._preconnect_cleanup_tasks_by_session[dogfood_session_id] = task
+        task.add_done_callback(
+            lambda done_task: (
+                self._preconnect_cleanup_tasks_by_session.pop(dogfood_session_id, None)
+                if self._preconnect_cleanup_tasks_by_session.get(dogfood_session_id) is done_task
+                else None
+            )
+        )
+
+    def _cancel_preconnect_cleanup(self, dogfood_session_id: str) -> None:
+        task = self._preconnect_cleanup_tasks_by_session.pop(dogfood_session_id, None)
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        task.cancel()
 
     async def ingest_browser_provider_event(
         self,
@@ -543,6 +582,7 @@ class GeminiBrowserDogfoodSessionManager:
             raise GeminiBrowserRelayError(
                 "Gemini browser relay can only ingest events for gemini_live dogfood sessions."
             )
+        self._cancel_preconnect_cleanup(dogfood_session_id)
 
         validated_event = validate_gemini_browser_provider_event(event)
         diagnostics = self._diagnostics_by_session.setdefault(
@@ -906,6 +946,7 @@ class GeminiBrowserDogfoodSessionManager:
             )
 
     async def close_session(self, dogfood_session_id: str) -> bool:
+        self._cancel_preconnect_cleanup(dogfood_session_id)
         self._cancelled_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._inflight_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._completed_tool_call_ids_by_session.pop(dogfood_session_id, None)

@@ -547,6 +547,55 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.sessionTelemetry.gemini?.artifactCountSource).toBe('public_event');
   });
 
+  it('summarizes voice preconnect hit telemetry', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-07T12:00:00.000Z',
+        category: 'voice-session',
+        name: 'start-talking-requested',
+        payload: { platform: 'voice', sessionId: 'session-dev' },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-07T12:00:00.020Z',
+        category: 'voice-session',
+        name: 'preconnect-reused',
+        payload: {
+          runtime: 'gemini_live',
+          preconnectStatus: 'hit',
+          preconnectAgeMs: 420,
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+      buildEvent({
+        seq: 3,
+        at: '2026-04-07T12:00:00.030Z',
+        category: 'voice-session',
+        name: 'credentials-received',
+        payload: {
+          callId: 'gemini-session-dev',
+          callType: 'gemini_live',
+          runtime: 'gemini_live',
+          sessionId: 'session-dev',
+          voiceAgentSessionId: 'gemini-session-dev',
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'connecting',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-07T12:00:00.050Z'),
+    });
+
+    expect(metrics.startup.preconnectAttempted).toBe(true);
+    expect(metrics.startup.preconnectStatus).toBe('hit');
+    expect(metrics.startup.preconnectAgeMs).toBe(420);
+    expect(metrics.startup.requestToCredentialsMs).toBe(30);
+  });
+
   it('summarizes Gemini stale-output suppression and unresolved tool diagnostics', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

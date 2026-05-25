@@ -632,6 +632,58 @@ async def test_production_browser_session_uses_production_public_payload(
 
 
 @pytest.mark.anyio
+async def test_browser_session_preconnect_cleanup_closes_unused_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-preconnect-cleanup",
+        preconnect_ttl_seconds=0.01,
+    )
+
+    assert realtime_sessions.get_session(browser_session.dogfood_session.session_id) is not None
+    await asyncio.sleep(0.05)
+    assert realtime_sessions.get_session(browser_session.dogfood_session.session_id) is None
+
+
+@pytest.mark.anyio
+async def test_browser_session_preconnect_cleanup_is_cancelled_when_adopted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-preconnect-adopted",
+        preconnect_ttl_seconds=0.01,
+    )
+
+    await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={"setupComplete": {}},
+    )
+    await asyncio.sleep(0.05)
+
+    assert realtime_sessions.get_session(browser_session.dogfood_session.session_id) is not None
+    await manager.close_session(browser_session.dogfood_session.session_id)
+
+
+@pytest.mark.anyio
 async def test_browser_relay_messages_enter_existing_gemini_adapter_and_normalizer_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

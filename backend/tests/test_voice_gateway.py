@@ -304,6 +304,20 @@ class TestVoiceConnect:
         assert data["session_id"] is None
         assert data["stream_url"] is None
 
+    def test_legacy_preconnect_behavior_remains_unchanged(self):
+        with _mock_dispatch_success() as dispatch:
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice", "preconnect": True},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime"] == "legacy_cascade"
+        assert data["voice_runtime"] == "legacy_cascade"
+        assert data["session_id"] == "test-session-id"
+        dispatch.assert_awaited_once()
+
     def test_gemini_runtime_requires_production_promotion_flag(self, monkeypatch):
         monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
 
@@ -320,9 +334,82 @@ class TestVoiceConnect:
         assert "SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED" in resp.json()["detail"]
         dispatch.assert_not_awaited()
 
-    def test_gemini_runtime_rejects_automatic_preconnect(self, monkeypatch):
+    def test_gemini_runtime_returns_short_lived_preconnect_bootstrap(self, monkeypatch):
         monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
         monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+        realtime_context = {
+            "diagnostics": {
+                "schema": "sophia_realtime_context_v1",
+                "mem0_status": "available",
+            }
+        }
+        runtime_payload = {
+            "runtime": "gemini_live",
+            "voice_runtime": "gemini_live",
+            "production_route": True,
+            "session_id": "gemini-prod-preconnect-1",
+            "stream_url": "/production/realtime/gemini/sessions/gemini-prod-preconnect-1/events",
+            "event_stream_url": "/production/realtime/gemini/sessions/gemini-prod-preconnect-1/events",
+            "provider_event_relay_url": (
+                "/production/realtime/gemini/browser-sessions/"
+                "gemini-prod-preconnect-1/provider-events"
+            ),
+            "disconnect_url": "/production/realtime/gemini/browser-sessions/gemini-prod-preconnect-1",
+            "browser_audio": "gemini_live_websocket_production_candidate",
+            "transport": "gemini_browser_websocket_ephemeral_token_with_backend_relay",
+            "websocket_url": "wss://gemini.example/live",
+            "websocket_auth": "ephemeral_access_token",
+            "ephemeral_token": {"value": "auth_tokens/test"},
+            "setup": {"model": "models/gemini-live"},
+            "public_event_boundary": "SophiaEventNormalizer",
+        }
+
+        with patch(
+            "app.gateway.routers.voice._proxy_voice_runtime_json",
+            new_callable=AsyncMock,
+            return_value=runtime_payload,
+        ) as proxy_runtime, patch(
+            "app.gateway.routers.voice._build_gemini_realtime_context_payload",
+            new_callable=AsyncMock,
+            return_value=realtime_context,
+        ):
+            resp = client.post(
+                "/api/sophia/user_123/voice/connect",
+                json={"platform": "voice", "preconnect": True},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["runtime"] == "gemini_live"
+        assert data["preconnect"] is True
+        assert data["preconnect_ttl_ms"] == 30000
+        assert data["preconnect_expires_at"].endswith("Z")
+        assert data["session_id"] == "gemini-prod-preconnect-1"
+        proxy_runtime.assert_awaited_once_with(
+            "POST",
+            "/production/realtime/gemini/browser-sessions",
+            json_body={
+                "user_id": "user_123",
+                "session_id": ANY,
+                "platform": "voice",
+                "context_mode": "life",
+                "ritual": None,
+                "realtime_context": realtime_context,
+                "preconnect": True,
+                "preconnect_ttl_seconds": 65.0,
+            },
+        )
+
+    def test_gemini_preconnect_skips_when_active_session_exists(self, monkeypatch):
+        from app.gateway.routers.voice import ActiveVoiceSession, _active_voice_sessions
+
+        monkeypatch.setenv("SOPHIA_VOICE_RUNTIME_MODE", "gemini_live")
+        monkeypatch.setenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED", "true")
+        _active_voice_sessions["user_123"] = ActiveVoiceSession(
+            call_id="gemini-prod-active",
+            session_id="gemini-prod-active",
+            runtime="gemini_live",
+        )
 
         with patch(
             "app.gateway.routers.voice._proxy_voice_runtime_json",
@@ -334,7 +421,7 @@ class TestVoiceConnect:
             )
 
         assert resp.status_code == 409
-        assert "automatic preconnect" in resp.json()["detail"]
+        assert "active voice session" in resp.json()["detail"]
         proxy_runtime.assert_not_awaited()
 
     def test_gemini_runtime_returns_browser_bootstrap_when_promoted(self, monkeypatch):

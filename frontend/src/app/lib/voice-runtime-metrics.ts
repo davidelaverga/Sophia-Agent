@@ -53,6 +53,8 @@ export type VoiceRegressionMarker = {
   level: "warn" | "bad"
 }
 
+export type VoicePreconnectStatus = "hit" | "miss" | "expired" | "failed" | "unsupported" | "disabled"
+
 export type VoiceStartupMetrics = {
   requestToCredentialsMs: number | null
   credentialsToJoinMs: number | null
@@ -60,6 +62,10 @@ export type VoiceStartupMetrics = {
   joinToRemoteAudioMs: number | null
   startToMicAudioMs: number | null
   startToFirstUserTranscriptMs: number | null
+  preconnectAttempted: boolean
+  preconnectStatus: VoicePreconnectStatus | null
+  preconnectAgeMs: number | null
+  preconnectSavedMs: number | null
 }
 
 export type VoicePipelineMetrics = {
@@ -752,6 +758,20 @@ function asSessionRuntime(value: string | null): SessionRuntime | null {
   switch (value) {
     case "legacy_cascade":
     case "gemini_live":
+      return value
+    default:
+      return null
+  }
+}
+
+function asPreconnectStatus(value: string | null): VoicePreconnectStatus | null {
+  switch (value) {
+    case "hit":
+    case "miss":
+    case "expired":
+    case "failed":
+    case "unsupported":
+    case "disabled":
       return value
     default:
       return null
@@ -2506,6 +2526,42 @@ function buildTimeline(
             detail: asString(event.payloadRecord?.callId) ?? "Gateway responded",
             tone: "neutral" as const,
           }
+        case "preconnect-started":
+          return {
+            label: "Preconnect started",
+            detail: asString(event.payloadRecord?.runtime) ?? "Preparing voice session",
+            tone: "neutral" as const,
+          }
+        case "preconnect-ready":
+          return {
+            label: "Preconnect ready",
+            detail: asString(event.payloadRecord?.runtime) ?? asString(event.payloadRecord?.callId) ?? "Warm session ready",
+            tone: "good" as const,
+          }
+        case "preconnect-reused":
+          return {
+            label: "Preconnect reused",
+            detail: formatEvidenceMs("age", asFiniteNumber(event.payloadRecord?.preconnectAgeMs)) ?? "Warm session hit",
+            tone: "good" as const,
+          }
+        case "preconnect-expired":
+          return {
+            label: "Preconnect expired",
+            detail: formatEvidenceMs("age", asFiniteNumber(event.payloadRecord?.preconnectAgeMs)) ?? "Warm session expired",
+            tone: "warn" as const,
+          }
+        case "preconnect-failed":
+          return {
+            label: "Preconnect failed",
+            detail: asString(event.payloadRecord?.error) ?? "Warm session unavailable",
+            tone: "warn" as const,
+          }
+        case "preconnect-miss":
+          return {
+            label: "Preconnect miss",
+            detail: "Falling back to normal connect",
+            tone: "neutral" as const,
+          }
         case "call-join-requested":
           return {
             label: "Joining call",
@@ -2809,6 +2865,33 @@ export function buildVoiceDeveloperMetrics({
     userEndedToFirstTextMs: committedFirstTextMs,
     userEndedToAgentStartMs: diffMs(lastUserEndedEvent?.atMs ?? null, lastAgentStartedEvent?.atMs ?? null),
   })
+  const latestPreconnectEvent = findLast(activeEvents, (event) => [
+    "preconnect-reused",
+    "preconnect-expired",
+    "preconnect-failed",
+    "preconnect-unsupported",
+    "preconnect-miss",
+    "preconnect-disabled",
+    "preconnect-ready",
+    "preconnect-started",
+  ].includes(event.name))
+  const latestPreconnectData = latestPreconnectEvent ? eventData(latestPreconnectEvent) : null
+  const latestPreconnectStatus = asPreconnectStatus(asString(latestPreconnectData?.preconnectStatus))
+    ?? (
+      latestPreconnectEvent?.name === "preconnect-reused"
+        ? "hit"
+        : latestPreconnectEvent?.name === "preconnect-expired"
+          ? "expired"
+          : latestPreconnectEvent?.name === "preconnect-failed"
+            ? "failed"
+            : latestPreconnectEvent?.name === "preconnect-unsupported"
+              ? "unsupported"
+              : latestPreconnectEvent?.name === "preconnect-disabled"
+                ? "disabled"
+                : latestPreconnectEvent?.name === "preconnect-miss"
+                  ? "miss"
+                  : null
+    )
   const startup: VoiceStartupMetrics = {
     requestToCredentialsMs: diffMs(lastStartEvent?.atMs ?? null, credentialsReceivedEvent?.atMs ?? null),
     credentialsToJoinMs: diffMs(credentialsReceivedEvent?.atMs ?? null, joinRequestedEvent?.atMs ?? null),
@@ -2816,6 +2899,14 @@ export function buildVoiceDeveloperMetrics({
     joinToRemoteAudioMs: diffMs(joinedEvent?.atMs ?? null, remoteAudioBoundEvent?.atMs ?? null),
     startToMicAudioMs: diffMs(lastStartEvent?.atMs ?? null, firstMicAudioEvent?.atMs ?? null),
     startToFirstUserTranscriptMs: diffMs(lastStartEvent?.atMs ?? null, firstUserTranscriptEvent?.atMs ?? null),
+    preconnectAttempted: Boolean(
+      latestPreconnectEvent
+        && latestPreconnectEvent.name !== "preconnect-miss"
+        && latestPreconnectEvent.name !== "preconnect-disabled",
+    ),
+    preconnectStatus: latestPreconnectStatus,
+    preconnectAgeMs: asFiniteNumber(latestPreconnectData?.preconnectAgeMs),
+    preconnectSavedMs: asFiniteNumber(latestPreconnectData?.preconnectSavedMs),
   }
   const pipeline: VoicePipelineMetrics = {
     micToUserTranscriptMs: diffMs(firstMicAudioEvent?.atMs ?? null, firstUserTranscriptEvent?.atMs ?? null),

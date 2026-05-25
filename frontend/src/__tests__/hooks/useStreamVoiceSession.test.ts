@@ -189,6 +189,25 @@ function getFetchCalls(url: string, method?: string) {
   })
 }
 
+function makeGeminiBootstrap(sessionId = "gemini-prod-session-1") {
+  return {
+    runtime: "gemini_live",
+    voice_runtime: "gemini_live",
+    production_route: true,
+    session_id: sessionId,
+    websocket_url: "wss://gemini.example/live",
+    websocket_auth: "ephemeral_access_token",
+    ephemeral_token: { value: `auth_tokens/${sessionId}` },
+    setup: { model: "models/gemini-live" },
+    stream_url: `/api/sophia/voice/gemini/events?session_id=${sessionId}`,
+    event_stream_url: `/api/sophia/voice/gemini/events?session_id=${sessionId}`,
+    provider_event_relay_url: "/api/sophia/voice/gemini/relay",
+    disconnect_url: "/api/sophia/voice/gemini/disconnect",
+    preconnect_ttl_ms: 30_000,
+    preconnect_expires_at: "2026-05-25T12:00:30Z",
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -746,6 +765,187 @@ describe("useStreamVoiceSession", () => {
           session_id: "voice-session-123",
           thread_id: "thread-voice-123",
         }),
+      }),
+    )
+  })
+
+  it("attempts Gemini preconnect automatically while the session is idle", async () => {
+    vi.useFakeTimers()
+    mockFetch.mockImplementation(async (url, _init) => {
+      if (url === "/api/sophia/user-1/voice/connect") {
+        return {
+          ok: true,
+          json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-preconnect-1")),
+          text: () => Promise.resolve(""),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
+    })
+
+    renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/user-1/voice/connect",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          platform: "voice",
+          context_mode: "gaming",
+          ritual: "vent",
+          preconnect: true,
+        }),
+      }),
+    )
+    expect(getFetchCalls("/api/sophia/user-1/voice/warmup", "POST")).toHaveLength(0)
+  })
+
+  it("uses a valid Gemini preconnect bootstrap on startTalking", async () => {
+    vi.useFakeTimers()
+    mockFetch.mockImplementation(async (url, _init) => {
+      if (url === "/api/sophia/user-1/voice/connect") {
+        return {
+          ok: true,
+          json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-preconnect-1")),
+          text: () => Promise.resolve(""),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(1)
+    expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: "user-1",
+        sessionId: "gemini-prod-preconnect-1",
+        bootstrap: expect.objectContaining({
+          runtime: "gemini_live",
+          session_id: "gemini-prod-preconnect-1",
+        }),
+      }),
+    )
+    expect(result.current.runtime).toBe("gemini_live")
+  })
+
+  it("falls back to normal Gemini connect when background preconnect fails without surfacing an error", async () => {
+    vi.useFakeTimers()
+    mockFetch.mockImplementation(async (url, init) => {
+      if (url === "/api/sophia/user-1/voice/connect") {
+        const body = JSON.parse(String((init as { body?: string }).body ?? "{}")) as { preconnect?: boolean }
+        if (body.preconnect) {
+          return {
+            ok: false,
+            status: 409,
+            text: () => Promise.resolve("unsupported"),
+          }
+        }
+
+        return {
+          ok: true,
+          json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-normal-1")),
+          text: () => Promise.resolve(""),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+    })
+
+    expect(result.current.stage).toBe("idle")
+    expect(result.current.error).toBeUndefined()
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    const connectCalls = getFetchCalls("/api/sophia/user-1/voice/connect", "POST")
+    expect(connectCalls).toHaveLength(2)
+    expect(JSON.parse(String((connectCalls[1]?.[1] as { body?: string })?.body))).toEqual({
+      platform: "voice",
+      context_mode: "gaming",
+      ritual: "vent",
+    })
+    expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "gemini-prod-normal-1",
+      }),
+    )
+  })
+
+  it("disconnects expired Gemini preconnect and falls back to normal connect", async () => {
+    vi.useFakeTimers()
+    mockFetch.mockImplementation(async (url, init) => {
+      if (url === "/api/sophia/user-1/voice/connect") {
+        const body = JSON.parse(String((init as { body?: string }).body ?? "{}")) as { preconnect?: boolean }
+        return {
+          ok: true,
+          json: () => Promise.resolve(
+            body.preconnect
+              ? makeGeminiBootstrap("gemini-prod-expired-1")
+              : makeGeminiBootstrap("gemini-prod-normal-2"),
+          ),
+          text: () => Promise.resolve(""),
+        }
+      }
+
+      return {
+        ok: true,
+        json: () => Promise.resolve({}),
+        text: () => Promise.resolve(""),
+      }
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(300)
+      await vi.advanceTimersByTimeAsync(30_001)
+      await result.current.startTalking()
+    })
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "/api/sophia/voice/gemini/disconnect",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ session_id: "gemini-prod-expired-1" }),
+      }),
+    )
+    expect(getFetchCalls("/api/sophia/user-1/voice/connect", "POST")).toHaveLength(2)
+    expect(mockConnectGeminiBrowserLiveFromBootstrap).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sessionId: "gemini-prod-normal-2",
       }),
     )
   })

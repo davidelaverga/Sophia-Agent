@@ -220,6 +220,14 @@ class SophiaGeminiProductionStartRequest(BaseModel):
         default=None,
         description="Backend-owned bounded realtime context payload for setup-time continuity",
     )
+    preconnect: bool = Field(
+        default=False,
+        description="True when this bootstrap was prepared before the user clicked the microphone",
+    )
+    preconnect_ttl_seconds: float | None = Field(
+        default=None,
+        description="Best-effort cleanup TTL for an unused preconnect bootstrap",
+    )
 
 
 session_router = APIRouter()
@@ -801,6 +809,9 @@ async def start_gemini_production_browser_session(
             context_mode=request.context_mode,
             ritual=request.ritual,
             realtime_context=request.realtime_context,
+            preconnect_ttl_seconds=(
+                request.preconnect_ttl_seconds if request.preconnect else None
+            ),
         )
     except RealtimeDogfoodConfigurationError as exc:
         raise HTTPException(
