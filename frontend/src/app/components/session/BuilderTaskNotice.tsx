@@ -1,5 +1,6 @@
 'use client';
 
+import { ChevronDown, ChevronUp } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState, type MouseEventHandler } from 'react';
 
 import { cn } from '../../lib/utils';
@@ -495,6 +496,19 @@ function BuilderTodoPreview({
   );
 }
 
+export function BuilderSeedDetail({
+  task,
+  compact,
+}: {
+  task: BuilderTaskV1;
+  compact?: boolean;
+}) {
+  if (!task.activityLog || task.activityLog.length === 0) {
+    return null;
+  }
+  return <BuilderActivityLog entries={task.activityLog} compact={compact} />;
+}
+
 export function BuilderTaskNotice({
   task,
   artifactTitle,
@@ -508,6 +522,7 @@ export function BuilderTaskNotice({
   className,
 }: BuilderTaskNoticeProps) {
   const [isFreshCompletion, setIsFreshCompletion] = useState(false);
+  const [isDetailOpen, setIsDetailOpen] = useState(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [taskReceivedAtMs, setTaskReceivedAtMs] = useState(() => Date.now());
   const taskFirstSeenMsRef = useRef(Date.now());
@@ -553,6 +568,7 @@ export function BuilderTaskNotice({
 
     if (isNewTask) {
       taskFirstSeenMsRef.current = Date.now();
+      setIsDetailOpen(false);
     }
 
     let timerId: ReturnType<typeof setTimeout> | undefined;
@@ -661,10 +677,27 @@ export function BuilderTaskNotice({
       </div>
 
       <div className={cn(compact ? 'mt-2.5' : 'mt-3')}>
-        <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
-        <BuilderTodoPreview task={liveTask} compact={compact} />
-        {liveTask.activityLog && liveTask.activityLog.length > 0 && (
-          <BuilderActivityLog entries={liveTask.activityLog} compact={compact} />
+        {!liveTask.canvasStreamed && (
+          <>
+            <BuilderProgressTrack task={liveTask} accentVar={meta.accentVar} compact={compact} elapsedMs={elapsedMs} />
+            <BuilderTodoPreview task={liveTask} compact={compact} />
+          </>
+        )}
+        {liveTask.canvasStreamed && liveTask.activityLog && liveTask.activityLog.length > 0 && (
+          <button
+            type="button"
+            onClick={() => setIsDetailOpen((open) => !open)}
+            aria-expanded={isDetailOpen}
+            aria-label={isDetailOpen ? 'Hide builder activity' : 'Show builder activity'}
+            className={cn('flex items-center gap-1 transition-opacity hover:opacity-100', compact ? 'mt-1 text-[9px]' : 'mt-1.5 text-[10px]')}
+            style={{ color: 'var(--cosmic-text-faint)' }}
+          >
+            <span>activity</span>
+            {isDetailOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+          </button>
+        )}
+        {(!liveTask.canvasStreamed || isDetailOpen) && (
+          <BuilderSeedDetail task={liveTask} compact={compact} />
         )}
       </div>
 

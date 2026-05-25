@@ -1,6 +1,6 @@
 """Gateway endpoints for the builder completion notifier.
 
-Three endpoints:
+Internal webhook endpoints plus legacy router definitions:
 
 - ``POST /internal/builder-events`` — accepts a webhook from the LangGraph
   process (``deerflow.sophia.builder_events``) when a sophia_builder task
@@ -8,13 +8,9 @@ Three endpoints:
   ``BuilderEventsWorker``, which fans it out to webapp SSE subscribers
   and the channel ``MessageBus``.
 
-- ``GET /api/threads/{thread_id}/builder-events`` — Server-Sent Events
-  stream for the webapp. Holds the connection open and emits one
-  ``data: {...json...}`` line per event delivered to the thread.
-
-- ``GET /api/threads/{thread_id}/builder-events/last`` — late-mount
-  recovery. Returns the most recent event for the thread (if still
-  inside the worker's TTL window) or ``204 No Content``.
+- The ``public_router`` legacy completion SSE definitions remain available
+  to focused backward-compatibility tests, but the gateway app no longer
+  mounts them. Browsers consume authenticated builder-canvas SSE routes.
 
 The internal POST is intended for in-cluster traffic only. Production
 deployments should bind the gateway to a non-public interface or guard
@@ -32,6 +28,7 @@ from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.gateway.workers.builder_canvas import get_builder_canvas_worker
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
 
@@ -104,6 +101,11 @@ class BuilderProgressEvent(BaseModel):
 
     task_id: str = Field(..., description="Builder thread_id / subagent task id.")
     run_id: str = Field(..., description="LangGraph run id (for diagnostics).")
+    parent_thread_id: str | None = Field(
+        None, description="Parent companion thread id used for authenticated web fan-out."
+    )
+    sequence: int | None = Field(None, ge=1, description="Monotonic sequence within this builder run.")
+    occurred_at: str | None = Field(None, description="ISO timestamp assigned by the producer.")
     event_name: str = Field(..., description="messages | updates | custom")
     data: Any | None = Field(
         default=None, description="Mode-specific payload — see class docstring."
@@ -132,6 +134,11 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
     payload = event.model_dump()
     worker = get_builder_events_worker(request.app)
     delivered = await worker.publish(payload)
+    try:
+        await get_builder_canvas_worker(request.app).publish_completion(payload)
+    except RuntimeError:
+        # Isolated legacy endpoint tests install only the terminal worker.
+        pass
 
     # Fan out to channel adapters too. Best-effort: never let a channel
     # failure surface to the LangGraph process (which already moved on).
@@ -173,7 +180,7 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
     status_code=status.HTTP_202_ACCEPTED,
     summary="Receive a progress event from the builder middleware",
 )
-async def receive_builder_progress(event: BuilderProgressEvent) -> dict[str, Any]:
+async def receive_builder_progress(event: BuilderProgressEvent, request: Request) -> dict[str, Any]:
     """Internal webhook for builder phase / tool-call events.
 
     The langgraph-side ``BuilderProgressMiddleware`` POSTs one of
@@ -213,7 +220,16 @@ async def receive_builder_progress(event: BuilderProgressEvent) -> dict[str, Any
             exc_info=True,
         )
         applied = False
-    return {"applied": applied}
+    web_delivered = 0
+    try:
+        web_delivered = await get_builder_canvas_worker(request.app).publish_progress(
+            event.model_dump()
+        )
+    except RuntimeError:
+        # Channel-only test fixtures and older app factories need not mount
+        # the browser worker.
+        pass
+    return {"applied": applied, "web_delivered": web_delivered} if event.parent_thread_id else {"applied": applied}
 
 
 def _format_sse_event(payload: dict[str, Any]) -> bytes:

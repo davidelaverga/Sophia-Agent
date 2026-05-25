@@ -342,23 +342,16 @@ The live `[ Researching ]` → `[ Drafting ]` → `[ Finalizing ]` → `[ Done ]
 
 - **`app/gateway/builder_progress/registry.py::BuilderProgressRegistry`** — per-process singleton, channel-agnostic. Maps `task_id` → `(chat_id, message_id, channel_name, run_id, ProgressRenderer)`. Per-entry `asyncio.Lock` serializes renderer mutation + callback await so concurrent webhooks for the same task_id can't interleave at the renderer-state boundary. Identity-guarded unregister (`expected_entry=entry`) protects against the `update_async_task` replacement-run race. Bounded terminal-edit retry (3 attempts, 2/5/15s backoff) protects against transient Telegram 5xx — completion webhooks are LRU-deduped server-side so a single failed edit without retry would permanently strand the placeholder.
 - **`app/channels/telegram_progress_renderer.py::ProgressRenderer`** — event → plain-text body. `_TOOL_LABELS` maps tool name → `(emoji, verb)`; `_HIDDEN_TOOLS = {"ls", "read_file", "str_replace", "todo_read", "todo_write", "bash"}` suppresses noisy tools from the activity stream (bash hidden because verification/inline-Python ops clutter the placeholder — trade-off accepted: binary-deliverable generator scripts also show no live signal during the ~30-60s run; the artifact still arrives via the terminal webhook). `mark_done` clears accumulated `activity_lines` so the final body is `[ Done ]` + optional summary. `mark_stalled` (per-event timeout) and `mark_stopped` (error / cancel) PRESERVE activity history — in those degraded states the history is the user's last honest signal.
-- **`app/gateway/routers/builder_events.py`** — three internal POST endpoints + two webapp SSE GET endpoints:
+- **`app/gateway/routers/builder_events.py` and `app/gateway/routers/builder_canvas.py`** — internal webhook endpoints plus the authenticated browser interface:
   - `POST /internal/builder-events` — terminal completion from langgraph (fire-and-forget channel fan-out via `asyncio.create_task` so the daemon-thread timeout doesn't trip).
   - `POST /internal/builder-progress` — live progress events from `BuilderProgressMiddleware`.
-  - `GET /api/threads/{thread_id}/builder-events` — webapp SSE for terminal events.
-  - `GET /api/threads/{thread_id}/builder-events/last` — late-mount recovery (returns the most recent terminal event if still in the TTL window).
+  - `GET /api/sophia/{user_id}/threads/{thread_id}/builder-canvas/events` — authenticated webapp SSE for curated progress and terminal events; consumed through the same-origin frontend proxy.
+  - `GET /api/sophia/{user_id}/threads/{thread_id}/builder-canvas/snapshot` — native-run hydration plus bounded recent activity recovery.
 - **`packages/harness/deerflow/agents/sophia_agent/middlewares/builder_progress.py::BuilderProgressMiddleware`** — async lifecycle hooks (`abefore_agent` / `aafter_model` / `aafter_agent`) emit fire-and-forget HTTP POSTs to `/internal/builder-progress`. Tool-name classification uses lowercase substring match (e.g., `search`/`fetch`/`browse`/`scrape` → `researching`). `_trim_tool_args` strips heavy fields like `write_file.content` from the payload (preserves only `query`/`url`/`path`/`command` per tool — the renderer only reads those). Strong-ref `_POST_TASKS` set with discard-on-done prevents GC of in-flight POSTs (v3-migration learning #4).
 
-**Webapp integration path (not yet built)**:
+**Webapp integration path (Stream Canvas V1)**:
 
-The registry is channel-agnostic. To wire the webapp into the same streaming primitives:
-
-1. **Build an SSE bridge** at `GET /api/threads/{thread_id}/builder-progress` (mirror the terminal-events SSE). On webhook arrival, the registry's edit callback for the webapp channel publishes per-thread to an SSE worker; clients connected to the endpoint receive each body.
-2. **Register the webapp callback** at gateway startup: `registry.register_channel_callback("webapp", _emit_sse_event)` where `_emit_sse_event(chat_id, message_id, body) -> bool` returns `True` after publishing (Phase 4M codex P1 explicit-True contract; `None`/`False` = no-op).
-3. **Register placeholder slots** when the webapp shows a placeholder: `registry.register_task(task_id=..., chat_id=..., message_id=..., channel_name="webapp", run_id=...)`. `chat_id` and `message_id` can be webapp-internal handles (any stable identifier for the placeholder DOM node / store entry).
-4. **Terminal finalization is free** — the existing `_on_builder_completion` on the message bus calls `registry.mark_done(task_id, run_id)` / `mark_stopped(task_id, reason, run_id)` for ALL registered channels. The webapp's callback receives the final `[ Done ]` body alongside Telegram.
-
-The langgraph-side middleware doesn't change — events fire for every task regardless of who's subscribed.
+The browser does not register a channel placeholder. `BuilderCanvasWorker` independently receives valid webhook events, projects curated phase/tool labels without raw arguments, buffers 64 events per run for SSE reconnect, and merges terminal completion into the same stream. The browser opens the same-origin `/api/sophia/builder/threads/{threadId}/canvas/*` proxy routes; authenticated gateway endpoints verify session-thread ownership and use native LangGraph `async_tasks` / run status for snapshot and cancel authority.
 
 Event sequence the webapp will see:
 

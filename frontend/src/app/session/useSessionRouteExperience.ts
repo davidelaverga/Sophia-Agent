@@ -5,14 +5,9 @@ import { useCompanionChatRuntime } from '../companion-runtime/chat-runtime';
 import { getCompanionRouteProfile } from '../companion-runtime/route-profiles';
 import { useCompanionStreamContract } from '../companion-runtime/stream-contract';
 import { useCompanionVoiceRuntime } from '../companion-runtime/voice-runtime';
-import { useBuilderEvents } from '../hooks/useBuilderEvents';
+import { useBuilderCanvas } from '../hooks/useBuilderCanvas';
 import {
   cancelBuilderTask as requestBuilderTaskCancellation,
-  getActiveBuilderTask,
-  getBuilderArtifactFromStatus,
-  getBuilderTaskPhaseFromStatus,
-  getBuilderTaskStatus,
-  mergeBuilderTaskStatus,
 } from '../lib/builder-workflow';
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
@@ -88,6 +83,7 @@ export function useSessionRouteExperience({
   const [builderArtifact, setBuilderArtifact] = useState<BuilderArtifactV1 | null>(storedBuilderArtifact ?? null);
   const [builderTask, setBuilderTask] = useState<BuilderTaskV1 | null>(null);
   const [isCancellingBuilderTask, setIsCancellingBuilderTask] = useState(false);
+  const builderCanvas = useBuilderCanvas(activeThreadId, { enabled: Boolean(activeThreadId) });
   const lastBuilderCaptureSignatureRef = useRef<string | null>(null);
   /** Task IDs dismissed after download — stale SSE events for these are rejected. */
   const dismissedTaskIdsRef = useRef(new Set<string>());
@@ -132,7 +128,7 @@ export function useSessionRouteExperience({
   /** Setter that rejects stale SSE events for tasks the user already dismissed. */
   const guardedSetBuilderTask = useCallback((task: BuilderTaskV1 | null) => {
     if (task?.taskId && dismissedTaskIdsRef.current.has(task.taskId)) return;
-    setBuilderTask(task);
+    setBuilderTask(task?.phase === 'running' ? { ...task, canvasStreamed: true } : task);
   }, []);
 
   const { artifactStatus, ingestArtifacts, applyMemoryCandidates } = useCompanionArtifactsRuntime({
@@ -172,45 +168,37 @@ export function useSessionRouteExperience({
     dismissedTaskIdsRef.current.clear();
   }, [activeSessionId, storedBuilderArtifact]);
 
-  // Rehydrate builder task on reconnect — discovers tasks started while SSE was down
+  // Native builder-canvas snapshot plus SSE is the single lifecycle source
+  // for browser progress, reload recovery, and terminal delivery.
   useEffect(() => {
-    if (!activeThreadId || builderTask) {
+    const active = builderCanvas.activeTask;
+    if (!active || dismissedTaskIdsRef.current.has(active.task_id)) {
       return;
     }
-
-    let cancelled = false;
-
-    const rehydrate = async () => {
-      try {
-        const active = await getActiveBuilderTask(activeThreadId);
-        if (cancelled || !active) return;
-
-        const rehydrated = mergeBuilderTaskStatus(null, active);
-        if (rehydrated) {
-          if (rehydrated.taskId && dismissedTaskIdsRef.current.has(rehydrated.taskId)) return;
-          recordSophiaCaptureEvent({
-            category: 'builder',
-            name: 'task-rehydrated',
-            payload: rehydrated,
-          });
-          setBuilderTask(rehydrated);
-
-          const artifact = getBuilderArtifactFromStatus(active);
-          if (artifact) {
-            setBuilderArtifactAndPersist(artifact);
-          }
-        }
-      } catch {
-        // Silent — rehydration is best-effort
-      }
-    };
-
-    void rehydrate();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeThreadId, builderTask, setBuilderArtifactAndPersist]);
+    const phase: BuilderTaskV1['phase'] = active.status === 'completed'
+      ? 'completed'
+      : active.status === 'failed'
+        ? 'failed'
+        : active.status === 'cancelled'
+          ? 'cancelled'
+          : 'running';
+    const activityLog = builderCanvas.recentEvents
+      .filter((event) => event.task_id === active.task_id && event.run_id === active.run_id && event.activity)
+      .map((event) => ({
+        type: 'thinking' as const,
+        title: event.activity?.label ?? 'Working on deliverable',
+        status: 'done' as const,
+      }));
+    setBuilderTask((current) => ({
+      ...(current?.taskId === active.task_id ? current : {}),
+      phase,
+      taskId: active.task_id,
+      runId: active.run_id,
+      detail: active.latest_activity?.label ?? current?.detail ?? 'Starting',
+      ...(activityLog.length ? { activityLog } : {}),
+      canvasStreamed: true,
+    }));
+  }, [builderCanvas.activeTask, builderCanvas.recentEvents]);
 
   useEffect(() => {
     if (!builderTask) {
@@ -229,86 +217,6 @@ export function useSessionRouteExperience({
       payload: builderTask,
     });
   }, [builderTask]);
-
-  useEffect(() => {
-    if (!builderTask?.taskId || builderTask.phase !== 'running') {
-      return;
-    }
-
-    const activeTaskId = builderTask.taskId;
-    let cancelled = false;
-    let timeoutId: ReturnType<typeof setTimeout> | null = null;
-    const pollStartedAt = Date.now();
-
-    /** Adaptive interval: fast at first to capture early activity log entries,
-     *  then slower as the task progresses to reduce load. */
-    const getPollInterval = (): number => {
-      const elapsed = Date.now() - pollStartedAt;
-      if (elapsed < 10_000) return 1000;   // first 10s: every 1s
-      if (elapsed < 30_000) return 2000;   // next 20s: every 2s
-      return 3000;                          // after 30s: every 3s
-    };
-
-    const pollTaskStatus = async () => {
-      try {
-        const status = await getBuilderTaskStatus(activeTaskId);
-        if (cancelled) {
-          return;
-        }
-
-        const nextBuilderArtifact = getBuilderArtifactFromStatus(status);
-        if (nextBuilderArtifact) {
-          setBuilderArtifactAndPersist(nextBuilderArtifact);
-        }
-
-        setBuilderTask((currentTask) => {
-          if (currentTask?.taskId !== activeTaskId) {
-            return currentTask;
-          }
-
-          return mergeBuilderTaskStatus(currentTask, status);
-        });
-
-        if (getBuilderTaskPhaseFromStatus(status.status) !== 'running') {
-          return;
-        }
-      } catch (error) {
-        if (cancelled) {
-          return;
-        }
-
-        if (error instanceof Error && error.message.includes('Task not found')) {
-          setBuilderTask((currentTask) => {
-            if (currentTask?.taskId !== activeTaskId || currentTask.phase !== 'running') {
-              return currentTask;
-            }
-
-            return {
-              ...currentTask,
-              phase: 'failed',
-              detail: 'Builder task state disappeared before completion.',
-            };
-          });
-          return;
-        }
-      }
-
-      if (!cancelled) {
-        timeoutId = setTimeout(() => {
-          void pollTaskStatus();
-        }, getPollInterval());
-      }
-    };
-
-    void pollTaskStatus();
-
-    return () => {
-      cancelled = true;
-      if (timeoutId !== null) {
-        clearTimeout(timeoutId);
-      }
-    };
-  }, [builderTask?.phase, builderTask?.taskId, setBuilderArtifactAndPersist]);
 
   useEffect(() => {
     if (!debugEnabled) return;
@@ -336,27 +244,21 @@ export function useSessionRouteExperience({
   });
 
   const cancelBuilderTask = useCallback(async () => {
-    if (!builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
+    if (!activeThreadId || !builderTask?.taskId || builderTask.phase !== 'running' || isCancellingBuilderTask) {
       return;
     }
+
+    const runId = builderTask.runId
+      ?? (builderCanvas.activeTask?.task_id === builderTask.taskId ? builderCanvas.activeTask.run_id : undefined);
 
     setIsCancellingBuilderTask(true);
 
     try {
-      const response = await requestBuilderTaskCancellation(builderTask.taskId);
-      setBuilderTask((currentTask) => {
-        if (currentTask?.taskId !== builderTask.taskId) {
-          return currentTask;
-        }
-
-        return {
-          ...currentTask,
-          phase: 'cancelled',
-          detail: response.detail || 'Builder was cancelled before finishing the deliverable.',
-        };
-      });
+      const response = await requestBuilderTaskCancellation(activeThreadId, builderTask.taskId, runId);
+      dismissedTaskIdsRef.current.add(builderTask.taskId);
+      setBuilderTask(null);
       showToast({
-        message: 'Builder cancelled.',
+        message: response.detail || 'Builder cancelled.',
         variant: 'info',
         durationMs: 2400,
       });
@@ -369,7 +271,7 @@ export function useSessionRouteExperience({
     } finally {
       setIsCancellingBuilderTask(false);
     }
-  }, [builderTask, isCancellingBuilderTask, showToast]);
+  }, [activeThreadId, builderCanvas.activeTask, builderTask, isCancellingBuilderTask, showToast]);
 
   const stopStreamingWithBuilderCancel = useCallback(() => {
     if (builderTask?.taskId && builderTask.phase === 'running') {
@@ -472,26 +374,11 @@ export function useSessionRouteExperience({
     setOnUserTranscriptHandler,
   ]);
 
-  // PR-B: subscribe to the gateway's builder-events SSE so terminal builder
-  // events arrive proactively (no need to wait for the user's next chat
-  // turn). The hook also probes ``/last`` on mount so a tab that opens
-  // mid-build still sees the most recent event without an empty interval.
-  //
-  // We keep the subscription open until the in-flight ``builderTask`` flips
-  // to a terminal phase. Once we've observed the terminal event we don't
-  // unsubscribe — the user can still see the same card after a refresh and
-  // the gateway dedups by task_id, so a stale event won't double-fire.
-  const builderEventsEnabled =
-    Boolean(activeThreadId) && builderTask?.phase === 'running';
-  const builderCompletion = useBuilderEvents(activeThreadId, {
-    enabled: builderEventsEnabled,
-  });
-
-  // Drop completion events for tasks the user has already dismissed so a
-  // late /last fetch on remount can't resurrect them.
+  // The authenticated canvas stream carries terminal events as well as live
+  // progress, keeping the session to one subscription.
   const effectiveBuilderCompletion: BuilderCompletionEventV1 | null =
-    builderCompletion && !dismissedTaskIdsRef.current.has(builderCompletion.task_id)
-      ? builderCompletion
+    builderCanvas.completion && !dismissedTaskIdsRef.current.has(builderCanvas.completion.task_id)
+      ? builderCanvas.completion
       : null;
 
   /**

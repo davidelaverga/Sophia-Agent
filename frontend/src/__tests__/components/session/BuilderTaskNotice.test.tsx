@@ -48,6 +48,24 @@ describe('BuilderTaskNotice', () => {
     expect(screen.getAllByText('100%').length).toBeGreaterThan(0);
   });
 
+  it('does not fabricate a percentage for a canvas-streamed running seed', () => {
+    render(
+      <BuilderTaskNotice
+        task={{
+          phase: 'running',
+          canvasStreamed: true,
+          detail: 'Researching sources',
+          activityLog: [{ type: 'thinking', title: 'Researching sources', status: 'done' }],
+        }}
+      />,
+    );
+
+    expect(screen.queryByRole('progressbar', { name: 'Builder progress' })).not.toBeInTheDocument();
+    expect(screen.getAllByText('Researching sources').length).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Show builder activity' }));
+    expect(screen.getAllByText('Researching sources').length).toBeGreaterThan(1);
+  });
+
   it('renders the completion pill state when artifact actions are available', () => {
     const onOpenArtifact = vi.fn();
 

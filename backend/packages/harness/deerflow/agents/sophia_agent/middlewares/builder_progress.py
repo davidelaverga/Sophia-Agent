@@ -38,6 +38,7 @@ import asyncio
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from typing import Any, NotRequired, override
 
 import httpx
@@ -161,12 +162,43 @@ def _resolve_task_id_and_run_id(runtime: Runtime) -> tuple[str | None, str | Non
     return task_id, run_id
 
 
+def _resolve_parent_thread_id(state: dict[str, Any]) -> str | None:
+    delegation_context = state.get("delegation_context")
+    if not isinstance(delegation_context, dict):
+        return None
+    parent_thread_id = delegation_context.get("parent_thread_id")
+    return parent_thread_id if isinstance(parent_thread_id, str) and parent_thread_id else None
+
+
+def _web_event_context(
+    state: dict[str, Any],
+    *,
+    offset: int = 1,
+) -> tuple[dict[str, Any], int | None]:
+    """Build browser-stream metadata only for native delegated builder runs."""
+    parent_thread_id = _resolve_parent_thread_id(state)
+    if parent_thread_id is None:
+        return {}, None
+    last_sequence = state.get("builder_progress_sequence", 0)
+    if not isinstance(last_sequence, int):
+        last_sequence = 0
+    sequence = last_sequence + offset
+    return {
+        "parent_thread_id": parent_thread_id,
+        "sequence": sequence,
+        "occurred_at": datetime.now(UTC).isoformat(),
+    }, sequence
+
+
 async def _post_progress_event(
     *,
     task_id: str,
     run_id: str,
     event_name: str,
     data: Any,
+    parent_thread_id: str | None = None,
+    sequence: int | None = None,
+    occurred_at: str | None = None,
 ) -> None:
     """Fire one progress event at the gateway.
 
@@ -181,6 +213,12 @@ async def _post_progress_event(
         "event_name": event_name,
         "data": data,
     }
+    if parent_thread_id:
+        payload["parent_thread_id"] = parent_thread_id
+    if sequence is not None:
+        payload["sequence"] = sequence
+    if occurred_at:
+        payload["occurred_at"] = occurred_at
     try:
         async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
             response = await client.post(url, json=payload)
@@ -207,6 +245,9 @@ def _schedule_post(
     run_id: str,
     event_name: str,
     data: Any,
+    parent_thread_id: str | None = None,
+    sequence: int | None = None,
+    occurred_at: str | None = None,
 ) -> None:
     """Schedule a webhook POST without awaiting it.
 
@@ -233,19 +274,28 @@ def _schedule_post(
             run_id=run_id,
             event_name=event_name,
             data=data,
+            parent_thread_id=parent_thread_id,
+            sequence=sequence,
+            occurred_at=occurred_at,
         )
     )
     _POST_TASKS.add(task)
     task.add_done_callback(_POST_TASKS.discard)
 
 
-def _emit_phase(task_id: str, run_id: str, phase: str) -> None:
+def _emit_phase(
+    task_id: str,
+    run_id: str,
+    phase: str,
+    event_context: dict[str, Any] | None = None,
+) -> None:
     """Send a ``{name: "phase", phase: <phase>}`` custom event."""
     _schedule_post(
         task_id=task_id,
         run_id=run_id,
         event_name="custom",
         data={"name": "phase", "phase": phase},
+        **(event_context or {}),
     )
 
 
@@ -322,7 +372,12 @@ def _trim_tool_args(name: str, args: dict) -> dict:
     return out
 
 
-def _emit_updates(task_id: str, run_id: str, tool_calls: list) -> None:
+def _emit_updates(
+    task_id: str,
+    run_id: str,
+    tool_calls: list,
+    event_context: dict[str, Any] | None = None,
+) -> None:
     """Send an ``updates`` event carrying the latest tool_calls.
 
     The renderer's ``_on_updates`` extracts tool_calls from the
@@ -359,11 +414,24 @@ def _emit_updates(task_id: str, run_id: str, tool_calls: list) -> None:
         run_id=run_id,
         event_name="updates",
         data={"agent": {"messages": [{"tool_calls": serializable}]}},
+        **(event_context or {}),
     )
+
+
+def _latest_ai_tool_calls(messages: list) -> list:
+    for msg in reversed(messages):
+        if getattr(msg, "type", None) == "ai":
+            return list(getattr(msg, "tool_calls", []) or [])
+    return []
+
+
+def _sequence_update(sequence: int | None) -> dict[str, Any] | None:
+    return {"builder_progress_sequence": sequence} if sequence is not None else None
 
 
 class BuilderProgressState(AgentState):
     builder_progress_last_phase: NotRequired[str]
+    builder_progress_sequence: NotRequired[int]
 
 
 class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
@@ -403,13 +471,17 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         if task_id is None or run_id is None:
             log_middleware("BuilderProgress", "no task_id/run_id in runtime", _t0)
             return {"builder_progress_last_phase": _PHASE_STARTING}
-        _emit_phase(task_id, run_id, _PHASE_STARTING)
+        web_context, sequence = _web_event_context(state)
+        _emit_phase(task_id, run_id, _PHASE_STARTING, web_context)
         log_middleware(
             "BuilderProgress",
             f"abefore_agent emit phase={_PHASE_STARTING} task_id={task_id}",
             _t0,
         )
-        return {"builder_progress_last_phase": _PHASE_STARTING}
+        update = {"builder_progress_last_phase": _PHASE_STARTING}
+        if sequence is not None:
+            update["builder_progress_sequence"] = sequence
+        return update
 
     @override
     async def aafter_model(
@@ -417,13 +489,7 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
     ) -> dict[str, Any] | None:
         _t0 = time.perf_counter()
         messages = state.get("messages", []) or []
-        tool_calls: list = []
-        for msg in reversed(messages):
-            if getattr(msg, "type", None) != "ai":
-                continue
-            raw = getattr(msg, "tool_calls", []) or []
-            tool_calls = list(raw)
-            break
+        tool_calls = _latest_ai_tool_calls(messages)
         if not tool_calls:
             log_middleware("BuilderProgress", "no tool_calls in latest AI msg", _t0)
             return None
@@ -432,11 +498,12 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         if task_id is None or run_id is None:
             log_middleware("BuilderProgress", "no task_id/run_id; skip POST", _t0)
             return None
-        # Always emit the tool_calls (activity lines like 🔍 Searching).
-        _emit_updates(task_id, run_id, tool_calls)
+        # Always emit the tool_calls (activity lines like searching/drafting).
+        updates_context, updates_sequence = _web_event_context(state)
+        _emit_updates(task_id, run_id, tool_calls, updates_context)
         if new_phase is None:
             log_middleware("BuilderProgress", "tool_calls emitted, no phase change", _t0)
-            return None
+            return _sequence_update(updates_sequence)
         last_phase = state.get("builder_progress_last_phase")
         if new_phase == last_phase:
             log_middleware(
@@ -444,14 +511,18 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
                 f"phase unchanged ({new_phase}); tool_calls emitted only",
                 _t0,
             )
-            return None
-        _emit_phase(task_id, run_id, new_phase)
+            return _sequence_update(updates_sequence)
+        phase_context, phase_sequence = _web_event_context(state, offset=2)
+        _emit_phase(task_id, run_id, new_phase, phase_context)
         log_middleware(
             "BuilderProgress",
             f"aafter_model emit phase={new_phase} task_id={task_id}",
             _t0,
         )
-        return {"builder_progress_last_phase": new_phase}
+        update = {"builder_progress_last_phase": new_phase}
+        if phase_sequence is not None:
+            update["builder_progress_sequence"] = phase_sequence
+        return update
 
     @override
     async def aafter_agent(
@@ -466,13 +537,17 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         if task_id is None or run_id is None:
             log_middleware("BuilderProgress", "no task_id/run_id; skip POST", _t0)
             return {"builder_progress_last_phase": _PHASE_DONE}
-        _emit_phase(task_id, run_id, _PHASE_DONE)
+        web_context, sequence = _web_event_context(state)
+        _emit_phase(task_id, run_id, _PHASE_DONE, web_context)
         log_middleware(
             "BuilderProgress",
             f"aafter_agent emit phase={_PHASE_DONE} task_id={task_id}",
             _t0,
         )
-        return {"builder_progress_last_phase": _PHASE_DONE}
+        update = {"builder_progress_last_phase": _PHASE_DONE}
+        if sequence is not None:
+            update["builder_progress_sequence"] = sequence
+        return update
 
 
 __all__ = ["BuilderProgressMiddleware"]

@@ -53,6 +53,7 @@ export type BuilderActivityEntryV1 = {
 export type BuilderTaskV1 = {
   phase: BuilderTaskPhaseV1;
   taskId?: string;
+  runId?: string;
   label?: string;
   detail?: string;
   messageIndex?: number;
@@ -77,4 +78,5 @@ export type BuilderTaskV1 = {
   heartbeat?: boolean;
   pollCount?: number;
   activityLog?: BuilderActivityEntryV1[];
+  canvasStreamed?: boolean;
 };

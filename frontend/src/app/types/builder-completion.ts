@@ -11,6 +11,7 @@ export type BuilderCompletionStatus = 'success' | 'error' | 'timeout' | 'cancell
 export type BuilderCompletionEventV1 = {
   thread_id: string;
   task_id: string;
+  run_id?: string | null;
   trace_id?: string | null;
   agent_name?: string | null;
   status: BuilderCompletionStatus;

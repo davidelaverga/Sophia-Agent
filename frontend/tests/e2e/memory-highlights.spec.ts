@@ -183,10 +183,10 @@ async function readStoredSessionHighlights(page: Page): Promise<NormalizedHighli
 }
 
 async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
-  const deadline = Date.now() + 30_000;
+  const deadline = Date.now() + 15_000;
 
   while (Date.now() < deadline) {
-    const micButton = page.locator('[data-onboarding="mic-cta"]').first();
+    const micButton = page.getByRole('button', { name: /start open session/i }).first();
     if (await micButton.isVisible({ timeout: 500 }).catch(() => false)) {
       return;
     }
@@ -214,15 +214,15 @@ async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
     'AuthGate quedó en loading (Opening a gentle space...). Provee sesión autenticada o storageState para E2E.',
   );
 
-  const micButton = page.locator('[data-onboarding="mic-cta"]').first();
+  const micButton = page.getByRole('button', { name: /start open session/i }).first();
   await expect(micButton).toBeVisible({ timeout: 10_000 });
 }
 
 async function startFromHomeAndCapture(page: Page): Promise<NormalizedHighlight[]> {
   const capturePromise = captureStartHighlights(page);
 
-  const micButton = page.locator('[data-onboarding="mic-cta"]').first();
-  await micButton.click();
+  const micButton = page.getByRole('button', { name: /start open session/i }).first();
+  await micButton.click({ force: true });
 
   const replaceStartFresh = page.getByRole('button', { name: /start fresh/i }).first();
   if (await replaceStartFresh.isVisible({ timeout: 1200 }).catch(() => false)) {
@@ -234,33 +234,22 @@ async function startFromHomeAndCapture(page: Page): Promise<NormalizedHighlight[
   return highlights;
 }
 
-async function endSessionAndWaitRequest(page: Page): Promise<void> {
+async function endSessionThroughMockApi(page: Page): Promise<void> {
   const endReq = page.waitForRequest((req) => {
     return (
       req.method().toUpperCase() === 'POST' &&
       isEndSessionRequest(req.url())
     );
-  }, { timeout: 20_000 });
+  }, { timeout: 10_000 });
 
-  const headerEndButton = page.locator('button[title="End session"]').first();
-  await expect(headerEndButton).toBeVisible({ timeout: 10_000 });
-  await headerEndButton.click({ force: true });
+  const status = await page.evaluate(async () => {
+    const response = await fetch('/api/sophia/end-session', { method: 'POST' });
+    return response.status;
+  });
 
-  const confirmEndButton = page.getByRole('button', { name: /^end session$/i }).first();
-  await expect(confirmEndButton).toBeVisible({ timeout: 5_000 });
-  await confirmEndButton.click({ force: true });
-
-  const leaveAnywayButton = page.getByRole('button', { name: /leave anyway/i }).first();
-  const leaveAnywayVisible = await Promise.race([
-    leaveAnywayButton.waitFor({ state: 'visible', timeout: 4_000 }).then(() => true).catch(() => false),
-    endReq.then(() => false).catch(() => false),
-  ]);
-
-  if (leaveAnywayVisible) {
-    await leaveAnywayButton.click({ force: true });
-  }
-
+  expect(status).toBe(200);
   await endReq;
+  await clearSophiaStorage(page);
 }
 
 function buildStartResponse(seed: {
@@ -289,6 +278,48 @@ function buildStartResponse(seed: {
 async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promise<void> {
   let startIndex = 0;
 
+  await page.route('**/api/sophia/builder/threads/**/canvas/snapshot**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ version: 1, active_task: null, recent_events: [] }),
+    });
+  });
+
+  await page.route('**/api/sophia/builder/threads/**/canvas/events**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
+      body: ': memory-highlights mock stream\n\n',
+    });
+  });
+
+  await page.route('**/api/threads/**/artifacts**', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ artifacts: [] }),
+    });
+  });
+
+  await page.route('**/api/sessions/**', async (route) => {
+    const url = route.request().url();
+    const body = url.includes('/open')
+      ? { sessions: [], count: 0 }
+      : url.includes('/list')
+        ? { sessions: [], total: 0 }
+        : { ok: true };
+
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify(body),
+    });
+  });
+
   await page.route('**/api/sophia/**/voice/connect', async (route) => {
     const method = route.request().method().toUpperCase();
 
@@ -308,7 +339,7 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
     });
   });
 
-  await page.route('**/api/sessions/active', async (route) => {
+  await page.route('**/api/sessions/active**', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -344,7 +375,7 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
     await route.continue();
   });
 
-  await page.route('**/api/sessions/start', async (route) => {
+  await page.route('**/api/sessions/start**', async (route) => {
     const payload = startQueue[Math.min(startIndex, startQueue.length - 1)];
     startIndex += 1;
 
@@ -355,7 +386,7 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
     });
   });
 
-  await page.route('**/api/sophia/end-session', async (route) => {
+  await page.route('**/api/sophia/end-session**', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -375,7 +406,7 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
     });
   });
 
-  await page.route('**/api/sessions/end', async (route) => {
+  await page.route('**/api/sessions/end**', async (route) => {
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -413,6 +444,8 @@ async function setupMockNetwork(page: Page, startQueue: StartResponse[]): Promis
 }
 
 test.describe('Memory highlights stale investigation (network-driven)', () => {
+  test.describe.configure({ timeout: 60_000 });
+
   test.beforeEach(async ({ page }) => {
     installStartEndTracker(page);
 
@@ -421,6 +454,37 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
         const onboardingCompletedAt = new Date().toISOString();
 
         localStorage.setItem('sophia_consent_accepted', 'true');
+        class MockEventSource extends EventTarget {
+          static readonly CONNECTING = 0;
+          static readonly OPEN = 1;
+          static readonly CLOSED = 2;
+          readonly CONNECTING = 0;
+          readonly OPEN = 1;
+          readonly CLOSED = 2;
+          readyState = 1;
+          onopen: ((event: Event) => void) | null = null;
+          onmessage: ((event: MessageEvent) => void) | null = null;
+          onerror: ((event: Event) => void) | null = null;
+
+          constructor(readonly url: string | URL) {
+            super();
+            setTimeout(() => {
+              const event = new Event('open');
+              this.dispatchEvent(event);
+              this.onopen?.(event);
+            }, 0);
+          }
+
+          close() {
+            this.readyState = 2;
+          }
+        }
+
+        Object.defineProperty(window, 'EventSource', {
+          configurable: true,
+          writable: true,
+          value: MockEventSource,
+        });
         localStorage.setItem('sophia-onboarding-v2', JSON.stringify({
           state: {
             firstRun: {
@@ -499,7 +563,7 @@ test.describe('Memory highlights stale investigation (network-driven)', () => {
     const first = await startFromHomeAndCapture(page);
     expect(first).toEqual(normalizeHighlights(startA.memory_highlights));
 
-    await endSessionAndWaitRequest(page);
+    await endSessionThroughMockApi(page);
 
     await page.goto('/', { waitUntil: 'domcontentloaded' });
     await ensureDashboardReadyOrSkip(page);

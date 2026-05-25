@@ -137,6 +137,23 @@ class TestAbeforeAgent:
         assert update == {"builder_progress_last_phase": "starting"}
         assert captured_posts == []
 
+    @pytest.mark.anyio
+    async def test_native_delegated_run_includes_parent_and_sequence(
+        self, captured_posts: list[dict]
+    ) -> None:
+        mw = BuilderProgressMiddleware()
+        update = await mw.abefore_agent(
+            {"delegation_context": {"parent_thread_id": "parent-A"}},
+            _runtime("task-A", "run-A"),
+        )
+        assert captured_posts[0]["parent_thread_id"] == "parent-A"
+        assert captured_posts[0]["sequence"] == 1
+        assert captured_posts[0]["occurred_at"]
+        assert update == {
+            "builder_progress_last_phase": "starting",
+            "builder_progress_sequence": 1,
+        }
+
 
 class TestAafterModel:
     @pytest.mark.anyio
